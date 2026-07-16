@@ -31,11 +31,12 @@ from typing import TYPE_CHECKING, Any
 import torch.distributed as dist
 
 from modelopt.torch.fastgen import PDDMetadata
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_EXECUTION
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_CHECKPOINT_SCHEMA_VERSION = 4
+_CHECKPOINT_SCHEMA_VERSION = 5
 _COMPLETE_SCHEMA_VERSION = 1
 
 
@@ -55,6 +56,13 @@ def _require_sha256(value: Any, *, name: str) -> str:
     except ValueError as error:
         raise ValueError(f"{name} must be hexadecimal.") from error
     return value.lower()
+
+
+def _require_qwen_image_execution(identity: Any) -> None:
+    if not isinstance(identity, Mapping) or identity.get("qwen_image") != {
+        "execution": QWEN_IMAGE_PDD_EXECUTION
+    }:
+        raise RuntimeError("PDD checkpoint has an incompatible Qwen execution identity.")
 
 
 def _rank() -> int:
@@ -157,6 +165,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def build_pdd_checkpoint_identity(
     *,
+    qwen_image_execution: str,
     metadata: PDDMetadata,
     model_id: str,
     model_revision: str | None,
@@ -177,6 +186,8 @@ def build_pdd_checkpoint_identity(
     scheduler: Any,
 ) -> dict[str, Any]:
     """Build the strict, path-independent compatibility identity for PDD resume."""
+    if qwen_image_execution != QWEN_IMAGE_PDD_EXECUTION:
+        raise ValueError("qwen_image_execution must identify the bound FastGen MR210 forward.")
     if not isinstance(metadata, PDDMetadata):
         raise TypeError("metadata must be PDDMetadata.")
     if not isinstance(model_id, str) or not model_id:
@@ -215,6 +226,7 @@ def build_pdd_checkpoint_identity(
         raise TypeError("PDD checkpoint identity requires the stock torch.optim.AdamW optimizer.")
     return {
         "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "qwen_image": {"execution": qwen_image_execution},
         "model": {"id": model_id, "revision": model_revision, "dtype": dtype},
         "pdd_metadata": metadata.to_dict(),
         "guidance": {"scale": None if guidance_scale is None else float(guidance_scale)},
@@ -370,6 +382,7 @@ def validate_pdd_training_checkpoint(
     if expected_identity is not None and manifest["identity"] != expected_identity:
         raise RuntimeError("PDD checkpoint identity does not match the current run.")
     identity = manifest["identity"]
+    _require_qwen_image_execution(identity)
     topology = identity.get("topology") if isinstance(identity, Mapping) else None
     world_size = topology.get("world_size") if isinstance(topology, Mapping) else None
     if type(world_size) is not int or world_size < 1:
@@ -542,6 +555,7 @@ class PDDCheckpointManager:
         self.identity = json.loads(json.dumps(identity, sort_keys=True))
         if self.identity.get("schema_version") != _CHECKPOINT_SCHEMA_VERSION:
             raise ValueError("PDD checkpoint identity has an unsupported schema version.")
+        _require_qwen_image_execution(self.identity)
         topology = self.identity.get("topology")
         if not isinstance(topology, dict) or topology.get("world_size") != _world_size():
             raise ValueError("PDD checkpoint identity world size does not match the process group.")

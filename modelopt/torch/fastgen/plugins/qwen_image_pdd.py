@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import types
 from collections.abc import Mapping
 from typing import Any
 
@@ -29,10 +30,15 @@ from ..methods.pdd import PDDLayerSpec, PDDOutputProjection
 from .qwen_image import build_img_shapes, pack_latents, unpack_latents
 
 __all__ = [
+    "QWEN_IMAGE_PDD_EXECUTION",
     "QWEN_IMAGE_PDD_LAYER_SPEC",
     "QwenImagePDDAdapter",
+    "adopt_qwen_image_mr210_forward",
     "convert_qwen_image_to_pdd",
+    "require_qwen_image_mr210_forward",
 ]
+
+QWEN_IMAGE_PDD_EXECUTION = "fastgen_mr210"
 
 QWEN_IMAGE_PDD_LAYER_SPEC = PDDLayerSpec(
     projection_path="transformer.proj_out",
@@ -54,6 +60,18 @@ _CONTROLLED_MODEL_KWARGS = {
     "txt_seq_lens",
 }
 
+_QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE = "_modelopt_qwen_image_pdd_execution"
+_QWEN_IMAGE_MR210_CHILDREN = (
+    "pos_embed",
+    "time_text_embed",
+    "txt_norm",
+    "img_in",
+    "txt_in",
+    "transformer_blocks",
+    "norm_out",
+    "proj_out",
+)
+
 
 def _require_binary_mask(mask: torch.Tensor, *, name: str) -> None:
     mask_int = mask.to(torch.int64)
@@ -66,6 +84,186 @@ def _config_guidance_embeds(transformer: nn.Module) -> bool:
     if isinstance(config, Mapping):
         return bool(config.get("guidance_embeds", False))
     return bool(getattr(config, "guidance_embeds", False))
+
+
+def _config_value(transformer: nn.Module, name: str, default: Any = None) -> Any:
+    config = getattr(transformer, "config", None)
+    if isinstance(config, Mapping):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _qwen_image_mr210_forward(
+    self: nn.Module,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor | None = None,
+    encoder_hidden_states_mask: torch.Tensor | None = None,
+    timestep: torch.Tensor | None = None,
+    img_shapes: list[Any] | None = None,
+    txt_seq_lens: list[int] | None = None,
+    guidance: torch.Tensor | None = None,
+    max_txt_seq_len: int | None = None,
+    attention_kwargs: dict[str, Any] | None = None,
+    controlnet_block_samples: Any = None,
+    additional_t_cond: torch.Tensor | None = None,
+    return_dict: bool = True,
+) -> Any:
+    """Run the regular-output Qwen forward used by FastGen MR210."""
+    if hidden_states.ndim != 3 or hidden_states.dtype != torch.bfloat16:
+        raise TypeError("Qwen MR210 hidden_states must be packed BF16 [B, P, C].")
+    if (
+        not isinstance(encoder_hidden_states, torch.Tensor)
+        or encoder_hidden_states.ndim != 3
+        or encoder_hidden_states.dtype != torch.bfloat16
+    ):
+        raise TypeError("Qwen MR210 encoder_hidden_states must be BF16 [B, S, D].")
+    if not isinstance(encoder_hidden_states_mask, torch.Tensor):
+        raise TypeError("Qwen MR210 requires encoder_hidden_states_mask.")
+    if not isinstance(timestep, torch.Tensor) or timestep.dtype != torch.float32:
+        raise TypeError("Qwen MR210 timestep must remain FP32 at transformer entry.")
+    batch_size = hidden_states.shape[0]
+    if encoder_hidden_states.shape[0] != batch_size:
+        raise ValueError("Qwen MR210 image and text batch sizes must match.")
+    if timestep.shape != (batch_size,):
+        raise ValueError("Qwen MR210 timestep must contain one value per batch item.")
+    if img_shapes is None or len(img_shapes) != batch_size:
+        raise ValueError("Qwen MR210 img_shapes must contain one entry per batch item.")
+    if attention_kwargs:
+        raise ValueError("Qwen MR210 PDD does not support nonempty attention_kwargs.")
+    if guidance is not None:
+        raise ValueError("Qwen MR210 PDD does not support transformer guidance embeddings.")
+    if controlnet_block_samples is not None:
+        raise ValueError("Qwen MR210 PDD does not support ControlNet block samples.")
+    if additional_t_cond is not None:
+        raise ValueError("Qwen MR210 PDD does not support additional timestep conditioning.")
+    if type(return_dict) is not bool:
+        raise TypeError("Qwen MR210 return_dict must be a bool.")
+    if encoder_hidden_states_mask.ndim != 2 or tuple(encoder_hidden_states_mask.shape) != tuple(
+        encoder_hidden_states.shape[:2]
+    ):
+        raise ValueError("Qwen MR210 mask must match the text batch and sequence dimensions.")
+    if encoder_hidden_states_mask.device != encoder_hidden_states.device:
+        raise ValueError("Qwen MR210 mask and text embeddings must share a device.")
+    if (
+        encoder_hidden_states_mask.dtype.is_floating_point
+        or encoder_hidden_states_mask.dtype.is_complex
+    ):
+        raise TypeError("Qwen MR210 mask must use an integer or boolean dtype.")
+    _require_binary_mask(encoder_hidden_states_mask, name="Qwen MR210")
+    expected_max_txt_seq_len = int(
+        encoder_hidden_states_mask.sum(dim=1).max().to(torch.int32).item()
+    )
+    if txt_seq_lens is not None:
+        expected_txt_seq_lens = encoder_hidden_states_mask.sum(dim=1).to(torch.int32).tolist()
+        if txt_seq_lens != expected_txt_seq_lens:
+            raise ValueError("Qwen MR210 txt_seq_lens must equal the valid mask lengths.")
+    if max_txt_seq_len is None:
+        max_txt_seq_len = expected_max_txt_seq_len
+    elif max_txt_seq_len != expected_max_txt_seq_len:
+        raise ValueError("Qwen MR210 max_txt_seq_len must equal the maximum valid mask length.")
+
+    hidden_states = self.img_in(hidden_states)
+    encoder_hidden_states = self.txt_in(self.txt_norm(encoder_hidden_states))
+    if timestep.dtype != torch.float32:
+        raise RuntimeError("Qwen MR210 timestep was rounded before time_text_embed.")
+    temb = self.time_text_embed(timestep, hidden_states)
+    image_rotary_emb = self.pos_embed(
+        img_shapes,
+        max_txt_seq_len=max_txt_seq_len,
+        device=hidden_states.device,
+    )
+
+    for block in self.transformer_blocks:
+        if torch.is_grad_enabled() and self.gradient_checkpointing:
+            encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
+                block,
+                hidden_states,
+                encoder_hidden_states,
+                encoder_hidden_states_mask,
+                temb,
+                image_rotary_emb,
+            )
+        else:
+            encoder_hidden_states, hidden_states = block(
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_hidden_states_mask=encoder_hidden_states_mask,
+                temb=temb,
+                image_rotary_emb=image_rotary_emb,
+                joint_attention_kwargs=attention_kwargs,
+            )
+
+    hidden_states = self.norm_out(hidden_states, temb)
+    output = self.proj_out(hidden_states)
+    if not return_dict:
+        return (output,)
+
+    from diffusers.models.modeling_outputs import Transformer2DModelOutput
+
+    return Transformer2DModelOutput(sample=output)
+
+
+def _is_qwen_image_mr210_forward(model: nn.Module) -> bool:
+    forward = model.__dict__.get("forward")
+    return (
+        isinstance(forward, types.MethodType)
+        and forward.__func__ is _qwen_image_mr210_forward
+        and forward.__self__ is model
+        and getattr(model, _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE, None) == QWEN_IMAGE_PDD_EXECUTION
+    )
+
+
+def require_qwen_image_mr210_forward(model: nn.Module) -> str:
+    """Require and return the semantic label for the exact bound MR210 forward."""
+    if not isinstance(model, nn.Module) or not _is_qwen_image_mr210_forward(model):
+        raise RuntimeError("Qwen-Image PDD requires the bound FastGen MR210 forward execution.")
+    return QWEN_IMAGE_PDD_EXECUTION
+
+
+def adopt_qwen_image_mr210_forward(transformer: nn.Module) -> nn.Module:
+    """Bind FastGen MR210's regular Qwen forward to the loaded root in place."""
+    if not isinstance(transformer, nn.Module):
+        raise TypeError(f"transformer must be nn.Module, got {type(transformer).__name__}.")
+    if _is_qwen_image_mr210_forward(transformer):
+        return transformer
+
+    # Diffusers is an optional dependency used only by the Qwen example.
+    from diffusers import QwenImageTransformer2DModel
+
+    if type(transformer) is not QwenImageTransformer2DModel:
+        raise TypeError(
+            "MR210 forward adoption requires the supported QwenImageTransformer2DModel, "
+            f"got {type(transformer).__name__}."
+        )
+    existing_forward = transformer.__dict__.get("forward")
+    if existing_forward is not None:
+        raise RuntimeError("Qwen root already has a different instance-level forward override.")
+    missing = [
+        name
+        for name in _QWEN_IMAGE_MR210_CHILDREN
+        if not isinstance(getattr(transformer, name, None), nn.Module)
+    ]
+    if missing:
+        raise RuntimeError(f"Qwen root is missing required MR210 modules: {missing}.")
+    if (
+        not isinstance(transformer.transformer_blocks, nn.ModuleList)
+        or not transformer.transformer_blocks
+    ):
+        raise RuntimeError("Qwen MR210 requires a nonempty transformer_blocks ModuleList.")
+    if _config_guidance_embeds(transformer):
+        raise ValueError("Qwen MR210 PDD does not support transformer guidance embeddings.")
+    if getattr(transformer, "peft_config", None):
+        raise ValueError("Qwen MR210 PDD does not support active PEFT adapters.")
+    if any(getattr(module, "fused_projections", False) for module in transformer.modules()):
+        raise ValueError("Qwen MR210 PDD does not support fused QKV projections.")
+    for name in ("zero_cond_t", "use_additional_t_cond", "use_layer3d_rope"):
+        if bool(_config_value(transformer, name, False)):
+            raise ValueError(f"Qwen MR210 PDD requires {name}=False.")
+
+    transformer.forward = types.MethodType(_qwen_image_mr210_forward, transformer)
+    setattr(transformer, _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE, QWEN_IMAGE_PDD_EXECUTION)
+    require_qwen_image_mr210_forward(transformer)
+    return transformer
 
 
 def _validate_qwen_pdd_config(config: PDDConfig) -> None:
@@ -235,6 +433,7 @@ class QwenImagePDDAdapter:
         condition_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self._validate_state_and_time(state, time)
+        require_qwen_image_mr210_forward(model)
         if _config_guidance_embeds(model):
             raise ValueError("Qwen-Image PDD does not support transformer guidance embeddings.")
         encoder_hidden_states, attention_mask = self._parse_condition(
@@ -268,15 +467,20 @@ class QwenImagePDDAdapter:
 
         batch_size, _, height, width = state.shape
         model_dtype = self._model_dtype(model, state.dtype)
+        if model_dtype != torch.bfloat16:
+            raise TypeError("Qwen MR210 PDD execution requires BF16 compute.")
+        if time.dtype != torch.float32:
+            raise TypeError("Qwen MR210 PDD execution requires FP32 time.")
         packed_state = pack_latents(state).to(model_dtype)
         encoder_hidden_states = encoder_hidden_states.to(model_dtype)
+        max_txt_seq_len = int(attention_mask.sum(dim=1).max().to(torch.int32).item())
         output = model(
             hidden_states=packed_state,
             timestep=time,
             encoder_hidden_states=encoder_hidden_states,
             encoder_hidden_states_mask=attention_mask,
             img_shapes=build_img_shapes(batch_size, height, width),
-            guidance=None,
+            max_txt_seq_len=max_txt_seq_len,
             return_dict=False,
             **model_kwargs,
         )
@@ -357,7 +561,7 @@ class QwenImagePDDAdapter:
         condition: Any = None,
         **model_kwargs: Any,
     ) -> torch.Tensor:
-        """Return unpacked canonical interval velocities from one Qwen call."""
+        """Return unpacked PDD interval velocities from one Qwen call."""
         self._projection(model, self.config.grid_size)
         packed = self._call_packed(
             model,
@@ -455,7 +659,25 @@ class QwenImagePDDAdapter:
                 f"{tuple(conditional.shape)} and {tuple(unconditional.shape)}."
             )
 
-        guided = unconditional + float(guidance_scale) * (conditional - unconditional)
-        conditional_norm = torch.linalg.vector_norm(conditional, dim=-1, keepdim=True)
-        guided_norm = torch.linalg.vector_norm(guided, dim=-1, keepdim=True)
-        return self._unpack_single(guided * (conditional_norm / guided_norm), state)
+        # MR210 unpacks each Qwen prediction before guidance. Keep that
+        # operation order: the FP32 global reduction order over NCHW is not
+        # guaranteed to match an algebraically equivalent packed reduction.
+        conditional_unpacked = self._unpack_single(conditional, state)
+        unconditional_unpacked = self._unpack_single(unconditional, state)
+        guided_low_precision = conditional_unpacked + (float(guidance_scale) - 1.0) * (
+            conditional_unpacked - unconditional_unpacked
+        )
+        conditional_fp32 = conditional_unpacked.to(torch.float32)
+        guided_fp32 = guided_low_precision.to(torch.float32)
+        norm_dims = tuple(range(1, conditional_fp32.ndim))
+        conditional_norm = torch.linalg.vector_norm(
+            conditional_fp32,
+            dim=norm_dims,
+            keepdim=True,
+        )
+        guided_norm = torch.linalg.vector_norm(
+            guided_fp32,
+            dim=norm_dims,
+            keepdim=True,
+        ).clamp_min(1e-5)
+        return (guided_fp32 * (conditional_norm / guided_norm)).to(conditional.dtype)

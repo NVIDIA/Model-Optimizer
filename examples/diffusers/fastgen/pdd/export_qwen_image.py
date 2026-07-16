@@ -161,6 +161,7 @@ def _collective_publication_preflight(output_dir: Path) -> None:
 
 def _require_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[str, Any]) -> None:
     from modelopt.torch.fastgen import PDDMetadata
+    from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_EXECUTION
 
     identity = manifest.get("identity")
     if not isinstance(identity, Mapping):
@@ -170,6 +171,8 @@ def _require_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[str,
         raise RuntimeError("PDD checkpoint has no PDD metadata mapping.")
     if PDDMetadata.from_dict(pdd_metadata) != setup.metadata:
         raise RuntimeError("PDD checkpoint metadata does not match the configured student.")
+    if identity.get("qwen_image") != {"execution": QWEN_IMAGE_PDD_EXECUTION}:
+        raise RuntimeError("PDD checkpoint Qwen execution identity does not match MR210.")
     if identity.get("model") != {
         "id": config.model_id,
         "revision": config.model_revision,
@@ -195,7 +198,10 @@ def _collective_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[s
 
 
 def _checkpoint_selector_identity(config: Any, setup: Any) -> dict[str, Any]:
+    from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_EXECUTION
+
     return {
+        "qwen_image": {"execution": QWEN_IMAGE_PDD_EXECUTION},
         "model": {
             "id": config.model_id,
             "revision": config.model_revision,

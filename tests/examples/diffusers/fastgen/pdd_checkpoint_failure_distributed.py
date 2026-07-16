@@ -36,6 +36,8 @@ if str(_FASTGEN_DIR) not in sys.path:
 import pdd.checkpoint as pdd_checkpoint_module
 from pdd.checkpoint import PDDCheckpointManager
 
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_EXECUTION
+
 
 class _State:
     def state_dict(self):
@@ -141,7 +143,11 @@ def _run_failure(root: pathlib.Path, stage: str) -> None:
             trainer=trainer,
             sampler=_Sampler(),
             rng=_State(),
-            identity={"schema_version": 4, "topology": {"world_size": 2}},
+            identity={
+                "schema_version": 5,
+                "qwen_image": {"execution": QWEN_IMAGE_PDD_EXECUTION},
+                "topology": {"world_size": 2},
+            },
         )
         initial.save()
         trainer.completed_steps = 2
@@ -156,7 +162,11 @@ def _run_failure(root: pathlib.Path, stage: str) -> None:
         trainer=trainer,
         sampler=_Sampler(),
         rng=_State(),
-        identity={"schema_version": 4, "topology": {"world_size": 2}},
+        identity={
+            "schema_version": 5,
+            "qwen_image": {"execution": QWEN_IMAGE_PDD_EXECUTION},
+            "topology": {"world_size": 2},
+        },
     )
     message = None
     try:

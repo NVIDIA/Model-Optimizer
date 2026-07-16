@@ -19,12 +19,13 @@ The provided schedules use the 128-interval grid as follows:
 Install the shared requirements from the repository root, then launch with released AutoModel
 APIs. No AutoModel, Diffusers, or Qwen source changes are required.
 
-The example uses the ordinary Diffusers Qwen transformer without replacing or monkeypatching its
-forward. Diffusers owns Qwen timestep conversion and converts each text mask into the joint
-text/image attention mask, so padded text tokens do not participate as attention keys. ModelOpt
-owns only PDD projection conversion, latent packing, condition validation, and packed per-token
-classifier-free guidance using the Qwen pipeline formula. Guidance-embedded models and PEFT remain
-outside this first example.
+The example loads the ordinary Diffusers Qwen transformer, then binds a ModelOpt-owned forward on
+that same model instance to reproduce FastGen MR210's executed Qwen path. Normalized time remains
+FP32 through `time_text_embed`; the text mask is passed to Qwen blocks as MR210 does instead of being
+converted into Diffusers' canonical joint mask. Teacher classifier-free guidance is rounded in the
+BF16 model-output dtype, globally norm-rescaled in FP32 with a `1e-5` denominator floor, and cast
+back to BF16 before the PDD loss. No AutoModel, Diffusers, or Qwen source is edited.
+Guidance-embedded models, PEFT, and QKV fusion remain outside this first example.
 
 ```bash
 pip install -r examples/diffusers/fastgen/requirements.txt
@@ -55,9 +56,9 @@ default per-rank batch gives global batch size 256; other GPU topologies must se
 `256 / world_size` because this recipe does not use gradient accumulation.
 Checkpoints include the student, optimizer, scheduler, RNG, trainer, and exact replayable sampler
 state needed to resume the next committed batch. FP32 master parameters and Adam state are sharded
-while forward/backward uses the configured model dtype and gradient reduction remains FP32. The
-adapter casts packed image/text inputs to that compute dtype; the ordinary Diffusers Qwen forward
-owns timestep conversion.
+while forward/backward uses BF16 model parameters and outputs and gradient reduction remains FP32.
+The adapter casts packed image/text inputs to BF16 while preserving FP32 normalized time at the
+FSDP root and Qwen time embedder.
 
 Start with a one-node smoke and scale only after it passes; project training runs are capped at 16
 nodes. Checkpointed training, export, and inference require the remote model ID and exact lowercase

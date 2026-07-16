@@ -49,6 +49,8 @@ from pdd.recipe import PDDDiffusionRecipe, initialize_pdd_distributed
 from pdd.training import prepare_qwen_pdd_batch
 from pdd_test_utils import SamplerDataset, build_toy_lifecycle, make_batch, ordered_id_sha256
 
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_EXECUTION
+
 
 def _released_sampler(sample_ids: tuple[str, ...]) -> ReplayableBatchSampler:
     sampler_module = pytest.importorskip("nemo_automodel.components.datasets.diffusion.sampler")
@@ -93,8 +95,15 @@ def _checkpointer(lifecycle, checkpoint_dir):
     return config.build(dp_rank=0, tp_rank=0, pp_rank=0, moe_mesh=None)
 
 
-def _identity(lifecycle, scheduler, sample_ids):
+def _identity(
+    lifecycle,
+    scheduler,
+    sample_ids,
+    *,
+    qwen_image_execution=QWEN_IMAGE_PDD_EXECUTION,
+):
     return build_pdd_checkpoint_identity(
+        qwen_image_execution=qwen_image_execution,
         metadata=lifecycle.metadata,
         model_id="synthetic-pdd-toy",
         model_revision="a" * 40,
@@ -114,6 +123,17 @@ def _identity(lifecycle, scheduler, sample_ids):
         optimizer=lifecycle.optimizer,
         scheduler=scheduler,
     )
+
+
+def test_checkpoint_identity_rejects_unbound_qwen_execution() -> None:
+    lifecycle = build_toy_lifecycle()
+    with pytest.raises(ValueError, match="qwen_image_execution"):
+        _identity(
+            lifecycle,
+            lifecycle.scheduler,
+            ("sample-0",),
+            qwen_image_execution="canonical_diffusers",
+        )
 
 
 class _StepSchedulerStub:
@@ -644,6 +664,7 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
     checkpoint = source_manager.save()
     assert checkpoint.name == "step_00000002"
     assert source_manager.identity["data"]["dataset_snapshot_sha256"] == "2" * 64
+    assert source_manager.identity["qwen_image"] == {"execution": "fastgen_mr210"}
     assert source_manager.identity["training"] == {
         "seed": 1234,
         "validation_seed": 2026,
@@ -741,6 +762,25 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
         )
     with pytest.raises(RuntimeError, match="identity"):
         third_manager.resolve(mismatched.name)
+
+    for step, execution in ((99999994, None), (99999995, "canonical_diffusers")):
+        incompatible = tmp_path / "checkpoints" / f"step_{step:08d}"
+        shutil.copytree(resumed_checkpoint, incompatible)
+        incompatible_manifest_path = incompatible / "manifest.json"
+        incompatible_manifest = json.loads(incompatible_manifest_path.read_text())
+        incompatible_manifest["completed_steps"] = step
+        if execution is None:
+            incompatible_manifest["identity"].pop("qwen_image")
+        else:
+            incompatible_manifest["identity"]["qwen_image"] = {"execution": execution}
+        incompatible_manifest_path.write_text(
+            json.dumps(incompatible_manifest, indent=2, sort_keys=True) + "\n"
+        )
+        _refresh_complete_marker(incompatible)
+        (tmp_path / "checkpoints" / "LATEST").write_text(incompatible.name + "\n")
+        assert third_manager.resolve("LATEST") == resumed_checkpoint.resolve()
+        with pytest.raises(RuntimeError, match="identity"):
+            third_manager.resolve(incompatible.name)
 
     missing_model = tmp_path / "checkpoints" / "step_99999996"
     shutil.copytree(resumed_checkpoint, missing_model)

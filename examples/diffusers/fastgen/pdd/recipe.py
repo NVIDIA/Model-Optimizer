@@ -34,7 +34,9 @@ from torch import nn
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDOutputProjection, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QwenImagePDDAdapter,
+    adopt_qwen_image_mr210_forward,
     convert_qwen_image_to_pdd,
+    require_qwen_image_mr210_forward,
 )
 
 from .checkpoint import PDDCheckpointManager, build_pdd_checkpoint_identity
@@ -471,6 +473,8 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
         model.get("fuse_qkv_projections", False),
         name="model.fuse_qkv_projections",
     )
+    if fuse_qkv_projections:
+        raise ValueError("Qwen MR210 PDD does not support QKV fusion.")
 
     seed = _require_int_at_least(raw.get("seed", 42), name="seed", minimum=0)
     max_steps = _require_int_at_least(
@@ -555,6 +559,8 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     )
 
     dtype = _resolve_dtype(model.get("torch_dtype", "bfloat16"))
+    if dtype != torch.bfloat16:
+        raise ValueError("Qwen MR210 PDD requires model.torch_dtype='bfloat16'.")
 
     return PDDRecipeConfig(
         model_id=model_id,
@@ -856,7 +862,9 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     )
     from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
-    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    pipe, loaded_transformer = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    student = adopt_qwen_image_mr210_forward(loaded_transformer)
+    pipe.transformer = student
     teacher = copy.deepcopy(student).eval().requires_grad_(False)
     lifecycle.append("load/select")
 
@@ -894,9 +902,10 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         # unresharded after forward.
         reshard_after_forward=True,
         mp_policy=MixedPrecisionPolicy(
-            param_dtype=config.dtype,
+            param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
-            output_dtype=config.dtype,
+            output_dtype=torch.bfloat16,
+            cast_forward_inputs=False,
         ),
     )
     distributed_setup = DistributedSetup.build(
@@ -1007,7 +1016,9 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
     from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
     lifecycle = ["load/select"]
-    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    pipe, loaded_transformer = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    student = adopt_qwen_image_mr210_forward(loaded_transformer)
+    pipe.transformer = student
     raw_transformer_config = getattr(student, "config", None)
     to_dict = getattr(raw_transformer_config, "to_dict", None)
     if callable(to_dict):
@@ -1046,9 +1057,10 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
     strategy = FSDP2Config(
         activation_checkpointing=False,
         mp_policy=MixedPrecisionPolicy(
-            param_dtype=config.dtype,
+            param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
-            output_dtype=config.dtype,
+            output_dtype=torch.bfloat16,
+            cast_forward_inputs=False,
         ),
     )
     distributed_setup = DistributedSetup.build(
@@ -1192,6 +1204,7 @@ class PDDDiffusionRecipe:
         )
 
         self.setup_artifacts = build_pdd_setup(config)
+        qwen_image_execution = require_qwen_image_mr210_forward(self.setup_artifacts.student)
         self.expected_latent_channels, self.expected_condition_features = (
             self._resolve_transformer_dimensions(self.setup_artifacts.student)
         )
@@ -1217,6 +1230,7 @@ class PDDDiffusionRecipe:
             raise ValueError("PDD v1 requires exactly one microbatch per optimizer update.")
 
         identity = build_pdd_checkpoint_identity(
+            qwen_image_execution=qwen_image_execution,
             metadata=self.setup_artifacts.metadata,
             model_id=config.model_id,
             model_revision=config.model_revision,

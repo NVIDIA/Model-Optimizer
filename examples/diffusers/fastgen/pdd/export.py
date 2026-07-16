@@ -31,7 +31,10 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_LAYER_SPEC
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QWEN_IMAGE_PDD_EXECUTION,
+    QWEN_IMAGE_PDD_LAYER_SPEC,
+)
 
 from .artifacts import (
     load_canonical_json,
@@ -41,7 +44,7 @@ from .artifacts import (
     write_canonical_json,
 )
 
-_EXPORT_SCHEMA_VERSION = 3
+_EXPORT_SCHEMA_VERSION = 4
 _COMPLETE_SCHEMA_VERSION = 1
 _EXPORT_FORMAT = "modelopt-pdd-safetensors"
 _CONFIG_FILE = "config.json"
@@ -171,6 +174,7 @@ def _validate_identity(identity: Mapping[str, Any], metadata: PDDMetadata) -> di
         "guidance",
         "model",
         "pdd_metadata",
+        "qwen_image",
         "topology",
     }
     missing = sorted(required.difference(identity))
@@ -178,6 +182,9 @@ def _validate_identity(identity: Mapping[str, Any], metadata: PDDMetadata) -> di
         raise ValueError(f"PDD export identity is missing keys: {missing}.")
     if identity["pdd_metadata"] != metadata.to_dict():
         raise ValueError("PDD export metadata does not match the checkpoint identity.")
+    _require_exact_mapping(identity["qwen_image"], {"execution"}, name="identity.qwen_image")
+    if identity["qwen_image"]["execution"] != QWEN_IMAGE_PDD_EXECUTION:
+        raise ValueError("PDD export has an incompatible Qwen execution identity.")
     model = _require_exact_mapping(
         identity["model"], {"id", "revision", "dtype"}, name="identity.model"
     )

@@ -45,8 +45,10 @@ from pdd.inference_qwen_image import (
     _validate_qwen_projection,
 )
 
+import modelopt.torch.fastgen.plugins.qwen_image_pdd as qwen_image_pdd_plugin
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QWEN_IMAGE_PDD_EXECUTION,
     QwenImagePDDAdapter,
     convert_qwen_image_to_pdd,
 )
@@ -56,6 +58,7 @@ class _TinyQwen(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(guidance_embeds=False, in_channels=4)
+        self._modelopt_qwen_image_pdd_execution = QWEN_IMAGE_PDD_EXECUTION
         self.backbone = nn.Linear(4, 5, dtype=torch.bfloat16)
         self.proj_out = nn.Linear(5, 4, dtype=torch.bfloat16)
         self.calls = 0
@@ -68,10 +71,11 @@ class _TinyQwen(nn.Module):
         encoder_hidden_states,
         encoder_hidden_states_mask,
         img_shapes,
-        guidance,
+        max_txt_seq_len,
         return_dict,
     ):
-        del img_shapes, guidance, return_dict
+        del img_shapes, max_txt_seq_len
+        assert return_dict is False
         condition = encoder_hidden_states.mean(dim=(1, 2), keepdim=True)
         condition += (encoder_hidden_states_mask.sum(dim=1)[:, None, None] / 100).to(
             condition.dtype
@@ -81,6 +85,22 @@ class _TinyQwen(nn.Module):
         hidden = hidden + condition
         hidden = hidden + (timestep[:, None, None] / 10).to(hidden.dtype)
         return (self.proj_out(hidden),)
+
+
+@pytest.fixture(autouse=True)
+def _allow_tiny_qwen_protocol_double(monkeypatch):
+    require_production_forward = qwen_image_pdd_plugin.require_qwen_image_mr210_forward
+
+    def require_forward(model: nn.Module) -> str:
+        if type(model) is _TinyQwen:
+            if model._modelopt_qwen_image_pdd_execution != QWEN_IMAGE_PDD_EXECUTION:
+                raise RuntimeError(
+                    "Qwen-Image PDD requires the bound FastGen MR210 forward execution."
+                )
+            return QWEN_IMAGE_PDD_EXECUTION
+        return require_production_forward(model)
+
+    monkeypatch.setattr(qwen_image_pdd_plugin, "require_qwen_image_mr210_forward", require_forward)
 
 
 def _config(blocks=(32, 32, 32, 32)) -> PDDConfig:
@@ -111,7 +131,8 @@ def _converted(seed: int = 17):
 
 def _identity(metadata: PDDMetadata) -> dict:
     return {
-        "schema_version": 4,
+        "schema_version": 5,
+        "qwen_image": {"execution": QWEN_IMAGE_PDD_EXECUTION},
         "model": {"id": "synthetic-qwen", "revision": "f" * 40, "dtype": "bfloat16"},
         "pdd_metadata": metadata.to_dict(),
         "guidance": {"scale": 4.0},
@@ -270,6 +291,35 @@ def test_export_accepts_an_immutable_model_revision(tmp_path) -> None:
         max_shard_bytes=12_000,
     )
     assert inspect_pdd_export(output).manifest["identity"]["model"]["revision"] == "f" * 40
+
+
+@pytest.mark.parametrize("execution", [None, "canonical_diffusers"])
+def test_export_and_inference_reject_incompatible_qwen_execution(tmp_path, execution) -> None:
+    model, _config_value, metadata = _converted()
+    identity = _identity(metadata)
+    if execution is None:
+        identity.pop("qwen_image")
+    else:
+        identity["qwen_image"] = {"execution": execution}
+
+    with pytest.raises(ValueError, match=r"Qwen execution identity|missing keys"):
+        write_pdd_export(
+            tmp_path / f"bad-execution-{execution}",
+            model.state_dict(),
+            metadata=metadata,
+            transformer_config={"in_channels": 4},
+            identity=identity,
+            source_checkpoint={
+                "name": "step_00000010",
+                "manifest_sha256": "3" * 64,
+                "completed_steps": 10,
+            },
+            max_shard_bytes=12_000,
+        )
+
+    descriptor = SimpleNamespace(manifest={"identity": identity})
+    with pytest.raises(RuntimeError, match="Qwen execution identity"):
+        _model_identity(descriptor)
 
 
 @pytest.mark.parametrize("revision", [None, "main", "F" * 40])

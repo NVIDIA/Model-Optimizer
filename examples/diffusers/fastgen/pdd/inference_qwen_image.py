@@ -72,9 +72,13 @@ def _dtype_from_name(name: Any) -> torch.dtype:
 
 
 def _model_identity(descriptor: Any) -> Mapping[str, Any]:
+    from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_EXECUTION
+
     identity = descriptor.manifest.get("identity")
     if not isinstance(identity, Mapping):
         raise RuntimeError("PDD export has no identity mapping.")
+    if identity.get("qwen_image") != {"execution": QWEN_IMAGE_PDD_EXECUTION}:
+        raise RuntimeError("PDD export has an incompatible Qwen execution identity.")
     model = identity.get("model")
     if not isinstance(model, Mapping) or set(model) != {"id", "revision", "dtype"}:
         raise RuntimeError("PDD export model identity is malformed.")
@@ -117,7 +121,10 @@ def build_pdd_student(export_dir: str | Path) -> tuple[nn.Module, Any, torch.dty
     """Reconstruct and strictly load the converted Qwen student on CPU."""
     from diffusers import QwenImageTransformer2DModel
 
-    from modelopt.torch.fastgen.plugins.qwen_image_pdd import convert_qwen_image_to_pdd
+    from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+        adopt_qwen_image_mr210_forward,
+        convert_qwen_image_to_pdd,
+    )
     from pdd.export import inspect_pdd_export, load_pdd_export_into_model, pdd_config_from_metadata
 
     descriptor = inspect_pdd_export(export_dir)
@@ -126,6 +133,7 @@ def build_pdd_student(export_dir: str | Path) -> tuple[nn.Module, Any, torch.dty
     student = QwenImageTransformer2DModel.from_config(dict(descriptor.transformer_config))
     metadata = descriptor.metadata
     _validate_qwen_projection(student, metadata)
+    student = adopt_qwen_image_mr210_forward(student)
     config = pdd_config_from_metadata(metadata, blocks=metadata.inference_blocks)
     convert_qwen_image_to_pdd(student, config)
     descriptor = load_pdd_export_into_model(export_dir, student)
@@ -254,6 +262,8 @@ def main() -> None:
         torch_dtype=dtype,
         use_safetensors=True,
     )
+    if pipe.transformer is not student:
+        raise RuntimeError("Qwen pipeline did not retain the adopted PDD transformer.")
     pipe.to(device)
     config = pdd_config_from_metadata(descriptor.metadata, schedule=args.schedule)
     adapter = QwenImagePDDAdapter(config, compute_dtype=dtype)

@@ -59,6 +59,7 @@ from pdd.recipe import (
 )
 
 from modelopt.torch.fastgen import PDDLayerSpec, convert_to_pdd_output_projection
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import require_qwen_image_mr210_forward
 
 
 def _canonical_parameter_names(model: nn.Module) -> tuple[set[str], set[str]]:
@@ -526,18 +527,25 @@ def test_incompatible_modes_fail_during_config_resolution(
         resolve_pdd_recipe_config(raw)
 
 
-def test_model_revision_and_compute_dtype_follow_loader_contract(tmp_path) -> None:
+def test_model_revision_and_strict_compute_contract(tmp_path) -> None:
     raw = _raw_config(tmp_path)
     raw["model"]["pretrained_model_name_or_path"] = "Qwen/Qwen-Image"
     raw["model"]["revision"] = "a" * 40
-    raw["model"]["torch_dtype"] = "float32"
-    raw["model"]["fuse_qkv_projections"] = True
 
     config = resolve_pdd_recipe_config(raw)
 
     assert config.model_revision == "a" * 40
-    assert config.dtype == torch.float32
-    assert config.fuse_qkv_projections is True
+    assert config.dtype == torch.bfloat16
+    assert config.fuse_qkv_projections is False
+
+    raw["model"]["torch_dtype"] = "float32"
+    with pytest.raises(ValueError, match="torch_dtype='bfloat16'"):
+        resolve_pdd_recipe_config(raw)
+
+    raw["model"]["torch_dtype"] = "bfloat16"
+    raw["model"]["fuse_qkv_projections"] = True
+    with pytest.raises(ValueError, match="does not support QKV fusion"):
+        resolve_pdd_recipe_config(raw)
 
 
 @pytest.mark.parametrize("revision", [None, "main", "A" * 40, "a" * 39])
@@ -685,6 +693,9 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert source.pipe.tokenizer is None
     assert source.pipe.vae is None
     assert source.pipe.transformer is source.student
+    assert source.student.forward.__self__ is source.student
+    assert source.teacher.forward.__self__ is source.teacher
+    assert source.teacher.forward.__func__ is source.student.forward.__func__
     assert source.student.get_submodule("proj_out") is source.projection
     assert source.projection.out_features == source.projection.base_out_features * 4
     assert "proj_out.weight" in source.checkpoint_keys
@@ -693,11 +704,12 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert policy.param_dtype == torch.bfloat16
     assert policy.reduce_dtype == torch.float32
     assert policy.output_dtype == torch.bfloat16
-    assert policy.cast_forward_inputs is True
+    assert policy.cast_forward_inputs is False
     assert source.distributed_setup.strategy_config.activation_checkpointing is False
     assert source.distributed_setup.strategy_config.reshard_after_forward is True
     assert config.parallel.activation_checkpointing is True
     for model in (source.student, source.teacher):
+        require_qwen_image_mr210_forward(model)
         assert model.gradient_checkpointing is False
         assert len(model.transformer_blocks) == 6
         assert all(isinstance(block, CheckpointWrapper) for block in model.transformer_blocks)
@@ -776,6 +788,13 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert export_setup.metadata == source.metadata
     assert export_setup.checkpoint_keys == source.checkpoint_keys
     assert not hasattr(export_setup, "optimizer")
+    require_qwen_image_mr210_forward(export_setup.student)
+    export_policy = export_setup.distributed_setup.strategy_config.mp_policy
+    assert export_policy.param_dtype == torch.bfloat16
+    assert export_policy.reduce_dtype == torch.float32
+    assert export_policy.output_dtype == torch.bfloat16
+    assert export_policy.cast_forward_inputs is False
+    assert export_setup.student.forward.__self__ is export_setup.student
     export_setup.checkpointer.load_model(
         export_setup.student,
         str(checkpoint_root / "model"),

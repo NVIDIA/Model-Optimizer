@@ -38,6 +38,11 @@ from pdd.export_qwen_image import collective_export_memory_preflight
 from pdd.inference_qwen_image import build_pdd_student
 from pdd.recipe import build_pdd_export_setup, resolve_pdd_recipe_config
 
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QWEN_IMAGE_PDD_EXECUTION,
+    require_qwen_image_mr210_forward,
+)
+
 
 def _raw_config(model_dir: pathlib.Path, checkpoint_dir: pathlib.Path) -> dict:
     return {
@@ -133,7 +138,8 @@ def main() -> None:
                     tensor.numel() * tensor.element_size() for tensor in actual.values()
                 )
                 identity = {
-                    "schema_version": 4,
+                    "schema_version": 5,
+                    "qwen_image": {"execution": QWEN_IMAGE_PDD_EXECUTION},
                     "model": {
                         "id": "Qwen/Qwen-Image",
                         "revision": "3" * 40,
@@ -158,12 +164,20 @@ def main() -> None:
                 )
                 descriptor = inspect_pdd_export(output)
                 assert descriptor.metadata == destination.metadata
-                restored, restored_descriptor, _dtype = build_pdd_student(output)
+                restored, restored_descriptor, dtype = build_pdd_student(output)
+                require_qwen_image_mr210_forward(restored)
+                assert dtype == torch.bfloat16
                 assert restored_descriptor.metadata == destination.metadata
                 restored_state = restored.state_dict()
                 assert restored_state.keys() == actual.keys()
                 for key in actual:
-                    torch.testing.assert_close(restored_state[key], actual[key], rtol=0, atol=0)
+                    assert restored_state[key].dtype == torch.bfloat16
+                    torch.testing.assert_close(
+                        restored_state[key],
+                        actual[key].to(torch.bfloat16),
+                        rtol=0,
+                        atol=0,
+                    )
                 status = {"ok": True}
             except BaseException as error:
                 status = {"ok": False, "error": f"{type(error).__name__}: {error}"}
