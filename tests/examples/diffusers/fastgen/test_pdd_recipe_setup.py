@@ -26,8 +26,18 @@ import sys
 import pytest
 import torch
 import yaml
-from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
+from _test_utils.torch.diffusers_models import (
+    create_tiny_qwen_image_pipeline_dir,
+    get_tiny_qwen_image_transformer,
+)
+from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
 from torch import nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointImpl,
+    CheckpointWrapper,
+    checkpoint_wrapper,
+)
+from torch.distributed.checkpoint import FileSystemReader
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
@@ -35,6 +45,7 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 from pdd.recipe import (
+    _apply_qwen_image_activation_checkpointing,
     _materialize_zero_step_adamw_state,
     _projection_identity,
     _require_fp32_optimizer_storage,
@@ -48,6 +59,72 @@ from pdd.recipe import (
 )
 
 from modelopt.torch.fastgen import PDDLayerSpec, convert_to_pdd_output_projection
+
+
+def _canonical_parameter_names(model: nn.Module) -> tuple[set[str], set[str]]:
+    raw_names = {name for name, _ in model.named_parameters()}
+    canonical_names: set[str] = set()
+    for raw_name in raw_names:
+        parts = raw_name.split(".")
+        if parts[0] == "transformer_blocks":
+            assert len(parts) > 3
+            assert parts[1].isdigit()
+            assert parts[2] == "_checkpoint_wrapped_module"
+            assert parts.count("_checkpoint_wrapped_module") == 1
+            canonical_name = ".".join((*parts[:2], *parts[3:]))
+        else:
+            assert "_checkpoint_wrapped_module" not in parts
+            canonical_name = raw_name
+        assert canonical_name not in canonical_names
+        canonical_names.add(canonical_name)
+    return raw_names, canonical_names
+
+
+def test_qwen_activation_checkpointing_wraps_every_block_once() -> None:
+    model = get_tiny_qwen_image_transformer(num_layers=2)
+    model.enable_gradient_checkpointing()
+    original_parameter_names = {name for name, _ in model.named_parameters()}
+    original_state_names = set(model.state_dict())
+
+    wrapped = _apply_qwen_image_activation_checkpointing(model, enabled=True)
+
+    assert wrapped == 2
+    assert model.gradient_checkpointing is False
+    assert len(model.transformer_blocks) == 2
+    for block in model.transformer_blocks:
+        assert isinstance(block, CheckpointWrapper)
+        assert block.checkpoint_impl is CheckpointImpl.NO_REENTRANT
+        assert type(block._checkpoint_wrapped_module) is QwenImageTransformerBlock
+    raw_parameter_names, canonical_parameter_names = _canonical_parameter_names(model)
+    assert canonical_parameter_names == original_parameter_names
+    assert set(model.state_dict()) == original_state_names
+    assert "proj_out.weight" in raw_parameter_names
+    assert "proj_out.bias" in raw_parameter_names
+
+    with pytest.raises(RuntimeError, match="already checkpoint-wrapped"):
+        _apply_qwen_image_activation_checkpointing(model, enabled=True)
+
+
+def test_qwen_activation_checkpointing_disabled_keeps_exact_blocks() -> None:
+    model = get_tiny_qwen_image_transformer(num_layers=2)
+    model.enable_gradient_checkpointing()
+
+    wrapped = _apply_qwen_image_activation_checkpointing(model, enabled=False)
+
+    assert wrapped == 0
+    assert model.gradient_checkpointing is False
+    assert all(type(block) is QwenImageTransformerBlock for block in model.transformer_blocks)
+
+
+def test_qwen_activation_checkpointing_rejects_pre_wrapped_input() -> None:
+    model = get_tiny_qwen_image_transformer(num_layers=2)
+    model.transformer_blocks[0].attn = checkpoint_wrapper(
+        model.transformer_blocks[0].attn,
+        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+    )
+
+    with pytest.raises(RuntimeError, match="already checkpoint-wrapped"):
+        _apply_qwen_image_activation_checkpointing(model, enabled=True)
 
 
 def test_zero_step_adamw_state_preserves_first_lazy_update() -> None:
@@ -113,7 +190,7 @@ def test_fp32_optimizer_storage_rejects_low_precision_masters_and_state() -> Non
         _require_fp32_optimizer_storage(fp32_optimizer)
 
 
-def test_training_setup_shards_student_before_staging_teacher() -> None:
+def test_training_setup_shards_student_before_staging_teacher(monkeypatch) -> None:
     events: list[str] = []
 
     class TrackedModel(nn.Module):
@@ -126,10 +203,24 @@ def test_training_setup_shards_student_before_staging_teacher() -> None:
             events.append(f"{self.label}.to")
             return super().to(*args, **kwargs)
 
+        def fuse_qkv_projections(self):
+            events.append(f"{self.label}.fuse")
+            self.fused_projections = True
+
     class TrackedManager:
         def parallelize(self, model):
             events.append(f"{model.label}.parallelize")
             return model
+
+    def apply_checkpointing(model, *, enabled):
+        assert enabled is True
+        events.append(f"{model.label}.checkpoint")
+        return 1
+
+    monkeypatch.setattr(
+        "pdd.recipe._apply_qwen_image_activation_checkpointing",
+        apply_checkpointing,
+    )
 
     student = TrackedModel("student", projection=True)
     teacher = TrackedModel("teacher")
@@ -146,7 +237,8 @@ def test_training_setup_shards_student_before_staging_teacher() -> None:
         _projection_identity(projection),
         TrackedManager(),
         device=torch.device("cpu"),
-        fuse_qkv_projections=False,
+        fuse_qkv_projections=True,
+        activation_checkpointing=True,
     )
 
     assert staged_student is student
@@ -154,17 +246,26 @@ def test_training_setup_shards_student_before_staging_teacher() -> None:
     assert {parameter.dtype for parameter in staged_student.parameters()} == {torch.float32}
     assert events == [
         "student.to",
+        "student.fuse",
+        "student.checkpoint",
         "student.parallelize",
         "teacher.to",
+        "teacher.fuse",
+        "teacher.checkpoint",
         "teacher.parallelize",
     ]
 
 
-def test_training_setup_upcasts_bf16_models_to_fp32_masters() -> None:
+def test_training_setup_upcasts_bf16_models_to_fp32_masters(monkeypatch) -> None:
     class IdentityManager:
         @staticmethod
         def parallelize(model):
             return model
+
+    monkeypatch.setattr(
+        "pdd.recipe._apply_qwen_image_activation_checkpointing",
+        lambda _model, *, enabled: 0,
+    )
 
     student = nn.Module()
     student.proj_out = nn.Linear(2, 2, dtype=torch.bfloat16)
@@ -183,6 +284,7 @@ def test_training_setup_upcasts_bf16_models_to_fp32_masters() -> None:
         IdentityManager(),
         device=torch.device("cpu"),
         fuse_qkv_projections=False,
+        activation_checkpointing=False,
     )
 
     assert {parameter.dtype for parameter in staged_student.parameters()} == {torch.float32}
@@ -563,7 +665,9 @@ def test_payload_hash_verification_mode_must_be_bool(tmp_path) -> None:
 def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     model_dir = create_tiny_qwen_image_pipeline_dir(tmp_path)
     initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
-    config = resolve_pdd_recipe_config(_raw_config(model_dir))
+    raw_config = _raw_config(model_dir)
+    raw_config["fsdp"]["activation_checkpointing"] = True
+    config = resolve_pdd_recipe_config(raw_config)
 
     source = build_pdd_setup(config)
 
@@ -590,6 +694,23 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert policy.reduce_dtype == torch.float32
     assert policy.output_dtype == torch.bfloat16
     assert policy.cast_forward_inputs is True
+    assert source.distributed_setup.strategy_config.activation_checkpointing is False
+    assert source.distributed_setup.strategy_config.reshard_after_forward is True
+    assert config.parallel.activation_checkpointing is True
+    for model in (source.student, source.teacher):
+        assert model.gradient_checkpointing is False
+        assert len(model.transformer_blocks) == 6
+        assert all(isinstance(block, CheckpointWrapper) for block in model.transformer_blocks)
+        assert all(
+            block.checkpoint_impl is CheckpointImpl.NO_REENTRANT
+            for block in model.transformer_blocks
+        )
+        assert all(
+            type(block._checkpoint_wrapped_module) is QwenImageTransformerBlock
+            for block in model.transformer_blocks
+        )
+        _, canonical_parameter_names = _canonical_parameter_names(model)
+        assert canonical_parameter_names == set(model.state_dict())
     assert all(
         base.__module__ != "modelopt.torch.fastgen.plugins.qwen_image_pdd"
         for base in type(source.student).__mro__
@@ -623,10 +744,25 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     source.optimizer.step()
     expected_weight = source.projection.weight.detach().clone()
     expected_exp_avg = source.optimizer.state[source.projection.weight]["exp_avg"].clone()
+    expected_student_state = {
+        name: value.detach().clone() for name, value in source.student.state_dict().items()
+    }
+    expected_optimizer_state = copy.deepcopy(source.optimizer.state_dict())
     assert source.optimizer.state[unused_parameter]["step"].item() == 0
     checkpoint_root = tmp_path / "checkpoint"
     source.checkpointer.save_model(source.student, str(checkpoint_root))
     source.checkpointer.save_optimizer(source.optimizer, source.student, str(checkpoint_root))
+    model_metadata_keys = set(
+        FileSystemReader(str(checkpoint_root / "model")).read_metadata().state_dict_metadata
+    )
+    optimizer_metadata_keys = set(
+        FileSystemReader(str(checkpoint_root / "optim")).read_metadata().state_dict_metadata
+    )
+    assert model_metadata_keys
+    assert optimizer_metadata_keys
+    assert all("_checkpoint_wrapped_module" not in key for key in model_metadata_keys)
+    assert all("_checkpoint_wrapped_module" not in key for key in optimizer_metadata_keys)
+    assert any(key.endswith("proj_out.weight") for key in model_metadata_keys)
 
     export_setup = build_pdd_export_setup(config)
     assert export_setup.lifecycle == (
@@ -648,6 +784,10 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
         export_setup.student.state_dict()["proj_out.weight"],
         expected_weight,
     )
+    export_state = export_setup.student.state_dict()
+    assert export_state.keys() == expected_student_state.keys()
+    for name, expected in expected_student_state.items():
+        torch.testing.assert_close(export_state[name], expected, rtol=0, atol=0)
 
     destination = build_pdd_setup(config)
     assert destination.metadata == source.metadata
@@ -667,6 +807,18 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert destination.student.get_submodule("proj_out") is destination_projection
     assert id(destination_projection.weight) == destination_weight_id
     torch.testing.assert_close(destination_projection.weight, expected_weight)
+    destination_state = destination.student.state_dict()
+    assert destination_state.keys() == expected_student_state.keys()
+    for name, expected in expected_student_state.items():
+        torch.testing.assert_close(destination_state[name], expected, rtol=0, atol=0)
+    destination_optimizer_state = destination.optimizer.state_dict()
+    assert destination_optimizer_state["param_groups"] == expected_optimizer_state["param_groups"]
+    assert destination_optimizer_state["state"].keys() == expected_optimizer_state["state"].keys()
+    for parameter_index, expected_state in expected_optimizer_state["state"].items():
+        actual_state = destination_optimizer_state["state"][parameter_index]
+        assert actual_state.keys() == expected_state.keys()
+        for name, expected in expected_state.items():
+            torch.testing.assert_close(actual_state[name], expected, rtol=0, atol=0)
     torch.testing.assert_close(
         destination.optimizer.state[destination_projection.weight]["exp_avg"],
         expected_exp_avg,

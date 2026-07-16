@@ -676,6 +676,70 @@ def _load_unwrapped_transformer(
     return pipe, student
 
 
+def _apply_qwen_image_activation_checkpointing(model: nn.Module, *, enabled: bool) -> int:
+    """Apply FastGen-compatible non-reentrant checkpointing to Qwen-Image blocks."""
+    if type(enabled) is not bool:
+        raise TypeError("enabled must be bool.")
+
+    # Diffusers is an optional example dependency; defer imports until this adapter is used.
+    from diffusers import QwenImageTransformer2DModel
+    from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        CheckpointImpl,
+        CheckpointWrapper,
+        checkpoint_wrapper,
+    )
+
+    if type(model) is not QwenImageTransformer2DModel:
+        raise TypeError(
+            "PDD activation checkpointing requires an ordinary "
+            f"QwenImageTransformer2DModel, got {type(model).__name__}."
+        )
+    blocks = model.transformer_blocks
+    if not isinstance(blocks, nn.ModuleList) or not blocks:
+        raise TypeError("Qwen-Image transformer_blocks must be a non-empty nn.ModuleList.")
+    wrapped_modules = [
+        (index, name or "<block>")
+        for index, block in enumerate(blocks)
+        for name, module in block.named_modules()
+        if isinstance(module, CheckpointWrapper) or hasattr(module, "_checkpoint_wrapped_module")
+    ]
+    if wrapped_modules:
+        raise RuntimeError(
+            "Qwen-Image has already checkpoint-wrapped modules in transformer blocks: "
+            f"{wrapped_modules}."
+        )
+    unexpected = [
+        (index, type(block).__name__)
+        for index, block in enumerate(blocks)
+        if type(block) is not QwenImageTransformerBlock
+    ]
+    if unexpected:
+        raise TypeError(f"Qwen-Image transformer block types changed: {unexpected}.")
+
+    model.disable_gradient_checkpointing()
+    if model.gradient_checkpointing:
+        raise RuntimeError("Qwen-Image native gradient checkpointing remained enabled.")
+    if not enabled:
+        return 0
+
+    for index, block in enumerate(tuple(blocks)):
+        blocks[index] = checkpoint_wrapper(
+            block,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+        )
+    for index, block in enumerate(blocks):
+        if not isinstance(block, CheckpointWrapper):
+            raise RuntimeError(f"Qwen-Image block {index} was not checkpoint-wrapped.")
+        if block.checkpoint_impl is not CheckpointImpl.NO_REENTRANT:
+            raise RuntimeError(
+                f"Qwen-Image block {index} uses the wrong checkpoint implementation."
+            )
+        if type(block._checkpoint_wrapped_module) is not QwenImageTransformerBlock:
+            raise RuntimeError(f"Qwen-Image block {index} wrapped an unexpected module type.")
+    return len(blocks)
+
+
 def _stage_and_shard_training_models(
     student: nn.Module,
     teacher: nn.Module,
@@ -685,6 +749,7 @@ def _stage_and_shard_training_models(
     *,
     device: torch.device,
     fuse_qkv_projections: bool,
+    activation_checkpointing: bool,
 ) -> tuple[nn.Module, nn.Module]:
     """Stage FP32 masters and shard one dense model at a time."""
     if fuse_qkv_projections and (
@@ -702,6 +767,11 @@ def _stage_and_shard_training_models(
                 "Qwen fuse_qkv_projections() was accepted but produced no fused attention "
                 "modules in the pinned Diffusers release."
             )
+    student_checkpoint_blocks = _apply_qwen_image_activation_checkpointing(
+        student,
+        enabled=activation_checkpointing,
+    )
+    logging.info("Qwen student checkpoint-wrapped blocks: %d", student_checkpoint_blocks)
     _require_projection_identity(student, projection, projection_identity, stage="student staging")
     student = manager.parallelize(student)
     _require_projection_module(student, projection, stage="student FSDP2 parallelization")
@@ -711,6 +781,11 @@ def _stage_and_shard_training_models(
     teacher.to(device=device, dtype=torch.float32)
     if fuse_qkv_projections:
         teacher.fuse_qkv_projections()
+    teacher_checkpoint_blocks = _apply_qwen_image_activation_checkpointing(
+        teacher,
+        enabled=activation_checkpointing,
+    )
+    logging.info("Qwen teacher checkpoint-wrapped blocks: %d", teacher_checkpoint_blocks)
     teacher = manager.parallelize(teacher)
     return student, teacher
 
@@ -810,7 +885,14 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     from torch.distributed.fsdp import MixedPrecisionPolicy
 
     strategy = FSDP2Config(
-        activation_checkpointing=config.parallel.activation_checkpointing,
+        # Qwen block checkpointing is applied explicitly before FSDP2 because
+        # AutoModel's generic language-model attribute policy does not match
+        # Qwen-Image blocks.
+        activation_checkpointing=False,
+        # Match FastGen's per-block PyTorch default instead of AutoModel's
+        # all-but-last ModuleList optimization. AutoModel still keeps the root
+        # unresharded after forward.
+        reshard_after_forward=True,
         mp_policy=MixedPrecisionPolicy(
             param_dtype=config.dtype,
             reduce_dtype=torch.float32,
@@ -820,7 +902,7 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     distributed_setup = DistributedSetup.build(
         strategy=strategy,
         parallelism_sizes=ParallelismSizes(dp_size=dp_size),
-        activation_checkpointing=config.parallel.activation_checkpointing,
+        activation_checkpointing=False,
         world_size=world_size,
     )
     mesh_context = distributed_setup.mesh_context
@@ -837,6 +919,7 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         manager,
         device=config.device,
         fuse_qkv_projections=config.fuse_qkv_projections,
+        activation_checkpointing=config.parallel.activation_checkpointing,
     )
     pipe.transformer = student
     # Keep the public lifecycle summary stable even though placement, optional QKV fusion, and
