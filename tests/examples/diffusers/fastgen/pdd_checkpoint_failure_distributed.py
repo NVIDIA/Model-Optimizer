@@ -58,6 +58,14 @@ class _Trainer(_State):
         self.completed_steps = completed_steps
 
 
+class _StepScheduler:
+    def __init__(self, trainer: _Trainer) -> None:
+        self.trainer = trainer
+
+    def state_dict(self):
+        return {"step": self.trainer.completed_steps, "epoch": 0}
+
+
 class _Checkpointer:
     def __init__(self, rank: int, *, fail_sidecar: bool = False) -> None:
         self.config = SimpleNamespace(is_async=False)
@@ -129,10 +137,11 @@ def _run_failure(root: pathlib.Path, stage: str) -> None:
             model=object(),
             optimizer=SimpleNamespace(param_groups=[{"lr": 2.0e-5}]),
             scheduler=object(),
+            step_scheduler=_StepScheduler(trainer),
             trainer=trainer,
             sampler=_Sampler(),
             rng=_State(),
-            identity={"schema_version": 1, "topology": {"world_size": 2}},
+            identity={"schema_version": 2, "topology": {"world_size": 2}},
         )
         initial.save()
         trainer.completed_steps = 2
@@ -143,10 +152,11 @@ def _run_failure(root: pathlib.Path, stage: str) -> None:
         model=object(),
         optimizer=SimpleNamespace(param_groups=[{"lr": 2.0e-5}]),
         scheduler=object(),
+        step_scheduler=_StepScheduler(trainer),
         trainer=trainer,
         sampler=_Sampler(),
         rng=_State(),
-        identity={"schema_version": 1, "topology": {"world_size": 2}},
+        identity={"schema_version": 2, "topology": {"world_size": 2}},
     )
     message = None
     try:

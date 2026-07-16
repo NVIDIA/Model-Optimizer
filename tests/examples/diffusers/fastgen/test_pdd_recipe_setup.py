@@ -179,7 +179,39 @@ def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
             "inference_blocks": [2, 2],
             "data_free": False,
         },
-        "optim": {"learning_rate": 2.0e-5, "weight_decay": 0.01},
+        "seed": 42,
+        "optim": {
+            "learning_rate": 2.0e-5,
+            "optimizer": {
+                "_target_": "torch.optim.AdamW",
+                "weight_decay": 0.01,
+            },
+        },
+        "lr_scheduler": {
+            "lr_decay_style": "constant",
+            "lr_warmup_steps": 0,
+            "min_lr": 2.0e-5,
+        },
+        "step_scheduler": {
+            "max_steps": 10,
+            "num_epochs": 2,
+            "log_every": 1,
+            "ckpt_every_steps": 5,
+            "local_batch_size": 1,
+            "global_batch_size": 1,
+            "save_checkpoint_every_epoch": False,
+        },
+        "training_health": {"max_grad_norm": 1.0, "zero_grad_warmup_steps": 0},
+        "validation": {"count": 3, "seed": 11, "split_seed": 7, "every_steps": 5},
+        "data": {
+            "dataloader": {
+                "_target_": "fastgen_data.build_text_to_image_multiresolution_dataloader",
+                "batch_size": 1,
+                "drop_last": True,
+                "shuffle": True,
+                "dynamic_batch_size": False,
+            }
+        },
         "fsdp": {
             "dp_size": 1,
             "tp_size": 1,
@@ -201,24 +233,115 @@ def test_example_recipe_explicitly_pins_grid_max_t() -> None:
     raw = yaml.safe_load((_FASTGEN_DIR / "pdd" / "configs" / "qwen_image.yaml").read_text())
     assert type(raw["pdd"]["grid_max_t"]) is float
     assert raw["pdd"]["grid_max_t"] == 0.999
-    assert raw["data"]["validation_count"] == 2000
-    assert raw["data"]["split_seed"] == 2026
+    assert raw["validation"]["count"] == 2000
+    assert raw["validation"]["split_seed"] == 2026
 
 
 def test_split_config_fields_are_strict(tmp_path) -> None:
     raw = _raw_config(tmp_path)
-    raw["data"] = {"validation_count": 3, "split_seed": 7}
+    raw["validation"] = {"count": 3, "seed": 11, "split_seed": 7, "every_steps": 5}
     config = resolve_pdd_recipe_config(raw)
-    assert config.validation_count == 3
-    assert config.split_seed == 7
+    assert config.validation.count == 3
+    assert config.validation.split_seed == 7
 
     for invalid_count in (0, -1, True, 1.5):
-        raw["data"]["validation_count"] = invalid_count
-        with pytest.raises((TypeError, ValueError), match="validation_count"):
+        raw["validation"]["count"] = invalid_count
+        with pytest.raises((TypeError, ValueError), match=r"validation\.count"):
             resolve_pdd_recipe_config(raw)
 
-    raw["data"] = {"validation_count": 3, "split_seed": -1}
+    raw["validation"] = {"count": 3, "seed": 11, "split_seed": -1, "every_steps": 5}
     with pytest.raises(ValueError, match="split_seed"):
+        resolve_pdd_recipe_config(raw)
+
+
+def test_config_node_and_canonical_dotted_values_are_consumed(tmp_path) -> None:
+    raw = _raw_config(tmp_path)
+    raw["step_scheduler"].update(
+        max_steps=50_000,
+        ckpt_every_steps=1_000,
+        global_batch_size=1,
+    )
+    raw["optim"]["learning_rate"] = 3.0e-5
+    raw["lr_scheduler"]["min_lr"] = 3.0e-5
+
+    class ConfigNodeLike:
+        def to_dict(self):
+            return copy.deepcopy(raw)
+
+    config = resolve_pdd_recipe_config(ConfigNodeLike())
+    assert config.step_scheduler.max_steps == 50_000
+    assert config.step_scheduler.ckpt_every_steps == 1_000
+    assert config.step_scheduler.global_batch_size == 1
+    assert config.learning_rate == 3.0e-5
+
+
+def test_automodel_parser_dotted_overrides_reach_the_pdd_resolver(tmp_path, monkeypatch) -> None:
+    parser_module = pytest.importorskip("nemo_automodel.components.config._arg_parser")
+    config_path = tmp_path / "pdd.yaml"
+    config_path.write_text(yaml.safe_dump(_raw_config(tmp_path)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "finetune.py",
+            "--config",
+            str(config_path),
+            "--step_scheduler.max_steps=50000",
+            "--step_scheduler.ckpt_every_steps=1000",
+            "--step_scheduler.global_batch_size=1",
+            "--optim.learning_rate=3e-5",
+            "--lr_scheduler.min_lr=3e-5",
+        ],
+    )
+
+    parsed = parser_module.parse_args_and_load_config(str(config_path))
+    resolved = resolve_pdd_recipe_config(parsed)
+    assert resolved.step_scheduler.max_steps == 50_000
+    assert resolved.step_scheduler.ckpt_every_steps == 1_000
+    assert resolved.step_scheduler.global_batch_size == 1
+    assert resolved.learning_rate == 3.0e-5
+
+
+@pytest.mark.parametrize(
+    ("legacy_key", "replacement"),
+    [
+        ("max_steps", "step_scheduler.max_steps"),
+        ("global_batch_size", "step_scheduler.global_batch_size"),
+        ("checkpoint_every_steps", "step_scheduler.ckpt_every_steps"),
+        ("log_every_steps", "step_scheduler.log_every"),
+    ],
+)
+def test_legacy_training_lifecycle_keys_are_rejected(tmp_path, legacy_key, replacement) -> None:
+    raw = _raw_config(tmp_path)
+    raw["training"] = {legacy_key: 2}
+    with pytest.raises(ValueError, match=replacement.replace(".", r"\.")):
+        resolve_pdd_recipe_config(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("lr_decay_style", "cosine", "lr_decay_style='constant'"),
+        ("lr_warmup_steps", 1, "lr_warmup_steps=0"),
+        ("min_lr", 1.0e-5, "min_lr must equal optim.learning_rate"),
+    ],
+)
+def test_nonconstant_lr_declarations_are_rejected(tmp_path, field, value, message) -> None:
+    raw = _raw_config(tmp_path)
+    raw["lr_scheduler"][field] = value
+    with pytest.raises(ValueError, match=message):
+        resolve_pdd_recipe_config(raw)
+
+
+@pytest.mark.parametrize("field", ["weight_decay", "betas", "eps"])
+def test_legacy_optimizer_fields_are_rejected(tmp_path, field) -> None:
+    raw = _raw_config(tmp_path)
+    raw["optim"][field] = {
+        "weight_decay": 0.01,
+        "betas": [0.9, 0.999],
+        "eps": 1.0e-8,
+    }[field]
+    with pytest.raises(ValueError, match=rf"optim\.optimizer\.{field}"):
         resolve_pdd_recipe_config(raw)
 
 
@@ -240,7 +363,7 @@ def test_pdd_finetune_namespace_module_help() -> None:
         capture_output=True,
         text=True,
     )
-    assert "Train Qwen-Image" in result.stdout
+    assert "Qwen-Image PDD training" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -280,19 +403,29 @@ def test_remote_model_requires_full_revision_and_non_dp_parallelism_is_rejected(
 @pytest.mark.parametrize(
     ("section", "name", "value", "message"),
     [
-        ("training", "grad_accumulation_steps", 2, "grad_accumulation_steps=1"),
-        ("training", "max_grad_norm", 0.0, "max_grad_norm must be > 0"),
-        ("training", "validation_every_steps", 0, "validation_every_steps"),
+        (
+            "step_scheduler",
+            "save_checkpoint_every_epoch",
+            True,
+            "save_checkpoint_every_epoch=false",
+        ),
+        ("training_health", "max_grad_norm", 0.0, "max_grad_norm must be > 0"),
+        ("validation", "every_steps", 0, "validation.every_steps"),
         ("guidance", "rescale", 1.1, "guidance.rescale must be <= 1"),
-        ("optim", "betas", [0.9, 1.0], "optim.betas values"),
-        ("optim", "eps", 0.0, "optim.eps must be > 0"),
+        ("optimizer", "betas", [0.9, 1.0], "optim.optimizer.betas values"),
+        ("optimizer", "eps", 0.0, "optim.optimizer.eps must be > 0"),
     ],
 )
 def test_training_config_gates_fail_during_resolution(
     tmp_path, section, name, value, message
 ) -> None:
     raw = _raw_config(tmp_path)
-    raw.setdefault(section, {})[name] = value
+    target = (
+        raw["optim"].setdefault("optimizer", {})
+        if section == "optimizer"
+        else raw.setdefault(section, {})
+    )
+    target[name] = value
 
     with pytest.raises(ValueError, match=message):
         resolve_pdd_recipe_config(raw)

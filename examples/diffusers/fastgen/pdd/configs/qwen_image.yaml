@@ -1,5 +1,7 @@
 # Qwen-Image PDD training recipe. Result-bearing paths/topology remain externally gated.
 
+seed: 42
+
 model:
   pretrained_model_name_or_path: Qwen/Qwen-Image
   revision: 75e0b4be04f60ec59a75f475837eced720f823b6
@@ -29,26 +31,46 @@ pdd:
 
 optim:
   learning_rate: 2.0e-5
-  weight_decay: 0.01
-  betas: [0.9, 0.999]
-  eps: 1.0e-8
+  optimizer:
+    _target_: torch.optim.AdamW
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    amsgrad: false
+    capturable: false
+    differentiable: false
+    foreach: false
+    fused: false
+    maximize: false
+
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  min_lr: 2.0e-5
 
 guidance:
   rescale: 1.0
   eps: 1.0e-5
 
-training:
-  seed: 42
+step_scheduler:
   max_steps: 10000
-  max_grad_norm: 1.0
-  zero_grad_warmup_steps: 0
-  log_every_steps: 10
-  checkpoint_every_steps: 1000
-  validation_every_steps: 1000
-  grad_accumulation_steps: 1
+  num_epochs: 200
+  log_every: 10
+  ckpt_every_steps: 1000
+  local_batch_size: 1
+  save_checkpoint_every_epoch: false
   # Freeze to 256 only after the production-topology/data gate is approved.
   global_batch_size:
-  validation_seed: 2026
+
+training_health:
+  max_grad_norm: 1.0
+  zero_grad_warmup_steps: 0
+
+validation:
+  count: 2000
+  seed: 2026
+  split_seed: 2026
+  every_steps: 1000
 
 fsdp:
   dp_size:
@@ -59,8 +81,6 @@ fsdp:
   activation_checkpointing: true
 
 data:
-  validation_count: 2000
-  split_seed: 2026
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: data/qwen_image_cache

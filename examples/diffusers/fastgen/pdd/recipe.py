@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,17 @@ from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     convert_qwen_image_to_pdd,
 )
 
+from .checkpoint import PDDCheckpointManager, build_pdd_checkpoint_identity
+from .data import (
+    _build_training_dataloader,
+    _build_validation_dataloader,
+    _build_validation_plan,
+    _collective_training_batch,
+    _collective_training_iterator,
+    _coverage_axis,
+    _iter_validation_batches,
+    _validate_dataset_contract,
+)
 from .verify_readonly_automodel import snapshot_installed_distribution
 
 
@@ -58,20 +70,34 @@ class PDDCheckpointConfig:
 
 
 @dataclass(frozen=True)
-class PDDTrainingConfig:
-    """Direct-update and observability settings for the standalone PDD lifecycle."""
+class PDDStepSchedulerConfig:
+    """AutoModel-compatible batch, cadence, and termination settings."""
 
-    seed: int = 42
     max_steps: int = 10_000
-    max_grad_norm: float = 1.0
-    zero_grad_warmup_steps: int = 0
-    log_every_steps: int = 10
-    checkpoint_every_steps: int = 1_000
-    validation_every_steps: int = 1_000
+    num_epochs: int = 200
+    log_every: int = 10
+    ckpt_every_steps: int = 1_000
     local_batch_size: int = 1
     global_batch_size: int | None = None
-    grad_accumulation_steps: int = 1
-    validation_seed: int = 2026
+    save_checkpoint_every_epoch: bool = False
+
+
+@dataclass(frozen=True)
+class PDDTrainingHealthConfig:
+    """PDD-only update health settings."""
+
+    max_grad_norm: float = 1.0
+    zero_grad_warmup_steps: int = 0
+
+
+@dataclass(frozen=True)
+class PDDValidationConfig:
+    """Deterministic held-out validation settings."""
+
+    count: int = 2_000
+    seed: int = 2026
+    split_seed: int = 2026
+    every_steps: int = 1_000
 
 
 @dataclass(frozen=True)
@@ -91,14 +117,15 @@ class PDDRecipeConfig:
     pdd: PDDConfig
     parallel: PDDParallelConfig
     checkpoint: PDDCheckpointConfig
-    training: PDDTrainingConfig
+    step_scheduler: PDDStepSchedulerConfig
+    training_health: PDDTrainingHealthConfig
+    validation: PDDValidationConfig
     guidance: PDDGuidanceConfig
+    seed: int
     learning_rate: float
     weight_decay: float
     adam_betas: tuple[float, float]
     adam_eps: float
-    validation_count: int
-    split_seed: int
     device: torch.device
     dtype: torch.dtype
     fuse_qkv_projections: bool
@@ -155,6 +182,22 @@ def _as_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _config_to_mapping(value: Any) -> Mapping[str, Any]:
+    """Materialize AutoModel config targets as their original YAML dotted paths."""
+    if isinstance(value, Mapping):
+        return value
+    to_yaml_dict = getattr(value, "to_yaml_dict", None)
+    if callable(to_yaml_dict):
+        return _as_mapping(
+            to_yaml_dict(resolve_env=True, use_orig_values=True),
+            name="ConfigNode.to_yaml_dict() result",
+        )
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _as_mapping(to_dict(), name="config.to_dict() result")
+    raise TypeError(f"config must be a mapping or ConfigNode, got {type(value).__name__}.")
+
+
 def _reject_enabled(value: Any, *, name: str) -> None:
     if value is None or value is False or value == {}:
         return
@@ -201,18 +244,55 @@ def _resolve_dtype(value: Any) -> torch.dtype:
         ) from error
 
 
-def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
-    """Resolve PDD and reject TE-linear, PEFT, and guidance embeddings before loading."""
-    raw = _as_mapping(raw, name="config")
+def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
+    """Resolve one canonical DMD2-shaped PDD configuration."""
+    raw = _config_to_mapping(raw)
+
+    legacy_training = _as_mapping(raw.get("training", {}), name="training")
+    legacy_replacements = {
+        "seed": "seed",
+        "max_steps": "step_scheduler.max_steps",
+        "log_every_steps": "step_scheduler.log_every",
+        "checkpoint_every_steps": "step_scheduler.ckpt_every_steps",
+        "validation_every_steps": "validation.every_steps",
+        "local_batch_size": "step_scheduler.local_batch_size",
+        "global_batch_size": "step_scheduler.global_batch_size",
+        "grad_accumulation_steps": "step_scheduler.global_batch_size",
+        "validation_seed": "validation.seed",
+        "max_grad_norm": "training_health.max_grad_norm",
+        "zero_grad_warmup_steps": "training_health.zero_grad_warmup_steps",
+    }
+    if legacy_training:
+        key = next(iter(legacy_training))
+        replacement_key = legacy_replacements.get(key, "the canonical PDD schema")
+        raise ValueError(f"training.{key} is unsupported; use {replacement_key}.")
+
     model = _as_mapping(raw.get("model"), name="model")
     pdd_raw = _as_mapping(raw.get("pdd"), name="pdd")
     fsdp = _as_mapping(raw.get("fsdp", {}), name="fsdp")
     optim = _as_mapping(raw.get("optim", {}), name="optim")
+    optimizer_cfg = _as_mapping(optim.get("optimizer", {}), name="optim.optimizer")
+    lr_scheduler = _as_mapping(raw.get("lr_scheduler", {}), name="lr_scheduler")
+    step_scheduler = _as_mapping(raw.get("step_scheduler", {}), name="step_scheduler")
+    training_health = _as_mapping(raw.get("training_health", {}), name="training_health")
+    validation = _as_mapping(raw.get("validation", {}), name="validation")
     checkpoint = _as_mapping(raw.get("checkpoint", {}), name="checkpoint")
-    training = _as_mapping(raw.get("training", {}), name="training")
     guidance = _as_mapping(raw.get("guidance", {}), name="guidance")
     data = _as_mapping(raw.get("data", {}), name="data")
     dataloader = _as_mapping(data.get("dataloader", {}), name="data.dataloader")
+
+    for legacy_key in ("weight_decay", "betas", "eps"):
+        if legacy_key in optim:
+            raise ValueError(
+                f"optim.{legacy_key} is unsupported; use optim.optimizer.{legacy_key}."
+            )
+
+    for legacy_key, replacement_key in (
+        ("validation_count", "validation.count"),
+        ("split_seed", "validation.split_seed"),
+    ):
+        if legacy_key in data:
+            raise ValueError(f"data.{legacy_key} is unsupported; use {replacement_key}.")
 
     target = dataloader.get("_target_")
     expected_target = "fastgen_data.build_text_to_image_multiresolution_dataloader"
@@ -236,16 +316,6 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
             "PDD uses deterministic ordinal splits from metadata.json; "
             "data.dataloader.metadata_index is unsupported."
         )
-    validation_count = _require_int_at_least(
-        data.get("validation_count", 2_000),
-        name="data.validation_count",
-        minimum=1,
-    )
-    split_seed = _require_int_at_least(
-        data.get("split_seed", 2026),
-        name="data.split_seed",
-        minimum=0,
-    )
 
     _reject_enabled(model.get("transformer_engine_linear"), name="global TE-linear conversion")
     _reject_enabled(model.get("peft"), name="PEFT/LoRA")
@@ -274,20 +344,43 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
         or any(character not in "0123456789abcdefABCDEF" for character in model_revision)
     ):
         raise ValueError("model.revision must be null or a full 40-character commit hash.")
-    if not Path(model_id).is_dir():
-        if model_revision is None:
-            raise ValueError("Remote PDD models require an exact model.revision commit hash.")
-    learning_rate = optim.get("learning_rate", 2.0e-5)
-    weight_decay = optim.get("weight_decay", 0.0)
-    if isinstance(learning_rate, bool) or not isinstance(learning_rate, int | float):
-        raise TypeError("optim.learning_rate must be a real number.")
-    if isinstance(weight_decay, bool) or not isinstance(weight_decay, int | float):
-        raise TypeError("optim.weight_decay must be a real number.")
-    if not math.isfinite(learning_rate) or not math.isfinite(weight_decay):
-        raise ValueError("optim.learning_rate and weight_decay must be finite.")
-    if learning_rate <= 0 or weight_decay < 0:
-        raise ValueError("optim.learning_rate must be > 0 and weight_decay must be >= 0.")
-    adam_betas_raw = optim.get("betas", [0.9, 0.999])
+    if not Path(model_id).is_dir() and model_revision is None:
+        raise ValueError("Remote PDD models require an exact model.revision commit hash.")
+
+    learning_rate = _require_finite_real(
+        optim.get("learning_rate", 2.0e-5),
+        name="optim.learning_rate",
+        minimum=0.0,
+    )
+    if learning_rate == 0.0:
+        raise ValueError("optim.learning_rate must be > 0.")
+    optimizer_target = optimizer_cfg.get("_target_", "torch.optim.AdamW")
+    if optimizer_target != "torch.optim.AdamW":
+        raise ValueError("PDD v1 requires optim.optimizer._target_='torch.optim.AdamW'.")
+    allowed_optimizer_keys = {
+        "_target_",
+        "weight_decay",
+        "betas",
+        "eps",
+        "amsgrad",
+        "capturable",
+        "differentiable",
+        "foreach",
+        "fused",
+        "maximize",
+    }
+    unsupported_optimizer_keys = sorted(set(optimizer_cfg) - allowed_optimizer_keys)
+    if unsupported_optimizer_keys:
+        raise ValueError(f"unsupported PDD optimizer keys: {unsupported_optimizer_keys}.")
+    for flag in ("amsgrad", "capturable", "differentiable", "foreach", "fused", "maximize"):
+        if _require_bool(optimizer_cfg.get(flag, False), name=f"optim.optimizer.{flag}"):
+            raise ValueError(f"PDD v1 requires optim.optimizer.{flag}=false.")
+    weight_decay = _require_finite_real(
+        optimizer_cfg.get("weight_decay", 0.0),
+        name="optim.optimizer.weight_decay",
+        minimum=0.0,
+    )
+    adam_betas_raw = optimizer_cfg.get("betas", [0.9, 0.999])
     if (
         not isinstance(adam_betas_raw, list | tuple)
         or len(adam_betas_raw) != 2
@@ -295,17 +388,45 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
             isinstance(beta, bool) or not isinstance(beta, int | float) for beta in adam_betas_raw
         )
     ):
-        raise TypeError("optim.betas must contain two real numbers.")
+        raise TypeError("optim.optimizer.betas must contain two real numbers.")
     adam_betas = (float(adam_betas_raw[0]), float(adam_betas_raw[1]))
     if any(not math.isfinite(beta) or not 0.0 <= beta < 1.0 for beta in adam_betas):
-        raise ValueError("optim.betas values must be finite and in [0, 1).")
+        raise ValueError("optim.optimizer.betas values must be finite and in [0, 1).")
     adam_eps = _require_finite_real(
-        optim.get("eps", 1e-8),
-        name="optim.eps",
+        optimizer_cfg.get("eps", 1e-8),
+        name="optim.optimizer.eps",
         minimum=0.0,
     )
     if adam_eps == 0.0:
-        raise ValueError("optim.eps must be > 0.")
+        raise ValueError("optim.optimizer.eps must be > 0.")
+
+    lr_decay_style = lr_scheduler.get("lr_decay_style", "constant")
+    if lr_decay_style != "constant":
+        raise ValueError("PDD v1 requires lr_scheduler.lr_decay_style='constant'.")
+    lr_warmup_steps = _require_int_at_least(
+        lr_scheduler.get("lr_warmup_steps", 0),
+        name="lr_scheduler.lr_warmup_steps",
+        minimum=0,
+    )
+    if lr_warmup_steps != 0:
+        raise ValueError("PDD v1 requires lr_scheduler.lr_warmup_steps=0.")
+    min_lr = _require_finite_real(
+        lr_scheduler.get("min_lr", learning_rate),
+        name="lr_scheduler.min_lr",
+        minimum=0.0,
+    )
+    if min_lr != learning_rate:
+        raise ValueError("lr_scheduler.min_lr must equal optim.learning_rate for constant PDD LR.")
+    if "max_lr" in lr_scheduler:
+        max_lr = _require_finite_real(
+            lr_scheduler["max_lr"],
+            name="lr_scheduler.max_lr",
+            minimum=0.0,
+        )
+        if max_lr != learning_rate:
+            raise ValueError(
+                "lr_scheduler.max_lr must equal optim.learning_rate for constant PDD LR."
+            )
 
     dp_size = fsdp.get("dp_size")
     if dp_size is not None and (type(dp_size) is not int or dp_size < 1):
@@ -324,7 +445,8 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
 
     checkpoint_enabled = _require_bool(checkpoint.get("enabled", True), name="checkpoint.enabled")
     save_consolidated = _require_bool(
-        checkpoint.get("save_consolidated", False), name="checkpoint.save_consolidated"
+        checkpoint.get("save_consolidated", False),
+        name="checkpoint.save_consolidated",
     )
     if save_consolidated:
         raise ValueError("PDD training checkpoints require checkpoint.save_consolidated=false.")
@@ -334,70 +456,98 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
     model_save_format = checkpoint.get("model_save_format", "torch_save")
     if model_save_format != "torch_save":
         raise ValueError("PDD training checkpoints require model_save_format='torch_save'.")
-    fuse_qkv_projections = _require_bool(
-        model.get("fuse_qkv_projections", False), name="model.fuse_qkv_projections"
-    )
     restore_from = checkpoint.get("restore_from")
     if restore_from is not None and (not isinstance(restore_from, str) or not restore_from):
         raise ValueError("checkpoint.restore_from must be null or a non-empty string.")
     if not checkpoint_enabled and restore_from is not None:
         raise ValueError("checkpoint.restore_from requires checkpoint.enabled=true.")
+    fuse_qkv_projections = _require_bool(
+        model.get("fuse_qkv_projections", False),
+        name="model.fuse_qkv_projections",
+    )
 
-    seed = _require_int_at_least(training.get("seed", 42), name="training.seed", minimum=0)
+    seed = _require_int_at_least(raw.get("seed", 42), name="seed", minimum=0)
     max_steps = _require_int_at_least(
-        training.get("max_steps", 10_000), name="training.max_steps", minimum=1
-    )
-    zero_grad_warmup_steps = _require_int_at_least(
-        training.get("zero_grad_warmup_steps", 0),
-        name="training.zero_grad_warmup_steps",
-        minimum=0,
-    )
-    log_every_steps = _require_int_at_least(
-        training.get("log_every_steps", 10),
-        name="training.log_every_steps",
+        step_scheduler.get("max_steps", 10_000),
+        name="step_scheduler.max_steps",
         minimum=1,
     )
-    checkpoint_every_steps = _require_int_at_least(
-        training.get("checkpoint_every_steps", 1_000),
-        name="training.checkpoint_every_steps",
+    num_epochs = _require_int_at_least(
+        step_scheduler.get("num_epochs", 200),
+        name="step_scheduler.num_epochs",
         minimum=1,
     )
-    validation_every_steps = _require_int_at_least(
-        training.get("validation_every_steps", 1_000),
-        name="training.validation_every_steps",
+    log_every = _require_int_at_least(
+        step_scheduler.get("log_every", 10),
+        name="step_scheduler.log_every",
         minimum=1,
     )
-    grad_accumulation_steps = _require_int_at_least(
-        training.get("grad_accumulation_steps", 1),
-        name="training.grad_accumulation_steps",
+    ckpt_every_steps = _require_int_at_least(
+        step_scheduler.get("ckpt_every_steps", 1_000),
+        name="step_scheduler.ckpt_every_steps",
         minimum=1,
     )
-    if grad_accumulation_steps != 1:
-        raise ValueError("PDD v1 exact resume requires training.grad_accumulation_steps=1.")
+    save_checkpoint_every_epoch = _require_bool(
+        step_scheduler.get("save_checkpoint_every_epoch", False),
+        name="step_scheduler.save_checkpoint_every_epoch",
+    )
+    if save_checkpoint_every_epoch:
+        raise ValueError(
+            "PDD exact resume requires step_scheduler.save_checkpoint_every_epoch=false."
+        )
     local_batch_size = _require_int_at_least(
-        dataloader.get("batch_size", training.get("local_batch_size", 1)),
+        step_scheduler.get("local_batch_size", 1),
+        name="step_scheduler.local_batch_size",
+        minimum=1,
+    )
+    data_batch_size = _require_int_at_least(
+        dataloader.get("batch_size", local_batch_size),
         name="data.dataloader.batch_size",
         minimum=1,
     )
-    global_batch_size = training.get("global_batch_size")
+    if data_batch_size != local_batch_size:
+        raise ValueError("data.dataloader.batch_size must equal step_scheduler.local_batch_size.")
+    global_batch_size = step_scheduler.get("global_batch_size")
     if global_batch_size is not None:
         global_batch_size = _require_int_at_least(
             global_batch_size,
-            name="training.global_batch_size",
+            name="step_scheduler.global_batch_size",
             minimum=1,
         )
-    validation_seed = _require_int_at_least(
-        training.get("validation_seed", 2026),
-        name="training.validation_seed",
-        minimum=0,
-    )
+
     max_grad_norm = _require_finite_real(
-        training.get("max_grad_norm", 1.0),
-        name="training.max_grad_norm",
+        training_health.get("max_grad_norm", 1.0),
+        name="training_health.max_grad_norm",
         minimum=0.0,
     )
     if max_grad_norm == 0.0:
-        raise ValueError("training.max_grad_norm must be > 0.")
+        raise ValueError("training_health.max_grad_norm must be > 0.")
+    zero_grad_warmup_steps = _require_int_at_least(
+        training_health.get("zero_grad_warmup_steps", 0),
+        name="training_health.zero_grad_warmup_steps",
+        minimum=0,
+    )
+    validation_count = _require_int_at_least(
+        validation.get("count", 2_000),
+        name="validation.count",
+        minimum=1,
+    )
+    validation_seed = _require_int_at_least(
+        validation.get("seed", 2026),
+        name="validation.seed",
+        minimum=0,
+    )
+    split_seed = _require_int_at_least(
+        validation.get("split_seed", 2026),
+        name="validation.split_seed",
+        minimum=0,
+    )
+    validation_every_steps = _require_int_at_least(
+        validation.get("every_steps", 1_000),
+        name="validation.every_steps",
+        minimum=1,
+    )
+
     guidance_rescale = _require_finite_real(
         guidance.get("rescale", 1.0),
         name="guidance.rescale",
@@ -428,26 +578,31 @@ def resolve_pdd_recipe_config(raw: Mapping[str, Any]) -> PDDRecipeConfig:
             restore_from=restore_from,
             save_consolidated=save_consolidated,
         ),
-        training=PDDTrainingConfig(
-            seed=seed,
+        step_scheduler=PDDStepSchedulerConfig(
             max_steps=max_steps,
-            max_grad_norm=max_grad_norm,
-            zero_grad_warmup_steps=zero_grad_warmup_steps,
-            log_every_steps=log_every_steps,
-            checkpoint_every_steps=checkpoint_every_steps,
-            validation_every_steps=validation_every_steps,
+            num_epochs=num_epochs,
+            log_every=log_every,
+            ckpt_every_steps=ckpt_every_steps,
             local_batch_size=local_batch_size,
             global_batch_size=global_batch_size,
-            grad_accumulation_steps=grad_accumulation_steps,
-            validation_seed=validation_seed,
+            save_checkpoint_every_epoch=save_checkpoint_every_epoch,
+        ),
+        training_health=PDDTrainingHealthConfig(
+            max_grad_norm=max_grad_norm,
+            zero_grad_warmup_steps=zero_grad_warmup_steps,
+        ),
+        validation=PDDValidationConfig(
+            count=validation_count,
+            seed=validation_seed,
+            split_seed=split_seed,
+            every_steps=validation_every_steps,
         ),
         guidance=PDDGuidanceConfig(rescale=guidance_rescale, eps=guidance_eps),
+        seed=seed,
         learning_rate=float(learning_rate),
         weight_decay=float(weight_decay),
         adam_betas=adam_betas,
         adam_eps=adam_eps,
-        validation_count=validation_count,
-        split_seed=split_seed,
         device=torch.device(model.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
         dtype=_resolve_dtype(model.get("torch_dtype", "bfloat16")),
         fuse_qkv_projections=fuse_qkv_projections,
@@ -628,17 +783,16 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     lifecycle.append("pdd_conversion")
 
     world_size = dist.get_world_size()
-    if config.training.global_batch_size is not None:
-        effective_global_batch = (
-            config.training.local_batch_size * world_size * config.training.grad_accumulation_steps
-        )
-        if effective_global_batch != config.training.global_batch_size:
+    if config.step_scheduler.global_batch_size is not None:
+        effective_global_batch = config.step_scheduler.local_batch_size * world_size
+        if effective_global_batch != config.step_scheduler.global_batch_size:
             raise ValueError(
                 "PDD global batch mismatch: "
-                f"local_batch_size={config.training.local_batch_size} * world_size={world_size} "
-                f"* grad_accumulation_steps={config.training.grad_accumulation_steps} "
-                f"= {effective_global_batch}, configured "
-                f"training.global_batch_size={config.training.global_batch_size}."
+                f"local_batch_size={config.step_scheduler.local_batch_size} * "
+                f"world_size={world_size} = {effective_global_batch}, configured "
+                "step_scheduler.global_batch_size="
+                f"{config.step_scheduler.global_batch_size}. PDD v1 requires one microbatch per "
+                "optimizer update."
             )
     dp_size = config.parallel.dp_size or world_size
     if dp_size != world_size:
@@ -862,13 +1016,13 @@ def build_pdd_training_artifacts(
     )
     pipeline = PDDPipeline(setup.student, setup.teacher, config.pdd, adapter)
     scheduler = torch.optim.lr_scheduler.LambdaLR(setup.optimizer, lr_lambda=lambda _: 1.0)
-    rng = StatefulRNG(config.training.seed, ranked=True)
+    rng = StatefulRNG(config.seed, ranked=True)
     trainer = PDDTrainer(
         pipeline,
         setup.optimizer,
         projection=setup.projection,
-        max_grad_norm=config.training.max_grad_norm,
-        warmup_steps=config.training.zero_grad_warmup_steps,
+        max_grad_norm=config.training_health.max_grad_norm,
+        warmup_steps=config.training_health.zero_grad_warmup_steps,
     )
     return PDDTrainingArtifacts(
         pipeline=pipeline,
@@ -884,3 +1038,319 @@ def initialize_pdd_distributed(*, backend: str, timeout_minutes: int = 60) -> An
     from nemo_automodel.components.distributed import initialize_distributed
 
     return initialize_distributed(backend=backend, timeout_minutes=timeout_minutes)
+
+
+class PDDDiffusionRecipe:
+    """Compose released AutoModel components around the PDD-specific update."""
+
+    def __init__(self, cfg: Any) -> None:
+        self.cfg = cfg
+        self.raw_config = _config_to_mapping(cfg)
+        self.config = resolve_pdd_recipe_config(self.raw_config)
+
+    def setup(self) -> None:
+        """Build data, converted models, AutoModel scheduling, and strict resume state."""
+        config = self.config
+        self.dist_env = initialize_pdd_distributed(
+            backend="nccl" if config.device.type == "cuda" else "gloo",
+            timeout_minutes=60,
+        )
+        from nemo_automodel.components.loggers.log_utils import setup_logging
+        from nemo_automodel.components.training.step_scheduler import StepScheduler
+
+        setup_logging()
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        self.dataloader, self.sampler = _build_training_dataloader(
+            self.raw_config,
+            config,
+            dp_rank=self.rank,
+            dp_world_size=self.world_size,
+        )
+        self.validation_dataloader, self.validation_sampler = _build_validation_dataloader(
+            self.raw_config,
+            config,
+            dp_rank=self.rank,
+            dp_world_size=self.world_size,
+        )
+        (
+            self.snapshot_report,
+            train_ordered_id_sha256,
+            heldout_ordered_id_sha256,
+        ) = _validate_dataset_contract(
+            self.sampler.dataset,
+            self.validation_sampler.dataset,
+            config,
+        )
+        self.validation_assignments, self.validation_masks = _build_validation_plan(
+            self.validation_sampler,
+            config,
+        )
+
+        self.setup_artifacts = build_pdd_setup(config)
+        self.expected_latent_channels, self.expected_condition_features = (
+            self._resolve_transformer_dimensions(self.setup_artifacts.student)
+        )
+        self.training = build_pdd_training_artifacts(self.setup_artifacts, config)
+        global_batch_size = (
+            config.step_scheduler.global_batch_size
+            or config.step_scheduler.local_batch_size * self.world_size
+        )
+        self.step_scheduler = StepScheduler(
+            global_batch_size=global_batch_size,
+            local_batch_size=config.step_scheduler.local_batch_size,
+            dp_size=self.world_size,
+            ckpt_every_steps=config.step_scheduler.ckpt_every_steps,
+            save_checkpoint_every_epoch=False,
+            dataloader=self.dataloader,
+            val_every_steps=None,
+            start_step=0,
+            start_epoch=0,
+            num_epochs=config.step_scheduler.num_epochs,
+            max_steps=config.step_scheduler.max_steps,
+        )
+        if self.step_scheduler.grad_acc_steps != 1:
+            raise ValueError("PDD v1 requires exactly one microbatch per optimizer update.")
+
+        identity = build_pdd_checkpoint_identity(
+            metadata=self.setup_artifacts.metadata,
+            model_id=config.model_id,
+            model_revision=config.model_revision,
+            guidance_scale=config.pdd.guidance_scale,
+            guidance_rescale=config.guidance.rescale,
+            guidance_eps=config.guidance.eps,
+            automodel_snapshot=self.setup_artifacts.automodel_snapshot,
+            ordered_train_id_sha256=train_ordered_id_sha256,
+            ordered_heldout_id_sha256=heldout_ordered_id_sha256,
+            dataset_snapshot_sha256=self.snapshot_report["dataset_snapshot_sha256"],
+            local_batch_size=config.step_scheduler.local_batch_size,
+            grad_accumulation_steps=1,
+            training_seed=config.seed,
+            validation_seed=config.validation.seed,
+            validation_every_steps=config.validation.every_steps,
+            max_grad_norm=config.training_health.max_grad_norm,
+            zero_grad_warmup_steps=config.training_health.zero_grad_warmup_steps,
+            activation_checkpointing=config.parallel.activation_checkpointing,
+            dtype=str(config.dtype).removeprefix("torch."),
+            optimizer=self.setup_artifacts.optimizer,
+            scheduler=self.training.scheduler,
+        )
+        self.checkpoint_manager = PDDCheckpointManager(
+            root=config.checkpoint.checkpoint_dir,
+            checkpointer=self.setup_artifacts.checkpointer,
+            model=self.setup_artifacts.student,
+            optimizer=self.setup_artifacts.optimizer,
+            scheduler=self.training.scheduler,
+            step_scheduler=self.step_scheduler,
+            trainer=self.training.trainer,
+            sampler=self.sampler,
+            rng=self.training.rng,
+            identity=identity,
+        )
+        self.resume = self.checkpoint_manager.load(config.checkpoint.restore_from)
+        self.resume_pending = self.resume is not None
+        self._log_setup()
+
+    @staticmethod
+    def _resolve_transformer_dimensions(student: nn.Module) -> tuple[int, int]:
+        transformer_config = getattr(student, "config", None)
+        if isinstance(transformer_config, Mapping):
+            in_channels = transformer_config.get("in_channels")
+            condition_features = transformer_config.get("joint_attention_dim")
+        else:
+            in_channels = getattr(transformer_config, "in_channels", None)
+            condition_features = getattr(transformer_config, "joint_attention_dim", None)
+        if type(in_channels) is not int or in_channels <= 0 or in_channels % 4:
+            raise RuntimeError("constructed Qwen transformer has invalid packed in_channels.")
+        if type(condition_features) is not int or condition_features <= 0:
+            raise RuntimeError("constructed Qwen transformer has invalid joint_attention_dim.")
+        return in_channels // 4, condition_features
+
+    def _log_setup(self) -> None:
+        if self.rank != 0:
+            return
+        if self.resume is not None:
+            logging.info(
+                "PDD resume selected: checkpoint=%s parent=%s step=%d sample_slots=%d "
+                "expected_first_sample_ids=%s",
+                self.resume.checkpoint_path,
+                self.resume.parent_checkpoint,
+                self.resume.completed_steps,
+                self.resume.sample_slots_consumed,
+                self.resume.expected_next_sample_ids,
+            )
+        logging.info(
+            "PDD dataset verified: snapshot_sha256=%s metadata_sha256=%s "
+            "train=%d validation=%d root=%s",
+            self.snapshot_report["dataset_snapshot_sha256"],
+            self.snapshot_report["metadata_sha256"],
+            self.snapshot_report["train_samples"],
+            self.snapshot_report["validation_samples"],
+            self.snapshot_report["cache_root"],
+        )
+        logging.info(
+            "PDD setup complete: lifecycle=%s student_keys=%d AutoModel=%s",
+            self.setup_artifacts.lifecycle,
+            len(self.setup_artifacts.checkpoint_keys),
+            self.setup_artifacts.automodel_snapshot["version"],
+        )
+
+    def _prepared_training_batches(self):
+        iterator = _collective_training_iterator(self.dataloader, self.sampler)
+        while True:
+            next_batch = _collective_training_batch(
+                iterator,
+                sampler=self.sampler,
+                resume=self.resume,
+                resume_pending=self.resume_pending,
+                device=self.config.device,
+                dtype=self.config.dtype,
+                require_negative_condition=self.config.pdd.guidance_scale is not None,
+                expected_batch_size=self.config.step_scheduler.local_batch_size,
+                expected_latent_channels=self.expected_latent_channels,
+                expected_condition_features=self.expected_condition_features,
+            )
+            if next_batch is None:
+                return
+            yield next_batch
+
+    def _run_validation(self, completed_step: int) -> None:
+        from .training import run_pdd_validation
+
+        self.validation_sampler.set_epoch(0)
+        self.validation_sampler.load_state_dict({"epoch": 0, "batches_yielded": 0})
+        result = run_pdd_validation(
+            self.training.pipeline,
+            _iter_validation_batches(
+                self.validation_dataloader,
+                self.validation_masks,
+                self.config,
+                self.expected_latent_channels,
+                self.expected_condition_features,
+            ),
+            self.validation_assignments,
+            validation_seed=self.config.validation.seed,
+        )
+        if self.rank == 0:
+            logging.info(
+                "PDD validation step=%d loss=%.12g pairs=%d starts=%d heads=%d "
+                "ordered_id_sha256=%s records=%d",
+                completed_step,
+                result.mean_loss,
+                result.pair_count,
+                result.start_count,
+                result.head_count,
+                result.ordered_id_sha256,
+                len(result.records),
+            )
+
+    def _log_step(self, diagnostics: Any, data_wait_seconds: float, step_seconds: float) -> None:
+        timing = torch.tensor(
+            [data_wait_seconds, step_seconds],
+            dtype=torch.float64,
+            device=self.config.device,
+        )
+        dist.all_reduce(timing, op=dist.ReduceOp.MAX)
+        peak_memory = (
+            torch.cuda.max_memory_allocated(self.config.device)
+            if self.config.device.type == "cuda"
+            else 0
+        )
+        memory = torch.tensor(peak_memory, dtype=torch.int64, device=self.config.device)
+        dist.all_reduce(memory, op=dist.ReduceOp.MAX)
+        global_samples = self.config.step_scheduler.local_batch_size * self.world_size
+        throughput = global_samples / max(float(timing[1].item()), 1e-12)
+        coverage = self.training.trainer.coverage
+        bin_loss = [
+            None if count == 0 else float(loss_sum / count)
+            for loss_sum, count in zip(
+                coverage.bin_loss_sums.tolist(),
+                coverage.bin_counts.tolist(),
+            )
+        ]
+        if self.rank == 0:
+            logging.info(
+                "PDD step=%d loss=%.6g grad_norm=%.6g nominal_update_ratio=%.6g "
+                "projection_update_ratio=%s lr=%.6g student_rms=%.6g "
+                "teacher_rms=%.6g student_teacher_rms_ratio=%.6g "
+                "reconstruction_rms=%.6g pairs=%d n_coverage=%s k_coverage=%s "
+                "bins=%s bin_loss=%s samples_per_second=%.3f "
+                "data_wait_seconds=%.4f peak_memory_bytes=%d",
+                diagnostics.completed_step,
+                diagnostics.loss,
+                diagnostics.grad_norm,
+                diagnostics.student_adamw_nominal_update_ratio,
+                diagnostics.pdd_projection_update_ratio,
+                diagnostics.learning_rate,
+                diagnostics.student_velocity_rms,
+                diagnostics.teacher_velocity_rms,
+                diagnostics.student_teacher_velocity_rms_ratio,
+                diagnostics.reconstructed_state_rms,
+                int((coverage.pair_counts > 0).sum()),
+                _coverage_axis(coverage.n_counts, coverage.n_loss_sums),
+                _coverage_axis(coverage.k_counts, coverage.k_loss_sums),
+                coverage.bin_counts.tolist(),
+                bin_loss,
+                throughput,
+                float(timing[0].item()),
+                int(memory.item()),
+            )
+        if self.config.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.config.device)
+
+    def run_train_validation_loop(self) -> None:
+        """Train through AutoModel StepScheduler without weakening PDD resume semantics."""
+        data_wait_started = time.perf_counter()
+        try:
+            for _epoch in self.step_scheduler.epochs:
+                self.step_scheduler.dataloader = self._prepared_training_batches()
+                for batch_group in self.step_scheduler:
+                    if len(batch_group) != 1:
+                        raise RuntimeError("PDD v1 requires one microbatch per optimizer update.")
+                    if self.step_scheduler.step != self.training.trainer.completed_steps:
+                        raise RuntimeError(
+                            "PDD trainer and AutoModel StepScheduler disagree before the update."
+                        )
+                    (batch, sample_ids) = batch_group[0]
+                    data_wait_seconds = time.perf_counter() - data_wait_started
+                    if self.resume_pending:
+                        if self.resume is None:
+                            raise RuntimeError("PDD resume is pending without restored state.")
+                        if self.rank == 0:
+                            logging.info(
+                                "PDD resume first batch verified: checkpoint=%s sample_ids=%s",
+                                self.resume.checkpoint_path,
+                                sample_ids,
+                            )
+                        self.resume_pending = False
+
+                    step_started = time.perf_counter()
+                    next_step = self.training.trainer.completed_steps + 1
+                    diagnostics = self.training.trainer.train_step(
+                        batch,
+                        measure_updates=(next_step % self.config.step_scheduler.log_every == 0),
+                    )
+                    self.training.scheduler.step()
+                    self.sampler.commit(sample_ids)
+                    if self.sampler.remaining_batches == 0:
+                        self.sampler.set_epoch(self.sampler.epoch + 1)
+                    if self.training.trainer.completed_steps != self.step_scheduler.step + 1:
+                        raise RuntimeError(
+                            "PDD trainer and AutoModel StepScheduler disagree after the update."
+                        )
+                    serialized_step = self.step_scheduler.state_dict()["step"]
+                    if serialized_step != self.training.trainer.completed_steps:
+                        raise RuntimeError("AutoModel StepScheduler serialized the wrong PDD step.")
+                    step_seconds = time.perf_counter() - step_started
+
+                    completed_step = diagnostics.completed_step
+                    is_final_step = self.step_scheduler.is_last_step
+                    if completed_step % self.config.step_scheduler.log_every == 0:
+                        self._log_step(diagnostics, data_wait_seconds, step_seconds)
+                    if completed_step % self.config.validation.every_steps == 0 or is_final_step:
+                        self._run_validation(completed_step)
+                    if self.config.checkpoint.enabled and self.step_scheduler.is_ckpt_step:
+                        self.checkpoint_manager.save()
+                    data_wait_started = time.perf_counter()
+        finally:
+            self.setup_artifacts.checkpointer.close()

@@ -25,9 +25,11 @@ import math
 import pathlib
 import shutil
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
@@ -44,7 +46,7 @@ from pdd.checkpoint import (
     build_pdd_checkpoint_identity,
     resolve_pdd_training_checkpoint,
 )
-from pdd.recipe import initialize_pdd_distributed
+from pdd.recipe import PDDDiffusionRecipe, initialize_pdd_distributed
 from pdd.training import prepare_qwen_pdd_batch
 from pdd.verify_readonly_automodel import snapshot_installed_distribution
 from pdd_test_utils import SamplerDataset, build_toy_lifecycle, make_batch, ordered_id_sha256
@@ -119,14 +121,47 @@ def _identity(lifecycle, scheduler, sample_ids):
     )
 
 
+class _StepSchedulerStub:
+    def __init__(self, trainer, sampler) -> None:
+        self.trainer = trainer
+        self.sampler = sampler
+        self.loaded_state = None
+
+    def state_dict(self):
+        return {"step": self.trainer.completed_steps, "epoch": self.sampler.epoch}
+
+    def load_state_dict(self, state):
+        self.loaded_state = dict(state)
+
+
+class _RecordingCheckpointManager(PDDCheckpointManager):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.save_calls = []
+
+    def save(self):
+        self.save_calls.append(
+            {
+                "live_step": self.step_scheduler.step,
+                "serialized_step": self.step_scheduler.state_dict()["step"],
+                "trainer_step": self.trainer.completed_steps,
+                "live_epoch": self.step_scheduler.epoch,
+                "sampler_epoch": self.sampler.epoch,
+            }
+        )
+        return super().save()
+
+
 def _manager(root, lifecycle, sampler, rng):
     checkpointer = _checkpointer(lifecycle, root)
+    step_scheduler = _StepSchedulerStub(lifecycle.trainer, sampler)
     manager = PDDCheckpointManager(
         root=root,
         checkpointer=checkpointer,
         model=lifecycle.student,
         optimizer=lifecycle.optimizer,
         scheduler=lifecycle.scheduler,
+        step_scheduler=step_scheduler,
         trainer=lifecycle.trainer,
         sampler=sampler,
         rng=rng,
@@ -181,6 +216,244 @@ def test_replayable_sampler_commits_consumed_batches_not_prefetch() -> None:
     bad_ids = dict(state, next_sample_ids=["wrong-id"])
     with pytest.raises(RuntimeError, match="next sample IDs"):
         _released_sampler(sample_ids).load_state_dict(bad_ids)
+
+
+def test_automodel_step_scheduler_serializes_the_completed_yielded_step() -> None:
+    scheduler_module = pytest.importorskip("nemo_automodel.components.training.step_scheduler")
+    scheduler = scheduler_module.StepScheduler(
+        global_batch_size=1,
+        local_batch_size=1,
+        dp_size=1,
+        ckpt_every_steps=2,
+        save_checkpoint_every_epoch=False,
+        dataloader=[{"sample": 0}, {"sample": 1}],
+        val_every_steps=None,
+        start_step=0,
+        start_epoch=0,
+        num_epochs=1,
+        max_steps=2,
+    )
+
+    iterator = iter(scheduler)
+    assert next(iterator) == [{"sample": 0}]
+    assert scheduler.step == 0
+    assert scheduler.state_dict() == {"step": 1, "epoch": 0}
+    assert next(iterator) == [{"sample": 1}]
+    assert scheduler.step == 1
+    assert scheduler.is_last_step
+    assert scheduler.state_dict() == {"step": 2, "epoch": 0}
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+def _build_recipe_loop(
+    root,
+    sample_ids,
+    *,
+    max_steps,
+    num_epochs,
+    ckpt_every_steps,
+    restore_from=None,
+):
+    if not dist.is_initialized():
+        initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
+    scheduler_module = pytest.importorskip("nemo_automodel.components.training.step_scheduler")
+    rng_module = pytest.importorskip("nemo_automodel.components.training.rng")
+
+    lifecycle = build_toy_lifecycle()
+    sampler = _released_sampler(sample_ids)
+    rng = rng_module.StatefulRNG(1234, ranked=True)
+    step_scheduler = scheduler_module.StepScheduler(
+        global_batch_size=1,
+        local_batch_size=1,
+        dp_size=1,
+        ckpt_every_steps=ckpt_every_steps,
+        save_checkpoint_every_epoch=False,
+        dataloader=[None] * len(sampler),
+        val_every_steps=None,
+        start_step=0,
+        start_epoch=0,
+        num_epochs=num_epochs,
+        max_steps=max_steps,
+    )
+    checkpointer = _checkpointer(lifecycle, root)
+    manager = _RecordingCheckpointManager(
+        root=root,
+        checkpointer=checkpointer,
+        model=lifecycle.student,
+        optimizer=lifecycle.optimizer,
+        scheduler=lifecycle.scheduler,
+        step_scheduler=step_scheduler,
+        trainer=lifecycle.trainer,
+        sampler=sampler,
+        rng=rng,
+        identity=_identity(lifecycle, lifecycle.scheduler, sample_ids),
+    )
+    resume = manager.load(restore_from)
+    events = SimpleNamespace(first_ids=[], diagnostics=[], validation_steps=[])
+
+    recipe = object.__new__(PDDDiffusionRecipe)
+    recipe.config = SimpleNamespace(
+        step_scheduler=SimpleNamespace(local_batch_size=1, log_every=1),
+        validation=SimpleNamespace(every_steps=10_000),
+        checkpoint=SimpleNamespace(enabled=True),
+        device=torch.device("cpu"),
+    )
+    recipe.training = SimpleNamespace(
+        pipeline=lifecycle.pipeline,
+        trainer=lifecycle.trainer,
+        scheduler=lifecycle.scheduler,
+        rng=rng,
+    )
+    recipe.setup_artifacts = SimpleNamespace(checkpointer=checkpointer)
+    recipe.step_scheduler = step_scheduler
+    recipe.checkpoint_manager = manager
+    recipe.sampler = sampler
+    recipe.resume = resume
+    recipe.resume_pending = resume is not None
+    recipe.rank = 0
+    recipe.world_size = 1
+
+    def prepared_batches():
+        # Bind this iterator to the current sampler plan. The production loader iterator also
+        # exhausts after that plan even though the recipe commits the sampler into its next epoch.
+        for _ in range(sampler.remaining_batches):
+            expected_ids = sampler.expected_next_sample_ids()
+            if recipe.resume_pending:
+                assert recipe.resume is not None
+                recipe.resume.verify_first_batch(expected_ids)
+            events.first_ids.append(expected_ids)
+            offset = sum(ord(character) for character in expected_ids[0]) / 10_000
+            yield make_batch(expected_ids, offset=offset), expected_ids
+
+    recipe.__dict__["_prepared_training_batches"] = prepared_batches
+    recipe.__dict__["_run_validation"] = events.validation_steps.append
+    recipe.__dict__["_log_step"] = lambda diagnostics, _data_wait, _step_time: (
+        events.diagnostics.append(diagnostics)
+    )
+    return SimpleNamespace(
+        recipe=recipe,
+        lifecycle=lifecycle,
+        sampler=sampler,
+        step_scheduler=step_scheduler,
+        manager=manager,
+        resume=resume,
+        events=events,
+    )
+
+
+def test_recipe_loop_saves_periodic_and_max_step_checkpoints_once(tmp_path) -> None:
+    run = _build_recipe_loop(
+        tmp_path / "periodic",
+        tuple(f"sample-{index}" for index in range(8)),
+        max_steps=3,
+        num_epochs=4,
+        ckpt_every_steps=2,
+    )
+    run.recipe.run_train_validation_loop()
+
+    assert [call["trainer_step"] for call in run.manager.save_calls] == [2, 3]
+    assert [call["live_step"] for call in run.manager.save_calls] == [1, 2]
+    assert [call["serialized_step"] for call in run.manager.save_calls] == [2, 3]
+    assert sorted(path.name for path in (tmp_path / "periodic").glob("step_*")) == [
+        "step_00000002",
+        "step_00000003",
+    ]
+    assert run.events.validation_steps == [3]
+
+
+def test_recipe_loop_epoch_final_save_normalizes_and_restores_epoch(tmp_path) -> None:
+    root = tmp_path / "epoch"
+    sample_ids = ("sample-0", "sample-1")
+    source = _build_recipe_loop(
+        root,
+        sample_ids,
+        max_steps=100,
+        num_epochs=1,
+        ckpt_every_steps=100,
+    )
+    source.recipe.run_train_validation_loop()
+
+    assert len(source.manager.save_calls) == 1
+    assert source.manager.save_calls[0] == {
+        "live_step": 1,
+        "serialized_step": 2,
+        "trainer_step": 2,
+        "live_epoch": 0,
+        "sampler_epoch": 1,
+    }
+    manifest = json.loads((root / "step_00000002" / "manifest.json").read_text())
+    assert manifest["step_scheduler"] == {"step": 2, "epoch": 1}
+
+    resumed = _build_recipe_loop(
+        root,
+        sample_ids,
+        max_steps=3,
+        num_epochs=2,
+        ckpt_every_steps=100,
+        restore_from="step_00000002",
+    )
+    assert resumed.step_scheduler.step == 2
+    assert resumed.step_scheduler.epoch == resumed.sampler.epoch == 1
+    assert resumed.resume is not None
+    expected_ids = resumed.resume.expected_next_sample_ids
+    resumed.recipe.run_train_validation_loop()
+    assert resumed.events.first_ids[0] == expected_ids
+    assert (root / "step_00000003" / "COMPLETE").is_file()
+
+
+def test_recipe_loop_resume_matches_uninterrupted_next_update(tmp_path) -> None:
+    sample_ids = tuple(f"sample-{index}" for index in range(4))
+    control = _build_recipe_loop(
+        tmp_path / "control",
+        sample_ids,
+        max_steps=2,
+        num_epochs=2,
+        ckpt_every_steps=100,
+    )
+    control.recipe.run_train_validation_loop()
+
+    staged_root = tmp_path / "staged"
+    first = _build_recipe_loop(
+        staged_root,
+        sample_ids,
+        max_steps=1,
+        num_epochs=2,
+        ckpt_every_steps=100,
+    )
+    first.recipe.run_train_validation_loop()
+    resumed = _build_recipe_loop(
+        staged_root,
+        sample_ids,
+        max_steps=2,
+        num_epochs=2,
+        ckpt_every_steps=100,
+        restore_from="step_00000001",
+    )
+    assert resumed.resume is not None
+    expected_next_ids = resumed.resume.expected_next_sample_ids
+    resumed.recipe.run_train_validation_loop()
+
+    assert resumed.events.first_ids == [expected_next_ids]
+    assert resumed.events.first_ids[0] == control.events.first_ids[1]
+    assert resumed.events.diagnostics == [control.events.diagnostics[1]]
+    for name, tensor in resumed.lifecycle.student.state_dict().items():
+        torch.testing.assert_close(
+            tensor,
+            control.lifecycle.student.state_dict()[name],
+            rtol=0,
+            atol=0,
+        )
+    actual_optimizer = _optimizer_state_by_name(resumed.lifecycle)
+    expected_optimizer = _optimizer_state_by_name(control.lifecycle)
+    assert actual_optimizer.keys() == expected_optimizer.keys()
+    for name in actual_optimizer:
+        for key, actual in actual_optimizer[name].items():
+            expected = expected_optimizer[name][key]
+            if isinstance(actual, torch.Tensor):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            else:
+                assert actual == expected
 
 
 def test_qwen_batch_preparation_preserves_ids_masks_and_negative_condition() -> None:
@@ -496,10 +769,12 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
     step_manifest_path = step_mismatch / "manifest.json"
     step_manifest = json.loads(step_manifest_path.read_text())
     step_manifest["completed_steps"] = 4
+    step_manifest["step_scheduler"]["step"] = 4
     step_manifest_path.write_text(json.dumps(step_manifest, indent=2, sort_keys=True) + "\n")
     trainer_state_path = step_mismatch / "trainer_state.json"
     trainer_state = json.loads(trainer_state_path.read_text())
     trainer_state["completed_steps"] = 4
+    trainer_state["step_scheduler"]["step"] = 4
     trainer_state_path.write_text(json.dumps(trainer_state, indent=2, sort_keys=True) + "\n")
     _refresh_complete_marker(step_mismatch)
     with pytest.raises(RuntimeError, match="trainer step"):

@@ -55,6 +55,7 @@ _EXPECTED_PDD_FILES = {
     "automodel_dependency.json",
     "checkpoint.py",
     "configs",
+    "data.py",
     "export.py",
     "export_qwen_image.py",
     "finetune.py",

@@ -35,7 +35,7 @@ from modelopt.torch.fastgen import PDDMetadata
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_CHECKPOINT_SCHEMA_VERSION = 1
+_CHECKPOINT_SCHEMA_VERSION = 2
 _COMPLETE_SCHEMA_VERSION = 1
 _FORBIDDEN_ARTIFACT_TOKENS = ("fake_score", "discriminator", "ema", "r1", "gan")
 
@@ -317,6 +317,25 @@ class PDDResumeState:
             )
 
 
+class _StepSchedulerCheckpointState:
+    """Rank-local carrier for the normalized next-data StepScheduler cursor."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, int] = {"step": 0, "epoch": 0}
+
+    def state_dict(self) -> dict[str, int]:
+        return dict(self.state)
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if set(state) != {"step", "epoch"}:
+            raise ValueError("PDD StepScheduler state must contain step and epoch.")
+        step = state["step"]
+        epoch = state["epoch"]
+        if type(step) is not int or step < 0 or type(epoch) is not int or epoch < 0:
+            raise ValueError("PDD StepScheduler step and epoch must be nonnegative integers.")
+        self.state = {"step": step, "epoch": epoch}
+
+
 def _checkpoint_sidecar_paths(checkpoint: Path, world_size: int) -> list[Path]:
     paths: list[Path] = []
     for rank in range(world_size):
@@ -324,6 +343,7 @@ def _checkpoint_sidecar_paths(checkpoint: Path, world_size: int) -> list[Path]:
             (
                 checkpoint / "rng" / f"rng_dp_rank_{rank}.pt",
                 checkpoint / "sampler" / f"sampler_dp_rank_{rank}.pt",
+                checkpoint / "step_scheduler" / f"step_scheduler_dp_rank_{rank}.pt",
                 checkpoint / "trainer" / f"trainer_dp_rank_{rank}.pt",
             )
         )
@@ -369,6 +389,7 @@ def validate_pdd_training_checkpoint(
         "identity",
         "completed_steps",
         "learning_rates",
+        "step_scheduler",
         "parent_checkpoint",
         "rank_progress",
         "dcp_sha256",
@@ -393,9 +414,19 @@ def validate_pdd_training_checkpoint(
     if trainer_state != {
         "completed_steps": manifest["completed_steps"],
         "learning_rates": manifest["learning_rates"],
+        "step_scheduler": manifest["step_scheduler"],
         "parent_checkpoint": manifest["parent_checkpoint"],
     }:
         raise RuntimeError("PDD trainer-state sidecar does not match the manifest.")
+    step_scheduler_state = manifest["step_scheduler"]
+    if (
+        not isinstance(step_scheduler_state, dict)
+        or set(step_scheduler_state) != {"step", "epoch"}
+        or step_scheduler_state.get("step") != manifest["completed_steps"]
+        or type(step_scheduler_state.get("epoch")) is not int
+        or step_scheduler_state["epoch"] < 0
+    ):
+        raise RuntimeError("PDD checkpoint StepScheduler state is invalid.")
     rank_progress = manifest["rank_progress"]
     if not isinstance(rank_progress, list) or len(rank_progress) != world_size:
         raise RuntimeError("PDD checkpoint rank progress does not match its topology.")
@@ -526,6 +557,7 @@ class PDDCheckpointManager:
         model: Any,
         optimizer: Any,
         scheduler: Any,
+        step_scheduler: Any,
         trainer: Any,
         sampler: Any,
         rng: Any,
@@ -536,6 +568,8 @@ class PDDCheckpointManager:
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.step_scheduler = step_scheduler
+        self._step_scheduler_checkpoint_state = _StepSchedulerCheckpointState()
         self.trainer = trainer
         self.sampler = sampler
         self.rng = rng
@@ -569,6 +603,7 @@ class PDDCheckpointManager:
             "identity",
             "completed_steps",
             "learning_rates",
+            "step_scheduler",
             "parent_checkpoint",
             "rank_progress",
             "dcp_sha256",
@@ -700,6 +735,7 @@ class PDDCheckpointManager:
         final: Path,
         completed_steps: int,
         learning_rates: list[float],
+        step_scheduler_state: Mapping[str, int],
         parent: Path | None,
         rank_summaries: list[dict[str, Any]],
     ) -> None:
@@ -710,6 +746,7 @@ class PDDCheckpointManager:
             "identity": self.identity,
             "completed_steps": completed_steps,
             "learning_rates": learning_rates,
+            "step_scheduler": dict(step_scheduler_state),
             "parent_checkpoint": None if parent is None else parent.name,
             "rank_progress": sorted(rank_summaries, key=lambda summary: summary["rank"]),
             "dcp_sha256": _dcp_payload_hashes(staging),
@@ -721,6 +758,7 @@ class PDDCheckpointManager:
             {
                 "completed_steps": completed_steps,
                 "learning_rates": learning_rates,
+                "step_scheduler": dict(step_scheduler_state),
                 "parent_checkpoint": manifest["parent_checkpoint"],
             },
         )
@@ -739,7 +777,7 @@ class PDDCheckpointManager:
         _atomic_text(self.root / "LATEST", final.name + "\n")
 
     def save(self) -> Path:
-        """Synchronously save into staging, publish atomically, mark complete, then update LATEST."""
+        """Save into staging, publish atomically, mark complete, then update LATEST."""
         completed_steps = self.trainer.completed_steps
         if type(completed_steps) is not int or completed_steps <= 0:
             raise ValueError("PDD checkpoint requires at least one completed optimizer step.")
@@ -747,6 +785,18 @@ class PDDCheckpointManager:
         if len({summary["sample_slots_consumed"] for summary in rank_summaries}) != 1:
             raise RuntimeError("PDD ranks disagree on consumed sample slots.")
         learning_rates = [float(group["lr"]) for group in self.optimizer.param_groups]
+        live_step_scheduler_state = self.step_scheduler.state_dict()
+        if live_step_scheduler_state.get("step") != completed_steps:
+            raise RuntimeError("PDD StepScheduler state does not match the completed update.")
+        sampler_epoch = self.sampler.state_dict()["epoch"]
+        live_epoch = live_step_scheduler_state.get("epoch")
+        if sampler_epoch not in {live_epoch, live_epoch + 1}:
+            raise RuntimeError("PDD sampler epoch is incompatible with the StepScheduler epoch.")
+        step_scheduler_state = {"step": completed_steps, "epoch": sampler_epoch}
+        self._step_scheduler_checkpoint_state.load_state_dict(step_scheduler_state)
+        rank_scheduler_states = _gather_objects(step_scheduler_state)
+        if any(state != step_scheduler_state for state in rank_scheduler_states):
+            raise RuntimeError("PDD ranks disagree on StepScheduler checkpoint state.")
         final = self.root / f"step_{completed_steps:08d}"
         parent = self._collective_resolve("LATEST")
 
@@ -779,6 +829,11 @@ class PDDCheckpointManager:
         try:
             self.checkpointer.save_on_dp_ranks(self.rng, "rng", str(staging))
             self.checkpointer.save_on_dp_ranks(self.sampler, "sampler", str(staging))
+            self.checkpointer.save_on_dp_ranks(
+                self._step_scheduler_checkpoint_state,
+                "step_scheduler",
+                str(staging),
+            )
             self.checkpointer.save_on_dp_ranks(self.trainer, "trainer", str(staging))
         except BaseException as error:
             sidecar_error = f"{type(error).__name__}: {error}"
@@ -800,6 +855,7 @@ class PDDCheckpointManager:
                     final=final,
                     completed_steps=completed_steps,
                     learning_rates=learning_rates,
+                    step_scheduler_state=step_scheduler_state,
                     parent=parent,
                     rank_summaries=rank_summaries,
                 )
@@ -833,6 +889,11 @@ class PDDCheckpointManager:
         )
         self.checkpointer.load_on_dp_ranks(self.trainer, "trainer", str(checkpoint))
         self.checkpointer.load_on_dp_ranks(self.sampler, "sampler", str(checkpoint))
+        self.checkpointer.load_on_dp_ranks(
+            self._step_scheduler_checkpoint_state,
+            "step_scheduler",
+            str(checkpoint),
+        )
         rank_progress = manifest["rank_progress"]
         if not isinstance(rank_progress, list) or len(rank_progress) != _world_size():
             raise RuntimeError("PDD checkpoint rank progress does not match world size.")
@@ -851,6 +912,14 @@ class PDDCheckpointManager:
                 raise RuntimeError(f"PDD restored sampler {key} does not match the manifest.")
         if self.trainer.completed_steps != manifest["completed_steps"]:
             raise RuntimeError("PDD restored trainer step does not match the manifest.")
+        step_scheduler_state = self._step_scheduler_checkpoint_state.state_dict()
+        if step_scheduler_state != manifest["step_scheduler"]:
+            raise RuntimeError("PDD restored StepScheduler state does not match the manifest.")
+        if step_scheduler_state["step"] != self.trainer.completed_steps:
+            raise RuntimeError("PDD restored StepScheduler step does not match the trainer.")
+        if step_scheduler_state["epoch"] != sampler_state["epoch"]:
+            raise RuntimeError("PDD restored StepScheduler epoch does not match the sampler.")
+        self.step_scheduler.load_state_dict(step_scheduler_state)
         current_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
         if current_lrs != manifest["learning_rates"]:
             raise RuntimeError("PDD restored learning rate does not match the manifest.")

@@ -65,7 +65,10 @@ def _raw_config(model_dir: pathlib.Path, checkpoint_dir: pathlib.Path) -> dict:
             "inference_blocks": [2, 2],
             "data_free": False,
         },
-        "optim": {"learning_rate": 2.0e-5, "weight_decay": 0.01},
+        "optim": {
+            "learning_rate": 2.0e-5,
+            "optimizer": {"weight_decay": 0.01},
+        },
         "fsdp": {
             "dp_size": 2,
             "tp_size": 1,
