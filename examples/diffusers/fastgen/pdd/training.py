@@ -633,6 +633,10 @@ class PDDTrainer:
             raise RuntimeError(
                 "PDD optimizer produced a zero nominal update from a nonzero gradient."
             )
+        if projection_ratio == 0.0 and grad_norm > 0.0:
+            raise RuntimeError(
+                "PDD optimizer produced a zero actual projection update from a nonzero gradient."
+            )
         self.completed_steps += 1
         student_velocity_rms = _global_sample_mean(metrics["student_velocity_rms"])
         teacher_velocity_rms = _global_sample_mean(metrics["teacher_velocity_rms"])

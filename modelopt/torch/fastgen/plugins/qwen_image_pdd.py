@@ -113,6 +113,7 @@ class QwenImagePDDAdapter:
         *,
         guidance_rescale: float = 1.0,
         guidance_eps: float = 1e-5,
+        compute_dtype: torch.dtype | None = None,
     ) -> None:
         """Validate the fixed Qwen continuous-time and packed-CFG contract."""
         _validate_qwen_pdd_config(config)
@@ -126,6 +127,10 @@ class QwenImagePDDAdapter:
             raise ValueError("guidance_eps must be finite and > 0.")
         if config.guidance_scale is not None and not math.isfinite(config.guidance_scale):
             raise ValueError("guidance_scale must be finite when Qwen teacher CFG is enabled.")
+        if compute_dtype is not None and (
+            not isinstance(compute_dtype, torch.dtype) or not compute_dtype.is_floating_point
+        ):
+            raise TypeError("compute_dtype must be a real floating-point torch dtype or None.")
 
         self.config = config
         self.guidance_scale = (
@@ -133,6 +138,7 @@ class QwenImagePDDAdapter:
         )
         self.guidance_rescale = float(guidance_rescale)
         self.guidance_eps = float(guidance_eps)
+        self.compute_dtype = compute_dtype
 
     @staticmethod
     def _validate_state_and_time(state: torch.Tensor, time: torch.Tensor) -> None:
@@ -188,8 +194,9 @@ class QwenImagePDDAdapter:
             raise ValueError(f"{name} tensors must be on {state.device}.")
         return encoder_hidden_states, attention_mask
 
-    @staticmethod
-    def _model_dtype(model: nn.Module, fallback: torch.dtype) -> torch.dtype:
+    def _model_dtype(self, model: nn.Module, fallback: torch.dtype) -> torch.dtype:
+        if self.compute_dtype is not None:
+            return self.compute_dtype
         for parameter in model.parameters():
             if parameter.dtype.is_floating_point:
                 return parameter.dtype
@@ -447,17 +454,27 @@ class QwenImagePDDAdapter:
                 f"{tuple(conditional.shape)} and {tuple(unconditional.shape)}."
             )
 
-        conditional_fp32 = conditional.to(torch.float32)
-        guided = conditional_fp32 + (float(guidance_scale) - 1.0) * (
-            conditional_fp32 - unconditional.to(torch.float32)
+        # FastGen applies CFG in the model-output dtype, including its BF16
+        # rounding, before cfg_rescale promotes the result for norm math.
+        guided_model_dtype = conditional + (float(guidance_scale) - 1.0) * (
+            conditional - unconditional
         )
+        conditional_fp32 = conditional.to(torch.float32)
+        guided = guided_model_dtype.to(torch.float32)
+        # MR210 applies CFG after unpacking Qwen output to NCHW and leaves
+        # ``rescale_dims`` unset, so the norm spans every non-batch element.
+        # Reducing packed [P, F] here is algebraically identical because
+        # pack/unpack only reshapes and permutes those elements.
+        norm_dims = tuple(range(1, conditional_fp32.ndim))
         conditional_norm = torch.linalg.vector_norm(
             conditional_fp32,
-            dim=-1,
+            dim=norm_dims,
             keepdim=True,
         )
-        guided_norm = torch.linalg.vector_norm(guided, dim=-1, keepdim=True)
+        guided_norm = torch.linalg.vector_norm(guided, dim=norm_dims, keepdim=True)
         factor = self.guidance_rescale * conditional_norm / guided_norm.clamp_min(
             self.guidance_eps
         ) + (1.0 - self.guidance_rescale)
-        return self._unpack_single(guided * factor, state)
+        # FastGen's cfg_rescale returns to the conditional model-output dtype
+        # before PDD promotes the teacher target for FP32 loss math.
+        return self._unpack_single((guided * factor).to(conditional.dtype), state)

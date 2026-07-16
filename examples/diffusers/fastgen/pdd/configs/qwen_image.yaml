@@ -57,7 +57,9 @@ step_scheduler:
   num_epochs: 200
   log_every: 10
   ckpt_every_steps: 1000
-  local_batch_size: 1
+  # Matches the original Qwen PDD per-rank batch. On 16 four-GPU nodes this
+  # gives the project target global batch size of 256 without accumulation.
+  local_batch_size: 4
   save_checkpoint_every_epoch: false
   # Freeze to 256 only after the production-topology/data gate is approved.
   global_batch_size:
@@ -85,7 +87,7 @@ data:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: data/qwen_image_cache
     base_resolution: [1024, 1024]
-    batch_size: 1
+    batch_size: 4
     drop_last: true
     shuffle: true
     dynamic_batch_size: false

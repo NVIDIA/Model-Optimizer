@@ -213,7 +213,7 @@ def test_fused_student_matches_explicit_packed_head_weighting() -> None:
     assert student.proj_out(state.new_zeros(1, 5)).shape[-1] == 16
 
 
-def test_teacher_cfg_and_packed_token_norm_rescale_match_direct_reference() -> None:
+def test_teacher_cfg_and_global_norm_rescale_match_mr210_reference() -> None:
     teacher = _TinyQwenTransformer()
     config = _config(guidance_scale=4.0)
     adapter = QwenImagePDDAdapter(config, guidance_rescale=1.0, guidance_eps=1e-5)
@@ -233,10 +233,10 @@ def test_teacher_cfg_and_packed_token_norm_rescale_match_direct_reference() -> N
     guided = conditional + 3.0 * (conditional - unconditional)
     factor = torch.linalg.vector_norm(
         conditional,
-        dim=-1,
+        dim=(1, 2),
         keepdim=True,
-    ) / torch.linalg.vector_norm(guided, dim=-1, keepdim=True).clamp_min(1e-5)
-    expected = unpack_latents(guided * factor, 4, 4)
+    ) / torch.linalg.vector_norm(guided, dim=(1, 2), keepdim=True).clamp_min(1e-5)
+    expected = unpack_latents((guided * factor).to(teacher.calls[0]["output"].dtype), 4, 4)
 
     assert actual.dtype == torch.float32
     torch.testing.assert_close(actual, expected)
@@ -244,6 +244,51 @@ def test_teacher_cfg_and_packed_token_norm_rescale_match_direct_reference() -> N
     torch.testing.assert_close(teacher.calls[1]["encoder_hidden_states"], negative_condition[0])
     assert all("txt_seq_lens" not in call["kwargs"] for call in teacher.calls)
     assert all(call["guidance"] is None for call in teacher.calls)
+
+
+def test_teacher_cfg_returns_to_low_precision_model_output_dtype() -> None:
+    class LowPrecisionTeacher(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(guidance_embeds=False)
+            self.anchor = nn.Parameter(torch.zeros((), dtype=torch.bfloat16), requires_grad=False)
+            self.outputs: list[torch.Tensor] = []
+
+        def forward(self, *, hidden_states, encoder_hidden_states, **kwargs):
+            value = encoder_hidden_states.mean(dim=(1, 2), keepdim=True).to(torch.bfloat16)
+            output = hidden_states.to(torch.bfloat16) + value
+            self.outputs.append(output.detach().clone())
+            return (output,)
+
+    teacher = LowPrecisionTeacher()
+    state, time, condition, negative_condition = _inputs()
+    actual = QwenImagePDDAdapter(_config(guidance_scale=4.0)).teacher_velocity(
+        teacher,
+        state,
+        time,
+        condition=condition,
+        negative_condition=negative_condition,
+    )
+
+    assert actual.dtype == torch.bfloat16
+    conditional, unconditional = teacher.outputs
+    guided_bf16 = conditional + 3.0 * (conditional - unconditional)
+    conditional_fp32 = conditional.float()
+    guided_fp32 = guided_bf16.float()
+    factor = torch.linalg.vector_norm(
+        conditional_fp32, dim=(1, 2), keepdim=True
+    ) / torch.linalg.vector_norm(guided_fp32, dim=(1, 2), keepdim=True).clamp_min(1e-5)
+    expected = unpack_latents((guided_fp32 * factor).to(torch.bfloat16), 4, 4)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    unrounded_guided = conditional_fp32 + 3.0 * (conditional_fp32 - unconditional.float())
+    unrounded_factor = torch.linalg.vector_norm(
+        conditional_fp32, dim=(1, 2), keepdim=True
+    ) / torch.linalg.vector_norm(unrounded_guided, dim=(1, 2), keepdim=True).clamp_min(1e-5)
+    unrounded = unpack_latents(
+        (unrounded_guided * unrounded_factor).to(torch.bfloat16), 4, 4
+    )
+    assert not torch.equal(actual, unrounded)
 
 
 def test_guidance_disabled_teacher_is_one_conditional_call_without_negative_condition() -> None:
@@ -286,6 +331,8 @@ def test_qwen_pdd_rejects_unsupported_config_condition_and_call_contracts() -> N
         QwenImagePDDAdapter(_config(), guidance_rescale=1.1)
     with pytest.raises(ValueError, match="guidance_eps"):
         QwenImagePDDAdapter(_config(), guidance_eps=0.0)
+    with pytest.raises(TypeError, match="compute_dtype"):
+        QwenImagePDDAdapter(_config(), compute_dtype=torch.long)
 
     transformer = _TinyQwenTransformer()
     transformer.config.guidance_embeds = True

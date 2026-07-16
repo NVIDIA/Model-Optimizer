@@ -24,7 +24,7 @@ import torch
 from torch import nn
 
 from modelopt.torch.fastgen import PDDConfig, PDDPipeline
-from modelopt.torch.fastgen.flow_matching import fusion_coefficients
+from modelopt.torch.fastgen.flow_matching import fusion_coefficients, make_shifted_flow_grid
 
 
 class _HeadModel(nn.Module):
@@ -109,7 +109,9 @@ class _RecordingAdapter:
                 "kwargs": model_kwargs,
             }
         )
-        coefficients = fusion_coefficients(grid, start, end)
+        # The real PDD projection derives coefficients from the float64 grid,
+        # then casts them to FP32 before fusing FP32 master parameters.
+        coefficients = fusion_coefficients(grid, start, end).to(torch.float32)
         heads = model.all_heads(state)[:, start:end]
         output = torch.einsum("n,bnd->bd", coefficients, heads)
         return output.to(torch.int64) if self.bad_fused_dtype else output
@@ -425,6 +427,12 @@ def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
 
     resolved = [4, 4] if blocks is None else blocks
     grid = pipeline.time_grid()
+    fusion_grid = make_shifted_flow_grid(
+        pipeline.config.grid_size,
+        pipeline.config.flow_shift,
+        max_t=pipeline.config.grid_max_t,
+        dtype=torch.float64,
+    )
     expected = (noise.to(torch.float64) * pipeline.config.grid_max_t).to(torch.float32)
     start = 0
     for block in resolved:
@@ -442,7 +450,8 @@ def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
         end = start + block
         assert (call["start"], call["end"]) == (start, end)
         torch.testing.assert_close(call["time"], grid[start].expand(noise.shape[0]))
-        torch.testing.assert_close(call["grid"], grid)
+        torch.testing.assert_close(call["grid"], fusion_grid)
+        assert call["grid"].dtype == torch.float64
         assert call["condition"] == "prompt"
         assert call["kwargs"] == {"tag": 23}
         start = end

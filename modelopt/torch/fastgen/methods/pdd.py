@@ -970,6 +970,16 @@ class PDDPipeline(DistillationPipeline):
         kwargs = self._model_kwargs(model_kwargs)
         resolved_blocks = self._validate_blocks(blocks)
         grid = self.time_grid(noise.device)
+        # MR210 derives fused projection coefficients from its float64 schedule,
+        # then casts the coefficients to FP32. Keep state/time integration on the
+        # canonical FP32 decoding grid while matching that coefficient path.
+        fusion_grid = make_shifted_flow_grid(
+            self.config.grid_size,
+            self.config.flow_shift,
+            max_t=self.config.grid_max_t,
+            device=noise.device,
+            dtype=torch.float64,
+        )
         current = (noise.to(torch.float64) * self.config.grid_max_t).to(torch.float32)
         start = 0
         for block in resolved_blocks:
@@ -981,7 +991,7 @@ class PDDPipeline(DistillationPipeline):
                 time,
                 start=start,
                 end=end,
-                grid=grid,
+                grid=fusion_grid,
                 condition=condition,
                 **kwargs,
             )

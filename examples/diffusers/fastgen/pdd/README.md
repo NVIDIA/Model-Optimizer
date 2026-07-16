@@ -2,8 +2,8 @@
 
 Parallel Decoding Distillation (PDD) trains one Qwen-Image student call to predict several
 consecutive rectified-flow updates. The student keeps the original transformer backbone and widens
-only its output projection to 128 velocity heads. During training it samples different aligned
-block lengths up to 64, so the same checkpoint can use different supported block schedules at
+only its output projection to 128 velocity heads. During training it samples aligned block starts
+and target spans from 1 through 64 intervals, so the same checkpoint can use different supported block schedules at
 inference.
 
 The provided schedules use the 128-interval grid as follows:
@@ -41,7 +41,11 @@ has additional read and SHA-256 cost and fails immediately when a hash is missin
 
 Training deterministically derives disjoint train and validation membership from metadata ordinals;
 it does not rewrite the cache or require separate split manifests. The default recipe uses 2,000
-validation samples, learning rate `2e-5`, 128 heads, and sampled block lengths from 4 through 64.
+validation samples, learning rate `2e-5`, per-rank batch size 4, 128 heads, start indices aligned by
+4, and target spans from 1 through 64 intervals. The learning rate is the cached-Qwen project
+treatment; the MR210 reference arm uses `5e-5` with 1,000 warmup steps. On 16 four-GPU nodes the
+default per-rank batch gives global batch size 256; other GPU topologies must set per-rank batch to
+`256 / world_size` because this recipe does not use gradient accumulation.
 Checkpoints include the student, optimizer, scheduler, RNG, trainer, and exact replayable sampler
 state needed to resume the next committed batch.
 

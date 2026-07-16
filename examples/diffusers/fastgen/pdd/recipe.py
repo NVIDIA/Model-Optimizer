@@ -77,7 +77,7 @@ class PDDStepSchedulerConfig:
     num_epochs: int = 200
     log_every: int = 10
     ckpt_every_steps: int = 1_000
-    local_batch_size: int = 1
+    local_batch_size: int = 4
     global_batch_size: int | None = None
     save_checkpoint_every_epoch: bool = False
 
@@ -696,16 +696,18 @@ def _stage_and_shard_training_models(
     manager: Any,
     *,
     device: torch.device,
-    dtype: torch.dtype,
     fuse_qkv_projections: bool,
 ) -> tuple[nn.Module, nn.Module]:
-    """Move and shard one dense model at a time to bound setup-time GPU memory."""
+    """Stage FP32 masters and shard one dense model at a time."""
     if fuse_qkv_projections and (
         not hasattr(student, "fuse_qkv_projections") or not hasattr(teacher, "fuse_qkv_projections")
     ):
         raise AttributeError("QKV fusion requires both Qwen transformers to expose the object API.")
 
-    student.to(device=device, dtype=dtype)
+    # Match the FastGen Qwen PDD recipe: FP32 parameter/optimizer storage,
+    # with the FSDP policy below casting gathered parameters to the configured
+    # model dtype for forward/backward compute.
+    student.to(device=device, dtype=torch.float32)
     if fuse_qkv_projections:
         student.fuse_qkv_projections()
         if not any(getattr(module, "fused_projections", False) for module in student.modules()):
@@ -719,7 +721,7 @@ def _stage_and_shard_training_models(
 
     # The student is already sharded before the dense teacher reaches the GPU, so multi-rank
     # setup never holds both complete Qwen transformers on one device.
-    teacher.to(device=device, dtype=dtype)
+    teacher.to(device=device, dtype=torch.float32)
     if fuse_qkv_projections:
         teacher.fuse_qkv_projections()
     teacher = manager.parallelize(teacher)
@@ -755,6 +757,23 @@ def _materialize_zero_step_adamw_state(optimizer: torch.optim.AdamW) -> None:
         for group, learning_rate in zip(optimizer.param_groups, learning_rates, strict=True):
             group["lr"] = learning_rate
         optimizer.zero_grad(set_to_none=True)
+
+
+def _require_fp32_optimizer_storage(optimizer: torch.optim.AdamW) -> None:
+    """Require the FP32 master-parameter and Adam-state contract used by MR210."""
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            if parameter.dtype != torch.float32:
+                raise RuntimeError(
+                    f"PDD trainable master parameters must be FP32, got {parameter.dtype}."
+                )
+            state = optimizer.state.get(parameter)
+            if state is None:
+                raise RuntimeError("PDD AdamW state is missing after eager materialization.")
+            for name in ("exp_avg", "exp_avg_sq"):
+                value = state.get(name)
+                if not isinstance(value, torch.Tensor) or value.dtype != torch.float32:
+                    raise RuntimeError(f"PDD AdamW {name} state must be FP32.")
 
 
 def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
@@ -803,7 +822,17 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         raise ValueError(
             f"Pure-DP PDD requires fsdp.dp_size ({dp_size}) to equal world size ({world_size})."
         )
-    strategy = FSDP2Config(activation_checkpointing=config.parallel.activation_checkpointing)
+    from torch.distributed.fsdp import MixedPrecisionPolicy
+
+    strategy = FSDP2Config(
+        activation_checkpointing=config.parallel.activation_checkpointing,
+        mp_policy=MixedPrecisionPolicy(
+            param_dtype=config.dtype,
+            reduce_dtype=torch.float32,
+            output_dtype=None,
+            cast_forward_inputs=False,
+        ),
+    )
     distributed_setup = DistributedSetup.build(
         strategy=strategy,
         parallelism_sizes=ParallelismSizes(dp_size=dp_size),
@@ -823,7 +852,6 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         identity,
         manager,
         device=config.device,
-        dtype=config.dtype,
         fuse_qkv_projections=config.fuse_qkv_projections,
     )
     pipe.transformer = student
@@ -850,6 +878,7 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         maximize=False,
     )
     _materialize_zero_step_adamw_state(optimizer)
+    _require_fp32_optimizer_storage(optimizer)
     optimizer_parameters = [
         parameter for group in optimizer.param_groups for parameter in group["params"]
     ]
@@ -1017,6 +1046,7 @@ def build_pdd_training_artifacts(
         config.pdd,
         guidance_rescale=config.guidance.rescale,
         guidance_eps=config.guidance.eps,
+        compute_dtype=config.dtype,
     )
     pipeline = PDDPipeline(setup.student, setup.teacher, config.pdd, adapter)
     scheduler = torch.optim.lr_scheduler.LambdaLR(setup.optimizer, lr_lambda=lambda _: 1.0)

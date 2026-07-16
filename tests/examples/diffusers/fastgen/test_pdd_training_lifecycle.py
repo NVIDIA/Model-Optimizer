@@ -578,7 +578,9 @@ def test_two_direct_updates_have_finite_gradients_updates_and_targeted_coverage(
     lifecycle.trainer.coverage.require_pairs([(0, 1), (1, 3), (2, 2), (3, 3)])
 
 
-def test_training_hard_aborts_for_teacher_gradient_zero_gradient_and_missing_coverage() -> None:
+def test_training_hard_aborts_for_teacher_gradient_zero_gradient_and_missing_coverage(
+    monkeypatch,
+) -> None:
     teacher_gradient = build_toy_lifecycle()
     teacher_gradient.teacher.scale.grad = torch.ones_like(teacher_gradient.teacher.scale)
     with pytest.raises(RuntimeError, match="teacher received a gradient"):
@@ -592,6 +594,11 @@ def test_training_hard_aborts_for_teacher_gradient_zero_gradient_and_missing_cov
 
     with pytest.raises(RuntimeError, match="did not cover"):
         zero_gradient.trainer.coverage.require_pairs([(3, 3)])
+
+    zero_actual_update = build_toy_lifecycle()
+    monkeypatch.setattr(zero_actual_update.trainer, "_projection_update_ratio", lambda before: 0.0)
+    with pytest.raises(RuntimeError, match="zero actual projection update"):
+        zero_actual_update.trainer.train_step(make_batch(("zero-actual-update",)))
 
     nonfinite = build_toy_lifecycle()
     bad_batch = make_batch(("nan",))

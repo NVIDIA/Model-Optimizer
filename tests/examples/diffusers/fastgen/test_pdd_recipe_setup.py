@@ -40,6 +40,7 @@ if str(_FASTGEN_DIR) not in sys.path:
 from pdd.recipe import (
     _materialize_zero_step_adamw_state,
     _projection_identity,
+    _require_fp32_optimizer_storage,
     _stage_and_shard_training_models,
     build_pdd_export_setup,
     build_pdd_setup,
@@ -97,6 +98,23 @@ def test_zero_step_adamw_state_preserves_first_lazy_update() -> None:
     assert lazy_model.bias not in lazy_optimizer.state
 
 
+def test_fp32_optimizer_storage_rejects_low_precision_masters_and_state() -> None:
+    model = nn.Linear(2, 2, dtype=torch.bfloat16)
+    optimizer = torch.optim.AdamW(model.parameters(), foreach=False, fused=False)
+    _materialize_zero_step_adamw_state(optimizer)
+    with pytest.raises(RuntimeError, match="master parameters must be FP32"):
+        _require_fp32_optimizer_storage(optimizer)
+
+    fp32_model = nn.Linear(2, 2)
+    fp32_optimizer = torch.optim.AdamW(fp32_model.parameters(), foreach=False, fused=False)
+    _materialize_zero_step_adamw_state(fp32_optimizer)
+    fp32_optimizer.state[fp32_model.weight]["exp_avg"] = torch.zeros_like(
+        fp32_model.weight, dtype=torch.bfloat16
+    )
+    with pytest.raises(RuntimeError, match="exp_avg state must be FP32"):
+        _require_fp32_optimizer_storage(fp32_optimizer)
+
+
 def _require_exact_automodel() -> None:
     try:
         version = importlib.metadata.version("nemo_automodel")
@@ -139,18 +157,47 @@ def test_training_setup_shards_student_before_staging_teacher() -> None:
         _projection_identity(projection),
         TrackedManager(),
         device=torch.device("cpu"),
-        dtype=torch.float32,
         fuse_qkv_projections=False,
     )
 
     assert staged_student is student
     assert staged_teacher is teacher
+    assert {parameter.dtype for parameter in staged_student.parameters()} == {torch.float32}
     assert events == [
         "student.to",
         "student.parallelize",
         "teacher.to",
         "teacher.parallelize",
     ]
+
+
+def test_training_setup_upcasts_bf16_models_to_fp32_masters() -> None:
+    class IdentityManager:
+        @staticmethod
+        def parallelize(model):
+            return model
+
+    student = nn.Module()
+    student.proj_out = nn.Linear(2, 2, dtype=torch.bfloat16)
+    teacher = nn.Linear(2, 2, dtype=torch.bfloat16)
+    projection = convert_to_pdd_output_projection(
+        student,
+        PDDLayerSpec("proj_out", "channel_major"),
+        grid_size=4,
+    )
+
+    staged_student, staged_teacher = _stage_and_shard_training_models(
+        student,
+        teacher,
+        projection,
+        _projection_identity(projection),
+        IdentityManager(),
+        device=torch.device("cpu"),
+        fuse_qkv_projections=False,
+    )
+
+    assert {parameter.dtype for parameter in staged_student.parameters()} == {torch.float32}
+    assert {parameter.dtype for parameter in staged_teacher.parameters()} == {torch.float32}
 
 
 def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
