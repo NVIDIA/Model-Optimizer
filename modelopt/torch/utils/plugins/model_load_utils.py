@@ -16,11 +16,12 @@
 """HuggingFace-coupled FSDP2 model loading helpers."""
 
 import json
+import logging
 import os
-import time
+import re
 from collections.abc import Callable
+from itertools import chain
 from typing import Any
-from warnings import warn
 
 import torch
 import torch.nn as nn
@@ -31,6 +32,11 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
+try:
+    from transformers.conversion_mapping import get_model_conversion_mapping
+except ImportError:  # transformers<5 has no fused-MoE weight-conversion engine
+    get_model_conversion_mapping = None
+
 from modelopt.torch.utils.distributed import (
     barrier,
     broadcast_state_dict,
@@ -38,28 +44,7 @@ from modelopt.torch.utils.distributed import (
     is_initialized,
 )
 
-
-def _phase_logger(rank: int) -> Callable[[str], None]:
-    """Return a rank-prefixed, elapsed-time progress printer.
-
-    Active only when ``MODELOPT_FSDP2_LOAD_VERBOSE`` is set in the environment;
-    otherwise a no-op so normal loads (and tests) stay silent. Each line is
-    flushed immediately so per-rank progress interleaves readably under torchrun.
-    """
-    if not os.environ.get("MODELOPT_FSDP2_LOAD_VERBOSE"):
-        return lambda msg: None
-
-    start = time.perf_counter()
-
-    def log(msg: str) -> None:
-        print(f"[fsdp2-load][rank {rank}] +{time.perf_counter() - start:6.1f}s  {msg}", flush=True)
-
-    return log
-
-
-def _state_dict_gb(state: dict) -> float:
-    """Total size in GB of the tensors in a name->tensor dict."""
-    return sum(t.numel() * t.element_size() for t in state.values()) / 1e9
+logger = logging.getLogger(__name__)
 
 
 def read_safetensors_subset(
@@ -112,6 +97,17 @@ def weight_map_for(ckpt_path: str) -> dict[str, str]:
     )
 
 
+def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
+    """Local dir for ``ckpt_path``; resolves an HF Hub ID (rank 0 downloads, others wait)."""
+    if os.path.isdir(ckpt_path):
+        return ckpt_path
+    if rank == 0:
+        snapshot_download(ckpt_path)
+    if is_initialized():
+        barrier()
+    return snapshot_download(ckpt_path)
+
+
 def _materialize_meta_model(model: nn.Module, device: torch.device) -> None:
     """Replace meta params/buffers with empty real ones on ``device``; move real buffers there.
 
@@ -141,6 +137,88 @@ def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
             module._buffers[name] = buf.to(device)
 
 
+def _conversion_rules(model: nn.Module) -> dict | None:
+    """Rename + fuse rules for ``model``, read from transformers' own conversion table.
+
+    Returns ``{"renames": {pattern: repl}, "fuses": [{"src_res", "target", "stack", "cat"}]}``, or
+    ``None`` when nothing needs converting (transformers<5 / already-matching checkpoint). A fuse
+    stacks its per-expert sources on ``stack`` and, when multi-source, concats them on ``cat``.
+    The readable source globs are logged at DEBUG (the dict keeps only compiled ``src_res``).
+    """
+    renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
+    fuses = []
+    readable = []
+    for rule in get_model_conversion_mapping(model) if get_model_conversion_mapping else []:
+        sources, targets = list(rule.source_patterns), list(rule.target_patterns)
+        ops = getattr(rule, "operations", None) or []  # rename-only rules carry none
+        if not ops:
+            renames.update(dict.fromkeys(sources, targets[0]))
+            continue
+        dims = {type(op).__name__: op.dim for op in ops}
+        if len(targets) != 1 or set(dims) - {"MergeModulelist", "Concatenate"}:
+            raise NotImplementedError(
+                f"Unsupported conversion rule {sources} -> {targets} ({set(dims)})"
+            )
+        fuses.append(
+            {
+                "src_res": [re.compile(s.replace("*", "([^.]+)")) for s in sources],
+                "target": targets[0],
+                "stack": dims["MergeModulelist"],
+                "cat": dims.get("Concatenate"),
+            }
+        )
+        readable.append(f"{sources} -> {targets[0]}")
+    rules = {"renames": renames, "fuses": fuses} if (renames or fuses) else None
+    if rules:
+        logger.debug(
+            "checkpoint key conversion: renames=%s fuses=[%s]", renames, "; ".join(readable)
+        )
+    return rules
+
+
+def _rename_key(key: str, renames: dict) -> str:
+    for old, new in renames.items():
+        key = re.sub(old, new, key)
+    return key
+
+
+def _match_fuse(key: str, fuses: list):
+    """``(target_name, fuse, source_index, expert_idx)`` if ``key`` is a fuse source, else ``None``."""
+    for fuse in fuses:
+        for i, rx in enumerate(fuse["src_res"]):
+            m = rx.search(key)
+            if m:
+                return key[: m.start()] + fuse["target"] + key[m.end() :], fuse, i, m.group(1)
+    return None
+
+
+def _target_name(rules: dict, key: str) -> str:
+    """Model param name that checkpoint ``key`` feeds (rename + fuse target; no tensor needed)."""
+    key = _rename_key(key, rules["renames"])
+    hit = _match_fuse(key, rules["fuses"])
+    return hit[0] if hit else key
+
+
+def _convert_keys(rules: dict, state: dict) -> dict:
+    """Rename 1:1 keys and fuse per-expert keys into the model's fused params."""
+    result, groups = {}, {}  # groups[target] = (fuse, {source_index: {expert_idx: tensor}})
+    for key, tensor in state.items():
+        key = _rename_key(key, rules["renames"])
+        hit = _match_fuse(key, rules["fuses"])
+        if hit is None:
+            result[key] = tensor
+            continue
+        target, fuse, i, expert = hit
+        groups.setdefault(target, (fuse, {}))[1].setdefault(i, {})[expert] = tensor
+    for target, (fuse, by_src) in groups.items():
+        stacks = [
+            torch.stack([by_src[i][e] for e in sorted(by_src[i], key=int)], fuse["stack"])
+            for i in range(len(fuse["src_res"]))
+        ]
+        result[target] = stacks[0] if fuse["cat"] is None else torch.cat(stacks, fuse["cat"])
+    return result
+
+
 def build_meta_causal_lm(
     ckpt_path: str,
     trust_remote_code: bool,
@@ -168,6 +246,99 @@ def build_meta_causal_lm(
     return model
 
 
+def _layers_for_rank(n_layers: int, world_size: int, r: int) -> list[int]:
+    """Round-robin: the decoder-layer indices owned by rank ``r``."""
+    return [i for i in range(n_layers) if i % world_size == r]
+
+
+def _read_and_convert(
+    resolved_path: str, weight_map: dict, keyset: set[str], rules: dict | None
+) -> dict:
+    """Read the checkpoint keys in ``keyset`` and apply the fuse/rename rules (identity when None)."""
+    raw = read_safetensors_subset(resolved_path, weight_map, lambda k: k in keyset)
+    return _convert_keys(rules, raw) if rules else raw
+
+
+def _read_owned_layers(
+    resolved_path: str,
+    weight_map: dict,
+    layer_sources: dict,
+    owned: list[int],
+    rules: dict | None,
+) -> dict:
+    """Read + convert this rank's owned decoder layers from disk (ranks read in parallel)."""
+    return {
+        layer_idx: _read_and_convert(
+            resolved_path, weight_map, set(layer_sources[layer_idx]), rules
+        )
+        for layer_idx in owned
+    }
+
+
+def _broadcast_load_group(
+    group: list[int],
+    src: int,
+    rank: int,
+    owned: dict,
+    decoder_layers: list,
+    layer_prefixes: list,
+    device: torch.device,
+    cpu_offload: bool,
+) -> None:
+    """Broadcast layers ``group`` from rank ``src`` to all ranks and reshard into their FSDP2 shards.
+
+    The owner assembles the group's full tensors; every rank receives them, reshards its local slice,
+    then frees the full copy (capping the transient GPU peak). The owner drops its read copy after.
+    """
+    big_dict: dict | None = None
+    if rank == src:
+        big_dict = {}
+        for i in group:
+            big_dict.update(owned[i])
+    full = broadcast_state_dict(big_dict, src=src, device=device)
+    for layer_idx in group:
+        prefix = layer_prefixes[layer_idx]
+        stripped = {k[len(prefix) :]: v for k, v in full.items() if k.startswith(prefix)}
+        if cpu_offload:
+            stripped = {k: v.cpu() for k, v in stripped.items()}
+        set_model_state_dict(
+            decoder_layers[layer_idx],
+            stripped,
+            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
+        )
+        del stripped
+    del full
+    if rank == src:
+        for i in group:
+            del owned[i]
+
+
+def _group_sources_by_layer(
+    weight_map: dict, rules: dict | None, model_param_names: set[str], layer_prefixes: list[str]
+) -> tuple[dict[int, list[str]], list[str], int]:
+    """Bucket checkpoint keys by the decoder layer their converted target lives in.
+
+    Returns ``(layer_sources, non_layer_sources, skipped)``: ``layer_sources[i]`` holds the keys
+    targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm) keys, and
+    ``skipped`` counts keys whose target isn't in the model (aux weights, e.g. an MTP head).
+    """
+    layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
+    non_layer_sources: list[str] = []
+    skipped = 0
+    for ckpt_key in weight_map:
+        target = _target_name(rules, ckpt_key) if rules else ckpt_key
+        if target not in model_param_names:
+            skipped += 1
+            continue
+        for i, prefix in enumerate(layer_prefixes):
+            if target.startswith(prefix):
+                layer_sources[i].append(ckpt_key)
+                break
+        else:
+            non_layer_sources.append(ckpt_key)
+    return layer_sources, non_layer_sources, skipped
+
+
 def parallel_load_and_prepare_fsdp2(
     ckpt_path: str,
     device: torch.device,
@@ -177,8 +348,8 @@ def parallel_load_and_prepare_fsdp2(
     mp_policy=None,
     cpu_offload: bool = False,
     attn_implementation: str | None = None,
-    freeze: bool = True,
     hf_config=None,
+    broadcast_chunk_size: int | None = 8,
 ) -> nn.Module:
     """Load and FSDP2-shard a HuggingFace causal LM via parallel safetensors reads.
 
@@ -190,127 +361,84 @@ def parallel_load_and_prepare_fsdp2(
     and the per-layer broadcasts both need it). A 1-rank PG (e.g. ``torchrun
     --nproc_per_node=1``) is allowed; bare single-process is not.
 
-    Set ``freeze=False`` for training callers; PTQ keeps the default ``True``.
     Pass ``hf_config`` if the caller has already fetched it (skips a redundant fetch).
-    """
-    log = _phase_logger(rank)
 
-    # Resolve HF Hub IDs to a local cache dir (rank 0 downloads; others wait).
-    if os.path.isdir(ckpt_path):
-        resolved_path = ckpt_path
-    else:
-        if rank == 0:
-            snapshot_download(ckpt_path)
-        if is_initialized():
-            barrier()
-        resolved_path = snapshot_download(ckpt_path)
+    ``broadcast_chunk_size`` sets how many of a source's owned layers are broadcast per collective:
+    a smaller value lowers the peak transient GPU memory at the cost of more collectives (default 8;
+    pass ``None`` to broadcast all of a source's layers at once).
+    """
+    resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
     weight_map = weight_map_for(resolved_path)
 
-    # Meta skeleton on every rank.
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
-    # Shard decoder layers (root stays unwrapped); reuse the returned detection result.
-    decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
+    # shard_root=True shards the root params (embed/lm_head/norm) too, rather than replicating them.
+    decoder_layers = fsdp2_wrap(
+        model, shard_root=True, mp_policy=mp_policy, cpu_offload=cpu_offload
+    )
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
 
-    # Materialize meta → empty real tensors (CPU when cpu_offload, GPU otherwise).
-    _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
-    log(f"meta skeleton built + sharded ({len(decoder_layers)} decoder layers)")
+    # transformers>=5 fuses/renames checkpoint keys so they no longer match param names 1:1
+    # (None => the pre-5.x identity path).
+    rules = _conversion_rules(model)
 
-    # Round-robin ownership: each rank reads only its owned layers from disk in parallel.
-    owned_indices = [i for i in range(len(decoder_layers)) if i % world_size == rank]
-    log(f"reading {len(owned_indices)} owned layers from disk: {owned_indices}")
-    owned: dict[int, dict] = {}
-    t_read = time.perf_counter()
-    for n_done, layer_idx in enumerate(owned_indices, 1):
-        prefix = layer_prefixes[layer_idx]
+    # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
+    model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
-        def _has_prefix(n: str) -> bool:
-            return n.startswith(prefix)
-
-        owned[layer_idx] = read_safetensors_subset(resolved_path, weight_map, _has_prefix)
-        log(f"  read layer {layer_idx} ({n_done}/{len(owned_indices)})")
-    read_gb = sum(_state_dict_gb(d) for d in owned.values())
-    read_s = time.perf_counter() - t_read
-    log(
-        f"owned read done: {read_gb:.1f} GB in {read_s:.1f}s ({read_gb / max(read_s, 1e-9):.2f} GB/s)"
+    # Bucket each checkpoint key by its target's decoder layer (root params go to non_layer_sources).
+    layer_sources, non_layer_sources, skipped = _group_sources_by_layer(
+        weight_map, rules, model_param_names, layer_prefixes
     )
+    if skipped:
+        logger.debug(
+            "skipping %d checkpoint keys not present in the model (e.g. MTP head)", skipped
+        )
 
-    # Per-source batching: each owner broadcasts all its owned layers in one collective.
-    # Cuts metadata broadcasts from N_layers to world_size; peak transient memory per rank
-    # rises to (N_layers / world_size) layers' worth of GPU tensors during each call.
+    _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
+
+    owned_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
+    owned = _read_owned_layers(resolved_path, weight_map, layer_sources, owned_indices, rules)
+
+    # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
     for src in range(world_size):
-        src_layers = [i for i in range(len(decoder_layers)) if i % world_size == src]
+        src_layers = _layers_for_rank(len(decoder_layers), world_size, src)
         if not src_layers:
             continue
-        big_dict: dict | None
-        if rank == src:
-            big_dict = {}
-            for i in src_layers:
-                big_dict.update(owned[i])
-        else:
-            big_dict = None
-        t_bcast = time.perf_counter()
-        full = broadcast_state_dict(big_dict, src=src, device=device)
-        log(
-            f"broadcast src={src} ({len(src_layers)} layers, {_state_dict_gb(full):.1f} GB) "
-            f"in {time.perf_counter() - t_bcast:.1f}s"
-        )
-
-        for layer_idx in src_layers:
-            prefix = layer_prefixes[layer_idx]
-            stripped = {k[len(prefix) :]: v for k, v in full.items() if k.startswith(prefix)}
-            if cpu_offload:
-                stripped = {k: v.cpu() for k, v in stripped.items()}
-            set_model_state_dict(
-                decoder_layers[layer_idx],
-                stripped,
-                options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
+        chunk = broadcast_chunk_size or len(src_layers)
+        for start in range(0, len(src_layers), chunk):
+            _broadcast_load_group(
+                src_layers[start : start + chunk],
+                src,
+                rank,
+                owned,
+                decoder_layers,
+                layer_prefixes,
+                device,
+                cpu_offload,
             )
-            del stripped
 
-        del full
-        if rank == src:
-            for i in src_layers:
-                del owned[i]
-
-    log("decoder layers loaded; reading non-layer params (embed/lm_head/norm) on rank 0")
-    # Non-decoder params (embed, lm_head, norm) — rank 0 reads + broadcasts.
-    # TODO: add support for shard_root=True and layerwise.
-    layer_prefix_tuple = tuple(layer_prefixes)
-    t_nl = time.perf_counter()
-    non_layer = (
-        read_safetensors_subset(
-            resolved_path, weight_map, lambda n: not n.startswith(layer_prefix_tuple)
-        )
-        if rank == 0
-        else None
-    )
+    # Non-decoder params: rank 0 reads + broadcasts; resharded into the root below.
+    # TODO: layerwise support.
+    non_layer = None
+    if rank == 0:
+        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), rules)
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
-    log(
-        f"non-layer params loaded ({_state_dict_gb(non_layer):.1f} GB) in {time.perf_counter() - t_nl:.1f}s"
-    )
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}
-    # strict=False: non_layer is a subset of the full model — decoder keys will
-    # show up as "missing" but that's expected. We filter and warn below.
-    missing, unexpected = model.load_state_dict(non_layer, strict=False, assign=False)
-    real_missing = [k for k in missing if not k.startswith(layer_prefix_tuple)]
-    if real_missing:
-        warn(f"Missing non-layer keys on rank {rank}: {real_missing[:5]}...")
-    if unexpected:
-        warn(f"Unexpected keys in non-layer state dict on rank {rank}: {unexpected[:3]}...")
+    # shard_root=True makes the root params sharded DTensors, so reshard the full tensors via
+    # set_model_state_dict. strict=False: decoder keys are absent here (loaded above).
+    set_model_state_dict(
+        model,
+        non_layer,
+        options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False, strict=False),
+    )
 
     if cpu_offload:
-        # All tensors were materialized on CPU only to satisfy set_model_state_dict's
-        # uniform-device requirement. FSDP2 only manages the wrapped decoder layers
-        # (streamed CPU↔GPU per forward); the unwrapped root (embed/lm_head/norm +
-        # buffers) is ours to place, and we retain it on GPU.
+        # Loaded on CPU for set_model_state_dict; FSDP2 streams decoder shards per forward, but
+        # the unwrapped root must live on GPU, so promote it.
         _promote_non_dtensor_to_gpu(model, device)
     if hasattr(model, "tie_weights"):
         model.tie_weights()
-    if freeze:
-        model.requires_grad_(False)
-    log("load complete")
+    model.requires_grad_(False)
     return model

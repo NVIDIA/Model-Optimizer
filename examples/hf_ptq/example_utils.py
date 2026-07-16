@@ -44,10 +44,9 @@ from transformers import (
 from modelopt.torch.export.model_utils import is_multimodal_model
 
 try:
-    from huggingface_hub import hf_hub_download, snapshot_download
+    from huggingface_hub import snapshot_download
 except ImportError:
     snapshot_download = None
-    hf_hub_download = None
 
 from modelopt.torch.utils import distributed as dist_utils
 
@@ -76,32 +75,6 @@ def cleanup_distributed(args):
         dist_utils.cleanup()
 
 
-def _checkpoint_has_mtp_weights(model_path: str) -> bool:
-    """Return True if the checkpoint's safetensors index advertises MTP weights.
-
-    Resolves local directories in place; for HF Hub IDs fetches the index file
-    (cheap, ~100KB). Returns False on any access error or missing index — single-file
-    checkpoints have no MTP shards by construction.
-    """
-    local_index = Path(model_path) / "model.safetensors.index.json"
-    if local_index.exists():
-        index_path = local_index
-    elif hf_hub_download is not None:
-        try:
-            index_path = Path(hf_hub_download(model_path, "model.safetensors.index.json"))
-        except Exception:
-            return False
-    else:
-        return False
-
-    try:
-        with open(index_path) as f:
-            weight_map = json.load(f).get("weight_map", {})
-    except (OSError, json.JSONDecodeError):
-        return False
-    return any("mtp" in k or "mtp" in v for k, v in weight_map.items())
-
-
 def validate_fsdp2_supported(args, config):
     """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
     issues = []
@@ -115,11 +88,7 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
-    if _checkpoint_has_mtp_weights(args.pyt_ckpt_path):
-        issues.append(
-            "MTP (Multi-Token Prediction) weights — the FSDP2 loader doesn't "
-            "carry them through; the exported checkpoint would be missing MTP layers"
-        )
+    # MTP is supported (loader drops the head, export re-attaches it BF16), so it is not rejected.
     if issues:
         raise NotImplementedError(
             "--use_fsdp2 does not support:\n  - "
@@ -445,6 +414,18 @@ def _apply_to_model_state_dict(
     if in_state_dict:
         model.load_state_dict(in_state_dict, strict=False)
     return out_state_dict
+
+def mtp_layer_prefixes_from_checkpoint(model_path: str) -> list[str]:
+    """MTP exclude-prefixes from a checkpoint's safetensors index (``[]`` if none); reads no tensors.
+
+    Local-index-only, matching :func:`load_mtp_weights`, so detection and re-attach stay in sync.
+    """
+    index_file = Path(model_path) / "model.safetensors.index.json"
+    if not index_file.exists():
+        return []
+    weight_map = json.load(open(index_file))["weight_map"]
+    mtp_keys = [k for k, v in weight_map.items() if "mtp" in k or "mtp" in v]
+    return list(_keys_to_prefixes(mtp_keys))
 
 
 def load_mtp_weights(

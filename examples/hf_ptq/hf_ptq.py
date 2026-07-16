@@ -39,6 +39,7 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
     resolve_checkpoint_dir,
     run_nemotron_vl_preview,
@@ -85,7 +86,6 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.distributed import shard_dataloader
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
@@ -560,6 +560,11 @@ def load_model(args: argparse.Namespace):
             attn_implementation=args.attn_implementation,
             hf_config=hf_config,
         )
+        # The FSDP2 loader drops MTP weights (re-attached BF16 at export); flag their prefixes now
+        # so the pre-quant exclusion below skips any MTP module from_config did build.
+        mtp_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
+        if mtp_prefixes:
+            full_model._mtp_layer_prefixes = mtp_prefixes
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
