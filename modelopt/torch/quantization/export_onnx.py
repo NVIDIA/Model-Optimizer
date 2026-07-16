@@ -643,13 +643,12 @@ def configure_linear_module_onnx_quantizers(model):
 
     For modules with block quantization (NVFP4/MXFP8):
     - Weight quantizers use "static" export (TRT_FP4QDQ for NVFP4, DQ-only for MXFP8)
-    - Input/output activation quantizers use "dynamic" export (TRT_FP4DynamicQuantize,
-      etc.); the static path would fail on activations in the NVFP4 exporter.
+    - Input/output activation quantizers use "dynamic" export (TRT_FP4DynamicQuantize, etc.)
 
-    This must be set for ALL modules with block quantization, not just nn.Linear,
-    because models like ResNet have non-Linear modules (e.g., MaxPool2d) with NVFP4/MXFP8
-    input quantizers that would otherwise default to the static path and produce
-    TRT_FP4QDQ nodes on activations (which the NVFP4 exporter cannot handle).
+    This must be set for ALL quantizers on activations, not just nn.Linear inputs,
+    because non-Linear modules (e.g., ResNet's MaxPool2d) and enabled output
+    quantizers would otherwise default to the static path and produce TRT_FP4QDQ
+    nodes on activations (which the NVFP4 exporter cannot handle).
     """
     sentinel = object()
     originals: list[tuple] = []
