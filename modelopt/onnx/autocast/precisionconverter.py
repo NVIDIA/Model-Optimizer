@@ -864,7 +864,9 @@ class PrecisionConverter:
         def _is_removable_fp_cast(cast_node):
             if cast_node.op_type != "Cast":
                 return False
-            cast_node_from_type = onnx_utils._get_tensor_type_by_name(self.model, cast_node.input[0])
+            cast_node_from_type = onnx_utils._get_tensor_type_by_name(
+                self.model, cast_node.input[0]
+            )
             cast_node_to_type = onnx_utils.get_cast_to_type(cast_node)
             return (
                 cast_node_to_type in [onnx.TensorProto.FLOAT16, onnx.TensorProto.FLOAT]

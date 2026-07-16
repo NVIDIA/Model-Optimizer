@@ -126,7 +126,9 @@ def test_remove_same_type_graph_output_cast_with_stable_producer():
 
     add_node = helper.make_node("Add", ["X", "weight"], ["add_out"], name="add")
     cast_node = helper.make_node("Cast", ["add_out"], ["Y"], name="cast", to=TensorProto.FLOAT)
-    graph = helper.make_graph([add_node, cast_node], "same_type_output_cast", [x], [y], [init_weight])
+    graph = helper.make_graph(
+        [add_node, cast_node], "same_type_output_cast", [x], [y], [init_weight]
+    )
     model = helper.make_model(graph, producer_name="same_type_output_cast")
     model.opset_import[0].version = 20
     model.ir_version = 10
