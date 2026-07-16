@@ -188,9 +188,9 @@ def get_args():
         type=str,
         required=False,
         default=None,
-        help="Export template: HF model whose architecture matches the exported student. Only needed "
-        "for heterogeneous (Puzzletron/NAS) students whose architecture differs from --student_hf_path. "
-        "Defaults to --student_hf_path; unused for VLMs.",
+        help="Reference HF model with a homogeneous architecture, used as the export template for a "
+        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
+        "correct for homogeneous students; unused for VLMs.",
     )
     args = parser.parse_args()
 
@@ -261,7 +261,7 @@ def main(args: argparse.Namespace):
             "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
             "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
         )
-    run_provider = convert_to_distillation_provider(
+    distill_provider = convert_to_distillation_provider(
         student_provider,
         teacher_provider,
         kd_config,
@@ -286,7 +286,7 @@ def main(args: argparse.Namespace):
             )
             return model_chunks
 
-        run_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+        distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
@@ -318,7 +318,7 @@ def main(args: argparse.Namespace):
 
     # Assemble ConfigContainer and run distillation
     config = ConfigContainer(
-        model=run_provider,
+        model=distill_provider,
         train=TrainingConfig(
             train_iters=args.train_iters,
             eval_interval=args.eval_interval,
@@ -351,7 +351,7 @@ def main(args: argparse.Namespace):
             wandb_exp_name=args.wandb_exp_name,
         ),
         tokenizer=TokenizerConfig(
-            tokenizer_type="NullTokenizer", vocab_size=run_provider.vocab_size
+            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
         ),
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
@@ -377,8 +377,8 @@ def main(args: argparse.Namespace):
         # Only the language model was distilled; export it back into the full VLM.
         print_rank_0(f"Exporting distilled VLM to HF format to {args.hf_export_path}")
         # ``distill`` tore down the model-parallel groups on exit, so rebuild them.
-        run_provider.initialize_model_parallel(seed=args.seed)
-        full_student = run_provider.full_model
+        distill_provider.initialize_model_parallel(seed=args.seed)
+        full_student = distill_provider.full_model
         # Strip the distillation wrapper -> plain trained language model (in place; reassign to be safe).
         full_student.language_model = mtd.export(full_student.language_model)
         save_vlm_to_hf(

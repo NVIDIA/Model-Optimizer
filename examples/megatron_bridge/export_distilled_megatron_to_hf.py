@@ -71,9 +71,9 @@ def export_llm_to_hf(
         megatron_path: Megatron checkpoint directory (an ``iter_*`` dir or its parent).
         hf_export_path: Directory to write the HuggingFace checkpoint to.
         student_hf_path: Student HF model used for the exported config / tokenizer.
-        template_hf: HF model whose architecture matches the exported student. Defaults to
-            ``student_hf_path``; pass a distinct value only for heterogeneous (Puzzletron/NAS)
-            students whose architecture differs from ``student_hf_path``.
+        template_hf: Reference HF model with a homogeneous architecture, used as the export template
+            for a heterogeneous (Puzzletron/NAS) student. Defaults to ``student_hf_path`` (correct for
+            homogeneous students).
         trust_remote_code: Whether to trust remote code when loading the HF model.
     """
     export_bridge = AutoBridge.from_hf_pretrained(
@@ -140,9 +140,9 @@ def get_args() -> argparse.Namespace:
         "--student_hf_model",
         type=str,
         default=None,
-        help="Export template: HF model whose architecture matches the exported student. Only needed "
-        "for heterogeneous (Puzzletron/NAS) students whose architecture differs from --student_hf_path. "
-        "Defaults to --student_hf_path; unused for VLMs.",
+        help="Reference HF model with a homogeneous architecture, used as the export template for a "
+        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
+        "correct for homogeneous students; unused for VLMs.",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")

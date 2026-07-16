@@ -207,7 +207,7 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
-`--student_hf_path` builds the student and provides the exported config / tokenizer. `--student_hf_model` is only needed when the student is **heterogeneous** (from Puzzletron/NAS pruning) and so differs from `--student_hf_path`; it points to a template matching that pruned architecture. For homogeneous models and VLMs, omit it -- it defaults to `--student_hf_path`.
+`--student_hf_path` builds the student and provides the exported config / tokenizer. `--student_hf_model` is a reference HF model with a **homogeneous** architecture, used as the export template only for **heterogeneous** (Puzzletron/NAS) students; for homogeneous models and VLMs, omit it -- it defaults to `--student_hf_path`.
 
 **Separate conversion** -- convert **any** saved iteration (intermediate or final) with [export_distilled_megatron_to_hf.py](export_distilled_megatron_to_hf.py):
 
