@@ -224,13 +224,13 @@ def is_fsdp2_model(model) -> bool:
     return any(isinstance(m, FSDPModule) for m in model.modules())
 
 
-def fsdp2_wrap(model, shard_root=False, mp_policy=None, cpu_offload: bool = False):
+def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
-    With ``shard_root``, the root module is wrapped too so embed/lm_head/norm are sharded
-    instead of replicated per rank; the parallel loader doesn't load sharded root params
-    yet, so only callers that load weights themselves should set it. Returns the detected
-    decoder layers so callers can reuse the detection result.
+    By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
+    sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
+    (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
+    detection result.
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector

@@ -78,11 +78,7 @@ def read_safetensors_subset(
 
 
 def weight_map_for(ckpt_path: str) -> dict[str, str]:
-    """Return the ``param_name → safetensors_file`` map for a local checkpoint directory.
-
-    Handles both sharded checkpoints (``model.safetensors.index.json``) and
-    single-file checkpoints (``model.safetensors``). Raises if neither exists.
-    """
+    """Return the ``param_name → safetensors_file`` map for a local checkpoint directory."""
     index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
     single_file = os.path.join(ckpt_path, "model.safetensors")
     if os.path.exists(index_path):
@@ -143,11 +139,9 @@ def _conversion_rules(model: nn.Module) -> dict | None:
     Returns ``{"renames": {pattern: repl}, "fuses": [{"src_res", "target", "stack", "cat"}]}``, or
     ``None`` when nothing needs converting (transformers<5 / already-matching checkpoint). A fuse
     stacks its per-expert sources on ``stack`` and, when multi-source, concats them on ``cat``.
-    The readable source globs are logged at DEBUG (the dict keeps only compiled ``src_res``).
     """
     renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
     fuses = []
-    readable = []
     for rule in get_model_conversion_mapping(model) if get_model_conversion_mapping else []:
         sources, targets = list(rule.source_patterns), list(rule.target_patterns)
         ops = getattr(rule, "operations", None) or []  # rename-only rules carry none
@@ -167,13 +161,7 @@ def _conversion_rules(model: nn.Module) -> dict | None:
                 "cat": dims.get("Concatenate"),
             }
         )
-        readable.append(f"{sources} -> {targets[0]}")
-    rules = {"renames": renames, "fuses": fuses} if (renames or fuses) else None
-    if rules:
-        logger.debug(
-            "checkpoint key conversion: renames=%s fuses=[%s]", renames, "; ".join(readable)
-        )
-    return rules
+    return {"renames": renames, "fuses": fuses} if (renames or fuses) else None
 
 
 def _rename_key(key: str, renames: dict) -> str:
@@ -182,8 +170,12 @@ def _rename_key(key: str, renames: dict) -> str:
     return key
 
 
-def _match_fuse(key: str, fuses: list):
-    """``(target_name, fuse, source_index, expert_idx)`` if ``key`` is a fuse source, else ``None``."""
+def _resolve_fuse_source(key: str, fuses: list):
+    """Where ``key`` lands in a fused param, or ``None`` if it isn't a fuse source.
+
+    On a hit returns ``(target_name, fuse, source_index, expert_idx)``: the fused param name, the
+    matched rule, which source slot matched (e.g. 0=gate, 1=up), and the expert index.
+    """
     for fuse in fuses:
         for i, rx in enumerate(fuse["src_res"]):
             m = rx.search(key)
@@ -193,9 +185,8 @@ def _match_fuse(key: str, fuses: list):
 
 
 def _target_name(rules: dict, key: str) -> str:
-    """Model param name that checkpoint ``key`` feeds (rename + fuse target; no tensor needed)."""
     key = _rename_key(key, rules["renames"])
-    hit = _match_fuse(key, rules["fuses"])
+    hit = _resolve_fuse_source(key, rules["fuses"])
     return hit[0] if hit else key
 
 
@@ -204,7 +195,7 @@ def _convert_keys(rules: dict, state: dict) -> dict:
     result, groups = {}, {}  # groups[target] = (fuse, {source_index: {expert_idx: tensor}})
     for key, tensor in state.items():
         key = _rename_key(key, rules["renames"])
-        hit = _match_fuse(key, rules["fuses"])
+        hit = _resolve_fuse_source(key, rules["fuses"])
         if hit is None:
             result[key] = tensor
             continue
@@ -225,10 +216,7 @@ def build_meta_causal_lm(
     attn_implementation: str | None,
     hf_config=None,
 ):
-    """Build a meta-init causal LM (no real storage allocated).
-
-    Pass ``hf_config`` to skip the ``AutoConfig.from_pretrained`` fetch.
-    """
+    """Build a meta-init causal LM (no real storage allocated)."""
     if hf_config is None:
         config_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
         if attn_implementation is not None:
@@ -247,14 +235,12 @@ def build_meta_causal_lm(
 
 
 def _layers_for_rank(n_layers: int, world_size: int, r: int) -> list[int]:
-    """Round-robin: the decoder-layer indices owned by rank ``r``."""
     return [i for i in range(n_layers) if i % world_size == r]
 
 
 def _read_and_convert(
     resolved_path: str, weight_map: dict, keyset: set[str], rules: dict | None
 ) -> dict:
-    """Read the checkpoint keys in ``keyset`` and apply the fuse/rename rules (identity when None)."""
     raw = read_safetensors_subset(resolved_path, weight_map, lambda k: k in keyset)
     return _convert_keys(rules, raw) if rules else raw
 
@@ -372,10 +358,8 @@ def parallel_load_and_prepare_fsdp2(
 
     model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
 
-    # shard_root=True shards the root params (embed/lm_head/norm) too, rather than replicating them.
-    decoder_layers = fsdp2_wrap(
-        model, shard_root=True, mp_policy=mp_policy, cpu_offload=cpu_offload
-    )
+    # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
+    decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
 

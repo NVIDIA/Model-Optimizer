@@ -778,9 +778,6 @@ def mono_quantize(
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
-                # FSDP2 shards each decoder layer in place, so a standard forward through
-                # the (unwrapped) root still hits the per-layer FSDP2 hooks — no special
-                # forward loop needed.
                 calibrate_loop = create_forward_loop(
                     dataloader=calib_dataloader,
                     allowed_non_tensor_keys={"base_model_outputs"}
