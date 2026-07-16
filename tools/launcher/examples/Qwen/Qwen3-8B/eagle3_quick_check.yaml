@@ -39,7 +39,7 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       gpus_per_node: 4
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
   # Step 2: Dump hidden states from target model
   task_1:
@@ -56,7 +56,7 @@ pipeline:
       _factory_: "slurm_factory"
       nodes: 1
       gpus_per_node: 4
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
   # Step 3: Train EAGLE3 draft head (offline, single task)
   task_2:
@@ -78,7 +78,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 4
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
   # Step 4: Benchmark speculative decoding (VLLM backend)
   #
@@ -90,7 +90,7 @@ pipeline:
   #   TRTLLM_LAUNCH_SCRIPT: trtllm-llmapi-launch
   # slurm_config:
   #   ntasks_per_node: 4
-  #   container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc2
+  #   container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
   #
   # To use SGLang
   #
