@@ -1071,9 +1071,13 @@ def get_extended_model_outputs(
         extended_onnx_path = onnx_path.replace(".onnx", "_extended.onnx")
         save_onnx(extended_model, extended_onnx_path, save_as_external_data=True)
         intermediate_generated_files.append(extended_onnx_path)
-        session = create_inference_session(extended_onnx_path, calibration_eps, input_shapes_profile)
+        session = create_inference_session(
+            extended_onnx_path, calibration_eps, input_shapes_profile
+        )
     else:
-        session = create_inference_session(extended_model.SerializeToString(), calibration_eps, input_shapes_profile)
+        session = create_inference_session(
+            extended_model.SerializeToString(), calibration_eps, input_shapes_profile
+        )
 
     # Run extended model's inference.
     extended_model_output_names = [output.name for output in session.get_outputs()]

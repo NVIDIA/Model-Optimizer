@@ -180,6 +180,10 @@ def _load_extra_cudnn_dlls():
     This scans the nvidia-cudnn bin directory and loads any cudnn*.dll not already
     loaded in the process.
     """
+    # Fix github code quality test failure
+    if sys.platform != "win32":
+        return
+
     import ctypes
     import ctypes.wintypes
 
