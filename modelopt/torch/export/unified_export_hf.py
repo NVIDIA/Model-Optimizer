@@ -925,17 +925,13 @@ def _export_transformers_checkpoint(
     _reconstruct_fused_moe_linear(model)
 
     if is_fsdp2_model(model):
-        # FSDP2: gather full state_dict to CPU on rank 0 only.
-        # full_state_dict=True + cpu_offload=True + initialized PG already gates
-        # ranks_only=(0,) in _maybe_full_or_cpu_state_dict; broadcast_from_rank0 is
-        # a set-side option and would be a no-op here.
+        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
         quantized_state_dict = get_model_state_dict(
             model,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
     else:
         # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
-        # A sharded non-FSDP2 model (TP/PP) would export an incomplete checkpoint here.
         quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
@@ -1476,10 +1472,7 @@ def export_hf_checkpoint(
                 "names may not match the original HF hub checkpoint."
             )
 
-        # Under torch.distributed: only rank 0 writes; everyone syncs at the finally barrier.
-        # If rank 0 raises BEFORE the collective gather inside _export_transformers_checkpoint
-        # (e.g. rank-divergent preprocessing), other ranks hang on that collective until NCCL
-        # timeout — closing that case would need a broadcast-status pattern; out of scope.
+        # Under torch.distributed only rank 0 writes; others sync at the finally barrier.
         if is_distributed and torch.distributed.get_rank() != 0:
             return
 
@@ -1511,9 +1504,7 @@ def export_hf_checkpoint(
 
         _sanitize_generation_config_for_save(model)
 
-        # TODO: Parallelize the disk write across ranks (each writes a disjoint shard
-        # subset) so we're not bound by single-process write speed and rank 0 doesn't
-        # have to hold the full state dict (OOM risk for large models).
+        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
         try:
             model.save_pretrained(
                 export_dir,

@@ -88,7 +88,7 @@ def validate_fsdp2_supported(args, config):
         issues.append("speculative decoding (--specdec_offline_dataset)")
     if getattr(args, "low_memory_mode", False):
         issues.append("--low_memory_mode (redundant with FSDP2)")
-    # MTP is supported (loader drops the head, export re-attaches it BF16), so it is not rejected.
+
     if issues:
         raise NotImplementedError(
             "--use_fsdp2 does not support:\n  - "
