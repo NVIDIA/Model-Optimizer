@@ -113,17 +113,18 @@ graphs take `input_ids` and `attention_mask` with dynamic batch/sequence axes.
 The default recipe
 (`modelopt_recipes/huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
 quantizes weights and activations to NVFP4 and additionally quantizes the
-projection-Linear outputs. Without output-side quantization, TensorRT's NVFP4
-GEMMs emit FP16 activations, so FP4 engines can use more activation memory than
-FP8 engines whose output-side Q/DQ enables FP8-out kernels; quantizing the
-projection outputs keeps inter-layer activations in FP4. With TensorRT 10.16 on
-RTX PRO 6000 Blackwell (strongly-typed engines, 5 dynamic-shape profiles up to
-32x512), engine activation memory vs the plain `nvfp4` preset:
+projection-Linear outputs. Without output-side quantization, quantized GEMMs
+emit FP16 activations, so FP8/FP4 engines can use as much or more activation
+memory than an unquantized FP16 engine; quantizing the projection outputs keeps
+inter-layer activations in the low-precision format. An FP8 twin of the recipe
+(`fp8_output_quant_proj.yaml`, pass it via `--recipe`) applies the same idea to
+the FP8 preset. With TensorRT 10.16 on RTX PRO 6000 Blackwell (strongly-typed
+engines, 5 dynamic-shape profiles up to 32x512), engine activation memory:
 
-| Model | `nvfp4` preset | This recipe |
-|-------|---------------:|------------:|
-| llama-nemotron-embed-1b-v2 | 1040 MiB | 516 MiB |
-| llama-nemotron-rerank-1b-v2 | 520 MiB | 331 MiB |
+| Model | FP16 | `fp8` preset | fp8 recipe | `nvfp4` preset | nvfp4 recipe |
+|-------|-----:|-------------:|-----------:|---------------:|-------------:|
+| llama-nemotron-embed-1b-v2 | 1040 MiB | 1392 MiB | 1096 MiB | 1040 MiB | 516 MiB |
+| llama-nemotron-rerank-1b-v2 | 1040 MiB | 1392 MiB | 1096 MiB | 520 MiB | 331 MiB |
 
 ### Usage
 
