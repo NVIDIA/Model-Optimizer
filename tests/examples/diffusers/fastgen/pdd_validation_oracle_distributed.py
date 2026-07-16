@@ -91,6 +91,27 @@ def main() -> None:
         assert abs(distributed.mean_loss - baseline.mean_loss) <= 1e-12
         assert distributed.ordered_id_sha256 == baseline.ordered_id_sha256
 
+        # Text conditions are padded only to each rank-local batch maximum in the
+        # real Qwen loader. Data-parallel validation must therefore accept
+        # different sequence lengths while preserving the same logical result.
+        ragged_conditions = [
+            dataclasses.replace(
+                batch,
+                condition=(
+                    torch.zeros((len(batch.sample_ids), rank + 1, 1)),
+                    torch.ones((len(batch.sample_ids), rank + 1), dtype=torch.long),
+                ),
+            )
+            for batch in local_batches
+        ]
+        ragged = run_pdd_validation(
+            lifecycle.pipeline,
+            ragged_conditions,
+            assignments,
+            validation_seed=91,
+        )
+        assert ragged == distributed
+
         invalid_mask = list(local_batches)
         if rank == 0:
             invalid_mask[0] = dataclasses.replace(invalid_mask[0], valid_mask=())

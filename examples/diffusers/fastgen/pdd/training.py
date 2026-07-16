@@ -852,7 +852,6 @@ def run_pdd_validation(
                 local_error: BaseException | None = None
                 selected: list[PDDValidationAssignment] = []
                 valid_mask: tuple[bool, ...] = ()
-                signature: Any = None
                 try:
                     if not isinstance(batch, PreparedPDDBatch):
                         raise TypeError("validation batches must contain PreparedPDDBatch values.")
@@ -886,30 +885,12 @@ def run_pdd_validation(
                                     template.k,
                                 )
                             )
-                    signature = (
-                        tuple(batch.data.shape),
-                        tuple(batch.condition[0].shape),
-                        tuple(batch.condition[1].shape),
-                        None
-                        if batch.negative_condition is None
-                        else (
-                            tuple(batch.negative_condition[0].shape),
-                            tuple(batch.negative_condition[1].shape),
-                        ),
-                    )
                 except BaseException as error:
                     local_error = error
                 _raise_collective_validation_error(local_error, context="batch preflight")
                 assert isinstance(batch, PreparedPDDBatch)
-
-                if distributed:
-                    signatures: list[Any] = [None] * dist.get_world_size()
-                    dist.all_gather_object(signatures, signature)
-                    if any(item != signatures[0] for item in signatures[1:]):
-                        raise RuntimeError(
-                            "distributed PDD validation requires the same padded batch shape "
-                            "on every rank."
-                        )
+                # Inputs remain rank-local. Equal batch counts above preserve collective
+                # ordering, while prompt sequence padding may legitimately differ by rank.
                 noise = torch.stack(
                     [
                         pdd_validation_noise(
