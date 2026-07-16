@@ -31,10 +31,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
-    QWEN_IMAGE_PDD_LAYER_SPEC,
-    require_qwen_image_pdd_forward_substrate,
-)
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_LAYER_SPEC
 
 from .artifacts import (
     load_canonical_json,
@@ -44,7 +41,7 @@ from .artifacts import (
     write_canonical_json,
 )
 
-_EXPORT_SCHEMA_VERSION = 2
+_EXPORT_SCHEMA_VERSION = 3
 _COMPLETE_SCHEMA_VERSION = 1
 _EXPORT_FORMAT = "modelopt-pdd-safetensors"
 _CONFIG_FILE = "config.json"
@@ -171,8 +168,6 @@ def _validate_identity(identity: Mapping[str, Any], metadata: PDDMetadata) -> di
     if not isinstance(identity, Mapping):
         raise TypeError("PDD export identity must be a mapping.")
     required = {
-        "automodel",
-        "forward_substrate",
         "guidance",
         "model",
         "pdd_metadata",
@@ -183,36 +178,19 @@ def _validate_identity(identity: Mapping[str, Any], metadata: PDDMetadata) -> di
         raise ValueError(f"PDD export identity is missing keys: {missing}.")
     if identity["pdd_metadata"] != metadata.to_dict():
         raise ValueError("PDD export metadata does not match the checkpoint identity.")
-    require_qwen_image_pdd_forward_substrate(identity["forward_substrate"])
     model = _require_exact_mapping(
         identity["model"], {"id", "revision", "dtype"}, name="identity.model"
     )
     if not isinstance(model["id"], str) or not model["id"] or not isinstance(model["dtype"], str):
         raise ValueError("PDD export checkpoint identity has an invalid model ID or dtype.")
     revision = model["revision"]
-    if not isinstance(revision, str) or len(revision) != 40:
-        raise ValueError("PDD export requires a pinned 40-character model revision.")
-    try:
-        int(revision, 16)
-    except ValueError as error:
-        raise ValueError("PDD export model revision must be hexadecimal.") from error
-    automodel = _require_exact_mapping(
-        identity["automodel"],
-        {"distribution", "version", "package_tree_sha256", "wheel_sha256", "runtime_versions"},
-        name="identity.automodel",
-    )
     if (
-        not isinstance(automodel["distribution"], str)
-        or not automodel["distribution"]
-        or not isinstance(automodel["version"], str)
-        or not isinstance(automodel["runtime_versions"], Mapping)
+        not isinstance(revision, str)
+        or len(revision) != 40
+        or any(character not in "0123456789abcdef" for character in revision)
     ):
-        raise ValueError("PDD export AutoModel identity is malformed.")
-    require_sha256(automodel["package_tree_sha256"], name="AutoModel package tree SHA-256")
-    require_sha256(automodel["wheel_sha256"], name="AutoModel wheel SHA-256")
-    guidance = _require_exact_mapping(
-        identity["guidance"], {"scale", "rescale", "eps"}, name="identity.guidance"
-    )
+        raise ValueError("PDD export model revision must be an exact lowercase commit.")
+    guidance = _require_exact_mapping(identity["guidance"], {"scale"}, name="identity.guidance")
     for name, value in guidance.items():
         if value is not None and (
             isinstance(value, bool)
@@ -231,20 +209,6 @@ def _validate_identity(identity: Mapping[str, Any], metadata: PDDMetadata) -> di
     return dict(identity)
 
 
-def _validate_modelopt_source(source: Mapping[str, Any]) -> dict[str, Any]:
-    source = _require_exact_mapping(source, {"commit", "dirty"}, name="modelopt_source")
-    commit = source["commit"]
-    if not isinstance(commit, str) or len(commit) != 40:
-        raise ValueError("modelopt_source.commit must be a 40-character Git commit.")
-    try:
-        int(commit, 16)
-    except ValueError as error:
-        raise ValueError("modelopt_source.commit must be hexadecimal.") from error
-    if source["dirty"] is not False:
-        raise ValueError("modelopt_source.dirty must be false.")
-    return dict(source)
-
-
 def write_pdd_export(
     output_dir: str | Path,
     state_dict: Mapping[str, Any],
@@ -253,7 +217,6 @@ def write_pdd_export(
     transformer_config: Mapping[str, Any],
     identity: Mapping[str, Any],
     source_checkpoint: Mapping[str, Any],
-    modelopt_source: Mapping[str, Any],
     max_shard_bytes: int,
 ) -> Path:
     """Publish a complete PDD export into a previously absent directory."""
@@ -278,7 +241,6 @@ def write_pdd_export(
         or source_checkpoint["completed_steps"] < 1
     ):
         raise ValueError("source_checkpoint.completed_steps must be an integer >= 1.")
-    resolved_modelopt_source = _validate_modelopt_source(modelopt_source)
     resolved_identity = _validate_identity(identity, metadata)
     tensors = _validate_state_dict(state_dict)
 
@@ -335,7 +297,6 @@ def write_pdd_export(
             "format": _EXPORT_FORMAT,
             "identity": resolved_identity,
             "source_checkpoint": dict(source_checkpoint),
-            "modelopt_source": resolved_modelopt_source,
             "max_shard_bytes": max_shard_bytes,
             "total_tensor_bytes": total_tensor_bytes,
             "tensors": tensor_specs,
@@ -401,7 +362,6 @@ def inspect_pdd_export(export_dir: str | Path) -> PDDExportDescriptor:
             "format",
             "identity",
             "source_checkpoint",
-            "modelopt_source",
             "max_shard_bytes",
             "total_tensor_bytes",
             "tensors",
@@ -411,7 +371,6 @@ def inspect_pdd_export(export_dir: str | Path) -> PDDExportDescriptor:
     )
     if manifest["schema_version"] != _EXPORT_SCHEMA_VERSION or manifest["format"] != _EXPORT_FORMAT:
         raise ValueError("PDD export manifest schema or format is unsupported.")
-    _validate_modelopt_source(manifest["modelopt_source"])
     if type(manifest["max_shard_bytes"]) is not int or manifest["max_shard_bytes"] <= 0:
         raise ValueError("PDD export max_shard_bytes is invalid.")
     if type(manifest["total_tensor_bytes"]) is not int or manifest["total_tensor_bytes"] <= 0:

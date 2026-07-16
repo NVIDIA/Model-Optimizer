@@ -18,11 +18,8 @@
 from __future__ import annotations
 
 import copy
-import importlib.metadata
-import json
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 
@@ -41,13 +38,14 @@ from pdd.recipe import (
     _materialize_zero_step_adamw_state,
     _projection_identity,
     _require_fp32_optimizer_storage,
+    _require_immutable_model_source,
+    _resolve_model_source,
     _stage_and_shard_training_models,
     build_pdd_export_setup,
     build_pdd_setup,
     initialize_pdd_distributed,
     resolve_pdd_recipe_config,
 )
-from pdd.verify_readonly_automodel import snapshot_installed_distribution
 
 from modelopt.torch.fastgen import PDDLayerSpec, convert_to_pdd_output_projection
 
@@ -113,15 +111,6 @@ def test_fp32_optimizer_storage_rejects_low_precision_masters_and_state() -> Non
     )
     with pytest.raises(RuntimeError, match="exp_avg state must be FP32"):
         _require_fp32_optimizer_storage(fp32_optimizer)
-
-
-def _require_exact_automodel() -> None:
-    try:
-        version = importlib.metadata.version("nemo_automodel")
-    except importlib.metadata.PackageNotFoundError:
-        pytest.skip("nemo_automodel is not installed")
-    if version != "0.5.0":
-        pytest.skip(f"requires the official nemo_automodel==0.5.0 wheel, found {version}")
 
 
 def test_training_setup_shards_student_before_staging_teacher() -> None:
@@ -422,8 +411,6 @@ def test_pdd_finetune_namespace_module_help() -> None:
         ("model", "guidance_embeds", True, "guidance embeddings"),
         ("model", "device_map", "auto", "device_map"),
         ("model", "quantization_config", {"bits": 8}, "quantization_config"),
-        ("model", "fuse_qkv_projections", True, "QKV fusion"),
-        ("model", "torch_dtype", "float32", "requires model.torch_dtype='bfloat16'"),
     ],
 )
 def test_incompatible_modes_fail_during_config_resolution(
@@ -437,13 +424,71 @@ def test_incompatible_modes_fail_during_config_resolution(
         resolve_pdd_recipe_config(raw)
 
 
-def test_remote_model_requires_full_revision_and_non_dp_parallelism_is_rejected(tmp_path) -> None:
+def test_model_revision_and_compute_dtype_follow_loader_contract(tmp_path) -> None:
     raw = _raw_config(tmp_path)
     raw["model"]["pretrained_model_name_or_path"] = "Qwen/Qwen-Image"
-    with pytest.raises(ValueError, match=r"exact model\.revision"):
+    raw["model"]["revision"] = "a" * 40
+    raw["model"]["torch_dtype"] = "float32"
+    raw["model"]["fuse_qkv_projections"] = True
+
+    config = resolve_pdd_recipe_config(raw)
+
+    assert config.model_revision == "a" * 40
+    assert config.dtype == torch.float32
+    assert config.fuse_qkv_projections is True
+
+
+@pytest.mark.parametrize("revision", [None, "main", "A" * 40, "a" * 39])
+def test_remote_model_requires_exact_lowercase_commit(tmp_path, revision) -> None:
+    raw = _raw_config(tmp_path)
+    raw["model"]["pretrained_model_name_or_path"] = "Qwen/Qwen-Image"
+    raw["model"]["revision"] = revision
+
+    with pytest.raises(ValueError, match="exact lowercase 40-character"):
         resolve_pdd_recipe_config(raw)
 
-    raw["model"]["revision"] = "a" * 40
+
+def test_model_source_resolution_requires_the_requested_snapshot(tmp_path, monkeypatch) -> None:
+    commit = "a" * 40
+    raw = _raw_config(tmp_path)
+    raw["model"]["pretrained_model_name_or_path"] = "Qwen/Qwen-Image"
+    raw["model"]["revision"] = commit
+    config = resolve_pdd_recipe_config(raw)
+    snapshot = tmp_path / "hub" / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    calls = []
+
+    def matching_snapshot(model_id, *, revision):
+        calls.append((model_id, revision))
+        return str(snapshot)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", matching_snapshot)
+    assert _resolve_model_source(config) == str(snapshot.resolve())
+    assert calls == [("Qwen/Qwen-Image", commit)]
+    _require_immutable_model_source(config, context="test")
+
+    wrong = snapshot.with_name("b" * 40)
+    wrong.mkdir()
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda *_args, **_kwargs: str(wrong))
+    with pytest.raises(RuntimeError, match=r"does not match model\.revision"):
+        _resolve_model_source(config)
+
+
+def test_local_model_source_is_limited_to_low_level_setup(tmp_path, monkeypatch) -> None:
+    config = resolve_pdd_recipe_config(_raw_config(tmp_path))
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda *_args, **_kwargs: pytest.fail("local model resolution must not access the Hub"),
+    )
+
+    assert _resolve_model_source(config) == str(tmp_path.resolve())
+    with pytest.raises(ValueError, match="Checkpointed PDD training requires"):
+        _require_immutable_model_source(config, context="Checkpointed PDD training")
+
+
+def test_non_dp_parallelism_is_rejected(tmp_path) -> None:
+    raw = _raw_config(tmp_path)
+
     raw["fsdp"]["tp_size"] = 2
     with pytest.raises(ValueError, match="tp_size must be 1"):
         resolve_pdd_recipe_config(raw)
@@ -460,7 +505,7 @@ def test_remote_model_requires_full_revision_and_non_dp_parallelism_is_rejected(
         ),
         ("training_health", "max_grad_norm", 0.0, "max_grad_norm must be > 0"),
         ("validation", "every_steps", 0, "validation.every_steps"),
-        ("guidance", "rescale", 1.1, "guidance.rescale must be <= 1"),
+        ("guidance", "rescale", 1.1, "does not support guidance overrides"),
         ("optimizer", "betas", [0.9, 1.0], "optim.optimizer.betas values"),
         ("optimizer", "eps", 0.0, "optim.optimizer.eps must be > 0"),
     ],
@@ -515,66 +560,7 @@ def test_payload_hash_verification_mode_must_be_bool(tmp_path) -> None:
         resolve_pdd_recipe_config(raw)
 
 
-def test_frozen_automodel_distribution_snapshot_is_stable() -> None:
-    _require_exact_automodel()
-
-    before = snapshot_installed_distribution()
-    after = snapshot_installed_distribution()
-
-    assert before == after
-    assert before["version"] == "0.5.0"
-    assert before["release_commit"] == "d02f49cb314554715aabb97e8dba6599c9f6e9e0"
-    assert before["runtime_versions"] == {"diffusers": "0.38.0"}
-    assert before["package_file_count"] == 490
-    assert before["package_tree_sha256"] == (
-        "b43cb34e04992c66d1888abc0529b760b5b69fc121ff4268b42ecb4a89b1e528"
-    )
-
-
-def test_exact_wheel_install_below_git_checkout_is_accepted(tmp_path) -> None:
-    _require_exact_automodel()
-    try:
-        distribution = importlib.metadata.distribution("nemo_automodel")
-    except importlib.metadata.PackageNotFoundError:
-        pytest.skip("nemo_automodel is not installed")
-
-    checkout = tmp_path / "checkout"
-    (checkout / ".git").mkdir(parents=True)
-    site_packages = checkout / ".venv" / "lib" / "python" / "site-packages"
-    site_packages.mkdir(parents=True)
-    installed_root = pathlib.Path(distribution.locate_file("")).resolve()
-    shutil.copytree(installed_root / "nemo_automodel", site_packages / "nemo_automodel")
-    dist_info_name = "nemo_automodel-0.5.0.dist-info"
-    shutil.copytree(installed_root / dist_info_name, site_packages / dist_info_name)
-
-    output = tmp_path / "snapshot.json"
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = os.pathsep.join(
-        filter(None, (str(site_packages), environment.get("PYTHONPATH")))
-    )
-    subprocess.run(
-        [
-            sys.executable,
-            str(_FASTGEN_DIR / "pdd" / "verify_readonly_automodel.py"),
-            "snapshot",
-            "--output",
-            str(output),
-        ],
-        check=True,
-        env=environment,
-    )
-
-    snapshot = json.loads(output.read_text())
-    assert pathlib.Path(snapshot["root"]) == site_packages.resolve()
-    assert pathlib.Path(snapshot["import_origin"]).is_relative_to(site_packages.resolve())
-    assert snapshot["package_tree_sha256"] == (
-        "b43cb34e04992c66d1888abc0529b760b5b69fc121ff4268b42ecb4a89b1e528"
-    )
-
-
 def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
-    _require_exact_automodel()
-    before = snapshot_installed_distribution()
     model_dir = create_tiny_qwen_image_pipeline_dir(tmp_path)
     initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
     config = resolve_pdd_recipe_config(_raw_config(model_dir))
@@ -603,7 +589,11 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert policy.param_dtype == torch.bfloat16
     assert policy.reduce_dtype == torch.float32
     assert policy.output_dtype == torch.bfloat16
-    assert policy.cast_forward_inputs is False
+    assert policy.cast_forward_inputs is True
+    assert all(
+        base.__module__ != "modelopt.torch.fastgen.plugins.qwen_image_pdd"
+        for base in type(source.student).__mro__
+    )
     assert not any(parameter.requires_grad for parameter in source.teacher.parameters())
     optimizer_parameters = [
         parameter for group in source.optimizer.param_groups for parameter in group["params"]
@@ -684,7 +674,6 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert destination.optimizer.state[destination_unused]["step"].item() == 0
     assert not destination.optimizer.state[destination_unused]["exp_avg"].count_nonzero()
     assert not destination.optimizer.state[destination_unused]["exp_avg_sq"].count_nonzero()
-    assert snapshot_installed_distribution() == before
     source.checkpointer.close()
     destination.checkpointer.close()
     export_setup.checkpointer.close()

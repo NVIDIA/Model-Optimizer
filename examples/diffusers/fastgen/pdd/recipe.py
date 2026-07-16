@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,9 +33,7 @@ from torch import nn
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDOutputProjection, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
-    QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
     QwenImagePDDAdapter,
-    adopt_qwen_image_mr210_forward,
     convert_qwen_image_to_pdd,
 )
 
@@ -49,7 +48,8 @@ from .data import (
     _iter_validation_batches,
     _validate_dataset_contract,
 )
-from .verify_readonly_automodel import snapshot_installed_distribution
+
+_HF_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True)
@@ -103,14 +103,6 @@ class PDDValidationConfig:
 
 
 @dataclass(frozen=True)
-class PDDGuidanceConfig:
-    """Resolved Qwen packed-CFG norm-rescaling settings."""
-
-    rescale: float = 1.0
-    eps: float = 1e-5
-
-
-@dataclass(frozen=True)
 class PDDRecipeConfig:
     """Resolved setup inputs; incompatible mutation modes have already been rejected."""
 
@@ -122,7 +114,6 @@ class PDDRecipeConfig:
     step_scheduler: PDDStepSchedulerConfig
     training_health: PDDTrainingHealthConfig
     validation: PDDValidationConfig
-    guidance: PDDGuidanceConfig
     seed: int
     learning_rate: float
     weight_decay: float
@@ -148,7 +139,6 @@ class PDDSetupArtifacts:
     metadata: PDDMetadata
     checkpoint_keys: tuple[str, ...]
     lifecycle: tuple[str, ...]
-    automodel_snapshot: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -175,7 +165,6 @@ class PDDExportSetupArtifacts:
     checkpoint_keys: tuple[str, ...]
     transformer_config: Mapping[str, Any]
     lifecycle: tuple[str, ...]
-    automodel_snapshot: Mapping[str, Any]
 
 
 def _as_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
@@ -246,6 +235,18 @@ def _resolve_dtype(value: Any) -> torch.dtype:
         ) from error
 
 
+def _is_exact_hf_commit(value: Any) -> bool:
+    return isinstance(value, str) and _HF_COMMIT_PATTERN.fullmatch(value) is not None
+
+
+def _require_immutable_model_source(config: PDDRecipeConfig, *, context: str) -> None:
+    if Path(config.model_id).is_dir() or not _is_exact_hf_commit(config.model_revision):
+        raise ValueError(
+            f"{context} requires a Hugging Face model ID and exact lowercase 40-character "
+            "commit revision."
+        )
+
+
 def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     """Resolve one canonical DMD2-shaped PDD configuration."""
     raw = _config_to_mapping(raw)
@@ -279,7 +280,6 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     training_health = _as_mapping(raw.get("training_health", {}), name="training_health")
     validation = _as_mapping(raw.get("validation", {}), name="validation")
     checkpoint = _as_mapping(raw.get("checkpoint", {}), name="checkpoint")
-    guidance = _as_mapping(raw.get("guidance", {}), name="guidance")
     data = _as_mapping(raw.get("data", {}), name="data")
     dataloader = _as_mapping(data.get("dataloader", {}), name="data.dataloader")
 
@@ -328,6 +328,7 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     _reject_enabled(model.get("peft_cfg"), name="PEFT/LoRA")
     _reject_enabled(raw.get("peft"), name="PEFT/LoRA")
     _reject_enabled(raw.get("peft_cfg"), name="PEFT/LoRA")
+    _reject_enabled(raw.get("guidance"), name="guidance overrides")
     _reject_enabled(model.get("guidance_embeds"), name="Qwen guidance embeddings")
     _reject_enabled(model.get("guidance_embeddings"), name="Qwen guidance embeddings")
     for option in (
@@ -344,14 +345,13 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     if not isinstance(model_id, str) or not model_id:
         raise ValueError("model.pretrained_model_name_or_path must be a non-empty string.")
     model_revision = model.get("revision")
-    if model_revision is not None and (
-        not isinstance(model_revision, str)
-        or len(model_revision) != 40
-        or any(character not in "0123456789abcdefABCDEF" for character in model_revision)
-    ):
-        raise ValueError("model.revision must be null or a full 40-character commit hash.")
-    if not Path(model_id).is_dir() and model_revision is None:
-        raise ValueError("Remote PDD models require an exact model.revision commit hash.")
+    if Path(model_id).is_dir():
+        if model_revision is not None:
+            raise ValueError("Local PDD model directories require model.revision=null.")
+    elif not _is_exact_hf_commit(model_revision):
+        raise ValueError(
+            "Remote PDD models require an exact lowercase 40-character model.revision commit."
+        )
 
     learning_rate = _require_finite_real(
         optim.get("learning_rate", 2.0e-5),
@@ -471,8 +471,6 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
         model.get("fuse_qkv_projections", False),
         name="model.fuse_qkv_projections",
     )
-    if fuse_qkv_projections:
-        raise ValueError("authenticated Qwen MR210 PDD does not support QKV fusion.")
 
     seed = _require_int_at_least(raw.get("seed", 42), name="seed", minimum=0)
     max_steps = _require_int_at_least(
@@ -556,23 +554,7 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
         minimum=1,
     )
 
-    guidance_rescale = _require_finite_real(
-        guidance.get("rescale", 1.0),
-        name="guidance.rescale",
-        minimum=0.0,
-    )
-    if guidance_rescale > 1.0:
-        raise ValueError("guidance.rescale must be <= 1.")
-    guidance_eps = _require_finite_real(
-        guidance.get("eps", 1e-5),
-        name="guidance.eps",
-        minimum=0.0,
-    )
-    if guidance_eps == 0.0:
-        raise ValueError("guidance.eps must be > 0.")
     dtype = _resolve_dtype(model.get("torch_dtype", "bfloat16"))
-    if dtype != torch.bfloat16:
-        raise ValueError("authenticated Qwen MR210 PDD requires model.torch_dtype='bfloat16'.")
 
     return PDDRecipeConfig(
         model_id=model_id,
@@ -608,7 +590,6 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
             split_seed=split_seed,
             every_steps=validation_every_steps,
         ),
-        guidance=PDDGuidanceConfig(rescale=guidance_rescale, eps=guidance_eps),
         seed=seed,
         learning_rate=float(learning_rate),
         weight_decay=float(weight_decay),
@@ -653,17 +634,17 @@ def _require_projection_module(
 
 def _resolve_model_source(config: PDDRecipeConfig) -> str:
     if Path(config.model_id).is_dir():
-        return config.model_id
+        return str(Path(config.model_id).resolve())
     from huggingface_hub import snapshot_download
 
-    if config.model_revision is None:
-        raise ValueError("Remote PDD models require a pinned model revision.")
-    model_source = snapshot_download(config.model_id, revision=config.model_revision)
-    if Path(model_source).resolve().name != config.model_revision:
+    model_source = Path(
+        snapshot_download(config.model_id, revision=config.model_revision)
+    ).resolve()
+    if model_source.parent.name != "snapshots" or model_source.name != config.model_revision:
         raise RuntimeError(
-            "Hugging Face resolved a model snapshot that does not match the pinned revision."
+            "Hugging Face resolved a model snapshot that does not match model.revision."
         )
-    return model_source
+    return str(model_source)
 
 
 def _load_unwrapped_transformer(
@@ -711,9 +692,8 @@ def _stage_and_shard_training_models(
     ):
         raise AttributeError("QKV fusion requires both Qwen transformers to expose the object API.")
 
-    # Match the FastGen Qwen PDD recipe: FP32 parameter/optimizer storage,
-    # with the FSDP policy below casting gathered parameters to the configured
-    # model dtype for forward/backward compute.
+    # Keep parameter and optimizer storage in FP32. The FSDP policy below casts
+    # gathered parameters to the configured dtype for forward/backward compute.
     student.to(device=device, dtype=torch.float32)
     if fuse_qkv_projections:
         student.fuse_qkv_projections()
@@ -767,7 +747,7 @@ def _materialize_zero_step_adamw_state(optimizer: torch.optim.AdamW) -> None:
 
 
 def _require_fp32_optimizer_storage(optimizer: torch.optim.AdamW) -> None:
-    """Require the FP32 master-parameter and Adam-state contract used by MR210."""
+    """Require FP32 master parameters and Adam state for stable small updates."""
     for group in optimizer.param_groups:
         for parameter in group["params"]:
             if parameter.dtype != torch.float32:
@@ -790,10 +770,8 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("Initialize torch.distributed before building the PDD FSDP2 setup.")
 
-    automodel_snapshot = snapshot_installed_distribution()
     lifecycle: list[str] = []
 
-    # Imports are intentionally delayed until the exact installed wheel has passed verification.
     from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
     from nemo_automodel.components.checkpoint.config import CheckpointingConfig
     from nemo_automodel.components.distributed import (
@@ -803,9 +781,7 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     )
     from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
-    pipe, loaded_transformer = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
-    student = adopt_qwen_image_mr210_forward(loaded_transformer)
-    pipe.transformer = student
+    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
     teacher = copy.deepcopy(student).eval().requires_grad_(False)
     lifecycle.append("load/select")
 
@@ -839,7 +815,6 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
             param_dtype=config.dtype,
             reduce_dtype=torch.float32,
             output_dtype=config.dtype,
-            cast_forward_inputs=False,
         ),
     )
     distributed_setup = DistributedSetup.build(
@@ -930,7 +905,6 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         metadata=metadata,
         checkpoint_keys=checkpoint_keys,
         lifecycle=tuple(lifecycle),
-        automodel_snapshot=automodel_snapshot,
     )
 
 
@@ -940,8 +914,6 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
         raise TypeError(f"config must be PDDRecipeConfig, got {type(config).__name__}.")
     if not dist.is_available() or not dist.is_initialized():
         raise RuntimeError("Initialize torch.distributed before building PDD export setup.")
-    automodel_snapshot = snapshot_installed_distribution()
-
     from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
     from nemo_automodel.components.checkpoint.config import CheckpointingConfig
     from nemo_automodel.components.distributed import (
@@ -952,9 +924,7 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
     from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
     lifecycle = ["load/select"]
-    pipe, loaded_transformer = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
-    student = adopt_qwen_image_mr210_forward(loaded_transformer)
-    pipe.transformer = student
+    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
     raw_transformer_config = getattr(student, "config", None)
     to_dict = getattr(raw_transformer_config, "to_dict", None)
     if callable(to_dict):
@@ -996,7 +966,6 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
             param_dtype=config.dtype,
             reduce_dtype=torch.float32,
             output_dtype=config.dtype,
-            cast_forward_inputs=False,
         ),
     )
     distributed_setup = DistributedSetup.build(
@@ -1046,7 +1015,6 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
         checkpoint_keys=checkpoint_keys,
         transformer_config=transformer_config,
         lifecycle=tuple(lifecycle),
-        automodel_snapshot=automodel_snapshot,
     )
 
 
@@ -1065,8 +1033,6 @@ def build_pdd_training_artifacts(
 
     adapter = QwenImagePDDAdapter(
         config.pdd,
-        guidance_rescale=config.guidance.rescale,
-        guidance_eps=config.guidance.eps,
         compute_dtype=config.dtype,
     )
     pipeline = PDDPipeline(setup.student, setup.teacher, config.pdd, adapter)
@@ -1088,8 +1054,7 @@ def build_pdd_training_artifacts(
 
 
 def initialize_pdd_distributed(*, backend: str, timeout_minutes: int = 60) -> Any:
-    """Verify the wheel, then initialize through AutoModel's released public API."""
-    snapshot_installed_distribution()
+    """Initialize through AutoModel's released public API."""
     from nemo_automodel.components.distributed import initialize_distributed
 
     return initialize_distributed(backend=backend, timeout_minutes=timeout_minutes)
@@ -1106,6 +1071,7 @@ class PDDDiffusionRecipe:
     def setup(self) -> None:
         """Build data, converted models, AutoModel scheduling, and strict resume state."""
         config = self.config
+        _require_immutable_model_source(config, context="Checkpointed PDD training")
         self.dist_env = initialize_pdd_distributed(
             backend="nccl" if config.device.type == "cuda" else "gloo",
             timeout_minutes=60,
@@ -1169,13 +1135,9 @@ class PDDDiffusionRecipe:
 
         identity = build_pdd_checkpoint_identity(
             metadata=self.setup_artifacts.metadata,
-            forward_substrate=QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
             model_id=config.model_id,
             model_revision=config.model_revision,
             guidance_scale=config.pdd.guidance_scale,
-            guidance_rescale=config.guidance.rescale,
-            guidance_eps=config.guidance.eps,
-            automodel_snapshot=self.setup_artifacts.automodel_snapshot,
             ordered_train_id_sha256=train_ordered_id_sha256,
             ordered_heldout_id_sha256=heldout_ordered_id_sha256,
             dataset_snapshot_sha256=self.snapshot_report["dataset_snapshot_sha256"],
@@ -1248,10 +1210,9 @@ class PDDDiffusionRecipe:
             self.snapshot_report["cache_root"],
         )
         logging.info(
-            "PDD setup complete: lifecycle=%s student_keys=%d AutoModel=%s",
+            "PDD setup complete: lifecycle=%s student_keys=%d",
             self.setup_artifacts.lifecycle,
             len(self.setup_artifacts.checkpoint_keys),
-            self.setup_artifacts.automodel_snapshot["version"],
         )
 
     def _prepared_training_batches(self):

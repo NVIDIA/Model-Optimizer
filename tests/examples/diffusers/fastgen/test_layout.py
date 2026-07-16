@@ -52,7 +52,6 @@ _EXPECTED_PDD_FILES = {
     "README.md",
     "__init__.py",
     "artifacts.py",
-    "automodel_dependency.json",
     "checkpoint.py",
     "configs",
     "data.py",
@@ -62,7 +61,6 @@ _EXPECTED_PDD_FILES = {
     "inference_qwen_image.py",
     "recipe.py",
     "training.py",
-    "verify_readonly_automodel.py",
 }
 _TEXT_SUFFIXES = {".json", ".md", ".py", ".rst", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 

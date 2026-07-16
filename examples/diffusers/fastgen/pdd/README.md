@@ -3,8 +3,8 @@
 Parallel Decoding Distillation (PDD) trains one Qwen-Image student call to predict several
 consecutive rectified-flow updates. The student keeps the original transformer backbone and widens
 only its output projection to 128 velocity heads. During training it samples aligned block starts
-and target spans from 1 through 64 intervals, so the same checkpoint can use different supported block schedules at
-inference.
+and target spans from 1 through 64 intervals, so the same checkpoint can use different supported
+block schedules at inference.
 
 The provided schedules use the 128-interval grid as follows:
 
@@ -19,14 +19,12 @@ The provided schedules use the 128-interval grid as follows:
 Install the shared requirements from the repository root, then launch with released AutoModel
 APIs. No AutoModel, Diffusers, or Qwen source changes are required.
 
-The reproducibility arm executes the Qwen forward semantics from FastGen MR210 commit
-`c8100b1347b278511336dccfc074a461457216ec`: BF16 image/text compute, FP32 normalized time through
-the timestep projection, and the MR attention behavior for zero-padded text. ModelOpt adopts the
-loaded Diffusers model into a compatible root without editing or monkeypatching external classes.
-The exact FastGen, Diffusers 0.38.0 transformer, and timestep-embedding source identities are
-authenticated in every checkpoint and export and are required again by resume and inference.
-Guidance-embedded/`zero_cond_t` models, additional time conditioning, ControlNet, PEFT, and QKV
-fusion are deliberately rejected because they are outside that executed algorithm.
+The example uses the ordinary Diffusers Qwen transformer without replacing or monkeypatching its
+forward. Diffusers owns Qwen timestep conversion and converts each text mask into the joint
+text/image attention mask, so padded text tokens do not participate as attention keys. ModelOpt
+owns only PDD projection conversion, latent packing, condition validation, and packed per-token
+classifier-free guidance using the Qwen pipeline formula. Guidance-embedded models and PEFT remain
+outside this first example.
 
 ```bash
 pip install -r examples/diffusers/fastgen/requirements.txt
@@ -57,14 +55,21 @@ default per-rank batch gives global batch size 256; other GPU topologies must se
 `256 / world_size` because this recipe does not use gradient accumulation.
 Checkpoints include the student, optimizer, scheduler, RNG, trainer, and exact replayable sampler
 state needed to resume the next committed batch. FP32 master parameters and Adam state are sharded
-while forward/backward compute remains BF16 and gradient reduction remains FP32. The FSDP policy
-does not recursively cast forward inputs; ModelOpt casts image/text tensors to BF16 itself so the
-FP32 timestep cannot be rounded before the source-locked forward receives it.
+while forward/backward uses the configured model dtype and gradient reduction remains FP32. The
+adapter casts packed image/text inputs to that compute dtype; the ordinary Diffusers Qwen forward
+owns timestep conversion.
 
 Start with a one-node smoke and scale only after it passes; project training runs are capped at 16
-nodes.
+nodes. Checkpointed training, export, and inference require the remote model ID and exact lowercase
+40-character Hugging Face commit in the provided config; local model directories are limited to
+low-level hermetic setup tests because the frozen teacher is rebuilt rather than checkpointed.
 
 ## Export and inference
+
+The v1 export restores the sharded checkpoint with the same total process count that created it;
+cross-world-size DCP resharding is not yet part of this example. The command below therefore
+applies to a checkpoint trained with eight ranks. For a 64-rank checkpoint, use the cluster
+launcher with 64 export ranks before running single-process inference.
 
 ```bash
 torchrun --standalone --nproc-per-node=8 \

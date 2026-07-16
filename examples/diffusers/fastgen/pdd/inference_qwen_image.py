@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run conditional-only PDD inference from an authenticated Qwen-Image export."""
+"""Run conditional-only PDD inference from a complete Qwen-Image PDD export."""
 
 from __future__ import annotations
 
@@ -81,12 +81,12 @@ def _model_identity(descriptor: Any) -> Mapping[str, Any]:
     if not isinstance(model["id"], str) or not model["id"]:
         raise RuntimeError("PDD export model ID is invalid.")
     revision = model["revision"]
-    if not isinstance(revision, str) or len(revision) != 40:
-        raise RuntimeError("PDD export requires a pinned 40-character model revision.")
-    try:
-        int(revision, 16)
-    except ValueError as error:
-        raise RuntimeError("PDD export model revision must be hexadecimal.") from error
+    if (
+        not isinstance(revision, str)
+        or len(revision) != 40
+        or any(character not in "0123456789abcdef" for character in revision)
+    ):
+        raise RuntimeError("PDD export model revision must be an exact lowercase commit.")
     return model
 
 
@@ -105,7 +105,7 @@ def _validate_qwen_projection(student: nn.Module, metadata: Any) -> nn.Linear:
         or base_projection.out_features != metadata.projection_out_features
         or (base_projection.bias is not None) != metadata.projection_bias
     ):
-        raise RuntimeError("reconstructed Qwen proj_out does not match authenticated metadata.")
+        raise RuntimeError("reconstructed Qwen proj_out does not match the export metadata.")
     if base_projection.out_features != in_channels:
         raise RuntimeError(
             "Qwen proj_out width must equal transformer in_channels for 2x2 latent packing."
@@ -117,23 +117,13 @@ def build_pdd_student(export_dir: str | Path) -> tuple[nn.Module, Any, torch.dty
     """Reconstruct and strictly load the converted Qwen student on CPU."""
     from diffusers import QwenImageTransformer2DModel
 
-    from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
-        adopt_qwen_image_mr210_forward,
-        convert_qwen_image_to_pdd,
-        require_qwen_image_pdd_forward_substrate,
-    )
+    from modelopt.torch.fastgen.plugins.qwen_image_pdd import convert_qwen_image_to_pdd
     from pdd.export import inspect_pdd_export, load_pdd_export_into_model, pdd_config_from_metadata
 
     descriptor = inspect_pdd_export(export_dir)
     model_identity = _model_identity(descriptor)
-    require_qwen_image_pdd_forward_substrate(
-        descriptor.manifest["identity"].get("forward_substrate")
-    )
     dtype = _dtype_from_name(model_identity["dtype"])
-    loaded_transformer = QwenImageTransformer2DModel.from_config(
-        dict(descriptor.transformer_config)
-    )
-    student = adopt_qwen_image_mr210_forward(loaded_transformer)
+    student = QwenImageTransformer2DModel.from_config(dict(descriptor.transformer_config))
     metadata = descriptor.metadata
     _validate_qwen_projection(student, metadata)
     config = pdd_config_from_metadata(metadata, blocks=metadata.inference_blocks)
@@ -318,7 +308,7 @@ def main() -> None:
 
     result_json.parent.mkdir(parents=True, exist_ok=True)
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "record_type": "pdd_inference",
         "condition": args.schedule.replace("-", "_"),
         "prompt_id": args.prompt_id,
@@ -328,7 +318,6 @@ def main() -> None:
         "blocks": list(config.inference_blocks),
         "height": args.height,
         "width": args.width,
-        "forward_substrate_id": descriptor.manifest["identity"]["forward_substrate"]["id"],
         "export_manifest_sha256": sha256_file(descriptor.root / "manifest.json"),
         "output": {"path": output_reference, "sha256": sha256_file(output)},
         "scheduler_steps": expected_invocations,

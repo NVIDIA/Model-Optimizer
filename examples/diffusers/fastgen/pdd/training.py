@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Direct PDD updates and a logical-ID-stable held-out validation oracle."""
+"""Direct PDD updates and logical-ID-stable held-out validation."""
 
 from __future__ import annotations
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Two-rank CPU/Gloo equivalence harness for the deterministic PDD validation oracle."""
+"""Two-rank CPU/Gloo equivalence harness for deterministic PDD validation."""
 
 from __future__ import annotations
 

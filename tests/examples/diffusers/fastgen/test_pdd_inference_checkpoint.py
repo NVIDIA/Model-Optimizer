@@ -39,11 +39,14 @@ from pdd.export import (
     pdd_config_from_metadata,
     write_pdd_export,
 )
-from pdd.inference_qwen_image import _normalize_prompt_condition, _validate_qwen_projection
+from pdd.inference_qwen_image import (
+    _model_identity,
+    _normalize_prompt_condition,
+    _validate_qwen_projection,
+)
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
-    QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
     QwenImagePDDAdapter,
     convert_qwen_image_to_pdd,
 )
@@ -108,18 +111,10 @@ def _converted(seed: int = 17):
 
 def _identity(metadata: PDDMetadata) -> dict:
     return {
-        "schema_version": 1,
-        "forward_substrate": dict(QWEN_IMAGE_PDD_FORWARD_SUBSTRATE),
+        "schema_version": 4,
         "model": {"id": "synthetic-qwen", "revision": "f" * 40, "dtype": "bfloat16"},
         "pdd_metadata": metadata.to_dict(),
-        "guidance": {"scale": 4.0, "rescale": 1.0, "eps": 1e-5},
-        "automodel": {
-            "distribution": "nemo_automodel",
-            "version": "0.5.0",
-            "package_tree_sha256": "1" * 64,
-            "wheel_sha256": "2" * 64,
-            "runtime_versions": {"diffusers": "0.38.0"},
-        },
+        "guidance": {"scale": 4.0},
         "topology": {"world_size": 1, "pure_data_parallel": True},
     }
 
@@ -137,7 +132,6 @@ def _write(tmp_path: pathlib.Path):
             "manifest_sha256": "3" * 64,
             "completed_steps": 10,
         },
-        modelopt_source={"commit": "4" * 40, "dirty": False},
         max_shard_bytes=5_800,
     )
     return output, model, config, metadata
@@ -259,13 +253,33 @@ def test_export_is_complete_before_atomic_rename(tmp_path, monkeypatch) -> None:
     assert observed
 
 
-def test_export_rejects_unpinned_local_model_identity(tmp_path) -> None:
+def test_export_accepts_an_immutable_model_revision(tmp_path) -> None:
     model, _config_value, metadata = _converted()
     identity = _identity(metadata)
-    identity["model"]["revision"] = None
-    with pytest.raises(ValueError, match="pinned 40-character"):
+    output = write_pdd_export(
+        tmp_path / "immutable-revision",
+        model.state_dict(),
+        metadata=metadata,
+        transformer_config={"in_channels": 4},
+        identity=identity,
+        source_checkpoint={
+            "name": "step_00000010",
+            "manifest_sha256": "3" * 64,
+            "completed_steps": 10,
+        },
+        max_shard_bytes=12_000,
+    )
+    assert inspect_pdd_export(output).manifest["identity"]["model"]["revision"] == "f" * 40
+
+
+@pytest.mark.parametrize("revision", [None, "main", "F" * 40])
+def test_export_and_inference_reject_mutable_model_revisions(tmp_path, revision) -> None:
+    model, _config_value, metadata = _converted()
+    identity = _identity(metadata)
+    identity["model"]["revision"] = revision
+    with pytest.raises(ValueError, match="exact lowercase commit"):
         write_pdd_export(
-            tmp_path / "local-model-export",
+            tmp_path / f"bad-revision-{str(revision)[:8]}",
             model.state_dict(),
             metadata=metadata,
             transformer_config={"in_channels": 4},
@@ -275,31 +289,12 @@ def test_export_rejects_unpinned_local_model_identity(tmp_path) -> None:
                 "manifest_sha256": "3" * 64,
                 "completed_steps": 10,
             },
-            modelopt_source={"commit": "4" * 40, "dirty": False},
             max_shard_bytes=12_000,
         )
 
-
-def test_export_rejects_missing_or_mismatched_forward_substrate(tmp_path) -> None:
-    model, _config_value, metadata = _converted()
-    for substrate in (None, {**QWEN_IMAGE_PDD_FORWARD_SUBSTRATE, "id": "canonical"}):
-        identity = _identity(metadata)
-        identity["forward_substrate"] = substrate
-        with pytest.raises(ValueError, match="authenticated MR210"):
-            write_pdd_export(
-                tmp_path / f"bad-substrate-{substrate is None}",
-                model.state_dict(),
-                metadata=metadata,
-                transformer_config={"in_channels": 4},
-                identity=identity,
-                source_checkpoint={
-                    "name": "step_00000010",
-                    "manifest_sha256": "3" * 64,
-                    "completed_steps": 10,
-                },
-                modelopt_source={"commit": "4" * 40, "dirty": False},
-                max_shard_bytes=12_000,
-            )
+    descriptor = SimpleNamespace(manifest={"identity": identity})
+    with pytest.raises(RuntimeError, match="exact lowercase commit"):
+        _model_identity(descriptor)
 
 
 def test_export_rejects_nonfinite_and_existing_destination(tmp_path) -> None:
@@ -316,7 +311,6 @@ def test_export_rejects_nonfinite_and_existing_destination(tmp_path) -> None:
                 "manifest_sha256": "3" * 64,
                 "completed_steps": 10,
             },
-            modelopt_source={"commit": "4" * 40, "dirty": False},
             max_shard_bytes=12_000,
         )
 
@@ -334,7 +328,6 @@ def test_export_rejects_nonfinite_and_existing_destination(tmp_path) -> None:
                 "manifest_sha256": "3" * 64,
                 "completed_steps": 10,
             },
-            modelopt_source={"commit": "4" * 40, "dirty": False},
             max_shard_bytes=12_000,
         )
 

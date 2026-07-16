@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.metadata
 import json
 import math
 import pathlib
@@ -48,10 +47,7 @@ from pdd.checkpoint import (
 )
 from pdd.recipe import PDDDiffusionRecipe, initialize_pdd_distributed
 from pdd.training import prepare_qwen_pdd_batch
-from pdd.verify_readonly_automodel import snapshot_installed_distribution
 from pdd_test_utils import SamplerDataset, build_toy_lifecycle, make_batch, ordered_id_sha256
-
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_FORWARD_SUBSTRATE
 
 
 def _released_sampler(sample_ids: tuple[str, ...]) -> ReplayableBatchSampler:
@@ -100,13 +96,9 @@ def _checkpointer(lifecycle, checkpoint_dir):
 def _identity(lifecycle, scheduler, sample_ids):
     return build_pdd_checkpoint_identity(
         metadata=lifecycle.metadata,
-        forward_substrate=QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
         model_id="synthetic-pdd-toy",
-        model_revision=None,
+        model_revision="a" * 40,
         guidance_scale=None,
-        guidance_rescale=1.0,
-        guidance_eps=1e-5,
-        automodel_snapshot=snapshot_installed_distribution(),
         ordered_train_id_sha256=ordered_id_sha256(sample_ids),
         ordered_heldout_id_sha256="1" * 64,
         dataset_snapshot_sha256="2" * 64,
@@ -636,9 +628,6 @@ def test_training_hard_aborts_for_teacher_gradient_zero_gradient_and_missing_cov
 
 def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) -> None:
     pytest.importorskip("nemo_automodel")
-    version = importlib.metadata.version("nemo_automodel")
-    if version != "0.5.0":
-        pytest.skip(f"requires the official nemo_automodel==0.5.0 wheel, found {version}")
     rng_module = pytest.importorskip("nemo_automodel.components.training.rng")
     if not torch.distributed.is_initialized():
         initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
@@ -716,13 +705,6 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
     assert second_resume.completed_steps == 3
     assert second_resume.expected_next_sample_ids == destination_sampler.expected_next_sample_ids()
 
-    inventory = {path.name.lower() for path in resumed_checkpoint.rglob("*")}
-    assert not any(
-        token in name
-        for name in inventory
-        for token in ("fake_score", "discriminator", "ema", "r1", "gan")
-    )
-
     incomplete = tmp_path / "checkpoints" / "step_99999998"
     incomplete.mkdir()
     (tmp_path / "checkpoints" / "LATEST").write_text(incomplete.name + "\n")
@@ -748,6 +730,15 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
     )
     assert selected == resumed_checkpoint.resolve()
     assert selected_manifest["identity"] == third_manager.identity
+    moved_model_identity = copy.deepcopy(third_manager.identity)
+    moved_model_identity["model"]["revision"] = "b" * 40
+    with pytest.raises(RuntimeError, match="identity"):
+        resolve_pdd_training_checkpoint(
+            tmp_path / "checkpoints",
+            resumed_checkpoint.name,
+            expected_world_size=1,
+            expected_identity=moved_model_identity,
+        )
     with pytest.raises(RuntimeError, match="identity"):
         third_manager.resolve(mismatched.name)
 

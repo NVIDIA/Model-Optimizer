@@ -38,8 +38,6 @@ from pdd.export_qwen_image import collective_export_memory_preflight
 from pdd.inference_qwen_image import build_pdd_student
 from pdd.recipe import build_pdd_export_setup, resolve_pdd_recipe_config
 
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_FORWARD_SUBSTRATE
-
 
 def _raw_config(model_dir: pathlib.Path, checkpoint_dir: pathlib.Path) -> dict:
     return {
@@ -135,25 +133,14 @@ def main() -> None:
                     tensor.numel() * tensor.element_size() for tensor in actual.values()
                 )
                 identity = {
-                    "schema_version": 1,
-                    "forward_substrate": dict(QWEN_IMAGE_PDD_FORWARD_SUBSTRATE),
+                    "schema_version": 4,
                     "model": {
                         "id": "Qwen/Qwen-Image",
                         "revision": "3" * 40,
                         "dtype": "bfloat16",
                     },
                     "pdd_metadata": destination.metadata.to_dict(),
-                    "guidance": {"scale": 4.0, "rescale": 1.0, "eps": 1e-5},
-                    "automodel": {
-                        key: destination.automodel_snapshot[key]
-                        for key in (
-                            "distribution",
-                            "version",
-                            "package_tree_sha256",
-                            "wheel_sha256",
-                            "runtime_versions",
-                        )
-                    },
+                    "guidance": {"scale": 4.0},
                     "topology": {"world_size": 2, "pure_data_parallel": True},
                 }
                 output = write_pdd_export(
@@ -167,7 +154,6 @@ def main() -> None:
                         "manifest_sha256": "1" * 64,
                         "completed_steps": 1,
                     },
-                    modelopt_source={"commit": "2" * 40, "dirty": False},
                     max_shard_bytes=4 * 1024 * 1024,
                 )
                 descriptor = inspect_pdd_export(output)

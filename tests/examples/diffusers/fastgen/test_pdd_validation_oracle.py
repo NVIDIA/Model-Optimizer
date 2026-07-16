@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Deterministic logical-ID PDD held-out oracle tests."""
+"""Deterministic logical-ID PDD held-out validation tests."""
 
 from __future__ import annotations
 

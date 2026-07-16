@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -142,35 +141,13 @@ def collective_export_memory_preflight(
     return full_state_bytes, largest_tensor_bytes
 
 
-def _git_source_identity() -> dict[str, Any]:
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=_REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    dirty = bool(
-        subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=normal"],
-            cwd=_REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    )
-    if dirty:
-        raise RuntimeError("PDD export requires a clean ModelOpt source checkout.")
-    return {"commit": commit, "dirty": False}
-
-
-def _collective_publication_preflight(output_dir: Path) -> Mapping[str, Any]:
+def _collective_publication_preflight(output_dir: Path) -> None:
     status = None
     if dist.get_rank() == 0:
         try:
             if output_dir.is_symlink() or output_dir.resolve().exists():
                 raise FileExistsError(f"PDD export output already exists: {output_dir}.")
-            status = {"ok": True, "modelopt_source": _git_source_identity()}
+            status = {"ok": True}
         except BaseException as error:
             status = {"ok": False, "error": f"{type(error).__name__}: {error}"}
     payload = [status]
@@ -180,17 +157,10 @@ def _collective_publication_preflight(output_dir: Path) -> Mapping[str, Any]:
         raise RuntimeError("rank 0 broadcast malformed PDD publication preflight status.")
     if not status["ok"]:
         raise RuntimeError(f"PDD publication preflight failed: {status.get('error')}.")
-    modelopt_source = status.get("modelopt_source")
-    if not isinstance(modelopt_source, Mapping):
-        raise RuntimeError("rank 0 broadcast malformed ModelOpt source identity.")
-    return modelopt_source
 
 
 def _require_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[str, Any]) -> None:
     from modelopt.torch.fastgen import PDDMetadata
-    from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
-        require_qwen_image_pdd_forward_substrate,
-    )
 
     identity = manifest.get("identity")
     if not isinstance(identity, Mapping):
@@ -200,25 +170,12 @@ def _require_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[str,
         raise RuntimeError("PDD checkpoint has no PDD metadata mapping.")
     if PDDMetadata.from_dict(pdd_metadata) != setup.metadata:
         raise RuntimeError("PDD checkpoint metadata does not match the configured student.")
-    require_qwen_image_pdd_forward_substrate(identity.get("forward_substrate"))
     if identity.get("model") != {
         "id": config.model_id,
         "revision": config.model_revision,
         "dtype": str(config.dtype).removeprefix("torch."),
     }:
         raise RuntimeError("PDD checkpoint model identity does not match the export config.")
-    checkpoint_automodel = identity.get("automodel")
-    if not isinstance(checkpoint_automodel, Mapping):
-        raise RuntimeError("PDD checkpoint has no AutoModel identity.")
-    for key in (
-        "distribution",
-        "version",
-        "package_tree_sha256",
-        "wheel_sha256",
-        "runtime_versions",
-    ):
-        if checkpoint_automodel.get(key) != setup.automodel_snapshot.get(key):
-            raise RuntimeError(f"PDD checkpoint AutoModel identity mismatch for {key}.")
     topology = identity.get("topology")
     if not isinstance(topology, Mapping) or topology.get("world_size") != dist.get_world_size():
         raise RuntimeError("PDD checkpoint topology does not match the export process group.")
@@ -238,31 +195,14 @@ def _collective_checkpoint_identity(config: Any, setup: Any, manifest: Mapping[s
 
 
 def _checkpoint_selector_identity(config: Any, setup: Any) -> dict[str, Any]:
-    from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_FORWARD_SUBSTRATE
-
     return {
-        "forward_substrate": dict(QWEN_IMAGE_PDD_FORWARD_SUBSTRATE),
         "model": {
             "id": config.model_id,
             "revision": config.model_revision,
             "dtype": str(config.dtype).removeprefix("torch."),
         },
         "pdd_metadata": setup.metadata.to_dict(),
-        "guidance": {
-            "scale": config.pdd.guidance_scale,
-            "rescale": config.guidance.rescale,
-            "eps": config.guidance.eps,
-        },
-        "automodel": {
-            key: setup.automodel_snapshot[key]
-            for key in (
-                "distribution",
-                "version",
-                "package_tree_sha256",
-                "wheel_sha256",
-                "runtime_versions",
-            )
-        },
+        "guidance": {"scale": config.pdd.guidance_scale},
         "topology": {"world_size": dist.get_world_size(), "pure_data_parallel": True},
     }
 
@@ -301,6 +241,7 @@ def main() -> None:
     from pdd.artifacts import sha256_file
     from pdd.export import write_pdd_export
     from pdd.recipe import (
+        _require_immutable_model_source,
         build_pdd_export_setup,
         initialize_pdd_distributed,
         resolve_pdd_recipe_config,
@@ -308,11 +249,7 @@ def main() -> None:
 
     raw = yaml.safe_load(args.config.read_text())
     config = resolve_pdd_recipe_config(raw)
-    if Path(config.model_id).is_dir() or config.model_revision is None:
-        raise ValueError(
-            "PDD inference export requires a remote model ID and pinned 40-character revision; "
-            "mutable local model directories are training-only inputs."
-        )
+    _require_immutable_model_source(config, context="PDD export")
     if not math.isfinite(args.max_shard_size_gib) or args.max_shard_size_gib <= 0:
         raise ValueError("max_shard_size_gib must be finite and > 0.")
     if not math.isfinite(args.memory_headroom) or args.memory_headroom < 1.0:
@@ -322,7 +259,7 @@ def main() -> None:
         backend="nccl" if config.device.type == "cuda" else "gloo",
         timeout_minutes=60,
     )
-    modelopt_source = _collective_publication_preflight(args.output_dir)
+    _collective_publication_preflight(args.output_dir)
     restore_from = args.checkpoint or config.checkpoint.restore_from
     if not restore_from:
         raise ValueError("PDD export requires --checkpoint or checkpoint.restore_from.")
@@ -384,7 +321,6 @@ def main() -> None:
                         "manifest_sha256": sha256_file(checkpoint / "manifest.json"),
                         "completed_steps": checkpoint_manifest["completed_steps"],
                     },
-                    modelopt_source=modelopt_source,
                     max_shard_bytes=max_shard_bytes,
                 )
                 publication = {"ok": True, "output": str(output)}

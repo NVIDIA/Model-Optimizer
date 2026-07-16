@@ -31,14 +31,12 @@ from typing import TYPE_CHECKING, Any
 import torch.distributed as dist
 
 from modelopt.torch.fastgen import PDDMetadata
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import require_qwen_image_pdd_forward_substrate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_CHECKPOINT_SCHEMA_VERSION = 3
+_CHECKPOINT_SCHEMA_VERSION = 4
 _COMPLETE_SCHEMA_VERSION = 1
-_FORBIDDEN_ARTIFACT_TOKENS = ("fake_score", "discriminator", "ema", "r1", "gan")
 
 
 def _sha256(path: Path) -> str:
@@ -160,13 +158,9 @@ def _read_json(path: Path) -> dict[str, Any]:
 def build_pdd_checkpoint_identity(
     *,
     metadata: PDDMetadata,
-    forward_substrate: Mapping[str, Any],
     model_id: str,
     model_revision: str | None,
     guidance_scale: float | None,
-    guidance_rescale: float,
-    guidance_eps: float,
-    automodel_snapshot: Mapping[str, Any],
     ordered_train_id_sha256: str,
     ordered_heldout_id_sha256: str,
     dataset_snapshot_sha256: str,
@@ -187,11 +181,12 @@ def build_pdd_checkpoint_identity(
         raise TypeError("metadata must be PDDMetadata.")
     if not isinstance(model_id, str) or not model_id:
         raise ValueError("model_id must be a non-empty string.")
-    if model_revision is not None and not isinstance(model_revision, str):
-        raise TypeError("model_revision must be a string or null.")
-    for name, value in (("guidance_rescale", guidance_rescale), ("guidance_eps", guidance_eps)):
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise TypeError(f"{name} must be a real number.")
+    if (
+        not isinstance(model_revision, str)
+        or len(model_revision) != 40
+        or any(character not in "0123456789abcdef" for character in model_revision)
+    ):
+        raise ValueError("model_revision must be an exact lowercase 40-character commit.")
     if guidance_scale is not None and (
         isinstance(guidance_scale, bool) or not isinstance(guidance_scale, int | float)
     ):
@@ -218,39 +213,11 @@ def build_pdd_checkpoint_identity(
         raise ValueError("dtype must be a non-empty string.")
     if type(optimizer).__module__ != "torch.optim.adamw" or type(optimizer).__name__ != "AdamW":
         raise TypeError("PDD checkpoint identity requires the stock torch.optim.AdamW optimizer.")
-    required_snapshot = {
-        "distribution",
-        "package_tree_sha256",
-        "runtime_versions",
-        "version",
-        "wheel_sha256",
-    }
-    missing = sorted(required_snapshot.difference(automodel_snapshot))
-    if missing:
-        raise ValueError(f"AutoModel snapshot is missing identity keys: {missing}.")
     return {
         "schema_version": _CHECKPOINT_SCHEMA_VERSION,
-        "forward_substrate": require_qwen_image_pdd_forward_substrate(forward_substrate),
         "model": {"id": model_id, "revision": model_revision, "dtype": dtype},
         "pdd_metadata": metadata.to_dict(),
-        "guidance": {
-            "scale": None if guidance_scale is None else float(guidance_scale),
-            "rescale": float(guidance_rescale),
-            "eps": float(guidance_eps),
-        },
-        "automodel": {
-            "distribution": automodel_snapshot["distribution"],
-            "version": automodel_snapshot["version"],
-            "package_tree_sha256": _require_sha256(
-                automodel_snapshot["package_tree_sha256"],
-                name="automodel.package_tree_sha256",
-            ),
-            "wheel_sha256": _require_sha256(
-                automodel_snapshot["wheel_sha256"],
-                name="automodel.wheel_sha256",
-            ),
-            "runtime_versions": dict(automodel_snapshot["runtime_versions"]),
-        },
+        "guidance": {"scale": None if guidance_scale is None else float(guidance_scale)},
         "data": {
             "ordered_train_id_sha256": _require_sha256(
                 ordered_train_id_sha256,
@@ -454,10 +421,6 @@ def validate_pdd_training_checkpoint(
             raise RuntimeError(f"PDD checkpoint sidecar is missing: {relative}.")
         if _sha256(path) != manifest["sidecar_sha256"][relative]:
             raise RuntimeError(f"PDD checkpoint sidecar hash mismatch: {relative}.")
-    for candidate in checkpoint.rglob("*"):
-        lowered = candidate.name.lower()
-        if any(token in lowered for token in _FORBIDDEN_ARTIFACT_TOKENS):
-            raise RuntimeError(f"PDD checkpoint contains a forbidden DMD artifact: {candidate}.")
     return manifest
 
 

@@ -48,10 +48,6 @@ lr_scheduler:
   lr_warmup_steps: 0
   min_lr: 2.0e-5
 
-guidance:
-  rescale: 1.0
-  eps: 1.0e-5
-
 step_scheduler:
   max_steps: 10000
   num_epochs: 200

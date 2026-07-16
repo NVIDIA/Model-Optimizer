@@ -5,7 +5,7 @@
 diffusers==0.38.0
 # NeMo AutoModel supplies the parent recipe, FSDP2 wrapping, checkpointer, and the unmodified
 # upstream diffusion helpers used by the shared data/preprocessing code. These versions are the
-# public APIs tested by both DMD2 and PDD; PDD also verifies the exact AutoModel wheel at runtime.
+# public APIs tested by both DMD2 and PDD.
 nemo_automodel[diffusion]==0.5.0
 
 # Optional but recommended for training logs.

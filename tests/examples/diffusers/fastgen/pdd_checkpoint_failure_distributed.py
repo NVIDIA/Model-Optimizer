@@ -141,7 +141,7 @@ def _run_failure(root: pathlib.Path, stage: str) -> None:
             trainer=trainer,
             sampler=_Sampler(),
             rng=_State(),
-            identity={"schema_version": 3, "topology": {"world_size": 2}},
+            identity={"schema_version": 4, "topology": {"world_size": 2}},
         )
         initial.save()
         trainer.completed_steps = 2
@@ -156,7 +156,7 @@ def _run_failure(root: pathlib.Path, stage: str) -> None:
         trainer=trainer,
         sampler=_Sampler(),
         rng=_State(),
-        identity={"schema_version": 3, "topology": {"world_size": 2}},
+        identity={"schema_version": 4, "topology": {"world_size": 2}},
     )
     message = None
     try:

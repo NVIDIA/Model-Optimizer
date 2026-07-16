@@ -970,9 +970,8 @@ class PDDPipeline(DistillationPipeline):
         kwargs = self._model_kwargs(model_kwargs)
         resolved_blocks = self._validate_blocks(blocks)
         grid = self.time_grid(noise.device)
-        # MR210 derives fused projection coefficients from its float64 schedule,
-        # then casts the coefficients to FP32. Keep state/time integration on the
-        # canonical FP32 decoding grid while matching that coefficient path.
+        # Derive fusion coefficients from the high-precision schedule, then cast
+        # them to the FP32 decoding dtype used for state/time integration.
         fusion_grid = make_shifted_flow_grid(
             self.config.grid_size,
             self.config.flow_shift,
