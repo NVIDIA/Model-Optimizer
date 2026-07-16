@@ -76,6 +76,10 @@ def export_llm_to_hf(
             homogeneous students).
         trust_remote_code: Whether to trust remote code when loading the HF model.
     """
+    # TODO: unify with save_vlm_to_hf's in-memory export path. This LLM path re-loads the checkpoint
+    # from disk via export_ckpt (which reads the actual per-layer shapes, so it handles heterogeneous
+    # Puzzletron/NAS students); an in-memory export would need to rebuild the (possibly heterogeneous)
+    # student first.
     export_bridge = AutoBridge.from_hf_pretrained(
         template_hf or student_hf_path, trust_remote_code=trust_remote_code
     )

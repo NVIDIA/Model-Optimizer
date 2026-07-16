@@ -251,6 +251,10 @@ def main(args: argparse.Namespace):
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
     )
 
+    # VLM detection convention: HF VLM configs expose a ``vision_config``, and Megatron-Bridge nests
+    # the text model under the ``language_model`` submodule (used as ``distill_submodule`` below). If a
+    # future model breaks either convention, the ``getattr(model, "language_model")`` in the provider
+    # will error loudly rather than silently distilling the wrong module.
     is_vlm = hasattr(
         AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
         "vision_config",
