@@ -19,10 +19,10 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      </div>
 
    <div class="announcement-grid" id="announcement-grid">
-     <article class="announcement-card" data-date="2026-07-15" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds Pareto-optimal mixed-precision assignments with gradient-based sensitivity scoring under an effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
+     <article class="announcement-card" data-date="2026-07-15" data-title="AutoQuantize: A Fast Automatic Mixed-Precision Assignment" data-summary="AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget." data-tags="autoquantize quantization mixed-precision modelopt">
        <div class="announcement-card-meta">July 15, 2026 &middot; Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin, Shengliang Xu</div>
        <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
-       <p>AutoQuantize finds Pareto-optimal mixed-precision assignments with gradient-based sensitivity scoring under an effective-bits budget.</p>
+       <p>AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget.</p>
        <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span></div>
      </article>
      <article class="announcement-card" data-date="2026-07-13" data-title="Model Optimizer announcements are moving to GitHub Pages" data-summary="The public Model Optimizer site is gaining a PR-updated announcements landing page within the existing Sphinx documentation." data-tags="release docs github-pages">

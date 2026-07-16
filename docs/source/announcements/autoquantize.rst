@@ -12,7 +12,7 @@ Why do we need AutoQuantize?
 
 LLMs carry a lot of redundancy, but not uniformly: a few layers — attention projections, the final layers of the network — are disproportionately sensitive to quantization, while most others (like MoE experts) are quite forgiving. Keeping just those few sensitive layers at higher precision (FP8 or BF16) while quantizing the rest to FP4 preserves accuracy with nearly all of FP4's memory savings and speedups. The hard part is finding *which* layers to keep — traditionally a slow pile of per-model ablation experiments.
 
-**AutoQuantize**, part of NVIDIA's `Model Optimizer <https://github.com/NVIDIA/TensorRT-Model-Optimizer>`_ library, automates this search: given a cost budget, it scores every layer's quantization sensitivity with a fast gradient-based heuristic and solves for a Pareto-optimal mixed-precision assignment — no per-model ablation studies required.
+**AutoQuantize**, part of NVIDIA's `Model Optimizer <https://github.com/NVIDIA/TensorRT-Model-Optimizer>`_ library, automates this search: given a cost budget, it scores every layer's quantization sensitivity with a fast gradient-based heuristic and finds the lowest-scoring mixed-precision assignment under that budget — no per-model ablation studies required.
 
 How AutoQuantize works
 **********************
@@ -50,12 +50,12 @@ where :math:`d` is the feature dimension of the layer output.
 
 The intuition: quantization perturbs the model, and the loss impact of that perturbation is the output error weighted by squared gradients. The error can be measured at the operation's immediate output or further downstream (e.g. the block output); for linear layers we use the linear-layer output. This output-side formulation is also what separates AutoQuantize from LLM-MQ, which measures error at each weight and therefore can't handle joint weight-and-activation quantization or the coupled decisions deployment-aware search needs.
 
-Both ingredients are cheap: the output error :math:`Y_{i,k} - Y_{i,k}^{Q_{i,f}}` comes from replaying the operator's captured input through simulated quantization for each candidate format, and the gradient :math:`g_{i,k}` from a single backward pass.
+Both ingredients are cheap: the output error :math:`Y_{i,k} - Y_{i,k}^{Q_{i,f}}` comes from replaying the operator's captured input through simulated quantization for each candidate format, and the gradient :math:`g_{i,k}` from one backward pass per scoring batch.
 
 Performance cost
 ================
 
-ModelOpt uses *effective bits* as the cost: the total compressed model size, counting each weight's bit-width plus scale-factor overhead. Sweeping the budget over effective-bits targets directly controls model size and makes the accuracy-vs-compression frontier easy to interpret.
+ModelOpt uses *effective bits* to model the average bit cost over AutoQuantize-eligible quantizable weights. The model includes format-provided overhead when an explicit effective-bits value is available; otherwise it estimates the cost from the format's ``num_bits``. Embeddings, norms, and other parameters outside the search are not included. Sweeping the target provides a consistent budget axis for comparing assignments.
 
 Putting it together
 ===================
@@ -66,7 +66,7 @@ Following the effective-bits objective above, AutoQuantize solves the constraine
 
    \min_{\{f\}} \sum_i S(\mathrm{Op}_i, Q_{i,f}) \quad \text{s.t.} \quad \sum_i N_{\mathrm{params}}(\mathrm{Op}_i) \times \mathrm{bits}(Q_{i,f}) \leq N_{\mathrm{total}} \times \bar{b},
 
-where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathrm{bits}(Q_{i,f})` the effective bits per weight of format :math:`f` (including scale-factor overhead), :math:`N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)` the total parameter count, and :math:`\bar{b}` the user-specified average effective bits (e.g. :math:`\bar{b} = 4.8`). Sweeping :math:`\bar{b}` traces out an accuracy-vs-compression frontier.
+where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathrm{bits}(Q_{i,f})` the modeled bit cost per eligible weight of format :math:`f`, :math:`N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)` the eligible quantizable-weight count, and :math:`\bar{b}` the user-specified average effective-bits target (e.g. :math:`\bar{b} = 4.8`). A format-provided effective-bits value includes its declared overhead; formats without one use the ``num_bits`` estimate described above. Sweeping :math:`\bar{b}` produces a budget sweep of proxy-optimal assignments.
 
 Deployment-restriction-aware search
 ***********************************
@@ -76,7 +76,7 @@ A mixed-precision assignment must respect the coupling constraints of its target
 Joint quantization for fused linear layers
 ===========================================
 
-TensorRT-LLM fuses each layer's Q, K, and V projections, so AutoQuantize constrains the three projections to share one format. Sensitivity remains measured at each projection's individual module output, and the three scores are aggregated for the shared-format decision:
+Inference runtimes commonly fuse each layer's Q, K, and V projections, so AutoQuantize constrains the three projections to share one format. Sensitivity remains measured at each projection's individual module output, and the three scores are aggregated for the shared-format decision:
 
 .. math::
 
@@ -104,14 +104,14 @@ Results
 
 **MMLU accuracy vs. effective bits under AutoQuantize, Qwen3 1.7B/4B/8B/14B.**
 
-The figure shows the accuracy-vs-compression frontier AutoQuantize traces on Qwen3 models: sweep the bit budget, solve at each point, evaluate on MMLU. Accuracy rises with the budget.
+The figure shows an AutoQuantize budget sweep on Qwen3 models: sweep the modeled bit budget, solve the additive sensitivity proxy at each point, and evaluate the resulting assignment on MMLU. Accuracy has an overall upward trend as the budget increases, with some non-monotonic points.
 
-Two things to notice. First, the rise is essentially monotonic, which means the sensitivity score is ranking layers correctly — a noisy proxy would give a jagged frontier. Second, adding FP8 to the format menu helps: at every budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
+Adding FP8 to the format menu helps across the reported sweep: at every budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
 
 AutoQuantize gradient is fast!
 ==============================
 
-Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. The gradient score instead scores all layers at once, so its cost scales with the number of formats, not the number of layers. On Qwen3.6-35B-A3B that is a ~51× difference (Table 1).
+Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method instead visits every scored module, locally replays every candidate format, and performs one backward pass. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~51× difference (Table 1).
 
 **Table 1. Scoring cost: gradient vs. KL divergence (lower is better).**
 
