@@ -145,6 +145,47 @@ def test_remove_same_type_graph_output_cast_with_stable_producer():
     assert converter.model.graph.node[0].output[0] == "Y"
 
 
+def test_deduplicate_network_output_producers_keeps_consumers_on_cast_output():
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3, 4])
+    z = helper.make_tensor_value_info("Z", TensorProto.FLOAT, [3, 4])
+    init_weight = numpy_helper.from_array(np.random.randn(3, 4).astype(np.float32), name="weight")
+
+    add_node = helper.make_node("Add", ["X", "weight"], ["Y"], name="add")
+    cast_down_node = helper.make_node(
+        "Cast", ["Y"], ["Y_cast_to_fp16"], name="cast_down", to=TensorProto.FLOAT16
+    )
+    cast_up_node = helper.make_node(
+        "Cast", ["Y_cast_to_fp16"], ["Y"], name="cast_up", to=TensorProto.FLOAT
+    )
+    relu_node = helper.make_node("Relu", ["Y"], ["Z"], name="relu")
+    graph = helper.make_graph(
+        [add_node, cast_down_node, cast_up_node, relu_node],
+        "duplicate_output",
+        [x],
+        [y, z],
+        [init_weight],
+    )
+    model = helper.make_model(graph, producer_name="duplicate_output")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+    )
+    converter._deduplicate_network_output_producers()
+
+    onnx.checker.check_model(converter.model)
+    assert converter.model.graph.node[0].output[0] == "Y_pre_cast"
+    assert converter.model.graph.node[1].input[0] == "Y_pre_cast"
+    assert converter.model.graph.node[2].output[0] == "Y"
+    assert converter.model.graph.node[3].input[0] == "Y"
+
+
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
 @pytest.mark.parametrize("use_standalone_type_inference", [True, False])

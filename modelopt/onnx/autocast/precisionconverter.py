@@ -1146,7 +1146,7 @@ class PrecisionConverter:
                     cast_node.output[0] = original_name
                     # If a cast-down/cast-up pair was inserted around a graph output, the original
                     # producer can still have the restored graph output name. Keep the final cast as
-                    # the graph output producer and move any other producers/consumers behind it.
+                    # the graph output producer and move any other producers behind it.
                     for node in onnx_utils.get_producer_nodes(self.model, original_name):
                         if node == cast_node:
                             continue
@@ -1154,12 +1154,6 @@ class PrecisionConverter:
                             if node_output == original_name:
                                 node.output[i] = pre_cast_name
                                 break
-                    for node in onnx_utils.get_consumer_nodes(self.model, original_name):
-                        if node == cast_node:
-                            continue
-                        for i, input_name in enumerate(node.input):
-                            if input_name == original_name:
-                                node.input[i] = pre_cast_name
                     # Ensure correct output tensor type
                     cast_to_precision = next(
                         attr.i for attr in cast_node.attribute if attr.name == "to"
@@ -1207,9 +1201,17 @@ class PrecisionConverter:
                     if node_output == output.name:
                         node.output[i] = pre_cast_name
                         break
+            for i, input_name in enumerate(final_cast_node.input):
+                if input_name == output.name:
+                    final_cast_node.input[i] = pre_cast_name
 
+            final_cast_inputs = set(final_cast_node.input)
+            # Reattach only the upstream Cast path that feeds the retained output Cast.
+            # Independent downstream consumers must keep reading the post-Cast output.
             for node in onnx_utils.get_consumer_nodes(self.model, output.name):
                 if node == final_cast_node:
+                    continue
+                if not any(node_output in final_cast_inputs for node_output in node.output):
                     continue
                 for i, input_name in enumerate(node.input):
                     if input_name == output.name:
