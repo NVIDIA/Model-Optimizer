@@ -4,7 +4,8 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-This example is tested with vllm 0.9.0 and 0.19.1
+The general fakequant example is tested with vLLM 0.9.0 and 0.19.1. The compact
+NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 ## Prepare environment
 
@@ -101,9 +102,9 @@ QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fa
 
 ## Serve a model with sparse attention in vLLM
 
-Apply ModelOpt sparse attention at serve time. The launcher replaces vLLM's `FlashAttentionImpl` with `ModelOptSparseAttentionImpl` (Triton kernel with paged KV cache support) on every attention layer right after model load.
+Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.
 
-The configuration is read from the checkpoint's `config.json` `sparse_attention_config` block, written by ModelOpt's HF export. The launcher restores calibrated skip-softmax metadata and N:M sparse-softmax metadata (`sparsity_n`, `sparsity_m`, `dense_sink_tokens`, `dense_recent_tokens`). Checkpoints exported with both metadata entries use ModelOpt Triton for sparse prefill launches; decode-only launches and launches without active sparse work delegate back to vLLM FlashAttention.
+The configuration is read from the checkpoint's `config.json` `sparse_attention_config` block, written by ModelOpt's HF export. The launcher restores calibrated skip-softmax metadata and N:M sparse-softmax metadata (`sparsity_n`, `sparsity_m`, `dense_sink_tokens`, `dense_recent_tokens`). Checkpoints exported with both metadata entries use ModelOpt Triton for sparse prefill launches; launches without active sparse work delegate back to the native backend selected by vLLM.
 
 Workflow:
 
@@ -114,12 +115,50 @@ Workflow:
    python vllm_serve_sparse_attn.py <EXPORT_DIR> --enforce-eager -tp 8 --host 0.0.0.0 --port 8000
    ```
 
-If the checkpoint has no `sparse_attention_config`, the worker logs a message and passes through — vLLM runs unchanged. Quant-only flows are handled by `vllm_serve_fakequant.py`; combined sparse + quant will land in a follow-up PR.
+If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through and vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
+
+The reusable serving policies live in `modelopt/torch/sparsity/attention_sparsity/plugins/vllm_runtime.py`. `install_vllm_sparse_attention_from_checkpoint` installs checkpoint-driven sparse-only attention, while `install_vllm_nvfp4_attention` installs fixed NVFP4 Q/K/P/V with optional checkpoint sparsity. Both validate every selected layer before publishing any replacement implementation and return a `VllmAttentionInstallReport` with the installed layer names and backend counts.
+
+`sparse_attn_worker.py` only invokes these APIs after vLLM loads the model. It retains `SparseAttnWorker` as the launcher's default and provides `QuantSparseAttnWorker` for the compact NVFP4 policy. Other vLLM integrations can invoke the same library APIs directly:
+
+```python
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
+    install_vllm_nvfp4_attention,
+)
+
+report = install_vllm_nvfp4_attention(model_runner, sparse_cfg="checkpoint")
+```
 
 Limitations:
 
 - vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span.
-- CUDA graph capture is not validated yet — use `--enforce-eager`.
+- `SparseAttnWorker` CUDA graph capture is not validated yet — use `--enforce-eager`.
+
+### Compact NVFP4 attention worker
+
+vLLM 0.15.0 or newer is required when either worker activates a ModelOpt attention transform. Importing `SparseAttnWorker`, or using it with no checkpoint sparse metadata, does not resolve quant-only APIs.
+
+Use the same launcher with the compact worker. By default, vLLM selects the backend for the model and platform; NemotronH on Blackwell selects FlashInfer:
+
+```bash
+python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+  --no-enable-prefix-caching \
+  --worker-cls sparse_attn_worker.QuantSparseAttnWorker
+```
+
+The installer supports both FlashInfer and FlashAttention, and the worker prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
+
+This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant format to Q/K/P/V. Q is dynamic; missing K/V scales default to global scale 1.0, and P defaults to amax 1.0. Existing scalar attention amax values are preserved, but this path does not calibrate or restore them itself. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+
+Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
+unnormalized online-softmax probabilities, so changing that schedule can change
+quantized results; split count is part of the numerical contract.
+
+K is QDQ before its cache write, while V is written pristine. Complete 16-token V groups are finalized once in cache; an incomplete tail remains pristine and is QDQ on read. P@V therefore sees uniform fakequant values without re-quantizing the tail.
+
+Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. The default `FULL_AND_PIECEWISE` mode remains enabled for fixed N:M and attention-only NVFP4; checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
+
+Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder/MLA attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
 
 ## Known Problems
 

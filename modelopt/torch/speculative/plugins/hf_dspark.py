@@ -381,7 +381,13 @@ class HFDSparkModel(HFDFlashModel):
         )
         full_pos = self._build_position_ids(seq_len, anchor_positions, device)
         attn_mask = self._build_draft_attention_mask(
-            seq_len, anchor_positions, block_keep_mask, n_blocks, target_hidden.dtype, device
+            seq_len,
+            anchor_positions,
+            block_keep_mask,
+            n_blocks,
+            target_hidden.dtype,
+            device,
+            window=self.dflash_swa_window_size,
         )
 
         # 5. Draft backbone forward.
@@ -459,7 +465,7 @@ class HFDSparkModel(HFDFlashModel):
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
             position_ids=pos_ids,
-            attention_mask=None,
+            attention_mask=self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device),
         )
         backbone_logits = self._base_model_lm_head(draft_hidden)  # [B, block_size, V]
 

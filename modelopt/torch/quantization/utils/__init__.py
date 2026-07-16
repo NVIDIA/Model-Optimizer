@@ -34,6 +34,8 @@ __all__ = [
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",
     "iter_shared_quant_states",
+    "promote_nvfp4_static_quantizers",
+    "promote_static_block_weight_quantizers",
     "reduce_amax",
     "reduce_sum",
     "replace_function",

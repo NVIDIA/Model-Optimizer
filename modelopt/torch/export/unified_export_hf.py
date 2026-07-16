@@ -15,7 +15,6 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
-import collections.abc
 import json
 import re
 import tempfile
@@ -65,14 +64,14 @@ try:
 except ImportError:
     export_sparse_attention_config = None
 
+# Importing the built-in handlers installs their entries in the two registries.
+from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
-    get_expert_linear_names,
     get_experts_list,
     is_layernorm,
     is_moe,
     is_quantlinear,
-    set_expert_quantizer_amax,
     sync_moe_gate_up_amax,
 )
 from .model_config import (
@@ -89,7 +88,6 @@ from .model_config import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .model_utils import _reorder_canonical_first, get_language_model_from_vl, is_multimodal_model
-from .moe_utils import _export_fused_experts
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
@@ -112,6 +110,7 @@ from .quant_utils import (
     sync_tied_input_amax,
     to_quantized_weight,
 )
+from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
@@ -786,9 +785,8 @@ def _process_quantized_modules(
 ) -> None:
     """Process all quantized modules in model, export weights in-place.
 
-    This function iterates through all modules in the model and exports quantized weights
-    for modules that have quantization enabled. It handles both standard linear layers
-    and specialized expert modules (Llama4TextExperts, GptOssExperts).
+    This function iterates through all modules in the model and invokes the first matching
+    handler in :data:`ExportModuleRegistry`. Modules matching no handler are left untouched.
 
     Args:
         model: The model containing quantized modules.
@@ -796,14 +794,10 @@ def _process_quantized_modules(
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
     """
-    # Per-call tied-weight dedup caches. Created fresh on every invocation
-    # so cache state is scoped to one export and cannot leak into a later
-    # call (a process-global cache would carry stale entries whose data_ptr
-    # keys can be recycled by PyTorch's allocator across exports — silent
-    # false-positive aliasing). int keys hold dense Linear / per-expert
-    # wrapper dedup; tuple keys hold MoE fused-experts module dedup.
-    _tied_cache: dict[int, nn.Module] = {}
-    _moe_tied_cache: dict[tuple[int, int], nn.Module] = {}
+    # Per-call tied-weight dedup caches inside the context. Created fresh on
+    # every invocation so cache state is scoped to one export and cannot leak
+    # into a later call (see ExportContext).
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
@@ -818,97 +812,19 @@ def _process_quantized_modules(
             fsdp_module_to_reshard = sub_module
 
         # We skip QuantLoraLinear module for modelopt QLoRA
-        if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
-            continue
-
-        # Step-3.5 QuantMoELinear reconstructs packed MoE tensors from child
-        # expert QuantLinears after export. Fill missing input amax here, before
-        # named_modules() reaches those children, so every expert emits input_scale.
-        if type(sub_module).__name__ == "QuantMoELinear" and hasattr(sub_module, "experts"):
-            set_expert_quantizer_amax(list(sub_module.experts), quantizer_attrs="input_quantizer")
+        if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
             continue
 
         # Preprocessing: restore unpacked weight so the export path can read
-        # the live quantizer state. Falls through to the export branches below.
+        # the live quantizer state. Falls through to the handler dispatch below.
         if hasattr(sub_module, "weight_packed") or (
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
         ):
             sub_module.unpack_weight()
 
-        first_proj_attr = getattr(sub_module, "_first_proj_attr", "gate_up_proj")
-        if hasattr(sub_module, f"{first_proj_attr}_weight_quantizers"):
-            # _QuantFusedExperts uses plural `<first_proj>_weight_quantizers`
-            # (ModuleList), which get_quantization_format's singular-weight_quantizer
-            # check misses. Handle it explicitly before the format gate so fused-experts
-            # get split + quantized.
-            with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                _export_fused_experts(
-                    sub_module,
-                    dtype,
-                    _moe_tied_cache=_moe_tied_cache,
-                    _tied_cache=_tied_cache,
-                )
-        elif get_quantization_format(sub_module) != QUANTIZATION_NONE:
-            # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
-            if type(sub_module).__name__ == "QuantMoELinear":
-                continue
-            if is_quantlinear(sub_module):
-                try:
-                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                        _export_quantized_weight(sub_module, dtype, _tied_cache=_tied_cache)
-                except AssertionError as e:
-                    raise AssertionError(
-                        f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
-                    ) from e
-            elif isinstance(sub_module, nn.Embedding) and hasattr(sub_module, "weight_quantizer"):
-                # Quantized nn.Embedding: pack the embedding table the same way as Linear
-                # weights so downstream loaders see the NVFP4/FP8/INT-packed bytes + scales.
-                # Skip packing when the embedding's weight is tied to another module
-                # (e.g. tied_word_embeddings → lm_head): _export_quantized_weight reassigns
-                # the .weight attribute to a new uint8 Parameter, which severs the Python-
-                # level tie and leaves the other module pointing at a stale float Parameter.
-                tied_to = [
-                    other_name
-                    for other_name, other_module in model.named_modules()
-                    if other_module is not sub_module
-                    and getattr(other_module, "weight", None) is sub_module.weight
-                ]
-                if tied_to:
-                    warnings.warn(
-                        f"Skipping quantized weight packing for embedding '{name}': its "
-                        f"weight Parameter is shared with {tied_to} (weight tying). Packing "
-                        "would break the tie and produce stale weights in the tied module(s). "
-                        "The embedding will be exported as its fake-quantized float weight."
-                    )
-                else:
-                    try:
-                        with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                            _export_quantized_weight(sub_module, dtype, _tied_cache=_tied_cache)
-                    except AssertionError as e:
-                        raise AssertionError(
-                            f"Failed to export embedding '{name}' (type={type(sub_module).__name__}): {e}"
-                        ) from e
-            elif (
-                "Llama4TextExperts" in type(sub_module).__name__
-                or "GptOssExperts" in type(sub_module).__name__
-            ):
-                # TODO: consolidate uncalibrated experts handling logic
-                # Handle weight quantizers amax values using smart fallback logic
-                set_expert_quantizer_amax(
-                    modules=sub_module,
-                    quantizer_attrs=["gate_up_proj_weight_quantizer", "down_proj_weight_quantizer"],
-                )
-                # Handle input quantizers amax values using smart fallback logic
-                set_expert_quantizer_amax(
-                    modules=sub_module,
-                    quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
-                )
-                # Export the quantized weights
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    for weight_name in ["gate_up_proj", "down_proj"]:
-                        _export_quantized_weight(
-                            sub_module, dtype, weight_name, _tied_cache=_tied_cache
-                        )
+        handler = ExportModuleRegistry.match(sub_module)
+        if handler is not None:
+            handler(name, sub_module, ctx)
 
 
 def _export_transformers_checkpoint(
@@ -940,71 +856,19 @@ def _export_transformers_checkpoint(
 
     accelerator = kwargs.get("accelerator")
 
-    # Handle input quantizers of experts that are not calibrated
-    for _, sub_module in model.named_modules():
+    # Handle input quantizers of experts that are not calibrated. Each MoE block is
+    # dispatched by its experts container to the matching preparation handler.
+    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    for name, sub_module in model.named_modules():
         if is_moe(sub_module) and hasattr(sub_module, "experts"):
-            expert_linear_names = get_expert_linear_names(sub_module)
-            first_proj_attr = getattr(sub_module.experts, "_first_proj_attr", "gate_up_proj")
-            has_fused_experts_quantizers = hasattr(
-                sub_module.experts, f"{first_proj_attr}_weight_quantizers"
-            )
-            for linear_name in expert_linear_names:
-                # Handle DBRX experts specifically
-                if "QuantDbrxExperts" in type(sub_module.experts).__name__:
-                    # For DBRX, experts are in sub_module.experts.mlp and linear layers are ModuleLists
-                    experts_mlp = sub_module.experts.mlp
-                    if hasattr(experts_mlp, linear_name):
-                        linear_modulelist = getattr(experts_mlp, linear_name)
-                        if hasattr(linear_modulelist, "__iter__"):
-                            set_expert_quantizer_amax(
-                                modules=list(linear_modulelist),
-                                quantizer_attrs=["input_quantizer"],
-                            )
-                elif has_fused_experts_quantizers:
-                    # _QuantFusedExperts: amax fallback is handled in _export_fused_experts
-                    break
-                elif (
-                    "QuantGptOssExperts" in type(sub_module.experts).__name__
-                    or "QuantLlama4TextExperts" in type(sub_module.experts).__name__
-                ):
-                    # Handle GPT-OSS / Llama4 fused experts specifically.
-                    # Both use gate_up_proj and down_proj with singular input quantizers
-                    # (gate_up_proj_input_quantizer/down_proj_input_quantizer); the actual
-                    # amax fallback and weight export is performed in _process_quantized_modules.
-                    gpt_oss_linear_names = ["gate_up_proj", "down_proj"]
-                    for linear_name in gpt_oss_linear_names:
-                        if hasattr(sub_module.experts, linear_name):
-                            linear_module = getattr(sub_module.experts, linear_name)
-                            if hasattr(linear_module, "input_quantizer"):
-                                set_expert_quantizer_amax(
-                                    modules=[linear_module],
-                                    quantizer_attrs=["input_quantizer"],
-                                )
-                elif isinstance(sub_module.experts, collections.abc.Iterable):
-                    # For other MoE models (like Mixtral) with iterable experts
-                    try:
-                        set_expert_quantizer_amax(
-                            modules=[getattr(expert, linear_name) for expert in sub_module.experts],
-                            quantizer_attrs=["input_quantizer"],
-                        )
-                    except AttributeError as e:
-                        # Provide more helpful debugging information
-                        expert_types = [type(expert).__name__ for expert in sub_module.experts]
-                        raise AttributeError(
-                            f"Failed to access attribute '{linear_name}' on experts. "
-                            f"MoE module type: {type(sub_module).__name__}, "
-                            f"Expert types: {expert_types}, "
-                            f"Expected linear names: {expert_linear_names}. "
-                            f"This suggests the get_expert_linear_names function may need "
-                            f"to be updated for this model architecture. "
-                            f"Original error: {e}"
-                        ) from e
-                else:
-                    # Unsupported MoE model structure
-                    raise NotImplementedError(
-                        f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
-                        f"Please file an issue or add support for this model architecture."
-                    )
+            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
+            if handler is None:
+                # Unsupported MoE model structure
+                raise NotImplementedError(
+                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
+                    f"Please file an issue or add support for this model architecture."
+                )
+            handler(name, sub_module, prepare_ctx)
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision

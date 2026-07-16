@@ -23,20 +23,82 @@ from functools import partial
 from itertools import chain
 
 import torch
-
-# Try multiple import paths for vLLM compatibility across versions
-if importlib.util.find_spec("vllm.attention"):
-    import vllm.attention as vllm_attention  # vllm < 0.16.0
-else:
-    import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
-
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
+from ..conversion import set_quantizer_by_cfg
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
+
+_NVFP4_ATTENTION_QUANTIZER_CFG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+}
+_VLLM_NVFP4_ATTENTION_QUANT_CFG = [
+    {"quantizer_name": "*_bmm_quantizer", "enable": False},
+    *(
+        {
+            "quantizer_name": f"*{name}_bmm_quantizer",
+            "cfg": _NVFP4_ATTENTION_QUANTIZER_CFG,
+            "enable": True,
+        }
+        for name in ("q", "k", "p", "v")
+    ),
+]
+_FP8_ATTENTION_QUANTIZER_CFG = {"num_bits": (4, 3)}  # per-tensor E4M3, static scale amax/448
+_BMM2_FORMAT_CFGS = {"nvfp4": _NVFP4_ATTENTION_QUANTIZER_CFG, "fp8": _FP8_ATTENTION_QUANTIZER_CFG}
+
+
+def build_vllm_attention_quant_cfg(
+    *,
+    q_format: str = "nvfp4",
+    k_format: str = "nvfp4",
+    p_format: str = "nvfp4",
+    v_format: str = "nvfp4",
+) -> list:
+    """Build the attention BMM quantizer config with per-operand formats.
+
+    Each of Q/K/P/V takes "nvfp4" (dynamic block-16, two-level scale) or
+    "fp8" (per-tensor E4M3, static scale amax/448).
+    """
+    formats = {"q": q_format, "k": k_format, "p": p_format, "v": v_format}
+    for name, fmt in formats.items():
+        if fmt not in _BMM2_FORMAT_CFGS:
+            raise ValueError(
+                f"{name}_format must be one of {sorted(_BMM2_FORMAT_CFGS)}, got {fmt!r}"
+            )
+    return [
+        {"quantizer_name": "*_bmm_quantizer", "enable": False},
+        *(
+            {
+                "quantizer_name": f"*{name}_bmm_quantizer",
+                "cfg": _BMM2_FORMAT_CFGS[fmt],
+                "enable": True,
+            }
+            for name, fmt in formats.items()
+        ),
+    ]
+
+
+def _import_attention_module():
+    """Import a vLLM module that exports the concrete ``Attention`` class."""
+    for module_name in (
+        "vllm.attention.layer",
+        "vllm.model_executor.layers.attention",
+        "vllm.attention",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "Attention"):
+            return module
+    raise ImportError("No supported vLLM Attention module was found")
+
+
+vllm_attention = _import_attention_module()
 
 # Try multiple import paths for vLLM compatibility across versions
 vllm_shared_fused_moe_layer = None
@@ -67,14 +129,6 @@ else:
         from vllm.model_executor.layers.attention.encoder_only_attention import EncoderOnlyAttention
     except ImportError:
         EncoderOnlyAttention = None
-
-try:
-    _has_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layer = False
-
-if _has_attention_layer:
-    import vllm.attention.layer as vllm_attention
 
 try:
     VllmMLAAttention = vllm_attention.MLAAttention
@@ -162,7 +216,7 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
     # kv_cache is a list of tensors (v0) or a single tensor (v1).
     kv = getattr(module, "kv_cache", None)
     if kv is not None:
-        t0 = kv[0] if isinstance(kv, (list, tuple)) and len(kv) > 0 else kv
+        t0 = kv[0] if isinstance(kv, list | tuple) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
             spec = getattr(module, "kv_cache_dtype", t0.dtype)
             out_dtype = (
@@ -186,6 +240,82 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 
 
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
+
+
+def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
+    """Set a global-scale-one amax on uncalibrated block-16 NVFP4 K/V quantizers."""
+    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(module, name, None)
+        if (
+            not isinstance(quantizer, TensorQuantizer)
+            or not quantizer.is_enabled
+            or not quantizer.is_nvfp4_dynamic
+            or (quantizer.block_sizes or {}).get(-1) != 16
+            or hasattr(quantizer, "_amax")
+        ):
+            continue
+        quantizer.amax = torch.tensor(6.0 * 448.0, device=device, dtype=torch.float32)
+
+
+def _set_vllm_attention_fp8_bmm2_default_amax(module, device: torch.device) -> None:
+    """Set fixed amax on uncalibrated per-tensor FP8 BMM2 quantizers (P=1.0, V=448)."""
+    for name, default in (
+        ("q_bmm_quantizer", 448.0),
+        ("k_bmm_quantizer", 448.0),
+        ("p_bmm_quantizer", 1.0),
+        ("v_bmm_quantizer", 448.0),
+    ):
+        quantizer = getattr(module, name, None)
+        if (
+            not isinstance(quantizer, TensorQuantizer)
+            or not quantizer.is_enabled
+            or getattr(quantizer, "num_bits", None) != (4, 3)
+            or getattr(quantizer, "block_sizes", None)
+            or hasattr(quantizer, "_amax")
+        ):
+            continue
+        quantizer.amax = torch.tensor(default, device=device, dtype=torch.float32)
+
+
+def configure_vllm_nvfp4_attention_quantizers(
+    module: torch.nn.Module,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+    cfg: list | None = None,
+) -> torch.nn.Module:
+    """Configure one vLLM Attention module for fused NVFP4 fake quantization.
+
+    This attention-scoped entry point avoids recursively converting vLLM Linear and MoE
+    modules. It configures only quantizer state; the caller remains responsible for installing
+    the fused attention implementation and enabling its in-kernel Q/V carriers.
+
+    Args:
+        module: A vLLM ``Attention`` module to convert and configure in place.
+        device: Device on which the attention quantizer state should reside.
+        dtype: Model compute dtype associated with the attention module.
+
+    Returns:
+        The supplied module, converted in place to ``_QuantVLLMAttention``.
+    """
+    if not isinstance(module, vllm_attention.Attention):
+        raise TypeError(f"Expected vLLM Attention, got {type(module).__name__}")
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"Expected torch.dtype, got {type(dtype).__name__}")
+
+    device = torch.device(device)
+    module.device, module.dtype = device, dtype
+    if not isinstance(module, _QuantVLLMAttention):
+        module = QuantModuleRegistry.convert(module)
+    if not hasattr(module, "p_bmm_quantizer"):
+        module.p_bmm_quantizer = TensorQuantizer()
+
+    set_quantizer_by_cfg(module, _VLLM_NVFP4_ATTENTION_QUANT_CFG if cfg is None else cfg)
+    for name in ("q", "k", "p", "v"):
+        getattr(module, f"{name}_bmm_quantizer").to(device=device)
+    _set_vllm_attention_kv_default_amax(module, device)
+    _set_vllm_attention_fp8_bmm2_default_amax(module, device)
+    return module
 
 
 def _vllm_attention_modelopt_post_restore(self) -> None:
@@ -497,9 +627,11 @@ class _QuantVLLMAttention(QuantModule):
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
-        query = self.q_bmm_quantizer(query)
+        if not getattr(self, "_query_quant_in_kernel", False):
+            query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if not getattr(self, "_value_quant_in_kernel", False):
+            value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:

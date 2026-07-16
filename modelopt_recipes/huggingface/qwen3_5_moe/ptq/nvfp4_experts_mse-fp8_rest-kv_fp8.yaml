@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NVFP4 on the LM routed experts (MSE/FP8-scale-sweep -> STATIC weight scales, dynamic inputs)
+# + ModelOpt-default FP8 (W8A8 per-tensor static, max-calibrated) on everything else the FP8
+# checkpoint quantizes; FP8 KV cache; MTP block BF16.
+# Note: fp8_scale_sweep refines ONLY static NVFP4 weights with MSE; all FP8 / dynamic / KV
+# quantizers stay max-calibrated (modelopt default) -- i.e. MSE applies only to the NVFP4 layers.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+  kv_fp8: configs/ptq/units/kv_fp8
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    NVFP4 (MSE static weights, dynamic inputs) on LM routed experts; ModelOpt-default FP8
+    (max-calibrated) on all other Linear layers; FP8 KV cache; MTP block BF16.
+
+quantize:
+  algorithm:
+    method: mse
+    fp8_scale_sweep: true   # MSE refines only static NVFP4 weights; FP8 layers stay max-calibrated
+    layerwise: false        # Qwen3.5 decoder layers nested under model.language_model.layers
+  quant_cfg:
+    - $import: base_disable_all
+    # FP8 base on every weight/input quantizer:
+    - $import: w8a8_fp8_fp8
+    # NVFP4 override on the LM routed experts (weights STATIC for MSE sweep, inputs dynamic):
+    - quantizer_name: '*language_model*mlp.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_static
+    - quantizer_name: '*language_model*mlp.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    # FP8 KV cache:
+    - $import: kv_fp8
+    # BF16 exclusions (applied last so they win):
+    - $import: default_disabled_quantizers
+    - {quantizer_name: '*linear_attn.in_proj_a*', enable: false}
+    - {quantizer_name: '*linear_attn.in_proj_b*', enable: false}
+    - {quantizer_name: '*visual*', enable: false}
+    - {quantizer_name: '*mtp*', enable: false}

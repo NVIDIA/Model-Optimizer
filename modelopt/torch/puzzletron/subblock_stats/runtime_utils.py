@@ -23,14 +23,18 @@ to ensure compatibility with downstream evaluation pipelines.
 """
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from transformers import AutoTokenizer, LlamaForCausalLM
 
 from ..anymodel.converter import Converter
 from ..anymodel.models.llama import LlamaModelDescriptor
+from ..tools.logger import mprint
+from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,11 @@ class RuntimeConfig:
     batch_size: int
     num_iters: int
     num_warmup_iters: int
+    # Fraction of total GPU memory vLLM may use. Kept well below the default
+    # (~0.9) because the parent puzzletron process is co-resident on the same
+    # GPU during benchmarking; requesting too much fails vLLM's startup
+    # free-memory check.
+    gpu_memory_utilization: float = 0.5
 
 
 def save_model(model: LlamaForCausalLM, tokenizer_path: Path, output_path: Path) -> None:
@@ -80,3 +89,40 @@ def save_model_as_anymodel(model, output_dir: Path, descriptor):
         config_data["architectures"] = ["AnyModel"]
         with open(config_path, "w") as f:
             json.dump(config_data, f, indent=2)
+
+
+def convert_config_to_vllm_anymodel(config_dir: Path):
+    """Convert a model to vLLM AnyModel format."""
+    # Load the model config.json, update "architectures" to ["AnyModel"], and write back to disk.
+    config_path = Path(config_dir) / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+
+    backup_config_path = config_path.with_suffix(".bak")
+    if backup_config_path.exists():
+        raise FileExistsError(f"Backup config file already exists at {backup_config_path}")
+
+    shutil.copy(config_path, backup_config_path)
+
+    try:
+        with open(config_path) as f:
+            config_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Error loading config file: {e}") from e
+
+    config = SimpleNamespace(**config_data)
+    config.architectures = ["AnyModel"]
+    config.base_architecture = "LlamaForCausalLM"  # TODO: extend support to other models
+
+    if convert_block_configs_to_per_layer_config(config):
+        mprint("Converted block configs to per-layer config")
+    else:
+        mprint("No block configs to convert")
+    with open(config_path, "w") as f:
+        json.dump(vars(config), f, indent=2)
+
+
+if __name__ == "__main__":
+    import fire
+
+    fire.Fire()

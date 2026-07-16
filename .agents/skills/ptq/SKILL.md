@@ -1,11 +1,20 @@
 ---
 name: ptq
-description: This skill should be used when the user asks to "quantize a model", "run PTQ", "post-training quantization", "NVFP4 quantization", "FP8 quantization", "INT8 quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM", or needs to produce a quantized HuggingFace or TensorRT-LLM checkpoint from a pretrained model using ModelOpt.
+description: >-
+  Use when the user asks to "quantize a model", "run PTQ", "post-training
+  quantization", "NVFP4 quantization", "FP8 quantization", "INT8
+  quantization", "INT4 AWQ", "quantize LLM", "quantize MoE", "quantize VLM",
+  or needs to produce a quantized HuggingFace checkpoint from a pretrained
+  model using ModelOpt. Do NOT use for multi-candidate recipe
+  exploration or optimization (use quant-recipe-search).
 ---
 
 # ModelOpt Post-Training Quantization
 
 Produce a quantized checkpoint from a pretrained model. **Read `examples/hf_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
+
+Use `quant-recipe-search` for multi-candidate recipe exploration or
+optimization. Use this skill for each selected recipe's PTQ run.
 
 ## Step 1 — Environment
 
@@ -75,6 +84,24 @@ If the source checkpoint is already quantized and the requested recipe/config re
 For **listed models** (4A/4B): run full calibration directly (`--calib_size 512`).
 For **unlisted models** (4C): run a smoke test first (`--calib_size 4`), wait for success, then full calibration.
 
+### Recommended calibration datasets
+
+- **Text-only LLM PTQ:** Prefer the representative `nemotron-post-training-v3` blend. `modelopt/torch/utils/dataset_utils.py` expands it to seven registered Nemotron SFT domains. Configure Hugging Face credentials where required.
+
+  ```bash
+  python examples/hf_ptq/hf_ptq.py ... \
+      --dataset nemotron-post-training-v3
+  ```
+
+- **VLM PTQ:** Include image-text calibration with `--calib_with_images`. This path uses `nemotron_vlm_dataset_v2` with the current default subsets `sparsetables`, `plotqa_cot`, and `wiki_en`; `examples/hf_ptq/hf_ptq.py` and `modelopt/torch/utils/vlm_dataset_utils.py` are the source of truth.
+
+  ```bash
+  python examples/hf_ptq/hf_ptq.py ... \
+      --calib_with_images
+  ```
+
+`--dataset` selects text-only calibration and cannot substitute for multimodal examples. Use `--dataset cnn_dailymail` only as a fallback when representative data is unavailable, such as without gated-data access or with only a local public cache.
+
 ### Which path?
 
 ```text
@@ -138,17 +165,16 @@ Report the path and size to the user.
 
 ### Post-quantization validation
 
-This is a required gate before any deployment or evaluation submission. Do not submit an eval, start a serving job, or hand off the checkpoint as ready until the gate has passed.
+This is a required gate before any deployment or evaluation submission. Do not submit an eval, start a production serving job, or hand off the checkpoint as ready until the gate, including its serving canary, has passed.
 
-Read `references/checkpoint-validation.md` and perform all three validation groups on the exact checkpoint path that will be deployed/evaluated:
+Read `references/checkpoint-validation.md` and perform all four validation groups on the exact checkpoint path that will be deployed/evaluated:
 
 1. Check output size and estimated bits per weight against the baseline/source checkpoint.
 2. Check quantized-weight coverage against the requested qformat/recipe/config.
 3. Check metadata consistency against the baseline/source model.
+4. Complete the required downstream handoff and serving-readiness validation.
 
-Report the gate result before moving on. The report must include source size, output size, output/source size ratio, layer precision counts (for example NVFP4, FP8, INT4, BF16/unquantized excluded, unexpected unquantized, declaration mismatches), and metadata diffs. If the output/source ratio is >= 1.0 for a compression recipe, if any intended layer group is missing quantization, or if metadata changed unexpectedly, stop and fix the checkpoint or ask the user before proceeding.
-
-**Next steps**: If the user wants to deploy or evaluate the quantized checkpoint, use the **deployment** or **evaluation** skill. The checkpoint workspace carries over. If the model required patches during PTQ (e.g., transformers upgrade), the same fixes will likely be needed at deployment and evaluation time.
+Report the gate result before moving on. Follow the canonical report format and all blocking conditions in `references/checkpoint-validation.md`; do not hand off a checkpoint unless every required check passes.
 
 ## Key API Rules
 
@@ -163,7 +189,7 @@ Report the gate result before moving on. The report must include source size, ou
 
 - **Model-specific dependencies**: Models with `trust_remote_code` may import packages not in the container (e.g., `mamba-ssm` for hybrid Mamba models). See Step 2.5. Use `EXTRA_PIP_DEPS` env var with the launcher, or install manually before running `hf_ptq.py`
 - **Transformers version**: New models may need a newer version of transformers than what's installed. Check `config.json` for `transformers_version`. In containers, beware of `PIP_CONSTRAINT` blocking upgrades — see `references/slurm-setup-ptq.md` for workarounds
-- **Gated datasets**: Some calibration datasets require HF authentication. Ensure `HF_TOKEN` is set in the job environment, or use `--dataset cnn_dailymail` as a non-gated alternative
+- **Gated datasets**: Some calibration datasets require HF authentication. Set `HF_TOKEN` in the job environment. Use `--dataset cnn_dailymail` only as the constrained-environment fallback described in Step 4, not as the preferred calibration set
 - **NFS root_squash + Docker**: See `skills/common/slurm-setup.md` section 5
 
 ## References

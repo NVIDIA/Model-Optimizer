@@ -149,6 +149,19 @@ class DFlashConfig(ModeloptBaseConfig):
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
 
+    dflash_swa_window_size: int | None = ModeloptField(
+        default=None,
+        description=(
+            "Sliding-window attention (SWA) window size for the DFlash draft. When set, ALL "
+            "draft layers use non-causal sliding-window attention (MiMo-style): each draft "
+            "query attends only to context positions within `dflash_swa_window_size` tokens "
+            "before it, while block-internal attention stays bidirectional. None (default) "
+            "keeps full attention over all context. Must be >= dflash_block_size. Exported to "
+            "the draft config as dflash_config.use_swa/swa_window_size (+ top-level "
+            "sliding_window) so vLLM applies the same window at inference."
+        ),
+    )
+
     dflash_export_rope_scaling: dict = ModeloptField(
         default={},
         description=(
@@ -221,6 +234,14 @@ class DFlashConfig(ModeloptBaseConfig):
         # is rejected even if it only becomes active after a later objective override.
         if not 0.0 < self.dflash_dpace_alpha <= 1.0:
             raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {self.dflash_dpace_alpha}")
+        if self.dflash_swa_window_size is not None:
+            # Block-internal attention is left un-windowed (bidirectional), so the window must
+            # cover a full block; otherwise the effective inference window would differ.
+            if self.dflash_swa_window_size < self.dflash_block_size:
+                raise ValueError(
+                    f"dflash_swa_window_size ({self.dflash_swa_window_size}) must be >= "
+                    f"dflash_block_size ({self.dflash_block_size})."
+                )
         return self
 
 

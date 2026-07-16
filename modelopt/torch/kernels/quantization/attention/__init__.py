@@ -15,10 +15,7 @@
 
 """Quantization-specific attention kernel pieces.
 
-``p_qdq.py`` holds the softmax-P (``p_bmm_quantizer``) quant-dequant
-``@triton.jit`` helpers invoked by the unified flash-attention kernel in
-``common/attention/triton_fa.py`` under its ``P_QDQ`` constexpr guard.
-Only NVFP4 needs a P-specific helper (tiling and block-amax policy on top of
-``quantization/common/nvfp4_quant.py``); the FP8 mode uses
-``quantization/common/fp8_quant.fp8_scalar_qdq`` directly.
+``bmm2_qdq.py`` holds the operand-specific NVFP4 helpers for the attention
+``P @ V`` matmul and the V-cache finalization kernel. This package initializer
+does not import that module, so importing the package alone does not require Triton.
 """

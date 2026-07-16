@@ -29,52 +29,51 @@ import torch
 import triton
 import triton.language as tl
 
-# Helpers for optional N:M sparsity and sink/window-aware dense regions live
-# in the sparsity package. The baseline forward kernel below calls them
-# conditionally under constexpr guards, so the unified single-kernel design
-# stays intact while keeping feature-specific logic in its own subpackage.
+# Helpers for optional N:M sparsity and skip-softmax live in the sparsity
+# package. The baseline forward kernel below calls them conditionally under
+# constexpr guards, so the unified single-kernel design stays intact while
+# keeping feature-specific logic in its own subpackage.
 #
 # Lazy import: Triton resolves @triton.jit names at kernel compile time (first
 # call), not at definition time, so populating the module globals before the
 # first ``attention()`` call is sufficient. Deferring avoids a circular import
 # (common.attention/__init__.py ↔ sparsity.attention/__init__.py via this file).
 _apply_sparse_nm_to_qk_tile: Any = None
-_is_dense_region: Any = None
 _skip_softmax_decision: Any = None
-_p_qdq_fp8: Any = None
+_qdq_fp8: Any = None
 _p_qdq_nvfp4: Any = None
+_v_qdq_nvfp4: Any = None
 
 
 def _load_sparsity_helpers() -> None:
-    global _apply_sparse_nm_to_qk_tile, _is_dense_region, _skip_softmax_decision
+    global _apply_sparse_nm_to_qk_tile, _skip_softmax_decision
     if _apply_sparse_nm_to_qk_tile is None:
         from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
             _apply_sparse_nm_to_qk_tile as _nm,
-        )
-        from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
-            _is_dense_region as _dense,
         )
         from modelopt.torch.kernels.sparsity.attention.skip_softmax_helpers import (
             _skip_softmax_decision as _skip,
         )
 
         _apply_sparse_nm_to_qk_tile = _nm
-        _is_dense_region = _dense
         _skip_softmax_decision = _skip
 
 
-def _load_p_qdq_helpers() -> None:
-    global _p_qdq_fp8, _p_qdq_nvfp4
-    if _p_qdq_fp8 is None:
-        from modelopt.torch.kernels.quantization.attention.p_qdq import _p_qdq_nvfp4 as _nvfp4
+def _load_qdq_helpers() -> None:
+    global _qdq_fp8, _p_qdq_nvfp4, _v_qdq_nvfp4
+    if _qdq_fp8 is None:
+        from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4 as _p_nvfp4
+        from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _v_qdq_nvfp4 as _v_nvfp4
         from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq as _fp8
 
-        _p_qdq_fp8 = _fp8
-        _p_qdq_nvfp4 = _nvfp4
+        _qdq_fp8 = _fp8
+        _p_qdq_nvfp4 = _p_nvfp4
+        _v_qdq_nvfp4 = _v_nvfp4
 
 
-# Maps the public p_qdq option to the kernel's P_QDQ constexpr.
+# Maps public QDQ options to kernel constexpr values.
 _P_QDQ_MODES = {None: 0, "fp8": 1, "nvfp4": 2}
+_V_QDQ_MODES = {None: 0, "nvfp4": 2}
 
 
 LOG2E: float = 1.44269504088896
@@ -83,21 +82,15 @@ LOG2E: float = 1.44269504088896
 # Autotune configs for forward kernel
 # ---------------------------------------------------------------------------
 _FWD_CONFIGS = [
-    triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_stages=s, num_warps=w)
-    for bm in [64, 128]
-    for bn in [32, 64, 128]
-    for s in [1, 2, 3]
-    for w in [4, 8]
+    triton.Config({"BLOCK_M": block_m, "BLOCK_N": 32}, num_stages=2, num_warps=4)
+    for block_m in (16, 64, 128)
 ]
 
-# Use a single config in testing for reproducibility
-if "PYTEST_VERSION" in __import__("os").environ:
-    _FWD_CONFIGS = [triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_stages=1, num_warps=4)]
-
 _MEASURE_BLOCK_M = 128
+_P_QDQ_MEASURE_BLOCK_M = 16
 # 128 so the kernel sparsity-measurement block matches the PyTorch
-# flash_skip_softmax calibration block (br = bc = 128) and the Triton
-# calibration kernel; otherwise the two measure at different granularities.
+# calibration/reference granularity. This is deliberately independent of the
+# autotuned compute tile.
 _MEASURE_BLOCK_N = 128
 _MEASURE_NUM_STAGES = 1
 _MEASURE_NUM_WARPS = 4
@@ -138,6 +131,7 @@ def _load_paged_k_tile(
         mask=kv_valid,
         other=0,
     )
+    page_global = page_global.to(tl.int64)
 
     # Load K values: K_cache[page_global, offset_in_page, kv_head_idx, dim]
     # K^T layout [BLOCK_D, BLOCK_N] for Q @ K^T matmul
@@ -181,6 +175,7 @@ def _load_paged_v_tile(
         mask=kv_valid,
         other=0,
     )
+    page_global = page_global.to(tl.int64)
 
     # V layout [BLOCK_N, BLOCK_D]
     v_ptrs = (
@@ -221,10 +216,41 @@ def _apply_mask(
     return scores
 
 
+@triton.jit
+def _apply_sparse_nm_with_dense_tokens(
+    scores,
+    kv_start,
+    q_pos,
+    kv_pos,
+    seq_len_q,
+    seq_len_kv,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SPARSITY_N: tl.constexpr,
+    SPARSITY_M: tl.constexpr,
+    DENSE_SINK_TOKENS: tl.constexpr,
+    DENSE_RECENT_TOKENS: tl.constexpr,
+):
+    """Apply N:M sparsity outside token-exact sink and recent regions."""
+    sparse_scores = _apply_sparse_nm_to_qk_tile(scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M)
+    q_abs_pos = q_pos[:, None] + seq_len_kv - seq_len_q
+    kv_abs_pos = kv_start + kv_pos[None, :]
+    token_distance = q_abs_pos - kv_abs_pos
+    dense_tokens = (
+        (seq_len_q <= 1)
+        | (kv_abs_pos < DENSE_SINK_TOKENS)
+        | ((token_distance >= 0) & (token_distance < DENSE_RECENT_TOKENS))
+    )
+    return tl.where(dense_tokens, scores, sparse_scores)
+
+
 # ---------------------------------------------------------------------------
 # Forward kernel
 # ---------------------------------------------------------------------------
-@triton.autotune(configs=_FWD_CONFIGS, key=["N_CTX", "HEAD_DIM"])
+@triton.autotune(
+    configs=(_FWD_CONFIGS[:1] if "PYTEST_VERSION" in __import__("os").environ else _FWD_CONFIGS),
+    key=["N_CTX", "HEAD_DIM", "Q_IS_FP32", "P_QDQ", "V_QDQ"],
+)
 @triton.jit
 def _attn_fwd(
     Q,  # [total_q, num_q_heads, head_dim] query tensor
@@ -255,6 +281,7 @@ def _attn_fwd(
     IS_CAUSAL: tl.constexpr,  # Whether to apply causal mask
     HEAD_DIM: tl.constexpr,  # Actual head dimension (for d_mask)
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
+    Q_IS_FP32: tl.constexpr,  # Dynamic NVFP4 QDQ carrier uses FP32
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
     DENSE_SINK_TOKENS: tl.constexpr = 0,  # Leading KV tokens kept dense (attention sinks)
@@ -263,6 +290,9 @@ def _attn_fwd(
     SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) in the kernel's scaled log2 score space
     P_QDQ: tl.constexpr = 0,  # Fake quant-dequant of softmax P: 0=off, 1=FP8 E4M3, 2=NVFP4
     p_qdq_scale=1.0,  # Per-tensor scale for softmax qdq (runtime scalar; amax/448 or amax/(6*448))
+    V_QDQ: tl.constexpr = 0,  # Fake quant-dequant of V: 0=off, 2=NVFP4
+    v_qdq_scale=1.0,
+    V_CACHE_QUANTIZED: tl.constexpr = False,  # complete block-16 groups are already QDQ
     Sparsity_total=None,  # Optional int64 scalar for counting total tiles (atomic)
     Sparsity_skipped=None,  # Optional int64 scalar for counting skipped tiles (atomic)
     MEASURE_SPARSITY: tl.constexpr = False,  # When True, count total/skipped tiles via atomic adds
@@ -323,6 +353,7 @@ def _attn_fwd(
         if not IS_CAUSAL
         else tl.minimum(causal_offset + (tile_q + 1) * BLOCK_M, seq_len_kv)
     )
+    v_quantized_boundary = (seq_len_kv // 16) * 16
 
     # --- Main loop: iterate over KV tiles ---
     for kv_start in range(0, kv_bound, BLOCK_N):
@@ -357,23 +388,28 @@ def _attn_fwd(
             )
 
         # scores = Q @ K^T * scale  [BLOCK_M, BLOCK_N]
-        scores = tl.dot(q, k) * qk_scale
+        if Q_IS_FP32:
+            scores = tl.dot(q, k.to(tl.float32), input_precision="ieee") * qk_scale
+        else:
+            scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
         # --- Optional N:M sparse softmax ---
         if SPARSITY_N > 0:
-            if not _is_dense_region(
+            scores = _apply_sparse_nm_with_dense_tokens(
+                scores,
                 kv_start,
-                tile_q,
+                q_pos,
+                kv_pos,
                 seq_len_q,
                 seq_len_kv,
                 BLOCK_M,
+                BLOCK_N,
+                SPARSITY_N,
+                SPARSITY_M,
                 DENSE_SINK_TOKENS,
                 DENSE_RECENT_TOKENS,
-            ):
-                scores = _apply_sparse_nm_to_qk_tile(
-                    scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
-                )
+            )
 
         # Optional skip-softmax decision — the decision logic (and optional
         # atomic counter updates) lives in sparsity/attention; this kernel
@@ -404,8 +440,14 @@ def _attn_fwd(
             # row_sum keeps the unquantized p: the softmax denominator stays in
             # fp32 and only the quantized P is fed to BMM2.
             if P_QDQ == 1:
-                p = _p_qdq_fp8(p, p_qdq_scale)
+                p = _qdq_fp8(p, p_qdq_scale)
             elif P_QDQ == 2:
+                # Native packing consumes the model dtype, but its QDQ value
+                # remains FP32 for the scaled MMA accumulation.
+                if IS_PAGED:
+                    p = p.to(V_cache.dtype.element_ty).to(tl.float32)
+                else:
+                    p = p.to(V.dtype.element_ty).to(tl.float32)
                 p = _p_qdq_nvfp4(p, p_qdq_scale, BLOCK_M, BLOCK_N)
 
             # Load V and accumulate
@@ -435,7 +477,20 @@ def _attn_fwd(
                     mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
                     other=0.0,
                 )
-            acc = tl.dot(p.to(v.dtype), v, acc)
+            if V_QDQ == 2 and (
+                (not V_CACHE_QUANTIZED) or (kv_start + BLOCK_N > v_quantized_boundary)
+            ):
+                v_qdq = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_D)
+                v_qdq = v_qdq.to(v.dtype)
+                if V_CACHE_QUANTIZED:
+                    use_qdq = (kv_start + kv_pos) >= v_quantized_boundary
+                    v = tl.where(use_qdq[:, None], v_qdq, v)
+                else:
+                    v = v_qdq
+            if P_QDQ == 2:
+                acc = tl.dot(p, v.to(tl.float32), acc, input_precision="ieee")
+            else:
+                acc = tl.dot(p.to(v.dtype), v, acc)
             row_max = m_new
         # else: tile skipped — no softmax, no V load, no BMM2 for this tile
 
@@ -615,24 +670,26 @@ def _attn_bwd_dq(
 
         # Re-apply N:M sparse softmax to match forward pass
         if SPARSITY_N > 0:
-            if not _is_dense_region(
+            scores = _apply_sparse_nm_with_dense_tokens(
+                scores,
                 kv_start,
-                tile_q,
+                q_pos,
+                kv_pos,
                 seq_len_q,
                 seq_len_kv,
                 BLOCK_M,
+                BLOCK_N,
+                SPARSITY_N,
+                SPARSITY_M,
                 DENSE_SINK_TOKENS,
                 DENSE_RECENT_TOKENS,
-            ):
-                scores = _apply_sparse_nm_to_qk_tile(
-                    scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
-                )
+            )
 
         p = tl.math.exp2(scores - lse[:, None])
 
         # Skip-softmax backward: zero out P for rows with negligible contribution.
         # Per-row using final LSE because forward/backward tile sizes may differ
-        # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+        # (forward autotunes BLOCK_M; backward uses a different fixed tile), so per-tile
         # skip masks from forward wouldn't align. LSE >= any intermediate running
         # max, so this conservatively zeros out at least what forward skipped.
         if APPLY_SKIP_SOFTMAX:
@@ -769,24 +826,26 @@ def _attn_bwd_dkdv(
 
             # Re-apply N:M sparse softmax to match forward pass
             if SPARSITY_N > 0:
-                if not _is_dense_region(
+                scores = _apply_sparse_nm_with_dense_tokens(
+                    scores,
                     kv_start,
-                    qi,
+                    q_pos,
+                    kv_pos,
                     seq_len_q,
                     seq_len_kv,
                     BLOCK_M,
+                    BLOCK_N,
+                    SPARSITY_N,
+                    SPARSITY_M,
                     DENSE_SINK_TOKENS,
                     DENSE_RECENT_TOKENS,
-                ):
-                    scores = _apply_sparse_nm_to_qk_tile(
-                        scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
-                    )
+                )
 
             p = tl.math.exp2(scores - lse[:, None])
 
             # Skip-softmax backward: zero out P for rows with negligible contribution.
             # Per-row using final LSE because forward/backward tile sizes may differ
-            # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+            # (forward autotunes BLOCK_M; backward uses a different fixed tile), so per-tile
             # skip masks from forward wouldn't align. LSE >= any intermediate running
             # max, so this conservatively zeros out at least what forward skipped.
             if APPLY_SKIP_SOFTMAX:
@@ -833,6 +892,9 @@ class _Attention(torch.autograd.Function):
         measure_sparsity,
         p_qdq_mode,
         p_qdq_scale,
+        v_qdq_mode,
+        v_qdq_scale,
+        v_cache_quantized,
         k_cache,
         v_cache,
         block_table,
@@ -918,12 +980,18 @@ class _Attention(torch.autograd.Function):
             lse.stride(1),
         )
         fwd_kwargs = {
-            "N_CTX": max_input_len,
+            # N_CTX is an autotune key only. Bucket variable prefill lengths so
+            # each power-of-two regime reuses one tuned configuration; the grid
+            # below still uses the exact max_input_len.
+            "N_CTX": triton.next_power_of_2(max(1, max_input_len)),
             "kv_group_num": kv_group_num,
             "BLOCK_D": BLOCK_D,
             "IS_CAUSAL": is_causal,
             "HEAD_DIM": HEAD_DIM,
             "STORE_LSE": True,
+            # An fp32 Q (the dynamic-quant carrier) always needs the fp32 BMM1 dot;
+            # gating on QDQ modes would miss recipes like fp8-BMM2 (P mode 1).
+            "Q_IS_FP32": q.dtype == torch.float32,
             "SPARSITY_N": sparsity_n,
             "SPARSITY_M": sparsity_m,
             "DENSE_SINK_TOKENS": dense_sink_tokens,
@@ -932,6 +1000,9 @@ class _Attention(torch.autograd.Function):
             "SKIP_THRESHOLD_LOG2": skip_threshold_log2,
             "P_QDQ": p_qdq_mode,
             "p_qdq_scale": p_qdq_scale,
+            "V_QDQ": v_qdq_mode,
+            "v_qdq_scale": v_qdq_scale,
+            "V_CACHE_QUANTIZED": v_cache_quantized,
             "Sparsity_total": sparsity_total,
             "Sparsity_skipped": sparsity_skipped,
             "MEASURE_SPARSITY": do_measure,
@@ -965,7 +1036,7 @@ class _Attention(torch.autograd.Function):
                 _attn_fwd.fn[grid](
                     *fwd_args,
                     **fwd_kwargs,
-                    BLOCK_M=_MEASURE_BLOCK_M,
+                    BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
                     BLOCK_N=_MEASURE_BLOCK_N,
                     num_warps=_MEASURE_NUM_WARPS,
                     num_stages=_MEASURE_NUM_STAGES,
@@ -1137,6 +1208,9 @@ class _Attention(torch.autograd.Function):
             None,  # measure_sparsity
             None,  # p_qdq_mode
             None,  # p_qdq_scale
+            None,  # v_qdq_mode
+            None,  # v_qdq_scale
+            None,  # v_cache_quantized
             None,  # k_cache
             None,  # v_cache
             None,  # block_table
@@ -1165,6 +1239,9 @@ def attention(
     measure_sparsity: bool = False,
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
+    v_qdq: str | None = None,
+    v_qdq_amax: float | None = None,
+    v_cache_quantized: bool = False,
     k_cache: torch.Tensor | None = None,
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
@@ -1211,8 +1288,8 @@ def attention(
             BLOCK_N is a multiple of 16). The softmax denominator stays
             unquantized. The backward pass uses the straight-through estimator:
             gradients are computed from the unquantized P, matching QAT
-            references that keep the backward dots in high precision.
-            Set to ``None`` to disable.
+            references that keep the backward dots in high precision. Set to
+            ``None`` to disable.
         p_qdq_amax: Per-tensor amax for the softmax-P quant-dequant. The
             kernel's unnormalized P lies in [0, 1] (the max-subtraction caps
             every entry at ``exp2(0) = 1``), so 1 is the theoretical upper
@@ -1221,6 +1298,13 @@ def attention(
             and the global scale ``amax / (6 * 448)`` for NVFP4. A runtime
             scalar — user-set or calibrated values do not recompile the
             kernel. Values above amax saturate.
+        v_qdq: Fake quant-dequant of V before ``P @ V``. ``"nvfp4"`` uses
+            signed E2M1 values with one E4M3 scale per 16 keys. ``None``
+            disables V QDQ.
+        v_qdq_amax: Optional per-tensor V amax. ``None`` uses global scale 1;
+            otherwise converts to the NVFP4 global scale ``amax / (6 * 448)``.
+        v_cache_quantized: Complete block-16 groups in the paged V cache are
+            already QDQ; only the pristine partial group is QDQ on read.
         k_cache: Paged K cache [num_blocks, page_size, num_kv_heads, head_dim].
             When provided, K/V are read from paged cache via block_table
             instead of from contiguous k/v tensors.
@@ -1244,7 +1328,7 @@ def attention(
     # permanently excluded from the cache key and later edits to them would
     # silently reuse stale compiled kernels from the on-disk cache.
     _load_sparsity_helpers()
-    _load_p_qdq_helpers()
+    _load_qdq_helpers()
     if p_qdq not in _P_QDQ_MODES:
         raise ValueError(
             f"p_qdq must be one of {sorted(k for k in _P_QDQ_MODES if k)} or None, got {p_qdq!r}"
@@ -1259,6 +1343,22 @@ def attention(
         if not (math.isfinite(p_qdq_amax) and p_qdq_amax > 0):
             raise ValueError(f"p_qdq_amax must be a finite positive value, got {p_qdq_amax}")
         p_qdq_scale = p_qdq_amax / 448.0 if p_qdq == "fp8" else p_qdq_amax / (6.0 * 448.0)
+    if v_qdq not in _V_QDQ_MODES:
+        raise ValueError(
+            f"v_qdq must be one of {sorted(k for k in _V_QDQ_MODES if k)} or None, got {v_qdq!r}"
+        )
+    v_qdq_mode = _V_QDQ_MODES[v_qdq]
+    if v_qdq_mode and any(t.requires_grad for t in (q, k, v)):
+        raise NotImplementedError("v_qdq is inference-only and does not support autograd")
+    v_qdq_scale = 1.0
+    if v_qdq_mode and v_qdq_amax is not None:
+        if not (math.isfinite(v_qdq_amax) and v_qdq_amax > 0):
+            raise ValueError(f"v_qdq_amax must be a finite positive value, got {v_qdq_amax}")
+        v_qdq_scale = v_qdq_amax / (6.0 * 448.0)
+    if v_cache_quantized and v_qdq != "nvfp4":
+        raise ValueError("v_cache_quantized requires v_qdq='nvfp4'")
+    if v_cache_quantized and any(x is None for x in (k_cache, v_cache, block_table)):
+        raise ValueError("v_cache_quantized requires a paged KV cache")
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
     return _Attention.apply(
         q,
@@ -1280,6 +1380,9 @@ def attention(
         measure_sparsity,
         p_qdq_mode,
         p_qdq_scale,
+        v_qdq_mode,
+        v_qdq_scale,
+        v_cache_quantized,
         k_cache,
         v_cache,
         block_table,
