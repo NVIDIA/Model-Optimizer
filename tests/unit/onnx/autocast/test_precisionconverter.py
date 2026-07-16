@@ -119,6 +119,32 @@ def test_convert_preserves_cast_chain_graph_output(tmp_path):
     assert output_producers[0].op_type == "Cast"
 
 
+def test_remove_same_type_graph_output_cast_with_stable_producer():
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3, 4])
+    init_weight = numpy_helper.from_array(np.random.randn(3, 4).astype(np.float32), name="weight")
+
+    add_node = helper.make_node("Add", ["X", "weight"], ["add_out"], name="add")
+    cast_node = helper.make_node("Cast", ["add_out"], ["Y"], name="cast", to=TensorProto.FLOAT)
+    graph = helper.make_graph([add_node, cast_node], "same_type_output_cast", [x], [y], [init_weight])
+    model = helper.make_model(graph, producer_name="same_type_output_cast")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+    )
+    converter._remove_preexisting_casts()
+
+    onnx.checker.check_model(converter.model)
+    assert all(node.op_type != "Cast" for node in converter.model.graph.node)
+    assert converter.model.graph.node[0].output[0] == "Y"
+
+
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
 @pytest.mark.parametrize("use_standalone_type_inference", [True, False])

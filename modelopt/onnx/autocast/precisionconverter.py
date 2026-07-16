@@ -858,6 +858,37 @@ class PrecisionConverter:
 
     def _remove_preexisting_casts(self) -> None:
         nodes_to_remove = []
+        initializer_names = {init.name for init in self.model.graph.initializer}
+        graph_outputs = {out.name: out for out in self.model.graph.output}
+
+        def _is_removable_fp_cast(cast_node):
+            if cast_node.op_type != "Cast":
+                return False
+            cast_node_from_type = onnx_utils._get_tensor_type_by_name(self.model, cast_node.input[0])
+            cast_node_to_type = onnx_utils.get_cast_to_type(cast_node)
+            return (
+                cast_node_to_type in [onnx.TensorProto.FLOAT16, onnx.TensorProto.FLOAT]
+                and cast_node_from_type
+                in [onnx.TensorProto.FLOAT16, onnx.TensorProto.FLOAT, onnx.TensorProto.BFLOAT16]
+                and cast_node.input[0] not in initializer_names
+            )
+
+        def _must_preserve_graph_output_cast(node, cast_from_type, cast_to_type):
+            graph_output = graph_outputs.get(node.output[0])
+            if graph_output is None or cast_to_type != graph_output.type.tensor_type.elem_type:
+                return False
+
+            # Casts that actually define the graph output dtype are semantically necessary.
+            if cast_from_type != cast_to_type:
+                return True
+
+            input_producers = onnx_utils.get_producer_nodes(self.model, node.input[0])
+            # A same-type output Cast fed by a graph input, or by a Cast chain that will also be
+            # removed, is the only remaining producer of the declared graph output name.
+            return not input_producers or all(
+                _is_removable_fp_cast(producer) for producer in input_producers
+            )
+
         for node in self.model.graph.node:
             if node.op_type == "Cast":
                 cast_from_type = onnx_utils._get_tensor_type_by_name(self.model, node.input[0])
@@ -871,16 +902,9 @@ class PrecisionConverter:
                     onnx.TensorProto.BFLOAT16,
                 ]
                 # Check if input comes from an initializer - don't remove cast in that case
-                input_from_initializer = node.input[0] in {
-                    init.name for init in self.model.graph.initializer
-                }
+                input_from_initializer = node.input[0] in initializer_names
                 if is_fp_cast and not input_from_initializer:
-                    # Keep cast nodes that are necessary producers of network outputs.
-                    if any(
-                        node.output[0] == out.name
-                        and cast_to_type == out.type.tensor_type.elem_type
-                        for out in self.model.graph.output
-                    ):
+                    if _must_preserve_graph_output_cast(node, cast_from_type, cast_to_type):
                         continue
                     nodes_to_remove.append(node)
                     onnx_utils._bypass_cast_node(self.model, node)
@@ -1012,6 +1036,7 @@ class PrecisionConverter:
 
         # Remove redundant casts
         self._remove_redundant_casts()
+        self._deduplicate_network_output_producers()
 
     def _cleanup_no_consumer_nodes(self):
         network_outputs = {o.name for o in self.model.graph.output}
@@ -1119,6 +1144,22 @@ class PrecisionConverter:
                                 break
                     cast_node.input[0] = pre_cast_name
                     cast_node.output[0] = original_name
+                    # If a cast-down/cast-up pair was inserted around a graph output, the original
+                    # producer can still have the restored graph output name. Keep the final cast as
+                    # the graph output producer and move any other producers/consumers behind it.
+                    for node in onnx_utils.get_producer_nodes(self.model, original_name):
+                        if node == cast_node:
+                            continue
+                        for i, node_output in enumerate(node.output):
+                            if node_output == original_name:
+                                node.output[i] = pre_cast_name
+                                break
+                    for node in onnx_utils.get_consumer_nodes(self.model, original_name):
+                        if node == cast_node:
+                            continue
+                        for i, input_name in enumerate(node.input):
+                            if input_name == original_name:
+                                node.input[i] = pre_cast_name
                     # Ensure correct output tensor type
                     cast_to_precision = next(
                         attr.i for attr in cast_node.attribute if attr.name == "to"
@@ -1142,6 +1183,37 @@ class PrecisionConverter:
             self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
                 self.model
             )
+
+    def _deduplicate_network_output_producers(self):
+        for output in self.model.graph.output:
+            producer_nodes = onnx_utils.get_producer_nodes(self.model, output.name)
+            if len(producer_nodes) <= 1:
+                continue
+
+            cast_producers = [
+                node
+                for node in producer_nodes
+                if node.op_type == "Cast" and output.name in node.output
+            ]
+            if len(cast_producers) != 1:
+                continue
+
+            final_cast_node = cast_producers[0]
+            pre_cast_name = f"{output.name}_pre_cast"
+            for node in producer_nodes:
+                if node == final_cast_node:
+                    continue
+                for i, node_output in enumerate(node.output):
+                    if node_output == output.name:
+                        node.output[i] = pre_cast_name
+                        break
+
+            for node in onnx_utils.get_consumer_nodes(self.model, output.name):
+                if node == final_cast_node:
+                    continue
+                for i, input_name in enumerate(node.input):
+                    if input_name == output.name:
+                        node.input[i] = pre_cast_name
 
     def _sanity_check(self):
         sanity_ok = True
