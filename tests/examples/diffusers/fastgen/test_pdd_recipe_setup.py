@@ -204,7 +204,7 @@ def _raw_config(model_dir: pathlib.Path, *, qkv: bool = False) -> dict:
     return {
         "model": {
             "pretrained_model_name_or_path": str(model_dir),
-            "torch_dtype": "float32",
+            "torch_dtype": "bfloat16",
             "device": "cpu",
             "transformer_engine_linear": False,
             "peft": None,
@@ -422,6 +422,8 @@ def test_pdd_finetune_namespace_module_help() -> None:
         ("model", "guidance_embeds", True, "guidance embeddings"),
         ("model", "device_map", "auto", "device_map"),
         ("model", "quantization_config", {"bits": 8}, "quantization_config"),
+        ("model", "fuse_qkv_projections", True, "QKV fusion"),
+        ("model", "torch_dtype", "float32", "requires model.torch_dtype='bfloat16'"),
     ],
 )
 def test_incompatible_modes_fail_during_config_resolution(
@@ -509,7 +511,7 @@ def test_payload_hash_verification_mode_must_be_bool(tmp_path) -> None:
     raw = _raw_config(tmp_path)
     raw["data"]["dataloader"]["verify_payload_hashes"] = "false"
 
-    with pytest.raises(TypeError, match="data.dataloader.verify_payload_hashes must be bool"):
+    with pytest.raises(TypeError, match=r"data\.dataloader\.verify_payload_hashes must be bool"):
         resolve_pdd_recipe_config(raw)
 
 
@@ -575,7 +577,7 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     before = snapshot_installed_distribution()
     model_dir = create_tiny_qwen_image_pipeline_dir(tmp_path)
     initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
-    config = resolve_pdd_recipe_config(_raw_config(model_dir, qkv=True))
+    config = resolve_pdd_recipe_config(_raw_config(model_dir))
 
     source = build_pdd_setup(config)
 
@@ -597,6 +599,11 @@ def test_real_loader_manager_optimizer_and_checkpoint_restore(tmp_path) -> None:
     assert source.projection.out_features == source.projection.base_out_features * 4
     assert "proj_out.weight" in source.checkpoint_keys
     assert source.student.state_dict()["proj_out.weight"].shape[0] == source.projection.out_features
+    policy = source.distributed_setup.strategy_config.mp_policy
+    assert policy.param_dtype == torch.bfloat16
+    assert policy.reduce_dtype == torch.float32
+    assert policy.output_dtype == torch.bfloat16
+    assert policy.cast_forward_inputs is False
     assert not any(parameter.requires_grad for parameter in source.teacher.parameters())
     optimizer_parameters = [
         parameter for group in source.optimizer.param_groups for parameter in group["params"]

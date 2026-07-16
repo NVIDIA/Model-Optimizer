@@ -38,12 +38,14 @@ from pdd.export_qwen_image import collective_export_memory_preflight
 from pdd.inference_qwen_image import build_pdd_student
 from pdd.recipe import build_pdd_export_setup, resolve_pdd_recipe_config
 
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_FORWARD_SUBSTRATE
+
 
 def _raw_config(model_dir: pathlib.Path, checkpoint_dir: pathlib.Path) -> dict:
     return {
         "model": {
             "pretrained_model_name_or_path": str(model_dir),
-            "torch_dtype": "float32",
+            "torch_dtype": "bfloat16",
             "device": "cpu",
             "transformer_engine_linear": False,
             "peft": None,
@@ -134,10 +136,11 @@ def main() -> None:
                 )
                 identity = {
                     "schema_version": 1,
+                    "forward_substrate": dict(QWEN_IMAGE_PDD_FORWARD_SUBSTRATE),
                     "model": {
                         "id": "Qwen/Qwen-Image",
                         "revision": "3" * 40,
-                        "dtype": "float32",
+                        "dtype": "bfloat16",
                     },
                     "pdd_metadata": destination.metadata.to_dict(),
                     "guidance": {"scale": 4.0, "rescale": 1.0, "eps": 1e-5},

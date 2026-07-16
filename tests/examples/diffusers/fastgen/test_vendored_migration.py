@@ -201,6 +201,37 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
     assert out["metadata"]["sample_ids"].tolist() == [7, 7]
 
 
+def test_collate_zero_pads_variable_length_qwen_embeddings_and_masks():
+    pytest.importorskip("nemo_automodel")
+    torch = pytest.importorskip("torch")
+
+    from fastgen_data import collate_fn_text_to_image
+
+    def sample(sample_id, sequence_length):
+        return {
+            "latent": torch.full((4, 8, 8), float(sample_id)),
+            "crop_resolution": torch.tensor([8, 8]),
+            "original_resolution": torch.tensor([8, 8]),
+            "crop_offset": torch.tensor([0, 0]),
+            "prompt": f"prompt-{sample_id}",
+            "image_path": f"/source/{sample_id}.png",
+            "bucket_id": 0,
+            "aspect_ratio": 1.0,
+            "prompt_embeds": torch.full((sequence_length, 3), float(sample_id)),
+            "prompt_embeds_mask": torch.ones(sequence_length, dtype=torch.long),
+            "sample_id": sample_id,
+        }
+
+    result = collate_fn_text_to_image([sample(1, 5), sample(2, 3)])
+
+    assert result["text_embeddings"].shape == (2, 5, 3)
+    assert result["text_embeddings_mask"].tolist() == [
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 0, 0],
+    ]
+    torch.testing.assert_close(result["text_embeddings"][1, 3:], torch.zeros(2, 3))
+
+
 def test_partial_load_checkpointer_overrides_only_load_optimizer():
     """The subclass relaxes only optimizer load; model-state load stays strict (inherited)."""
     pytest.importorskip("nemo_automodel")

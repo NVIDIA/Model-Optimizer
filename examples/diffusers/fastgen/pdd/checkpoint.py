@@ -31,11 +31,12 @@ from typing import TYPE_CHECKING, Any
 import torch.distributed as dist
 
 from modelopt.torch.fastgen import PDDMetadata
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import require_qwen_image_pdd_forward_substrate
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_CHECKPOINT_SCHEMA_VERSION = 2
+_CHECKPOINT_SCHEMA_VERSION = 3
 _COMPLETE_SCHEMA_VERSION = 1
 _FORBIDDEN_ARTIFACT_TOKENS = ("fake_score", "discriminator", "ema", "r1", "gan")
 
@@ -159,6 +160,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 def build_pdd_checkpoint_identity(
     *,
     metadata: PDDMetadata,
+    forward_substrate: Mapping[str, Any],
     model_id: str,
     model_revision: str | None,
     guidance_scale: float | None,
@@ -228,6 +230,7 @@ def build_pdd_checkpoint_identity(
         raise ValueError(f"AutoModel snapshot is missing identity keys: {missing}.")
     return {
         "schema_version": _CHECKPOINT_SCHEMA_VERSION,
+        "forward_substrate": require_qwen_image_pdd_forward_substrate(forward_substrate),
         "model": {"id": model_id, "revision": model_revision, "dtype": dtype},
         "pdd_metadata": metadata.to_dict(),
         "guidance": {

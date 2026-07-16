@@ -19,6 +19,15 @@ The provided schedules use the 128-interval grid as follows:
 Install the shared requirements from the repository root, then launch with released AutoModel
 APIs. No AutoModel, Diffusers, or Qwen source changes are required.
 
+The reproducibility arm executes the Qwen forward semantics from FastGen MR210 commit
+`c8100b1347b278511336dccfc074a461457216ec`: BF16 image/text compute, FP32 normalized time through
+the timestep projection, and the MR attention behavior for zero-padded text. ModelOpt adopts the
+loaded Diffusers model into a compatible root without editing or monkeypatching external classes.
+The exact FastGen, Diffusers 0.38.0 transformer, and timestep-embedding source identities are
+authenticated in every checkpoint and export and are required again by resume and inference.
+Guidance-embedded/`zero_cond_t` models, additional time conditioning, ControlNet, PEFT, and QKV
+fusion are deliberately rejected because they are outside that executed algorithm.
+
 ```bash
 pip install -r examples/diffusers/fastgen/requirements.txt
 export MODELOPT_FASTGEN_DATASET_CACHE_DIR=/absolute/path/to/qwen_image_cache
@@ -47,7 +56,10 @@ treatment; the MR210 reference arm uses `5e-5` with 1,000 warmup steps. On 16 fo
 default per-rank batch gives global batch size 256; other GPU topologies must set per-rank batch to
 `256 / world_size` because this recipe does not use gradient accumulation.
 Checkpoints include the student, optimizer, scheduler, RNG, trainer, and exact replayable sampler
-state needed to resume the next committed batch.
+state needed to resume the next committed batch. FP32 master parameters and Adam state are sharded
+while forward/backward compute remains BF16 and gradient reduction remains FP32. The FSDP policy
+does not recursively cast forward inputs; ModelOpt casts image/text tensors to BF16 itself so the
+FP32 timestep cannot be rounded before the source-locked forward receives it.
 
 Start with a one-node smoke and scale only after it passes; project training runs are capped at 16
 nodes.

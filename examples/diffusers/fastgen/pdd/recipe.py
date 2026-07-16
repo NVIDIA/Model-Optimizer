@@ -32,7 +32,9 @@ from torch import nn
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDOutputProjection, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
     QwenImagePDDAdapter,
+    adopt_qwen_image_mr210_forward,
     convert_qwen_image_to_pdd,
 )
 
@@ -469,6 +471,8 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
         model.get("fuse_qkv_projections", False),
         name="model.fuse_qkv_projections",
     )
+    if fuse_qkv_projections:
+        raise ValueError("authenticated Qwen MR210 PDD does not support QKV fusion.")
 
     seed = _require_int_at_least(raw.get("seed", 42), name="seed", minimum=0)
     max_steps = _require_int_at_least(
@@ -566,6 +570,9 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
     )
     if guidance_eps == 0.0:
         raise ValueError("guidance.eps must be > 0.")
+    dtype = _resolve_dtype(model.get("torch_dtype", "bfloat16"))
+    if dtype != torch.bfloat16:
+        raise ValueError("authenticated Qwen MR210 PDD requires model.torch_dtype='bfloat16'.")
 
     return PDDRecipeConfig(
         model_id=model_id,
@@ -608,7 +615,7 @@ def resolve_pdd_recipe_config(raw: Any) -> PDDRecipeConfig:
         adam_betas=adam_betas,
         adam_eps=adam_eps,
         device=torch.device(model.get("device", "cuda" if torch.cuda.is_available() else "cpu")),
-        dtype=_resolve_dtype(model.get("torch_dtype", "bfloat16")),
+        dtype=dtype,
         fuse_qkv_projections=fuse_qkv_projections,
     )
 
@@ -796,7 +803,9 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
     )
     from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
-    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    pipe, loaded_transformer = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    student = adopt_qwen_image_mr210_forward(loaded_transformer)
+    pipe.transformer = student
     teacher = copy.deepcopy(student).eval().requires_grad_(False)
     lifecycle.append("load/select")
 
@@ -829,7 +838,7 @@ def build_pdd_setup(config: PDDRecipeConfig) -> PDDSetupArtifacts:
         mp_policy=MixedPrecisionPolicy(
             param_dtype=config.dtype,
             reduce_dtype=torch.float32,
-            output_dtype=None,
+            output_dtype=config.dtype,
             cast_forward_inputs=False,
         ),
     )
@@ -943,7 +952,9 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
     from nemo_automodel.components.distributed.fsdp2 import FSDP2Manager
 
     lifecycle = ["load/select"]
-    pipe, student = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    pipe, loaded_transformer = _load_unwrapped_transformer(config, NeMoAutoDiffusionPipeline)
+    student = adopt_qwen_image_mr210_forward(loaded_transformer)
+    pipe.transformer = student
     raw_transformer_config = getattr(student, "config", None)
     to_dict = getattr(raw_transformer_config, "to_dict", None)
     if callable(to_dict):
@@ -959,7 +970,7 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
     identity = _projection_identity(projection)
     metadata = PDDMetadata.from_config(config.pdd, projection)
     lifecycle.append("pdd_conversion")
-    student.to(device=config.device, dtype=config.dtype)
+    student.to(device=config.device, dtype=torch.float32)
     _require_projection_identity(student, projection, identity, stage="device placement")
     lifecycle.append("device")
 
@@ -977,7 +988,17 @@ def build_pdd_export_setup(config: PDDRecipeConfig) -> PDDExportSetupArtifacts:
             f"Pure-DP PDD export requires fsdp.dp_size ({dp_size}) to equal world size "
             f"({world_size})."
         )
-    strategy = FSDP2Config(activation_checkpointing=False)
+    from torch.distributed.fsdp import MixedPrecisionPolicy
+
+    strategy = FSDP2Config(
+        activation_checkpointing=False,
+        mp_policy=MixedPrecisionPolicy(
+            param_dtype=config.dtype,
+            reduce_dtype=torch.float32,
+            output_dtype=config.dtype,
+            cast_forward_inputs=False,
+        ),
+    )
     distributed_setup = DistributedSetup.build(
         strategy=strategy,
         parallelism_sizes=ParallelismSizes(dp_size=dp_size),
@@ -1148,6 +1169,7 @@ class PDDDiffusionRecipe:
 
         identity = build_pdd_checkpoint_identity(
             metadata=self.setup_artifacts.metadata,
+            forward_substrate=QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
             model_id=config.model_id,
             model_revision=config.model_revision,
             guidance_scale=config.pdd.guidance_scale,

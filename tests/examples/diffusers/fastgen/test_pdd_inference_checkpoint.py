@@ -43,6 +43,7 @@ from pdd.inference_qwen_image import _normalize_prompt_condition, _validate_qwen
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
     QwenImagePDDAdapter,
     convert_qwen_image_to_pdd,
 )
@@ -52,8 +53,8 @@ class _TinyQwen(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(guidance_embeds=False, in_channels=4)
-        self.backbone = nn.Linear(4, 5)
-        self.proj_out = nn.Linear(5, 4)
+        self.backbone = nn.Linear(4, 5, dtype=torch.bfloat16)
+        self.proj_out = nn.Linear(5, 4, dtype=torch.bfloat16)
         self.calls = 0
 
     def forward(
@@ -69,10 +70,14 @@ class _TinyQwen(nn.Module):
     ):
         del img_shapes, guidance, return_dict
         condition = encoder_hidden_states.mean(dim=(1, 2), keepdim=True)
-        condition += encoder_hidden_states_mask.sum(dim=1)[:, None, None] / 100
+        condition += (encoder_hidden_states_mask.sum(dim=1)[:, None, None] / 100).to(
+            condition.dtype
+        )
         hidden = torch.tanh(self.backbone(hidden_states))
         self.calls += 1
-        return (self.proj_out(hidden + condition + timestep[:, None, None] / 10),)
+        hidden = hidden + condition
+        hidden = hidden + (timestep[:, None, None] / 10).to(hidden.dtype)
+        return (self.proj_out(hidden),)
 
 
 def _config(blocks=(32, 32, 32, 32)) -> PDDConfig:
@@ -104,7 +109,8 @@ def _converted(seed: int = 17):
 def _identity(metadata: PDDMetadata) -> dict:
     return {
         "schema_version": 1,
-        "model": {"id": "synthetic-qwen", "revision": "f" * 40, "dtype": "float32"},
+        "forward_substrate": dict(QWEN_IMAGE_PDD_FORWARD_SUBSTRATE),
+        "model": {"id": "synthetic-qwen", "revision": "f" * 40, "dtype": "bfloat16"},
         "pdd_metadata": metadata.to_dict(),
         "guidance": {"scale": 4.0, "rescale": 1.0, "eps": 1e-5},
         "automodel": {
@@ -132,17 +138,24 @@ def _write(tmp_path: pathlib.Path):
             "completed_steps": 10,
         },
         modelopt_source={"commit": "4" * 40, "dirty": False},
-        max_shard_bytes=12_000,
+        max_shard_bytes=5_800,
     )
     return output, model, config, metadata
 
 
 def _condition():
-    return torch.tensor([[[0.2, -0.3], [0.1, 0.4]]]), torch.ones(1, 2, dtype=torch.long)
+    return torch.tensor([[[0.2, -0.3], [0.1, 0.4]]], dtype=torch.bfloat16), torch.ones(
+        1, 2, dtype=torch.long
+    )
 
 
 def _sample(model: nn.Module, config: PDDConfig, noise: torch.Tensor) -> torch.Tensor:
-    pipeline = PDDPipeline(model, nn.Identity(), config, QwenImagePDDAdapter(config))
+    pipeline = PDDPipeline(
+        model,
+        nn.Identity(),
+        config,
+        QwenImagePDDAdapter(config, compute_dtype=torch.bfloat16),
+    )
     return pipeline.sample(noise.clone(), condition=_condition())
 
 
@@ -265,6 +278,28 @@ def test_export_rejects_unpinned_local_model_identity(tmp_path) -> None:
             modelopt_source={"commit": "4" * 40, "dirty": False},
             max_shard_bytes=12_000,
         )
+
+
+def test_export_rejects_missing_or_mismatched_forward_substrate(tmp_path) -> None:
+    model, _config_value, metadata = _converted()
+    for substrate in (None, {**QWEN_IMAGE_PDD_FORWARD_SUBSTRATE, "id": "canonical"}):
+        identity = _identity(metadata)
+        identity["forward_substrate"] = substrate
+        with pytest.raises(ValueError, match="authenticated MR210"):
+            write_pdd_export(
+                tmp_path / f"bad-substrate-{substrate is None}",
+                model.state_dict(),
+                metadata=metadata,
+                transformer_config={"in_channels": 4},
+                identity=identity,
+                source_checkpoint={
+                    "name": "step_00000010",
+                    "manifest_sha256": "3" * 64,
+                    "completed_steps": 10,
+                },
+                modelopt_source={"commit": "4" * 40, "dirty": False},
+                max_shard_bytes=12_000,
+            )
 
 
 def test_export_rejects_nonfinite_and_existing_destination(tmp_path) -> None:

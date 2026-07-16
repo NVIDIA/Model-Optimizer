@@ -51,6 +51,8 @@ from pdd.training import prepare_qwen_pdd_batch
 from pdd.verify_readonly_automodel import snapshot_installed_distribution
 from pdd_test_utils import SamplerDataset, build_toy_lifecycle, make_batch, ordered_id_sha256
 
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_FORWARD_SUBSTRATE
+
 
 def _released_sampler(sample_ids: tuple[str, ...]) -> ReplayableBatchSampler:
     sampler_module = pytest.importorskip("nemo_automodel.components.datasets.diffusion.sampler")
@@ -98,6 +100,7 @@ def _checkpointer(lifecycle, checkpoint_dir):
 def _identity(lifecycle, scheduler, sample_ids):
     return build_pdd_checkpoint_identity(
         metadata=lifecycle.metadata,
+        forward_substrate=QWEN_IMAGE_PDD_FORWARD_SUBSTRATE,
         model_id="synthetic-pdd-toy",
         model_revision=None,
         guidance_scale=None,

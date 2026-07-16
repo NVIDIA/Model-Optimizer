@@ -31,7 +31,10 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt.torch.fastgen import PDDConfig, PDDMetadata
-from modelopt.torch.fastgen.plugins.qwen_image_pdd import QWEN_IMAGE_PDD_LAYER_SPEC
+from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+    QWEN_IMAGE_PDD_LAYER_SPEC,
+    require_qwen_image_pdd_forward_substrate,
+)
 
 from .artifacts import (
     load_canonical_json,
@@ -41,7 +44,7 @@ from .artifacts import (
     write_canonical_json,
 )
 
-_EXPORT_SCHEMA_VERSION = 1
+_EXPORT_SCHEMA_VERSION = 2
 _COMPLETE_SCHEMA_VERSION = 1
 _EXPORT_FORMAT = "modelopt-pdd-safetensors"
 _CONFIG_FILE = "config.json"
@@ -167,12 +170,20 @@ def _bounded_shard_groups(
 def _validate_identity(identity: Mapping[str, Any], metadata: PDDMetadata) -> dict[str, Any]:
     if not isinstance(identity, Mapping):
         raise TypeError("PDD export identity must be a mapping.")
-    required = {"automodel", "guidance", "model", "pdd_metadata", "topology"}
+    required = {
+        "automodel",
+        "forward_substrate",
+        "guidance",
+        "model",
+        "pdd_metadata",
+        "topology",
+    }
     missing = sorted(required.difference(identity))
     if missing:
         raise ValueError(f"PDD export identity is missing keys: {missing}.")
     if identity["pdd_metadata"] != metadata.to_dict():
         raise ValueError("PDD export metadata does not match the checkpoint identity.")
+    require_qwen_image_pdd_forward_substrate(identity["forward_substrate"])
     model = _require_exact_mapping(
         identity["model"], {"id", "revision", "dtype"}, name="identity.model"
     )

@@ -117,19 +117,29 @@ def build_pdd_student(export_dir: str | Path) -> tuple[nn.Module, Any, torch.dty
     """Reconstruct and strictly load the converted Qwen student on CPU."""
     from diffusers import QwenImageTransformer2DModel
 
-    from modelopt.torch.fastgen.plugins.qwen_image_pdd import convert_qwen_image_to_pdd
+    from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
+        adopt_qwen_image_mr210_forward,
+        convert_qwen_image_to_pdd,
+        require_qwen_image_pdd_forward_substrate,
+    )
     from pdd.export import inspect_pdd_export, load_pdd_export_into_model, pdd_config_from_metadata
 
     descriptor = inspect_pdd_export(export_dir)
     model_identity = _model_identity(descriptor)
+    require_qwen_image_pdd_forward_substrate(
+        descriptor.manifest["identity"].get("forward_substrate")
+    )
     dtype = _dtype_from_name(model_identity["dtype"])
-    student = QwenImageTransformer2DModel.from_config(dict(descriptor.transformer_config))
+    loaded_transformer = QwenImageTransformer2DModel.from_config(
+        dict(descriptor.transformer_config)
+    )
+    student = adopt_qwen_image_mr210_forward(loaded_transformer)
     metadata = descriptor.metadata
     _validate_qwen_projection(student, metadata)
     config = pdd_config_from_metadata(metadata, blocks=metadata.inference_blocks)
     convert_qwen_image_to_pdd(student, config)
-    student.to(dtype=dtype)
     descriptor = load_pdd_export_into_model(export_dir, student)
+    student.to(dtype=dtype)
     return student, descriptor, dtype
 
 
@@ -256,7 +266,7 @@ def main() -> None:
     )
     pipe.to(device)
     config = pdd_config_from_metadata(descriptor.metadata, schedule=args.schedule)
-    adapter = QwenImagePDDAdapter(config)
+    adapter = QwenImagePDDAdapter(config, compute_dtype=dtype)
     sampler = PDDPipeline(student, nn.Identity(), config, adapter)
     prompt_embeds, prompt_mask = pipe.encode_prompt(
         prompt=args.prompt,
@@ -318,6 +328,7 @@ def main() -> None:
         "blocks": list(config.inference_blocks),
         "height": args.height,
         "width": args.width,
+        "forward_substrate_id": descriptor.manifest["identity"]["forward_substrate"]["id"],
         "export_manifest_sha256": sha256_file(descriptor.root / "manifest.json"),
         "output": {"path": output_reference, "sha256": sha256_file(output)},
         "scheduler_steps": expected_invocations,

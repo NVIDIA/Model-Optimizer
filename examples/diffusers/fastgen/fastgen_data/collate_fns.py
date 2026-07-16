@@ -40,6 +40,7 @@ from pathlib import Path
 
 import torch
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
+from torch.nn.utils.rnn import pad_sequence
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from .paths import resolve_under_root
@@ -89,7 +90,11 @@ def collate_fn_text_to_image(
     image_batch = {
         "image_latents": torch.stack([item["latent"] for item in batch]),
         "data_type": "image",
-        "text_embeddings": torch.stack([item["prompt_embeds"] for item in batch]),
+        "text_embeddings": pad_sequence(
+            [item["prompt_embeds"] for item in batch],
+            batch_first=True,
+            padding_value=0.0,
+        ),
         "metadata": {
             "prompts": [item["prompt"] for item in batch],
             "image_paths": [item["image_path"] for item in batch],
@@ -108,9 +113,14 @@ def collate_fn_text_to_image(
             image_batch[key] = torch.stack([item[key] for item in batch])
 
     # DMD2 text mask: the stock production collate does not stack ``prompt_embeds_mask``.
-    if "prompt_embeds_mask" in batch[0]:
-        image_batch["text_embeddings_mask"] = torch.stack(
-            [item["prompt_embeds_mask"] for item in batch]
+    mask_presence = ["prompt_embeds_mask" in item for item in batch]
+    if any(mask_presence) and not all(mask_presence):
+        raise ValueError("prompt_embeds_mask must be present for every sample or none.")
+    if all(mask_presence):
+        image_batch["text_embeddings_mask"] = pad_sequence(
+            [item["prompt_embeds_mask"] for item in batch],
+            batch_first=True,
+            padding_value=0,
         )
 
     if negative_text_embeddings is not None:
