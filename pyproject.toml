@@ -288,7 +288,13 @@ module = ["examples.diffusers.fastgen.preprocess.*"]
 ignore_errors = true
 
 [tool.bandit]
-exclude_dirs = [".github/", "examples/", "noxfile.py", "tests/"]
+exclude_dirs = [
+    ".agents/skills/benchmark-model-kernels/",
+    ".github/",
+    "examples/",
+    "noxfile.py",
+    "tests/",
+]
 # Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
 # Use of `# nosec BXXX` requires special approval
 skips = [
