@@ -234,6 +234,16 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--doge_virtual_step_candidate_weights is provided."
         ),
     )
+    doge.add_argument(
+        "--doge_alignment_param_scope",
+        choices=("final_mlp", "all_trainable"),
+        default="final_mlp",
+        help=(
+            "Parameter scope for DoGE gradient scoring and virtual-step diagnostics. "
+            "'final_mlp' is the cheap Qwen3-8B PoC probe; 'all_trainable' is expensive and "
+            "intended only for diagnostics."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -348,6 +358,7 @@ def main(args: argparse.Namespace) -> None:
             if args.doge_virtual_step_candidate_weights
             else None
         ),
+        alignment_param_scope=args.doge_alignment_param_scope,
     )
 
     print("Initial DoGE blend weights:")

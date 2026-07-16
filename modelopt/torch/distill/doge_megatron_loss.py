@@ -19,7 +19,7 @@ import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import torch
 import torch.distributed as dist
@@ -31,8 +31,11 @@ from megatron.core.utils import get_model_config
 
 from modelopt.torch.distill.doge_megatron_data import _GPTBatch
 
+DoGEAlignmentParamScope = Literal["final_mlp", "all_trainable"]
+
 __all__ = [
     "DoGEAlignmentDiagnostics",
+    "DoGEAlignmentParamScope",
     "DoGEVirtualStepDiagnostic",
     "compute_alignment_scores",
     "compute_virtual_step_diagnostics",
@@ -54,7 +57,7 @@ class DoGEAlignmentDiagnostics:
 
 
 class DoGEVirtualStepDiagnostic(TypedDict):
-    """Target-probe result after one virtual selected-parameter step."""
+    """Target-probe result after one virtual selected-scope step."""
 
     blend_weights: dict[str, float]
     target_probe_kd_before: float
@@ -215,7 +218,7 @@ def zero_weighted_source_forward_step(
     return output_tensor, partial(_zero_weighted_loss, loss_function)
 
 
-# The functions below compute selected-parameter gradients for the DoGE outer loop.
+# The functions below compute selected-scope gradients for the DoGE outer loop.
 # They reuse the same Megatron-Bridge GPT forward and ModelOpt KD-loss path as the training loss,
 # but read only the selected gradients before clearing them so scoring does not affect training.
 def _clear_model_grads(model: GPTModel) -> None:
@@ -232,23 +235,34 @@ def _clear_model_grads(model: GPTModel) -> None:
             parameter.main_grad.zero_()
 
 
-def _get_alignment_parameters(model: GPTModel) -> list[torch.nn.Parameter]:
-    """Return hardcoded Qwen3-8B final-MLP projection parameters for DoGE scoring."""
-    # TODO: Temporary DoGE PoC selector for Qwen3-8B. DoGE computes source and target KD gradients
-    # on this parameter, compares their directions, and uses the score to update data-blend
-    # weights. Make this configurable before using other models.
-    alignment_param_suffix = "decoder.layers.35.mlp.linear_fc2.weight"
-    parameters = [
-        parameter
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad and name.endswith(alignment_param_suffix)
-    ]
-    if not parameters:
-        raise RuntimeError(
-            "DoGE alignment parameter not found: expected a trainable parameter ending with "
-            f"{alignment_param_suffix!r}."
-        )
-    return parameters
+def _get_alignment_parameters(
+    model: GPTModel, alignment_param_scope: DoGEAlignmentParamScope
+) -> list[torch.nn.Parameter]:
+    """Return parameters used for DoGE gradient-alignment scoring."""
+    if alignment_param_scope == "all_trainable":
+        parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        if not parameters:
+            raise RuntimeError("DoGE alignment found no trainable parameters.")
+        return parameters
+
+    if alignment_param_scope == "final_mlp":
+        # TODO: Temporary DoGE PoC selector for Qwen3-8B. DoGE computes source and target KD
+        # gradients on this parameter, compares their directions, and uses the score to update
+        # data-blend weights.
+        alignment_param_suffix = "decoder.layers.35.mlp.linear_fc2.weight"
+        parameters = [
+            parameter
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad and name.endswith(alignment_param_suffix)
+        ]
+        if not parameters:
+            raise RuntimeError(
+                "DoGE alignment parameter not found: expected a trainable parameter ending with "
+                f"{alignment_param_suffix!r}."
+            )
+        return parameters
+
+    raise ValueError(f"Unsupported DoGE alignment parameter scope: {alignment_param_scope!r}")
 
 
 def _read_parameter_gradient(parameter: torch.nn.Parameter) -> torch.Tensor:
@@ -265,13 +279,14 @@ def _calc_alignment_gradient_vector(
     state: GlobalState,
     batch: _GPTBatch,
     model: GPTModel,
+    alignment_param_scope: DoGEAlignmentParamScope,
 ) -> tuple[torch.Tensor, float]:
-    """Return a selected-parameter KD gradient vector and normalized KD loss.
+    """Return a KD gradient vector and normalized KD loss for the selected parameter scope.
 
     The PoC uses Qwen3-8B's final MLP output projection as an approximation to full-model DoGE
-    gradients. The probe uses normal backward and then reads the selected parameter's Megatron grad
-    buffer; gradients are cleared before and after scoring so they do not leak into the optimizer
-    step.
+    gradients by default. ``all_trainable`` is an experiment-only diagnostic scope that reads
+    gradients for every trainable local parameter shard. Gradients are cleared before and after
+    scoring so they do not leak into the optimizer step.
 
     The forward/loss construction mirrors ``megatron.bridge.training.gpt_step.forward_step_modelopt``:
     run the GPT forward pass, build the ModelOpt KD loss with ``_create_loss_function_modelopt()``,
@@ -285,7 +300,7 @@ def _calc_alignment_gradient_vector(
     path.
     """
     _clear_model_grads(model)
-    parameters = _get_alignment_parameters(model)
+    parameters = _get_alignment_parameters(model, alignment_param_scope)
     no_sync = model.no_sync() if hasattr(model, "no_sync") else contextlib.nullcontext()
     with no_sync:
         output, loss_mask = _forward_batch(batch, model)
@@ -301,7 +316,7 @@ def _calc_alignment_gradient_vector(
     probe_loss = _reduce_probe_loss(loss, num_tokens)
     vector = torch.cat([_read_parameter_gradient(parameter) for parameter in parameters])
     _clear_model_grads(model)
-    # BF16 probe backward can overflow a small number of entries in this large projection layer.
+    # BF16 probe backward can overflow a small number of entries in the selected gradient vector.
     # DoGE scoring only needs a direction; zero non-finite entries so they do not poison the score.
     return torch.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0), probe_loss
 
@@ -345,8 +360,8 @@ def _calc_alignment_score(
     """Return one DoGE source-to-target alignment score.
 
     Args:
-        source_gradient: Flattened selected-parameter KD gradient for one training source.
-        target_gradient: Flattened selected-parameter KD gradient for the target objective.
+        source_gradient: Flattened selected-scope KD gradient for one training source.
+        target_gradient: Flattened selected-scope KD gradient for the target objective.
 
     Returns:
         A cosine-similarity score and debug values used to compute it. Higher scores mean the
@@ -399,6 +414,7 @@ def compute_alignment_scores(
     target_batch: _GPTBatch,
     model: GPTModel,
     blend_weights: dict[str, float],
+    alignment_param_scope: DoGEAlignmentParamScope,
 ) -> DoGEAlignmentDiagnostics:
     """Compute source-to-target gradient-alignment scores for DoGE weight updates.
 
@@ -408,7 +424,7 @@ def compute_alignment_scores(
     Probe KD losses are one-batch diagnostics from the same batches used for alignment scoring.
     """
     target_gradient, target_probe_kd_loss = _calc_alignment_gradient_vector(
-        state, target_batch, model
+        state, target_batch, model, alignment_param_scope
     )
     target_token_sum = int(target_batch[0].sum().item())
     scores = {}
@@ -416,7 +432,9 @@ def compute_alignment_scores(
     source_probe_kd_loss = {}
     source_gradients = {}
     for path, batch in source_batches.items():
-        source_gradient, probe_loss = _calc_alignment_gradient_vector(state, batch, model)
+        source_gradient, probe_loss = _calc_alignment_gradient_vector(
+            state, batch, model, alignment_param_scope
+        )
         score, debug = _calc_alignment_score(source_gradient, target_gradient)
         source_gradients[path] = source_gradient
         scores[path] = score
@@ -447,19 +465,23 @@ def compute_virtual_step_diagnostics(
     candidate_blend_weights: Mapping[str, Mapping[str, float]],
     virtual_step_lr: float,
     target_probe_kd_loss: float,
+    alignment_param_scope: DoGEAlignmentParamScope,
 ) -> dict[str, DoGEVirtualStepDiagnostic]:
-    """Measure target-KD change after virtual selected-parameter steps for candidate blends.
+    """Measure target-KD change after virtual selected-scope steps for candidate blends.
 
     For each candidate blend, this helper mixes the already-computed source gradients, temporarily
     applies ``param -= virtual_step_lr * mixed_gradient`` to the selected DoGE alignment
-    parameter, evaluates target KD on the same target batch, and restores the original parameter.
+    parameters, evaluates target KD on the same target batch, and restores the original parameter
+    values.
     The real model and real blend weights are unchanged.
     """
     diagnostics: dict[str, DoGEVirtualStepDiagnostic] = {}
     for label, weights in candidate_blend_weights.items():
         mixed_gradient = _mix_source_gradients(source_gradients, weights)
         virtual_gradient_norm = _reduced_vector_norm(mixed_gradient)
-        with _temporary_alignment_parameter_step(model, mixed_gradient, virtual_step_lr):
+        with _temporary_alignment_parameter_step(
+            model, mixed_gradient, virtual_step_lr, alignment_param_scope
+        ):
             target_probe_kd_after = _calc_probe_kd_loss(state, target_batch, model)
         diagnostics[label] = {
             "blend_weights": dict(weights),
@@ -500,16 +522,23 @@ def _reduced_vector_norm(vector: torch.Tensor) -> float:
 
 @contextlib.contextmanager
 def _temporary_alignment_parameter_step(
-    model: GPTModel, gradient_vector: torch.Tensor, virtual_step_lr: float
+    model: GPTModel,
+    gradient_vector: torch.Tensor,
+    virtual_step_lr: float,
+    alignment_param_scope: DoGEAlignmentParamScope,
 ):
-    """Temporarily apply a selected-parameter SGD step and restore original values."""
-    parameters = _get_alignment_parameters(model)
+    """Temporarily apply a selected-scope SGD step and restore original values."""
+    parameters = _get_alignment_parameters(model, alignment_param_scope)
     original_values = [parameter.detach().clone() for parameter in parameters]
     offset = 0
     try:
         with torch.no_grad():
             for parameter in parameters:
                 numel = parameter.numel()
+                # ``gradient_vector`` concatenates gradients for all selected parameters. Slice
+                # this parameter's shard and apply one virtual SGD step:
+                #     theta <- theta - virtual_step_lr * grad
+                # PyTorch ``add_(grad, alpha=-lr)`` performs ``theta += -lr * grad`` in place.
                 gradient = gradient_vector[offset : offset + numel].view_as(parameter)
                 parameter.add_(gradient.to(dtype=parameter.dtype), alpha=-virtual_step_lr)
                 offset += numel

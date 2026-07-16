@@ -33,6 +33,7 @@ from modelopt.torch.distill.doge_megatron_data import (
     _next_doge_batches,
 )
 from modelopt.torch.distill.doge_megatron_loss import (
+    DoGEAlignmentParamScope,
     DoGEVirtualStepDiagnostic,
     compute_alignment_scores,
     compute_virtual_step_diagnostics,
@@ -57,6 +58,7 @@ class DoGEForwardStep:
         freeze_blend: bool = False,
         virtual_step_candidate_weights: list[list[float]] | None = None,
         virtual_step_lr: float | None = None,
+        alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
@@ -72,6 +74,8 @@ class DoGEForwardStep:
             virtual_step_candidate_weights: Optional source-order candidate blend weights used
                 for frozen-model/frozen-blend virtual-step diagnostics.
             virtual_step_lr: Learning rate for virtual selected-parameter diagnostic steps.
+            alignment_param_scope: Parameter scope used for DoGE gradient scoring and virtual-step
+                diagnostics. ``all_trainable`` is intended for expensive diagnostic runs.
         """
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -86,6 +90,7 @@ class DoGEForwardStep:
             virtual_step_candidate_weights, tuple(self.blend_weights)
         )
         self.virtual_step_lr = virtual_step_lr
+        self.alignment_param_scope = alignment_param_scope
 
     def write_trajectory_record(
         self,
@@ -181,7 +186,12 @@ class DoGEForwardStep:
         # Outer loop: use the target batch to score each source batch and propose a data-blend
         # update. This changes only ``self.blend_weights`` unless blend updates are frozen.
         alignment_result = compute_alignment_scores(
-            state, source_batches, target_batch, model, self.blend_weights
+            state,
+            source_batches,
+            target_batch,
+            model,
+            self.blend_weights,
+            self.alignment_param_scope,
         )
         virtual_step_diagnostics = None
         if self.virtual_step_candidate_blend_weights:
@@ -195,6 +205,7 @@ class DoGEForwardStep:
                 self.virtual_step_candidate_blend_weights,
                 self.virtual_step_lr,
                 alignment_result.target_probe_kd_loss,
+                self.alignment_param_scope,
             )
 
         candidate_blend_weights = dict(
