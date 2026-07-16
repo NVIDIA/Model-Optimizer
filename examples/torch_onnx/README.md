@@ -69,6 +69,11 @@ python torch_quant_to_onnx.py \
     --onnx_save_path=<path to save the exported ONNX model>
 ```
 
+Quantization configs are loaded from the YAML preset recipes under
+`modelopt_recipes/configs/ptq/presets/model/`, selected by `--quantize_mode`. Pass
+`--recipe=<preset basename or path to a QuantizeConfig YAML>` to use a different
+recipe (e.g. `--recipe=nvfp4_awq_lite` or `--recipe=/path/to/my_quant_cfg.yaml`).
+
 ### Conv2d Quantization Override
 
 TensorRT only supports FP8 and INT8 for convolution operations. When quantizing models with Conv2d layers (like SwinTransformer), the script automatically applies the following overrides:
@@ -92,6 +97,53 @@ python ../onnx_ptq/evaluate.py \
     --engine_precision=stronglyTyped \
     --model_name=<timm model name>
 ```
+
+## HF Embedding Models
+
+`hf_embedding_quant_to_onnx.py` quantizes an HF text-embedding model
+(a bidirectional Llama encoder such as
+[nvidia/llama-nemotron-embed-1b-v2](https://huggingface.co/nvidia/llama-nemotron-embed-1b-v2))
+with a PTQ recipe and exports it to ONNX. The exported graph wraps the encoder
+with mean pooling and L2 normalization and takes `input_ids` and
+`attention_mask` with dynamic batch/sequence axes.
+
+The default recipe
+(`modelopt_recipes/huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
+quantizes weights and activations to NVFP4 and additionally quantizes the
+projection-Linear outputs. Without output-side quantization, TensorRT's NVFP4
+GEMMs emit FP16 activations, so FP4 engines can use more activation memory than
+FP8 engines whose output-side Q/DQ enables FP8-out kernels; quantizing the
+projection outputs keeps inter-layer activations in FP4 and roughly halves the
+engine's activation memory relative to the plain `nvfp4` preset on this model.
+
+### Usage
+
+```bash
+python hf_embedding_quant_to_onnx.py \
+    --model_path=nvidia/llama-nemotron-embed-1b-v2 \
+    --recipe=huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj \
+    --onnx_save_path=llama_nemotron_embed_nvfp4.onnx
+```
+
+### Building a TensorRT engine with trtexec
+
+NVFP4 requires a Blackwell GPU (SM100+) and TensorRT 10.11 or later. Build a
+strongly-typed engine with dynamic shapes (add optimization profiles matching
+your serving batch sizes and sequence lengths):
+
+```bash
+trtexec --onnx=llama_nemotron_embed_nvfp4.onnx \
+    --stronglyTyped \
+    --saveEngine=llama_nemotron_embed_nvfp4.plan \
+    --minShapes=input_ids:1x2,attention_mask:1x2 \
+    --optShapes=input_ids:32x128,attention_mask:32x128 \
+    --maxShapes=input_ids:32x512,attention_mask:32x512
+```
+
+The exported `.onnx` references a sibling weights file (`<name>.onnx_data`);
+keep the two files in the same directory when building. To inspect the chosen
+kernels and per-profile activation memory, add
+`--profilingVerbosity=detailed --exportLayerInfo=<path>.json --verbose`.
 
 ## LLM Quantization and Export with TensorRT-Edge-LLM
 
@@ -283,7 +335,7 @@ The `auto` mode enables mixed precision quantization by searching for the optima
 python torch_quant_to_onnx.py \
     --timm_model_name=vit_base_patch16_224 \
     --quantize_mode=auto \
-    --auto_quantization_formats NVFP4_AWQ_LITE_CFG FP8_DEFAULT_CFG \
+    --auto_quantization_formats nvfp4_awq_lite fp8 \
     --effective_bits=4.8 \
     --num_score_steps=128 \
     --calibration_data_size=512 \
