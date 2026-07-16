@@ -46,3 +46,20 @@ def test_torch_onnx(model_key, quantize_mode):
     )
     cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
+
+
+def test_torch_onnx_recipe_flag():
+    timm_model_name, model_kwargs = _MODELS["vit_tiny"]
+
+    cmd_parts = extend_cmd_parts(
+        ["python", "torch_quant_to_onnx.py"],
+        timm_model_name=timm_model_name,
+        model_kwargs=model_kwargs,
+        quantize_mode="nvfp4",
+        recipe="configs/ptq/presets/model/nvfp4",
+        onnx_save_path="vit_tiny.recipe.onnx",
+        calibration_data_size="1",
+        num_score_steps="1",
+    )
+    cmd_parts.extend(["--no_pretrained", "--trt_build"])
+    run_example_command(cmd_parts, "torch_onnx")
