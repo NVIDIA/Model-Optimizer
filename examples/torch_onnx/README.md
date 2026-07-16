@@ -98,14 +98,17 @@ python ../onnx_ptq/evaluate.py \
     --model_name=<timm model name>
 ```
 
-## HF Embedding Models
+## HF Embedding and Reranking Models
 
-`hf_embedding_quant_to_onnx.py` quantizes an HF text-embedding model
-(a bidirectional Llama encoder such as
-[nvidia/llama-nemotron-embed-1b-v2](https://huggingface.co/nvidia/llama-nemotron-embed-1b-v2))
-with a PTQ recipe and exports it to ONNX. The exported graph wraps the encoder
-with mean pooling and L2 normalization and takes `input_ids` and
-`attention_mask` with dynamic batch/sequence axes.
+`hf_embedding_quant_to_onnx.py` quantizes an HF text-embedding or reranking
+model (bidirectional Llama encoders such as
+[nvidia/llama-nemotron-embed-1b-v2](https://huggingface.co/nvidia/llama-nemotron-embed-1b-v2)
+and
+[nvidia/llama-nemotron-rerank-1b-v2](https://huggingface.co/nvidia/llama-nemotron-rerank-1b-v2))
+with a PTQ recipe and exports it to ONNX. Embedding models are exported with
+mean pooling and L2 normalization on top of the encoder; reranking
+(sequence-classification) models are exported to their relevance logits. Both
+graphs take `input_ids` and `attention_mask` with dynamic batch/sequence axes.
 
 The default recipe
 (`modelopt_recipes/huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
@@ -113,8 +116,14 @@ quantizes weights and activations to NVFP4 and additionally quantizes the
 projection-Linear outputs. Without output-side quantization, TensorRT's NVFP4
 GEMMs emit FP16 activations, so FP4 engines can use more activation memory than
 FP8 engines whose output-side Q/DQ enables FP8-out kernels; quantizing the
-projection outputs keeps inter-layer activations in FP4 and roughly halves the
-engine's activation memory relative to the plain `nvfp4` preset on this model.
+projection outputs keeps inter-layer activations in FP4. With TensorRT 10.16 on
+RTX PRO 6000 Blackwell (strongly-typed engines, 5 dynamic-shape profiles up to
+32x512), engine activation memory vs the plain `nvfp4` preset:
+
+| Model | `nvfp4` preset | This recipe |
+|-------|---------------:|------------:|
+| llama-nemotron-embed-1b-v2 | 1040 MiB | 516 MiB |
+| llama-nemotron-rerank-1b-v2 | 520 MiB | 331 MiB |
 
 ### Usage
 
@@ -123,6 +132,11 @@ python hf_embedding_quant_to_onnx.py \
     --model_path=nvidia/llama-nemotron-embed-1b-v2 \
     --recipe=huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj \
     --onnx_save_path=llama_nemotron_embed_nvfp4.onnx
+
+# Reranking variant (auto-detected from the model architecture)
+python hf_embedding_quant_to_onnx.py \
+    --model_path=nvidia/llama-nemotron-rerank-1b-v2 \
+    --onnx_save_path=llama_nemotron_rerank_nvfp4.onnx
 ```
 
 ### Building a TensorRT engine with trtexec

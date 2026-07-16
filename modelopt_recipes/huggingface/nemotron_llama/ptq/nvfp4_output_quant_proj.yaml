@@ -39,3 +39,7 @@ quantize:
     - quantizer_name: '*_proj.output_quantizer'
       cfg:
         $import: nvfp4
+    # Reranker (sequence-classification) score head: keep in high precision like
+    # lm_head; its [1, hidden] weight also cannot be packed by the NVFP4 exporter.
+    - quantizer_name: '*score*'
+      enable: false

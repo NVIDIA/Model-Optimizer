@@ -18,22 +18,24 @@ import os
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 """
-Quantize an HF embedding model (bidirectional Llama encoder, e.g.
-nvidia/llama-nemotron-embed-1b-v2) with a PTQ recipe and export it to ONNX for
-TensorRT deployment.
+Quantize an HF embedding or reranking model (bidirectional Llama encoder, e.g.
+nvidia/llama-nemotron-embed-1b-v2 or nvidia/llama-nemotron-rerank-1b-v2) with a
+PTQ recipe and export it to ONNX for TensorRT deployment.
 
 The default recipe quantizes weights and activations to NVFP4 and additionally
 quantizes the projection-Linear outputs so the TensorRT engine keeps
 inter-layer activations in FP4 (see modelopt_recipes/huggingface/nemotron_llama/).
-The exported graph wraps the encoder with mean pooling and L2 normalization,
-taking (input_ids, attention_mask) with dynamic batch/sequence axes.
+Embedding models are exported with mean pooling and L2 normalization on top of
+the encoder; reranking (sequence-classification) models are exported to their
+relevance logits. Both graphs take (input_ids, attention_mask) with dynamic
+batch/sequence axes.
 """
 
 DEFAULT_RECIPE = "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj"
@@ -73,6 +75,17 @@ class EmbeddingModel(torch.nn.Module):
         mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
         pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
         return F.normalize(pooled, p=2, dim=1)
+
+
+class RerankModel(torch.nn.Module):
+    """Sequence-classification reranker exported to its relevance logits."""
+
+    def __init__(self, base):
+        super().__init__()
+        self.base = base
+
+    def forward(self, input_ids, attention_mask):
+        return self.base(input_ids=input_ids, attention_mask=attention_mask).logits
 
 
 def register_bidirectional_sdpa():
@@ -217,23 +230,44 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base = AutoModel.from_pretrained(args.model_path, trust_remote_code=True, dtype=torch.float32)
-    model = EmbeddingModel(base).to(device).eval()
+    config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    is_reranker = any("ForSequenceClassification" in a for a in (config.architectures or []))
+    if is_reranker:
+        base = AutoModelForSequenceClassification.from_pretrained(
+            args.model_path, trust_remote_code=True, dtype=torch.float32
+        )
+        model = RerankModel(base).to(device).eval()
+    else:
+        base = AutoModel.from_pretrained(
+            args.model_path, trust_remote_code=True, dtype=torch.float32
+        )
+        model = EmbeddingModel(base).to(device).eval()
 
     pairs = (CALIBRATION_TEXTS * (args.calibration_data_size // len(CALIBRATION_TEXTS) + 1))[
         : args.calibration_data_size
     ]
-    texts = [f"question:{q} \n \n passage:{p}" for q, p in pairs]
 
     def forward_loop(m):
-        for i in range(0, len(texts), args.batch_size):
-            batch = tokenizer(
-                texts[i : i + args.batch_size],
-                padding=True,
-                truncation=True,
-                max_length=512,
-                return_tensors="pt",
-            ).to(device)
+        for i in range(0, len(pairs), args.batch_size):
+            chunk = pairs[i : i + args.batch_size]
+            if is_reranker:
+                # Rerankers score (query, passage) pairs.
+                batch = tokenizer(
+                    [q for q, _ in chunk],
+                    [p for _, p in chunk],
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt",
+                ).to(device)
+            else:
+                batch = tokenizer(
+                    [f"question:{q} \n \n passage:{p}" for q, p in chunk],
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
+                    return_tensors="pt",
+                ).to(device)
             with torch.no_grad():
                 m(batch["input_ids"], batch["attention_mask"])
 
