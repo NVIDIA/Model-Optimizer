@@ -84,3 +84,61 @@ python examples/diffusers/fastgen/pdd/inference_qwen_image.py \
   --seed 42 --height 1024 --width 1024 \
   --output /path/to/pdd4.png --result-json /path/to/pdd4.json
 ```
+
+## Repeatable evaluation records
+
+`evaluate_qwen_image.py` loads the authenticated export once and evaluates every ordered
+prompt/seed pair for one of the source-owned `pdd-2`, `pdd-4`, or `pdd-8` schedules. The prompt
+file must be canonical JSON, including its trailing newline. For example:
+
+```json
+{"prompts":[{"prompt":"a small red cube on a white table","prompt_id":"red-cube-0001","seeds":[42]}],"schema_version":1}
+```
+
+```bash
+python examples/diffusers/fastgen/pdd/evaluate_qwen_image.py \
+  --export-dir /path/to/pdd-export \
+  --prompts /path/to/prompts.json --schedule pdd-4 \
+  --output-dir /path/to/evaluation-pdd4 \
+  --result-json /path/to/evaluation-pdd4/result.json \
+  --warmup-runs 1 --measured-runs 5 \
+  --height 1024 --width 1024 --max-sequence-length 512
+```
+
+The runner publishes the output directory atomically. Its canonical result records exact export,
+prompt, raw-noise, initial-state, and grid identities; requested logical blocks; observed scheduler
+calls; actual transformer calls; synchronized end-to-end and transformer timings; throughput; and
+peak CUDA allocation. Warmups execute and validate the same path but are excluded from measured
+arrays. CPU memory entries are `null`. The record deliberately contains no image-quality score or
+effectiveness conclusion.
+
+For a functional standard-teacher baseline, the public Diffusers pipeline can be pinned to the
+same immutable Qwen revision and run for 50 steps:
+
+```python
+import torch
+from diffusers import QwenImagePipeline
+
+revision = "75e0b4be04f60ec59a75f475837eced720f823b6"
+pipe = QwenImagePipeline.from_pretrained(
+    "Qwen/Qwen-Image",
+    revision=revision,
+    torch_dtype=torch.bfloat16,
+    use_safetensors=True,
+).to("cuda")
+generator = torch.Generator(device="cuda").manual_seed(42)
+image = pipe(
+    prompt="a small red cube on a white table",
+    height=1024,
+    width=1024,
+    num_inference_steps=50,
+    generator=generator,
+).images[0]
+image.save("teacher-50.png")
+```
+
+That command is a functional baseline, not matched scientific evidence. A result-bearing study
+must separately freeze the prompt set, seeds, controls, quality metrics, thresholds, and exact
+teacher-50, undistilled Euler-2/4/8, and PDD-2/4/8 trajectory/counter schemas. Those controls and
+conclusions belong to the reviewed external `scripts/pdd_qwen_effectiveness_v1` experiment package,
+not this general ModelOpt example.
