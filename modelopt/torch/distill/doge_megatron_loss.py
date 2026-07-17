@@ -361,11 +361,9 @@ def compute_alignment_scores(
     scores = {}
     alignment_debug = {}
     source_probe_kd_loss = {}
-    source_gradients = {}
     for path, batch in source_batches.items():
         source_gradient, probe_loss = _calc_alignment_gradient_vector(state, batch, model)
         score, debug = _calc_alignment_score(source_gradient, target_gradient)
-        source_gradients[path] = source_gradient
         scores[path] = score
         source_probe_kd_loss[path] = probe_loss
         alignment_debug[path] = {
@@ -373,93 +371,9 @@ def compute_alignment_scores(
             "target_token_sum": target_token_sum,
             **debug,
         }
-    advantage_debug = _calc_advantage_debug(source_gradients, target_gradient, blend_weights)
-    for path, debug in advantage_debug.items():
-        alignment_debug[path].update(debug)
     return DoGEAlignmentDiagnostics(
         scores=scores,
         alignment_debug=alignment_debug,
         source_probe_kd_loss=source_probe_kd_loss,
         target_probe_kd_loss=target_probe_kd_loss,
     )
-
-
-def _calc_advantage_debug(
-    source_gradients: dict[str, torch.Tensor],
-    target_gradient: torch.Tensor,
-    blend_weights: dict[str, float],
-) -> dict[str, dict[str, float]]:
-    """Return the predicted target-loss benefit of shifting weight toward each source.
-
-    ``advantage_scaled_dot`` is a numerically scaled version of
-    ``dot(g_target, g_source - g_mix)``. Under the first-order Taylor approximation, positive
-    values mean moving weight toward that source is predicted to reduce target loss more than
-    keeping the current blend. The shared positive scale preserves signs and ordering but not
-    absolute magnitudes.
-    """
-    mix_gradient = None
-    for path, gradient in source_gradients.items():
-        weighted_gradient = blend_weights[path] * gradient
-        mix_gradient = (
-            weighted_gradient if mix_gradient is None else mix_gradient + weighted_gradient
-        )
-    if mix_gradient is None:
-        raise RuntimeError("DoGE advantage diagnostics require at least one source gradient.")
-
-    scale = torch.maximum(target_gradient.abs().max(), mix_gradient.abs().max())
-    for gradient in source_gradients.values():
-        scale = torch.maximum(scale, gradient.abs().max())
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(scale, op=dist.ReduceOp.MAX)
-
-    if scale.item() != 0:
-        scaled_target_gradient = target_gradient / scale
-        scaled_mix_gradient = mix_gradient / scale
-        scaled_source_gradients = {
-            path: gradient / scale for path, gradient in source_gradients.items()
-        }
-    else:
-        scaled_target_gradient = target_gradient
-        scaled_mix_gradient = mix_gradient
-        scaled_source_gradients = source_gradients
-
-    mix_dot = torch.dot(scaled_target_gradient, scaled_mix_gradient)
-    mix_norm = torch.dot(scaled_mix_gradient, scaled_mix_gradient)
-    target_norm = torch.dot(scaled_target_gradient, scaled_target_gradient)
-    components = [mix_dot, mix_norm, target_norm]
-    for gradient in scaled_source_gradients.values():
-        components.extend(
-            [
-                torch.dot(scaled_target_gradient, gradient),
-                torch.dot(scaled_target_gradient, gradient - scaled_mix_gradient),
-            ]
-        )
-    reduced = torch.stack(components)
-    if dist.is_available() and dist.is_initialized():
-        # Same TP-only PoC reduction as cosine scoring above.
-        # TODO: reduce over exact model/data-parallel groups for other parallelism layouts.
-        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
-
-    mix_dot = reduced[0]
-    mix_norm = torch.sqrt(reduced[1])
-    target_norm = torch.sqrt(reduced[2])
-    mix_denominator = mix_norm * target_norm
-    mix_cosine = (
-        torch.zeros((), dtype=mix_dot.dtype, device=mix_dot.device)
-        if mix_denominator.item() == 0
-        else mix_dot / mix_denominator
-    )
-
-    debug = {}
-    offset = 3
-    for path in scaled_source_gradients:
-        source_target_dot = reduced[offset]
-        advantage_dot = reduced[offset + 1]
-        debug[path] = {
-            "source_target_scaled_dot": source_target_dot.item(),
-            "mix_target_scaled_dot": mix_dot.item(),
-            "advantage_scaled_dot": advantage_dot.item(),
-            "mix_target_cosine": mix_cosine.item(),
-        }
-        offset += 2
-    return debug
