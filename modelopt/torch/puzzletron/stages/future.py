@@ -915,8 +915,11 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             "objective": {
                 "main_ce": {"weight": float(stage_cfg.get("main_ce_weight", 1.0))},
                 "main_kd": {"weight": float(stage_cfg.get("main_kd_weight", 1.0))},
-                "mtp_ce": {"weight": float(stage_cfg.get("mtp_ce_weight", 1.0))},
-                "mtp_kd": {"weight": float(stage_cfg.get("mtp_kd_weight", 1.0))},
+                # MTP is opt-in: architectures such as Nemotron Nano have no
+                # next-token prediction head, and enabling it would make every
+                # otherwise-valid global-KD run fail at the first loss step.
+                "mtp_ce": {"weight": float(stage_cfg.get("mtp_ce_weight", 0.0))},
+                "mtp_kd": {"weight": float(stage_cfg.get("mtp_kd_weight", 0.0))},
             },
             "metadata": metadata,
         }

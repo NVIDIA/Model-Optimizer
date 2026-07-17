@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 from modelopt.torch.puzzletron.distillation.global_automodel import (
     GlobalKDConfig,
@@ -9,6 +11,73 @@ from modelopt.torch.puzzletron.distillation.global_automodel import (
     build_automodel_global_kd_recipe,
     build_global_kd_config,
 )
+
+
+def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
+    monkeypatch, tmp_path
+):
+    """Nano-like checkpoints without MTP must not enable MTP loss implicitly."""
+    from modelopt.torch.puzzletron.manifest import StageManifest
+    from modelopt.torch.puzzletron.stages import future
+
+    registry_path = tmp_path / "selected_solutions.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "solutions": [
+                    {"solution_id": "teacher", "checkpoint": str(tmp_path / "teacher")},
+                    {"solution_id": "candidate", "checkpoint": str(tmp_path / "candidate")},
+                ]
+            }
+        )
+    )
+    captured = {}
+
+    def fake_build_global_kd_config(candidate):
+        captured["objective"] = candidate["distillation"]["objective"]
+        return candidate["distillation"]
+
+    def fake_run_global_kd(kd_config):
+        training_log = Path(kd_config["output_dir"]) / "checkpoints" / "training.jsonl"
+        training_log.parent.mkdir(parents=True)
+        training_log.write_text(json.dumps({"step": 1, "loss": 1.0}) + "\n")
+        return SimpleNamespace(to_dict=lambda: {})
+
+    monkeypatch.setattr(
+        future,
+        "resolve_descriptor_from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(name="nemotron3_nano"),
+    )
+    monkeypatch.setattr(future, "build_global_kd_config", fake_build_global_kd_config)
+    monkeypatch.setattr(future, "run_global_kd", fake_run_global_kd)
+    monkeypatch.setattr(future, "_distributed_barrier", lambda *args: None)
+    monkeypatch.delenv("RANK", raising=False)
+
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"trust_remote_code": True},
+        "global_distillation_sanity": {
+            "enabled": True,
+            "profile_id": "runtime-075",
+            "registry_path": str(registry_path),
+            "dataset_path": str(tmp_path / "data"),
+            "sample_count": 1,
+            "sequence_length": 8,
+            "max_steps": 1,
+            "local_batch_size": 1,
+        },
+    }
+
+    future.distillation_overfit_stage(
+        config, StageManifest(stage="global_distillation_sanity")
+    )
+
+    assert captured["objective"] == {
+        "main_ce": {"weight": 1.0},
+        "main_kd": {"weight": 1.0},
+        "mtp_ce": {"weight": 0.0},
+        "mtp_kd": {"weight": 0.0},
+    }
 
 
 def test_global_distillation_summary_publishes_canonical_training_records(tmp_path):
