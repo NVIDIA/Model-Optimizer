@@ -7,7 +7,7 @@ model:
 - `qwen3.6-27b_aws-cmh.yaml`
 
 Each pipeline stages the public Hugging Face model, tokenizer, and evaluation-data
-prefix on `cpu_datamove`, then runs four sequential one-node jobs on `batch_long` with
+prefix on `cpu_datamover`, then runs four sequential one-node jobs on `batch_long` with
 all four GPUs on the node. The four candidate slots are per-tensor FP8, static
 block-128 weight-only FP8, research-only dynamic block-128 W8A8 FP8, and MXFP8.
 `allow_to_fail` is enabled so a candidate failure does not prevent later independent

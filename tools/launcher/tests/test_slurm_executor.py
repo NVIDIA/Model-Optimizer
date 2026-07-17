@@ -40,7 +40,7 @@ class TestBuildSlurmExecutor:
             host="test-host",
             port=22,
             account="test_account",
-            partition="cpu_datamove",
+            partition="cpu_datamover",
             container="ubuntu:24.04",
             modelopt_install_path="/opt/modelopt",
             container_mounts=[],

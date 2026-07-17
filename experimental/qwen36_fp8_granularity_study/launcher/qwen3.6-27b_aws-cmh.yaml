@@ -20,7 +20,7 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       account: coreai_numerics_edge
-      partition: cpu_datamove
+      partition: cpu_datamover
       nodes: 1
       ntasks_per_node: 1
       # Zero is the launcher CLI-safe spelling for no GPU GRES; core normalizes it to None.
