@@ -1931,3 +1931,45 @@ def test_custom_op_mode_uses_schema_shape_for_standard_gathernd():
 
     output = next(vi for vi in propagated.graph.output if vi.name == "last_token_embed")
     assert [dim.dim_value for dim in output.type.tensor_type.shape.dim] == [1, 2]
+
+
+def test_custom_op_mode_preserves_scalar_gathernd_shape():
+    data = helper.make_tensor_value_info("data", TensorProto.FLOAT, [4])
+    plugin_in = helper.make_tensor_value_info("plugin_in", TensorProto.FLOAT, [4])
+    indices_init = numpy_helper.from_array(np.array([2], dtype=np.int64), name="indices")
+    custom_node = helper.make_node(
+        "FakeTensorRTPlugin", ["plugin_in"], ["plugin_out"], name="fake_plugin"
+    )
+    gather_node = helper.make_node(
+        "GatherND",
+        ["data", "indices"],
+        ["selected_scalar"],
+        name="scalar_gathernd",
+    )
+    graph = helper.make_graph(
+        [custom_node, gather_node],
+        "custom_op_scalar_gathernd_shape",
+        [data, plugin_in],
+        [
+            helper.make_tensor_value_info("plugin_out", TensorProto.FLOAT, [4]),
+            helper.make_tensor_value_info("selected_scalar", TensorProto.FLOAT, None),
+        ],
+        [indices_init],
+    )
+    model = helper.make_model(graph, producer_name="custom_op_scalar_gathernd_shape")
+    model.opset_import[0].version = 19
+    model.ir_version = 10
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        custom_ops={"FakeTensorRTPlugin"},
+    )
+    propagated = converter._propagate_types_shapes_custom_ops(model)
+
+    output = next(vi for vi in propagated.graph.output if vi.name == "selected_scalar")
+    assert [dim.dim_value for dim in output.type.tensor_type.shape.dim] == []

@@ -425,7 +425,8 @@ class PrecisionConverter:
 
                 # Set the output shape
                 if not out.shape:
-                    if shape := _infer_gathernd_op_shape(node):
+                    shape = _infer_gathernd_op_shape(node)
+                    if shape is not None:
                         out.shape = shape
                     elif isinstance(inp, gs.Constant):
                         out.shape = inp.values.shape
