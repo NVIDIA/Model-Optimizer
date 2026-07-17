@@ -210,8 +210,6 @@ trtexec --onnx=/tmp/identity_neural_network.quant.onnx \
 ### Optimize Q/DQ node placement with Autotune
 
 This feature automates Q/DQ (Quantize/Dequantize) node placement optimization for ONNX models using TensorRT performance measurements.
-For accuracy-sensitive ONNX PTQ that starts from an unquantized model, prefer enabling Autotune in this quantization workflow with representative calibration data and validate model accuracy after quantization.
-For lower-level Q/DQ placement workflows such as direct pattern cache experiments, `qdq_baseline` import, or custom benchmarking, refer to the [Autotune guide](https://nvidia.github.io/Model-Optimizer/guides/9_autotune.html).
 
 To access this feature in the ONNX quantization workflow, simply add `--autotune` in your CLI:
 
@@ -225,7 +223,8 @@ python -m modelopt.onnx.quantization \
     --autotune=<quick,default,extensive>
 ```
 
-For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html).
+For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html) and the [Autotune guide](https://nvidia.github.io/Model-Optimizer/guides/9_autotune.html).
+
 
 ## Resources
 

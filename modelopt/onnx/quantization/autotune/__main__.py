@@ -156,8 +156,9 @@ def get_parser() -> argparse.ArgumentParser:
         prog="modelopt.onnx.quantization.autotune",
         description=(
             "ONNX Q/DQ placement autotuning with TensorRT latency measurements. "
-            "For end-to-end ONNX quantization, use "
-            "`python -m modelopt.onnx.quantization ... --autotune=<mode>`."
+            "For end-to-end ONNX quantization taking into consideration accuracy, use "
+            "`python -m modelopt.onnx.quantization ... --autotune=<mode>` "
+            "with representative calibration data."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
