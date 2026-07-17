@@ -17,6 +17,7 @@
 
 import warnings
 from collections import defaultdict
+from collections.abc import Collection
 from typing import Any
 
 
@@ -127,11 +128,17 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         return {"quant_algo": quant_algo}
 
 
-def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, Any]:
+def convert_hf_quant_config_format(
+    input_config: dict[str, Any],
+    *,
+    target_types: Collection[str] | None = None,
+) -> dict[str, Any]:
     """Converts modelopt quantization config dictionary to align with llm-compressor config format.
 
     Args:
         input_config: The original quantization config dictionary.
+        target_types: Optional stable PyTorch module type names for homogeneous
+            config groups. ``None`` retains the historical Linear-only target.
 
     Note:
         The "targets" field specifies which PyTorch module types to quantize. Compressed-tensors
@@ -198,7 +205,7 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
                 "group_size": group_size,
             },
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": group_size},
-            "targets": ["Linear"],
+            "targets": sorted(set(target_types)) if target_types else ["Linear"],
         }
         new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "W4A16_NVFP4":
