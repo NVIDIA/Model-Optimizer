@@ -1,4 +1,4 @@
-# API guide: custom PyTorch to ComfyUI NVFP4
+# API guide: custom PyTorch to ComfyUI FP8 or NVFP4
 
 The [`quantize.py`](./quantize.py) example loads a Hugging Face Diffusers pipeline and exports it with
 `export_hf_checkpoint`. This note instead assumes that the model remains a plain PyTorch `torch.nn.Module`: it
@@ -25,10 +25,11 @@ def forward_loop(model):
         model(**sample)
 
 
-mtq.quantize(model, copy.deepcopy(mtq.NVFP4_DEFAULT_CFG), forward_loop)
+quant_cfg = mtq.NVFP4_DEFAULT_CFG  # Use mtq.FP8_DEFAULT_CFG for FP8.
+mtq.quantize(model, copy.deepcopy(quant_cfg), forward_loop)
 
 # Optional: save a resumable ModelOpt checkpoint before deployment packing.
-mto.save(model, "model_nvfp4_modelopt.pt")
+mto.save(model, "model_quantized_modelopt.pt")
 ```
 
 ## Which export API to call
@@ -38,7 +39,7 @@ mto.save(model, "model_nvfp4_modelopt.pt")
 | A Diffusers `ModelMixin` or `DiffusionPipeline` | Public `modelopt.torch.export.export_hf_checkpoint` |
 | A plain `torch.nn.Module` | Internal `_export_diffusers_checkpoint` shown below |
 
-The internal Diffusers exporter already accepts a plain `nn.Module` and writes packed NVFP4 tensors to
+The internal Diffusers exporter already accepts a plain `nn.Module` and writes packed deployment tensors to
 `model.safetensors`. This is an intermediate packed checkpoint; the adapter in the next section is what makes it
 compatible with a particular ComfyUI loader.
 
@@ -61,17 +62,20 @@ the model itself remains a plain `nn.Module`. It packs recognized quantized modu
 disposable model instance after `mto.save`. To avoid the Diffusers dependency, build the same staging file by
 calling `_process_quantized_modules` and `hide_quantizers_from_state_dict` directly.
 
+For FP8, the export call is unchanged. FP8 does not use the NVFP4 `weight_scale_2`, padding, or scale-swizzle
+steps, so only the loader-specific key mapping, optional component merge, and metadata steps below remain.
+
 ## Make the packed file ComfyUI-specific
 
 There is no universal ComfyUI key layout. After packing, add a small adapter for the exact ComfyUI loader or
 custom node that will consume the model:
 
 1. Rename every tensor key to the loader's expected namespace. Rename `.weight`, `.weight_scale`,
-   `.weight_scale_2`, `.input_scale`, and bias keys consistently.
+   `.input_scale`, bias, and NVFP4 `.weight_scale_2` keys consistently.
 2. If the loader expects a full checkpoint, merge the required VAE, text encoder, or other tensors from a base
    safetensors file.
-3. Optionally call `pad_nvfp4_weights`, followed by `swizzle_nvfp4_scales`, only when the target runtime expects
-   the cuBLAS/comfy_kitchen scale layout.
+3. For NVFP4 only, optionally call `pad_nvfp4_weights`, followed by `swizzle_nvfp4_scales`, when the target
+   runtime expects the cuBLAS/comfy_kitchen scale layout. Skip both for FP8.
 4. Read `quantization_config` from the generated `packed_model/config.json`. After the final key mapping, call
    `build_layerwise_quant_metadata` and write both values into the single-file safetensors header.
 
