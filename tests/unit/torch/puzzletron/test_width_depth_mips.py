@@ -3,7 +3,27 @@ from pathlib import Path
 
 import pytest
 
+import examples.puzzletron.run_width_depth_mips as width_depth_mips
 from examples.puzzletron.run_width_depth_mips import _replacement_score_paths, _stats_profile
+from modelopt.torch.puzzletron.mip.profiles import DepthSelection
+
+
+def test_depth_stage_config_prefers_canonical_depth_importance_section():
+    config = {
+        "depth": {"max_subblocks_to_remove": 1, "granularity": "block"},
+        "depth_importance": {
+            "max_subblocks_to_remove": 5,
+            "granularity": "subblock",
+        },
+    }
+
+    assert width_depth_mips._depth_stage_config(config) == config["depth_importance"]
+
+
+def test_depth_stage_config_keeps_legacy_depth_fallback():
+    config = {"depth": {"max_subblocks_to_remove": 3, "granularity": "subblock"}}
+
+    assert width_depth_mips._depth_stage_config(config) == config["depth"]
 
 
 @pytest.mark.parametrize(
@@ -67,3 +87,103 @@ def test_stats_profile_rejects_conflicting_static_parameter_inventories(
 
     with pytest.raises(RuntimeError, match="conflicting parameter inventories"):
         _stats_profile(path, runtime_stats=False)
+
+
+def test_teacher_summary_costs_include_named_workload_denominators():
+    costs = width_depth_mips._teacher_summary_costs(
+        {"stats.num_params": 100.0, "stats.memory_mib": 200.0},
+        {
+            "serving-8k": {
+                "stats.memory_mib": 300.0,
+                "stats.runtime_ms": 400.0,
+            }
+        },
+    )
+
+    assert costs == {
+        "stats.num_params": 100.0,
+        "stats.memory_mib": 200.0,
+        "stats.memory_mib@serving-8k": 300.0,
+        "stats.runtime_ms@serving-8k": 400.0,
+    }
+
+
+def test_forced_removals_support_total_and_typed_prefixes_in_global_order():
+    selected = [
+        {"layer_idx": 0, "kind": "attention"},
+        {"layer_idx": 1, "kind": "mamba"},
+        {"layer_idx": 2, "kind": "moe"},
+        {"layer_idx": 3, "kind": "attention"},
+        {"layer_idx": 4, "kind": "moe"},
+    ]
+
+    assert width_depth_mips._forced_removals_for_depth(
+        selected, DepthSelection.total_prefix(3)
+    ) == selected[:3]
+    assert width_depth_mips._forced_removals_for_depth(
+        selected,
+        DepthSelection((("attention", 2), ("moe", 1))),
+    ) == [selected[0], selected[2], selected[3]]
+
+
+def test_forced_removals_reject_unavailable_typed_count():
+    selected = [{"layer_idx": 0, "kind": "attention"}]
+
+    with pytest.raises(ValueError, match="attention.*2.*1"):
+        width_depth_mips._forced_removals_for_depth(
+            selected,
+            DepthSelection((("attention", 2),)),
+        )
+
+
+def test_completed_scenario_resume_uses_full_depth_selection_identity(
+    tmp_path: Path,
+) -> None:
+    scenario_root = tmp_path / "scenario"
+    scenario_root.mkdir()
+    manifest = {
+        "profile_id": "params-075",
+        "hidden_width": 2688,
+        "removed_sublayers": 3,
+        "constraint_type": "named_profile",
+        "status": "infeasible",
+    }
+    (scenario_root / "scenario_manifest.json").write_text(json.dumps(manifest))
+
+    resumed = width_depth_mips._load_completed_scenario(
+        scenario_root,
+        profile_id="params-075",
+        width=2688,
+        depth_selection=DepthSelection.total_prefix(3),
+        constraint_type="named_profile",
+        solve_only=True,
+    )
+    assert resumed == manifest
+
+    manifest["depth_selection"] = {"attention": 2, "moe": 1}
+    (scenario_root / "scenario_manifest.json").write_text(json.dumps(manifest))
+    matching = DepthSelection((("attention", 2), ("moe", 1)))
+    same_total_but_different = DepthSelection((("attention", 1), ("moe", 2)))
+
+    assert (
+        width_depth_mips._load_completed_scenario(
+            scenario_root,
+            profile_id="params-075",
+            width=2688,
+            depth_selection=matching,
+            constraint_type="named_profile",
+            solve_only=True,
+        )
+        == manifest
+    )
+    assert (
+        width_depth_mips._load_completed_scenario(
+            scenario_root,
+            profile_id="params-075",
+            width=2688,
+            depth_selection=same_total_but_different,
+            constraint_type="named_profile",
+            solve_only=True,
+        )
+        is None
+    )

@@ -26,10 +26,10 @@ def _cfg_get(args: DictConfig, key: str, default: Any = None) -> Any:
 
 def _standalone_config(args: DictConfig) -> DictConfig:
     automodel = _cfg_get(args, "automodel", None)
-    if automodel is None or not _cfg_get(automodel, "recipe_path", None):
+    if automodel is None or not _cfg_get(automodel, "parallel", None):
         raise ValueError(
             "AutoModel validation requires the full Hydra config or "
-            "args.automodel.recipe_path; stitched/HF validation has been removed"
+            "args.automodel.parallel; stitched/HF validation has been removed"
         )
     checkpoint = Path(str(_cfg_get(args, "model_name_or_path"))).resolve()
     scoring = OmegaConf.to_container(args, resolve=True)
@@ -60,7 +60,8 @@ def validate_model(
     """Validate one realized checkpoint and preserve the legacy metrics return shape.
 
     Direct preloaded-model and external-hidden-state validation belonged to the deleted stitched
-    runtime. Callers must provide a checkpoint and use the shared native AutoModel recipe.
+    runtime. Callers must provide a checkpoint; its stage-local ``automodel.parallel``
+    mesh is compiled into the native AutoModel configuration at launch time.
     """
     unsupported = []
     if model is not None:

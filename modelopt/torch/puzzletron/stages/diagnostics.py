@@ -1301,7 +1301,7 @@ def _run_hidden_width_diagnostic_at_width(
 
     solution = _identity_width_solution(block_configs, width)
     rows = []
-    recipe_path = _diagnostic_recipe_path(hydra_cfg, diag_cfg)
+    parallel = _diagnostic_parallel(hydra_cfg, diag_cfg)
     runtime_sources = {
         "original": teacher_dir,
         "activation": activation_parent,
@@ -1327,9 +1327,8 @@ def _run_hidden_width_diagnostic_at_width(
         cfg.scoring.score_source_baseline = False
         cfg.scoring.zero_pad_hidden_to_teacher_width = True
         cfg.scoring.skip_existing_solutions = not bool(diag_cfg.get("force_rescore", False))
-        if recipe_path:
-            cfg.recipe_path = recipe_path
-            cfg.scoring.automodel.recipe_path = recipe_path
+        if parallel:
+            cfg.scoring.automodel.parallel = parallel
         for key in ("eval_samples", "micro_batch_size", "block_size"):
             if key in diag_cfg:
                 cfg.scoring[key] = diag_cfg[key]
@@ -1370,9 +1369,8 @@ def _run_hidden_width_diagnostic_at_width(
     realized_cfg.scoring.output_dir = str(realized_output)
     realized_cfg.scoring.baseline_only = True
     realized_cfg.scoring.zero_pad_hidden_to_teacher_width = True
-    if recipe_path:
-        realized_cfg.recipe_path = recipe_path
-        realized_cfg.scoring.automodel.recipe_path = recipe_path
+    if parallel:
+        realized_cfg.scoring.automodel.parallel = parallel
     realized_cfg.scoring.baseline_payload = {
         "axis": "hidden_width",
         "target_value": width,
@@ -2058,22 +2056,19 @@ def _diagnostic_scoring_container(hydra_cfg: Any) -> dict[str, Any]:
     return data
 
 
-def _diagnostic_recipe_path(hydra_cfg: Any, diag_cfg: Any) -> str | None:
-    """Resolve a diagnostic recipe without inheriting a server-only scoring mesh.
-
-    Diagnostics run in the campaign launcher's distributed world, so their
-    default recipe must be the campaign recipe.  A diagnostic can still opt
-    into another matching topology explicitly; the replacement-scoring recipe
-    remains a compatibility fallback for older configs without a top-level
-    recipe.
-    """
+def _diagnostic_parallel(hydra_cfg: Any, diag_cfg: Any) -> dict[str, Any] | None:
+    """Resolve the diagnostic stage mesh, falling back to replacement scoring."""
 
     candidates = (
-        _get(_get(diag_cfg, "automodel", {}), "recipe_path", None),
-        _get(hydra_cfg, "recipe_path", None),
-        _get(_get(_get(hydra_cfg, "scoring", {}), "automodel", {}), "recipe_path", None),
+        _get(_get(diag_cfg, "automodel", {}), "parallel", None),
+        _get(_get(_get(hydra_cfg, "scoring", {}), "automodel", {}), "parallel", None),
     )
-    return next((str(path) for path in candidates if path), None)
+    for parallel in candidates:
+        if parallel:
+            if OmegaConf.is_config(parallel):
+                return dict(OmegaConf.to_container(parallel, resolve=True))
+            return dict(parallel)
+    return None
 
 
 def _scoring_cfg_for_method(
@@ -2081,7 +2076,7 @@ def _scoring_cfg_for_method(
     *,
     method_dir: Path,
     scoring_output_dir: Path,
-    recipe_path: str | None,
+    parallel: dict[str, Any] | None,
     source_checkpoint_dir: Path | str | None = None,
     target_teacher_dir: Path | str | None = None,
 ) -> Any:
@@ -2100,9 +2095,8 @@ def _scoring_cfg_for_method(
         cfg.scoring.source_checkpoint_dir = str(source_checkpoint_dir)
     if target_teacher_dir is not None:
         cfg.scoring.target_teacher_dir = str(target_teacher_dir)
-    if recipe_path:
-        cfg.recipe_path = recipe_path
-        cfg.scoring.automodel.recipe_path = recipe_path
+    if parallel:
+        cfg.scoring.automodel.parallel = parallel
     return cfg
 
 
@@ -2156,7 +2150,7 @@ def _scoring_cfg_for_parent_sweep(
     parent_specs: list[dict[str, Any]],
     manifest_path: Path,
     tolerances: dict[str, float],
-    recipe_path: str | None,
+    parallel: dict[str, Any] | None,
     force_rescore: bool,
 ) -> Any:
     cfg = OmegaConf.create(_diagnostic_scoring_container(hydra_cfg))
@@ -2172,9 +2166,8 @@ def _scoring_cfg_for_parent_sweep(
     cfg.scoring.output_dir = parent_specs[0]["output_dir"]
     cfg.scoring.skip_existing_solutions = not bool(force_rescore)
     cfg.scoring.solutions_to_validate = None
-    if recipe_path:
-        cfg.recipe_path = recipe_path
-        cfg.scoring.automodel.recipe_path = recipe_path
+    if parallel:
+        cfg.scoring.automodel.parallel = parallel
     return cfg
 
 
@@ -2564,7 +2557,7 @@ def _activation_diagnostic_parent_sweep(
             )
         dist.barrier()
 
-        recipe_path = _diagnostic_recipe_path(hydra_cfg, diag_cfg)
+        parallel = _diagnostic_parallel(hydra_cfg, diag_cfg)
         tolerances = dict(diag_cfg.get("parent_equivalence_tolerances") or {})
         scoring_cfg = _scoring_cfg_for_parent_sweep(
             hydra_cfg,
@@ -2573,7 +2566,7 @@ def _activation_diagnostic_parent_sweep(
             parent_specs=parent_specs,
             manifest_path=load_manifest_path,
             tolerances=tolerances,
-            recipe_path=recipe_path,
+            parallel=parallel,
             force_rescore=bool(diag_cfg.get("force_rescore", False)),
         )
         for key in ("eval_samples", "micro_batch_size", "block_size", "varlen"):
@@ -2915,12 +2908,12 @@ def activation_diagnostic_stage(config: dict[str, Any], manifest: StageManifest)
                         method_outputs[f"{axis}:{method}:{layer_name}"] = str(scoring_output_dir)
                         continue
 
-                    recipe_path = _diagnostic_recipe_path(hydra_cfg, diag_cfg)
+                    parallel = _diagnostic_parallel(hydra_cfg, diag_cfg)
                     scoring_cfg = _scoring_cfg_for_method(
                         hydra_cfg,
                         method_dir=method_dir,
                         scoring_output_dir=scoring_output_dir,
-                        recipe_path=recipe_path,
+                        parallel=parallel,
                         source_checkpoint_dir=sorted_dir,
                         target_teacher_dir=teacher_dir,
                     )
@@ -3161,7 +3154,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             hydra_cfg,
             method_dir=diag_root,
             scoring_output_dir=scoring_output_dir,
-            recipe_path=_diagnostic_recipe_path(hydra_cfg, diag_cfg),
+            parallel=_diagnostic_parallel(hydra_cfg, diag_cfg),
         )
         scoring_cfg.scoring.source_checkpoint_dir = str(sorted_dir)
         scoring_cfg.scoring.target_teacher_dir = str(teacher_dir)
@@ -3186,7 +3179,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
                 hydra_cfg,
                 method_dir=reverse_root,
                 scoring_output_dir=reverse_output_dir,
-                recipe_path=_diagnostic_recipe_path(hydra_cfg, diag_cfg),
+                parallel=_diagnostic_parallel(hydra_cfg, diag_cfg),
             )
             reverse_scoring_cfg.scoring.source_checkpoint_dir = str(reverse_dir)
             reverse_scoring_cfg.scoring.target_teacher_dir = str(teacher_dir)
@@ -3839,7 +3832,7 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                 hydra_cfg,
                 method_dir=method_dir,
                 scoring_output_dir=scoring_output_dir,
-                recipe_path=_diagnostic_recipe_path(hydra_cfg, diag_cfg),
+                parallel=_diagnostic_parallel(hydra_cfg, diag_cfg),
             )
             scoring_cfg.scoring.source_checkpoint_dir = str(sorted_dir)
             scoring_cfg.scoring.target_teacher_dir = str(sorted_dir)
@@ -3897,7 +3890,7 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                     hydra_cfg,
                     method_dir=method_dir,
                     scoring_output_dir=scoring_output_dir,
-                    recipe_path=_diagnostic_recipe_path(hydra_cfg, diag_cfg),
+                    parallel=_diagnostic_parallel(hydra_cfg, diag_cfg),
                 )
                 scoring_cfg.scoring.source_checkpoint_dir = str(source_dir)
                 scoring_cfg.scoring.target_teacher_dir = str(sorted_dir)
@@ -3957,7 +3950,7 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                         hydra_cfg,
                         method_dir=method_dir,
                         scoring_output_dir=scoring_output_dir,
-                        recipe_path=_diagnostic_recipe_path(hydra_cfg, diag_cfg),
+                        parallel=_diagnostic_parallel(hydra_cfg, diag_cfg),
                     )
                     scoring_cfg.scoring.source_checkpoint_dir = str(source_dir)
                     scoring_cfg.scoring.target_teacher_dir = str(sorted_dir)

@@ -515,6 +515,17 @@ class ModelDescriptor(ABC):
         )
 
     @classmethod
+    def runtime_benchmark_sublayers_are_exclusive(cls) -> bool:
+        """Whether each runtime layer executes exactly one active sublayer kind."""
+        return False
+
+    @classmethod
+    def runtime_benchmark_scaffold_policy(cls, block_config: BlockConfig) -> str:
+        """Return the structural scaffold required for this runtime candidate."""
+
+        return "none"
+
+    @classmethod
     def create_runtime_benchmark_model(
         cls, runtime_config: Any, block_configs: list[BlockConfig]
     ) -> nn.Module:

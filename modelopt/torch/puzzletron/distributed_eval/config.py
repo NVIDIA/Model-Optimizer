@@ -7,13 +7,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from omegaconf import OmegaConf
-
 from ..anymodel.registry import resolve_descriptor_from_pretrained
+from ..plugins.automodel.config import build_stage_recipe_config
 from ..scoring_parent import ensure_scoring_parent
 from .schema import CampaignManifest, ParallelismSpec
 
 DEFAULT_EVALUATOR_REVISION = "puzzletron-distributed-replace-block-v1"
+DEFAULT_DEPTH_EVALUATOR_REVISION = "puzzletron-distributed-depth-v1"
 
 
 def _replacement_scoring_config(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -22,6 +22,54 @@ def _replacement_scoring_config(cfg: dict[str, Any]) -> dict[str, Any]:
     if "replacement_scoring" in cfg:
         return dict(cfg.get("replacement_scoring") or {})
     return dict(cfg.get("scoring") or {})
+
+
+def distributed_stage_config(
+    cfg: dict[str, Any], *, stage: str = "replace_block"
+) -> dict[str, Any]:
+    """Expose one pipeline stage through the evaluator's canonical scoring view."""
+    if stage == "replace_block":
+        return dict(cfg)
+    if stage != "depth":
+        raise ValueError(f"unsupported distributed evaluation stage {stage!r}")
+
+    result = dict(cfg)
+    depth = dict(cfg.get("depth") or cfg.get("depth_importance") or {})
+    scoring = _replacement_scoring_config(cfg)
+    automodel = {
+        **dict(scoring.get("automodel") or {}),
+        **dict(depth.get("automodel") or {}),
+    }
+    scoring["automodel"] = automodel
+    for key in (
+        "eval_samples",
+        "micro_batch_size",
+        "block_size",
+        "seed",
+        "shuffle_seed",
+        "varlen",
+        "dataset_path",
+        "packed_token_cache_path",
+        "realized_dataset_cache_dir",
+        "val_dataset_name",
+        "data_column",
+        "load_dataset_fn",
+    ):
+        if key in depth:
+            scoring[key] = depth[key]
+    puzzle_dir = Path(cfg.get("puzzle_dir") or (cfg.get("experiment") or {}).get("dir"))
+    source = depth.get("source_checkpoint_dir") or str(
+        puzzle_dir / "ckpts" / "elastic_sorted_teacher"
+    )
+    scoring["teacher_dir"] = source
+    scoring["source_checkpoint_dir"] = source
+    scoring["target_teacher_dir"] = source
+    scoring["output_dir"] = depth.get("output_dir") or str(
+        puzzle_dir / "depth" / "iterative"
+    )
+    result.pop("replacement_scoring", None)
+    result["scoring"] = scoring
+    return result
 
 
 def load_plain_pipeline_config(
@@ -45,23 +93,14 @@ def load_runtime_config(
     return load_runtime_hydra_config(normalized)
 
 
-def _load_recipe(cfg: dict[str, Any]) -> dict[str, Any]:
+def _stage_recipe(cfg: dict[str, Any]) -> dict[str, Any]:
     scoring = _replacement_scoring_config(cfg)
     automodel = dict(scoring.get("automodel") or {})
-    recipe = automodel.get("recipe")
-    if recipe is not None:
-        return dict(recipe)
-    recipe_path = automodel.get("recipe_path") or cfg.get("recipe_path")
-    if recipe_path is None:
-        raise ValueError(
-            "Distributed evaluation needs scoring.automodel.recipe_path or an inline recipe"
-        )
-    loaded = OmegaConf.load(str(recipe_path))
-    return OmegaConf.to_container(loaded, resolve=True)
+    return build_stage_recipe_config(automodel)
 
 
 def parallelism_from_config(cfg: dict[str, Any], *, world_size: int) -> ParallelismSpec:
-    recipe = _load_recipe(cfg)
+    recipe = _stage_recipe(cfg)
     distributed = dict(recipe.get("distributed") or {})
     strategy = dict(recipe.get("distributed_config") or {})
     target = str(strategy.get("_target_", ""))
@@ -158,14 +197,18 @@ def build_campaign_manifest(
     *,
     world_size: int,
     name: str | None = None,
-    evaluator_revision: str = DEFAULT_EVALUATOR_REVISION,
+    evaluator_revision: str | None = None,
     overrides: list[str] | None = None,
+    stage: str = "replace_block",
 ) -> CampaignManifest:
-    cfg = load_plain_pipeline_config(config_path, overrides=overrides)
+    cfg = distributed_stage_config(
+        load_plain_pipeline_config(config_path, overrides=overrides),
+        stage=stage,
+    )
     scoring = _replacement_scoring_config(cfg)
     automodel = dict(scoring.get("automodel") or {})
     model_cfg = dict(cfg.get("model") or {})
-    recipe = _load_recipe(cfg)
+    recipe = _stage_recipe(cfg)
     puzzle_dir = Path(cfg.get("puzzle_dir") or (cfg.get("experiment") or {}).get("dir"))
     source_dir = Path(
         scoring.get("source_checkpoint_dir")
@@ -192,6 +235,7 @@ def build_campaign_manifest(
         "shuffle_seed",
         "bos_rate",
         "source_datasets_to_discard",
+        "packed_token_cache_path",
     )
     metric_keys = (
         "calculate_full_score_ablations",
@@ -236,9 +280,15 @@ def build_campaign_manifest(
         automodel_recipe=recipe,
         data=data,
         metrics=metrics,
-        evaluator_revision=evaluator_revision,
+        evaluator_revision=evaluator_revision
+        or (
+            DEFAULT_DEPTH_EVALUATOR_REVISION
+            if stage == "depth"
+            else DEFAULT_EVALUATOR_REVISION
+        ),
         metadata={
             "config_path": str(Path(config_path).resolve()),
             "overrides": list(overrides or []),
+            "evaluation_stage": stage,
         },
     )

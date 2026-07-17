@@ -16,14 +16,18 @@
 import json
 from pathlib import Path
 
+import modelopt.torch.puzzletron.diagnostics.campaign_progress_report as report_module
+import pytest
 from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     _activation_diagnostic_summary,
     _campaign_options_data,
     _library_scenario,
     _mamba_family_hint,
     _pipeline_state,
+    _replacement_section,
     _stage_artifact_present,
     _subblock_axes,
+    _varying_replacement_axes,
     _vllm_data,
     _vllm_section,
     generate_campaign_progress_report,
@@ -35,6 +39,23 @@ from modelopt.torch.puzzletron.stages.diagnostics import _PRIMARY_METRICS
 def _write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_replacement_axis_discovery_collects_each_record_once():
+    class CountingAxes(dict):
+        iterations = 0
+
+        def items(self):
+            type(self).iterations += 1
+            return super().items()
+
+    records = [
+        {"axes": CountingAxes(hidden_width=2688, num_experts=value, top_k=6)}
+        for value in (128, 112, 96)
+    ]
+
+    assert _varying_replacement_axes(records) == ["num_experts"]
+    assert CountingAxes.iterations == len(records)
 
 
 def test_pipeline_state_uses_artifacts_and_completed_takes_precedence(tmp_path: Path):
@@ -400,6 +421,75 @@ def test_vllm_report_rejects_negative_native_phase_measurements(tmp_path: Path):
     assert "<article class='finding warning'>" not in _vllm_section(data)
 
 
+def test_vllm_report_reads_canonical_root_stats_without_built_library(tmp_path: Path):
+    runtime_args = {
+        "runtime_stats": True,
+        "runtime_backend": "vllm",
+        "prefill_seq_len": 8192,
+        "generation_seq_len": 1024,
+        "max_num_seqs": 4,
+    }
+    _write(
+        tmp_path / "subblock_stats.json",
+        [
+            {
+                "args": {**runtime_args, "n_embd": width},
+                "subblocks": [
+                    {
+                        "subblock_config": {
+                            "kind": "moe",
+                            "name": "moe",
+                            "num_experts": experts,
+                        },
+                        "runtime_ms": runtime_ms,
+                        "prefill_runtime_ms": runtime_ms - 1.0,
+                        "decode_runtime_ms": 1.0,
+                    }
+                    for experts, runtime_ms in ((128, 10.0), (96, 8.0))
+                ]
+                + [
+                    {
+                        "subblock_config": {
+                            "kind": "ffn",
+                            "name": "ffn",
+                            "no_op": True,
+                        },
+                        "runtime_ms": 0.0,
+                        "prefill_runtime_ms": 0.0,
+                        "decode_runtime_ms": 0.0,
+                    }
+                ],
+            }
+            for width in (2688, 2560)
+        ],
+    )
+
+    data = _vllm_data(tmp_path, {"scenarios": [], "mamba_family_hint": "mamba"})
+
+    assert data["widths"] == [2560, 2688]
+    assert len(data["records"]) == 4
+    assert [scenario["measured"] for scenario in data["scenarios"]] == [2, 2]
+    assert "Measured configurations" in _vllm_section(data)
+
+
+def test_vllm_sweep_explorer_uses_independent_axis_filters():
+    document = _vllm_section(
+        {
+            "scenarios": [],
+            "records": [{"hidden_width": 2688}],
+            "metrics": ["runtime_ms"],
+            "axes": ["moe_num_experts"],
+            "axis_labels": {"moe_num_experts": "MoE experts"},
+            "widths": [2688],
+            "profiles": [{"id": "profile", "label": "profile"}],
+        }
+    )
+
+    assert "id='vllm-axis-filters'" in document
+    assert "vllm-family-select" not in document
+    assert "vllm-config-select" not in document
+
+
 def test_campaign_options_mark_parameter_selection_not_latency_verified(tmp_path: Path):
     _write(
         tmp_path / "manifests/campaign_options.json",
@@ -604,6 +694,23 @@ def test_progress_report_uses_subblock_losses_for_subblock_bypass_overfit(tmp_pa
     )[0]
 
 
+def test_nested_bypass_report_exposes_ema_and_display_only_outlier_controls(tmp_path: Path):
+    document = Path(generate_campaign_progress_report(tmp_path)["html"]).read_text(encoding="utf-8")
+    section = report_module._nested_bypass_section(
+        {
+            "records": [{"step": 1}],
+            "units": [{"layer_idx": 0, "subblock_kind": "attention", "subblock_name": "self_attn"}],
+            "observations": [{"step": 1, "layer_idx": 0, "loss": 1.0}],
+            "granularity": "subblock",
+        }
+    )
+
+    assert 'id="nested-bypass-ema-alpha"' in section
+    assert 'id="nested-bypass-exclude-outliers"' in section
+    assert "emaByStep" in document
+    assert "tukeyInliers" in document
+
+
 def test_progress_report_renders_profile_evaluation_and_aiperf_explorers(tmp_path: Path):
     registry = {
         "profile_id": "params-080",
@@ -685,6 +792,66 @@ def test_progress_report_renders_profile_evaluation_and_aiperf_explorers(tmp_pat
     assert "id='aiperf-latency-throughput-plot'" in document
     assert "id='aiperf-interactivity-throughput-plot'" in document
     assert "id='aiperf-tpot-throughput-plot'" in document
+
+
+def test_evaluation_report_adds_teacher_styles_solution_kinds_and_pareto_front(tmp_path: Path):
+    _write(
+        tmp_path
+        / "artifacts/zero_shot_evaluation/profiles/params-075/text-s128-l8192/evaluation_summary.json",
+        {
+            "profile_id": "params-075",
+            "teacher": {
+                "solution_id": "teacher",
+                "label": "Teacher",
+                "parameter_count": 100,
+                "metrics": {"lm_loss": 1.0},
+            },
+            "solutions": [
+                {
+                    "solution_id": "mixed-h2560-d1",
+                    "parameter_count": 75,
+                    "metrics": {"lm_loss": 1.1},
+                },
+                {
+                    "solution_id": "homogeneous-h2432-d2",
+                    "homogeneous_assignment": {"attention.q_per_group": 8},
+                    "parameter_count": 73,
+                    "metrics": {"lm_loss": 1.2},
+                },
+            ],
+        },
+    )
+
+    data = report_module._evaluation_data(tmp_path)
+    rows = data["profiles"][0]["rows"]
+    document = Path(generate_campaign_progress_report(tmp_path)["html"]).read_text(encoding="utf-8")
+
+    assert [row["solution_id"] for row in rows] == [
+        "teacher",
+        "mixed-h2560-d1",
+        "homogeneous-h2432-d2",
+    ]
+    assert [row["kind"] for row in rows] == ["teacher", "heterogeneous", "homogeneous"]
+    assert [row["marker"] for row in rows] == ["star", "circle", "diamond"]
+    assert len({row["color"] for row in rows}) == 3
+    assert "id='evaluation-best-across-profiles'" in document
+    assert "bestRowsAcrossProfiles" in document
+    assert "bestAcrossProfiles.checked" in document
+    assert "paretoFront" in document
+    assert "Pareto frontier" in document
+
+
+def test_report_separates_plot_titles_from_horizontal_legends(tmp_path: Path):
+    document = Path(generate_campaign_progress_report(tmp_path)["html"]).read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "legend:{orientation:'h',x:0,xanchor:'left',y:1.18,yanchor:'bottom'}" in document
+    )
+    assert "margin:{l:62,r:18,t:96,b:55}" in document
+    assert "function chartTitle(text,size=15)" in document
+    assert "title:chartTitle(" in document
 
 
 def test_progress_report_renders_proper_distillation_terms_and_before_after_eval(
@@ -914,6 +1081,120 @@ def test_progress_report_labels_latency_constrained_mip_profiles(tmp_path: Path)
     assert ">Score</button>" not in document
 
 
+def test_mip_report_separates_homogeneous_solutions_and_simplifies_costs(tmp_path: Path):
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import _mip_data
+
+    _write(
+        tmp_path / "mip/profiles/params-075/mip_grid.json",
+        {
+            "profile": {
+                "id": "params-075",
+                "label": "75% params",
+                "constraint_type": "named_profile",
+                "constraints": {"stats.num_params": [73.0, 75.0]},
+            },
+            "expected_scenario_count": 2,
+            "teacher": {
+                "hidden_width": 4096,
+                "status": "teacher",
+                "sliced_teacher_baseline": 0.0,
+                "total_costs": {
+                    "stats.num_params": 100.0,
+                    "stats.memory_mib": 200.0,
+                    "stats.has_attention": 8.0,
+                    "stats.has_moe": 0.0,
+                    "stats.num_experts": 0.0,
+                    "stats.top_k": 0.0,
+                    "stats.not_no_op": 32.0,
+                },
+            },
+            "scenarios": [
+                {
+                    "status": "feasible",
+                    "hidden_width": 3584,
+                    "removed_sublayers": 1,
+                    "sliced_teacher_baseline": 0.0,
+                    "solver_objective_sum": 1.5,
+                    "chosen_replacement_count": 31,
+                    "total_costs": {
+                        "stats.num_params": 75.0,
+                        "stats.memory_mib": 150.0,
+                        "stats.has_attention": 7.0,
+                        "stats.has_moe": 0.0,
+                        "stats.num_experts": 0.0,
+                        "stats.top_k": 0.0,
+                        "stats.not_no_op": 31.0,
+                    },
+                    "homogeneous_solutions": [
+                        {
+                            "rank": 0,
+                            "score": 2.0,
+                            "solver_objective_sum": 2.0,
+                            "homogeneous_assignment": {
+                                "attention.num_kv_heads": 2,
+                                "attention.q_per_group": 8,
+                                "moe.num_experts": 96,
+                            },
+                            "total_costs": {
+                                "stats.num_params": 70.0,
+                                "stats.memory_mib": 140.0,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "status": "infeasible",
+                    "hidden_width": 3072,
+                    "removed_sublayers": 2,
+                    "reason": "lower resource bound cannot be met",
+                },
+            ],
+        },
+    )
+
+    data = _mip_data(tmp_path)
+    document = Path(generate_campaign_progress_report(tmp_path)["html"]).read_text()
+
+    assert "sliced_teacher_baseline" not in data["columns"]
+    assert "parameter_ratio" not in data["columns"]
+    assert "has_attention" not in data["columns"]
+    assert "not_no_op" not in data["columns"]
+    assert "status" not in data["profiles"][0]["columns"]
+    assert "chosen_replacement_count" not in data["profiles"][0]["columns"]
+    assert "num_experts" not in data["profiles"][0]["columns"]
+    assert "top_k" not in data["profiles"][0]["columns"]
+    assert len(data["profiles"][0]["rows"]) == 2
+    assert data["profiles"][0]["infeasible_rows"] == [
+        {
+            "label": "H=3072, Drop=2",
+            "hidden_width": 3072,
+            "removed_sublayers": 2,
+            "reason": "lower resource bound cannot be met",
+        }
+    ]
+    assert data["profiles"][0]["homogeneous_rows"][0]["assignment"] == {
+        "attention.num_kv_heads": 2,
+        "attention.q_per_group": 8,
+        "moe.num_experts": 96,
+    }
+    assert "Homogeneous solutions" in document
+    assert "id='mip-homogeneous-table'" in document
+    assert "id='mip-homogeneous-empty'" in document
+    assert "(% of teacher)" in document
+    assert ">Sliced Teacher Baseline</button>" not in document
+    assert ">Has Attention</button>" not in document
+    assert ">Not No Op</button>" not in document
+    assert "Chosen Replacement Count" not in document
+    assert "lower resource bound cannot be met" in document
+    assert "Resource band" in document
+    assert "stats.num_params: 73–75" in document
+    assert (
+        "homogeneousHead.innerHTML=`<tr><th>Solution</th><th>Hidden Width</th>"
+        "<th>Removed Sublayers</th>"
+        not in document
+    )
+
+
 def test_replacement_data_omits_empty_width_scenarios(tmp_path: Path):
     from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import _replacement_data
 
@@ -974,6 +1255,79 @@ def test_replacement_data_reads_width_local_subblock_scores(tmp_path: Path):
     assert data["records"][0]["metrics"]["lm_loss"] == 1.25
 
 
+def test_replacement_explorer_uses_independent_axis_filters():
+    document = _replacement_section(
+        {
+            "records": [{"hidden_width": 2688}],
+            "scenarios": [],
+            "metrics": ["lm_loss"],
+            "axes": ["moe_num_experts"],
+            "axis_labels": {"moe_num_experts": "MoE experts"},
+            "widths": [2688],
+            "layers": [0],
+            "eval_samples": [128],
+        }
+    )
+
+    assert "id='replacement-axis-filters'" in document
+    assert "replacement-family-select" not in document
+    assert "replacement-config-select" not in document
+
+
+def test_report_shows_partial_replacement_scores_while_stage_is_pending(tmp_path: Path):
+    scenario = tmp_path / "scenarios/width-2688/depth-00"
+    _write(scenario / "scenario_manifest.json", {"hidden_width": 2688})
+    _write(scenario / "single_subblock_replacement_solutions.json", [{}, {}])
+    _write(
+        scenario / "single_subblock_replacement_solutions--validation/solution_0.json",
+        {
+            "i_solution": 0,
+            "args": {"eval_samples": 2},
+            "lm_loss": {"avg": 1.25},
+            "puzzle_solution": {
+                "single_sequence_replacement": {
+                    "parent_layer_indices": [3],
+                    "child_block_configs": [
+                        {
+                            "subblock_configs": [
+                                {
+                                    "kind": "moe",
+                                    "name": "moe",
+                                    "num_experts": 128,
+                                    "no_op": False,
+                                }
+                            ]
+                        }
+                    ],
+                },
+                "subblock_replacement": {"kind": "moe", "name": "moe"},
+            },
+        },
+    )
+
+    result = generate_campaign_progress_report(tmp_path)
+    document = Path(result["html"]).read_text(encoding="utf-8")
+
+    assert 'data-stage="replacement_scoring" data-status="pending"' in document
+    assert "Replacement-score explorer" in document
+    assert "replacement-family-select" not in document
+    assert "id='replacement-axis-filters'" in document
+
+
+def test_report_explorers_use_per_axis_filter_javascript(tmp_path: Path):
+    result = generate_campaign_progress_report(tmp_path)
+    document = Path(result["html"]).read_text(encoding="utf-8")
+
+    assert "populateVllmAxisFilters" in document
+    assert "populateReplacementAxisFilters" in document
+    assert "axisName!==axis.value" in document
+    assert "let compatible=[]" not in document
+    assert ".vllm-controls>span{display:contents}" in document
+    assert "legendgroup:kind" in document
+    assert "showlegend:true" in document
+    assert "delete charts.theme.legend" not in document
+
+
 def test_diverse_bypass_gate_uses_decreasing_per_width_trends_and_diversity():
     from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
         _overfit_summary_card,
@@ -996,3 +1350,96 @@ def test_diverse_bypass_gate_uses_decreasing_per_width_trends_and_diversity():
 
     assert "probe-summary passed" in card
     assert "Trend + diversity gate</dt><dd>passed" in card
+
+
+def test_report_cache_reuses_sections_and_targets_changed_inputs(tmp_path: Path, monkeypatch):
+    _write(tmp_path / "artifacts/replacement_scoring/summary.json", {"value": 1})
+    _write(tmp_path / "artifacts/mip/summary.json", {"value": 1})
+    calls = {"replacement": 0, "mip": 0}
+
+    def replacement_data(_root: Path):
+        calls["replacement"] += 1
+        return {
+            "records": [],
+            "scenarios": [],
+            "metrics": [],
+            "axes": [],
+            "axis_labels": {},
+            "widths": [],
+            "layers": [],
+            "eval_samples": [],
+        }
+
+    def mip_data(_root: Path):
+        calls["mip"] += 1
+        return {"profiles": [], "columns": []}
+
+    monkeypatch.setattr(report_module, "_replacement_data", replacement_data)
+    monkeypatch.setattr(report_module, "_mip_data", mip_data)
+
+    first = generate_campaign_progress_report(tmp_path)
+    second = generate_campaign_progress_report(tmp_path)
+
+    assert int(first["cache_misses"]) > 0
+    assert second["cache_misses"] == "0"
+    assert second["cache_hits"] == first["cache_misses"]
+    assert calls == {"replacement": 1, "mip": 1}
+
+    _write(tmp_path / "artifacts/mip/summary.json", {"value": 200})
+    changed = generate_campaign_progress_report(tmp_path)
+
+    assert int(changed["cache_misses"]) >= 1
+    assert calls["replacement"] == 1
+    assert calls["mip"] == 2
+
+    generate_campaign_progress_report(tmp_path, use_cache=False)
+    assert calls["replacement"] == 2
+    assert calls["mip"] == 3
+
+    generate_campaign_progress_report(tmp_path, rebuild_sections=("replacement",))
+    assert calls["replacement"] == 3
+    assert calls["mip"] == 4
+
+
+def test_report_cli_maps_cache_controls(tmp_path: Path):
+    from examples.puzzletron.generate_campaign_progress_report import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "--puzzle-dir",
+            str(tmp_path),
+            "--model-name",
+            "Example",
+            "--no-cache",
+            "--rebuild-section",
+            "replacement",
+            "--rebuild-section",
+            "mip",
+        ]
+    )
+
+    assert args.puzzle_dir == tmp_path
+    assert args.model_name == "Example"
+    assert args.no_cache is True
+    assert args.rebuild_section == ["replacement", "mip"]
+
+
+def test_report_verification_failure_preserves_previous_html_and_manifest(
+    tmp_path: Path, monkeypatch
+):
+    first = generate_campaign_progress_report(tmp_path)
+    html_path = Path(first["html"])
+    manifest_path = Path(first["manifest"])
+    old_html = html_path.read_bytes()
+    old_manifest = manifest_path.read_bytes()
+    _write(tmp_path / "artifacts/mip/summary.json", {"changed": True})
+
+    def reject(_path: Path) -> None:
+        raise RuntimeError("semantic verification failed")
+
+    monkeypatch.setattr(report_module, "_verify_report_candidate", reject)
+    with pytest.raises(RuntimeError, match="semantic verification failed"):
+        generate_campaign_progress_report(tmp_path)
+
+    assert html_path.read_bytes() == old_html
+    assert manifest_path.read_bytes() == old_manifest

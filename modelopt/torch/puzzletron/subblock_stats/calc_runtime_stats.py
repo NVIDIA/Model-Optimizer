@@ -23,6 +23,7 @@ import hashlib
 import json
 import math
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -47,6 +48,14 @@ from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from .runtime_utils import RuntimeConfig, save_model
 from .runtime_vllm import RuntimeMeasurement, run_vllm_latency_benchmark
+from .runtime_estimator import (
+    candidate_slope,
+    effective_repeat_count,
+    fixed_intercept,
+    homogeneous_layout,
+    median_measurement,
+    scaffolded_layout,
+)
 from .topology import RuntimeTopology
 
 _ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
@@ -118,21 +127,22 @@ def _extra_vllm_args(runtime_stats_config: DictConfig) -> tuple[str, ...]:
     return tuple(str(arg) for arg in runtime_stats_config.get("vllm_args", []))
 
 
+def _vllm_env(runtime_stats_config: DictConfig) -> tuple[tuple[str, str], ...]:
+    """Freeze explicit vLLM subprocess overrides into a stable cache identity."""
+
+    configured = runtime_stats_config.get("vllm_env", {}) or {}
+    return tuple(sorted((str(key), str(value)) for key, value in configured.items()))
+
+
 def create_benchmark_model(
     runtime_config: RuntimeConfig,
-    block_config: BlockConfig | None,
-    trailing_base_block: bool = False,
+    block_layout: tuple[BlockConfig, ...],
 ):
-    """Build a small descriptor-specific model with repeated subblocks."""
-    block_configs = [runtime_config.descriptor.runtime_benchmark_base_block_config(runtime_config)]
-    if block_config:
-        block_configs.extend([block_config] * runtime_config.repeat_block_n_times)
-    if trailing_base_block:
-        block_configs.append(
-            runtime_config.descriptor.runtime_benchmark_base_block_config(runtime_config)
-        )
+    """Build a descriptor-specific model from an exact immutable block layout."""
 
-    return runtime_config.descriptor.create_runtime_benchmark_model(runtime_config, block_configs)
+    return runtime_config.descriptor.create_runtime_benchmark_model(
+        runtime_config, list(block_layout)
+    )
 
 
 def _block_config_for_subblock(
@@ -146,12 +156,24 @@ def _block_config_for_subblock(
         return None
     if isinstance(subblock_config, BlockConfig):
         return subblock_config
+    exclusive = bool(
+        getattr(
+            runtime_config.descriptor,
+            "runtime_benchmark_sublayers_are_exclusive",
+            lambda: False,
+        )()
+    )
+    if exclusive:
+        return BlockConfig(subblock_configs=(subblock_config,))
     if isinstance(subblock_config, FFNConfig | MoEConfig):
         base_block_config = runtime_config.descriptor.runtime_benchmark_base_block_config(
             runtime_config
         )
-        return base_block_config.with_subblock(
-            subblock_config, replace_kinds=_FFN_LIKE_KINDS
+        return _mark_noop_kinds(
+            base_block_config.with_subblock(
+                subblock_config, replace_kinds=_FFN_LIKE_KINDS
+            ),
+            _ATTENTION_LIKE_KINDS,
         )
     if isinstance(subblock_config, AttentionConfig | MLAConfig | MambaConfig):
         base_block_config = runtime_config.descriptor.runtime_benchmark_base_block_config(
@@ -170,35 +192,38 @@ def _validate_marginal_runtime(
     measurement: RuntimeMeasurement,
     *,
     label: str,
+    ignore_negatives: bool = False,
 ) -> None:
     """Reject derived timings that cannot represent additive operator work."""
 
     if measurement.total_ms <= 0.0:
-        raise ValueError(
+        message = (
             f"non-positive marginal runtime for {label}: {measurement.total_ms:.6g} ms"
         )
+        if not ignore_negatives or measurement.total_ms == 0.0:
+            raise ValueError(message)
+        warnings.warn(f"Ignoring {message}", RuntimeWarning)
     negative = {
         "prefill_ms": measurement.prefill_ms,
         "decode_ms": measurement.decode_ms,
     }
     negative = {name: value for name, value in negative.items() if value < 0.0}
     if negative:
-        raise ValueError(f"negative marginal phase for {label}: {negative}")
+        message = f"negative marginal phase for {label}: {negative}"
+        if not ignore_negatives:
+            raise ValueError(message)
+        warnings.warn(f"Ignoring {message}", RuntimeWarning)
 
 
 def _benchmark_spec(
     runtime_config: RuntimeConfig,
-    block_config: BlockConfig | None,
+    block_layout: tuple[BlockConfig, ...],
     gpu_id: str | int | None,
     cache_dir: Path | None,
-    trailing_base_block: bool = False,
 ) -> RuntimeMeasurement:
-    """Build the repeated-block model for a spec and measure its total latency (ms)."""
-    model = create_benchmark_model(
-        runtime_config,
-        block_config=block_config,
-        trailing_base_block=trailing_base_block,
-    )
+    """Build one exact-layout model and measure its total latency."""
+
+    model = create_benchmark_model(runtime_config, block_layout)
     with tempfile.TemporaryDirectory() as model_tmpdir:
         save_model(
             model,
@@ -329,7 +354,7 @@ def _runtime_shard_results_complete(status_dir: Path, *, shard_count: int) -> bo
 
 
 def _run_benchmarks(
-    specs: dict[tuple, tuple[RuntimeConfig, BlockConfig | None, bool]],
+    specs: dict[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]],
     gpu_ids: list[str | None],
     cache_dir: Path | None,
 ) -> dict[tuple, RuntimeMeasurement]:
@@ -345,23 +370,22 @@ def _run_benchmarks(
         gpu_pool.put(gpu)
 
     def _work(
-        item: tuple[tuple, tuple[RuntimeConfig, BlockConfig | None, bool]],
+        item: tuple[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]],
     ) -> tuple[tuple, RuntimeMeasurement]:
-        key, (rc, block_config, trailing_base_block) = item
+        key, (rc, block_layout) = item
         gpu = gpu_pool.get()
         try:
             try:
                 ms = _benchmark_spec(
                     rc,
-                    block_config,
+                    block_layout,
                     gpu_id=gpu,
                     cache_dir=cache_dir,
-                    trailing_base_block=trailing_base_block,
                 )
             except Exception as exc:
                 raise RuntimeError(
                     f"vLLM runtime benchmark failed on gpu={gpu} "
-                    f"with block_config={block_config}"
+                    f"with block_layout={block_layout}"
                 ) from exc
         finally:
             gpu_pool.put(gpu)
@@ -504,7 +528,13 @@ def calc_runtime_for_blocks(
     Returns ``(runtime_by_block_dict, no_block_runtime_ms)`` analogous to
     :func:`calc_runtime_for_subblocks`.
     """
-    repeat_block_n_times = max(3, int(runtime_stats_config.get("repeat_block_n_times", 10)))
+    configured_repeat_count = max(
+        1, int(runtime_stats_config.get("repeat_block_n_times", 10))
+    )
+    topology = RuntimeTopology.from_config(runtime_stats_config.get("topology", None))
+    repeat_block_n_times = effective_repeat_count(
+        configured_repeat_count, topology.pipeline_parallel_size
+    )
 
     runtime_config = RuntimeConfig(
         vocab_size,
@@ -522,46 +552,79 @@ def calc_runtime_for_blocks(
         runtime_stats_config.get("num_warmup_iters", 10),
         _extra_vllm_args(runtime_stats_config),
         runtime_stats_config.get("max_num_seqs", None),
-        RuntimeTopology.from_config(runtime_stats_config.get("topology", None)),
+        topology,
+        effective_repeat_count=repeat_block_n_times,
+        vllm_env=_vllm_env(runtime_stats_config),
     )
-    runtime_config_fewer = replace(runtime_config, repeat_block_n_times=repeat_block_n_times - 1)
     runtime_config.topology.validate_model_dimensions(
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
     )
     base_block_config = descriptor.runtime_benchmark_base_block_config(runtime_config)
 
-    specs: dict[tuple, tuple] = {}
+    specs: dict[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]] = {}
 
-    def _add_spec(rc, block_config, trailing_base_block=False):
-        key = (rc, block_config, trailing_base_block)
-        specs.setdefault(key, (rc, block_config, trailing_base_block))
+    def _add_spec(
+        block_layout: tuple[BlockConfig, ...], scaffold_policy: str
+    ) -> tuple:
+        spec_runtime = replace(runtime_config, scaffold_policy=scaffold_policy)
+        key = (spec_runtime, block_layout)
+        specs.setdefault(key, (spec_runtime, block_layout))
         return key
-
-    # A one-layer model leaves one PP stage empty when PP=2, which the hybrid
-    # cache planner cannot represent.  Measure two cache-bearing base layers
-    # instead, then recover the one-layer intercept from the repeated-base
-    # measurement below.  Both anchors therefore use the production topology.
-    two_base_key = _add_spec(runtime_config, None, trailing_base_block=True)
-    ten_block_key = _add_spec(runtime_config_fewer, base_block_config)
 
     def _is_noop_block(bc) -> bool:
         # ``BlockConfig`` has no ``no_op`` field; a block is a no-op only when all present
         # subblocks are no-ops.
         return not any(not subblock.no_op for subblock in bc.subblock_configs)
 
-    block_spec_keys: dict = {}
-    for block_config in block_config_set:
-        if not _is_noop_block(block_config):
-            needs_pp_cache_anchor = any(
-                subblock.no_op and subblock.kind in _ATTENTION_LIKE_KINDS
-                for subblock in block_config.subblock_configs
-            )
-            block_spec_keys[block_config] = _add_spec(
-                runtime_config,
+    block_spec_keys: dict[BlockConfig, tuple[tuple, tuple]] = {}
+    fixed_overhead_keys: list[tuple[tuple, tuple]] = []
+    scaffold_required = False
+    for block_config in sorted(block_config_set):
+        if _is_noop_block(block_config):
+            continue
+        policy = getattr(
+            descriptor,
+            "runtime_benchmark_scaffold_policy",
+            lambda _candidate: "none",
+        )(block_config)
+        if policy == "none":
+            short_layout = homogeneous_layout(block_config, repeat_block_n_times)
+            long_layout = homogeneous_layout(block_config, 2 * repeat_block_n_times)
+            short_key = _add_spec(short_layout, policy)
+            long_key = _add_spec(long_layout, policy)
+            fixed_overhead_keys.append((short_key, long_key))
+        elif policy == "attention_scaffold_per_pp_stage":
+            scaffold_required = True
+            short_layout = scaffolded_layout(
                 block_config,
-                trailing_base_block=needs_pp_cache_anchor,
+                base_block_config,
+                repeat_block_n_times,
+                topology.pipeline_parallel_size,
             )
+            long_layout = scaffolded_layout(
+                block_config,
+                base_block_config,
+                2 * repeat_block_n_times,
+                topology.pipeline_parallel_size,
+            )
+            short_key = _add_spec(short_layout, policy)
+            long_key = _add_spec(long_layout, policy)
+        else:
+            raise ValueError(f"unsupported runtime scaffold policy: {policy!r}")
+        block_spec_keys[block_config] = (short_key, long_key)
+
+    scaffold_overhead_keys = None
+    if scaffold_required:
+        scaffold_overhead_keys = (
+            _add_spec(homogeneous_layout(base_block_config, repeat_block_n_times), "none"),
+            _add_spec(
+                homogeneous_layout(base_block_config, 2 * repeat_block_n_times),
+                "none",
+            ),
+        )
+    if not block_spec_keys:
+        raise ValueError("runtime estimation requires at least one active block")
 
     gpu_ids = _resolve_gpu_ids(runtime_config.topology.gpu_group_size)
     mprint(
@@ -570,33 +633,28 @@ def calc_runtime_for_blocks(
     )
     results = _run_benchmarks(specs, gpu_ids, cache_dir)
 
-    runtime_ms_two_base_blocks = results[two_base_key]
-    runtime_ms_ten_blocks = results[ten_block_key]
-    runtime_ms_per_base_block = (
-        runtime_ms_ten_blocks - runtime_ms_two_base_blocks
-    ) / (repeat_block_n_times - 2)
-    runtime_ms_one_block = runtime_ms_two_base_blocks - runtime_ms_per_base_block
-
     runtime_by_block_dict: dict = {}
-    for block_config in block_config_set:
+    for block_config in sorted(block_config_set):
         if _is_noop_block(block_config):
             runtime_by_block_dict[block_config] = RuntimeMeasurement.zero()
         else:
-            block_total_ms = results[block_spec_keys[block_config]]
-            needs_pp_cache_anchor = any(
-                subblock.no_op and subblock.kind in _ATTENTION_LIKE_KINDS
-                for subblock in block_config.subblock_configs
+            short_key, long_key = block_spec_keys[block_config]
+            runtime_by_block_dict[block_config] = candidate_slope(
+                results[short_key], results[long_key], repeat_block_n_times
             )
-            baseline_ms = (
-                runtime_ms_two_base_blocks
-                if needs_pp_cache_anchor
-                else runtime_ms_one_block
+            _validate_marginal_runtime(
+                runtime_by_block_dict[block_config],
+                label=json.dumps(block_config.to_dict(), sort_keys=True),
+                ignore_negatives=bool(runtime_stats_config.get("ignore_negatives", False)),
             )
-            runtime_by_block_dict[block_config] = (
-                block_total_ms - baseline_ms
-            ) / repeat_block_n_times
 
-    no_block_runtime_ms = runtime_ms_one_block - runtime_ms_per_base_block
+    if scaffold_overhead_keys is not None:
+        fixed_overhead_keys.append(scaffold_overhead_keys)
+    overhead_estimates = [
+        fixed_intercept(results[short_key], results[long_key])
+        for short_key, long_key in fixed_overhead_keys
+    ]
+    no_block_runtime_ms = median_measurement(overhead_estimates)
 
     return runtime_by_block_dict, no_block_runtime_ms
 
@@ -623,7 +681,13 @@ def calc_runtime_for_subblocks(
     then the per-subblock runtimes are derived from the cached measurements using
     the same differencing the sequential version used.
     """
-    repeat_block_n_times = max(3, int(runtime_stats_config.get("repeat_block_n_times", 10)))
+    configured_repeat_count = max(
+        1, int(runtime_stats_config.get("repeat_block_n_times", 10))
+    )
+    topology = RuntimeTopology.from_config(runtime_stats_config.get("topology", None))
+    repeat_block_n_times = effective_repeat_count(
+        configured_repeat_count, topology.pipeline_parallel_size
+    )
 
     runtime_config = RuntimeConfig(
         vocab_size,
@@ -641,45 +705,78 @@ def calc_runtime_for_subblocks(
         runtime_stats_config.get("num_warmup_iters", 10),
         _extra_vllm_args(runtime_stats_config),
         runtime_stats_config.get("max_num_seqs", None),
-        RuntimeTopology.from_config(runtime_stats_config.get("topology", None)),
+        topology,
+        effective_repeat_count=repeat_block_n_times,
+        vllm_env=_vllm_env(runtime_stats_config),
     )
-    # Config with one fewer repeat, used only for the no-block overhead estimate.
-    runtime_config_fewer = replace(runtime_config, repeat_block_n_times=repeat_block_n_times - 1)
     runtime_config.topology.validate_model_dimensions(
         num_attention_heads=num_attention_heads,
         num_key_value_heads=num_key_value_heads,
     )
     base_block_config = descriptor.runtime_benchmark_base_block_config(runtime_config)
-    base_attention_block = _mark_noop_kinds(base_block_config, _FFN_LIKE_KINDS)
-
-    # ---- Enumerate the distinct (runtime_config, block_config) benchmarks ----
-    # A spec is uniquely identified by (runtime_config, block_config); the same
-    # spec requested twice (e.g. a baseline shared by every FFN subblock) is
-    # benchmarked once.
-    specs: dict[tuple, tuple[RuntimeConfig, BlockConfig | None, bool]] = {}
+    specs: dict[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]] = {}
 
     def _add_spec(
-        rc: RuntimeConfig,
-        block_config: BlockConfig | None,
-        trailing_base_block: bool = False,
+        block_layout: tuple[BlockConfig, ...], scaffold_policy: str
     ) -> tuple:
-        key = (rc, block_config, trailing_base_block)
-        specs.setdefault(key, (rc, block_config, trailing_base_block))
+        spec_runtime = replace(runtime_config, scaffold_policy=scaffold_policy)
+        key = (spec_runtime, block_layout)
+        specs.setdefault(key, (spec_runtime, block_layout))
         return key
 
-    # A one-layer model leaves one PP stage without a cache-bearing layer when PP=2, which
-    # vLLM's hybrid cache planner cannot represent.  Time two base layers instead and recover
-    # the one-layer baseline from the adjacent repeated-base anchor below.
-    two_base_key = _add_spec(runtime_config, None, trailing_base_block=True)
-    ten_block_key = _add_spec(runtime_config_fewer, base_block_config)  # base + 9 base blocks
-    ffn_baseline_key = _add_spec(runtime_config, base_attention_block)  # base + 10 attn-only blocks
+    def _scaffold_policy(candidate: BlockConfig) -> str:
+        policy = getattr(
+            descriptor,
+            "runtime_benchmark_scaffold_policy",
+            lambda _candidate: "none",
+        )(candidate)
+        if policy not in {"none", "attention_scaffold_per_pp_stage"}:
+            raise ValueError(f"unsupported runtime scaffold policy: {policy!r}")
+        return policy
 
-    subblock_spec_keys: dict[SubblockConfig, tuple] = {}
-    for subblock_config in subblock_config_set:
-        if not subblock_config.no_op:
-            subblock_spec_keys[subblock_config] = _add_spec(
-                runtime_config, _block_config_for_subblock(runtime_config, subblock_config)
+    subblock_spec_keys: dict[SubblockConfig, tuple[tuple, tuple]] = {}
+    fixed_overhead_keys: list[tuple[tuple, tuple]] = []
+    scaffold_required = False
+    for subblock_config in sorted(subblock_config_set):
+        if subblock_config.no_op:
+            continue
+        candidate = _block_config_for_subblock(runtime_config, subblock_config)
+        assert candidate is not None
+        policy = _scaffold_policy(candidate)
+        if policy == "none":
+            short_layout = homogeneous_layout(candidate, repeat_block_n_times)
+            long_layout = homogeneous_layout(candidate, 2 * repeat_block_n_times)
+            short_key = _add_spec(short_layout, policy)
+            long_key = _add_spec(long_layout, policy)
+            fixed_overhead_keys.append((short_key, long_key))
+        else:
+            scaffold_required = True
+            short_layout = scaffolded_layout(
+                candidate,
+                base_block_config,
+                repeat_block_n_times,
+                topology.pipeline_parallel_size,
             )
+            long_layout = scaffolded_layout(
+                candidate,
+                base_block_config,
+                2 * repeat_block_n_times,
+                topology.pipeline_parallel_size,
+            )
+            short_key = _add_spec(short_layout, policy)
+            long_key = _add_spec(long_layout, policy)
+        subblock_spec_keys[subblock_config] = (short_key, long_key)
+
+    scaffold_overhead_keys = None
+    if scaffold_required:
+        scaffold_short = homogeneous_layout(base_block_config, repeat_block_n_times)
+        scaffold_long = homogeneous_layout(base_block_config, 2 * repeat_block_n_times)
+        scaffold_overhead_keys = (
+            _add_spec(scaffold_short, "none"),
+            _add_spec(scaffold_long, "none"),
+        )
+    if not subblock_spec_keys:
+        raise ValueError("runtime estimation requires at least one active subblock")
 
     # ---- Run all benchmarks (parallel across GPUs, cached/resumable) ----
     gpu_ids = _resolve_gpu_ids(runtime_config.topology.gpu_group_size)
@@ -689,38 +786,47 @@ def calc_runtime_for_subblocks(
     )
     results = _run_benchmarks(specs, gpu_ids, cache_dir)
 
-    # Recover the one-block baseline and non-block overhead from two adjacent cache-bearing
-    # anchors.  With ``repeat_block_n_times == 3``, these are two- and three-block models.
-    runtime_ms_two_base_blocks = results[two_base_key]
-    runtime_ms_ten_blocks = results[ten_block_key]
-    runtime_ms_per_base_block = (
-        runtime_ms_ten_blocks - runtime_ms_two_base_blocks
-    ) / (repeat_block_n_times - 2)
-    runtime_ms_one_block = runtime_ms_two_base_blocks - runtime_ms_per_base_block
-    no_block_runtime_ms = runtime_ms_one_block - runtime_ms_per_base_block
-
-    # ---- Derive per-subblock runtimes from the measured totals ----
     runtime_by_subblock_dict = {}
     for subblock_config in sorted(subblock_config_set):
-        if isinstance(subblock_config, AttentionConfig | MLAConfig | MambaConfig):
-            baseline_runtime_ms = runtime_ms_one_block
-        elif isinstance(subblock_config, FFNConfig | MoEConfig):
-            baseline_runtime_ms = results[ffn_baseline_key]
-        else:
+        if not isinstance(
+            subblock_config,
+            AttentionConfig | MLAConfig | MambaConfig | FFNConfig | MoEConfig,
+        ):
             raise ValueError(f"Unsupported subblock type: {type(subblock_config)}")
-
         if subblock_config.no_op:
             total_runtime_ms = RuntimeMeasurement.zero()
         else:
-            subblock_total_runtime_ms = results[subblock_spec_keys[subblock_config]]
-            total_runtime_ms = (
-                subblock_total_runtime_ms - baseline_runtime_ms
-            ) / repeat_block_n_times
+            short_key, long_key = subblock_spec_keys[subblock_config]
+            total_runtime_ms = candidate_slope(
+                results[short_key], results[long_key], repeat_block_n_times
+            )
             _validate_marginal_runtime(
                 total_runtime_ms,
                 label=json.dumps(subblock_config.to_dict(), sort_keys=True),
+                ignore_negatives=bool(runtime_stats_config.get("ignore_negatives", False)),
             )
 
         runtime_by_subblock_dict[subblock_config] = total_runtime_ms
+
+    if scaffold_overhead_keys is not None:
+        fixed_overhead_keys.append(scaffold_overhead_keys)
+    overhead_estimates = [
+        fixed_intercept(results[short_key], results[long_key])
+        for short_key, long_key in fixed_overhead_keys
+    ]
+    no_block_runtime_ms = median_measurement(overhead_estimates)
+    relative_tolerance = float(
+        runtime_stats_config.get("fixed_overhead_relative_tolerance", 0.5)
+    )
+    denominator = max(abs(no_block_runtime_ms.total_ms), 1.0e-12)
+    relative_spread = max(
+        abs(value.total_ms - no_block_runtime_ms.total_ms) / denominator
+        for value in overhead_estimates
+    )
+    if relative_spread > relative_tolerance:
+        raise ValueError(
+            "fixed runtime overhead estimates exceed relative tolerance: "
+            f"spread={relative_spread:.6g} tolerance={relative_tolerance:.6g}"
+        )
 
     return runtime_by_subblock_dict, no_block_runtime_ms

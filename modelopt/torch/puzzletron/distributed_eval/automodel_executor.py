@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 import time
 
@@ -52,7 +52,7 @@ class AutoModelReplaceBlockExecutor:
         if self.params is not None:
             force_hf = self.params["force_hf"]
         return {
-            "handlers": ["replace_block"],
+            "handlers": ["replace_block", "depth_candidate"],
             "force_hf": force_hf,
             "teacher_target_cache": True,
             "batch_cache_identity": (self.cfg.get("data", {}) or {}).get("fingerprint"),
@@ -168,7 +168,7 @@ class AutoModelReplaceBlockExecutor:
         self._setup_complete = True
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult | None:
-        if request.handler != "replace_block":
+        if request.handler not in {"replace_block", "depth_candidate"}:
             raise NotImplementedError(f"Unsupported evaluation handler {request.handler!r}")
         if not self._setup_complete:
             raise RuntimeError("AutoModelReplaceBlockExecutor.setup() was not called")
@@ -182,23 +182,44 @@ class AutoModelReplaceBlockExecutor:
                 f"request={request_width} source={self.source_hidden_width}"
             )
 
-        layer_replacement = parse_layer_replacement(request.payload["layer_replacement"])
-        prune_target = _solution_prune_target(
-            layer_replacement,
-            self.teacher_block_configs,
-            self.num_q,
-            self.head_dim,
+        raw_replacements = (
+            request.payload.get("layer_replacements", [])
+            if request.handler == "depth_candidate"
+            else [request.payload["layer_replacement"]]
         )
+        prune_targets = [
+            target
+            for raw in raw_replacements
+            if (
+                target := _solution_prune_target(
+                    parse_layer_replacement(raw),
+                    self.teacher_block_configs,
+                    self.num_q,
+                    self.head_dim,
+                )
+            )
+            is not None
+        ]
+        layer_indices = [int(target["layer_idx"]) for target in prune_targets]
+        if len(layer_indices) != len(set(layer_indices)):
+            raise ValueError(
+                "depth_candidate must contain at most one cumulative replacement per layer"
+            )
         started = time.perf_counter()
         import torch.distributed as torch_dist
 
         if not torch_dist.is_initialized() or torch_dist.get_rank() == 0:
             print(
                 "[distributed-eval/automodel] "
-                f"request_start={request.request_id} layer={prune_target['layer_idx']}",
+                f"request_start={request.request_id} layers={layer_indices}",
                 flush=True,
             )
-        metrics = self._score(prune_target)
+        score_target = (
+            prune_targets
+            if request.handler == "depth_candidate"
+            else (prune_targets[0] if prune_targets else None)
+        )
+        metrics = self._score(score_target)
         if metrics is None:
             return None
         if not torch_dist.is_initialized() or torch_dist.get_rank() == 0:
@@ -222,13 +243,14 @@ class AutoModelReplaceBlockExecutor:
             provenance={
                 "handler": request.handler,
                 "evaluator_revision": request.evaluator_revision,
+                "micro_batch_size": self.params.get("micro_batch_size"),
                 "hidden_width": self.source_hidden_width,
                 "sliced_teacher_baseline": self.sliced_teacher_baseline,
                 "observability": self.latest_observability,
             },
         )
 
-    def _score(self, prune_target: dict | None) -> dict | None:
+    def _score(self, prune_target: dict | list[dict] | None) -> dict | None:
         import torch.distributed as torch_dist
         import modelopt.torch.utils.distributed as dist
 
@@ -244,30 +266,31 @@ class AutoModelReplaceBlockExecutor:
         per_batch = []
         tp_group = recipe.tensor_parallel_group()
         candidate_lm_head = recipe.lm_head_weight() if recipe.has_outputs else None
-        prune_target = None if prune_target is None else dict(prune_target)
-        bypass_dir = (
-            self.bypass_checkpoint_dir
-            if prune_target is None
-            else prune_target.pop("bypass_checkpoint_dir", self.bypass_checkpoint_dir)
-        )
-        layer_idx = None if prune_target is None else int(prune_target["layer_idx"])
-        owns_layer = layer_idx is not None and recipe._find_decoder_layer(layer_idx) is not None
+        raw_targets = prune_target if isinstance(prune_target, list) else [prune_target]
+        prune_targets = [dict(target) for target in raw_targets if target is not None]
+        layer_indices = [int(target["layer_idx"]) for target in prune_targets]
+        owned_layers = [
+            layer_idx
+            for layer_idx in layer_indices
+            if recipe._find_decoder_layer(layer_idx) is not None
+        ]
         overlay_started = time.perf_counter()
-        overlay = (
-            recipe.block_checkpoint_overlay_context(bypass_dir, layer_idx)
-            if bypass_dir is not None and layer_idx is not None
-            else nullcontext()
-        )
-        prune_context = (
-            nullcontext()
-            if prune_target is None
-            else recipe.prune_block_context(**prune_target)
-        )
-        with overlay, prune_context:
-            if owns_layer:
+        with ExitStack() as stack:
+            for target in prune_targets:
+                layer_idx = int(target["layer_idx"])
+                bypass_dir = target.pop(
+                    "bypass_checkpoint_dir", self.bypass_checkpoint_dir
+                )
+                stack.enter_context(
+                    recipe.block_checkpoint_overlay_context(bypass_dir, layer_idx)
+                    if bypass_dir is not None
+                    else nullcontext()
+                )
+                stack.enter_context(recipe.prune_block_context(**target))
+            if owned_layers:
                 print(
                     "[distributed-eval/automodel] "
-                    f"rank={torch_dist.get_rank()} layer={layer_idx} "
+                    f"rank={torch_dist.get_rank()} layers={owned_layers} "
                     f"overlay_and_prune_ready_seconds={time.perf_counter() - overlay_started:.3f}",
                     flush=True,
                 )
@@ -309,7 +332,7 @@ class AutoModelReplaceBlockExecutor:
                 if self.is_output_writer:
                     print(
                         "[distributed-eval/automodel] "
-                        f"layer={layer_idx} batch={batch_idx} "
+                        f"layers={layer_indices} batch={batch_idx} "
                         f"score_seconds={time.perf_counter() - batch_started:.3f}",
                         flush=True,
                     )

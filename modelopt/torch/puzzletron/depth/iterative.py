@@ -70,12 +70,8 @@ def _depth_scoring_config(hydra_cfg: DictConfig) -> DictConfig:
     depth = clone_hydra_config(cfg.get("depth", {}))
     scoring = clone_hydra_config(cfg.scoring)
     depth_automodel = clone_hydra_config(depth.get("automodel", {}))
-    if "recipe_path" not in depth_automodel and cfg.get("recipe_path", None) is not None:
-        # RPC replacement scoring commonly uses a one-node recipe, while the
-        # iterative depth stage runs under the campaign's full distributed
-        # topology.  Inherit metric/backend knobs from ``scoring.automodel``
-        # but use the stage-level recipe unless depth explicitly overrides it.
-        depth_automodel.recipe_path = cfg.recipe_path
+    # Inherit scoring backend/metric knobs while allowing depth RPC to own an
+    # independent model mesh through ``depth.automodel.parallel``.
     scoring.automodel = OmegaConf.merge(scoring.get("automodel", {}), depth_automodel)
     for key in (
         "eval_samples",

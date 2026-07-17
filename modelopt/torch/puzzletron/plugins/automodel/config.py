@@ -13,15 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Translate the puzzletron ``pruning`` Hydra config into a NeMo recipe config.
+"""Translate stage-owned Puzzletron parallelism into a NeMo AutoModel recipe.
 
-The operator authors a NeMo recipe as a **standalone YAML file** (same schema as the
-reference ``pretrain.yaml``: ``model`` / ``distributed`` / ``dataset`` / ``dataloader`` /
-``optimizer`` / ``loss_fn`` / ``step_scheduler`` / ...) and points
-``pruning.automodel.recipe_path`` at it. It is loaded raw (NOT through puzzletron's Hydra
-``instantiate`` pass) so its ``_target_`` entries are not eagerly constructed. We inject the
-puzzletron-derived values (teacher checkpoint path, AnyModel descriptor, ``force_hf``) into
-its ``model`` block, and surface the scoring-specific knobs separately.
+Operators configure the model mesh directly under each model-loading stage. Puzzletron owns
+the stable AutoModel recipe boilerplate and derives ``dp_size`` from the independent FSDP
+shard and replication axes. This keeps activation scoring, depth RPC, replacement scoring,
+and bypass/KD free to use different topologies without maintaining duplicated recipe YAMLs.
 
 Example config block (in the puzzletron pruning config — only scalars/paths, no ``_target_``)::
 
@@ -33,7 +30,13 @@ Example config block (in the puzzletron pruning config — only scalars/paths, n
       automodel:
         force_hf: true
         use_puzzletron_dataloader: true
-        recipe_path: ${...}/automodel_scoring_recipe.yaml   # standalone NeMo recipe YAML
+        parallel:
+          tp: 1
+          cp: 1
+          pp: 2
+          ep: 4
+          dp_shard: 4
+          dp_replicate: 1
 """
 
 import logging
@@ -48,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "build_recipe_config",
+    "build_stage_recipe_config",
     "build_solution_recipe_config",
     "inject_descriptor_model_kwargs",
     "inject_descriptor_pipeline_config",
@@ -134,21 +138,92 @@ def _inject_canonical_data(recipe: dict, hydra_cfg) -> dict:
     return recipe
 
 
-def _load_recipe(automodel_cfg) -> dict:
-    """Load the NeMo recipe config as a plain dict.
+def build_stage_recipe_config(automodel_cfg) -> dict:
+    """Generate the standard AutoModel recipe from a stage's parallel mesh.
 
-    Prefers ``recipe_path`` (a standalone NeMo YAML, loaded raw so its ``_target_``
-    entries are NOT eagerly instantiated by puzzletron's Hydra pass) and falls back to
-    an inline ``recipe`` mapping (used by tests).
+    ``dp_shard`` is the FSDP shard axis on which expert parallelism is overlaid;
+    ``dp_replicate`` is the independent FSDP replication axis. Consequently AutoModel's
+    combined ``dp_size`` is their product and ``dp_shard`` must be divisible by ``ep``.
     """
-    if automodel_cfg is None:
-        return {}
-    recipe_path = _as_dict(automodel_cfg).get("recipe_path", None)
-    if recipe_path:
-        return OmegaConf.to_container(OmegaConf.load(recipe_path), resolve=True)
-    return _as_dict(
-        automodel_cfg.get("recipe", None) if OmegaConf.is_config(automodel_cfg) else None
-    )
+    config = _as_dict(automodel_cfg)
+    removed = sorted({"recipe", "recipe_path"}.intersection(config))
+    if removed:
+        raise ValueError(
+            "AutoModel recipe files and inline recipes were removed; configure "
+            f"automodel.parallel instead (found {', '.join(removed)})"
+        )
+    parallel = _as_dict(config.get("parallel"))
+    if not parallel:
+        raise ValueError("AutoModel stages require an automodel.parallel mapping")
+
+    tp = _int_or_default(parallel.get("tp"), 1)
+    cp = _int_or_default(parallel.get("cp"), 1)
+    pp = _int_or_default(parallel.get("pp"), 1)
+    ep = _int_or_default(parallel.get("ep"), 1)
+    dp_shard = _int_or_default(parallel.get("dp_shard"), 1)
+    dp_replicate = _int_or_default(parallel.get("dp_replicate"), 1)
+    axes = {
+        "tp": tp,
+        "cp": cp,
+        "pp": pp,
+        "ep": ep,
+        "dp_shard": dp_shard,
+        "dp_replicate": dp_replicate,
+    }
+    invalid = {name: value for name, value in axes.items() if value < 1}
+    if invalid:
+        raise ValueError(f"AutoModel parallel axes must be positive integers: {invalid}")
+    if dp_shard % ep:
+        raise ValueError(
+            "automodel.parallel.dp_shard must be divisible by ep because AutoModel "
+            f"overlays EP on the FSDP shard axis; got dp_shard={dp_shard}, ep={ep}"
+        )
+
+    distributed = {
+        "dp_size": dp_shard * dp_replicate,
+        "tp_size": tp,
+        "cp_size": cp,
+        "ep_size": ep,
+        "pp_size": pp,
+        "sequence_parallel": bool(parallel.get("sequence_parallel", False)),
+    }
+    if dp_replicate > 1:
+        distributed["dp_replicate_size"] = dp_replicate
+    if pp > 1:
+        distributed["pipeline"] = {
+            "pp_schedule": str(parallel.get("pipeline_schedule", "1f1b")),
+            "pp_microbatch_size": 1,
+            "pp_batch_size": pp,
+        }
+
+    return {
+        "step_scheduler": {"global_batch_size": 1, "local_batch_size": 1, "max_steps": 1},
+        "dist_env": {"backend": "nccl"},
+        "model": {"torch_dtype": "bf16", "trust_remote_code": True},
+        "checkpoint": {"enabled": False},
+        "distributed": distributed,
+        "distributed_config": {
+            "_target_": "nemo_automodel.components.distributed.config.FSDP2Config",
+            "activation_checkpointing": bool(config.get("activation_checkpointing", True)),
+        },
+        "packed_sequence": {"packed_sequence_size": 0},
+        "dataset": {
+            "_target_": (
+                "modelopt.torch.puzzletron.plugins.automodel.dummy_data.make_dummy_dataset"
+            ),
+            "num_samples": 1,
+            "seq_length": 512,
+        },
+        "dataloader": {
+            "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
+            "shuffle": False,
+            "collate_fn": "nemo_automodel.components.datasets.utils.default_collater",
+        },
+        "optimizer": {"_target_": "torch.optim.AdamW", "lr": 0.0},
+        "loss_fn": {
+            "_target_": "nemo_automodel.components.loss.te_parallel_ce.TEParallelCrossEntropy"
+        },
+    }
 
 
 def _load_model_config_for_descriptor(model_path, *, trust_remote_code: bool):
@@ -324,6 +399,20 @@ def _align_pipeline_seq_len(recipe: dict, *, block_size, cp_size=None) -> dict:
     return recipe
 
 
+def _align_dummy_dataset(recipe: dict, *, num_samples, block_size) -> dict:
+    """Keep generated setup data aligned with the stage's real validation shape."""
+
+    dataset = dict(recipe.get("dataset") or {})
+    if not str(dataset.get("_target_", "")).endswith("make_dummy_dataset"):
+        return recipe
+    if num_samples not in (None, "none", "None", ""):
+        dataset["num_samples"] = int(num_samples)
+    if block_size not in (None, "none", "None", ""):
+        dataset["seq_length"] = int(block_size)
+    recipe["dataset"] = dataset
+    return recipe
+
+
 def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
     """Align static PP metadata with the batch after Puzzletron's DP split."""
     if micro_batch_size in (None, "none", "None", ""):
@@ -332,7 +421,6 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
     if _int_or_default(distributed.get("pp_size"), 1) <= 1:
         return recipe
     explicit_dp = distributed.get("dp_size")
-    batch_dp = max(_int_or_default(explicit_dp, 1), 1)
     # AutoModel's StepScheduler counts the EP mesh as its data mesh when no
     # explicit FSDP/DP axis exists. EP ranks still consume the same packed
     # batch, so this factor affects scheduler divisibility only—not batch
@@ -344,6 +432,18 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
         ),
         1,
     )
+    # AutoModel overlays EP on the configured DP shard axis. Only the residual
+    # DP degree owns distinct samples; EP peers consume the same sample slice.
+    if explicit_dp in (None, "none", "None", ""):
+        batch_dp = 1
+    else:
+        ep_size = max(_int_or_default(distributed.get("ep_size"), 1), 1)
+        if scheduler_dp % ep_size:
+            raise ValueError(
+                "AutoModel dp_size must be divisible by ep_size for pipeline batch "
+                f"alignment; got dp_size={scheduler_dp}, ep_size={ep_size}"
+            )
+        batch_dp = max(scheduler_dp // ep_size, 1)
     global_batch = int(micro_batch_size)
     local_batch = (
         global_batch // batch_dp if global_batch % batch_dp == 0 else global_batch
@@ -363,12 +463,11 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
 def build_recipe_config(hydra_cfg) -> dict:
     """Build the NeMo recipe config dict for AutoModel activation scoring.
 
-    Loads the operator-authored recipe (via ``pruning.automodel.recipe_path``, or an inline
-    ``recipe`` mapping in tests) and injects the teacher checkpoint path, AnyModel descriptor,
-    and ``force_hf`` into its ``model`` block (without overwriting explicit operator values).
+    Generates the standard recipe from ``pruning.automodel.parallel`` and injects the teacher
+    checkpoint path, AnyModel descriptor, and ``force_hf`` into its ``model`` block.
     """
     automodel_cfg = hydra_cfg.pruning.get("automodel", None)
-    recipe = _load_recipe(automodel_cfg)
+    recipe = build_stage_recipe_config(automodel_cfg)
 
     model = dict(recipe.get("model", {}))
     model.setdefault("_target_", _FROM_PRETRAINED_TARGET)
@@ -385,6 +484,11 @@ def build_recipe_config(hydra_cfg) -> dict:
         )
 
     _inject_canonical_data(recipe, hydra_cfg)
+    _align_dummy_dataset(
+        recipe,
+        num_samples=hydra_cfg.pruning.get("eval_samples", None),
+        block_size=hydra_cfg.pruning.get("block_size", None),
+    )
 
     _inject_descriptor_model_kwargs(
         recipe,
@@ -446,16 +550,23 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     """NeMo recipe dict for AutoModel replace-1-block scoring, pointed at ``model_path``.
 
     ``model_path`` is the teacher dir for the target-extraction phase and a per-solution
-    candidate checkpoint dir during the candidate loop. Reuses ``scoring.automodel.recipe_path``
-    (the same NeMo recipe YAML schema as activation scoring) for the parallel layout.
+    candidate checkpoint dir during the candidate loop. The scoring stage owns its mesh through
+    ``scoring.automodel.parallel``.
     """
     automodel_cfg = hydra_cfg.scoring.get("automodel", None)
-    recipe = _load_recipe(automodel_cfg)
+    recipe = build_stage_recipe_config(automodel_cfg)
     force_hf = bool(_as_dict(automodel_cfg).get("force_hf", True))
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)
     recipe = _inject_model(recipe, model_path, descriptor, force_hf)
     _inject_canonical_data(recipe, hydra_cfg)
+    _align_dummy_dataset(
+        recipe,
+        num_samples=hydra_cfg.scoring.get("eval_samples", None),
+        block_size=hydra_cfg.scoring.get(
+            "block_size", hydra_cfg.pruning.get("block_size", None)
+        ),
+    )
     _align_pipeline_seq_len(
         recipe,
         block_size=hydra_cfg.scoring.get(
@@ -520,7 +631,7 @@ def scoring_params(hydra_cfg) -> dict:
     data_cfg = _as_dict(hydra_cfg.get("data", None))
     hook_kwargs = _as_dict(pruning.get("activation_hooks_kwargs", None))
 
-    recipe = _load_recipe(pruning.get("automodel", None))
+    recipe = build_stage_recipe_config(pruning.get("automodel", None))
     distributed = _as_dict(recipe.get("distributed", None))
     ep_size = distributed.get("ep_size", 1) or 1
 

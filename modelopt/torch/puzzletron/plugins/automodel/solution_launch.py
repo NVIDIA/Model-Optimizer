@@ -35,7 +35,7 @@ import logging
 import math
 import os
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 
 import modelopt.torch.utils.distributed as dist
@@ -218,6 +218,7 @@ def _source_hidden_channel_indices(
     teacher_width: int,
     *,
     retained_width: int | None = None,
+    source_and_teacher_share_basis: bool = False,
 ) -> tuple[int, ...]:
     """Map a source checkpoint's local hidden basis to the original teacher basis."""
     source_width = int(source_width)
@@ -227,6 +228,12 @@ def _source_hidden_channel_indices(
         raise ValueError(
             f"retained hidden width {retained_width} exceeds teacher width {teacher_width}"
         )
+    if source_and_teacher_share_basis:
+        if retained_width > source_width:
+            raise ValueError(
+                f"retained hidden width {retained_width} exceeds source width {source_width}"
+            )
+        return tuple(range(retained_width))
     permutation_path = Path(source_dir) / "sorted_permutations.json"
     if not permutation_path.is_file():
         return tuple(range(retained_width))
@@ -270,22 +277,13 @@ def _score_candidate(
     tp_group = recipe.tensor_parallel_group()
     is_writer = _is_output_writer(recipe)
     lm_head_w = recipe.lm_head_weight() if recipe.has_outputs else None
-    overlay = (
-        recipe.block_checkpoint_overlay_context(bypass_checkpoint_dir, prune_target["layer_idx"])
-        if bypass_checkpoint_dir is not None and prune_target is not None
-        else nullcontext()
-    )
-    if isinstance(prune_target, (list, tuple)):
-        prune_context = recipe.architecture_context(prune_target)
-    else:
-        prune_context = (
-            recipe.prune_block_context(**prune_target)
-            if prune_target is not None
-            else nullcontext()
-        )
-    hidden_width_context = recipe.hidden_width_context(hidden_width)
     batch_started = time.perf_counter()
-    with overlay, prune_context, hidden_width_context:
+    with _candidate_execution_context(
+        recipe,
+        prune_target,
+        bypass_checkpoint_dir=bypass_checkpoint_dir,
+        hidden_width=hidden_width,
+    ):
         for batch_idx, (hidden, targets) in enumerate(recipe.iterate_captures()):
             _trace_batch("candidate_capture_yield", batch_idx, has_hidden=hidden is not None, name=name)
             if hidden is not None:
@@ -487,6 +485,8 @@ def _solution_prune_target(layer_replacements, teacher_block_configs, num_q_head
     layer_idx = int(rep["parent_layer_indices"][0])
     child = rep["child_block_configs"][0]
     teacher = teacher_block_configs[layer_idx]
+    if child == teacher:
+        return None
 
     child_ffn = child.get_subblock("ffn")
     child_attn = child.get_subblock("attention")
@@ -543,6 +543,78 @@ def _solution_prune_target(layer_replacements, teacher_block_configs, num_q_head
         # reporting only.
         "expert_keep_ids": None,
     }
+
+
+def _solution_prune_targets(
+    solution: dict,
+    teacher_block_configs,
+    num_q_heads: int,
+    head_dim: int,
+) -> dict | list[dict] | None:
+    """Resolve a replace-one or complete-architecture solution into runtime targets."""
+
+    payload = solution.get("puzzle_solution", solution)
+    if "single_sequence_replacement" in payload:
+        replacement = parse_layer_replacement(payload["single_sequence_replacement"])
+        return _solution_prune_target(
+            replacement,
+            teacher_block_configs,
+            num_q_heads,
+            head_dim,
+        )
+    replacements = [
+        parse_layer_replacement(replacement)
+        for replacement in payload.get("chosen_replacements", ())
+    ]
+    if not replacements:
+        raise KeyError(
+            "solution scoring requires single_sequence_replacement or chosen_replacements"
+        )
+    targets = [
+        target
+        for replacement in replacements
+        if (
+            target := _solution_prune_target(
+                replacement,
+                teacher_block_configs,
+                num_q_heads,
+                head_dim,
+            )
+        )
+        is not None
+    ]
+    return targets
+
+
+@contextmanager
+def _candidate_execution_context(
+    recipe,
+    prune_target: dict | list[dict] | tuple[dict, ...] | None,
+    *,
+    bypass_checkpoint_dir=None,
+    hidden_width: int | None = None,
+):
+    """Overlay every changed layer, apply its architecture, and restore deterministically."""
+
+    is_architecture = isinstance(prune_target, (list, tuple))
+    targets = list(prune_target) if is_architecture else [prune_target]
+    targets = [target for target in targets if target is not None]
+    with ExitStack() as stack:
+        if bypass_checkpoint_dir is not None:
+            for target in targets:
+                stack.enter_context(
+                    recipe.block_checkpoint_overlay_context(
+                        bypass_checkpoint_dir,
+                        int(target["layer_idx"]),
+                        offload_restore=is_architecture and len(targets) > 1,
+                    )
+                )
+        if is_architecture:
+            stack.enter_context(recipe.architecture_context(targets))
+        elif targets:
+            stack.enter_context(recipe.prune_block_context(**targets[0]))
+        stack.enter_context(recipe.hidden_width_context(hidden_width))
+        yield
 
 
 def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: int = 0) -> None:
@@ -638,6 +710,7 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
         loader=load_model_config,
     )
     source_hidden_width = int(descriptor.get_language_model_config(source_config).hidden_size)
+    same_checkpoint = source_dir.resolve() == target_dir.resolve()
     retained_hidden_indices = _source_hidden_channel_indices(
         source_dir,
         source_hidden_width,
@@ -647,6 +720,7 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
             if bool(scoring.get("zero_pad_hidden_to_teacher_width", False))
             else source_hidden_width
         ),
+        source_and_teacher_share_basis=same_checkpoint,
     )
     if solution_widths and max(solution_widths) > source_hidden_width:
         raise ValueError(
@@ -662,8 +736,6 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
         "[solution/automodel] checkpoint roles | "
         f"target={target_dir} source={source_dir}"
     )
-    same_checkpoint = source_dir.resolve() == target_dir.resolve()
-
     def score_pending(recipe, cache) -> None:
         sliced_teacher_baseline = None
         if baseline_only or bool(scoring.get("score_source_baseline", True)):
@@ -686,9 +758,11 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
             dist.barrier()
         for i_solution in ids:
             solution = solutions[i_solution]
-            layer_replacement = _extract_single_sequence_replacement(solution)
-            prune_target = _solution_prune_target(
-                layer_replacement, teacher_block_configs, num_q, head_dim
+            prune_target = _solution_prune_targets(
+                solution,
+                teacher_block_configs,
+                num_q,
+                head_dim,
             )
             mprint(f"[solution/automodel] Phase 2: scoring solution_{i_solution} {prune_target}")
             _score_candidate(

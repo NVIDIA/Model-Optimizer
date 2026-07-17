@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
+from modelopt.torch.puzzletron.stages.graph import distributed_stage_ids
 
 __all__ = [
     "finalize_replacement_scoring_diagnostics",
@@ -125,7 +126,7 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
     )
     scoring_solutions = scenario / f"{stem}.json"
     scoring_output = scenario / f"{stem}--validation"
-    return (
+    overrides = [
         f"puzzle_dir={scenario}",
         f"experiment.dir={scenario}",
         f"teacher_dir={teacher}",
@@ -143,7 +144,13 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         f"vllm_stats_diagnostic.output_dir={scenario / 'artifacts/vllm_stats_diagnostic'}",
         f"scoring_diagnostic.scores_dir={scoring_output}",
         f"scoring_diagnostic.output_dir={scenario / 'artifacts/scoring_diagnostic'}",
-    )
+    ]
+    if (config.get("replacement_scoring") or {}).get("bypass_checkpoint_dir") is not None:
+        overrides.append(
+            "replacement_scoring.bypass_checkpoint_dir="
+            f"{scenario / 'ckpts' / 'bypass_overlay'}"
+        )
+    return tuple(overrides)
 
 
 def scenario_preparation_commands(
@@ -187,7 +194,7 @@ def scenario_worker_commands(
     commands = []
     for width in widths:
         command = [sys.executable]
-        if stage == "replacement_scoring":
+        if stage in distributed_stage_ids():
             command.extend(
                 (
                     "-m",

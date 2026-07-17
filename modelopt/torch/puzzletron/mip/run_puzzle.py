@@ -49,6 +49,7 @@ from ..tools.logger import mprint
 from ..utils.misc import block_config_to_str, solution_to_str
 from ..utils.parsing import get_nested_key, parse_json, parse_path
 from .solver_backend import run_mip_with_backend
+from .search_space import filter_replacements_by_axes, rank_homogeneous_solutions
 
 __all__ = [
     "PuzzleMetrics",
@@ -361,7 +362,13 @@ def run_single_puzzle_config(
     args = deepcopy(args)
     report_additional_costs = args.get("report_additional_costs", []) or []
 
-    subblock_stats = filter_subblock_stats_by_args(subblock_stats, subblock_stats_args)
+    all_subblock_stats = subblock_stats
+    subblock_stats = filter_subblock_stats_by_args(all_subblock_stats, subblock_stats_args)
+    _merge_namespaced_workload_stats(
+        subblock_stats,
+        all_subblock_stats,
+        dict(args.get("workload_stats_args", {}) or {}),
+    )
     teacher_reference_metrics = deepcopy(gathered_metrics)
     gathered_metrics = _filter_tp_incompatible_replacements(
         gathered_metrics,
@@ -376,6 +383,12 @@ def run_single_puzzle_config(
             objective=str(args.objective),
             bigger_is_better=bool(args.bigger_is_better),
         )
+    gathered_metrics = filter_replacements_by_axes(
+        gathered_metrics,
+        axes_default=str(args.get("axes_default", "all")),
+        axis_options=dict(args.get("axis_options", {}) or {}),
+        teacher_replacements=teacher_reference_metrics,
+    )
     _add_block_stats_to_gathered_metrics(gathered_metrics, subblock_stats)
 
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -434,7 +447,15 @@ def run_single_puzzle_config(
         solver_backend=args.get("solver_backend", args.get("use_cuopt", None)),
     )
 
-    for solution in solutions:
+    homogeneous_solutions = rank_homogeneous_solutions(
+        gathered_metrics,
+        objective=args.objective,
+        constraints=mip_constraints,
+        bigger_is_better=args.bigger_is_better,
+        num_solutions=int(args.get("num_homogeneous_solutions", 0) or 0),
+    )
+
+    for solution in [*solutions, *homogeneous_solutions]:
         for stat_name in set([*orig_mip_constraints.keys(), *report_additional_costs]):
             try:
                 non_block_cost = get_nested_key(non_block_stats, stat_name)
@@ -470,6 +491,8 @@ def run_single_puzzle_config(
 
     solutions_file = output_folder / "solutions.json"
     json_dump(solutions, solutions_file)
+    if int(args.get("num_homogeneous_solutions", 0) or 0) != 0:
+        json_dump(homogeneous_solutions, output_folder / "homogeneous_solutions.json")
     mprint(solutions_file)
     return solutions_file
 
@@ -1015,6 +1038,34 @@ def filter_subblock_stats_by_args(
             subblocks_dict[dict_key] = substats
         subblock_stats["subblocks"] = subblocks_dict
     return subblock_stats
+
+
+def _merge_namespaced_workload_stats(
+    base_stats: dict[str, Any],
+    all_subblock_stats: list[dict[str, Any]],
+    workloads: dict[str, dict[str, Any]],
+) -> None:
+    """Attach multiple workload measurements to one additive stats table."""
+
+    for workload_name, workload_args in workloads.items():
+        workload_stats = filter_subblock_stats_by_args(
+            all_subblock_stats,
+            workload_args,
+        )
+        for key, value in workload_stats["non_block"].items():
+            if value is None or isinstance(value, (int, float)):
+                base_stats["non_block"][f"{key}@{workload_name}"] = value
+        missing = set(base_stats["subblocks"]) - set(workload_stats["subblocks"])
+        if missing:
+            raise ValueError(
+                f"workload {workload_name!r} is missing {len(missing)} subblock measurements"
+            )
+        for subblock_key, base_values in base_stats["subblocks"].items():
+            for key, value in workload_stats["subblocks"][subblock_key].items():
+                if key == "parent_layer_index":
+                    continue
+                if value is None or isinstance(value, (int, float)):
+                    base_values[f"{key}@{workload_name}"] = value
 
 
 def _normalize_subblock_stats_args(args: dict[str, Any]) -> dict[str, Any]:

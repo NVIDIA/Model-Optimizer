@@ -127,8 +127,22 @@ def resolve_subblock_boundaries(
     boundaries: dict[SubblockKey, SubblockBoundary] = {}
     for layer_idx, layer in layers.items():
         block = block_configs[layer_idx]
-        paths = resolver(block, layer_idx=layer_idx)
-        expected = {(subblock.kind, subblock.name) for subblock in block.subblock_configs}
+        declared_paths = resolver(block, layer_idx=layer_idx)
+        configured = {
+            (subblock.kind, subblock.name) for subblock in block.subblock_configs
+        }
+        unexpected = set(declared_paths) - configured
+        if unexpected:
+            raise RuntimeError(
+                f"descriptor subblock boundary mismatch at layer {layer_idx}: "
+                f"unexpected={sorted(unexpected)}"
+            )
+        expected = {
+            (subblock.kind, subblock.name)
+            for subblock in block.subblock_configs
+            if not subblock.no_op
+        }
+        paths = {key: path for key, path in declared_paths.items() if key in expected}
         if set(paths) != expected:
             raise RuntimeError(
                 f"descriptor subblock boundary mismatch at layer {layer_idx}: "

@@ -61,7 +61,22 @@ def extract_block_configs_and_locations(
     block_configs = []
     block_locations = []
     for layer_replacement in layer_replacements:
-        child_block_configs = layer_replacement["child_block_configs"]
+        if "child_block_configs" in layer_replacement:
+            child_block_configs = layer_replacement["child_block_configs"]
+        elif "block_config" in layer_replacement:
+            # Canonical scored candidates use ``block_config``. The legacy MIP
+            # solver adds ``child_block_configs`` to its selected candidates,
+            # but homogeneous solutions retain the canonical representation.
+            child_block_configs = layer_replacement["block_config"]
+        elif "layer_replacement" in layer_replacement:
+            child_block_configs = layer_replacement["layer_replacement"][
+                "child_block_configs"
+            ]
+        else:
+            raise KeyError(
+                "replacement must define child_block_configs, block_config, "
+                "or layer_replacement.child_block_configs"
+            )
         if not isinstance(child_block_configs, list | tuple):
             child_block_configs = [child_block_configs]
         for block_idx_in_replacement, block_config in enumerate(child_block_configs):

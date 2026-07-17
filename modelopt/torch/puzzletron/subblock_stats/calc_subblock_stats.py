@@ -18,10 +18,14 @@
 
 import copy
 import dataclasses
+import hashlib
 import json
 import math
+import multiprocessing
 import os
+import time
 from collections.abc import Mapping
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from functools import partial
 from itertools import product
 from pathlib import Path
@@ -77,6 +81,141 @@ _SUBBLOCK_KINDS = ("attention", "mla", "mamba", "ffn", "moe")
 _ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
 _FFN_LIKE_KINDS = frozenset(("ffn", "moe"))
 _NON_BLOCK_PARAM_CACHE: dict[tuple[str, str, int], int] = {}
+_PARAMETER_INVENTORY_SCHEMA = 1
+
+
+def _atomic_json_dump(value: object, path: Path) -> None:
+    """Publish JSON without exposing partial contents to resumable readers."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    json_dump(value, temporary)
+    temporary.replace(path)
+
+
+def _unique_hidden_sizes(model_hidden_sizes: Iterable[int], teacher_hidden_size: int) -> tuple[int, ...]:
+    """Return configured widths plus the teacher exactly once, preserving order."""
+
+    return tuple(dict.fromkeys(int(width) for width in (*model_hidden_sizes, teacher_hidden_size)))
+
+
+def _resolve_width_checkpoint(
+    master_puzzle_dir: Path,
+    teacher_dir: Path,
+    width: int,
+    teacher_hidden_size: int,
+) -> Path:
+    """Resolve the physical checkpoint whose config governs one hidden width."""
+
+    scenario = (
+        master_puzzle_dir
+        / "scenarios"
+        / f"width-{int(width):04d}"
+        / "depth-00"
+        / "ckpts"
+        / "sorted_teacher"
+    )
+    if (scenario / "config.json").is_file():
+        return scenario
+    if int(width) == int(teacher_hidden_size) and (teacher_dir / "config.json").is_file():
+        return teacher_dir
+    raise FileNotFoundError(
+        f"No physical width checkpoint for hidden size {width}. Expected {scenario}; "
+        "parameter accounting cannot safely reuse the native-width config."
+    )
+
+
+def _parameter_inventory_key(subblock: SubblockConfig | dict, parent_layer_index: int) -> str:
+    return f"{int(parent_layer_index)}:{_subblock_identity(subblock)}"
+
+
+def _checkpoint_parameter_identity(
+    checkpoint_dir: Path,
+    descriptor: Type[ModelDescriptor],
+    width: int,
+    subblock_configs: list[immutabledict[str, SubblockConfig]],
+) -> str:
+    """Build a cheap identity over config/code, checkpoint shapes, and candidates."""
+
+    files = []
+    for path in sorted(checkpoint_dir.iterdir()):
+        if not (
+            path.name == "config.json"
+            or path.suffix == ".py"
+            or path.suffix == ".safetensors"
+            or path.name.endswith(".safetensors.index.json")
+        ):
+            continue
+        stat = path.stat()
+        item = {"name": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        if path.name == "config.json" or path.suffix == ".py":
+            item["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        files.append(item)
+    candidates = [
+        {
+            "subblock_config": row["subblock_config"].to_dict(),
+            "parent_layer_index": int(row["parent_layer_indices"][0]),
+        }
+        for row in sorted(
+            subblock_configs,
+            key=lambda row: (
+                int(row["parent_layer_indices"][0]),
+                str(row["subblock_config"]),
+            ),
+        )
+    ]
+    payload = {
+        "schema": _PARAMETER_INVENTORY_SCHEMA,
+        "descriptor": f"{descriptor.__module__}.{descriptor.__qualname__}",
+        "width": int(width),
+        "checkpoint": str(checkpoint_dir.resolve()),
+        "files": files,
+        "candidates": candidates,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _load_parameter_inventory_cache(
+    path: Path,
+    *,
+    identity: str,
+    total: int,
+) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("identity") != identity or int(payload.get("total", -1)) != int(total):
+        return None
+    if not isinstance(payload.get("rows"), list):
+        return None
+    return payload
+
+
+def _parameter_inventory_progress(
+    *,
+    width: int,
+    completed: int,
+    total: int,
+    elapsed_seconds: float,
+    status: str,
+) -> dict[str, float | int | str | None]:
+    rate = completed / elapsed_seconds if completed and elapsed_seconds > 0 else 0.0
+    remaining = max(0, total - completed)
+    return {
+        "width": int(width),
+        "status": status,
+        "completed": int(completed),
+        "total": int(total),
+        "fraction_complete": completed / total if total else 1.0,
+        "elapsed_seconds": float(elapsed_seconds),
+        "rate_per_second": rate,
+        "eta_seconds": remaining / rate if rate else None,
+    }
 
 
 def _runtime_measurement_fields(
@@ -113,8 +252,79 @@ def _runtime_measurement_fields(
     }
 
 
+_REUSABLE_RUNTIME_FIELDS = (
+    "runtime_ms",
+    "prefill_runtime_ms",
+    "decode_runtime_ms",
+    "decode_runtime_ms_per_token",
+    "latency_difference_negative",
+)
+_REUSABLE_RUNTIME_ARG_FIELDS = (
+    "runtime_granularity",
+    "runtime_backend",
+    "num_iters",
+    "num_warmup_iters",
+    "max_num_seqs",
+    "repeat_block_n_times",
+    "vllm_args",
+    "runtime_selection_identity",
+)
+
+
+def _reuse_runtime_stats(target: dict, source: dict, *, source_path: str) -> dict:
+    """Overlay immutable measured latency onto refreshed static statistics."""
+
+    # Synthetic vLLM timings are layer-independent: collection benchmarks the
+    # set of unique subblock configs, while a post-scoring replacement library
+    # can repeat one config at many parent layers. Reuse by config identity.
+    source_by_key = {
+        _subblock_identity(row["subblock_config"]): row
+        for row in source.get("subblocks", [])
+    }
+    for target_row in target.get("subblocks", []):
+        key = _subblock_identity(target_row["subblock_config"])
+        source_row = source_by_key.get(key)
+        if source_row is None:
+            raise KeyError(f"Reusable runtime stats are missing subblock {key}")
+        for field in _REUSABLE_RUNTIME_FIELDS:
+            target_row[field] = source_row.get(field)
+        source_provenance = source_row.get("additive_metric_provenance") or {}
+        target_provenance = target_row.setdefault("additive_metric_provenance", {})
+        target_provenance.update(
+            {
+                field: provenance
+                for field, provenance in source_provenance.items()
+                if field in _REUSABLE_RUNTIME_FIELDS
+            }
+        )
+
+    source_args = source.get("args", {})
+    target_args = target.setdefault("args", {})
+    target_args["runtime_stats"] = True
+    target_args["runtime_reuse_source"] = str(source_path)
+    for field in _REUSABLE_RUNTIME_ARG_FIELDS:
+        target_args[field] = source_args.get(field)
+
+    source_non_block = source.get("non_block", {})
+    target_non_block = target.setdefault("non_block", {})
+    for field in _REUSABLE_RUNTIME_FIELDS:
+        target_non_block[field] = source_non_block.get(field)
+    for field in ("runtime_decomposition", "block_runtimes", "block_runtime_records"):
+        if field in source:
+            target[field] = copy.deepcopy(source[field])
+    return target
+
+
 def _subblock_identity(subblock: SubblockConfig | dict) -> str:
-    payload = subblock.to_dict() if isinstance(subblock, SubblockConfig) else subblock
+    if isinstance(subblock, SubblockConfig):
+        payload = subblock.to_dict()
+    elif subblock.get("kind") in SUBBLOCK_CLS_DICT:
+        # Robust JSON serialization of dataclasses retains explicit ``None``
+        # fields, while ``to_dict`` omits them. Normalize both representations
+        # so an immutable runtime record matches the same live candidate.
+        payload = SUBBLOCK_CLS_DICT[subblock["kind"]](**subblock).to_dict()
+    else:
+        payload = subblock
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -200,6 +410,256 @@ def _checkpoint_non_block_params(
         return None
 
 
+def _write_parameter_inventory_progress_manifest(
+    cache_root: Path,
+    widths: Iterable[int],
+) -> None:
+    progress_rows = []
+    for width in widths:
+        path = cache_root / "progress" / f"width-{int(width):04d}.json"
+        if path.is_file():
+            try:
+                progress_rows.append(json.loads(path.read_text()))
+                continue
+            except (OSError, json.JSONDecodeError):
+                pass
+        progress_rows.append(
+            _parameter_inventory_progress(
+                width=int(width),
+                completed=0,
+                total=0,
+                elapsed_seconds=0.0,
+                status="pending",
+            )
+        )
+    _atomic_json_dump(
+        {
+            "schema": _PARAMETER_INVENTORY_SCHEMA,
+            "updated_at_unix": time.time(),
+            "widths": progress_rows,
+            "completed": sum(int(row["completed"]) for row in progress_rows),
+            "total": sum(int(row["total"]) for row in progress_rows),
+        },
+        cache_root / "progress.json",
+    )
+
+
+def _calculate_parameter_inventory_for_width(
+    *,
+    master_puzzle_dir: Path,
+    checkpoint_dir: Path,
+    descriptor: Type[ModelDescriptor],
+    width: int,
+    subblock_configs: list[immutabledict[str, SubblockConfig]],
+    cache_root: Path,
+    progress_every: int,
+) -> dict:
+    """Count one physical width once, publishing resumable progress."""
+
+    trust_remote_code = descriptor.requires_trust_remote_code()
+    model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
+    lm_config = descriptor.get_language_model_config(model_config)
+    actual_width = int(lm_config.hidden_size)
+    if actual_width != int(width):
+        raise ValueError(
+            f"Physical width checkpoint {checkpoint_dir} has hidden_size={actual_width}, "
+            f"expected {width}."
+        )
+
+    unique_rows: dict[str, immutabledict[str, SubblockConfig]] = {}
+    for row in sorted(
+        subblock_configs,
+        key=lambda item: (
+            int(item["parent_layer_indices"][0]),
+            str(item["subblock_config"]),
+        ),
+    ):
+        key = _parameter_inventory_key(
+            row["subblock_config"], int(row["parent_layer_indices"][0])
+        )
+        unique_rows.setdefault(key, row)
+
+    total = len(unique_rows)
+    identity = _checkpoint_parameter_identity(
+        checkpoint_dir, descriptor, width, list(unique_rows.values())
+    )
+    cache_path = cache_root / f"width-{int(width):04d}.json"
+    progress_path = cache_root / "progress" / f"width-{int(width):04d}.json"
+    cached = _load_parameter_inventory_cache(cache_path, identity=identity, total=total)
+    if (
+        cached is not None
+        and cached.get("status") == "complete"
+        and len(cached["rows"]) == total
+        and cached.get("non_block_params") is not None
+        and cached.get("model") is not None
+    ):
+        progress = _parameter_inventory_progress(
+            width=width,
+            completed=total,
+            total=total,
+            elapsed_seconds=float(cached.get("elapsed_seconds", 0.0)),
+            status="complete",
+        )
+        _atomic_json_dump(progress, progress_path)
+        print(f"[parameter-stats width={width}] reused complete cache ({total}/{total})", flush=True)
+        return cached
+
+    rows = list(cached.get("rows", [])) if cached is not None else []
+    completed_keys = {
+        str(row["inventory_key"])
+        for row in rows
+        if isinstance(row, dict) and row.get("inventory_key") is not None
+    }
+    prior_elapsed = float(cached.get("elapsed_seconds", 0.0)) if cached is not None else 0.0
+    started = time.monotonic()
+
+    def publish(status: str) -> None:
+        elapsed = prior_elapsed + time.monotonic() - started
+        progress = _parameter_inventory_progress(
+            width=width,
+            completed=len(rows),
+            total=total,
+            elapsed_seconds=elapsed,
+            status=status,
+        )
+        payload = {
+            "schema": _PARAMETER_INVENTORY_SCHEMA,
+            "identity": identity,
+            "status": status,
+            "width": int(width),
+            "teacher_dir": str(checkpoint_dir.resolve()),
+            "descriptor": f"{descriptor.__module__}.{descriptor.__qualname__}",
+            "total": total,
+            "elapsed_seconds": elapsed,
+            "rows": rows,
+        }
+        _atomic_json_dump(payload, cache_path)
+        _atomic_json_dump(progress, progress_path)
+        eta = progress["eta_seconds"]
+        eta_text = "unknown" if eta is None else f"{float(eta):.1f}s"
+        print(
+            f"[parameter-stats width={width}] {len(rows)}/{total} "
+            f"({100 * float(progress['fraction_complete']):.1f}%) "
+            f"rate={float(progress['rate_per_second']):.3f}/s ETA={eta_text}",
+            flush=True,
+        )
+
+    publish("running")
+    for inventory_key, indexed in unique_rows.items():
+        if inventory_key in completed_keys:
+            continue
+        subblock_config = indexed["subblock_config"]
+        parent_layer_index = int(indexed["parent_layer_indices"][0])
+        layer_model_config = copy.deepcopy(model_config)
+        descriptor.truncate_pattern_for_subblock(
+            descriptor.get_language_model_config(layer_model_config), parent_layer_index
+        )
+        num_params = calculate_subblock_params(
+            layer_model_config, subblock_config, descriptor
+        )
+        active_params = calc_subblock_active_params(
+            subblock_config,
+            layer_model_config,
+            descriptor,
+            actual_width,
+            num_params=num_params,
+        )
+        rows.append(
+            {
+                "inventory_key": inventory_key,
+                "subblock_config": subblock_config.to_dict(),
+                "parent_layer_index": parent_layer_index,
+                "num_params": int(num_params),
+                "active_params": int(active_params),
+            }
+        )
+        completed_keys.add(inventory_key)
+        if len(rows) % max(1, int(progress_every)) == 0:
+            publish("running")
+
+    non_block_params = _checkpoint_non_block_params(
+        checkpoint_dir,
+        descriptor,
+        int(lm_config.num_hidden_layers),
+    )
+    if non_block_params is None:
+        non_block_params = calculate_non_block_params(actual_width, int(lm_config.vocab_size))
+        non_block_source = "lm_formula_fallback"
+    else:
+        non_block_source = "checkpoint_tensor_inventory"
+    publish("complete")
+    payload = json.loads(cache_path.read_text())
+    payload["non_block_params"] = int(non_block_params)
+    payload["non_block_parameter_count_source"] = non_block_source
+    payload["model"] = {
+        "hidden_size": actual_width,
+        "num_attention_heads": int(lm_config.num_attention_heads),
+        "num_hidden_layers": int(lm_config.num_hidden_layers),
+        "vocab_size": int(lm_config.vocab_size),
+    }
+    _atomic_json_dump(payload, cache_path)
+    return payload
+
+
+def _collect_parameter_inventories(
+    *,
+    calc_subblock_stats_config: Mapping,
+    master_puzzle_dir: Path,
+    teacher_dir: Path,
+    descriptor: Type[ModelDescriptor],
+    teacher_hidden_size: int,
+    model_hidden_sizes: tuple[int, ...],
+    subblock_configs: list[immutabledict[str, SubblockConfig]],
+) -> dict[int, dict]:
+    cache_root = master_puzzle_dir / "artifacts" / "subblock_stats" / "parameter_inventory"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    checkpoints = {
+        width: _resolve_width_checkpoint(
+            master_puzzle_dir, teacher_dir, width, teacher_hidden_size
+        )
+        for width in model_hidden_sizes
+    }
+    progress_every = max(1, int(calc_subblock_stats_config.get("parameter_progress_every", 10)))
+    requested_workers = max(1, int(calc_subblock_stats_config.get("parameter_workers", 1)))
+    num_workers = min(requested_workers, len(model_hidden_sizes))
+    kwargs_by_width = {
+        width: {
+            "master_puzzle_dir": master_puzzle_dir,
+            "checkpoint_dir": checkpoints[width],
+            "descriptor": descriptor,
+            "width": width,
+            "subblock_configs": subblock_configs,
+            "cache_root": cache_root,
+            "progress_every": progress_every,
+        }
+        for width in model_hidden_sizes
+    }
+    _write_parameter_inventory_progress_manifest(cache_root, model_hidden_sizes)
+    if num_workers == 1:
+        results = {
+            width: _calculate_parameter_inventory_for_width(**kwargs_by_width[width])
+            for width in model_hidden_sizes
+        }
+        _write_parameter_inventory_progress_manifest(cache_root, model_hidden_sizes)
+        return results
+
+    results: dict[int, dict] = {}
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=num_workers, mp_context=context) as executor:
+        pending = {
+            executor.submit(_calculate_parameter_inventory_for_width, **kwargs): width
+            for width, kwargs in kwargs_by_width.items()
+        }
+        while pending:
+            done, _ = wait(tuple(pending), timeout=2.0, return_when=FIRST_COMPLETED)
+            _write_parameter_inventory_progress_manifest(cache_root, model_hidden_sizes)
+            for future in done:
+                width = pending.pop(future)
+                results[width] = future.result()
+    _write_parameter_inventory_progress_manifest(cache_root, model_hidden_sizes)
+    return results
+
+
 def _block_config_from_subblocks(*subblocks: SubblockConfig | None) -> BlockConfig:
     return BlockConfig(subblock_configs=tuple(subblock for subblock in subblocks if subblock))
 
@@ -247,6 +707,7 @@ def calculate_subblock_stats(
     activations_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
     runtime_selection_identity: str | None = None,
+    parameter_inventory: Mapping | None = None,
 ) -> dict:
     runtime_granularity = "subblock"
     runtime_stats_config = (
@@ -310,6 +771,9 @@ def calculate_subblock_stats(
             ),
             runtime_selection_identity=(
                 runtime_selection_identity if runtime_stats_enabled else None
+            ),
+            parameter_inventory_identity=(
+                str(parameter_inventory["identity"]) if parameter_inventory is not None else None
             ),
         ),
         "non_block": dict(),
@@ -461,6 +925,14 @@ def calculate_subblock_stats(
     sorted_subblock_config = sorted(
         subblock_configs, key=lambda subblock_config: subblock_config["subblock_config"]
     )
+    parameter_rows = (
+        {
+            str(row["inventory_key"]): row
+            for row in parameter_inventory.get("rows", [])
+        }
+        if parameter_inventory is not None
+        else {}
+    )
     it = (
         tqdm(sorted_subblock_config, desc="Measuring subblock runtimes")
         if runtime_stats_enabled
@@ -470,9 +942,39 @@ def calculate_subblock_stats(
         subblock_config = subblock_config_indexed["subblock_config"]
         parent_layer_indices = subblock_config_indexed["parent_layer_indices"]
 
-        layer_model_config = copy.deepcopy(model_config)
-        descriptor.truncate_pattern_for_subblock(
-            descriptor.get_language_model_config(layer_model_config), parent_layer_indices[0]
+        inventory_row = parameter_rows.get(
+            _parameter_inventory_key(subblock_config, parent_layer_indices[0])
+        )
+        if parameter_inventory is not None and inventory_row is None:
+            raise KeyError(
+                "Parameter inventory is missing subblock "
+                f"{subblock_config} at parent layer {parent_layer_indices[0]}"
+            )
+        if inventory_row is not None:
+            # The inventory already used the correctly truncated physical-width
+            # config. Static assembly only needs family-wide config attributes.
+            layer_model_config = model_config
+        else:
+            layer_model_config = copy.deepcopy(model_config)
+            descriptor.truncate_pattern_for_subblock(
+                descriptor.get_language_model_config(layer_model_config),
+                parent_layer_indices[0],
+            )
+        subblock_params = (
+            int(inventory_row["num_params"])
+            if inventory_row is not None
+            else calculate_subblock_params(layer_model_config, subblock_config, descriptor)
+        )
+        subblock_active_params = (
+            int(inventory_row["active_params"])
+            if inventory_row is not None
+            else calc_subblock_active_params(
+                subblock_config,
+                layer_model_config,
+                descriptor,
+                n_embd,
+                num_params=subblock_params,
+            )
         )
 
         latency_fields = _runtime_measurement_fields(
@@ -491,19 +993,11 @@ def calculate_subblock_stats(
             kv_cache_dtype,
             model_config=layer_model_config,
             descriptor=descriptor,
+            num_params=subblock_params,
         )
         if not isinstance(subblock_memory, dict):
             subblock_memory = {"memory_mib": subblock_memory, "kv_cache_memory_mib": 0.0}
 
-        subblock_params = calculate_subblock_params(layer_model_config, subblock_config, descriptor)
-        # For dense subblocks this equals subblock_params; for MoE it is the deterministic
-        # top-k active-parameter count (router + shared expert + top_k experts).
-        subblock_active_params = calc_subblock_active_params(
-            subblock_config,
-            layer_model_config,
-            descriptor,
-            n_embd,
-        )
         additive_fields = calculate_additive_metrics(
             subblock_config,
             model_config=layer_model_config,
@@ -540,13 +1034,20 @@ def calculate_subblock_stats(
         non_block_runtime_ms = None
     non_block_memory = calculate_non_block_memory(n_embd, vocab_size, weights_dtype)
     lm_config = descriptor.get_language_model_config(model_config)
-    non_block_params = _checkpoint_non_block_params(
-        teacher_dir,
-        descriptor,
-        int(lm_config.num_hidden_layers),
-    )
-    if non_block_params is None:
-        non_block_params = calculate_non_block_params(n_embd, vocab_size)
+    if parameter_inventory is not None:
+        non_block_params = int(parameter_inventory["non_block_params"])
+        non_block_source = str(parameter_inventory["non_block_parameter_count_source"])
+    else:
+        non_block_params = _checkpoint_non_block_params(
+            teacher_dir,
+            descriptor,
+            int(lm_config.num_hidden_layers),
+        )
+        if non_block_params is None:
+            non_block_params = calculate_non_block_params(n_embd, vocab_size)
+            non_block_source = "lm_formula_fallback"
+        else:
+            non_block_source = "checkpoint_tensor_inventory"
 
     subblock_stats["non_block"] = {
         **_runtime_measurement_fields(
@@ -554,16 +1055,7 @@ def calculate_subblock_stats(
         ),
         "memory_mib": non_block_memory,
         "num_params": non_block_params,
-        "parameter_count_source": (
-            "checkpoint_tensor_inventory"
-            if _checkpoint_non_block_params(
-                teacher_dir,
-                descriptor,
-                int(lm_config.num_hidden_layers),
-            )
-            is not None
-            else "lm_formula_fallback"
-        ),
+        "parameter_count_source": non_block_source,
     }
     return subblock_stats
 
@@ -610,6 +1102,7 @@ def _arg_signature(args: dict) -> tuple:
         str(args["kv_cache_dtype"]),
         args["n_embd"],
         args.get("runtime_selection_identity"),
+        args.get("parameter_inventory_identity"),
     )
 
 
@@ -622,6 +1115,7 @@ def _subblock_stats_already_complete(
     runtime_stats_enabled: bool,
     runtime_granularity: str = "subblock",
     runtime_selection_identity: str | None = None,
+    parameter_inventory_identities: Mapping[int, str] | None = None,
 ) -> bool:
     """Whether ``existing_stats`` already covers every configuration this run would compute.
 
@@ -662,6 +1156,11 @@ def _subblock_stats_already_complete(
             (
                 runtime_selection_identity
                 if runtime_stats_enabled and weights_dtype == torch.bfloat16
+                else None
+            ),
+            (
+                parameter_inventory_identities.get(int(model_hidden_size))
+                if parameter_inventory_identities is not None
                 else None
             ),
         )
@@ -764,9 +1263,56 @@ def calculate_subblock_stats_for_puzzle_dir(
         (torch.bfloat16, torch.bfloat16, torch.bfloat16),
     ]
 
-    model_hidden_sizes = list(model_hidden_sizes) + [
-        lm_config.hidden_size
-    ]  # add a teacher model hidden size
+    teacher_hidden_size = int(lm_config.hidden_size)
+    model_hidden_sizes = _unique_hidden_sizes(model_hidden_sizes, teacher_hidden_size)
+    runtime_reuse_path = runtime_stats_config.get("reuse_stats_path")
+    runtime_reuse_by_width: dict[int, dict] = {}
+    if runtime_stats_enabled and runtime_reuse_path:
+        runtime_reuse_path = Path(str(runtime_reuse_path))
+        if not runtime_reuse_path.is_file():
+            candidate = master_puzzle_dir / runtime_reuse_path
+            if candidate.is_file():
+                runtime_reuse_path = candidate
+            else:
+                raise FileNotFoundError(
+                    f"Reusable runtime stats file does not exist: {runtime_reuse_path}"
+                )
+        reusable_entries = json.loads(runtime_reuse_path.read_text())
+        runtime_reuse_by_width = {
+            int(entry["args"]["n_embd"]): entry
+            for entry in reusable_entries
+            if entry.get("args", {}).get("runtime_stats")
+            and entry.get("args", {}).get("weights_dtype") == str(torch.bfloat16)
+        }
+        missing_runtime_widths = set(model_hidden_sizes) - set(runtime_reuse_by_width)
+        if missing_runtime_widths:
+            raise ValueError(
+                f"Reusable runtime stats {runtime_reuse_path} are missing widths "
+                f"{sorted(missing_runtime_widths)}"
+            )
+        runtime_selection_identity = "reuse-" + hashlib.sha256(
+            runtime_reuse_path.read_bytes()
+        ).hexdigest()
+    parameter_inventories = _collect_parameter_inventories(
+        calc_subblock_stats_config=calc_subblock_stats_config,
+        master_puzzle_dir=master_puzzle_dir,
+        teacher_dir=teacher_dir,
+        descriptor=descriptor,
+        teacher_hidden_size=teacher_hidden_size,
+        model_hidden_sizes=model_hidden_sizes,
+        subblock_configs=subblock_configs,
+    )
+    parameter_inventory_identities = {
+        width: str(inventory["identity"])
+        for width, inventory in parameter_inventories.items()
+    }
+    width_model_configs = {
+        width: load_model_config(
+            Path(str(inventory["teacher_dir"])),
+            trust_remote_code=trust_remote_code,
+        )
+        for width, inventory in parameter_inventories.items()
+    }
 
     subblock_stats_file = master_puzzle_dir / subblock_stats_filename
 
@@ -791,6 +1337,7 @@ def calculate_subblock_stats_for_puzzle_dir(
                 "granularity", "subblock"
             ),
             runtime_selection_identity=runtime_selection_identity,
+            parameter_inventory_identities=parameter_inventory_identities,
         ):
             mprint(
                 f"Subblock stats file {subblock_stats_file} already covers all requested "
@@ -807,6 +1354,17 @@ def calculate_subblock_stats_for_puzzle_dir(
     else:
         subblock_stats = []
 
+    # Entries written before width-specific inventory identities are stale for
+    # the requested widths. Remove them so one canonical row remains per dtype
+    # and width rather than leaving ambiguous duplicate costs for MIP readers.
+    subblock_stats = [
+        entry
+        for entry in subblock_stats
+        if int(entry.get("args", {}).get("n_embd", -1)) not in parameter_inventory_identities
+        or entry.get("args", {}).get("parameter_inventory_identity")
+        == parameter_inventory_identities[int(entry["args"]["n_embd"])]
+    ]
+
     subblock_stats_indices = {
         _freeze_stats_args(entry["args"]): index for index, entry in enumerate(subblock_stats)
     }
@@ -816,14 +1374,21 @@ def calculate_subblock_stats_for_puzzle_dir(
         activations_dtype,
         kv_cache_dtype,
     ), model_hidden_size in product(batch_sizes, data_types, model_hidden_sizes):
+        width_model_config = width_model_configs[int(model_hidden_size)]
+        width_lm_config = descriptor.get_language_model_config(width_model_config)
         curr_runtime_stats_enabled = (
             runtime_stats_enabled if weights_dtype == torch.bfloat16 else False
+        )
+        reused_runtime_stats = (
+            runtime_reuse_by_width.get(int(model_hidden_size))
+            if curr_runtime_stats_enabled
+            else None
         )
 
         curr_subblock_stats = calculate_subblock_stats(
             calc_subblock_stats_config,
             teacher_dir=teacher_dir,
-            model_config=model_config,
+            model_config=width_model_config,
             descriptor=descriptor,
             master_puzzle_dir=master_puzzle_dir,
             subblock_configs=subblock_configs,
@@ -831,9 +1396,9 @@ def calculate_subblock_stats_for_puzzle_dir(
             prefill_seq_len=prefill_seq_len,
             generation_seq_len=generation_seq_len,
             n_embd=model_hidden_size,
-            n_head=lm_config.num_attention_heads,
-            vocab_size=lm_config.vocab_size,
-            runtime_stats_enabled=curr_runtime_stats_enabled,
+            n_head=width_lm_config.num_attention_heads,
+            vocab_size=width_lm_config.vocab_size,
+            runtime_stats_enabled=curr_runtime_stats_enabled and reused_runtime_stats is None,
             # The vLLM benchmark runs with --optimization-level 0 (CUDA graphs disabled) for
             # accurate per-block timing, so record that rather than a misleading True.
             use_cuda_graph=False,
@@ -841,7 +1406,17 @@ def calculate_subblock_stats_for_puzzle_dir(
             activations_dtype=activations_dtype,
             kv_cache_dtype=kv_cache_dtype,
             runtime_selection_identity=runtime_selection_identity,
+            parameter_inventory=parameter_inventories[int(model_hidden_size)],
         )
+        if reused_runtime_stats is not None:
+            curr_subblock_stats = _reuse_runtime_stats(
+                curr_subblock_stats,
+                reused_runtime_stats,
+                source_path=str(runtime_reuse_path),
+            )
+            curr_subblock_stats["args"]["runtime_selection_identity"] = (
+                runtime_selection_identity
+            )
 
         curr_args = _freeze_stats_args(curr_subblock_stats["args"])
         if curr_args in subblock_stats_indices:
@@ -856,7 +1431,7 @@ def calculate_subblock_stats_for_puzzle_dir(
         os.environ.get("PUZZLETRON_RUNTIME_CACHE_WARMUP_ONLY") != "1"
         and (shard_count == 1 or shard_index == 0)
     ):
-        json_dump(subblock_stats, subblock_stats_file)
+        _atomic_json_dump(subblock_stats, subblock_stats_file)
 
     mprint(subblock_stats_file)
 

@@ -34,6 +34,7 @@ def _prepare_scenario_destination(
     scenario_dir: Path,
     *,
     source_checkpoint_fingerprint: str,
+    bypass_source_fingerprint: str | None = None,
     overwrite_stale: bool,
 ) -> bool:
     """Return whether a width scenario must be built, removing it only when authorized."""
@@ -43,6 +44,7 @@ def _prepare_scenario_destination(
     if manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text())
         checkpoint = scenario_dir / "ckpts" / "sorted_teacher"
+        bypass_overlay = scenario_dir / "ckpts" / "bypass_overlay"
         complete = all(
             path.is_file()
             for path in (
@@ -50,11 +52,16 @@ def _prepare_scenario_destination(
                 scenario_dir / "replacement_library.json",
                 scenario_dir / "single_sequence_replacement_solutions.json",
             )
+        ) and (
+            bypass_source_fingerprint is None
+            or (bypass_overlay / "config.json").is_file()
         )
         if (
             manifest.get("status") == "complete"
             and manifest.get("source_checkpoint_fingerprint")
             == source_checkpoint_fingerprint
+            and manifest.get("bypass_source_fingerprint")
+            == bypass_source_fingerprint
             and complete
         ):
             return False
@@ -83,6 +90,19 @@ def _resolve_source_checkpoint(
     return requested
 
 
+def _resolve_bypass_checkpoint(config: dict) -> Path | None:
+    """Resolve the optional nested-bypass checkpoint used for one-block overlays."""
+    configured = (config.get("replacement_scoring") or {}).get("bypass_checkpoint_dir")
+    if configured is None:
+        return None
+    checkpoint = Path(configured).resolve()
+    if not (checkpoint / "config.json").is_file():
+        raise FileNotFoundError(
+            f"bypass overlay checkpoint is incomplete: {checkpoint}"
+        )
+    return checkpoint
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -96,6 +116,8 @@ def main() -> None:
     if not (source / "config.json").is_file():
         raise FileNotFoundError(f"width-scenario parent is incomplete: {source}")
     source_identity = checkpoint_identity(source)
+    bypass_source = _resolve_bypass_checkpoint(cfg)
+    bypass_identity = checkpoint_identity(bypass_source) if bypass_source is not None else None
     model_cfg = cfg.get("model") or {}
     descriptor = resolve_descriptor_from_pretrained(
         str(source),
@@ -115,6 +137,10 @@ def main() -> None:
     summary = {
         "source_checkpoint": str(source.resolve()),
         "source_checkpoint_identity": source_identity,
+        "bypass_source": (
+            str(bypass_source.resolve()) if bypass_source is not None else None
+        ),
+        "bypass_source_identity": bypass_identity,
         "scenarios": [],
     }
     for width in widths:
@@ -122,6 +148,9 @@ def main() -> None:
         if not _prepare_scenario_destination(
             scenario_dir,
             source_checkpoint_fingerprint=source_identity["fingerprint"],
+            bypass_source_fingerprint=(
+                bypass_identity["fingerprint"] if bypass_identity is not None else None
+            ),
             overwrite_stale=bool(args.overwrite_stale),
         ):
             summary["scenarios"].append(
@@ -146,6 +175,21 @@ def main() -> None:
                 parent_dir,
                 alignment=int(embedding.get("alignment", 1)),
             )
+
+        bypass_overlay_dir = None
+        if bypass_source is not None:
+            bypass_overlay_dir = scenario_dir / "ckpts" / "bypass_overlay"
+            if width == teacher_width:
+                bypass_overlay_dir.parent.mkdir(parents=True, exist_ok=True)
+                bypass_overlay_dir.symlink_to(bypass_source.resolve(), target_is_directory=True)
+            else:
+                materialize_hidden_width_checkpoint(
+                    bypass_source,
+                    descriptor,
+                    width,
+                    bypass_overlay_dir,
+                    alignment=int(embedding.get("alignment", 1)),
+                )
 
         build_replacement_library_from_sorted_teacher(
             master_puzzle_dir=scenario_dir,
@@ -187,6 +231,17 @@ def main() -> None:
             "parent_checkpoint": str(parent_dir.resolve()),
             "parent_checkpoint_identity": checkpoint_identity(parent_dir),
             "source_checkpoint_fingerprint": source_identity["fingerprint"],
+            "bypass_checkpoint": (
+                str(bypass_overlay_dir.resolve()) if bypass_overlay_dir is not None else None
+            ),
+            "bypass_checkpoint_identity": (
+                checkpoint_identity(bypass_overlay_dir)
+                if bypass_overlay_dir is not None
+                else None
+            ),
+            "bypass_source_fingerprint": (
+                bypass_identity["fingerprint"] if bypass_identity is not None else None
+            ),
             "model_revision": (cfg.get("model") or {}).get("revision"),
             "descriptor": cfg.get("descriptor"),
             "alignment": int(embedding.get("alignment", 1)),

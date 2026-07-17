@@ -178,6 +178,107 @@ def _load_checkpoint_tensors(checkpoint_dir: str | Path, keys: set[str]) -> dict
     )
 
 
+def _local_tensor_geometry(target: torch.Tensor) -> tuple[tuple[int, ...], tuple[int, ...], bool]:
+    """Return local shape/offset for a tensor and whether it is distributed."""
+
+    try:
+        from torch.distributed.tensor import DTensor
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+    except Exception:  # noqa: BLE001
+        DTensor = ()  # type: ignore[assignment]
+
+    if isinstance(target, DTensor):
+        local_shape, global_offset = compute_local_shape_and_global_offset(
+            tuple(int(size) for size in target.shape),
+            target.device_mesh,
+            target.placements,
+        )
+        return tuple(local_shape), tuple(global_offset), True
+    return tuple(int(size) for size in target.shape), (0,) * target.ndim, False
+
+
+def _load_split_expert_overlay_tensor(
+    checkpoint_dir: str | Path,
+    checkpoint_key: str,
+    target: torch.Tensor,
+) -> tuple[torch.Tensor, bool] | None:
+    """Merge one HF split-expert projection into a native grouped tensor.
+
+    AutoModel exposes grouped expert parameters while canonical HF checkpoints
+    store one matrix per expert.  For a distributed target, load only the
+    rectangular slice owned by this rank instead of materializing the complete
+    MoE tensor on every EP/FSDP rank.
+    """
+
+    gate_and_up_suffix = ".experts.gate_and_up_projs"
+    down_suffix = ".experts.down_projs"
+    if checkpoint_key.endswith(gate_and_up_suffix):
+        expert_prefix = checkpoint_key[: -len("gate_and_up_projs")]
+        projection_names = ("gate_proj", "up_proj")
+    elif checkpoint_key.endswith(down_suffix):
+        expert_prefix = checkpoint_key[: -len("down_projs")]
+        projection_names = ("down_proj",)
+    else:
+        return None
+
+    local_shape, global_offset, is_local = _local_tensor_geometry(target)
+    if len(local_shape) != 3:
+        return None
+    expert_ids = range(global_offset[0], global_offset[0] + local_shape[0])
+    keys = {
+        f"{expert_prefix}{expert_idx}.{projection}.weight"
+        for expert_idx in expert_ids
+        for projection in projection_names
+    }
+    loaded = _load_checkpoint_tensors(checkpoint_dir, keys)
+
+    def expert_key(expert_idx: int, projection: str) -> str:
+        return f"{expert_prefix}{expert_idx}.{projection}.weight"
+
+    if projection_names == ("down_proj",):
+        required = {expert_key(idx, "down_proj") for idx in expert_ids}
+        if not loaded:
+            return None
+        missing = sorted(required - set(loaded))
+        if missing:
+            raise KeyError(f"split-expert checkpoint is missing tensors: {missing[:5]}")
+        value = torch.stack(
+            [loaded[expert_key(idx, "down_proj")].T for idx in expert_ids],
+            dim=0,
+        )
+    else:
+        required_up = {expert_key(idx, "up_proj") for idx in expert_ids}
+        if not loaded:
+            return None
+        missing_up = sorted(required_up - set(loaded))
+        if missing_up:
+            raise KeyError(f"split-expert checkpoint is missing tensors: {missing_up[:5]}")
+        gate_keys = {expert_key(idx, "gate_proj") for idx in expert_ids}
+        present_gate = gate_keys & set(loaded)
+        if present_gate and present_gate != gate_keys:
+            missing_gate = sorted(gate_keys - present_gate)
+            raise KeyError(f"split-expert checkpoint is missing tensors: {missing_gate[:5]}")
+        values = []
+        for idx in expert_ids:
+            up = loaded[expert_key(idx, "up_proj")].T
+            if present_gate:
+                up = torch.cat((loaded[expert_key(idx, "gate_proj")].T, up), dim=-1)
+            values.append(up)
+        value = torch.stack(values, dim=0)
+
+    local_slices = tuple(
+        slice(offset, offset + size)
+        for offset, size in zip(global_offset[1:], local_shape[1:])
+    )
+    value = value[(slice(None), *local_slices)].contiguous()
+    if tuple(value.shape) != local_shape:
+        raise ValueError(
+            "split-expert overlay shape mismatch for "
+            f"{checkpoint_key}: checkpoint={tuple(value.shape)} live_local={local_shape}"
+        )
+    return value, is_local
+
+
 def _redistribute_like(value: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Return ``value`` with dtype/device/DTensor layout matching ``target``."""
     try:
@@ -202,6 +303,21 @@ def _redistribute_like(value: torch.Tensor, target: torch.Tensor) -> torch.Tenso
 def _copy_tensor_value(target: torch.Tensor, value: torch.Tensor) -> None:
     with torch.no_grad():
         target.copy_(_redistribute_like(value, target))
+
+
+def _copy_overlay_tensor_value(
+    target: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    value_is_local: bool,
+) -> None:
+    """Copy either a global checkpoint tensor or a rank-local overlay slice."""
+
+    if not value_is_local:
+        _copy_tensor_value(target, value)
+        return
+    with torch.no_grad():
+        target.to_local().copy_(value.to(device=target.device, dtype=target.dtype))
 
 
 @contextmanager
@@ -342,7 +458,7 @@ def _masked_native_gate_forward(
             top_k = min(top_k, int(effective_count))
         top_k = max(1, top_k)
 
-        def _mask(scores_for_choice):
+        def _compact(scores_for_choice):
             if kept_expert_indices is not None:
                 keep = torch.as_tensor(
                     kept_expert_indices,
@@ -354,36 +470,32 @@ def _masked_native_gate_forward(
                         f"kept_expert_indices={kept_expert_indices} are invalid for "
                         f"num_experts={scores_for_choice.shape[-1]}"
                     )
-                scores_for_choice = scores_for_choice.clone()
-                remove = torch.ones(
-                    scores_for_choice.shape[-1],
-                    dtype=torch.bool,
-                    device=scores_for_choice.device,
-                )
-                remove[keep] = False
-                scores_for_choice[..., remove] = float("-inf")
+                scores_for_choice = scores_for_choice.index_select(-1, keep)
             elif target_num_experts is not None and int(target_num_experts) < scores_for_choice.shape[-1]:
-                scores_for_choice = scores_for_choice.clone()
-                scores_for_choice[..., int(target_num_experts):] = float("-inf")
-            return scores_for_choice
+                keep = torch.arange(int(target_num_experts), device=scores_for_choice.device)
+                scores_for_choice = scores_for_choice[..., : int(target_num_experts)]
+            else:
+                keep = torch.arange(scores_for_choice.shape[-1], device=scores_for_choice.device)
+            return scores_for_choice, keep
+
+        scores, expert_ids = _compact(scores)
+        correction = getattr(self, "e_score_correction_bias", None)
+        if correction is not None:
+            correction = correction.index_select(0, expert_ids)
 
         if score_func == "softmax":
             if getattr(self, "softmax_before_topk", False):
                 probs = scores.softmax(dim=-1, dtype=compute_dtype or torch.float32)
-                scores_for_choice = _mask(probs)
-                indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
-                weights = probs.gather(1, indices)
+                compact_indices = torch.topk(probs, k=top_k, dim=-1).indices
+                weights = probs.gather(1, compact_indices)
             else:
-                scores_for_choice = _mask(scores)
-                values, indices = torch.topk(scores_for_choice, k=top_k, dim=-1)
+                values, compact_indices = torch.topk(scores, k=top_k, dim=-1)
                 weights = values.softmax(dim=1, dtype=compute_dtype or torch.float32)
         elif score_func == "softmax_with_bias":
             probs = scores.softmax(dim=-1, dtype=compute_dtype or torch.float32)
             scores_for_choice = probs
-            correction = getattr(self, "e_score_correction_bias", None)
             if correction is not None:
                 scores_for_choice = scores_for_choice + correction
-            scores_for_choice = _mask(scores_for_choice)
             n_groups = int(getattr(self, "n_groups", 1) or 1)
             topk_groups = int(getattr(self, "topk_groups", 1) or 1)
             if n_groups > 1:
@@ -392,20 +504,53 @@ def _masked_native_gate_forward(
                 group_idx = group_scores.topk(min(topk_groups, group_scores.shape[-1]), dim=-1).indices
                 mask = torch.zeros_like(grouped[..., 0]).scatter_(1, group_idx, True)
                 scores_for_choice = (grouped * mask.unsqueeze(-1)).flatten(1)
-            indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
-            weights = probs.gather(1, indices)
+            compact_indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
+            weights = probs.gather(1, compact_indices)
         elif score_func == "sqrtsoftplus":
             probs = torch.sqrt(F.softplus(scores.float()))
-            scores_for_choice = _mask(probs)
-            indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
-            weights = probs.gather(1, indices)
+            scores_for_choice = probs if correction is None else probs + correction
+            compact_indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
+            weights = probs.gather(1, compact_indices)
+        elif score_func == "sigmoid_with_bias":
+            probs = torch.sigmoid(scores.float())
+            scores_for_choice = probs if correction is None else probs + correction
+            n_groups = int(getattr(self, "n_groups", 1) or 1)
+            topk_groups = int(getattr(self, "topk_groups", 1) or 1)
+            if n_groups > 1:
+                grouped = scores_for_choice.view(x.size(0), n_groups, -1)
+                group_scores = grouped.topk(min(2, grouped.shape[-1]), dim=-1).values.sum(dim=-1)
+                group_idx = group_scores.topk(
+                    min(topk_groups, group_scores.shape[-1]), dim=-1
+                ).indices
+                group_mask = torch.zeros_like(group_scores, dtype=torch.bool).scatter_(
+                    1, group_idx, True
+                )
+                scores_for_choice = grouped.flatten(1).masked_fill(
+                    ~group_mask.unsqueeze(-1).expand_as(grouped).flatten(1),
+                    float("-inf"),
+                )
+            compact_indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
+            weights = probs.gather(1, compact_indices)
         else:
             probs = torch.sigmoid(scores.float())
-            scores_for_choice = _mask(probs)
-            indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
-            weights = probs.gather(1, indices)
+            scores_for_choice = probs if correction is None else probs + correction
+            n_groups = int(getattr(self, "n_groups", 1) or 1)
+            topk_groups = int(getattr(self, "topk_groups", 1) or 1)
+            if n_groups > 1:
+                grouped = scores_for_choice.view(x.size(0), n_groups, -1)
+                if correction is None:
+                    group_scores = grouped.amax(dim=-1)
+                else:
+                    group_scores = grouped.topk(min(2, grouped.shape[-1]), dim=-1).values.sum(dim=-1)
+                group_idx = group_scores.topk(min(topk_groups, group_scores.shape[-1]), dim=-1).indices
+                mask = torch.zeros_like(grouped[..., 0]).scatter_(1, group_idx, True)
+                scores_for_choice = (grouped * mask.unsqueeze(-1)).flatten(1)
+            compact_indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
+            weights = probs.gather(1, compact_indices)
 
-        if getattr(self, "norm_topk_prob", False):
+        indices = expert_ids[compact_indices]
+
+        if getattr(self, "norm_topk_prob", False) and top_k > 1:
             weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
         weights = weights * float(getattr(self, "route_scale", 1.0))
         return weights.to(dtype=original_dtype), indices, None
@@ -539,6 +684,88 @@ def _mamba_prefix_masks(
     state = orig_groups * orig_state_dim
     conv_keep = projected[intermediate : 2 * intermediate + 2 * state]
     return projected[:intermediate], projected, conv_keep
+
+
+def _supports_compact_fused_mamba(mamba_module) -> bool:
+    """Return whether the module uses the native no-cache fused Mamba path."""
+
+    return getattr(mamba_module, "cp", object()) is None and all(
+        hasattr(mamba_module, name)
+        for name in ("in_proj", "conv1d", "norm", "out_proj")
+    )
+
+
+@contextmanager
+def _compact_fused_mamba_forward(
+    mamba_module,
+    *,
+    projected_keep: torch.Tensor,
+    conv_keep: torch.Tensor,
+    inner_keep: torch.Tensor,
+    orig_heads: int,
+    target_head_dim: int,
+):
+    """Run one native fused mixer with the same compact geometry as export."""
+
+    from mamba_ssm.ops.triton import ssd_combined
+
+    projected_indices = projected_keep.nonzero(as_tuple=True)[0]
+    conv_indices = conv_keep.nonzero(as_tuple=True)[0]
+    inner_indices = inner_keep.nonzero(as_tuple=True)[0]
+    head_indices = projected_keep[-orig_heads:].nonzero(as_tuple=True)[0]
+    original_forward = mamba_module.forward
+
+    def compact_forward(module, *args, **kwargs):
+        original_kernel = ssd_combined.mamba_split_conv1d_scan_combined
+
+        def compact_kernel(
+            projected,
+            conv_weight,
+            conv_bias,
+            dt_bias,
+            A,
+            *kernel_args,
+            **kernel_kwargs,
+        ):
+            def index_first(tensor, indices):
+                if tensor is None:
+                    return None
+                return tensor.index_select(0, indices.to(tensor.device)).contiguous()
+
+            def index_last(tensor, indices):
+                if tensor is None:
+                    return None
+                return tensor.index_select(-1, indices.to(tensor.device)).contiguous()
+
+            kernel_kwargs["D"] = index_first(kernel_kwargs.get("D"), head_indices)
+            kernel_kwargs["rmsnorm_weight"] = index_first(
+                kernel_kwargs.get("rmsnorm_weight"), inner_indices
+            )
+            kernel_kwargs["outproj_weight"] = index_last(
+                kernel_kwargs.get("outproj_weight"), inner_indices
+            )
+            kernel_kwargs["headdim"] = target_head_dim
+            return original_kernel(
+                index_last(projected, projected_indices),
+                index_first(conv_weight, conv_indices),
+                index_first(conv_bias, conv_indices),
+                index_first(dt_bias, head_indices),
+                index_first(A, head_indices),
+                *kernel_args,
+                **kernel_kwargs,
+            )
+
+        ssd_combined.mamba_split_conv1d_scan_combined = compact_kernel
+        try:
+            return original_forward(*args, **kwargs)
+        finally:
+            ssd_combined.mamba_split_conv1d_scan_combined = original_kernel
+
+    mamba_module.forward = MethodType(compact_forward, mamba_module)
+    try:
+        yield
+    finally:
+        mamba_module.forward = original_forward
 
 
 def _gdn_prefix_masks(
@@ -973,7 +1200,13 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
             return None
 
     @contextmanager
-    def block_checkpoint_overlay_context(self, checkpoint_dir: str | Path | None, layer_idx: int):
+    def block_checkpoint_overlay_context(
+        self,
+        checkpoint_dir: str | Path | None,
+        layer_idx: int,
+        *,
+        offload_restore: bool = False,
+    ):
         """Temporarily overlay one owned decoder block with tensors from a checkpoint.
 
         Nested bypass checkpoints contain trained weights for every block.  Replace-one-block
@@ -1013,29 +1246,60 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
         }
         checkpoint_keys = set(checkpoint_key_by_local_name.values())
         loaded = _load_checkpoint_tensors(checkpoint_dir, checkpoint_keys)
-        missing = sorted(checkpoint_keys - set(loaded))
+        loaded_by_local_name: dict[str, tuple[torch.Tensor, bool]] = {}
+        missing = []
+        for local_name, target in tensors_by_name.items():
+            checkpoint_key = checkpoint_key_by_local_name[local_name]
+            if checkpoint_key in loaded:
+                loaded_by_local_name[local_name] = (loaded[checkpoint_key], False)
+                continue
+            split_expert = _load_split_expert_overlay_tensor(
+                checkpoint_dir,
+                checkpoint_key,
+                target,
+            )
+            if split_expert is None:
+                missing.append(checkpoint_key)
+            else:
+                loaded_by_local_name[local_name] = split_expert
         if missing:
             raise KeyError(
                 f"bypass overlay checkpoint {checkpoint_dir} is missing {len(missing)} tensor(s) "
-                f"for layer {layer_idx}; first missing: {missing[:5]}"
+                f"for layer {layer_idx}; first missing: {sorted(missing)[:5]}"
             )
 
-        saved: list[tuple[torch.Tensor, torch.Tensor]] = []
+        saved: list[tuple[torch.Tensor, torch.Tensor, bool]] = []
         try:
             for local_name, target in tensors_by_name.items():
                 checkpoint_key = checkpoint_key_by_local_name[local_name]
-                value = loaded[checkpoint_key]
-                if tuple(value.shape) != tuple(target.shape):
+                value, value_is_local = loaded_by_local_name[local_name]
+                expected_shape = (
+                    tuple(target.to_local().shape) if value_is_local else tuple(target.shape)
+                )
+                if tuple(value.shape) != expected_shape:
                     raise ValueError(
                         "bypass overlay shape mismatch for "
-                        f"{checkpoint_key}: checkpoint={tuple(value.shape)} live={tuple(target.shape)}"
+                        f"{checkpoint_key}: checkpoint={tuple(value.shape)} live={expected_shape}"
                     )
-                saved.append((target, target.detach().clone()))
-                _copy_tensor_value(target, value)
+                if offload_restore:
+                    _, _, is_distributed = _local_tensor_geometry(target)
+                    original = (
+                        target.to_local().detach().cpu().clone()
+                        if is_distributed
+                        else target.detach().cpu().clone()
+                    )
+                    saved.append((target, original, is_distributed))
+                else:
+                    saved.append((target, target.detach().clone(), False))
+                _copy_overlay_tensor_value(target, value, value_is_local=value_is_local)
             yield
         finally:
-            for target, original in reversed(saved):
-                _copy_tensor_value(target, original)
+            for target, original, original_is_local in reversed(saved):
+                _copy_overlay_tensor_value(
+                    target,
+                    original,
+                    value_is_local=original_is_local,
+                )
 
     @contextmanager
     def prune_block_context(
@@ -1593,71 +1857,94 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                                 f"projection on {type(mamba_module).__name__}"
                             )
                         keep_mask, projected_keep, conv_keep = masks
-                        in_proj = getattr(mamba_module, "in_proj", None)
-                        if in_proj is not None and not bool(projected_keep.all()):
-                            handles.append(in_proj.register_forward_hook(_mask_last_dim_forward_hook(projected_keep)))
-
-                        # Fused Mamba2 kernels normalize the scan output over the
-                        # static teacher group width.  Zero-padding a compact child
-                        # therefore inflates retained channels by
-                        # sqrt(teacher_width / child_width).  A physical child has
-                        # the smaller RMS denominator, so compensate before the
-                        # output projection.  Native fused kernels consume
-                        # ``out_proj.weight`` directly, so apply the uniform scalar
-                        # to the Mamba module output rather than relying on an
-                        # ``out_proj.forward`` hook.  This avoids gathering and
-                        # rewriting FSDP/DTensor norm weights.
-                        original_inner = int(orig_heads) * int(orig_head_dim)
-                        target_inner = int(target_heads) * int(target_head_dim)
-                        norm = getattr(mamba_module, "norm", None)
-                        norm_weight = getattr(norm, "weight", None)
-                        norm_scale = 1.0
-                        if target_inner < original_inner and norm_weight is not None:
-                            norm_scale = (float(target_inner) / float(original_inner)) ** 0.5
-
-                        out_proj = getattr(mamba_module, "out_proj", None)
-                        if out_proj is not None and not bool(keep_mask.all()):
-                            handles.append(
-                                out_proj.register_forward_pre_hook(
-                                    lambda module, args, km=keep_mask: (
-                                        args[0]
-                                        * km.to(dtype=args[0].dtype, device=args[0].device).reshape(
-                                            (1,) * (args[0].ndim - 1) + (-1,)
-                                        ),
-                                        *args[1:],
+                        if _supports_compact_fused_mamba(mamba_module):
+                            contexts.append(
+                                _compact_fused_mamba_forward(
+                                    mamba_module,
+                                    projected_keep=projected_keep,
+                                    conv_keep=conv_keep,
+                                    inner_keep=keep_mask,
+                                    orig_heads=int(orig_heads),
+                                    target_head_dim=int(target_head_dim),
+                                )
+                            )
+                        else:
+                            in_proj = getattr(mamba_module, "in_proj", None)
+                            if in_proj is not None and not bool(projected_keep.all()):
+                                handles.append(
+                                    in_proj.register_forward_hook(
+                                        _mask_last_dim_forward_hook(projected_keep)
                                     )
                                 )
-                            )
-                        can_scale_output = (
-                            out_proj is not None and getattr(out_proj, "bias", None) is None
-                        )
-                        if norm_scale != 1.0 and can_scale_output:
-                            handles.append(
-                                mamba_module.register_forward_hook(
-                                    _scale_tensor_output_forward_hook(norm_scale)
+
+                            # Static-shape fallbacks need an RMS compensation because
+                            # their normalization still includes masked teacher channels.
+                            original_inner = int(orig_heads) * int(orig_head_dim)
+                            target_inner = int(target_heads) * int(target_head_dim)
+                            norm = getattr(mamba_module, "norm", None)
+                            norm_weight = getattr(norm, "weight", None)
+                            norm_scale = 1.0
+                            if target_inner < original_inner and norm_weight is not None:
+                                norm_scale = (float(target_inner) / float(original_inner)) ** 0.5
+                                for epsilon_name in ("variance_epsilon", "eps", "epsilon"):
+                                    if hasattr(norm, epsilon_name):
+                                        epsilon = getattr(norm, epsilon_name)
+                                        contexts.append(
+                                            _temporary_attrs(
+                                                norm,
+                                                {
+                                                    epsilon_name: float(epsilon)
+                                                    * float(target_inner)
+                                                    / float(original_inner)
+                                                },
+                                            )
+                                        )
+                                        break
+
+                            out_proj = getattr(mamba_module, "out_proj", None)
+                            if out_proj is not None and not bool(keep_mask.all()):
+                                handles.append(
+                                    out_proj.register_forward_pre_hook(
+                                        lambda module, args, km=keep_mask: (
+                                            args[0]
+                                            * km.to(
+                                                dtype=args[0].dtype, device=args[0].device
+                                            ).reshape((1,) * (args[0].ndim - 1) + (-1,)),
+                                            *args[1:],
+                                        )
+                                    )
                                 )
+                            can_scale_output = (
+                                out_proj is not None
+                                and getattr(out_proj, "bias", None) is None
                             )
-                        if in_proj is None and out_proj is None:
-                            raise RuntimeError(
-                                "Mamba runtime slicing requested but neither in_proj nor out_proj "
-                                f"exists on {type(mamba_module).__name__}"
-                            )
+                            if norm_scale != 1.0 and can_scale_output:
+                                handles.append(
+                                    mamba_module.register_forward_hook(
+                                        _scale_tensor_output_forward_hook(norm_scale)
+                                    )
+                                )
+                            if in_proj is None and out_proj is None:
+                                raise RuntimeError(
+                                    "Mamba runtime slicing requested but neither in_proj nor "
+                                    f"out_proj exists on {type(mamba_module).__name__}"
+                                )
 
-                        # Preserve support for native kernels without an output
-                        # projection.  Such implementations cannot take the cheap
-                        # activation-side path above, so use the reversible parameter
-                        # overlay as a compatibility fallback.
-                        if norm_scale != 1.0 and not can_scale_output:
-                            multiplier = torch.ones(original_inner, dtype=torch.float64)
-                            multiplier[keep_mask] = norm_scale
-                            contexts.append(
-                                _temporary_parameter_multiplier(norm_weight, multiplier)
-                            )
+                            if norm_scale != 1.0 and not can_scale_output:
+                                multiplier = torch.ones(original_inner, dtype=torch.float64)
+                                multiplier[keep_mask] = norm_scale
+                                contexts.append(
+                                    _temporary_parameter_multiplier(norm_weight, multiplier)
+                                )
 
-                        conv1d = getattr(mamba_module, "conv1d", None)
-                        conv_bias = getattr(conv1d, "bias", None) if conv1d is not None else None
-                        if conv_bias is not None and not bool(conv_keep.all()):
-                            contexts.append(_temporary_parameter_mask(conv_bias, conv_keep))
+                            conv1d = getattr(mamba_module, "conv1d", None)
+                            conv_bias = (
+                                getattr(conv1d, "bias", None) if conv1d is not None else None
+                            )
+                            if conv_bias is not None and not bool(conv_keep.all()):
+                                contexts.append(
+                                    _temporary_parameter_mask(conv_bias, conv_keep)
+                                )
 
         return handles, contexts
 

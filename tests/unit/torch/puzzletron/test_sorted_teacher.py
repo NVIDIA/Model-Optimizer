@@ -290,6 +290,47 @@ def test_sort_state_dict_can_record_expert_order_without_reindexing_runtime_stat
         torch.testing.assert_close(sorted_state[key], value)
 
 
+def test_sort_state_dict_does_not_treat_non_latent_nemotron_experts_as_latent() -> None:
+    num_experts, hidden, intermediate = 2, 4, 3
+    layouts = build_layer_layouts(
+        [
+            BlockConfig(
+                subblock_configs=(
+                    MoEConfig(
+                        num_experts=num_experts,
+                        expert_intermediate_size=intermediate,
+                        latent_dim=None,
+                    ),
+                )
+            )
+        ],
+        layer_prefix_tmpl="backbone.layers.{i}",
+        num_attention_heads=2,
+        head_dim=2,
+        moe_module="mixer",
+    )
+    prefix = "backbone.layers.0.mixer"
+    state = {
+        f"{prefix}.experts.0.up_proj.weight": torch.randn(intermediate, hidden),
+        f"{prefix}.experts.0.down_proj.weight": torch.randn(hidden, intermediate),
+    }
+
+    sorted_state, permutations = sort_state_dict(
+        state,
+        layouts,
+        ffn_scores={},
+        attention_logs={},
+        score_logs={prefix: {"format_version": 3, "score": torch.ones(num_experts)}},
+    )
+
+    assert layouts[0].moe_latent_dim is None
+    assert layouts[0].moe_fc1_latent_key is None
+    assert layouts[0].moe_fc2_latent_key is None
+    assert not any(key.startswith("moe.latent") for key in permutations)
+    for key, value in state.items():
+        torch.testing.assert_close(sorted_state[key], value)
+
+
 @pytest.mark.parametrize("group_size", [1, 2])
 def test_sort_state_dict_permutes_fused_expert_intermediate_channels(group_size):
     num_experts, intermediate, hidden = 2, 4, 3
@@ -362,6 +403,181 @@ def test_sort_state_dict_permutes_fused_expert_intermediate_channels(group_size)
         torch.testing.assert_close(
             sorted_state[f"{prefix}.experts.down"][expert],
             down[expert].index_select(1, group_permutation),
+        )
+
+
+def test_sort_state_dict_applies_each_expert_channel_order_before_expert_order() -> None:
+    num_experts, intermediate, hidden = 3, 4, 2
+    layouts = build_layer_layouts(
+        [
+            BlockConfig(
+                subblock_configs=(
+                    MoEConfig(
+                        num_experts=num_experts,
+                        expert_intermediate_size=intermediate,
+                    ),
+                )
+            )
+        ],
+        layer_prefix_tmpl="model.layers.{i}",
+        num_attention_heads=2,
+        head_dim=2,
+        moe_router_subname="gate",
+        moe_fused_expert_subnames=("experts.gate_up", "experts.down"),
+        moe_fused_gate_up_subnames=("experts.gate_up",),
+        moe_fused_down_subnames=("experts.down",),
+    )
+    prefix = "model.layers.0.mlp"
+    gate_up = torch.arange(num_experts * 2 * intermediate * hidden).reshape(
+        num_experts, 2 * intermediate, hidden
+    )
+    down = torch.arange(num_experts * hidden * intermediate).reshape(
+        num_experts, hidden, intermediate
+    )
+    state = {
+        f"{prefix}.gate.weight": torch.arange(num_experts * hidden).reshape(
+            num_experts, hidden
+        ),
+        f"{prefix}.experts.gate_up": gate_up,
+        f"{prefix}.experts.down": down,
+    }
+    channel_scores = {
+        0: torch.tensor([0.1, 0.4, 0.9, 0.2]),
+        1: torch.tensor([0.8, 0.1, 0.3, 0.7]),
+        2: torch.tensor([0.2, 0.9, 0.1, 0.6]),
+    }
+    expert_scores = torch.tensor([0.2, 0.9, 0.4])
+
+    sorted_state, permutations = sort_state_dict(
+        state,
+        layouts,
+        ffn_scores={},
+        attention_logs={},
+        score_logs={
+            f"{prefix}.gate": {"score": expert_scores},
+            f"{prefix}.experts": {
+                "expert_stats_dict": {
+                    expert: {"score": score}
+                    for expert, score in channel_scores.items()
+                }
+            },
+        },
+    )
+
+    expert_order = torch.argsort(expert_scores, descending=True)
+    torch.testing.assert_close(permutations["moe.experts.0"], expert_order)
+    for new_expert, old_expert in enumerate(expert_order.tolist()):
+        channel_order = torch.argsort(channel_scores[old_expert], descending=True)
+        gated_order = torch.cat((channel_order, channel_order + intermediate))
+        torch.testing.assert_close(
+            sorted_state[f"{prefix}.experts.gate_up"][new_expert],
+            gate_up[old_expert].index_select(0, gated_order),
+        )
+        torch.testing.assert_close(
+            sorted_state[f"{prefix}.experts.down"][new_expert],
+            down[old_expert].index_select(1, channel_order),
+        )
+
+
+def test_sort_state_dict_composes_mamba_channels_with_groupwise_head_order() -> None:
+    num_heads, head_dim, num_groups, state_dim, hidden = 4, 3, 2, 2, 5
+    inner = num_heads * head_dim
+    state_width = num_groups * state_dim
+    layouts = build_layer_layouts(
+        [
+            BlockConfig(
+                subblock_configs=(
+                    MambaConfig(
+                        num_heads=num_heads,
+                        head_dim=head_dim,
+                        num_groups=num_groups,
+                        state_dim=state_dim,
+                    ),
+                )
+            )
+        ],
+        layer_prefix_tmpl="model.layers.{i}",
+        num_attention_heads=2,
+        head_dim=2,
+        mamba_module="mixer",
+    )
+    prefix = "model.layers.0.mixer"
+    in_rows = 2 * inner + 2 * state_width + num_heads
+    state = {
+        f"{prefix}.in_proj.weight": torch.arange(in_rows * hidden).reshape(in_rows, hidden),
+        f"{prefix}.out_proj.weight": torch.arange(hidden * inner).reshape(hidden, inner),
+        f"{prefix}.conv1d.weight": torch.arange((inner + 2 * state_width) * 2).reshape(
+            inner + 2 * state_width, 2
+        ),
+        f"{prefix}.A_log": torch.arange(num_heads),
+        f"{prefix}.D": torch.arange(num_heads) + 10,
+        f"{prefix}.dt_bias": torch.arange(num_heads) + 20,
+        f"{prefix}.norm.weight": torch.arange(inner),
+    }
+    head_scores = torch.tensor([0.1, 0.9, 0.8, 0.2])
+    channel_scores = torch.tensor(
+        [
+            [0.2, 0.9, 0.1],
+            [0.8, 0.1, 0.7],
+            [0.3, 0.2, 0.9],
+            [0.6, 0.8, 0.1],
+        ]
+    )
+
+    sorted_state, permutations = sort_state_dict(
+        state,
+        layouts,
+        ffn_scores={},
+        attention_logs={},
+        score_logs={
+            f"{prefix}.in_proj": {
+                "mamba_head_scores": head_scores,
+                "mamba_head_dim_scores": channel_scores,
+            }
+        },
+    )
+
+    head_order = permutations["mamba.heads.0"]
+    heads_per_group = num_heads // num_groups
+    torch.testing.assert_close(
+        head_order // heads_per_group,
+        torch.arange(num_heads) // heads_per_group,
+    )
+    within_head_order = torch.argsort(channel_scores[head_order], dim=-1, descending=True)
+    combined_order = (
+        head_order[:, None] * head_dim + within_head_order
+    ).reshape(-1)
+    torch.testing.assert_close(
+        sorted_state[f"{prefix}.in_proj.weight"][:inner],
+        state[f"{prefix}.in_proj.weight"][:inner].index_select(0, combined_order),
+    )
+    torch.testing.assert_close(
+        sorted_state[f"{prefix}.in_proj.weight"][inner : 2 * inner],
+        state[f"{prefix}.in_proj.weight"][inner : 2 * inner].index_select(
+            0, combined_order
+        ),
+    )
+    torch.testing.assert_close(
+        sorted_state[f"{prefix}.out_proj.weight"],
+        state[f"{prefix}.out_proj.weight"].index_select(1, combined_order),
+    )
+    torch.testing.assert_close(
+        sorted_state[f"{prefix}.norm.weight"],
+        state[f"{prefix}.norm.weight"].index_select(0, combined_order),
+    )
+    torch.testing.assert_close(
+        sorted_state[f"{prefix}.conv1d.weight"][:inner],
+        state[f"{prefix}.conv1d.weight"][:inner].index_select(0, combined_order),
+    )
+    dt_start = 2 * inner + 2 * state_width
+    torch.testing.assert_close(
+        sorted_state[f"{prefix}.in_proj.weight"][dt_start:],
+        state[f"{prefix}.in_proj.weight"][dt_start:].index_select(0, head_order),
+    )
+    for suffix in ("A_log", "D", "dt_bias"):
+        torch.testing.assert_close(
+            sorted_state[f"{prefix}.{suffix}"],
+            state[f"{prefix}.{suffix}"].index_select(0, head_order),
         )
 
 

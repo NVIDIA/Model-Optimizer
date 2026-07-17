@@ -29,20 +29,18 @@ def _atomic_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
-def _single_gpu_recipe(source: Path, output: Path) -> Path:
-    recipe = OmegaConf.to_container(OmegaConf.load(source), resolve=True)
-    distributed = dict(recipe.get("distributed") or {})
-    distributed.update(
-        {"tp_size": 1, "cp_size": 1, "pp_size": 1, "dp_size": 1, "ep_size": 1}
-    )
-    distributed["pipeline"] = {"pp_batch_size": 1, "pp_microbatch_size": 1}
-    recipe["distributed"] = distributed
-    scheduler = dict(recipe.get("step_scheduler") or {})
-    scheduler.update({"global_batch_size": 1, "local_batch_size": 1})
-    recipe["step_scheduler"] = scheduler
-    output.parent.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(OmegaConf.create(recipe), output)
-    return output
+def _single_gpu_parallelism() -> dict[str, int | bool]:
+    """Return the stage-local AutoModel mesh for one-GPU profile evaluation."""
+
+    return {
+        "tp": 1,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 1,
+        "sequence_parallel": False,
+    }
 
 
 def _evaluation_root(
@@ -156,9 +154,7 @@ def evaluate_one(
         )
         / solution_id
     )
-    original_recipe = Path(hydra_cfg.scoring.automodel.recipe_path)
-    recipe = _single_gpu_recipe(original_recipe, output_dir / "single_gpu_recipe.yaml")
-    hydra_cfg.scoring.automodel.recipe_path = str(recipe)
+    hydra_cfg.scoring.automodel.parallel = _single_gpu_parallelism()
     hydra_cfg.scoring.automodel.force_hf = False
     hydra_cfg.scoring.teacher_dir = str(puzzle_dir / "ckpts" / "teacher")
     hydra_cfg.scoring.target_teacher_dir = str(puzzle_dir / "ckpts" / "teacher")

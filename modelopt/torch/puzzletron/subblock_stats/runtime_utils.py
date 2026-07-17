@@ -72,6 +72,11 @@ class RuntimeConfig:
     # memory, which bounds the usable value at long context.
     max_num_seqs: int | None = None
     topology: RuntimeTopology = RuntimeTopology()
+    estimator_schema: str = "candidate_slope_v1"
+    estimator_mode: str = "homogeneous"
+    effective_repeat_count: int | None = None
+    scaffold_policy: str = "none"
+    vllm_env: tuple[tuple[str, str], ...] = ()
 
     def model_config_value(self, key: str, default: Any = None) -> Any:
         """Return a descriptor-specific benchmark config value."""

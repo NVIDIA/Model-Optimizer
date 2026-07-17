@@ -30,7 +30,7 @@ _EXECUTION_BUNDLES = frozenset(("activation", "depth", "vllm_stats", "scoring"))
 _IMPORT_MANIFEST = Path("manifests/imports/campaign_artifacts.json")
 _CAMPAIGN_ROOT_PLACEHOLDER = "<campaign-root>"
 _EXECUTION_ONLY_CONFIG_KEYS = frozenset(
-    ("enabled", "execution", "micro_batch_size", "parallel", "recipe_path", "sharding", "topology")
+    ("enabled", "execution", "micro_batch_size", "parallel", "sharding", "topology")
 )
 _RELOCATION_ONLY_CONFIG_SUFFIXES = ("_output_dir", "_solutions_path")
 

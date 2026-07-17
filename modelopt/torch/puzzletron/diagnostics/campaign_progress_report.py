@@ -19,16 +19,24 @@ from __future__ import annotations
 
 import html
 import json
-from dataclasses import asdict
+import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any
+import time
+from typing import Any, Callable, Iterable, Mapping
 
 from ..stages.graph import (
     STAGE_SPECS,
     StageSpec,
     selected_parent_stage_ids,
     stage_display_name,
+)
+from .report_section_cache import (
+    ReportSectionCache,
+    fingerprint_paths,
+    publish_report_transaction,
+    stable_digest,
 )
 from .width_sanity import descriptor_realization_findings
 
@@ -703,26 +711,133 @@ def _bypass_overfit_section(data: dict[str, Any]) -> str:
     )
 
 
+_NESTED_BYPASS_OBSERVATION_FIELDS = (
+    "step",
+    "dp_lane",
+    "granularity",
+    "layer_idx",
+    "subblock_kind",
+    "subblock_name",
+    "loss",
+    "candidate_id",
+    "hidden_width",
+    "active_params",
+    "teacher_params",
+)
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _report_candidate_config(config: Any) -> Any:
+    """Return the user-facing candidate axes without changing stored artifacts."""
+    if not isinstance(config, dict):
+        return config
+    normalized = dict(config)
+    if normalized.get("kind") == "attention":
+        query_heads = _finite_number(normalized.pop("num_query_heads", None))
+        kv_heads = _finite_number(normalized.get("num_kv_heads"))
+        if query_heads is not None and kv_heads is not None and kv_heads > 0:
+            ratio = query_heads / kv_heads
+            normalized["num_query_heads_per_kv_head"] = (
+                int(ratio) if ratio.is_integer() else ratio
+            )
+    return normalized
+
+
+def _compact_nested_bypass_observations(
+    observations: list[dict[str, Any]], candidate_catalog: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int]]:
+    compact: list[dict[str, Any]] = []
+    referenced_candidate_ids: set[str] = set()
+    invalid_parameter_counts = 0
+    missing_catalog_entries = 0
+    for observation in observations:
+        row = {
+            key: observation.get(key)
+            for key in _NESTED_BYPASS_OBSERVATION_FIELDS
+            if key in observation
+        }
+        candidate_id = str(observation.get("candidate_id") or "")
+        if candidate_id:
+            referenced_candidate_ids.add(candidate_id)
+            if candidate_id not in candidate_catalog:
+                missing_catalog_entries += 1
+        active_params = _finite_number(observation.get("active_params"))
+        teacher_params = _finite_number(observation.get("teacher_params"))
+        if active_params is None or active_params < 0 or teacher_params is None or teacher_params <= 0:
+            row["parameter_ratio"] = None
+            invalid_parameter_counts += 1
+        else:
+            row["parameter_ratio"] = active_params / teacher_params
+        compact.append(row)
+    referenced_catalog = {
+        candidate_id: _report_candidate_config(candidate_catalog[candidate_id])
+        for candidate_id in sorted(referenced_candidate_ids)
+        if candidate_id in candidate_catalog
+    }
+    diagnostics = {
+        "input_count": len(observations),
+        "emitted_count": len(compact),
+        "invalid_parameter_counts": invalid_parameter_counts,
+        "missing_catalog_entries": missing_catalog_entries,
+    }
+    return compact, referenced_catalog, diagnostics
+
+
+def _resolve_campaign_artifact_path(
+    root: Path, configured_path: str | Path | None, default_path: Path
+) -> Path:
+    if not configured_path:
+        return default_path
+    path = Path(configured_path)
+    if path.is_absolute():
+        return path
+    candidates = [path, root / path]
+    root_parts = root.resolve().parts
+    path_parts = path.parts
+    for overlap in range(min(len(root_parts), len(path_parts)), 0, -1):
+        if root_parts[-overlap:] == path_parts[:overlap]:
+            candidates.append(Path(*root_parts, *path_parts[overlap:]))
+            break
+    candidates.append(default_path)
+    return next((candidate for candidate in candidates if candidate.is_file()), candidates[1])
+
+
 def _nested_bypass_data(root: Path) -> dict[str, Any]:
     history_path = root / "artifacts" / "bypass" / "local_kd_loss_history.json"
     history = _load_optional(history_path)
     records = [row for row in history.get("records", ()) if isinstance(row, dict)]
-    observation_path = Path(
-        history.get("dp_observation_path") or history_path.with_name("dp_observations.jsonl")
+    observation_path = _resolve_campaign_artifact_path(
+        root,
+        history.get("dp_observation_path"),
+        history_path.with_name("dp_observations.jsonl"),
     )
     observations: list[dict[str, Any]] = []
     if observation_path.is_file():
-        for line in observation_path.read_text(encoding="utf-8").splitlines():
+        for line in observation_path.open(encoding="utf-8"):
             if not line.strip():
                 continue
             payload = json.loads(line)
             observations.extend(
                 item for item in payload.get("observations", ()) if isinstance(item, dict)
             )
-    catalog_path = Path(
-        history.get("candidate_catalog_path") or history_path.with_name("candidate_catalog.json")
+    catalog_path = _resolve_campaign_artifact_path(
+        root,
+        history.get("candidate_catalog_path"),
+        history_path.with_name("candidate_catalog.json"),
     )
-    candidate_catalog = _load_optional(catalog_path)
+    raw_candidate_catalog = _load_optional(catalog_path)
+    observations, candidate_catalog, observation_diagnostics = (
+        _compact_nested_bypass_observations(observations, raw_candidate_catalog)
+    )
     layers = sorted(
         {str(layer_idx) for row in records for layer_idx in (row.get("per_layer_loss") or {})},
         key=lambda value: int(value),
@@ -772,6 +887,7 @@ def _nested_bypass_data(root: Path) -> dict[str, Any]:
         "observation_path": str(observation_path),
         "candidate_catalog": candidate_catalog,
         "candidate_catalog_path": str(catalog_path),
+        "observation_diagnostics": observation_diagnostics,
     }
 
 
@@ -793,6 +909,27 @@ def _nested_bypass_section(data: dict[str, Any]) -> str:
         if observations
         else " Legacy aggregate records do not contain normalized DP-lane parameter colors."
     )
+    diagnostics = data.get("observation_diagnostics") or {}
+    warning_messages = []
+    invalid_parameter_counts = int(diagnostics.get("invalid_parameter_counts") or 0)
+    if invalid_parameter_counts:
+        subject = "observation has" if invalid_parameter_counts == 1 else "observations have"
+        warning_messages.append(
+            f"{invalid_parameter_counts} {subject} missing or invalid parameter counts"
+        )
+    missing_catalog_entries = int(diagnostics.get("missing_catalog_entries") or 0)
+    if missing_catalog_entries:
+        subject = "observation references" if missing_catalog_entries == 1 else "observations reference"
+        warning_messages.append(
+            f"{missing_catalog_entries} {subject} a candidate missing from the catalog"
+        )
+    warnings = (
+        '<p id="nested-bypass-data-warnings" class="note">Metadata warning: '
+        + html.escape("; ".join(warning_messages))
+        + ".</p>"
+        if warning_messages
+        else '<p id="nested-bypass-data-warnings" class="note" hidden></p>'
+    )
     options = []
     for unit in units:
         layer = int(unit["layer_idx"])
@@ -806,10 +943,21 @@ def _nested_bypass_section(data: dict[str, Any]) -> str:
     selector_label = "Sublayer" if granularity == "subblock" else "Layer"
     return (
         f"<p class='note'>{len(records)} elastic optimizer steps. {selection_note}{color_note}</p>"
+        f"{warnings}"
+        '<div class="nested-bypass-controls">'
         f'<label class="selector-label" for="nested-bypass-unit-select">{selector_label}</label>'
         f'<select id="nested-bypass-unit-select">{"".join(options)}</select>'
-        '<label class="selector-label" for="nested-bypass-config-select">Layer configuration</label>'
-        '<select id="nested-bypass-config-select"><option value="ALL">ALL</option></select>'
+        '<label class="selector-label" for="nested-bypass-width-select">Hidden width</label>'
+        '<select id="nested-bypass-width-select"><option value="ALL">ALL</option></select>'
+        '<span id="nested-bypass-axis-filters"></span>'
+        '<label class="selector-label" for="nested-bypass-ema-alpha">EMA coefficient</label>'
+        '<input id="nested-bypass-ema-alpha" type="range" min="0.01" max="1" '
+        'step="0.01" value="0.10">'
+        '<output id="nested-bypass-ema-alpha-value" for="nested-bypass-ema-alpha">0.10</output>'
+        '<label class="selector-label"><input id="nested-bypass-exclude-outliers" '
+        'type="checkbox"> Exclude step outliers (1.5× IQR)</label>'
+        "</div>"
+        '<p id="nested-bypass-config-summary" class="note"></p>'
         "<article class='probe-plot-panel'>"
         "<h3 id='nested-bypass-unit-title'></h3>"
         "<div id='nested-bypass-unit-plot' class='plotly-chart' role='img' "
@@ -1289,21 +1437,63 @@ def _compact_runtime_config(
     return f"{kind}: {values}" if values else kind
 
 
+def _canonical_vllm_scenarios(root: Path) -> list[dict[str, Any]]:
+    """Describe widths measured in the canonical aggregate stats artifact."""
+
+    stats_path = root / "subblock_stats.json"
+    payload = _load_optional(stats_path)
+    if not isinstance(payload, list):
+        return []
+    configs_by_width: dict[int, set[str]] = {}
+    for profile in payload:
+        if not isinstance(profile, dict):
+            continue
+        args = profile.get("args") or {}
+        if args.get("runtime_stats") is not True or args.get("n_embd") is None:
+            continue
+        width = int(args["n_embd"])
+        configs = configs_by_width.setdefault(width, set())
+        for row in profile.get("subblocks", ()):
+            if isinstance(row, dict):
+                config = row.get("subblock_config") or {}
+                if config.get("no_op") is not True:
+                    configs.add(_canonical_json(config))
+    return [
+        {
+            "hidden_width": width,
+            "stats_path": str(stats_path),
+            "unique_runtime_configs": len(configs),
+        }
+        for width, configs in sorted(configs_by_width.items(), reverse=True)
+    ]
+
+
 def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     scenarios: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     runtime_profiles: dict[str, dict[str, Any]] = {}
     mamba_family_hint = library.get("mamba_family_hint")
-    for scenario in library.get("scenarios", ()):
+    source_scenarios = list(library.get("scenarios", ())) or _canonical_vllm_scenarios(root)
+    for scenario in source_scenarios:
         width = scenario.get("hidden_width")
-        stats_path = Path(scenario["path"]).with_name("subblock_stats.json")
+        stats_path = Path(
+            scenario.get("stats_path")
+            or Path(scenario["path"]).with_name("subblock_stats.json")
+        )
+        if not stats_path.is_file() and (root / "subblock_stats.json").is_file():
+            stats_path = root / "subblock_stats.json"
         payload = json.loads(stats_path.read_text()) if stats_path.is_file() else []
         profiles = (
             [
                 row
                 for row in payload
                 if isinstance(row, dict) and (row.get("args") or {}).get("runtime_stats") is True
+                and (
+                    width is None
+                    or (row.get("args") or {}).get("n_embd") is None
+                    or int((row.get("args") or {})["n_embd"]) == int(width)
+                )
             ]
             if isinstance(payload, list)
             else []
@@ -1330,6 +1520,8 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
             profile_seen: set[str] = set()
             for row in profile.get("subblocks", ()):
                 config = row.get("subblock_config") or {}
+                if config.get("no_op") is True:
+                    continue
                 key = _canonical_json(config)
                 if key in profile_seen:
                     continue
@@ -1489,8 +1681,9 @@ def _vllm_section(data: dict[str, Any]) -> str:
         f"<select id='vllm-metric-select'>{metric_options}</select></label>"
         "<label>Swept axis"
         f"<select id='vllm-axis-select'>{axis_options}</select></label>"
-        "<label>Compatible configuration<select id='vllm-config-select'>"
-        "<option value='ALL'>ALL</option></select></label></div>"
+        "<span id='vllm-axis-filters'></span></div>"
+        "<label class='vllm-connect-toggle'><input id='vllm-connect-configs' "
+        "type='checkbox'>Connect matching configurations</label>"
         "<p id='vllm-config-summary' class='note'></p>"
         "<div id='vllm-stats-plot' class='plotly-chart depth-chart' role='img' "
         "aria-label='vLLM metric sweep across compatible configurations and widths'></div>"
@@ -1570,6 +1763,18 @@ def _subblock_replacement_record(
             ),
         },
     }
+
+
+def _varying_replacement_axes(records: Iterable[Mapping[str, Any]]) -> list[str]:
+    values: dict[str, set[str]] = {}
+    for record in records:
+        for axis, value in (record.get("axes") or {}).items():
+            if axis != "hidden_width":
+                values.setdefault(str(axis), set()).add(_canonical_json(value))
+    return sorted(
+        (axis for axis, observed in values.items() if len(observed) > 1),
+        key=_axis_sort_key,
+    )
 
 
 def _replacement_data(root: Path) -> dict[str, Any]:
@@ -1682,21 +1887,7 @@ def _replacement_data(root: Path) -> dict[str, Any]:
     available = {metric for record in records for metric in (record.get("metrics") or {})}
     metrics = [metric for metric in _ACTIVATION_METRIC_ORDER if metric in available]
     metrics.extend(sorted(available - set(metrics)))
-    observed_axes = {
-        axis
-        for record in records
-        for axis in (record.get("axes") or {})
-        if axis != "hidden_width"
-        if len(
-            {
-                _canonical_json((candidate.get("axes") or {}).get(axis))
-                for candidate in records
-                if axis in (candidate.get("axes") or {})
-            }
-        )
-        > 1
-    }
-    axes = sorted(observed_axes, key=_axis_sort_key)
+    axes = _varying_replacement_axes(records)
     return {
         "granularity": granularity,
         "scenarios": scenarios,
@@ -1769,8 +1960,7 @@ def _replacement_section(data: dict[str, Any]) -> str:
         f"<select id='replacement-width-select'>{width_options}</select></label>"
         "<label>Swept axis"
         f"<select id='replacement-axis-select'>{axis_options}</select></label>"
-        "<label>Compatible configuration<select id='replacement-config-select'>"
-        "<option value='ALL'>ALL</option></select></label></div>"
+        "<span id='replacement-axis-filters'></span></div>"
         "<p id='replacement-config-summary' class='note'></p>"
         "<label class='replacement-connect-toggle'><input id='replacement-connect-layers' "
         "type='checkbox' checked> Connect points within each layer</label>"
@@ -1787,11 +1977,8 @@ def _replacement_section(data: dict[str, Any]) -> str:
 
 
 _MIP_COLUMN_ORDER = (
-    "status",
-    "sliced_teacher_baseline",
     "solver_objective_sum",
     "num_params",
-    "parameter_ratio",
     "memory_mib",
     "active_params",
     "num_experts",
@@ -1809,30 +1996,60 @@ _MIP_COLUMN_ORDER = (
     "decode_flops",
     "num_kv_heads",
     "num_query_heads",
+)
+
+_MIP_HIDDEN_COLUMNS = {
+    "sliced_teacher_baseline",
+    "parameter_ratio",
     "has_attention",
     "has_mamba",
     "has_ffn",
     "has_moe",
     "not_no_op",
+    "status",
     "chosen_replacement_count",
-)
+}
+
+_MIP_FAMILY_COLUMNS = {
+    "attention": ("attention.", "attention_", "num_kv_heads", "num_query_heads"),
+    "mamba": ("mamba.", "mamba_"),
+    "ffn": ("ffn.", "ffn_"),
+    "moe": ("moe.", "moe_", "num_experts", "top_k"),
+}
+
+
+def _mip_supported_columns(
+    names: set[str], *, family_presence: dict[str, bool]
+) -> list[str]:
+    def hidden(name: str) -> bool:
+        return any(name == base or name.startswith(f"{base}@") for base in _MIP_HIDDEN_COLUMNS)
+
+    def supported(name: str) -> bool:
+        return all(
+            family_presence.get(family, True)
+            or not any(name == prefix or name.startswith(prefix) for prefix in prefixes)
+            for family, prefixes in _MIP_FAMILY_COLUMNS.items()
+        )
+
+    visible = {name for name in names if not hidden(name) and supported(name)}
+    columns = [name for name in _MIP_COLUMN_ORDER if name in visible]
+    columns.extend(sorted(visible - set(columns)))
+    return columns
 
 
 def _mip_outputs(row: dict[str, Any], *, runtime_profile: dict[str, Any]) -> dict[str, Any]:
-    outputs: dict[str, Any] = {"status": row.get("status")}
+    outputs: dict[str, Any] = {}
     for key, value in (row.get("total_costs") or {}).items():
         name = str(key).removeprefix("stats.")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             outputs[name] = value
-    for key in (
-        "sliced_teacher_baseline",
-        "solver_objective_sum",
-        "parameter_ratio",
-        "chosen_replacement_count",
-    ):
-        value = row.get(key)
-        if value is not None:
-            outputs[key] = value
+    solver_objective_sum = row.get("solver_objective_sum")
+    if solver_objective_sum is not None:
+        outputs["solver_objective_sum"] = solver_objective_sum
+    if "num_params" not in outputs:
+        parameter_count = row.get("parameter_count")
+        if isinstance(parameter_count, (int, float)) and not isinstance(parameter_count, bool):
+            outputs["num_params"] = parameter_count
     if "throughput" not in outputs and isinstance(outputs.get("runtime_ms"), (int, float)):
         batch = runtime_profile.get("batch_size")
         generation = runtime_profile.get("generation_seq_len")
@@ -1846,20 +2063,34 @@ def _mip_outputs(row: dict[str, Any], *, runtime_profile: dict[str, Any]) -> dic
 def _mip_data(root: Path) -> dict[str, Any]:
     profiles: list[dict[str, Any]] = []
     available_columns: set[str] = set()
+    homogeneous_assignment_columns: set[str] = set()
+    homogeneous_output_columns: set[str] = set()
     for path in sorted((root / "mip" / "profiles").glob("*/mip_grid.json")):
         payload = _load_optional(path)
         profile = payload.get("profile") or {}
         profile_id = str(profile.get("id") or path.parent.name)
         runtime_profile = payload.get("runtime_profile") or {}
         teacher = dict(payload.get("teacher") or {})
+        teacher_outputs = _mip_outputs(teacher, runtime_profile=runtime_profile)
+        teacher_costs = teacher.get("total_costs") or {}
+        family_presence = {
+            family: bool(teacher_costs[f"stats.has_{family}"])
+            if f"stats.has_{family}" in teacher_costs
+            else True
+            for family in _MIP_FAMILY_COLUMNS
+        }
         rows = [
             {
                 "label": "Teacher",
                 "hidden_width": teacher.get("hidden_width"),
                 "removed_sublayers": 0,
-                "outputs": _mip_outputs(teacher, runtime_profile=runtime_profile),
+                "outputs": teacher_outputs,
             }
         ]
+        homogeneous_rows: list[dict[str, Any]] = []
+        infeasible_rows: list[dict[str, Any]] = []
+        profile_assignment_columns: set[str] = set()
+        profile_homogeneous_columns: set[str] = set()
         scenarios = [row for row in payload.get("scenarios", ()) if isinstance(row, dict)]
         for scenario in sorted(
             scenarios,
@@ -1870,6 +2101,24 @@ def _mip_data(root: Path) -> dict[str, Any]:
         ):
             width = int(scenario.get("hidden_width"))
             depth = int(scenario.get("removed_sublayers", 0))
+            if scenario.get("status") != "feasible":
+                reason = next(
+                    (
+                        scenario.get(key)
+                        for key in ("reason", "infeasible_reason", "solver_message", "message")
+                        if scenario.get(key)
+                    ),
+                    "No feasible assignment satisfies this scenario.",
+                )
+                infeasible_rows.append(
+                    {
+                        "label": f"H={width}, Drop={depth}",
+                        "hidden_width": width,
+                        "removed_sublayers": depth,
+                        "reason": str(reason),
+                    }
+                )
+                continue
             rows.append(
                 {
                     "label": f"H={width}, Drop={depth}",
@@ -1879,11 +2128,41 @@ def _mip_data(root: Path) -> dict[str, Any]:
                     "solution_path": scenario.get("solution_path"),
                 }
             )
+            for index, homogeneous in enumerate(scenario.get("homogeneous_solutions") or ()):
+                if not isinstance(homogeneous, dict):
+                    continue
+                assignment = dict(homogeneous.get("homogeneous_assignment") or {})
+                outputs = _mip_outputs(homogeneous, runtime_profile=runtime_profile)
+                profile_assignment_columns.update(assignment)
+                profile_homogeneous_columns.update(outputs)
+                homogeneous_rows.append(
+                    {
+                        "label": f"H={width}, Drop={depth}, Rank={int(homogeneous.get('rank', index)) + 1}",
+                        "hidden_width": width,
+                        "removed_sublayers": depth,
+                        "rank": int(homogeneous.get("rank", index)) + 1,
+                        "assignment": assignment,
+                        "outputs": outputs,
+                    }
+                )
         # The teacher inventory includes internal per-family accounting fields
         # that the solver does not emit.  Columns are defined by real MIP
         # outputs; the teacher contributes values only where names match.
-        for row in rows[1:]:
-            available_columns.update((row.get("outputs") or {}).keys())
+        profile_columns = _mip_supported_columns(
+            {name for row in rows[1:] for name in (row.get("outputs") or {})},
+            family_presence=family_presence,
+        )
+        profile_assignment_columns_ordered = _mip_supported_columns(
+            profile_assignment_columns,
+            family_presence=family_presence,
+        )
+        profile_homogeneous_columns_ordered = _mip_supported_columns(
+            profile_homogeneous_columns,
+            family_presence=family_presence,
+        )
+        available_columns.update(profile_columns)
+        homogeneous_assignment_columns.update(profile_assignment_columns_ordered)
+        homogeneous_output_columns.update(profile_homogeneous_columns_ordered)
         expected = int(payload.get("expected_scenario_count") or len(scenarios))
         feasible = sum(row.get("status") == "feasible" for row in scenarios)
         terminal = sum(row.get("status") in {"feasible", "infeasible"} for row in scenarios)
@@ -1900,11 +2179,26 @@ def _mip_data(root: Path) -> dict[str, Any]:
                 "terminal_count": terminal,
                 "complete": expected > 0 and len(scenarios) == expected and terminal == expected,
                 "rows": rows,
+                "columns": profile_columns,
+                "family_presence": family_presence,
+                "infeasible_rows": infeasible_rows,
+                "homogeneous_rows": homogeneous_rows,
+                "homogeneous_assignment_columns": profile_assignment_columns_ordered,
+                "homogeneous_columns": profile_homogeneous_columns_ordered,
             }
         )
     columns = [name for name in _MIP_COLUMN_ORDER if name in available_columns]
     columns.extend(sorted(available_columns - set(columns)))
-    return {"profiles": profiles, "columns": columns}
+    homogeneous_columns = [
+        name for name in _MIP_COLUMN_ORDER if name in homogeneous_output_columns
+    ]
+    homogeneous_columns.extend(sorted(homogeneous_output_columns - set(homogeneous_columns)))
+    return {
+        "profiles": profiles,
+        "columns": columns,
+        "homogeneous_assignment_columns": sorted(homogeneous_assignment_columns),
+        "homogeneous_columns": homogeneous_columns,
+    }
 
 
 def _mip_section(data: dict[str, Any]) -> str:
@@ -1919,6 +2213,12 @@ def _mip_section(data: dict[str, Any]) -> str:
 
     def constraint_display(profile: dict[str, Any]) -> tuple[str, str]:
         constraint = profile.get("constraint") or {}
+        if constraint.get("constraint_type") == "named_profile":
+            bands = []
+            for metric, bounds in (constraint.get("constraints") or {}).items():
+                lower, upper = bounds
+                bands.append(f"{metric}: {_fmt(lower)}–{_fmt(upper)}")
+            return "Resource band", "; ".join(bands) or "N/A"
         if constraint.get("constraint_type") == "latency_ratio":
             return "Latency limit", f"{_fmt(constraint.get('latency_limit_ms'))} ms"
         if constraint.get("constraint_type") == "none":
@@ -1958,11 +2258,52 @@ def _mip_section(data: dict[str, Any]) -> str:
         "<div class='table-wrap'><table id='mip-solution-table' class='mip-table'>"
         "<thead id='mip-solution-head'></thead><tbody id='mip-solution-body'></tbody>"
         "</table></div>"
+        "<h3>Homogeneous solutions</h3>"
+        "<p class='note'>These feasible alternatives use one constant value for each "
+        "listed pruning axis across every compatible layer.</p>"
+        "<p id='mip-homogeneous-empty' class='empty'>No homogeneous solutions were recorded "
+        "for this profile.</p>"
+        "<div class='table-wrap'><table id='mip-homogeneous-table' class='mip-table'>"
+        "<thead id='mip-homogeneous-head'></thead><tbody id='mip-homogeneous-body'></tbody>"
+        "</table></div>"
+        "<h3>Infeasible scenarios</h3>"
+        "<p class='note'>These width/depth scenarios are listed separately because no valid "
+        "assignment satisfied the selected constraint band.</p>"
+        "<p id='mip-infeasible-empty' class='empty'>No infeasible scenarios were recorded "
+        "for this profile.</p>"
+        "<div class='table-wrap'><table id='mip-infeasible-table' class='mip-table'>"
+        "<thead><tr><th>Solution</th><th>Hidden Width</th><th>Removed Sublayers</th>"
+        "<th>Reason</th></tr></thead><tbody id='mip-infeasible-body'></tbody>"
+        "</table></div>"
     )
 
 
 def _profile_registry(root: Path, profile_id: str) -> dict[str, Any]:
     return _load_optional(root / "mip" / "profiles" / profile_id / "selected_solutions.json")
+
+
+_EVALUATION_PALETTE = (
+    "#f5c451",
+    "#4f8cff",
+    "#35d07f",
+    "#ff6577",
+    "#a78bfa",
+    "#22d3ee",
+    "#fb923c",
+    "#f472b6",
+)
+
+
+def _evaluation_solution_kind(raw: dict[str, Any], style: dict[str, Any]) -> str:
+    solution_id = str(raw.get("solution_id") or "")
+    if solution_id == "teacher":
+        return "teacher"
+    explicit = str(style.get("kind") or raw.get("kind") or raw.get("solution_kind") or "")
+    if explicit in {"homogeneous", "heterogeneous"}:
+        return explicit
+    if raw.get("is_homogeneous") or raw.get("homogeneous_assignment"):
+        return "homogeneous"
+    return "homogeneous" if "homogeneous" in solution_id.lower() else "heterogeneous"
 
 
 def _evaluation_data(root: Path) -> dict[str, Any]:
@@ -1979,9 +2320,19 @@ def _evaluation_data(root: Path) -> dict[str, Any]:
         registry = _profile_registry(root, profile_id)
         styles = {row["solution_id"]: row for row in registry.get("solutions", ())}
         rows = []
+        combined: dict[str, dict[str, Any]] = {}
+        teacher = payload.get("teacher")
+        if isinstance(teacher, dict):
+            combined["teacher"] = {**teacher, "solution_id": "teacher"}
         for raw in payload.get("solutions", ()):
+            if not isinstance(raw, dict):
+                continue
+            solution_id = str(raw.get("solution_id"))
+            combined[solution_id] = {**combined.get(solution_id, {}), **raw}
+        for index, raw in enumerate(combined.values()):
             solution_id = str(raw.get("solution_id"))
             style = styles.get(solution_id, {})
+            kind = _evaluation_solution_kind(raw, style)
             x = {}
             for key, value in (raw.get("total_costs") or {}).items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -2001,9 +2352,16 @@ def _evaluation_data(root: Path) -> dict[str, Any]:
                 {
                     **raw,
                     "label": style.get("label", raw.get("label", solution_id)),
-                    "color": style.get("color", raw.get("color", "#4f8cff")),
-                    "marker": style.get("marker", raw.get("marker", "circle")),
-                    "always_enabled": bool(style.get("always_enabled", False)),
+                    "color": style.get(
+                        "color", raw.get("color", _EVALUATION_PALETTE[index % len(_EVALUATION_PALETTE)])
+                    ),
+                    "marker": {
+                        "teacher": "star",
+                        "homogeneous": "diamond",
+                        "heterogeneous": "circle",
+                    }[kind],
+                    "kind": kind,
+                    "always_enabled": bool(style.get("always_enabled", kind == "teacher")),
                     "x": x,
                     "metrics": metrics,
                 }
@@ -2061,6 +2419,8 @@ def _evaluation_section(data: dict[str, Any]) -> str:
         f"<select id='evaluation-x-select'>{x_options}</select></label>"
         "<label>Y axis"
         f"<select id='evaluation-y-select'>{y_options}</select></label></div>"
+        "<label class='vllm-connect-toggle'><input type='checkbox' "
+        "id='evaluation-best-across-profiles'>Best across MIP constraint profiles</label>"
         "<div id='evaluation-scatter-plot' class='plotly-chart depth-chart' role='img' "
         "aria-label='Exact evaluation metrics against architecture costs'></div>"
     )
@@ -2727,14 +3087,315 @@ def _stage_dag(
     )
 
 
+@dataclass(frozen=True)
+class _ReportSectionSpec:
+    section_id: str
+    data_key: str
+    schema_version: int
+    extractor_version: int
+    stage_ids: tuple[str, ...]
+    config_identity: Callable[[dict[str, Any]], Any]
+    sources: Callable[[Path, bool], Iterable[Path]]
+    extract: Callable[[Path, Mapping[str, dict[str, Any]]], dict[str, Any]]
+    render: Callable[[dict[str, Any]], str]
+    dependencies: tuple[str, ...] = ()
+
+
+_REPORT_SOURCE_DIRS = {
+    "sort": ("artifacts/sort_sanity",),
+    "activation": ("artifacts/width_sanity", "artifacts/slicing_sanity"),
+    "bypass_sanity": ("artifacts/bypass_sanity",),
+    "nested_bypass": ("artifacts/bypass",),
+    "depth": ("artifacts/depth_importance",),
+    "library": ("artifacts/build_library",),
+    "vllm": ("artifacts/vllm_stats",),
+    "replacement": ("artifacts/replacement_scoring",),
+    "mip": ("artifacts/mip", "mip"),
+    "evaluation": ("artifacts/zero_shot_evaluation",),
+    "aiperf": ("artifacts/aiperf",),
+    "distillation_overfit": ("artifacts/global_distillation_sanity",),
+    "proper_distillation": (
+        "artifacts/global_distillation",
+        "artifacts/distillation",
+        "artifacts/post_distillation_evaluation",
+    ),
+}
+
+
+def _report_stage_completed(root: Path, stage_ids: tuple[str, ...]) -> bool:
+    return bool(stage_ids) and all(
+        (root / "manifests" / "completions" / f"{stage_id}.json").is_file()
+        for stage_id in stage_ids
+    )
+
+
+def _report_source_paths(
+    root: Path,
+    section_id: str,
+    stage_ids: tuple[str, ...],
+    completed: bool,
+) -> tuple[Path, ...]:
+    paths: set[Path] = set()
+
+    def add(path: Path) -> None:
+        if path.is_file():
+            paths.add(path)
+
+    def add_tree(path: Path) -> None:
+        if path.is_dir():
+            paths.update(candidate for candidate in path.rglob("*") if candidate.is_file())
+
+    for stage_id in stage_ids:
+        add(root / "manifests" / f"{stage_id}.json")
+        add(root / "manifests" / "completions" / f"{stage_id}.json")
+        artifact_dir = root / "artifacts" / stage_id
+        add(artifact_dir / "summary.json")
+        if completed:
+            for candidate in artifact_dir.glob("*.json"):
+                add(candidate)
+
+    if section_id == "library":
+        for pattern in (
+            "scenarios/width-*/depth-00/scenario_manifest.json",
+            "scenarios/width-*/depth-00/replacement_library.json",
+        ):
+            for candidate in root.glob(pattern):
+                add(candidate)
+        add(root / "replacement_library.json")
+    elif section_id == "vllm":
+        add(root / "subblock_stats.json")
+        for pattern in (
+            "scenarios/width-*/depth-00/subblock_stats.json",
+            "scenarios/width-*/depth-00/replacement_library.json",
+        ):
+            for candidate in root.glob(pattern):
+                add(candidate)
+    elif section_id == "replacement":
+        for pattern in (
+            "scenarios/width-*/depth-00/scenario_manifest.json",
+            "scenarios/width-*/depth-00/replacement_library.json",
+            "scenarios/width-*/depth-00/single_subblock_replacement_solutions.json",
+            "scenarios/width-*/depth-00/single_sequence_replacement_solutions.json",
+        ):
+            for candidate in root.glob(pattern):
+                add(candidate)
+        if not completed:
+            for pattern in (
+                "scenarios/width-*/depth-00/single_subblock_replacement_solutions--validation",
+                "scenarios/width-*/depth-00/single_sequence_replacement_solutions--validation",
+            ):
+                for directory in root.glob(pattern):
+                    add_tree(directory)
+
+    if not completed:
+        for relative in _REPORT_SOURCE_DIRS.get(section_id, ()):
+            add_tree(root / relative)
+    return tuple(sorted(paths, key=lambda path: str(path)))
+
+
+def _section_config_selector(*stage_ids: str) -> Callable[[dict[str, Any]], Any]:
+    return lambda config: {stage_id: config.get(stage_id) for stage_id in stage_ids}
+
+
+def _section_source_selector(
+    section_id: str,
+    stage_ids: tuple[str, ...],
+) -> Callable[[Path, bool], Iterable[Path]]:
+    return lambda root, completed: _report_source_paths(
+        root, section_id, stage_ids, completed
+    )
+
+
+def _report_section_specs() -> tuple[_ReportSectionSpec, ...]:
+    extractor_versions = {
+        "nested_bypass": 3,
+        "vllm": 2,
+        "mip": 4,
+        "evaluation": 2,
+    }
+    definitions = (
+        (
+            "sort",
+            "sort_equivalence",
+            ("sort_sanity",),
+            lambda root, _dependencies: _sort_summary(root),
+            _sort_table,
+            (),
+        ),
+        (
+            "activation",
+            "activation_diagnostic",
+            ("width_sanity", "slicing_sanity"),
+            lambda root, _dependencies: _activation_diagnostic_summary(root),
+            _activation_diagnostic_section,
+            (),
+        ),
+        (
+            "bypass_sanity",
+            "bypass_overfit",
+            ("bypass_sanity",),
+            lambda root, _dependencies: _bypass_overfit_data(root),
+            _bypass_overfit_section,
+            (),
+        ),
+        (
+            "nested_bypass",
+            "nested_bypass",
+            ("bypass",),
+            lambda root, _dependencies: _nested_bypass_data(root),
+            _nested_bypass_section,
+            (),
+        ),
+        (
+            "depth",
+            "depth",
+            ("depth_importance",),
+            lambda root, _dependencies: _depth_data(root),
+            _depth_section,
+            (),
+        ),
+        (
+            "library",
+            "library",
+            ("build_library",),
+            lambda root, _dependencies: _library_data(root),
+            _library_section,
+            (),
+        ),
+        (
+            "vllm",
+            "vllm",
+            ("vllm_stats",),
+            lambda root, dependencies: _vllm_data(root, dependencies["library"]),
+            _vllm_section,
+            ("library",),
+        ),
+        (
+            "replacement",
+            "replacement",
+            ("replacement_scoring",),
+            lambda root, _dependencies: _replacement_data(root),
+            _replacement_section,
+            ("library",),
+        ),
+        (
+            "mip",
+            "mip",
+            ("mip",),
+            lambda root, _dependencies: _mip_data(root),
+            _mip_section,
+            ("replacement", "vllm", "depth"),
+        ),
+        (
+            "evaluation",
+            "evaluation",
+            ("zero_shot_evaluation",),
+            lambda root, _dependencies: _evaluation_data(root),
+            _evaluation_section,
+            ("mip",),
+        ),
+        (
+            "aiperf",
+            "aiperf",
+            ("aiperf",),
+            lambda root, _dependencies: _aiperf_data(root),
+            _aiperf_section,
+            ("mip",),
+        ),
+        (
+            "distillation_overfit",
+            "distillation_overfit",
+            ("global_distillation_sanity",),
+            lambda root, _dependencies: _distillation_overfit_data(root),
+            _distillation_overfit_section,
+            ("evaluation",),
+        ),
+        (
+            "proper_distillation",
+            "proper_distillation",
+            ("global_distillation", "post_distillation_evaluation"),
+            lambda root, _dependencies: _proper_distillation_data(root),
+            _proper_distillation_section,
+            ("evaluation",),
+        ),
+    )
+    return tuple(
+        _ReportSectionSpec(
+            section_id=section_id,
+            data_key=data_key,
+            schema_version=1,
+            extractor_version=extractor_versions.get(section_id, 1),
+            stage_ids=stage_ids,
+            config_identity=_section_config_selector(*stage_ids),
+            sources=_section_source_selector(section_id, stage_ids),
+            extract=extract,
+            render=render,
+            dependencies=dependencies,
+        )
+        for section_id, data_key, stage_ids, extract, render, dependencies in definitions
+    )
+
+
+def _report_campaign_identity(
+    root: Path, model_name: str, merged_config: dict[str, Any]
+) -> str:
+    return stable_digest(
+        {
+            "report_contract": 1,
+            "root": str(root),
+            "model_name": model_name,
+            "model": merged_config.get("model"),
+        }
+    )
+
+
+def _forced_report_sections(
+    specs: tuple[_ReportSectionSpec, ...], requested: Iterable[str]
+) -> set[str]:
+    forced = {str(section_id) for section_id in requested}
+    known = {spec.section_id for spec in specs}
+    unknown = forced - known
+    if unknown:
+        raise ValueError(f"unknown report section(s): {', '.join(sorted(unknown))}")
+    changed = True
+    while changed:
+        changed = False
+        for spec in specs:
+            if spec.section_id not in forced and any(
+                dependency in forced for dependency in spec.dependencies
+            ):
+                forced.add(spec.section_id)
+                changed = True
+    return forced
+
+
+def _verify_report_candidate(path: Path) -> None:
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValueError("campaign report is empty")
+    with path.open("rb") as stream:
+        prefix = stream.read(min(size, 16 * 1024 * 1024))
+        stream.seek(max(0, size - 4096))
+        suffix = stream.read()
+    if not prefix.lstrip().startswith(b"<!doctype html>"):
+        raise ValueError("campaign report has no HTML doctype")
+    if b'id="campaign-data"' not in prefix:
+        raise ValueError("campaign report has no embedded campaign data")
+    if not suffix.rstrip().endswith(b"</html>"):
+        raise ValueError("campaign report is truncated")
+
+
 def generate_campaign_progress_report(
     puzzle_dir: str | Path,
     *,
     model_name: str = "Puzzletron model",
     running_stage: str | None = None,
+    use_cache: bool = True,
+    rebuild_sections: Iterable[str] = (),
 ) -> dict[str, str]:
     """Rewrite the stable campaign HTML using all artifacts available so far."""
 
+    generation_started = time.monotonic()
     root = Path(puzzle_dir).resolve()
     output = root / "artifacts" / "campaign_report"
     output.mkdir(parents=True, exist_ok=True)
@@ -2745,19 +3406,71 @@ def generate_campaign_progress_report(
         spec.stage_id: _pipeline_state(root, spec, merged_config) for spec in STAGE_SPECS
     }
     present = {spec.stage_id: _stage_artifact_present(root, spec) for spec in STAGE_SPECS}
-    sort_summary = _sort_summary(root)
-    activation_summary = _activation_diagnostic_summary(root)
-    bypass_overfit = _bypass_overfit_data(root)
-    nested_bypass = _nested_bypass_data(root)
-    depth_data = _depth_data(root)
-    library_data = _library_data(root)
-    vllm_data = _vllm_data(root, library_data)
-    replacement_data = _replacement_data(root)
-    mip_data = _mip_data(root)
-    evaluation_data = _evaluation_data(root)
-    aiperf_data = _aiperf_data(root)
-    distillation_overfit_data = _distillation_overfit_data(root)
-    proper_distillation_data = _proper_distillation_data(root)
+    section_specs = _report_section_specs()
+    forced_sections = _forced_report_sections(section_specs, rebuild_sections)
+    cache = ReportSectionCache(
+        output,
+        campaign_identity=_report_campaign_identity(root, model_name, merged_config),
+    )
+    section_data: dict[str, dict[str, Any]] = {}
+    section_bodies: dict[str, str] = {}
+    section_results = {}
+    cache_hits = 0
+    cache_misses = 0
+    for section_spec in section_specs:
+        completed = _report_stage_completed(root, section_spec.stage_ids)
+        sources = fingerprint_paths(
+            root,
+            section_spec.sources(root, completed),
+            hash_contents=completed,
+        )
+        dependencies = {
+            dependency: section_data[dependency]
+            for dependency in section_spec.dependencies
+        }
+        dependency_identities = {
+            dependency: section_results[dependency].snapshot.input_digest
+            for dependency in section_spec.dependencies
+        }
+
+        def build_section(
+            spec: _ReportSectionSpec = section_spec,
+            resolved_dependencies: Mapping[str, dict[str, Any]] = dependencies,
+        ) -> tuple[dict[str, Any], str, dict[str, Any]]:
+            data = spec.extract(root, resolved_dependencies)
+            return data, spec.render(data), {"data_key": spec.data_key}
+
+        build_result = cache.load_or_build(
+            section_id=section_spec.section_id,
+            schema_version=section_spec.schema_version,
+            extractor_version=section_spec.extractor_version,
+            sources=sources,
+            config_identity=stable_digest(section_spec.config_identity(merged_config)),
+            dependency_identities=dependency_identities,
+            builder=build_section,
+            force=not use_cache or section_spec.section_id in forced_sections,
+        )
+        section_results[section_spec.section_id] = build_result
+        section_data[section_spec.section_id] = build_result.snapshot.data
+        section_bodies[section_spec.section_id] = build_result.snapshot.body_html
+        if build_result.cache_hit:
+            cache_hits += 1
+        else:
+            cache_misses += 1
+
+    sort_summary = section_data["sort"]
+    activation_summary = section_data["activation"]
+    bypass_overfit = section_data["bypass_sanity"]
+    nested_bypass = section_data["nested_bypass"]
+    depth_data = section_data["depth"]
+    library_data = section_data["library"]
+    vllm_data = section_data["vllm"]
+    replacement_data = section_data["replacement"]
+    mip_data = section_data["mip"]
+    evaluation_data = section_data["evaluation"]
+    aiperf_data = section_data["aiperf"]
+    distillation_overfit_data = section_data["distillation_overfit"]
+    proper_distillation_data = section_data["proper_distillation"]
     has_sort_diagnosis = present["sort_sanity"]
     has_activation_diagnosis = present["width_sanity"] or present["slicing_sanity"]
     has_bypass_overfit = present["bypass_sanity"]
@@ -2765,7 +3478,7 @@ def generate_campaign_progress_report(
     has_depth = present["depth_importance"]
     has_library = present["build_library"]
     has_vllm = present["vllm_stats"]
-    has_replacement = present["replacement_scoring"]
+    has_replacement = present["replacement_scoring"] or bool(replacement_data.get("records"))
     has_mip = present["mip"]
     has_evaluation = present["zero_shot_evaluation"]
     has_aiperf = present["aiperf"]
@@ -2821,7 +3534,7 @@ def generate_campaign_progress_report(
             (
                 has_sort_diagnosis,
                 _report_section(
-                    "sort-sanity", "Sort Sanity Check", _sort_table(sort_summary), expanded=True
+                    "sort-sanity", "Sort Sanity Check", section_bodies["sort"], expanded=True
                 ),
             ),
             (
@@ -2829,7 +3542,7 @@ def generate_campaign_progress_report(
                 _report_section(
                     "width-sanity",
                     "Width and Slicing Sanity Checks",
-                    _activation_diagnostic_section(activation_summary),
+                    section_bodies["activation"],
                     expanded=True,
                 ),
             ),
@@ -2838,14 +3551,14 @@ def generate_campaign_progress_report(
                 _report_section(
                     "bypass-sanity",
                     "Bypass Sanity Check",
-                    _bypass_overfit_section(bypass_overfit),
+                    section_bodies["bypass_sanity"],
                     expanded=True,
                 ),
             ),
             (
                 has_nested_bypass,
                 _report_section(
-                    "bypass", bypass_title, _nested_bypass_section(nested_bypass), expanded=True
+                    "bypass", bypass_title, section_bodies["nested_bypass"], expanded=True
                 ),
             ),
             (
@@ -2853,7 +3566,7 @@ def generate_campaign_progress_report(
                 _report_section(
                     "depth-importance",
                     "Depth Importance Estimation",
-                    _depth_section(depth_data),
+                    section_bodies["depth"],
                     expanded=True,
                 ),
             ),
@@ -2862,14 +3575,14 @@ def generate_campaign_progress_report(
                 _report_section(
                     "block-library",
                     "Build Block Library",
-                    _library_section(library_data),
+                    section_bodies["library"],
                     expanded=True,
                 ),
             ),
             (
                 has_vllm,
                 _report_section(
-                    "vllm-statistics", vllm_title, _vllm_section(vllm_data), expanded=True
+                    "vllm-statistics", vllm_title, section_bodies["vllm"], expanded=True
                 ),
             ),
             (
@@ -2877,14 +3590,14 @@ def generate_campaign_progress_report(
                 _report_section(
                     "replacement-scoring",
                     replacement_title,
-                    _replacement_section(replacement_data),
+                    section_bodies["replacement"],
                     expanded=True,
                 ),
             ),
             (
                 has_mip,
                 _report_section(
-                    "mip-solutions", "MIP Search", _mip_section(mip_data), expanded=True
+                    "mip-solutions", "MIP Search", section_bodies["mip"], expanded=True
                 ),
             ),
             (
@@ -2892,14 +3605,14 @@ def generate_campaign_progress_report(
                 _report_section(
                     "zero-shot-evaluation",
                     "Zero-shot Evaluation",
-                    _evaluation_section(evaluation_data),
+                    section_bodies["evaluation"],
                     expanded=True,
                 ),
             ),
             (
                 has_aiperf,
                 _report_section(
-                    "aiperf-benchmarks", "AIPerf", _aiperf_section(aiperf_data), expanded=True
+                    "aiperf-benchmarks", "AIPerf", section_bodies["aiperf"], expanded=True
                 ),
             ),
             (
@@ -2907,7 +3620,7 @@ def generate_campaign_progress_report(
                 _report_section(
                     "global-distillation-sanity",
                     "Global Distillation Sanity Check",
-                    _distillation_overfit_section(distillation_overfit_data),
+                    section_bodies["distillation_overfit"],
                     expanded=True,
                 ),
             ),
@@ -2916,7 +3629,7 @@ def generate_campaign_progress_report(
                 _report_section(
                     "global-distillation",
                     "Global Distillation",
-                    _proper_distillation_section(proper_distillation_data),
+                    section_bodies["proper_distillation"],
                     expanded=True,
                 ),
             ),
@@ -2967,6 +3680,7 @@ def generate_campaign_progress_report(
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@dagrejs/dagre@1.1.5/dist/dagre.min.js"></script>
 <style>
+[hidden]{{display:none!important}}
 :root{{--ink:#e7edf7;--muted:#93a4bd;--panel:#101826;--line:#26344a;--blue:#4f8cff;--green:#35d07f;--amber:#ffbd45;--red:#ff6577}}
 *{{box-sizing:border-box}} body{{margin:0;background:#08101c;color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,sans-serif}}
 main{{max-width:1280px;margin:auto;padding:32px}} h1{{font-size:30px;margin:0 0 4px}} h2{{margin:0;font-size:20px}} .subtitle{{color:var(--muted);margin:0 0 28px}}
@@ -2977,7 +3691,8 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
 .summary-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}} .summary-grid article{{display:flex;min-height:86px;flex-direction:column;justify-content:center;gap:7px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:#0a1421}} .summary-grid span{{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}} .summary-grid strong{{color:#cfe0ff;font-size:16px}}
 .dag-scroll{{overflow-x:auto;padding:6px 0 12px}} .stage-dag{{display:block;min-width:100%;font-family:Inter,ui-sans-serif,system-ui,sans-serif}} .dag-edge{{fill:none;stroke:#4f8cff88;stroke-width:2;marker-end:url(#dag-arrow)}} .dag-edge.muted{{stroke:#55647a55;stroke-dasharray:5 6}} .dag-node rect{{fill:#0b1421;stroke:#34445e;stroke-width:1.5;transition:fill .15s,stroke .15s}} .dag-node.optional rect{{stroke-dasharray:6 4}} .dag-node circle{{fill:#55647a}} .dag-node .dag-label{{fill:var(--ink);font-size:11px;font-weight:650}} .dag-node .dag-status{{fill:var(--muted);font-size:9px;letter-spacing:.08em}} .dag-node.completed circle{{fill:var(--green)}} .dag-node.completed rect{{stroke:#35d07f99}} .dag-node.pending circle{{fill:var(--amber)}} .dag-node.pending rect{{stroke:#ffbd4577}} .dag-node.disabled{{opacity:.38}} .stage-dag a:hover .dag-node rect{{fill:#101d30;stroke:var(--blue)}} .dag-legend{{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:5px}} .dag-legend span::before{{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#55647a}} .dag-legend .completed::before{{background:var(--green)}} .dag-legend .pending::before{{background:var(--amber)}} .dag-legend .disabled::before{{background:#55647a;opacity:.45}} .dag-type-legend span::before{{width:13px;height:9px;border-radius:2px;background:transparent;border:1.5px solid #93a4bd}} .dag-type-legend .optional-node::before{{border-style:dashed}}
 @keyframes pulse{{50%{{transform:scale(1.7);box-shadow:0 0 18px #ffbd45aa}}}} .table-wrap{{overflow:auto}} table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right}} th:first-child{{text-align:left}} thead th{{color:#a9bee0;background:#0a1421;position:sticky;top:0}} td.warning-cell{{background:#ffbd4524;color:#ffe3a3;box-shadow:inset 0 0 0 1px #ffbd4570}} .warning-value{{cursor:help;outline-offset:3px}} #warning-tooltip{{position:fixed;z-index:10000;max-width:min(420px,calc(100vw - 24px));padding:9px 11px;border:1px solid #ffbd4588;border-radius:8px;background:#241b0d;color:#ffe3a3;font-size:12px;line-height:1.4;box-shadow:0 10px 30px #0009;pointer-events:none;white-space:pre-wrap}} .gate{{display:inline-block;border-radius:999px;padding:5px 10px;background:#1b2839}} .gate.passed{{color:var(--green)}} .empty,.note{{color:var(--muted)}} select{{margin:0 18px 18px 8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#0a1421;color:var(--ink)}} .selector-label{{color:var(--muted)}} code{{color:#bcd2ff}} .probe-summaries{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}} .probe-summary{{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0a1421}} .probe-summary.passed{{border-color:#35d07f66}} .probe-summary.failed{{border-color:#ff657766}} .probe-summary h3{{margin:0 0 10px}} .probe-summary dl{{display:grid;grid-template-columns:1fr auto;gap:5px 14px;margin:0}} .probe-summary dt{{color:var(--muted)}} .probe-summary dd{{margin:0;text-align:right}} .probe-plots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px}} .probe-plot-panel{{min-width:0;border:1px solid var(--line);border-radius:12px;padding:12px;background:#091321}} .probe-plot-panel h3{{margin:0 0 4px}} .plotly-chart{{width:100%;height:390px}} .depth-chart{{height:460px}}
-.vllm-overview-cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:16px 0}} .vllm-overview-cards article{{display:flex;flex-direction:column;padding:14px;border:1px solid var(--line);border-radius:10px;background:#0a1421}} .vllm-overview-cards strong{{font-size:24px;color:#cfe0ff}} .vllm-overview-cards span{{color:var(--muted)}} .vllm-panel{{margin:14px 0}} .vllm-controls{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:14px 0}} .vllm-controls label{{display:flex;flex-direction:column;gap:5px;color:var(--muted)}} .vllm-controls select{{margin:0}}
+.vllm-overview-cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:16px 0}} .vllm-overview-cards article{{display:flex;flex-direction:column;padding:14px;border:1px solid var(--line);border-radius:10px;background:#0a1421}} .vllm-overview-cards strong{{font-size:24px;color:#cfe0ff}} .vllm-overview-cards span{{color:var(--muted)}} .vllm-panel{{margin:14px 0}} .vllm-controls{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:14px 0}} .vllm-controls>span{{display:contents}} .vllm-controls label{{display:flex;flex-direction:column;gap:5px;color:var(--muted)}} .vllm-controls select{{margin:0}}
+.vllm-connect-toggle{{display:flex;align-items:center;gap:7px;margin:8px 0 12px;color:var(--muted)}} .vllm-connect-toggle input{{accent-color:#4f8cff}}
 .replacement-layer-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:6px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:10px;background:#091321}} .layer-toggle,.replacement-connect-toggle,.replacement-all-toggle{{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}} .layer-toggle input,.replacement-connect-toggle input,.replacement-all-toggle input{{accent-color:#4f8cff}} .replacement-connect-toggle{{margin:8px 0}} .replacement-layer-toolbar{{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:10px 0}} .replacement-all-toggle{{font-weight:600;color:var(--ink)}} .replacement-layer-color-key{{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}} .replacement-layer-color-key i{{display:block;width:min(280px,32vw);height:8px;border-radius:999px;background:linear-gradient(90deg,#ff6577,#4f8cff)}}
 .mip-table th:first-child,.mip-table td:first-child{{position:sticky;left:0;z-index:2;background:#0a1421;text-align:left;white-space:nowrap}} .mip-table td{{font-variant-numeric:tabular-nums;white-space:nowrap}} .mip-table .status-feasible,.mip-table .status-reference{{color:var(--green)}} .mip-table .status-infeasible{{color:var(--red)}} .mip-sort-button{{display:inline-flex;align-items:center;gap:5px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer;white-space:nowrap}} .mip-sort-button:hover{{color:#fff}} .mip-sort-arrow{{display:inline-block;min-width:10px;color:var(--blue)}}
 .aiperf-solution-grid .layer-toggle i{{display:inline-block;width:10px;height:10px;border-radius:50%}} .replacement-layer-toolbar button{{border:1px solid var(--line);border-radius:7px;background:#0a1421;color:var(--ink);padding:6px 12px;cursor:pointer}} .replacement-layer-toolbar button:hover{{border-color:var(--blue)}}
@@ -2988,6 +3703,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
 {result_sections}
 <div id="warning-tooltip" role="tooltip" hidden></div>
 <script id="campaign-data" type="application/json">{embedded}</script>
+<script>window.PuzzletronReport=JSON.parse(document.getElementById('campaign-data').textContent);</script>
 <script>(()=>{{function openTarget(){{if(!location.hash)return;const target=document.querySelector(location.hash);if(!(target instanceof HTMLDetailsElement))return;target.open=true;requestAnimationFrame(()=>target.scrollIntoView({{behavior:'smooth',block:'start'}}));}}document.querySelectorAll('.stage-dag a[href^="#"]').forEach(link=>link.addEventListener('click',()=>requestAnimationFrame(openTarget)));window.addEventListener('hashchange',openTarget);openTarget();}})();</script>
 <script>(()=>{{
   const svg=document.querySelector('.stage-dag');
@@ -3032,7 +3748,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const body=document.getElementById('activation-diagnostic-body');
   const help=document.getElementById('activation-metric-help');
   if(!axis||!metric||!body)return;
-  const data=JSON.parse(document.getElementById('campaign-data').textContent).activation_diagnostic_view;
+  const data=window.PuzzletronReport.activation_diagnostic_view;
   const esc=v=>String(v).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
   const fmt=v=>v==null?'N/A':typeof v==='number'?v.toPrecision(9).replace(/0+$/,'').replace(/[.]$/,''):String(v);
   const methodKeys=['preferred_method','comparison_method','left_method','right_method'];
@@ -3068,80 +3784,200 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   metric.addEventListener('change',render);
   render();
 }})();</script>
-<script>(()=>{{const root=document.getElementById('campaign-data');if(!root)return;const report=JSON.parse(root.textContent),theme={{paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'#091321',font:{{color:'#cfe0ff'}},xaxis:{{title:'Iteration',gridcolor:'#26344a',zerolinecolor:'#26344a'}},yaxis:{{title:'Loss',gridcolor:'#26344a',zerolinecolor:'#26344a'}},legend:{{orientation:'h',y:1.12}},margin:{{l:62,r:18,t:42,b:55}},hovermode:'x unified',hoverlabel:{{bgcolor:'rgba(8,16,28,.74)',bordercolor:'rgba(147,164,189,.35)',font:{{size:11,color:'#e7edf7'}},namelength:18}}}},config={{responsive:true,displaylogo:false,modeBarButtonsToRemove:['lasso2d','select2d']}};function stableConfigKey(value){{const normalize=item=>{{if(Array.isArray(item))return item.map(normalize);if(item&&typeof item==='object')return Object.keys(item).sort().reduce((result,key)=>{{result[key]=normalize(item[key]);return result;}},{{}});return item;}};return JSON.stringify(normalize(value));}}function installConfigFocus(element,keys){{if(!element||typeof element.on!=='function'||!keys.length)return;if(typeof element.removeAllListeners==='function'){{element.removeAllListeners('plotly_hover');element.removeAllListeners('plotly_unhover');}}const restore=()=>Plotly.restyle(element,{{'marker.opacity':[keys.map(()=>.82)]}},[0]);element.on('plotly_hover',event=>{{const index=event.points&&event.points[0]&&event.points[0].pointIndex;if(index==null)return;const active=keys[index];Plotly.restyle(element,{{'marker.opacity':[keys.map(key=>key===active?.95:.1)]}},[0]);}});element.on('plotly_unhover',restore);restore();}}function layerSelection(record,unit){{const layer=String(unit).split(':',1)[0];return ((record.elastic_selection||{{}}).layers||[]).find(item=>String(item.layer_idx)===layer)||{{}};}}function renderLossChart(elementId,mode,unit){{const element=document.getElementById(elementId),modeData=(((report.bypass_overfit||{{}}).modes||{{}})[mode]||{{}}),records=modeData.records||[],metricKey=modeData.metric_key||'per_layer_loss';if(!element||!records.length)return;const x=records.map(r=>Number(r.step)),mean=records.map(r=>Number(r.loss)),selected=records.map(r=>Number((r[metricKey]||{{}})[unit])),meanMeta=records.map(r=>[r.hidden_width==null?'N/A':r.hidden_width]),unitMeta=records.map(r=>{{const choice=layerSelection(r,unit);return [r.hidden_width==null?'N/A':r.hidden_width,choice.candidate_id||'N/A',JSON.stringify(choice.changed_axes||{{}})];}}),unitLabel=modeData.granularity==='subblock'?`Subblock ${{unit}}`:`Layer ${{unit}}`,traces=[{{x,y:mean,name:'Mean',mode:'lines+markers',line:{{color:'#ffbd45',width:2}},marker:{{size:4}},customdata:meanMeta,hovertemplate:'#%{{x}} · mean %{{y:.5g}}<br>w=%{{customdata[0]}}<extra></extra>'}},{{x,y:selected,name:unitLabel,mode:'lines+markers',line:{{color:'#4f8cff',width:2}},marker:{{size:4}},customdata:unitMeta,hovertemplate:'#%{{x}} · loss %{{y:.5g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}}<br>%{{customdata[2]}}<extra></extra>'}}];Plotly.react(element,traces,{{...theme,title:{{text:mode==='diverse_resampled'?'Diverse resampled':'Smallest fixed',font:{{size:15}}}}}},config);}}window.PuzzletronCharts={{theme,config,renderLossChart,installConfigFocus,stableConfigKey}};const select=document.getElementById('bypass-overfit-unit-select');if(!select)return;function render(){{renderLossChart('bypass-diverse-plot','diverse_resampled',select.value);renderLossChart('bypass-fixed-plot','smallest_fixed',select.value);}}select.addEventListener('change',render);render();}})();</script>
+<script>(()=>{{const root=document.getElementById('campaign-data');if(!root)return;const report=window.PuzzletronReport,theme={{paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'#091321',font:{{color:'#cfe0ff'}},xaxis:{{title:'Iteration',gridcolor:'#26344a',zerolinecolor:'#26344a'}},yaxis:{{title:'Loss',gridcolor:'#26344a',zerolinecolor:'#26344a'}},legend:{{orientation:'h',x:0,xanchor:'left',y:1.18,yanchor:'bottom'}},margin:{{l:62,r:18,t:96,b:55}},hovermode:'x unified',hoverlabel:{{bgcolor:'rgba(8,16,28,.74)',bordercolor:'rgba(147,164,189,.35)',font:{{size:11,color:'#e7edf7'}},namelength:18}}}},config={{responsive:true,displaylogo:false,modeBarButtonsToRemove:['lasso2d','select2d']}};function chartTitle(text,size=15){{return {{text,font:{{size}},y:.98,yanchor:'top',pad:{{b:10}}}};}}function stableConfigKey(value){{const normalize=item=>{{if(Array.isArray(item))return item.map(normalize);if(item&&typeof item==='object')return Object.keys(item).sort().reduce((result,key)=>{{result[key]=normalize(item[key]);return result;}},{{}});return item;}};return JSON.stringify(normalize(value));}}function installConfigFocus(element,keys){{if(!element||typeof element.on!=='function'||!keys.length)return;if(typeof element.removeAllListeners==='function'){{element.removeAllListeners('plotly_hover');element.removeAllListeners('plotly_unhover');}}const restore=()=>Plotly.restyle(element,{{'marker.opacity':[keys.map(()=>.82)]}},[0]);element.on('plotly_hover',event=>{{const index=event.points&&event.points[0]&&event.points[0].pointIndex;if(index==null)return;const active=keys[index];Plotly.restyle(element,{{'marker.opacity':[keys.map(key=>key===active?.95:.1)]}},[0]);}});element.on('plotly_unhover',restore);restore();}}function layerSelection(record,unit){{const layer=String(unit).split(':',1)[0];return ((record.elastic_selection||{{}}).layers||[]).find(item=>String(item.layer_idx)===layer)||{{}};}}function renderLossChart(elementId,mode,unit){{const element=document.getElementById(elementId),modeData=(((report.bypass_overfit||{{}}).modes||{{}})[mode]||{{}}),records=modeData.records||[],metricKey=modeData.metric_key||'per_layer_loss';if(!element||!records.length)return;const x=records.map(r=>Number(r.step)),mean=records.map(r=>Number(r.loss)),selected=records.map(r=>Number((r[metricKey]||{{}})[unit])),meanMeta=records.map(r=>[r.hidden_width==null?'N/A':r.hidden_width]),unitMeta=records.map(r=>{{const choice=layerSelection(r,unit);return [r.hidden_width==null?'N/A':r.hidden_width,choice.candidate_id||'N/A',JSON.stringify(choice.changed_axes||{{}})];}}),unitLabel=modeData.granularity==='subblock'?`Subblock ${{unit}}`:`Layer ${{unit}}`,traces=[{{x,y:mean,name:'Mean',mode:'lines+markers',line:{{color:'#ffbd45',width:2}},marker:{{size:4}},customdata:meanMeta,hovertemplate:'#%{{x}} · mean %{{y:.5g}}<br>w=%{{customdata[0]}}<extra></extra>'}},{{x,y:selected,name:unitLabel,mode:'lines+markers',line:{{color:'#4f8cff',width:2}},marker:{{size:4}},customdata:unitMeta,hovertemplate:'#%{{x}} · loss %{{y:.5g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}}<br>%{{customdata[2]}}<extra></extra>'}}];Plotly.react(element,traces,{{...theme,title:chartTitle(mode==='diverse_resampled'?'Diverse resampled':'Smallest fixed')}},config);}}window.PuzzletronCharts={{theme,config,chartTitle,renderLossChart,installConfigFocus,stableConfigKey}};const select=document.getElementById('bypass-overfit-unit-select');if(!select)return;function render(){{renderLossChart('bypass-diverse-plot','diverse_resampled',select.value);renderLossChart('bypass-fixed-plot','smallest_fixed',select.value);}}select.addEventListener('change',render);render();}})();</script>
 <script>(()=>{{
   const charts=window.PuzzletronCharts;
   if(!charts)return;
-  const nested=JSON.parse(document.getElementById('campaign-data').textContent).nested_bypass||{{}};
+  const nested=window.PuzzletronReport.nested_bypass||{{}};
   const observations=nested.observations||[],catalog=nested.candidate_catalog||{{}};
   const colorscale=[[0,'#4f8cff'],[1,'#ff6577']];
   const select=document.getElementById('nested-bypass-unit-select');
-  const configSelect=document.getElementById('nested-bypass-config-select');
+  const widthSelect=document.getElementById('nested-bypass-width-select');
+  const axisFilters=document.getElementById('nested-bypass-axis-filters');
+  const emaAlpha=document.getElementById('nested-bypass-ema-alpha');
+  const emaAlphaValue=document.getElementById('nested-bypass-ema-alpha-value');
+  const excludeOutliers=document.getElementById('nested-bypass-exclude-outliers');
+  const summary=document.getElementById('nested-bypass-config-summary');
   const element=document.getElementById('nested-bypass-unit-plot');
   const title=document.getElementById('nested-bypass-unit-title');
-  if(!select||!configSelect||!element)return;
+  if(!select||!widthSelect||!axisFilters||!element)return;
+  const unitKey=unit=>charts.stableConfigKey([Number(unit.layer_idx),unit.subblock_kind||'',unit.subblock_name||'']);
+  const pointUnitKey=point=>charts.stableConfigKey([Number(point.layer_idx),point.subblock_kind||'',point.subblock_name||'']);
+  const pointsByUnit=new Map();
+  observations.forEach(point=>{{
+    const key=pointUnitKey(point);
+    if(!pointsByUnit.has(key))pointsByUnit.set(key,[]);
+    pointsByUnit.get(key).push(point);
+  }});
+  const configFor=point=>catalog[point.candidate_id]||{{candidate_id:point.candidate_id}};
   const configKey=point=>charts.stableConfigKey({{hidden_width:point.hidden_width,configuration:catalog[point.candidate_id]||{{candidate_id:point.candidate_id}}}});
   function pointsForUnit(unit){{
     const legacy=!observations.length;
-    let points=observations.filter(point=>Number(point.layer_idx)===Number(unit.layer_idx));
-    if(unit.subblock_kind)points=points.filter(point=>point.subblock_kind===unit.subblock_kind&&point.subblock_name===unit.subblock_name);
+    if(!legacy)return pointsByUnit.get(unitKey(unit))||[];
+    let points=[];
     if(legacy){{
       const key=unit.subblock_kind?`${{unit.layer_idx}}:${{unit.subblock_kind}}:${{unit.subblock_name}}`:String(unit.layer_idx);
       points=(nested.records||[]).map(row=>({{step:row.step,dp_lane:0,loss:Number(unit.subblock_kind?(row.per_subblock_loss||{{}})[key]:(row.per_layer_loss||{{}})[key]),parameter_ratio:null,candidate_id:'legacy',hidden_width:row.hidden_width}})).filter(point=>Number.isFinite(point.loss));
     }}
     return points;
   }}
-  function configLabel(point){{
-    const width=point.hidden_width==null?'N/A':point.hidden_width;
-    return `width=${{width}} · ${{JSON.stringify(catalog[point.candidate_id]||{{candidate_id:point.candidate_id}})}}`;
+  const formatValue=value=>Array.isArray(value)?`[${{value.map(formatValue).join(', ')}}]`:value&&typeof value==='object'?JSON.stringify(value):String(value);
+  function formatConfig(point){{
+    const fields=[];
+    if(point.hidden_width!=null)fields.push(`hidden width=${{formatValue(point.hidden_width)}}`);
+    Object.entries(configFor(point)).filter(([key])=>!['kind','name','no_op'].includes(key)).sort(([left],[right])=>left.localeCompare(right)).forEach(([key,value])=>fields.push(`${{key.replaceAll('_',' ')}}=${{formatValue(value)}}`));
+    return fields.length?fields.join(' · '):`candidate=${{point.candidate_id||'legacy'}}`;
   }}
-  function populateConfigSelector(){{
-    const unit=JSON.parse(select.value),points=pointsForUnit(unit),previous=configSelect.value;
-    const choices=new Map();
-    points.forEach(point=>choices.set(configKey(point),configLabel(point)));
-    configSelect.replaceChildren(new Option('ALL','ALL'));
-    [...choices.entries()].sort((left,right)=>left[1].localeCompare(right[1])).forEach(([key,label])=>configSelect.add(new Option(label,key)));
-    configSelect.value=[...configSelect.options].some(option=>option.value===previous)?previous:'ALL';
+  function populateWidthSelector(points){{
+    const previous=widthSelect.value;
+    const widths=[...new Set(points.map(point=>point.hidden_width).filter(value=>value!=null).map(String))].sort((left,right)=>Number(left)-Number(right));
+    widthSelect.replaceChildren(new Option('ALL','ALL'));
+    widths.forEach(width=>widthSelect.add(new Option(width,width)));
+    widthSelect.value=widths.includes(previous)?previous:'ALL';
+    widthSelect.hidden=widths.length<=1;
+    const widthLabel=document.querySelector('label[for="nested-bypass-width-select"]');
+    if(widthLabel)widthLabel.hidden=widths.length<=1;
+  }}
+  function populateAxisFilters(points){{
+    axisFilters.replaceChildren();
+    const axes=[...new Set(points.flatMap(point=>Object.keys(configFor(point))).filter(key=>!['kind','name','no_op','candidate_id','hidden_width'].includes(key)))].sort();
+    axes.forEach(axis=>{{
+      const label=document.createElement('label');
+      label.className='selector-label';
+      const axisSelect=document.createElement('select');
+      axisSelect.dataset.axis=axis;
+      axisSelect.setAttribute('aria-label',axis.replaceAll('_',' '));
+      axisSelect.add(new Option('ALL','ALL'));
+      const choices=new Map();
+      points.forEach(point=>{{
+        const value=configFor(point)[axis];
+        if(value!==undefined)choices.set(charts.stableConfigKey(value),formatValue(value));
+      }});
+      if(choices.size<=1)return;
+      [...choices.entries()].sort((left,right)=>left[1].localeCompare(right[1],undefined,{{numeric:true}})).forEach(([value,text])=>axisSelect.add(new Option(text,value)));
+      label.append(`${{axis.replaceAll('_',' ')}} `,axisSelect);
+      axisFilters.append(label);
+      axisSelect.addEventListener('change',render);
+    }});
+  }}
+  function selectedPoints(unit){{
+    let points=pointsForUnit(unit);
+    if(widthSelect.value!=='ALL')points=points.filter(point=>String(point.hidden_width)===widthSelect.value);
+    [...axisFilters.querySelectorAll('select[data-axis]')].forEach(axisSelect=>{{
+      if(axisSelect.value!=='ALL')points=points.filter(point=>charts.stableConfigKey(configFor(point)[axisSelect.dataset.axis])===axisSelect.value);
+    }});
+    return points;
+  }}
+  function numberSummary(values,digits=0){{
+    const finite=values.map(Number).filter(Number.isFinite);
+    if(!finite.length)return 'N/A';
+    const minimum=Math.min(...finite),maximum=Math.max(...finite),format=value=>digits?value.toFixed(digits):Number.isInteger(value)?value.toLocaleString():value.toPrecision(7);
+    return minimum===maximum?format(minimum):`${{format(minimum)}}–${{format(maximum)}}`;
+  }}
+  function updateSummary(points){{
+    if(!summary)return;
+    const configurations=new Set(points.map(configKey));
+    summary.textContent=`selected configurations ${{configurations.size}} · observations ${{points.length}} · active params ${{numberSummary(points.map(point=>point.active_params))}} · teacher params ${{numberSummary(points.map(point=>point.teacher_params))}} · active/teacher ratio ${{numberSummary(points.map(point=>point.parameter_ratio),4)}}`;
+  }}
+  function tukeyInliers(points){{
+    if(points.length<4)return points;
+    const losses=points.map(point=>Number(point.loss)).filter(Number.isFinite).sort((left,right)=>left-right);
+    if(losses.length<4)return points;
+    const quantile=probability=>{{const position=(losses.length-1)*probability,lower=Math.floor(position),upper=Math.ceil(position),weight=position-lower;return losses[lower]*(1-weight)+losses[upper]*weight;}};
+    const q1=quantile(.25),q3=quantile(.75),iqr=q3-q1,lower=q1-1.5*iqr,upper=q3+1.5*iqr;
+    return points.filter(point=>{{const loss=Number(point.loss);return Number.isFinite(loss)&&loss>=lower&&loss<=upper;}});
+  }}
+  function filterStepOutliers(points){{
+    if(!excludeOutliers?.checked)return points;
+    const byStep=new Map();
+    points.forEach(point=>{{const step=Number(point.step);if(!byStep.has(step))byStep.set(step,[]);byStep.get(step).push(point);}});
+    return [...byStep.values()].flatMap(tukeyInliers);
+  }}
+  function emaByStep(values,alpha){{
+    let average=null;
+    return values.map(([step,value])=>{{average=average==null?value:alpha*value+(1-alpha)*average;return [step,average];}});
   }}
   function render(){{
     const unit=JSON.parse(select.value),legacy=!observations.length;
     const label=unit.subblock_kind?`layer_${{unit.layer_idx}}:${{unit.subblock_kind}}:${{unit.subblock_name}}`:`layer_${{unit.layer_idx}}`;
     if(title)title.textContent=label;
-    let points=pointsForUnit(unit);
-    if(configSelect.value==='ALL'){{/* Keep the complete selected-unit scatter. */}}
-    else points=points.filter(point=>configKey(point)===configSelect.value);
-    const meta=points.map(point=>[point.dp_lane,point.hidden_width==null?'N/A':point.hidden_width,point.candidate_id,JSON.stringify(catalog[point.candidate_id]||{{}}),point.active_params==null?'N/A':point.active_params,point.teacher_params==null?'N/A':point.teacher_params]);
-    const marker={{size:8,opacity:.82,color:points.map(point=>point.parameter_ratio),cmin:0,cmax:1,colorscale,showscale:!legacy,colorbar:{{title:'Active / teacher params',thickness:14}}}};
-    Plotly.react(element,[{{x:points.map(point=>Number(point.step)),y:points.map(point=>Number(point.loss)),mode:'markers',type:'scatter',name:'DP observations',marker,customdata:meta,hovertemplate:'step=%{{x}} · loss=%{{y:.6g}}<br>DP lane %{{customdata[0]}} · width=%{{customdata[1]}}<br>ratio=%{{marker.color:.4f}} · params=%{{customdata[4]}}/%{{customdata[5]}}<br>%{{customdata[2]}}<br>%{{customdata[3]}}<extra></extra>'}}],{{...charts.theme,xaxis:{{...charts.theme.xaxis,title:'Optimizer step'}},yaxis:{{...charts.theme.yaxis,title:'Loss'}},hovermode:'closest'}},charts.config);
+    const selected=selectedPoints(unit);
+    const points=filterStepOutliers(selected);
+    updateSummary(points);
+    if(summary&&points.length!==selected.length)summary.textContent+=` · hidden outliers ${{selected.length-points.length}}`;
+    const ratioAvailable=points.some(point=>Number.isFinite(Number(point.parameter_ratio)));
+    const meta=points.map(point=>[point.dp_lane,point.hidden_width==null?'N/A':point.hidden_width,point.candidate_id,formatConfig(point),point.active_params==null?'N/A':point.active_params,point.teacher_params==null?'N/A':point.teacher_params,point.parameter_ratio==null?'N/A':Number(point.parameter_ratio).toFixed(4)]);
+    const marker={{size:8,opacity:.82,color:points.map(point=>point.parameter_ratio),cmin:0,cmax:1,colorscale,showscale:!legacy&&ratioAvailable,colorbar:{{title:'Active / teacher params',thickness:14}}}};
+    const perStep=new Map();
+    points.forEach(point=>{{const step=Number(point.step),loss=Number(point.loss);if(!Number.isFinite(step)||!Number.isFinite(loss))return;if(!perStep.has(step))perStep.set(step,[]);perStep.get(step).push(loss);}});
+    const stepMeans=[...perStep.entries()].sort((left,right)=>left[0]-right[0]).map(([step,losses])=>[step,losses.reduce((sum,value)=>sum+value,0)/losses.length]);
+    const alpha=Math.min(1,Math.max(.01,Number(emaAlpha?.value||.1)));
+    if(emaAlphaValue)emaAlphaValue.value=alpha.toFixed(2);
+    const smoothed=emaByStep(stepMeans,alpha);
+    const traces=[{{x:points.map(point=>Number(point.step)),y:points.map(point=>Number(point.loss)),mode:'markers',type:'scatter',name:'DP observations',marker,customdata:meta,hovertemplate:'step=%{{x}} · loss=%{{y:.6g}}<br>DP lane %{{customdata[0]}} · width=%{{customdata[1]}}<br>ratio=%{{customdata[6]}} · params=%{{customdata[4]}}/%{{customdata[5]}}<br>%{{customdata[2]}}<br>%{{customdata[3]}}<extra></extra>'}},{{x:smoothed.map(entry=>entry[0]),y:smoothed.map(entry=>entry[1]),mode:'lines',type:'scatter',name:`EMA (α=${{alpha.toFixed(2)}})`,line:{{color:'#ffbd45',width:3}},hovertemplate:'step=%{{x}} · EMA=%{{y:.6g}}<extra></extra>'}}];
+    Plotly.react(element,traces,{{...charts.theme,xaxis:{{...charts.theme.xaxis,title:'Optimizer step'}},yaxis:{{...charts.theme.yaxis,title:'Loss'}},hovermode:'closest'}},charts.config);
     const configKeys=points.map(configKey);
     charts.installConfigFocus(element,configKeys);
   }}
-  select.addEventListener('change',()=>{{populateConfigSelector();render();}});
-  configSelect.addEventListener('change',render);
-  populateConfigSelector();
-  render();
+  function rebuildControls(){{
+    const points=pointsForUnit(JSON.parse(select.value));
+    populateWidthSelector(points);
+    populateAxisFilters(points);
+    render();
+  }}
+  select.addEventListener('change',rebuildControls);
+  widthSelect.addEventListener('change',render);
+  emaAlpha?.addEventListener('input',render);
+  excludeOutliers?.addEventListener('change',render);
+  rebuildControls();
 }})();</script>
-<script>(()=>{{const select=document.getElementById('depth-metric-select'),charts=window.PuzzletronCharts;if(!select||!charts)return;const data=JSON.parse(document.getElementById('campaign-data').textContent).depth||{{}},rows=data.rows||[];function render(){{const metric=select.value,valid=rows.filter(row=>Number.isFinite(Number((row.metrics||{{}})[metric]))),x=valid.map(row=>Number(row.removed_count)),y=valid.map(row=>Number(row.metrics[metric])),meta=valid.map(row=>[row.removed_count===0?'Teacher':JSON.stringify(row.removals)]);Plotly.react('depth-trajectory-plot',[{{x,y,mode:'lines+markers',name:metric,line:{{color:'#4f8cff',width:3}},marker:{{size:10,color:x.map(value=>value===0?'#ffbd45':'#4f8cff')}},customdata:meta,hovertemplate:'Removed sublayers %{{x}}<br>'+metric+' %{{y:.7g}}<br>%{{customdata[0]}}<extra></extra>'}}],{{...charts.theme,title:{{text:`${{metric}} by iterative depth`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:'Sublayers removed',dtick:1}},yaxis:{{...charts.theme.yaxis,title:metric}},hovermode:'closest'}},charts.config);}}select.addEventListener('change',render);render();}})();</script>
+<script>(()=>{{const select=document.getElementById('depth-metric-select'),charts=window.PuzzletronCharts;if(!select||!charts)return;const data=window.PuzzletronReport.depth||{{}},rows=data.rows||[];function render(){{const metric=select.value,valid=rows.filter(row=>Number.isFinite(Number((row.metrics||{{}})[metric]))),x=valid.map(row=>Number(row.removed_count)),y=valid.map(row=>Number(row.metrics[metric])),meta=valid.map(row=>[row.removed_count===0?'Teacher':JSON.stringify(row.removals)]);Plotly.react('depth-trajectory-plot',[{{x,y,mode:'lines+markers',name:metric,line:{{color:'#4f8cff',width:3}},marker:{{size:10,color:x.map(value=>value===0?'#ffbd45':'#4f8cff')}},customdata:meta,hovertemplate:'Removed sublayers %{{x}}<br>'+metric+' %{{y:.7g}}<br>%{{customdata[0]}}<extra></extra>'}}],{{...charts.theme,title:{{text:`${{metric}} by iterative depth`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:'Sublayers removed',dtick:1}},yaxis:{{...charts.theme.yaxis,title:metric}},hovermode:'closest'}},charts.config);}}select.addEventListener('change',render);render();}})();</script>
 <script>
 (()=>{{
   const profile=document.getElementById('vllm-profile-select');
   const overviewMetric=document.getElementById('vllm-overview-metric');
+  const charts=window.PuzzletronCharts;
+  if(!profile||!overviewMetric||!charts)return;
+  const data=window.PuzzletronReport.vllm||{{}};
+  const rows=data.records||[];
+  const palette=['#4f8cff','#35d07f','#ffbd45','#ff6577','#a78bfa','#22d3ee'];
+  const finite=value=>Number.isFinite(Number(value));
+  const metricRows=name=>rows.filter(row=>row.profile_id===profile.value&&finite((row.metrics||{{}})[name]));
+  const profileLabel=()=>{{const selected=profile.options[profile.selectedIndex];return selected?selected.textContent:'runtime profile';}};
+  const widthColor=width=>{{const index=(data.widths||[]).map(String).indexOf(String(width));return palette[(index<0?0:index)%palette.length];}};
+  const warningText=row=>row.warning?`<br>Warning: ${{row.warning}}`:'';
+  const warningSymbol=row=>row.warning?'x':row.kind==='ffn'?'square':row.kind==='attention'?'circle':'diamond';
+  function renderOverview(){{
+    const name=overviewMetric.value,ordered=metricRows(name).slice().sort((a,b)=>Number(a.metrics[name])-Number(b.metrics[name]));
+    const kinds=[...new Set(ordered.map(row=>String(row.kind||'unknown')))];
+    const traces=kinds.map(kind=>{{
+      const values=ordered.map((row,index)=>({{row,rank:index+1}})).filter(item=>String(item.row.kind||'unknown')===kind);
+      return {{
+        x:values.map(item=>item.rank),y:values.map(item=>Number(item.row.metrics[name])),mode:'markers',type:'scatter',name:kind.replace(/(^|[_-])([a-z])/g,(_,prefix,char)=>`${{prefix?' ':''}}${{char.toUpperCase()}}`),legendgroup:kind,showlegend:true,
+        marker:{{size:9,opacity:.82,color:values.map(item=>item.row.warning?'#ff6577':widthColor(item.row.hidden_width)),symbol:values.map(item=>warningSymbol(item.row))}},
+        customdata:values.map(item=>[item.row.hidden_width,item.row.kind,item.row.label,warningText(item.row)]),
+        hovertemplate:'rank=%{{x}} · %{{y:.7g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}} · %{{customdata[2]}}%{{customdata[3]}}<extra></extra>'
+      }};
+    }});
+    Plotly.react('vllm-overview-plot',traces,{{...charts.theme,showlegend:true,title:{{text:`${{name}} · ${{profileLabel()}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:`Candidate rank (ascending ${{name}})`}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest'}},charts.config);
+  }}
+  profile.addEventListener('change',renderOverview);
+  overviewMetric.addEventListener('change',renderOverview);
+  renderOverview();
+}})();
+</script>
+<script>
+(()=>{{
+  const profile=document.getElementById('vllm-profile-select');
   const metric=document.getElementById('vllm-metric-select');
   const axis=document.getElementById('vllm-axis-select');
-  const configSelect=document.getElementById('vllm-config-select');
+  const connect=document.getElementById('vllm-connect-configs');
+  const axisFilters=document.getElementById('vllm-axis-filters');
   const summary=document.getElementById('vllm-config-summary');
+  const element=document.getElementById('vllm-stats-plot');
   const charts=window.PuzzletronCharts;
-  if(!profile||!overviewMetric||!metric||!axis||!configSelect||!charts)return;
-  // Let Plotly choose its normal vertical legend placement instead of forcing
-  // a horizontal legend into the title area. Re-render the already-created
-  // overfit charts once so they receive the same layout policy.
-  delete charts.theme.legend;
-  const bypassUnit=document.getElementById('bypass-overfit-unit-select');
-  if(bypassUnit){{
-    charts.renderLossChart('bypass-diverse-plot','diverse_resampled',bypassUnit.value);
-    charts.renderLossChart('bypass-fixed-plot','smallest_fixed',bypassUnit.value);
-  }}
-  const data=JSON.parse(document.getElementById('campaign-data').textContent).vllm||{{}};
+  if(!profile||!metric||!axis||!connect||!axisFilters||!element||!charts)return;
+  const data=window.PuzzletronReport.vllm||{{}};
   const rows=data.records||[],labels=data.axis_labels||{{}};
   const palette=['#4f8cff','#35d07f','#ffbd45','#ff6577','#a78bfa','#22d3ee'];
   const finite=value=>Number.isFinite(Number(value));
@@ -3150,61 +3986,98 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
     if(Array.isArray(value))return JSON.stringify(value);
     return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b))));
   }};
+  const formatValue=value=>Array.isArray(value)?`[${{value.map(formatValue).join(', ')}}]`:value&&typeof value==='object'?JSON.stringify(value):String(value);
   const metricRows=name=>rows.filter(row=>row.profile_id===profile.value&&finite((row.metrics||{{}})[name]));
   const profileLabel=()=>{{const selected=profile.options[profile.selectedIndex];return selected?selected.textContent:'runtime profile';}};
   const widthColor=width=>{{const index=(data.widths||[]).map(String).indexOf(String(width));return palette[(index<0?0:index)%palette.length];}};
   const warningText=row=>row.warning?`<br>Warning: ${{row.warning}}`:'';
   const warningSymbol=row=>row.warning?'x':row.kind==='ffn'?'square':row.kind==='attention'?'circle':'diamond';
-  function renderOverview(){{
-    const name=overviewMetric.value,ordered=metricRows(name).slice().sort((a,b)=>Number(a.metrics[name])-Number(b.metrics[name]));
-    const rank=new Map(ordered.map((row,index)=>[row,index+1])),groups=new Map();
-    ordered.forEach(row=>{{const key=`${{row.hidden_width}} · ${{row.kind}}`;if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);}});
-    const traces=[...groups.entries()].map(([traceName,values])=>({{
-      x:values.map(row=>rank.get(row)),y:values.map(row=>Number(row.metrics[name])),mode:'markers',name:traceName,
-      marker:{{size:11,color:values.map(row=>row.warning?'#ff6577':widthColor(row.hidden_width)),symbol:values.map(warningSymbol)}},
-      customdata:values.map(row=>[row.hidden_width,row.label,warningText(row)]),
-      hovertemplate:'rank=%{{x}} · %{{y:.7g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}}%{{customdata[2]}}<extra></extra>'
-    }}));
-    Plotly.react('vllm-overview-plot',traces,{{...charts.theme,title:{{text:`${{name}} · ${{profileLabel()}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:`Candidate rank (ascending ${{name}})`}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest'}},charts.config);
+  function showSweepError(error){{
+    const detail=error instanceof Error?error.message:String(error),message=`Sweep explorer failed: ${{detail}}`;
+    if(summary)summary.textContent=message;
+    element.replaceChildren();
+    const notice=document.createElement('p');
+    notice.className='empty';
+    notice.textContent=message;
+    element.append(notice);
+    console.error(message,error);
   }}
-  function anchorFor(row,swept){{
-    const result={{kind:row.kind}};
-    Object.entries(row.axes||{{}}).sort(([a],[b])=>a.localeCompare(b)).forEach(([key,value])=>{{if(key!==swept&&key!=='hidden_width')result[key]=value;}});
-    return result;
-  }}
-  function configLabel(anchor){{
-    const parts=[anchor.kind];
-    Object.entries(anchor).filter(([key])=>key!=='kind').forEach(([key,value])=>parts.push(`${{labels[key]||key}}=${{value}}`));
-    return parts.join(' · ');
-  }}
-  let compatible=[];
-  function rebuildConfigs(){{
-    const swept=axis.value,groups=new Map();
-    metricRows(metric.value).filter(row=>swept in (row.axes||{{}})).forEach(row=>{{
-      const anchor=anchorFor(row,swept),key=canonical(anchor);
-      if(!groups.has(key))groups.set(key,{{anchor,values:new Set()}});
-      groups.get(key).values.add(canonical(row.axes[swept]));
+  const baseSweepRows=()=>metricRows(metric.value).filter(row=>axis.value in (row.axes||{{}}));
+  function populateVllmAxisFilters(){{
+    const previous=new Map([...axisFilters.querySelectorAll('select[data-axis]')].map(item=>[item.dataset.axis,item.value]));
+    axisFilters.replaceChildren();
+    const eligible=baseSweepRows();
+    (data.axes||[]).filter(axisName=>axisName!==axis.value).forEach(axisName=>{{
+      const choices=new Map();
+      eligible.forEach(row=>{{const value=(row.axes||{{}})[axisName];if(value!==undefined)choices.set(canonical(value),formatValue(value));}});
+      if(choices.size<=1)return;
+      const label=document.createElement('label');
+      const selector=document.createElement('select');
+      selector.dataset.axis=axisName;
+      selector.setAttribute('aria-label',labels[axisName]||axisName);
+      selector.add(new Option('ALL','ALL'));
+      [...choices.entries()].sort((left,right)=>left[1].localeCompare(right[1],undefined,{{numeric:true}})).forEach(([value,text])=>selector.add(new Option(text,value)));
+      const saved=previous.get(axisName);
+      selector.value=saved&&choices.has(saved)?saved:'ALL';
+      label.append(`${{labels[axisName]||axisName}} `,selector);
+      axisFilters.append(label);
+      selector.addEventListener('change',renderSweep);
     }});
-    compatible=[...groups.values()].filter(group=>group.values.size>=2).sort((a,b)=>configLabel(a.anchor).localeCompare(configLabel(b.anchor)));
-    configSelect.innerHTML='';
-    const all=document.createElement('option');all.value='ALL';all.textContent='ALL';configSelect.appendChild(all);
-    compatible.forEach((group,index)=>{{const option=document.createElement('option');option.value=String(index);option.textContent=configLabel(group.anchor);configSelect.appendChild(option);}});
-    renderSweep();
+  }}
+  function selectedVllmRows(){{
+    let selected=baseSweepRows();
+    [...axisFilters.querySelectorAll('select[data-axis]')].forEach(selector=>{{
+      if(selector.value!=='ALL')selected=selected.filter(row=>canonical((row.axes||{{}})[selector.dataset.axis])===selector.value);
+    }});
+    return selected;
+  }}
+  function vllmFilterSummary(){{
+    const parts=[];
+    [...axisFilters.querySelectorAll('select[data-axis]')].forEach(selector=>{{const option=selector.options[selector.selectedIndex];parts.push(`${{labels[selector.dataset.axis]||selector.dataset.axis}}=${{option?option.textContent:'ALL'}}`);}});
+    return parts.length?parts.join(' · '):'no fixed-axis filters';
+  }}
+  function configurationKey(row,swept){{
+    const fixedAxes=Object.fromEntries(Object.entries(row.axes||{{}}).filter(([name])=>name!==swept).sort(([left],[right])=>left.localeCompare(right)));
+    return canonical({{kind:row.kind,axes:fixedAxes}});
+  }}
+  function traceFor(values,name,swept,metricName,mode){{
+    return {{
+      x:values.map(row=>(row.axes||{{}})[swept]),y:values.map(row=>Number(row.metrics[metricName])),mode,type:'scatter',name,showlegend:false,
+      marker:{{size:9,opacity:.82,color:values.map(row=>row.warning?'#ff6577':widthColor(row.hidden_width)),symbol:values.map(warningSymbol)}},
+      line:{{color:'rgba(147,164,189,.38)',width:1.2}},
+      customdata:values.map(row=>[row.hidden_width,row.kind,row.label,warningText(row)]),
+      hovertemplate:`${{labels[swept]||swept}}=%{{x}} · %{{y:.7g}}<br>w=%{{customdata[0]}} · %{{customdata[1]}} · %{{customdata[2]}}%{{customdata[3]}}<extra></extra>`
+    }};
   }}
   function renderSweep(){{
-    const name=metric.value,swept=axis.value,choice=configSelect.value,anchor=choice==='ALL'?null:(compatible[Number(choice)]||{{}}).anchor;
-    let selected=metricRows(name).filter(row=>swept in (row.axes||{{}}));
-    if(anchor)selected=selected.filter(row=>canonical(anchorFor(row,swept))===canonical(anchor));
-    const widths=[...new Set(selected.map(row=>row.hidden_width))].sort((a,b)=>Number(b)-Number(a));
-    const traces=widths.map(width=>{{
-      const values=selected.filter(row=>String(row.hidden_width)===String(width)).sort((a,b)=>Number(a.axes[swept])-Number(b.axes[swept]));
-      return {{x:values.map(row=>row.axes[swept]),y:values.map(row=>Number(row.metrics[name])),mode:choice==='ALL'?'markers':'lines+markers',name:`width ${{width}}`,marker:{{size:11,color:values.map(row=>row.warning?'#ff6577':widthColor(width)),symbol:values.map(warningSymbol)}},line:{{color:widthColor(width),width:2}},customdata:values.map(row=>[row.label,warningText(row)]),hovertemplate:`${{labels[swept]||swept}}=%{{x}} · %{{y:.7g}}<br>%{{customdata[0]}}%{{customdata[1]}}<extra></extra>`}};
+    try{{
+    const name=metric.value,swept=axis.value,selected=selectedVllmRows();
+    const ordered=selected.slice().sort((left,right)=>{{
+      const a=(left.axes||{{}})[swept],b=(right.axes||{{}})[swept],numeric=Number(a)-Number(b);
+      return Number.isFinite(numeric)?numeric:String(a).localeCompare(String(b),undefined,{{numeric:true}});
     }});
-    if(summary)summary.textContent=`${{profileLabel()}} · `+(choice==='ALL'?'ALL compatible configurations; every width remains visible as its own trace.':configLabel(anchor));
-    Plotly.react('vllm-stats-plot',traces,{{...charts.theme,title:{{text:`${{name}} by ${{labels[swept]||swept}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:labels[swept]||swept}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest'}},charts.config);
+    let traces=[traceFor(ordered,'Selected candidates',swept,name,'markers')];
+    if(connect.checked){{
+      const groups=new Map();
+      ordered.forEach(row=>{{const key=configurationKey(row,swept);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(row);}});
+      traces=[...groups.values()].map((values,index)=>traceFor(values,`Configuration ${{index+1}}`,swept,name,values.length>1?'lines+markers':'markers'));
+    }}
+    const configurations=new Set(selected.map(row=>canonical({{hidden_width:row.hidden_width,config:row.config}})));
+    const connected=connect.checked?` · connected groups ${{traces.length}}`:'';
+    if(summary)summary.textContent=`${{profileLabel()}} · ${{vllmFilterSummary()}} · selected configurations ${{configurations.size}} · visible points ${{selected.length}}${{connected}}`;
+    const rendering=Plotly.react(element,traces,{{...charts.theme,title:{{text:`${{name}} by ${{labels[swept]||swept}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:labels[swept]||swept}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest'}},charts.config);
+    if(rendering&&typeof rendering.catch==='function')rendering.catch(showSweepError);
+    }}catch(error){{showSweepError(error);}}
   }}
-  profile.addEventListener('change',()=>{{renderOverview();rebuildConfigs();}});overviewMetric.addEventListener('change',renderOverview);metric.addEventListener('change',rebuildConfigs);axis.addEventListener('change',rebuildConfigs);configSelect.addEventListener('change',renderSweep);
-  renderOverview();rebuildConfigs();
+  function rebuildVllmControls(){{
+    try{{populateVllmAxisFilters();renderSweep();}}
+    catch(error){{showSweepError(error);}}
+  }}
+  profile.addEventListener('change',rebuildVllmControls);
+  metric.addEventListener('change',rebuildVllmControls);
+  axis.addEventListener('change',rebuildVllmControls);
+  connect.addEventListener('change',renderSweep);
+  rebuildVllmControls();
 }})();
 </script>
 <script>
@@ -3212,14 +4085,15 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const metric=document.getElementById('replacement-metric-select');
   const width=document.getElementById('replacement-width-select');
   const axis=document.getElementById('replacement-axis-select');
-  const configSelect=document.getElementById('replacement-config-select');
+  const axisFilters=document.getElementById('replacement-axis-filters');
   const connect=document.getElementById('replacement-connect-layers');
   const allLayers=document.getElementById('replacement-all-layers');
   const summary=document.getElementById('replacement-config-summary');
   const charts=window.PuzzletronCharts;
-  if(!metric||!width||!axis||!configSelect||!connect||!allLayers||!charts)return;
-  const data=JSON.parse(document.getElementById('campaign-data').textContent).replacement||{{}};
+  if(!metric||!width||!axis||!axisFilters||!connect||!allLayers||!charts)return;
+  const data=window.PuzzletronReport.replacement||{{}};
   const rows=data.records||[],labels=data.axis_labels||{{}};
+  width.parentElement.hidden=(data.widths||[]).length<=1;
   const toggles=[...document.querySelectorAll('[data-replacement-layer]')];
   const finite=value=>Number.isFinite(Number(value));
   const layerColor=layer=>{{
@@ -3233,37 +4107,49 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
     return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b))));
   }};
   const metricRows=name=>rows.filter(row=>String(row.hidden_width)===width.value&&finite((row.metrics||{{}})[name]));
-  function anchorFor(row,swept){{
-    const result={{family:row.family}};
-    Object.entries(row.axes||{{}}).sort(([a],[b])=>a.localeCompare(b)).forEach(([key,value])=>{{if(key!==swept&&key!=='hidden_width')result[key]=value;}});
-    return result;
-  }}
-  function configLabel(anchor){{
-    const parts=[anchor.family];
-    Object.entries(anchor).filter(([key])=>key!=='family').forEach(([key,value])=>parts.push(`${{labels[key]||key}}=${{value}}`));
-    return parts.join(' · ');
-  }}
-  let compatible=[];
-  function rebuildConfigs(){{
-    const swept=axis.value,groups=new Map();
-    metricRows(metric.value).filter(row=>swept in (row.axes||{{}})).forEach(row=>{{
-      const anchor=anchorFor(row,swept),key=canonical(anchor);
-      if(!groups.has(key))groups.set(key,{{anchor,values:new Set()}});
-      groups.get(key).values.add(canonical(row.axes[swept]));
+  const formatValue=value=>Array.isArray(value)?`[${{value.map(formatValue).join(', ')}}]`:value&&typeof value==='object'?JSON.stringify(value):String(value);
+  const baseReplacementRows=()=>metricRows(metric.value).filter(row=>axis.value in (row.axes||{{}}));
+  function populateReplacementAxisFilters(){{
+    const previous=new Map([...axisFilters.querySelectorAll('select[data-axis]')].map(item=>[item.dataset.axis,item.value]));
+    axisFilters.replaceChildren();
+    const eligible=baseReplacementRows();
+    (data.axes||[]).filter(axisName=>axisName!==axis.value).forEach(axisName=>{{
+      const choices=new Map();
+      eligible.forEach(row=>{{const value=(row.axes||{{}})[axisName];if(value!==undefined)choices.set(canonical(value),formatValue(value));}});
+      if(choices.size<=1)return;
+      const label=document.createElement('label');
+      const selector=document.createElement('select');
+      selector.dataset.axis=axisName;
+      selector.setAttribute('aria-label',labels[axisName]||axisName);
+      selector.add(new Option('ALL','ALL'));
+      [...choices.entries()].sort((left,right)=>left[1].localeCompare(right[1],undefined,{{numeric:true}})).forEach(([value,text])=>selector.add(new Option(text,value)));
+      const saved=previous.get(axisName);
+      selector.value=saved&&choices.has(saved)?saved:'ALL';
+      label.append(`${{labels[axisName]||axisName}} `,selector);
+      axisFilters.append(label);
+      selector.addEventListener('change',render);
     }});
-    compatible=[...groups.values()].filter(group=>group.values.size>=2).sort((a,b)=>configLabel(a.anchor).localeCompare(configLabel(b.anchor)));
-    configSelect.innerHTML='<option value="ALL">ALL</option>';
-    compatible.forEach((group,index)=>{{const option=document.createElement('option');option.value=String(index);option.textContent=configLabel(group.anchor);configSelect.appendChild(option);}});
-    render();
+  }}
+  function selectedReplacementRows(){{
+    const enabled=new Set(toggles.filter(item=>item.checked).map(item=>String(item.dataset.replacementLayer)));
+    let selected=baseReplacementRows().filter(row=>enabled.has(String(row.layer_idx)));
+    [...axisFilters.querySelectorAll('select[data-axis]')].forEach(selector=>{{
+      if(selector.value!=='ALL')selected=selected.filter(row=>canonical((row.axes||{{}})[selector.dataset.axis])===selector.value);
+    }});
+    return selected;
+  }}
+  function replacementFilterSummary(){{
+    const parts=[];
+    [...axisFilters.querySelectorAll('select[data-axis]')].forEach(selector=>{{const option=selector.options[selector.selectedIndex];parts.push(`${{labels[selector.dataset.axis]||selector.dataset.axis}}=${{option?option.textContent:'ALL'}}`);}});
+    return parts.length?parts.join(' · '):'no fixed-axis filters';
   }}
   function render(){{
-    const name=metric.value,swept=axis.value,choice=configSelect.value,anchor=choice==='ALL'?null:(compatible[Number(choice)]||{{}}).anchor;
-    const enabled=new Set(toggles.filter(item=>item.checked).map(item=>String(item.dataset.replacementLayer)));
-    let selected=metricRows(name).filter(row=>enabled.has(String(row.layer_idx))&&swept in (row.axes||{{}}));
-    if(anchor)selected=selected.filter(row=>canonical(anchorFor(row,swept))===canonical(anchor));
-    const connectLayers=choice!=='ALL'&&connect.checked;
-    connect.disabled=choice==='ALL';
-    connect.parentElement.style.opacity=choice==='ALL'?'.5':'1';
+    const name=metric.value,swept=axis.value,selected=selectedReplacementRows();
+    const selectors=[...axisFilters.querySelectorAll('select[data-axis]')];
+    const concreteSweep=selectors.every(selector=>selector.value!=='ALL');
+    const connectLayers=concreteSweep&&connect.checked;
+    connect.disabled=!concreteSweep;
+    connect.parentElement.style.opacity=concreteSweep?'1':'.5';
     const layers=[...new Set(selected.map(row=>Number(row.layer_idx)))].sort((a,b)=>a-b);
     const traces=layers.map(layer=>{{
       const values=selected.filter(row=>Number(row.layer_idx)===layer).sort((a,b)=>Number(a.axes[swept])-Number(b.axes[swept]));
@@ -3274,7 +4160,8 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
         hovertemplate:`layer %{{customdata[0]}} · ${{labels[swept]||swept}}=%{{x}}<br>${{name}}=%{{y:.7g}}<br>baseline=%{{customdata[2]:.7g}}<br>%{{customdata[1]}}<extra>width ${{width.value}}</extra>`
       }};
     }});
-    if(summary)summary.textContent=`width ${{width.value}} · `+(choice==='ALL'?`ALL compatible configurations · ${{selected.length}} visible scores`:`${{configLabel(anchor)}} · ${{selected.length}} visible scores`);
+    const configurations=new Set(selected.map(row=>canonical(row.config)));
+    if(summary)summary.textContent=`width ${{width.value}} · ${{replacementFilterSummary()}} · selected configurations ${{configurations.size}} · visible scores ${{selected.length}}`;
     Plotly.react('replacement-score-plot',traces,{{...charts.theme,title:{{text:`${{name}} by ${{labels[swept]||swept}} · width ${{width.value}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:labels[swept]||swept}},yaxis:{{...charts.theme.yaxis,title:name}},hovermode:'closest',showlegend:false}},charts.config);
   }}
   function syncMaster(){{
@@ -3282,40 +4169,64 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
     allLayers.checked=selected===toggles.length;
     allLayers.indeterminate=selected>0&&selected<toggles.length;
   }}
-  metric.addEventListener('change',rebuildConfigs);width.addEventListener('change',rebuildConfigs);axis.addEventListener('change',rebuildConfigs);configSelect.addEventListener('change',render);connect.addEventListener('change',render);
+  function rebuildReplacementControls(){{populateReplacementAxisFilters();render();}}
+  metric.addEventListener('change',rebuildReplacementControls);width.addEventListener('change',rebuildReplacementControls);axis.addEventListener('change',rebuildReplacementControls);connect.addEventListener('change',render);
   allLayers.addEventListener('change',()=>{{toggles.forEach(toggle=>{{toggle.checked=allLayers.checked;}});allLayers.indeterminate=false;render();}});
   toggles.forEach(toggle=>toggle.addEventListener('change',()=>{{syncMaster();render();}}));
   syncMaster();
-  rebuildConfigs();
+  rebuildReplacementControls();
 }})();
 </script>
 <script>
 (()=>{{
   const xSelect=document.getElementById('evaluation-x-select');
   const ySelect=document.getElementById('evaluation-y-select');
+  const bestAcrossProfiles=document.getElementById('evaluation-best-across-profiles');
   const element=document.getElementById('evaluation-scatter-plot');
   const summary=document.getElementById('evaluation-profile-summary');
   const charts=window.PuzzletronCharts;
   if(!xSelect||!ySelect||!element||!charts)return;
-  const report=JSON.parse(document.getElementById('campaign-data').textContent);
+  const report=window.PuzzletronReport;
   const profiles=(report.evaluation||{{}}).profiles||[];
   let profileId=((window.PuzzletronReportState||{{}}).mipConstraintProfile||{{}}).id||profiles[0]?.profile_id;
   const finite=value=>Number.isFinite(Number(value));
+  const metricDirection=name=>/(accuracy|throughput|tokens_per|score_rate)/i.test(name)?'max':'min';
+  function paretoFront(points,xDirection,yDirection){{
+    const noWorse=(left,right,direction)=>direction==='max'?left>=right:left<=right;
+    const better=(left,right,direction)=>direction==='max'?left>right:left<right;
+    return points.filter((point,index)=>!points.some((other,otherIndex)=>otherIndex!==index&&noWorse(other.x,point.x,xDirection)&&noWorse(other.y,point.y,yDirection)&&(better(other.x,point.x,xDirection)||better(other.y,point.y,yDirection))));
+  }}
   function selectedProfile(){{return profiles.find(row=>String(row.profile_id)===String(profileId))||profiles[0];}}
+  function bestRowsAcrossProfiles(xName,yName){{
+    const compare=(left,right,direction)=>direction==='max'?right-left:left-right;
+    const chosen=[];
+    [...new Set(profiles.map(profile=>String(profile.profile_id)))].forEach(id=>{{
+      const candidates=profiles.filter(profile=>String(profile.profile_id)===id).flatMap(profile=>(profile.rows||[]).map(row=>({{...row,profile_id:id}}))).filter(row=>row.solution_id!=='teacher'&&finite((row.x||{{}})[xName])&&finite((row.metrics||{{}})[yName]));
+      candidates.sort((left,right)=>compare(Number(left.metrics[yName]),Number(right.metrics[yName]),metricDirection(yName))||compare(Number(left.x[xName]),Number(right.x[xName]),metricDirection(xName))||String(left.solution_id).localeCompare(String(right.solution_id)));
+      if(candidates.length)chosen.push(candidates[0]);
+    }});
+    const teacher=profiles.flatMap(profile=>(profile.rows||[]).map(row=>({{...row,profile_id:String(profile.profile_id)}}))).find(row=>row.solution_id==='teacher'&&finite((row.x||{{}})[xName])&&finite((row.metrics||{{}})[yName]));
+    return teacher?[teacher,...chosen]:chosen;
+  }}
   function render(){{
     const profile=selectedProfile();if(!profile)return;
     const xName=xSelect.value,yName=ySelect.value;
-    const rows=(profile.rows||[]).filter(row=>finite((row.x||{{}})[xName])&&finite((row.metrics||{{}})[yName]));
+    const rows=bestAcrossProfiles.checked?bestRowsAcrossProfiles(xName,yName):(profile.rows||[]).filter(row=>finite((row.x||{{}})[xName])&&finite((row.metrics||{{}})[yName])).map(row=>({{...row,profile_id:String(profile.profile_id)}}));
     const traces=rows.map(row=>({{
-      x:[Number(row.x[xName])],y:[Number(row.metrics[yName])],name:row.label,mode:'markers',
+      x:[Number(row.x[xName])],y:[Number(row.metrics[yName])],name:bestAcrossProfiles.checked&&row.solution_id!=='teacher'?`${{row.profile_id}} · ${{row.label}}`:row.label,mode:'markers',
       marker:{{color:row.color,symbol:row.marker||'circle',size:row.solution_id==='teacher'?18:13,line:{{color:'#e7edf7',width:row.solution_id==='teacher'?1.5:.5}}}},
-      customdata:[[row.solution_id,row.hidden_width,row.removed_sublayers,row.parameter_ratio,row.checkpoint]],
-      hovertemplate:`${{row.label}}<br>${{xName}}=%{{x:.7g}}<br>${{yName}}=%{{y:.7g}}<br>width=%{{customdata[1]}} · drop=%{{customdata[2]}}<br>ratio=%{{customdata[3]:.4f}}<extra></extra>`
+      customdata:[[row.solution_id,row.hidden_width,row.removed_sublayers,row.parameter_ratio,row.checkpoint,row.kind,row.profile_id]],
+      hovertemplate:`${{row.label}} · %{{customdata[5]}}<br>profile=%{{customdata[6]}}<br>${{xName}}=%{{x:.7g}}<br>${{yName}}=%{{y:.7g}}<br>width=%{{customdata[1]}} · drop=%{{customdata[2]}}<br>ratio=%{{customdata[3]:.4f}}<extra></extra>`
     }}));
-    if(summary)summary.textContent=`${{profile.profile_id}} · ${{profile.workload_id}} · ${{rows.length}} evaluated models`;
-    Plotly.react(element,traces,{{...charts.theme,title:{{text:`${{yName}} vs ${{xName}}`,font:{{size:16}}}},xaxis:{{...charts.theme.xaxis,title:xName}},yaxis:{{...charts.theme.yaxis,title:yName}},hovermode:'closest'}},charts.config);
+    const frontier=paretoFront(
+      rows.map(row=>({{row,x:Number(row.x[xName]),y:Number(row.metrics[yName])}})),
+      metricDirection(xName),metricDirection(yName)
+    ).sort((left,right)=>left.x-right.x);
+    if(frontier.length>1)traces.push({{x:frontier.map(point=>point.x),y:frontier.map(point=>point.y),name:'Pareto frontier',mode:'lines',line:{{color:'#e7edf7',width:2,dash:'dash'}},hoverinfo:'skip'}});
+    if(summary)summary.textContent=bestAcrossProfiles.checked?`Best ${{yName}} across ${{new Set(rows.filter(row=>row.solution_id!=='teacher').map(row=>row.profile_id)).size}} MIP constraint profiles · ${{rows.length}} plotted models`:`${{profile.profile_id}} · ${{profile.workload_id}} · ${{rows.length}} evaluated models`;
+    Plotly.react(element,traces,{{...charts.theme,title:charts.chartTitle(`${{yName}} vs ${{xName}}`,16),xaxis:{{...charts.theme.xaxis,title:xName}},yaxis:{{...charts.theme.yaxis,title:yName}},hovermode:'closest'}},charts.config);
   }}
-  xSelect.addEventListener('change',render);ySelect.addEventListener('change',render);
+  xSelect.addEventListener('change',render);ySelect.addEventListener('change',render);bestAcrossProfiles.addEventListener('change',render);
   window.addEventListener('puzzletron:mip-constraint-change',event=>{{profileId=event.detail.profile.id;render();}});
   render();
 }})();
@@ -3330,7 +4241,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const summary=document.getElementById('aiperf-profile-summary');
   const charts=window.PuzzletronCharts;
   if(!workload||!topology||!statistic||!charts)return;
-  const report=JSON.parse(document.getElementById('campaign-data').textContent);
+  const report=window.PuzzletronReport;
   const profiles=(report.aiperf||{{}}).profiles||[];
   const toggles=[...document.querySelectorAll('[data-aiperf-solution]')];
   let profileId=((window.PuzzletronReportState||{{}}).mipConstraintProfile||{{}}).id||profiles[0]?.profile_id;
@@ -3357,7 +4268,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
         line:{{color:style.color||'#4f8cff',width:2}},customdata:points.map(point=>[point.row.concurrency,point.row.topology_id,point.row.solution_id]),
         hovertemplate:`${{style.label||solutionId}}<br>throughput=%{{x:.7g}}<br>${{title}}=%{{y:.7g}}<br>concurrency=%{{customdata[0]}}<br>%{{customdata[1]}}<extra></extra>`}};
     }}).filter(trace=>trace.x.length);
-    Plotly.react(elementId,traces,{{...charts.theme,title:{{text:title,font:{{size:15}}}},xaxis:{{...charts.theme.xaxis,title:'Output token throughput (tokens/s)'}},yaxis:{{...charts.theme.yaxis,title}},hovermode:'closest'}},charts.config);
+    Plotly.react(elementId,traces,{{...charts.theme,title:charts.chartTitle(title),xaxis:{{...charts.theme.xaxis,title:'Output token throughput (tokens/s)'}},yaxis:{{...charts.theme.yaxis,title}},hovermode:'closest'}},charts.config);
   }}
   function render(){{
     const profile=selectedProfile();
@@ -3381,19 +4292,30 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const head=document.getElementById('mip-solution-head');
   const body=document.getElementById('mip-solution-body');
   const summary=document.getElementById('mip-constraint-summary');
-  if(!select||!head||!body)return;
-  const report=JSON.parse(document.getElementById('campaign-data').textContent);
-  const data=report.mip||{{}},profiles=data.profiles||[],columns=data.columns||[];
+  const homogeneousTable=document.getElementById('mip-homogeneous-table');
+  const homogeneousHead=document.getElementById('mip-homogeneous-head');
+  const homogeneousBody=document.getElementById('mip-homogeneous-body');
+  const homogeneousEmpty=document.getElementById('mip-homogeneous-empty');
+  const infeasibleTable=document.getElementById('mip-infeasible-table');
+  const infeasibleBody=document.getElementById('mip-infeasible-body');
+  const infeasibleEmpty=document.getElementById('mip-infeasible-empty');
+  if(!select||!head||!body||!homogeneousTable||!homogeneousHead||!homogeneousBody||!homogeneousEmpty||!infeasibleTable||!infeasibleBody||!infeasibleEmpty)return;
+  const report=window.PuzzletronReport;
+  const data=report.mip||{{}},profiles=data.profiles||[];
   const byId=new Map(profiles.map(profile=>[String(profile.id),profile]));
   const esc=value=>String(value).replace(/[&<>"']/g,char=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
-  const label=name=>name.replaceAll('_',' ').replace(/(^|\\s)([a-z])/g,(_,prefix,char)=>prefix+char.toUpperCase());
   const numeric=new Intl.NumberFormat(undefined,{{maximumSignificantDigits:7}});
+  const finiteNumber=value=>typeof value==='number'&&Number.isFinite(value);
+  const baseLabel=name=>name.replaceAll('_',' ').replaceAll('.',' · ').replace(/(^|\\s)([a-z])/g,(_,prefix,char)=>prefix+char.toUpperCase());
+  const label=(name,teacherValue)=>`${{baseLabel(name)}}${{finiteNumber(teacherValue)&&teacherValue!==0?' (% of teacher)':''}}`;
   let sortColumn=null,sortDirection='asc';
-  function format(name,value){{
+  function format(name,value,teacherValue){{
     if(value==null||Number.isNaN(value))return 'N/A';
     if(typeof value!=='number')return String(value);
-    if(name==='parameter_ratio')return `${{(100*value).toFixed(3).replace(/0+$/,'').replace(/\\.$/,'')}}%`;
-    return numeric.format(value);
+    const rendered=numeric.format(value);
+    if(!finiteNumber(teacherValue)||teacherValue===0)return rendered;
+    const percentage=(100*value/teacherValue).toFixed(3).replace(/0+$/,'').replace(/\\.$/,'');
+    return `${{rendered}} (${{percentage}}%)`;
   }}
   function publish(profile){{
     window.PuzzletronReportState=window.PuzzletronReportState||{{}};
@@ -3413,16 +4335,31 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   }}
   function render(){{
     const profile=byId.get(select.value)||profiles[0];if(!profile)return;
-    head.innerHTML=`<tr><th>Solution</th>${{columns.map(name=>{{const active=sortColumn===name,arrow=active?(sortDirection==='asc'?'▲':'▼'):'';return `<th title="${{esc(name)}}" aria-sort="${{active?(sortDirection==='asc'?'ascending':'descending'):'none'}}"><button class="mip-sort-button" data-mip-sort="${{esc(name)}}">${{esc(label(name))}}<span class="mip-sort-arrow">${{arrow}}</span></button></th>`;}}).join('')}}</tr>`;
+    const columns=profile.columns||data.columns||[];
+    const homogeneousColumns=profile.homogeneous_columns||data.homogeneous_columns||[];
+    const assignmentColumns=profile.homogeneous_assignment_columns||data.homogeneous_assignment_columns||[];
+    if(sortColumn&&!columns.includes(sortColumn))sortColumn=null;
+    const teacher=(profile.rows||[]).find(row=>row.label==='Teacher')||{{}},teacherOutputs=teacher.outputs||{{}};
+    head.innerHTML=`<tr><th>Solution</th>${{columns.map(name=>{{const active=sortColumn===name,arrow=active?(sortDirection==='asc'?'▲':'▼'):'';return `<th title="${{esc(name)}}" aria-sort="${{active?(sortDirection==='asc'?'ascending':'descending'):'none'}}"><button class="mip-sort-button" data-mip-sort="${{esc(name)}}">${{esc(label(name,teacherOutputs[name]))}}<span class="mip-sort-arrow">${{arrow}}</span></button></th>`;}}).join('')}}</tr>`;
     body.innerHTML=orderedRows(profile.rows||[]).map(row=>{{
-      const outputs=row.outputs||{{}},status=String(outputs.status||'unknown');
-      return `<tr><th>${{esc(row.label)}}</th>${{columns.map(name=>`<td class="${{name==='status'?'status-'+status:''}}">${{esc(format(name,outputs[name]))}}</td>`).join('')}}</tr>`;
+      const outputs=row.outputs||{{}};
+      return `<tr><th>${{esc(row.label)}}</th>${{columns.map(name=>`<td>${{esc(format(name,outputs[name],teacherOutputs[name]))}}</td>`).join('')}}</tr>`;
     }}).join('');
+    const homogeneousRows=profile.homogeneous_rows||[];
+    homogeneousEmpty.hidden=homogeneousRows.length>0;
+    homogeneousTable.hidden=homogeneousRows.length===0;
+    homogeneousHead.innerHTML=`<tr><th>Solution</th><th>Hidden Width</th>${{assignmentColumns.map(name=>`<th title="${{esc(name)}}">${{esc(baseLabel(name))}}</th>`).join('')}}${{homogeneousColumns.map(name=>`<th title="${{esc(name)}}">${{esc(label(name,teacherOutputs[name]))}}</th>`).join('')}}</tr>`;
+    homogeneousBody.innerHTML=homogeneousRows.map(row=>{{const assignment=row.assignment||{{}},outputs=row.outputs||{{}};return `<tr><th>${{esc(row.label)}}</th><td>${{esc(row.hidden_width)}}</td>${{assignmentColumns.map(name=>`<td>${{esc(format(name,assignment[name],null))}}</td>`).join('')}}${{homogeneousColumns.map(name=>`<td>${{esc(format(name,outputs[name],teacherOutputs[name]))}}</td>`).join('')}}</tr>`;}}).join('');
+    const infeasibleRows=profile.infeasible_rows||[];
+    infeasibleEmpty.hidden=infeasibleRows.length>0;
+    infeasibleTable.hidden=infeasibleRows.length===0;
+    infeasibleBody.innerHTML=infeasibleRows.map(row=>`<tr><th>${{esc(row.label)}}</th><td>${{esc(row.hidden_width)}}</td><td>${{esc(row.removed_sublayers)}}</td><td>${{esc(row.reason)}}</td></tr>`).join('');
     head.querySelectorAll('[data-mip-sort]').forEach(button=>button.addEventListener('click',()=>{{const name=button.dataset.mipSort;if(sortColumn===name)sortDirection=sortDirection==='asc'?'desc':'asc';else{{sortColumn=name;sortDirection='asc';}}render();}}));
     const constraint=profile.constraint||{{}},runtime=profile.runtime_profile||{{}},concurrency=runtime.max_num_seqs||runtime.batch_size||'N/A';
-    const constraintText=constraint.constraint_type==='latency_ratio'
-      ? `limit ${{numeric.format(constraint.latency_limit_ms)}} ms · denominator ${{numeric.format(constraint.latency_denominator_ms)}} ms`
-      : `limit ${{numeric.format(constraint.parameter_limit)}} parameters · denominator ${{numeric.format(constraint.parameter_denominator)}}`;
+    let constraintText;
+    if(constraint.constraint_type==='named_profile')constraintText=Object.entries(constraint.constraints||{{}}).map(([metric,bounds])=>`${{metric}} ${{numeric.format(bounds[0])}}–${{numeric.format(bounds[1])}}`).join(' · ');
+    else if(constraint.constraint_type==='latency_ratio')constraintText=`limit ${{numeric.format(constraint.latency_limit_ms)}} ms · denominator ${{numeric.format(constraint.latency_denominator_ms)}} ms`;
+    else constraintText=`limit ${{numeric.format(constraint.parameter_limit)}} parameters · denominator ${{numeric.format(constraint.parameter_denominator)}}`;
     if(summary)summary.textContent=`${{profile.label}} · ${{constraintText}} · ISL ${{runtime.prefill_seq_len??'N/A'}} · OSL ${{runtime.generation_seq_len??'N/A'}} · concurrency ${{concurrency}}`;
     publish(profile);
   }}
@@ -3436,7 +4373,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const container=document.getElementById('distillation-overfit-plots');
   const charts=window.PuzzletronCharts;
   if(!container||!charts)return;
-  const report=JSON.parse(document.getElementById('campaign-data').textContent);
+  const report=window.PuzzletronReport;
   const profile=((report.distillation_overfit||{{}}).profiles||[])[0];
   if(!profile)return;
   const toggles=[...document.querySelectorAll('[data-distillation-overfit-solution]')];
@@ -3464,7 +4401,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   const container=document.getElementById('proper-distillation-plots');
   const charts=window.PuzzletronCharts;
   if(!container||!charts)return;
-  const report=JSON.parse(document.getElementById('campaign-data').textContent);
+  const report=window.PuzzletronReport;
   const runs=((report.proper_distillation||{{}}).runs||[]);
   const run=runs[runs.length-1];if(!run)return;
   const finite=value=>Number.isFinite(Number(value));
@@ -3481,10 +4418,43 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
 }})();
 </script>
 </main></body></html>"""
-    temporary = html_path.with_suffix(".tmp")
-    temporary.write_text(document, encoding="utf-8")
-    temporary.replace(html_path)
-    return {"html": str(html_path)}
+    manifest_path = output / "report_manifest.json"
+    manifest = {
+        "schema_version": 1,
+        "campaign_identity": cache.campaign_identity,
+        "model_name": model_name,
+        "root": str(root),
+        "cache_enabled": use_cache,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "forced_sections": sorted(forced_sections),
+        "generation_seconds": time.monotonic() - generation_started,
+        "output_characters": len(document),
+        "verification": "passed",
+        "sections": {
+            section_id: {
+                "input_digest": result.snapshot.input_digest,
+                "snapshot_path": str(result.snapshot_path.relative_to(output)),
+                "cache_hit": result.cache_hit,
+                "validation": result.snapshot.validation,
+                "telemetry": result.snapshot.telemetry,
+            }
+            for section_id, result in section_results.items()
+        },
+    }
+    publish_report_transaction(
+        html_path=html_path,
+        html=document,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        verifier=_verify_report_candidate,
+    )
+    return {
+        "html": str(html_path),
+        "manifest": str(manifest_path),
+        "cache_hits": str(cache_hits),
+        "cache_misses": str(cache_misses),
+    }
 
 
 __all__ = ["generate_campaign_progress_report"]

@@ -1,0 +1,93 @@
+# @package _global_
+
+defaults:
+  - /families/qwen3_5/qwen3_5_9b/sanity_check_full_width_mip@_global_
+  - _self_
+
+# Canonical current-code reconstruction of the completed Qwen3.5-9B sanity
+# campaign. The imported activation/depth/runtime/scoring bundles come from the
+# sibling full_pipeline run, exactly as recorded by the original import receipt.
+
+mip:
+  human_constraints:
+    target_latency_ratio: 0.95
+  latency_constraint_profiles: [0.95]
+
+zero_shot_evaluation:
+  enabled: true
+  eval_samples: 128
+  block_size: 16384
+  packed_token_cache_path: ${validation_token_cache_path}
+
+aiperf:
+  enabled: true
+  profile_id: latency-095
+  num_best_to_eval: 1
+  expected_solution_count: 1
+  input_tokens: 16384
+  output_tokens: 4096
+  concurrency: [1, 4, 16, 64]
+  topology_matrix:
+    - {id: tp2, tensor_parallel_size: 2, pipeline_parallel_size: 1, data_parallel_size: 1, expert_parallel_size: 1}
+    - {id: pp2, tensor_parallel_size: 1, pipeline_parallel_size: 2, data_parallel_size: 1, expert_parallel_size: 1}
+    - {id: dp2, tensor_parallel_size: 1, pipeline_parallel_size: 1, data_parallel_size: 2, expert_parallel_size: 1}
+
+global_distillation_sanity:
+  enabled: true
+  profile_id: latency-095
+  registry_path: ${puzzle_dir}/mip/profiles/latency-095/selected_solutions.json
+  solution_ids: [h4096-d4]
+  sample_count: 8
+  sequence_length: 16384
+  packed_token_cache_path: ${train_token_cache_path}
+  max_steps: 128
+  checkpoint_every_steps: 16
+  local_batch_size: 8
+  lr: 1.0e-4
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 8
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+  main_ce_weight: 1.0
+  main_kd_weight: 1.0
+  mtp_ce_weight: 1.0
+  mtp_kd_weight: 1.0
+
+global_distillation:
+  enabled: true
+  profile_id: latency-095
+  selection: best_evaluation
+  evaluation_summary_path: ${puzzle_dir}/artifacts/zero_shot_evaluation/profiles/latency-095/text-s128-l16384/evaluation_summary.json
+  max_steps: 256
+  checkpoint_every_steps: 128
+  global_batch_size: 16
+  local_batch_size: 2
+  lr: 1.0e-5
+  automodel:
+    activation_checkpointing: true
+    parallel:
+      tp: 1
+      cp: 4
+      pp: 2
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 8
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+  validation_enabled: false
+  resume: true
+  save_consolidated: false
+  checkpoint_format: torch_save
+  num_best_to_distill: 1
+
+post_distillation_evaluation:
+  enabled: true
+  eval_samples: 128
+  block_size: 16384
+  packed_token_cache_path: ${validation_token_cache_path}

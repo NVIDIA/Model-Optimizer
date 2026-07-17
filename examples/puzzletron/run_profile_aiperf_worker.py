@@ -21,34 +21,64 @@ CONCURRENCIES = (1, 4, 16, 64)
 REQUEST_COUNTS = {1: 8, 4: 8, 16: 32, 64: 128}
 TOPOLOGIES = (
     {
-        "topology_id": "tp2-pp1-dp1-ep1-pcp1-dcp1",
-        "tensor_parallel_size": 2,
+        "topology_id": "tp8-pp1-dp1-ep1-pcp1-dcp1",
+        "tensor_parallel_size": 8,
         "pipeline_parallel_size": 1,
         "data_parallel_size": 1,
         "expert_parallel_size": 1,
         "prefill_context_parallel_size": 1,
         "decode_context_parallel_size": 1,
-        "gpu_count": 2,
+        "gpu_count": 8,
     },
     {
-        "topology_id": "tp1-pp1-dp2-ep1-pcp1-dcp1",
-        "tensor_parallel_size": 1,
-        "pipeline_parallel_size": 1,
-        "data_parallel_size": 2,
-        "expert_parallel_size": 1,
-        "prefill_context_parallel_size": 1,
-        "decode_context_parallel_size": 1,
-        "gpu_count": 2,
-    },
-    {
-        "topology_id": "tp1-pp2-dp1-ep1-pcp1-dcp1",
-        "tensor_parallel_size": 1,
+        "topology_id": "tp4-pp2-dp1-ep1-pcp1-dcp1",
+        "tensor_parallel_size": 4,
         "pipeline_parallel_size": 2,
         "data_parallel_size": 1,
         "expert_parallel_size": 1,
         "prefill_context_parallel_size": 1,
         "decode_context_parallel_size": 1,
-        "gpu_count": 2,
+        "gpu_count": 8,
+    },
+    {
+        "topology_id": "tp2-pp4-dp1-ep1-pcp1-dcp1",
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 4,
+        "data_parallel_size": 1,
+        "expert_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "gpu_count": 8,
+    },
+    {
+        "topology_id": "tp2-pp2-dp2-ep2-pcp1-dcp1",
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 2,
+        "data_parallel_size": 2,
+        "expert_parallel_size": 2,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "gpu_count": 8,
+    },
+    {
+        "topology_id": "tp1-pp2-dp4-ep4-pcp1-dcp1",
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 2,
+        "data_parallel_size": 4,
+        "expert_parallel_size": 4,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "gpu_count": 8,
+    },
+    {
+        "topology_id": "tp1-pp1-dp8-ep8-pcp1-dcp1",
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "data_parallel_size": 8,
+        "expert_parallel_size": 8,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "gpu_count": 8,
     },
 )
 
@@ -124,14 +154,14 @@ def _registry(puzzle_dir: Path, profile_id: str) -> dict[str, Any]:
 def _visible_gpu_ids() -> str:
     value = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     visible = [item.strip() for item in value.split(",") if item.strip()]
-    if len(visible) == 2:
+    if len(visible) == 8:
         return value
     local_id = int(os.environ.get("SLURM_LOCALID", "0"))
-    start = 2 * local_id
-    selected = visible[start : start + 2]
-    if len(selected) != 2:
+    start = 8 * local_id
+    selected = visible[start : start + 8]
+    if len(selected) != 8:
         raise RuntimeError(
-            "each profile AIPerf worker requires a deterministic two-GPU slice; "
+            "each profile AIPerf worker requires a deterministic eight-GPU node; "
             f"SLURM_LOCALID={local_id} CUDA_VISIBLE_DEVICES={value!r}"
         )
     return ",".join(selected)

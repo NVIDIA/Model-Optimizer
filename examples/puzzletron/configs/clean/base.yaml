@@ -6,7 +6,6 @@ defaults:
 clean_config_root: examples/puzzletron/configs/clean
 puzzle_root: puzzle_runs/clean
 dataset_path: ../Puzzle-KD-Nemotron-Post-Training-Dataset-v2
-recipe_path: ${clean_config_root}/recipes/automodel.yaml
 nccl_timeout_minutes: 120
 
 teacher_dir: ${puzzle_dir}/ckpts/teacher
@@ -77,14 +76,28 @@ pruning:
   automodel:
     force_hf: ${model.force_hf}
     use_puzzletron_dataloader: true
-    recipe_path: ${recipe_path}
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
 
 bypass:
   enabled: false
   granularity: block
   backend: automodel
   automodel:
-    recipe_path: ${recipe_path}
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
   elastic: false
   elastic_seed: 42
   dtype: bf16
@@ -184,6 +197,9 @@ vllm_stats:
   generation_seq_len: 4096
   model_hidden_sizes: []
   ffn_hidden_sizes: []
+  # CPU workers used to inventory unique physical widths before dtype/runtime assembly.
+  parameter_workers: 1
+  parameter_progress_every: 10
   merge_with_existing_stats: true
   subblock_stats_filename: subblock_stats.json
   runtime_stats:
@@ -193,6 +209,7 @@ vllm_stats:
     num_iters: 30
     num_warmup_iters: 10
     max_num_seqs: 1
+    ignore_negatives: false
     topology:
       tensor_parallel_size: 1
       pipeline_parallel_size: 1
@@ -242,7 +259,14 @@ replacement_scoring:
   automodel:
     force_hf: ${model.force_hf}
     use_puzzletron_dataloader: true
-    recipe_path: ${recipe_path}
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
     temperature: 1.0
     chunk_size: 16384
 
@@ -279,6 +303,16 @@ realize_model:
   source_datasets_to_discard: ${replacement_scoring.source_datasets_to_discard}
   bos_rate: ${replacement_scoring.bos_rate}
   load_dataset_fn: ${replacement_scoring.load_dataset_fn}
+  automodel:
+    force_hf: ${model.force_hf}
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
 
 mip:
   single_block_replacement_validation_dir: ${to_path:${replacement_scoring.output_dir}}
@@ -301,6 +335,16 @@ mip:
 
 global_distillation:
   backend: automodel
+  automodel:
+    activation_checkpointing: false
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
   teacher_dir: ${teacher_dir}
   student_dir: ${puzzle_dir}/ckpts/final
   output_dir: ${puzzle_dir}/ckpts/final_distilled

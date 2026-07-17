@@ -156,6 +156,8 @@ def build_worker_command(
             str(config_path),
             "--worker-stage",
             stage,
+            "--gpus-per-node",
+            str(gpus_per_node),
         )
     )
     for override in overrides:
@@ -175,11 +177,25 @@ def refresh_campaign_report(config: dict, running_stage: str | None = None) -> N
         generate_campaign_progress_report,
     )
 
-    model = config.get("model") or {}
     generate_campaign_progress_report(
         puzzle_dir,
-        model_name=str(model.get("source") or "Puzzletron model"),
+        model_name=_report_model_name(config),
         running_stage=running_stage,
+    )
+
+
+def _report_model_name(config: dict) -> str:
+    """Return a stable human identity rather than a resolved cache path."""
+
+    model = config.get("model") or {}
+    model_info = config.get("model_info") or {}
+    return str(
+        config.get("display_name")
+        or model_info.get("hf_repo")
+        or model.get("display_name")
+        or model.get("name")
+        or model.get("source")
+        or "Puzzletron model"
     )
 
 

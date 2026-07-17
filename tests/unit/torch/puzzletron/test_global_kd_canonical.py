@@ -179,14 +179,20 @@ def test_global_distillation_stage_promotes_canonical_namespace(tmp_path):
     config = {
         "experiment": {"dir": str(tmp_path)},
         "model": {"descriptor_override": "qwen3_5_text"},
-        "parallel": {"pp": 8},
-        "distillation": {"local_batch_size": 1, "pp": 8},
+        "distillation": {"local_batch_size": 1},
         "global_distillation": {
             "local_batch_size": 2,
             "global_batch_size": 16,
-            "pp": 2,
-            "cp": 4,
-            "dp": 8,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 4,
+                    "pp": 2,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 8,
+                }
+            },
         },
     }
 
@@ -688,6 +694,16 @@ def test_global_kd_uses_canonical_multimodal_packing_and_train_all(tmp_path, mon
             "validation_enabled": False,
             "student_dir": str(tmp_path / "student"),
             "teacher_dir": str(tmp_path / "teacher"),
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            },
         },
     }
 

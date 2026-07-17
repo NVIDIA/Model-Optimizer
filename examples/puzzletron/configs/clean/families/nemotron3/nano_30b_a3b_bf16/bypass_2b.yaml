@@ -1,0 +1,52 @@
+# @package _global_
+
+defaults:
+  - /families/nemotron3/nano_30b_a3b_bf16/production@_global_
+  - _self_
+
+# Staging entrypoint for the approved four-node 2 Gi-token bypass rerun. The
+# same values are folded into production.yaml after the concurrent vLLM stage
+# has finalized, so its active config identity cannot change mid-run.
+train_token_cache_path: ${puzzle_dir}/dataset_cache/train_262144x8192.tokens
+
+tokenize_data:
+  caches:
+    - output: ${train_token_cache_path}
+      split: train
+      num_samples: 262144
+      seq_length: 8192
+      shuffle_seed: 444
+    - output: ${validation_token_cache_path}
+      split: validation
+      num_samples: 128
+      seq_length: 8192
+      shuffle_seed: 445
+
+bypass:
+  automodel:
+    # PP2 x DP_REPLICATE4 x DP_SHARD4 = 32 ranks; EP4 overlays DP_SHARD4.
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 4
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+  data:
+    packed_token_cache_path: ${train_token_cache_path}
+  training:
+    # 2^31 tokens / (4 samples x 8192 tokens x GA4) = 16,384 updates.
+    training_tokens: 2147483648
+    micro_batch_size: 4
+    val_micro_batch_size: 4
+    grad_accumulation_steps: 4
+  model:
+    model_overrides:
+      # Leave enough wall time to validate and publish a resumable checkpoint
+      # before the cluster's four-hour limit.
+      save_interval_seconds: 12000
+      save_interval: 1000000000
+      save_checkpoint_when_done: true
+      delete_old_checkpoints: false

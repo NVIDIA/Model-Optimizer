@@ -17,17 +17,24 @@ from modelopt.torch.puzzletron.anymodel.capabilities import (
 from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.stage_runner import _preflight
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
+    _load_parameter_inventory_cache,
+    _parameter_inventory_progress,
+    _reuse_runtime_stats,
+    _resolve_width_checkpoint,
     _runtime_measurement_fields,
     _select_runtime_subblock_configs,
+    _unique_hidden_sizes,
     _validate_sparse_runtime_settings,
 )
 from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
     _merge_runtime_shard_results,
     _runtime_shard_results_complete,
     _runtime_shard_spec_identity,
+    calc_runtime_for_blocks,
     calc_runtime_for_subblocks,
     enumerate_runtime_block_configs,
 )
+from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
 from modelopt.torch.puzzletron.pipeline_config import (
     adapt_runtime_hydra_config,
     normalize_pipeline_config,
@@ -44,6 +51,126 @@ def _indexed(config, layer):
     return immutabledict(
         {"subblock_config": config, "parent_layer_indices": (layer,)}
     )
+
+
+def test_parameter_stats_hidden_widths_are_stably_deduplicated():
+    assert _unique_hidden_sizes([2688, 2560, 2432], 2688) == (2688, 2560, 2432)
+
+
+def test_parameter_stats_resolve_physical_width_checkpoint(tmp_path):
+    teacher = tmp_path / "teacher"
+    teacher.mkdir()
+    (teacher / "config.json").write_text("{}\n")
+    physical = (
+        tmp_path
+        / "scenarios"
+        / "width-2560"
+        / "depth-00"
+        / "ckpts"
+        / "sorted_teacher"
+    )
+    physical.mkdir(parents=True)
+    (physical / "config.json").write_text("{}\n")
+
+    assert _resolve_width_checkpoint(tmp_path, teacher, 2560, 2688) == physical
+    assert _resolve_width_checkpoint(tmp_path, teacher, 2688, 2688) == teacher
+    with pytest.raises(FileNotFoundError, match="physical width checkpoint"):
+        _resolve_width_checkpoint(tmp_path, teacher, 2432, 2688)
+
+
+def test_parameter_inventory_cache_resumes_only_matching_identity(tmp_path):
+    cache = tmp_path / "width-2560.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "identity": "matching",
+                "total": 2,
+                "status": "running",
+                "rows": [{"inventory_key": "first", "num_params": 11}],
+            }
+        )
+    )
+
+    assert _load_parameter_inventory_cache(cache, identity="matching", total=2)["rows"] == [
+        {"inventory_key": "first", "num_params": 11}
+    ]
+    assert _load_parameter_inventory_cache(cache, identity="stale", total=2) is None
+    assert _load_parameter_inventory_cache(cache, identity="matching", total=3) is None
+
+
+def test_parameter_inventory_progress_reports_rate_and_eta():
+    progress = _parameter_inventory_progress(
+        width=2560,
+        completed=25,
+        total=100,
+        elapsed_seconds=10.0,
+        status="running",
+    )
+
+    assert progress["rate_per_second"] == pytest.approx(2.5)
+    assert progress["eta_seconds"] == pytest.approx(30.0)
+    assert progress["fraction_complete"] == pytest.approx(0.25)
+
+
+def test_runtime_stats_can_be_reused_while_static_metrics_are_refreshed():
+    config = AttentionConfig(num_query_heads=8, num_kv_heads=2)
+    target = {
+        "args": {"runtime_stats": False, "n_embd": 32},
+        "subblocks": [
+            {
+                "subblock_config": config.to_dict(),
+                "parent_layer_index": 0,
+                "num_params": 123,
+                "runtime_ms": None,
+                "additive_metric_provenance": {"num_params": "refreshed"},
+            },
+            {
+                "subblock_config": config.to_dict(),
+                "parent_layer_index": 7,
+                "num_params": 123,
+                "runtime_ms": None,
+                "additive_metric_provenance": {},
+            },
+        ],
+        "non_block": {"num_params": 45, "runtime_ms": None},
+    }
+    source = {
+        "args": {
+            "runtime_stats": True,
+            "runtime_granularity": "subblock",
+            "runtime_backend": "vllm",
+        },
+        "subblocks": [
+            {
+                "subblock_config": {
+                    **config.to_dict(),
+                    # Historical robust JSON kept explicit nullable fields.
+                    "qk_head_dim": None,
+                },
+                "parent_layer_index": 0,
+                "runtime_ms": 7.0,
+                "prefill_runtime_ms": 3.0,
+                "decode_runtime_ms": 4.0,
+                "decode_runtime_ms_per_token": 2.0,
+                "latency_difference_negative": False,
+                "additive_metric_provenance": {"runtime_ms": "vllm_measured"},
+            }
+        ],
+        "non_block": {"runtime_ms": 1.0},
+    }
+
+    result = _reuse_runtime_stats(target, source, source_path="existing.json")
+
+    assert result["args"]["runtime_stats"] is True
+    assert result["args"]["runtime_reuse_source"] == "existing.json"
+    assert result["subblocks"][0]["runtime_ms"] == 7.0
+    assert result["subblocks"][1]["runtime_ms"] == 7.0
+    assert result["subblocks"][0]["num_params"] == 123
+    assert result["subblocks"][0]["additive_metric_provenance"] == {
+        "num_params": "refreshed",
+        "runtime_ms": "vllm_measured",
+    }
+    assert result["non_block"]["runtime_ms"] == 1.0
 
 
 def test_runtime_block_candidates_load_converted_teacher_without_replacement_library(tmp_path):
@@ -329,10 +456,10 @@ def test_vllm_stage_prepares_sparse_subblock_selection_from_teacher(tmp_path):
     }
 
 
-def test_subblock_runtime_uses_two_cache_bearing_base_layers_for_pp2(monkeypatch):
+def test_subblock_runtime_uses_homogeneous_n_and_2n_layouts(monkeypatch):
     attention = AttentionConfig(num_query_heads=8, num_kv_heads=2)
     base_block = BlockConfig(
-        subblock_configs=(attention, FFNConfig(intermediate_size=16))
+        subblock_configs=(attention, FFNConfig(no_op=True))
     )
 
     class Descriptor:
@@ -344,21 +471,28 @@ def test_subblock_runtime_uses_two_cache_bearing_base_layers_for_pp2(monkeypatch
         def runtime_benchmark_base_block_config(_runtime_config):
             return base_block
 
-    captured_specs = []
+        @staticmethod
+        def runtime_benchmark_sublayers_are_exclusive():
+            return True
+
+    captured_layouts = []
 
     def run_benchmarks(specs, _gpu_ids, _cache_dir):
         from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
 
-        captured_specs.extend(specs.values())
-        return {
-            key: RuntimeMeasurement(total_ms=float(index + 10), prefill_ms=0.0)
-            for index, key in enumerate(specs)
-        }
+        results = {}
+        for key, (_runtime, layout) in specs.items():
+            captured_layouts.append(layout)
+            results[key] = RuntimeMeasurement(
+                total_ms=6.0 + 2.0 * len(layout),
+                prefill_ms=2.0 + 0.5 * len(layout),
+            )
+        return results
 
     monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
     monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0,1"])
 
-    calc_runtime_for_subblocks(
+    runtime, non_block = calc_runtime_for_subblocks(
         {attention},
         OmegaConf.create(
             {
@@ -383,8 +517,222 @@ def test_subblock_runtime_uses_two_cache_bearing_base_layers_for_pp2(monkeypatch
         batch_size=1,
     )
 
-    assert any(block is None and trailing for _, block, trailing in captured_specs)
-    assert not any(block is None and not trailing for _, block, trailing in captured_specs)
+    assert sorted(len(layout) for layout in captured_layouts) == [4, 8]
+    assert all(block == attention.to_blockconfig() for layout in captured_layouts for block in layout)
+    assert runtime[attention] == RuntimeMeasurement(total_ms=2.0, prefill_ms=0.5)
+    assert non_block == RuntimeMeasurement(total_ms=6.0, prefill_ms=2.0)
+
+
+def test_scaffolded_ffn_slope_cancels_one_attention_per_pp_stage(monkeypatch):
+    attention = AttentionConfig(num_query_heads=8, num_kv_heads=2)
+    ffn = FFNConfig(intermediate_size=16)
+    scaffold = BlockConfig(
+        subblock_configs=(attention, FFNConfig(no_op=True))
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_config_fields(_config):
+            return {}
+
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return scaffold
+
+        @staticmethod
+        def runtime_benchmark_scaffold_policy(candidate):
+            candidate_attention = candidate.get_subblock("attention")
+            if candidate_attention is None or candidate_attention.no_op:
+                return "attention_scaffold_per_pp_stage"
+            return "none"
+
+    captured_layouts = []
+
+    def run_benchmarks(specs, _gpu_ids, _cache_dir):
+        from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
+
+        results = {}
+        for key, (_runtime, layout) in specs.items():
+            captured_layouts.append(layout)
+            scaffold_count = sum(block == scaffold for block in layout)
+            candidate_count = len(layout) - scaffold_count
+            results[key] = RuntimeMeasurement(
+                total_ms=6.0 + 5.0 * scaffold_count + 2.0 * candidate_count,
+                prefill_ms=2.0 + 1.0 * scaffold_count + 0.5 * candidate_count,
+            )
+        return results
+
+    monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
+    monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0,1"])
+
+    runtime, non_block = calc_runtime_for_subblocks(
+        {ffn},
+        OmegaConf.create(
+            {
+                "repeat_block_n_times": 3,
+                "topology": {
+                    "pipeline_parallel_size": 2,
+                    "gpu_group_size": 2,
+                },
+            }
+        ),
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        descriptor=Descriptor,
+        lm_config=SimpleNamespace(),
+        tokenizer_path="tokenizer",
+        prefill_seq_len=16,
+        generation_seq_len=4,
+        batch_size=1,
+    )
+
+    candidate_layouts = [
+        layout
+        for layout in captured_layouts
+        if any(block.get_subblock("ffn") == ffn for block in layout)
+    ]
+    assert sorted(len(layout) for layout in candidate_layouts) == [6, 10]
+    assert [sum(block == scaffold for block in layout) for layout in candidate_layouts] == [2, 2]
+    assert runtime[ffn] == RuntimeMeasurement(total_ms=2.0, prefill_ms=0.5)
+    assert non_block == RuntimeMeasurement(total_ms=6.0, prefill_ms=2.0)
+
+
+def test_block_runtime_uses_homogeneous_n_and_2n_layouts(monkeypatch):
+    block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            FFNConfig(intermediate_size=16),
+        )
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_config_fields(_config):
+            return {}
+
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return block
+
+    captured_layouts = []
+
+    def run_benchmarks(specs, _gpu_ids, _cache_dir):
+        from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
+
+        results = {}
+        for key, (_runtime, layout) in specs.items():
+            captured_layouts.append(layout)
+            results[key] = RuntimeMeasurement(
+                total_ms=6.0 + 2.0 * len(layout),
+                prefill_ms=2.0 + 0.5 * len(layout),
+            )
+        return results
+
+    monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
+    monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0,1"])
+
+    runtime, non_block = calc_runtime_for_blocks(
+        {block},
+        OmegaConf.create(
+            {
+                "repeat_block_n_times": 3,
+                "topology": {
+                    "pipeline_parallel_size": 2,
+                    "gpu_group_size": 2,
+                },
+            }
+        ),
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        descriptor=Descriptor,
+        lm_config=SimpleNamespace(),
+        tokenizer_path="tokenizer",
+        prefill_seq_len=16,
+        generation_seq_len=4,
+        batch_size=1,
+    )
+
+    assert sorted(len(layout) for layout in captured_layouts) == [4, 8]
+    assert all(candidate == block for layout in captured_layouts for candidate in layout)
+    assert runtime[block] == RuntimeMeasurement(total_ms=2.0, prefill_ms=0.5)
+    assert non_block == RuntimeMeasurement(total_ms=6.0, prefill_ms=2.0)
+
+
+def test_exclusive_sublayer_runtime_candidate_does_not_keep_attention_active():
+    base_block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            FFNConfig(no_op=True),
+        )
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base_block
+
+        @staticmethod
+        def runtime_benchmark_sublayers_are_exclusive():
+            return True
+
+    runtime_config = SimpleNamespace(descriptor=Descriptor)
+    candidate = runtime_stats_module._block_config_for_subblock(
+        runtime_config,
+        MoEConfig(num_experts=8, expert_intermediate_size=16, top_k=2),
+    )
+
+    active = [
+        subblock.kind for subblock in candidate.subblock_configs if not subblock.no_op
+    ]
+    assert active == ["moe"]
+
+
+def test_runtime_subblock_builder_isolates_generic_ffn():
+    base_block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            FFNConfig(intermediate_size=32),
+        )
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base_block
+
+    runtime = SimpleNamespace(descriptor=Descriptor)
+    candidate = runtime_stats_module._block_config_for_subblock(
+        runtime, FFNConfig(intermediate_size=16)
+    )
+
+    assert candidate.require_subblock("ffn").no_op is False
+    assert candidate.require_subblock("attention").no_op is True
+
+
+def test_runtime_subblock_builder_isolates_generic_attention():
+    base_block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+            FFNConfig(intermediate_size=32),
+        )
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base_block
+
+    runtime = SimpleNamespace(descriptor=Descriptor)
+    candidate = runtime_stats_module._block_config_for_subblock(
+        runtime, AttentionConfig(num_query_heads=8, num_kv_heads=2)
+    )
+
+    assert candidate.require_subblock("attention").no_op is False
+    assert candidate.require_subblock("ffn").no_op is True
 
 
 def test_vllm_stage_rejects_missing_runtime_aggregate(tmp_path, monkeypatch):
@@ -639,15 +987,11 @@ def test_subblock_runtime_rejects_negative_marginal_phase(monkeypatch):
 
     def run_benchmarks(specs, _gpu_ids, _cache_dir):
         results = {}
-        for key, (runtime, block, trailing) in specs.items():
-            if block is None and trailing:
+        for key, (_runtime, layout) in specs.items():
+            if len(layout) == 3:
                 value = RuntimeMeasurement(total_ms=10.0, prefill_ms=4.0)
-            elif runtime.repeat_block_n_times == 2:
-                value = RuntimeMeasurement(total_ms=14.0, prefill_ms=6.0)
-            elif block is not None and block.get_subblock("moe") is not None:
-                value = RuntimeMeasurement(total_ms=18.3, prefill_ms=6.6)
             else:
-                value = RuntimeMeasurement(total_ms=18.0, prefill_ms=6.0)
+                value = RuntimeMeasurement(total_ms=18.3, prefill_ms=14.0)
             results[key] = value
         return results
 
@@ -669,6 +1013,26 @@ def test_subblock_runtime_rejects_negative_marginal_phase(monkeypatch):
             generation_seq_len=4,
             batch_size=1,
         )
+
+    with pytest.warns(RuntimeWarning, match="Ignoring negative marginal phase"):
+        runtime_by_subblock, _ = calc_runtime_for_subblocks(
+            {moe},
+            OmegaConf.create(
+                {"repeat_block_n_times": 3, "ignore_negatives": True}
+            ),
+            vocab_size=32,
+            hidden_size=16,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            descriptor=Descriptor,
+            lm_config=SimpleNamespace(),
+            tokenizer_path="tokenizer",
+            prefill_seq_len=16,
+            generation_seq_len=4,
+            batch_size=1,
+        )
+
+    assert runtime_by_subblock[moe].decode_ms < 0
 
 
 def test_runtime_measurement_fields_save_phase_breakdown_and_noise_flag():
@@ -714,6 +1078,221 @@ def test_runtime_config_restores_frozen_mapping_values():
     assert runtime.model_config_value("rope_parameters") == {
         "factor": 32.0,
         "type": "yarn",
+    }
+
+
+def test_runtime_cache_schema_separates_candidate_slope_from_legacy_cache():
+    from modelopt.torch.puzzletron.subblock_stats import runtime_vllm
+
+    assert runtime_vllm._RUNTIME_CACHE_SCHEMA_VERSION == 4
+
+
+def test_runtime_config_records_candidate_slope_estimator_metadata():
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+
+    runtime = RuntimeConfig(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        descriptor=object,
+        model_config_fields=(),
+        tokenizer_path="tokenizer",
+        repeat_block_n_times=4,
+        prefill_seq_len=8,
+        generation_seq_len=4,
+        batch_size=1,
+        num_iters=1,
+        num_warmup_iters=0,
+    )
+
+    assert runtime.estimator_schema == "candidate_slope_v1"
+    assert runtime.estimator_mode == "homogeneous"
+    assert runtime.effective_repeat_count is None
+    assert runtime.scaffold_policy == "none"
+
+
+def test_vllm_subprocess_env_applies_explicit_runtime_overrides(monkeypatch):
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
+        _build_subprocess_env,
+    )
+
+    monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1")
+    runtime = RuntimeConfig(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        descriptor=object,
+        model_config_fields=(),
+        tokenizer_path="tokenizer",
+        repeat_block_n_times=4,
+        prefill_seq_len=8,
+        generation_seq_len=4,
+        batch_size=1,
+        num_iters=1,
+        num_warmup_iters=0,
+        vllm_env=(("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0"),),
+    )
+
+    env = _build_subprocess_env(
+        "3", runtime.topology, runtime.vllm_env
+    )
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "3"
+    assert env["VLLM_USE_FUSED_MOE_GROUPED_TOPK"] == "0"
+
+
+def test_vllm_subprocess_env_assigns_fresh_rendezvous_port_for_mp(monkeypatch):
+    from modelopt.torch.puzzletron.subblock_stats import runtime_vllm
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+
+    runtime = RuntimeConfig(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        descriptor=object,
+        model_config_fields=(),
+        tokenizer_path="tokenizer",
+        repeat_block_n_times=4,
+        prefill_seq_len=8,
+        generation_seq_len=4,
+        batch_size=1,
+        num_iters=1,
+        num_warmup_iters=0,
+    )
+    assert runtime.topology.distributed_executor_backend == "mp"
+    monkeypatch.setenv("MASTER_PORT", "28561")
+    monkeypatch.setattr(runtime_vllm, "_free_tcp_port", lambda: 31001)
+
+    env = runtime_vllm._build_subprocess_env("3", runtime.topology)
+
+    assert env["VLLM_PORT"] == "31001"
+    assert "MASTER_PORT" not in env
+
+
+def test_vllm_environment_config_is_frozen_in_stable_string_order():
+    from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
+        _vllm_env,
+    )
+
+    runtime_stats = OmegaConf.create(
+        {
+            "vllm_env": {
+                "VLLM_USE_FUSED_MOE_GROUPED_TOPK": 0,
+                "VLLM_LOGGING_LEVEL": "WARNING",
+            }
+        }
+    )
+
+    assert _vllm_env(runtime_stats) == (
+        ("VLLM_LOGGING_LEVEL", "WARNING"),
+        ("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0"),
+    )
+
+
+def test_runtime_cache_metadata_records_vllm_environment_overrides():
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
+        _runtime_environment_metadata,
+    )
+
+    runtime = RuntimeConfig(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        descriptor=object,
+        model_config_fields=(),
+        tokenizer_path="tokenizer",
+        repeat_block_n_times=4,
+        prefill_seq_len=8,
+        generation_seq_len=4,
+        batch_size=1,
+        num_iters=1,
+        num_warmup_iters=0,
+        vllm_env=(("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0"),),
+    )
+
+    assert _runtime_environment_metadata(runtime) == {
+        "VLLM_USE_FUSED_MOE_GROUPED_TOPK": "0"
+    }
+
+
+def test_vllm_environment_override_changes_runtime_cache_identity():
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
+        _benchmark_cache_key,
+        _runtime_environment_metadata,
+    )
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+
+    common = dict(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        descriptor=object,
+        model_config_fields=(),
+        tokenizer_path="tokenizer",
+        repeat_block_n_times=4,
+        prefill_seq_len=8,
+        generation_seq_len=4,
+        batch_size=1,
+        num_iters=1,
+        num_warmup_iters=0,
+    )
+    fused = RuntimeConfig(
+        **common,
+        vllm_env=(("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"),),
+    )
+    fallback = RuntimeConfig(
+        **common,
+        vllm_env=(("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0"),),
+    )
+
+    model_config = {"model_type": "test"}
+    fused_key = _benchmark_cache_key(
+        model_config,
+        {"vllm_env": _runtime_environment_metadata(fused)},
+    )
+    fallback_key = _benchmark_cache_key(
+        model_config,
+        {"vllm_env": _runtime_environment_metadata(fallback)},
+    )
+
+    assert fused_key != fallback_key
+
+
+def test_runtime_cache_identity_records_estimator_metadata():
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
+        _runtime_estimator_metadata,
+    )
+
+    runtime = RuntimeConfig(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        descriptor=object,
+        model_config_fields=(),
+        tokenizer_path="tokenizer",
+        repeat_block_n_times=4,
+        prefill_seq_len=8,
+        generation_seq_len=4,
+        batch_size=1,
+        num_iters=1,
+        num_warmup_iters=0,
+        effective_repeat_count=4,
+    )
+
+    assert _runtime_estimator_metadata(runtime) == {
+        "schema": "candidate_slope_v1",
+        "mode": "homogeneous",
+        "effective_repeat_count": 4,
+        "scaffold_policy": "none",
     }
 
 

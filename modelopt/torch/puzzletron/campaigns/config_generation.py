@@ -1,4 +1,4 @@
-"""Generate one canonical Puzzletron config and AutoModel recipe per campaign model."""
+"""Generate one canonical, stage-parallel Puzzletron config per campaign model."""
 
 from __future__ import annotations
 
@@ -254,70 +254,22 @@ def _axis_inventory(descriptor, config: Any) -> tuple[dict[str, dict], list[dict
     return search_axes, activation_axes
 
 
-def _recipe(
-    model: CampaignModel,
-    *,
-    capabilities,
-    sequence_length: int = 2048,
-    num_samples: int = 16,
-    max_steps: int = 16,
-    data_layout: str = "packed_varlen",
-) -> dict[str, Any]:
+def _stage_parallel(model: CampaignModel, *, capabilities) -> dict[str, Any]:
+    """Map the campaign's independent EP/FSDP axes to AutoModel's EP overlay."""
+
     topology = model.topology
-    # AutoModel PP requires at least one microbatch per pipeline stage.  Its
-    # native VLM collator also partitions media by this local PP batch, so the
-    # value must be topology-derived rather than left at the scalar default.
-    local_batch_size = max(1, topology.pp)
-    data_parallel_size = max(1, topology.fsdp)
-    recipe = {
-        "step_scheduler": {
-            "global_batch_size": local_batch_size * data_parallel_size,
-            "local_batch_size": local_batch_size,
-            "max_steps": int(max_steps),
-        },
-        "dist_env": {"backend": "nccl"},
-        "model": {"torch_dtype": "bf16", "trust_remote_code": True, "force_hf": False},
-        "checkpoint": {"enabled": False},
-        "distributed": {
-            "dp_size": topology.fsdp if topology.fsdp > 1 else "none",
-            "tp_size": topology.tp,
-            "cp_size": topology.cp,
-            "ep_size": topology.ep,
-            "pp_size": topology.pp,
-            "sequence_parallel": (
-                topology.tp > 1 and capabilities.parallelism.sequence_parallel
-            ),
-        },
-        "distributed_config": {
-            "_target_": "nemo_automodel.components.distributed.config.FSDP2Config",
-            "activation_checkpointing": True,
-        },
-        "dataset": {
-            "_target_": "modelopt.torch.puzzletron.plugins.automodel.dummy_data.make_dummy_dataset",
-            "num_samples": int(num_samples),
-            "seq_length": int(sequence_length),
-        },
-        "dataloader": {
-            "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
-            "shuffle": False,
-            "collate_fn": "nemo_automodel.components.datasets.utils.default_collater",
-        },
-        "optimizer": {"_target_": "torch.optim.AdamW", "lr": 0.0},
-        "loss_fn": {
-            "_target_": "nemo_automodel.components.loss.te_parallel_ce.TEParallelCrossEntropy"
-        },
+    return {
+        "tp": topology.tp,
+        "cp": topology.cp,
+        "pp": topology.pp,
+        "ep": topology.ep,
+        "dp_shard": topology.ep,
+        "dp_replicate": topology.fsdp,
+        "sequence_parallel": (
+            topology.tp > 1 and capabilities.parallelism.sequence_parallel
+        ),
+        "pipeline_schedule": "1f1b",
     }
-    if data_layout == "packed_varlen":
-        recipe["packed_sequence"] = {"packed_sequence_size": int(sequence_length)}
-        recipe["dataset"]["split"] = "train"
-    if topology.pp > 1:
-        recipe["distributed"]["pipeline"] = {
-            "pp_schedule": "1f1b",
-            "pp_microbatch_size": 1,
-            "pp_batch_size": local_batch_size,
-            "pp_seq_len": int(sequence_length),
-        }
-    return recipe
 
 
 def _deferred_sort_axes(capabilities, activation_axes: list[dict]) -> list[str]:
@@ -337,7 +289,6 @@ def _model_config(
     source_config: Any,
     *,
     output_root: Path,
-    recipe_path: Path,
 ) -> dict[str, Any]:
     base = yaml.safe_load(_BASE_CONFIG.read_text())
     base.pop("defaults", None)
@@ -362,6 +313,10 @@ def _model_config(
     )
     hidden_axis = search_axes.get("hidden_width")
     puzzle_dir = output_root / "models" / model.model_id
+    stage_parallel = _stage_parallel(
+        model,
+        capabilities=descriptor.puzzletron_capabilities(source_config),
+    )
     data_path = _VLM_DATASET if model.is_multimodal else _TEXT_DATASET
     # Packed rows can be split by their cu_seqlens metadata. Fixed/padded rows
     # must instead form a global batch divisible across the data-parallel ranks.
@@ -374,7 +329,6 @@ def _model_config(
         {
             "input_hf_model_path": model.hf_id,
             "puzzle_dir": str(puzzle_dir),
-            "recipe_path": str(recipe_path),
             "model": {
                 "source": model.hf_id,
                 "revision": record.immutable_revision,
@@ -382,13 +336,6 @@ def _model_config(
                 "force_hf": False,
                 "selected_model_class": record.selected_model_class,
                 "native_automodel": record.native_automodel,
-            },
-            "parallel": {
-                "tp": model.topology.tp,
-                "cp": model.topology.cp,
-                "pp": model.topology.pp,
-                "dp": model.topology.fsdp,
-                "ep": model.topology.ep,
             },
             "capability_validation": {
                 "require_complete_pipeline": True,
@@ -440,7 +387,7 @@ def _model_config(
                 "axes": search_axes,
             },
             "sort": {"deferred_axes": deferred_sort_axes},
-            "sort_equivalence": {
+            "sort_sanity": {
                 "eval_samples": min(4, campaign.activation_samples),
                 "micro_batch_size": model_stage_microbatch_size,
                 "block_size": campaign.sequence_length,
@@ -459,7 +406,7 @@ def _model_config(
                     "max_abs_lm_loss_delta"
                 ],
             },
-            "activation_diagnostic": {
+            "width_sanity": {
                 "enabled": True,
                 "single_load_parent_sweep": True,
                 "methods": ["activation", "random", "reverse"],
@@ -507,6 +454,13 @@ def _model_config(
             "activations_log_dir": str(puzzle_dir / "pruning/pruning_scores/automodel/all_axes"),
         }
     )
+    base["pruning"].setdefault("automodel", {})["parallel"] = dict(stage_parallel)
+    for section_name in (
+        "sort_sanity",
+        "width_sanity",
+        "realize_model",
+    ):
+        base[section_name].setdefault("automodel", {})["parallel"] = dict(stage_parallel)
     if campaign.data_layout != "packed_varlen":
         base["data"].pop("packing", None)
     global_microbatch_size = max(1, model.topology.fsdp)
@@ -528,6 +482,7 @@ def _model_config(
             "elastic_coverage_mode": "coverage_then_uniform",
         }
     )
+    base["bypass"].setdefault("automodel", {})["parallel"] = dict(stage_parallel)
     base["bypass"]["data"].update(
         {
             "block_size": campaign.sequence_length,
@@ -551,10 +506,10 @@ def _model_config(
         }
     )
     base["bypass"]["model_factory"]["keys_to_learn"] = "entire_block"
-    base["build_replacement_library"]["include_noops"] = bool(
+    base["build_library"]["include_noops"] = bool(
         model.elastic_no_op_subblocks
     )
-    base["calc_subblock_stats"]["runtime_stats"].update(
+    base["vllm_stats"]["runtime_stats"].update(
         {
             "execution": "sharded",
             "num_iters": 2,
@@ -562,25 +517,31 @@ def _model_config(
             "granularity": "subblock",
         }
     )
-    base["scoring"].update(
+    base["replacement_scoring"].update(
         {
             "eval_samples": campaign.activation_samples,
             "block_size": campaign.sequence_length,
         }
     )
-    base["depth"] = {
+    base["replacement_scoring"].setdefault("automodel", {})["parallel"] = dict(
+        stage_parallel
+    )
+    base["depth_importance"] = {
         "max_subblocks_to_remove": 3,
         "ranking_metric": "lm_loss",
         "eval_samples": campaign.activation_samples,
         "micro_batch_size": 1,
         "block_size": campaign.sequence_length,
+        "automodel": {"parallel": dict(stage_parallel)},
     }
-    base["replacement_scoring"] = {
-        "reference": "scoring_parent",
-        "samples": campaign.activation_samples,
-        "max_candidates_per_width": 50,
-    }
-    base["evaluation"].update(
+    base["replacement_scoring"].update(
+        {
+            "reference": "scoring_parent",
+            "samples": campaign.activation_samples,
+            "max_candidates_per_width": 50,
+        }
+    )
+    base["zero_shot_evaluation"].update(
         {
             "enabled": True,
             "eval_samples": campaign.activation_samples,
@@ -605,7 +566,7 @@ def _model_config(
             "expected_solution_count": 8,
         }
     )
-    base["distillation"].update(
+    base["global_distillation"].update(
         {
             "backend": "automodel",
             "force_hf": False,
@@ -635,9 +596,12 @@ def _model_config(
             },
         }
     )
-    base["distillation"].pop("teacher_descriptor", None)
-    base["distillation"].pop("student_descriptor", None)
-    base["distillation"].pop("descriptor", None)
+    base["global_distillation"].setdefault("automodel", {})["parallel"] = dict(
+        stage_parallel
+    )
+    base["global_distillation"].pop("teacher_descriptor", None)
+    base["global_distillation"].pop("student_descriptor", None)
+    base["global_distillation"].pop("descriptor", None)
     return base
 
 
@@ -661,40 +625,18 @@ def generate_campaign_configs(
 
     root = Path(output_root)
     config_dir = root / "configs"
-    recipe_dir = root / "recipes"
     config_dir.mkdir(parents=True, exist_ok=True)
-    recipe_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
     for model in campaign.models:
         record = records[model.model_id]
         source_config = config_loader(model, record)
-        descriptor = resolve_descriptor(
-            source_config,
-            descriptor_override=record.descriptor_name,
-        ).descriptor
-        capabilities = descriptor.puzzletron_capabilities(source_config)
-        recipe_path = recipe_dir / f"{model.model_id}.yaml"
         config_path = config_dir / f"{model.model_id}.yaml"
-        recipe_path.write_text(
-            yaml.safe_dump(
-                _recipe(
-                    model,
-                    capabilities=capabilities,
-                    sequence_length=campaign.sequence_length,
-                    num_samples=campaign.activation_samples,
-                    max_steps=campaign.kd_steps,
-                    data_layout=campaign.data_layout,
-                ),
-                sort_keys=False,
-            )
-        )
         config = _model_config(
             campaign,
             model,
             record,
             source_config,
             output_root=root,
-            recipe_path=recipe_path.resolve(),
         )
         config_path.write_text(yaml.safe_dump(config, sort_keys=False))
         outputs.append(config_path)

@@ -62,8 +62,9 @@ _ELASTIC_ENV_VARS = {
     "ROLE_NAME",
     "OMP_NUM_THREADS",
 }
+_INHERITED_VLLM_RENDEZVOUS_ENV_VARS = {"VLLM_PORT", "VLLM_DP_MASTER_PORT"}
 
-_RUNTIME_CACHE_SCHEMA_VERSION = 3
+_RUNTIME_CACHE_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,11 @@ def _free_tcp_port() -> int:
         return s.getsockname()[1]
 
 
-def _build_subprocess_env(gpu_id: str | int | None, topology) -> dict[str, str]:
+def _build_subprocess_env(
+    gpu_id: str | int | None,
+    topology,
+    overrides: tuple[tuple[str, str], ...] = (),
+) -> dict[str, str]:
     """Clean env for vLLM-owned multiprocessing on one ordered GPU group.
 
     Mirrors the known-good single-GPU rendezvous (WORLD_SIZE=1, fresh MASTER_PORT)
@@ -142,8 +147,19 @@ def _build_subprocess_env(gpu_id: str | int | None, topology) -> dict[str, str]:
     """
     env = dict(os.environ)
     for key in list(env):
-        if key.startswith(_ELASTIC_ENV_PREFIXES) or key in _ELASTIC_ENV_VARS:
+        if (
+            key.startswith(_ELASTIC_ENV_PREFIXES)
+            or key in _ELASTIC_ENV_VARS
+            or key in _INHERITED_VLLM_RENDEZVOUS_ENV_VARS
+        ):
             env.pop(key, None)
+    env.update({str(key): str(value) for key, value in overrides})
+    # Every independent local vLLM engine needs its own rendezvous range. If
+    # VLLM_PORT is absent, vLLM starts scanning at its process-wide default;
+    # concurrent one-GPU engines can then all observe the same port as free and
+    # race to bind it. A fresh base port gives each subprocess an independent
+    # scan range while remaining intentionally absent from the cache identity.
+    env.setdefault("VLLM_PORT", str(_free_tcp_port()))
     if topology.distributed_executor_backend == "external_launcher":
         if topology.world_size != 1:
             raise ValueError(
@@ -185,6 +201,23 @@ def _benchmark_cache_key(config_dict: dict, bench_args: dict) -> str:
         default=str,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _runtime_estimator_metadata(runtime_config: RuntimeConfig) -> dict[str, object]:
+    """Return cache provenance for the repeated-candidate estimator."""
+
+    return {
+        "schema": runtime_config.estimator_schema,
+        "mode": runtime_config.estimator_mode,
+        "effective_repeat_count": runtime_config.effective_repeat_count,
+        "scaffold_policy": runtime_config.scaffold_policy,
+    }
+
+
+def _runtime_environment_metadata(runtime_config: RuntimeConfig) -> dict[str, str]:
+    """Return explicit vLLM environment overrides for provenance and caching."""
+
+    return dict(runtime_config.vllm_env)
 
 
 def _cacheable_command(
@@ -248,7 +281,11 @@ def _has_cli_arg(args: list[str], key: str) -> bool:
 
 
 def _run_latency_cmd(
-    cmd: list[str], *, gpu_id: str | int | None, topology
+    cmd: list[str],
+    *,
+    gpu_id: str | int | None,
+    topology,
+    vllm_env: tuple[tuple[str, str], ...] = (),
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
@@ -256,7 +293,7 @@ def _run_latency_cmd(
         capture_output=True,
         text=True,
         timeout=1800,  # 30 minutes
-        env=_build_subprocess_env(gpu_id, topology),
+        env=_build_subprocess_env(gpu_id, topology, vllm_env),
     )  # nosec B603
 
 
@@ -371,6 +408,8 @@ def _run_vllm_latency_phase(
             "extra_vllm_args": runtime_config.extra_vllm_args,
             "descriptor_args": descriptor_args,
             "topology": runtime_config.topology.to_dict(),
+            "estimator": _runtime_estimator_metadata(runtime_config),
+            "vllm_env": _runtime_environment_metadata(runtime_config),
             "effective_command": _cacheable_command(
                 cmd, model_path, output_json_path
             ),
@@ -404,6 +443,7 @@ def _run_vllm_latency_phase(
             effective_cmd,
             gpu_id=gpu_id,
             topology=runtime_config.topology,
+            vllm_env=runtime_config.vllm_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("vLLM latency benchmark timed out") from exc
@@ -418,6 +458,7 @@ def _run_vllm_latency_phase(
                     effective_cmd,
                     gpu_id=gpu_id,
                     topology=runtime_config.topology,
+                    vllm_env=runtime_config.vllm_env,
                 )
             except subprocess.TimeoutExpired as retry_exc:
                 raise TimeoutError("vLLM latency benchmark timed out") from retry_exc
@@ -455,6 +496,7 @@ def _run_vllm_latency_phase(
                     effective_cmd,
                     gpu_id=gpu_id,
                     topology=runtime_config.topology,
+                    vllm_env=runtime_config.vllm_env,
                 )
             except subprocess.TimeoutExpired as retry_exc:
                 raise TimeoutError("vLLM latency benchmark timed out") from retry_exc

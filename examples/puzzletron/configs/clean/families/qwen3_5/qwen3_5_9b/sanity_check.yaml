@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 # Keep this campaign independent from the full-pipeline run while retaining its
-# model, data, topology, and recipe settings through the parent overlay.
+# model, data, and stage topology settings through the parent overlay.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs}/qwen3_5/qwen3_5_9b/sanity_check
 display_name: Qwen3.5-9B - Sanity Check
 
@@ -44,7 +44,15 @@ bypass:
     learning_rate: 3.0e-4
     grad_accumulation_steps: 1
   automodel:
-    recipe_path: ${clean_config_root}/recipes/automodel_pp8_dp1.yaml
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 8
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
   training:
     micro_batch_size: 8
     val_micro_batch_size: 8

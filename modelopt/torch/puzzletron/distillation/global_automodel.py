@@ -208,8 +208,25 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
     student = dict(kd_cfg.get("student") or {})
     teacher = dict(kd_cfg.get("teacher") or {})
     objective = dict(kd_cfg.get("objective") or {})
-    parallel = config.get("parallel") or {}
-    distributed = config.get("distributed") or {}
+    automodel = dict(kd_cfg.get("automodel") or {})
+    parallel = dict(automodel.get("parallel") or {})
+    if not parallel:
+        raise ValueError("Global KD requires distillation.automodel.parallel")
+    removed_axes = sorted({"tp", "cp", "pp", "ep", "dp"}.intersection(kd_cfg))
+    if removed_axes:
+        raise ValueError(
+            "Global KD top-level parallel axes were removed; use "
+            "distillation.automodel.parallel instead "
+            f"(found {', '.join(removed_axes)})"
+        )
+    ep = _int_value((parallel, "ep"))
+    dp_shard = _int_value((parallel, "dp_shard"))
+    if dp_shard % ep:
+        raise ValueError(
+            "distillation.automodel.parallel.dp_shard must be divisible by ep; "
+            f"got dp_shard={dp_shard}, ep={ep}"
+        )
+    logical_dp = _int_value((parallel, "dp_replicate")) * (dp_shard // ep)
     model_cfg = config.get("model") or {}
     runtime_cfg = config.get("_runtime") or {}
     exp_dir = Path((config.get("experiment") or {})["dir"])
@@ -266,24 +283,17 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         trust_remote_code=bool(kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", True))),
         torch_dtype=str(kd_cfg.get("torch_dtype") or model_cfg.get("torch_dtype") or "bf16"),
         attn_implementation=kd_cfg.get("attn_implementation") or model_cfg.get("attn_implementation"),
-        tp=_int_value((kd_cfg, "tp"), (parallel, "tp"), (distributed, "tp_size")),
-        pp=_int_value((kd_cfg, "pp"), (parallel, "pp"), (distributed, "pp_size")),
-        ep=_int_value((kd_cfg, "ep"), (parallel, "ep"), (distributed, "ep_size")),
-        cp=_int_value((kd_cfg, "cp"), (parallel, "cp"), (distributed, "cp_size")),
-        dp=_int_value((kd_cfg, "dp"), (parallel, "dp"), (distributed, "dp_size")),
-        sequence_parallel=bool(
-            kd_cfg.get("sequence_parallel", distributed.get("sequence_parallel", False))
-        ),
+        tp=_int_value((parallel, "tp")),
+        pp=_int_value((parallel, "pp")),
+        ep=ep,
+        cp=_int_value((parallel, "cp")),
+        dp=logical_dp,
+        sequence_parallel=bool(parallel.get("sequence_parallel", False)),
         activation_checkpointing=kd_cfg.get(
             "activation_checkpointing",
-            distributed.get("activation_checkpointing", False),
+            automodel.get("activation_checkpointing", False),
         ),
-        pp_schedule=str(
-            kd_cfg.get(
-                "pp_schedule",
-                (distributed.get("pipeline") or {}).get("pp_schedule", "1f1b"),
-            )
-        ).lower(),
+        pp_schedule=str(parallel.get("pipeline_schedule", "1f1b")).lower(),
         save_consolidated=kd_cfg.get("save_consolidated", False),
         checkpoint_format=str(kd_cfg.get("checkpoint_format", "auto")).lower(),
         main_ce_weight=_weight("main_ce", "ce_weight", 1.0),

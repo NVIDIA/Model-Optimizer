@@ -684,6 +684,7 @@ def sort_state_dict(
             }
             if (
                 "moe_latent_dim" not in deferred_axes
+                and layout.moe_latent_dim is not None
                 and isinstance(latent_log, dict)
                 and latent_keys.intersection(sd)
             ):
@@ -1061,8 +1062,9 @@ def build_layer_layouts(
                 ]
             layout.moe_shared_up_key = f"{mprefix}.shared_experts.up_proj.weight"
             layout.moe_shared_down_key = f"{mprefix}.shared_experts.down_proj.weight"
-            layout.moe_fc1_latent_key = f"{mprefix}.fc1_latent_proj.weight"
-            layout.moe_fc2_latent_key = f"{mprefix}.fc2_latent_proj.weight"
+            if moe.latent_dim is not None:
+                layout.moe_fc1_latent_key = f"{mprefix}.fc1_latent_proj.weight"
+                layout.moe_fc2_latent_key = f"{mprefix}.fc2_latent_proj.weight"
         if mamba is not None and not mamba.no_op:
             mprefix = f"{prefix}.{mamba_module}"
             layout.mamba_prefix = mprefix

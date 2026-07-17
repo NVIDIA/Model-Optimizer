@@ -8,7 +8,7 @@ set -Eeuo pipefail
 : "${TARGET_TEACHER_DIR:?set TARGET_TEACHER_DIR}"
 
 ROOT=${ROOT:-$(pwd)}
-RECIPE_PATH=${RECIPE_PATH:-${ROOT}/examples/puzzletron/configs/clean/recipes/automodel.yaml}
+PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv_new"}
 TASK_ID=${SLURM_PROCID:-0}
 LOCAL_ID=${SLURM_LOCALID:-0}
 TASK_COUNT=${SLURM_NTASKS:-1}
@@ -18,7 +18,7 @@ cd "${ROOT}"
 if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then
   source "${PUZZLETRON_SETUP_ENV}"
 fi
-source .venv/bin/activate
+source "${PUZZLETRON_VENV}/bin/activate"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 
@@ -39,8 +39,7 @@ for required in \
   "${MODEL_TEACHER_DIR}/config.json" \
   "${TARGET_TEACHER_DIR}/config.json" \
   "${SOLUTIONS_PATH}" \
-  "${LIBRARY_PATH}" \
-  "${RECIPE_PATH}"; do
+  "${LIBRARY_PATH}"; do
   [[ -f "${required}" ]] || { echo "missing required replacement-scoring input: ${required}" >&2; exit 3; }
 done
 
@@ -57,7 +56,6 @@ export STALE_SECONDS=${STALE_SECONDS:-120}
 export DISTRIBUTED_EVAL_OVERRIDES
 DISTRIBUTED_EVAL_OVERRIDES=$(printf '%s\n' \
   "puzzle_dir=${SCENARIO_DIR}" \
-  "recipe_path=${RECIPE_PATH}" \
   "model.force_hf=false" \
   "replacement_library_path=${LIBRARY_PATH}" \
   "scoring.replacement_library_path=${LIBRARY_PATH}" \
@@ -66,7 +64,12 @@ DISTRIBUTED_EVAL_OVERRIDES=$(printf '%s\n' \
   "scoring.target_teacher_dir=${TARGET_TEACHER_DIR}" \
   "scoring.output_dir=${COMPATIBILITY_OUTPUT_DIR}" \
   "scoring.automodel.force_hf=false" \
-  "scoring.automodel.recipe_path=${RECIPE_PATH}" \
+  "scoring.automodel.parallel.tp=1" \
+  "scoring.automodel.parallel.cp=1" \
+  "scoring.automodel.parallel.pp=1" \
+  "scoring.automodel.parallel.ep=1" \
+  "scoring.automodel.parallel.dp_shard=1" \
+  "scoring.automodel.parallel.dp_replicate=1" \
   "scoring.distributed_eval.gpus_per_task=1" \
   "scoring.eval_samples=${SCORING_EVAL_SAMPLES:-8}" \
   "scoring.micro_batch_size=${SCORING_MICRO_BATCH_SIZE:-4}" \

@@ -75,6 +75,10 @@ def test_model_executing_sanity_stages_are_distributed():
     assert not STAGE_REGISTRY["slicing_sanity"].distributed
 
 
+def test_block_library_stage_is_distributed():
+    assert STAGE_REGISTRY["build_library"].distributed
+
+
 def test_stage_labels_use_independent_granularity():
     assert stage_display_name("vllm_stats", granularity="block") == "Block vLLM Stats"
     assert stage_display_name("vllm_stats", granularity="subblock") == "Subblock vLLM Stats"

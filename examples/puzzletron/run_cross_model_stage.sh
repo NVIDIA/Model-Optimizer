@@ -10,7 +10,7 @@ EXTRA_ARGS=("${@:3}")
 CFG=${CAMPAIGN_ROOT}/configs/${MODEL_ID}.yaml
 MODEL_ROOT=${CAMPAIGN_ROOT}/models/${MODEL_ID}
 MAIN=${ROOT}/examples/puzzletron/main.py
-PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv"}
+PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv_new"}
 
 if [[ "${PUZZLETRON_ENV_READY:-0}" != 1 ]]; then
   if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then

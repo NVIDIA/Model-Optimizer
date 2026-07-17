@@ -91,7 +91,7 @@ def calculate_additive_metrics(
         num_params = calculate_subblock_params(model_config, subblock_config, descriptor)
     if active_params is None:
         active_params = calc_subblock_active_params(
-            subblock_config, model_config, descriptor, n_embd
+            subblock_config, model_config, descriptor, n_embd, num_params=num_params
         )
     if subblock_config.no_op:
         num_params = active_params = 0
@@ -232,6 +232,12 @@ def _get_decoder_layer_module(model: torch.nn.Module, descriptor: type[ModelDesc
     )
 
 
+def _checkpoint_tensor_count(module: torch.nn.Module) -> int:
+    """Count parameters and persistent buffers serialized by ``state_dict``."""
+
+    return sum(tensor.numel() for tensor in module.state_dict().values())
+
+
 def _fallback_attention_config(
     config: PretrainedConfig, descriptor: type[ModelDescriptor], *, no_op: bool
 ) -> AttentionConfig:
@@ -289,6 +295,7 @@ def calculate_subblock_memory(
     kv_cache_dtype: torch.dtype,
     model_config: PretrainedConfig,
     descriptor: type[ModelDescriptor],
+    num_params: int | None = None,
 ) -> float | dict[str, float]:
     """Calculate the memory usage of a single subblock (FFN or Attention).
 
@@ -317,6 +324,7 @@ def calculate_subblock_memory(
             model_config,
             descriptor,
             weights_dtype,
+            num_params=num_params,
         )
     if isinstance(subblock_config, AttentionConfig):
         return calculate_attention_memory(
@@ -330,6 +338,7 @@ def calculate_subblock_memory(
             n_head,
             weights_dtype,
             kv_cache_dtype,
+            num_params=num_params,
         )
     if isinstance(subblock_config, MLAConfig):
         return calculate_mla_memory(
@@ -341,6 +350,7 @@ def calculate_subblock_memory(
             generation_seq_len,
             weights_dtype,
             kv_cache_dtype,
+            num_params=num_params,
         )
     if isinstance(subblock_config, MambaConfig):
         return calculate_mamba_memory(
@@ -350,6 +360,7 @@ def calculate_subblock_memory(
             batch_size,
             weights_dtype,
             kv_cache_dtype,
+            num_params=num_params,
         )
     raise_unknown_subblock_config_error(subblock_config)
 
@@ -421,7 +432,7 @@ def calculate_subblock_params(
         descriptor.attn_no_op_post_init(decoder_layer)
     if not active_ffn_like:
         descriptor.mlp_no_op_post_init(decoder_layer)
-    return sum(p.numel() for p in decoder_layer.parameters())
+    return _checkpoint_tensor_count(decoder_layer)
 
 
 def calc_subblock_active_params(
@@ -429,6 +440,7 @@ def calc_subblock_active_params(
     model_config: PretrainedConfig,
     descriptor: type[ModelDescriptor],
     n_embd: int,
+    num_params: int | None = None,
 ) -> int:
     """Calculate the number of "active" parameters for a subblock (FFN, Attention, or MoE).
 
@@ -465,6 +477,8 @@ def calc_subblock_active_params(
             or _language_model_attr(model_config, descriptor, "moe_latent_size"),
         )
         return estimate_moe_active_params(moe_config, n_embd)
+    if num_params is not None:
+        return num_params
     return calculate_subblock_params(model_config, sublayer_config, descriptor)
 
 
@@ -527,6 +541,7 @@ def calculate_attention_memory(
     n_head: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
+    num_params: int | None = None,
 ) -> dict[str, float]:
     """Estimate attention subblock memory (KV cache + weights) in MiB."""
     seq_len = prefill_seq_len + generation_seq_len
@@ -542,7 +557,8 @@ def calculate_attention_memory(
     kv_dim = calculate_kv_dim(attention_config.num_kv_heads, n_head, n_embd)
     total_num_tokens = seq_len * batch_size
     kv_cache_size = total_num_tokens * kv_dim
-    num_params = calculate_subblock_params(model_config, attention_config, descriptor)
+    if num_params is None:
+        num_params = calculate_subblock_params(model_config, attention_config, descriptor)
     total_memory = (
         kv_cache_size * sizeof_dtype(kv_cache_dtype) + num_params * sizeof_dtype(weights_dtype)
     ) / 2**20
@@ -559,6 +575,7 @@ def calculate_mla_memory(
     generation_seq_len: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
+    num_params: int | None = None,
 ) -> dict[str, float]:
     """Estimate MLA weights and compressed latent/rope KV cache memory."""
 
@@ -567,7 +584,8 @@ def calculate_mla_memory(
     cached_width = int(mla_config.kv_lora_rank or 0) + rope_dim
     total_tokens = (prefill_seq_len + generation_seq_len) * batch_size
     cache_elements = total_tokens * cached_width
-    num_params = calculate_subblock_params(model_config, mla_config, descriptor)
+    if num_params is None:
+        num_params = calculate_subblock_params(model_config, mla_config, descriptor)
     kv_cache_memory = cache_elements * sizeof_dtype(kv_cache_dtype) / 2**20
     return {
         "memory_mib": kv_cache_memory + num_params * sizeof_dtype(weights_dtype) / 2**20,
@@ -582,6 +600,7 @@ def calculate_mamba_memory(
     batch_size: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
+    num_params: int | None = None,
 ) -> int:
     """Calculate memory usage (MiB) for a Mamba subblock.
 
@@ -596,7 +615,8 @@ def calculate_mamba_memory(
     Returns:
         Estimated memory usage in mebibytes (MiB) for the Mamba subblock.
     """
-    num_params = calculate_subblock_params(model_config, mamba_config, descriptor)
+    if num_params is None:
+        num_params = calculate_subblock_params(model_config, mamba_config, descriptor)
     return (
         num_params * sizeof_dtype(weights_dtype)
         + calculate_mamba_state_size(mamba_config, batch_size) * sizeof_dtype(kv_cache_dtype)
@@ -640,6 +660,7 @@ def calculate_ffn_memory(
     descriptor: type[ModelDescriptor],
     weights_dtype: torch.dtype | str,
     experts_dtype: torch.dtype | str | None = None,
+    num_params: int | None = None,
 ) -> float:
     """Estimate the memory usage in MiB of a feed-forward network (FFN) subblock.
 
@@ -654,7 +675,8 @@ def calculate_ffn_memory(
         Estimated FFN memory usage in mebibytes (MiB).
     """
     # TODO: How to separate between expert weights and the rest for any model (same as puzzletron).
-    num_params = calculate_subblock_params(model_config, ffn_config, descriptor)
+    if num_params is None:
+        num_params = calculate_subblock_params(model_config, ffn_config, descriptor)
     return num_params * sizeof_dtype(weights_dtype) / 2**20
 
 

@@ -21,7 +21,7 @@ def test_profile_aiperf_filters_registry_to_explicit_solutions():
     ]
 
 
-def test_profile_aiperf_work_matrix_has_fifteen_persistent_server_sweeps():
+def test_profile_aiperf_work_matrix_uses_six_all_eight_gpu_topologies():
     from examples.puzzletron.run_profile_aiperf_worker import build_work_items
 
     registry = {
@@ -33,14 +33,10 @@ def test_profile_aiperf_work_matrix_has_fifteen_persistent_server_sweeps():
     }
     items = build_work_items(registry)
 
-    assert len(items) == 15
-    assert len({(row["solution_id"], row["topology_id"]) for row in items}) == 15
-    assert {row["topology_id"] for row in items} == {
-        "tp2-pp1-dp1-ep1-pcp1-dcp1",
-        "tp1-pp1-dp2-ep1-pcp1-dcp1",
-        "tp1-pp2-dp1-ep1-pcp1-dcp1",
-    }
-    assert all(row["gpu_count"] == 2 for row in items)
+    assert len(items) == 30
+    assert len({(row["solution_id"], row["topology_id"]) for row in items}) == 30
+    assert all(row["gpu_count"] == 8 for row in items)
+    assert any(row["topology"]["expert_parallel_size"] > 1 for row in items)
 
 
 def test_profile_aiperf_work_shards_cover_every_item_once():
@@ -63,7 +59,7 @@ def test_profile_aiperf_expected_results_follow_registry_size():
         ]
     }
 
-    assert expected_result_count(registry) == 24
+    assert expected_result_count(registry) == 48
 
 
 def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
@@ -128,4 +124,4 @@ def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
 
     payload = json.loads(output.read_text())
     assert payload["concurrencies"] == [1]
-    assert len(payload["results"]) == 6
+    assert len(payload["results"]) == 12

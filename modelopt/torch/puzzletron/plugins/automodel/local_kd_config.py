@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,7 @@ from .config import (
     _as_dict,
     _inject_canonical_data,
     _int_or_default,
-    _load_recipe,
+    build_stage_recipe_config,
     inject_descriptor_model_kwargs,
     inject_descriptor_pipeline_config,
 )
@@ -100,33 +99,28 @@ def _model_config(
 
 
 def _logical_dp_size(hydra_cfg, recipe_distributed: dict[str, Any]) -> int:
-    """Resolve sample-parallel DP independently of an EP-overlaid recipe mesh."""
+    """Return sample-parallel lanes after removing the EP overlay from AutoModel DP."""
 
-    parallel = _as_dict(hydra_cfg.get("parallel", None))
-    configured = parallel.get("dp")
-    if configured in (None, "none", "None", ""):
-        public_distributed = _as_dict(hydra_cfg.get("distributed", None))
-        configured = public_distributed.get("dp_size")
-    if configured not in (None, "none", "None", ""):
-        return max(_int_or_default(configured, 1), 1)
-    return max(_int_or_default(recipe_distributed.get("dp_size"), 1), 1)
+    del hydra_cfg  # The generated recipe is the canonical topology source.
+    automodel_dp = max(_int_or_default(recipe_distributed.get("dp_size"), 1), 1)
+    ep_size = max(_int_or_default(recipe_distributed.get("ep_size"), 1), 1)
+    logical_dp, remainder = divmod(automodel_dp, ep_size)
+    if remainder:
+        raise ValueError(
+            "AutoModel dp_size must be divisible by ep_size; "
+            f"got dp_size={automodel_dp}, ep_size={ep_size}"
+        )
+    return logical_dp
 
 
 def build_local_kd_recipe_config(hydra_cfg) -> dict[str, Any]:
     """Translate Puzzletron bypass configuration to an AutoModel recipe dictionary.
 
-    The standalone recipe owns distributed topology and kernel settings. Puzzletron
-    overrides model identity, training budget, optimizer, and checkpoint location.
+    The bypass stage owns its parallel mesh. Puzzletron generates the stable recipe
+    boilerplate and then injects model identity, training budget, and checkpoint location.
     """
     automodel_cfg = hydra_cfg.bypass.get("automodel", None)
-    recipe_source = automodel_cfg
-    if recipe_source is None or not _as_dict(recipe_source).get("recipe_path"):
-        recipe_source = {"recipe_path": hydra_cfg.get("recipe_path", None)}
-    recipe = copy.deepcopy(_load_recipe(recipe_source))
-    if not recipe:
-        raise ValueError(
-            "bypass.backend=automodel requires bypass.automodel.recipe_path or recipe_path"
-        )
+    recipe = build_stage_recipe_config(automodel_cfg)
 
     teacher_dir = _teacher_dir(hydra_cfg)
     base_model = dict(recipe.get("model", {}))

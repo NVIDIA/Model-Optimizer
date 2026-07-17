@@ -4,6 +4,7 @@ import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 from omegaconf import OmegaConf
 
@@ -26,7 +27,7 @@ from modelopt.torch.puzzletron.campaigns.config_generation import (
     _axis_inventory,
     _deferred_sort_axes,
     _embedding_alignment,
-    _recipe,
+    _stage_parallel,
     generate_campaign_configs,
 )
 from modelopt.torch.puzzletron.anymodel.capabilities import AxisCapabilities
@@ -44,6 +45,22 @@ SUPER_SMOKE_CONFIG = Path(
     "examples/puzzletron/configs/clean/families/nemotron3/"
     "super_120b_a12b_bf16/super_smoke.yaml"
 )
+NANO_PRODUCTION_CONFIG = Path(
+    "examples/puzzletron/configs/clean/families/nemotron3/"
+    "nano_30b_a3b_bf16/production.yaml"
+)
+QWEN_FULL_PIPELINE_CONFIG = Path(
+    "examples/puzzletron/configs/clean/families/qwen3_5/"
+    "qwen3_5_9b/full_pipeline.yaml"
+)
+_NANO_ONE_NODE_MESH = {
+    "tp": 1,
+    "cp": 1,
+    "pp": 2,
+    "ep": 4,
+    "dp_shard": 4,
+    "dp_replicate": 1,
+}
 
 
 def test_super_smoke_downstream_topology_and_distillation_contract() -> None:
@@ -71,6 +88,72 @@ def test_super_smoke_downstream_topology_and_distillation_contract() -> None:
     assert distillation["metadata"]["llm"]["dataset"][
         "packed_token_cache_path"
     ].endswith("dataset_cache/train_2x256.tokens")
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_by_stage"),
+    [
+        (
+            NANO_PRODUCTION_CONFIG,
+            {
+                stage: _NANO_ONE_NODE_MESH
+                for stage in (
+                    "pruning",
+                    "bypass",
+                    "replacement_scoring",
+                    "realize_model",
+                )
+            },
+        ),
+        (
+            QWEN_FULL_PIPELINE_CONFIG,
+            {
+                "pruning": {
+                    "tp": 1,
+                    "cp": 4,
+                    "pp": 2,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                },
+                "bypass": {
+                    "tp": 1,
+                    "cp": 2,
+                    "pp": 2,
+                    "ep": 1,
+                    "dp_shard": 2,
+                    "dp_replicate": 1,
+                },
+                "replacement_scoring": {
+                    "tp": 1,
+                    "cp": 4,
+                    "pp": 2,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                },
+                "realize_model": {
+                    "tp": 1,
+                    "cp": 4,
+                    "pp": 2,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                },
+            },
+        ),
+    ],
+)
+def test_production_configs_own_automodel_parallelism_per_stage(
+    path, expected_by_stage
+) -> None:
+    config = pipeline_config_from_path(path)
+
+    assert "parallel" not in config
+    assert "recipe_path" not in config
+    for section, expected in expected_by_stage.items():
+        parallel = config[section]["automodel"]["parallel"]
+        assert {key: parallel[key] for key in expected} == expected
 
 
 def test_sharded_runtime_execution_is_deferred_from_library_stage() -> None:
@@ -153,7 +236,7 @@ def test_nemotron3_family_scores_enabled_hidden_width_axis() -> None:
     assert [activation_pass["name"] for activation_pass in hidden_passes] == ["hidden_width"]
 
 
-def test_recipe_uses_descriptor_sequence_parallel_capability() -> None:
+def test_stage_parallel_uses_descriptor_sequence_parallel_capability() -> None:
     campaign = default_cross_model_campaign()
     models = {model.model_id: model for model in campaign.models}
     config = _config_loader(None, None)
@@ -161,12 +244,12 @@ def test_recipe_uses_descriptor_sequence_parallel_capability() -> None:
     qwen_capabilities = Qwen3P5TextModelDescriptor.puzzletron_capabilities(config)
     llama_capabilities = LlamaModelDescriptor.puzzletron_capabilities(config)
 
-    assert _recipe(
+    assert _stage_parallel(
         models["qwen35_dense"], capabilities=qwen_capabilities
-    )["distributed"]["sequence_parallel"] is False
-    assert _recipe(
+    )["sequence_parallel"] is False
+    assert _stage_parallel(
         models["llama31_8b"], capabilities=llama_capabilities
-    )["distributed"]["sequence_parallel"] is True
+    )["sequence_parallel"] is True
 
 
 def test_descriptors_default_dynamic_shape_diagnosis_to_eager_execution() -> None:
@@ -221,16 +304,16 @@ def test_unscored_sortable_axes_are_deferred_from_checkpoint_permutation() -> No
     ) == ["latent_unscored"]
 
 
-def test_generator_supplies_split_only_for_packed_recipe() -> None:
+def test_stage_parallel_separates_fsdp_sharding_and_replication() -> None:
     campaign = default_cross_model_campaign()
     model = campaign.models[0]
     config = _config_loader(None, None)
     capabilities = Qwen3P5TextModelDescriptor.puzzletron_capabilities(config)
 
-    recipe = _recipe(model, capabilities=capabilities, data_layout="packed_varlen")
+    parallel = _stage_parallel(model, capabilities=capabilities)
 
-    assert recipe["packed_sequence"]["packed_sequence_size"] == 2048
-    assert recipe["dataset"]["split"] == "train"
+    assert parallel["dp_shard"] == model.topology.ep
+    assert parallel["dp_replicate"] == model.topology.fsdp
 
 
 def test_moe_top_k_is_a_generic_variant_axis_for_gpt_oss_and_nano() -> None:

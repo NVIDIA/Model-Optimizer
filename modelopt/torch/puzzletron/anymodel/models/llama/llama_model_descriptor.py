@@ -82,6 +82,13 @@ class LlamaModelDescriptor(ModelDescriptor):
             config, widths=widths, alignment=alignment
         )
 
+    @classmethod
+    def runtime_benchmark_scaffold_policy(cls, block_config: BlockConfig) -> str:
+        attention = block_config.get_subblock("attention")
+        if attention is None or attention.no_op:
+            return "attention_scaffold_per_pp_stage"
+        return "none"
+
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
         attention = block_config.require_subblock("attention")

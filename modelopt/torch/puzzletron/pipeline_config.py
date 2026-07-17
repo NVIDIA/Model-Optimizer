@@ -173,6 +173,11 @@ def normalize_pipeline_config(config: DictConfig | dict[str, Any]) -> dict[str, 
     dictionary.
     """
     cfg = _to_plain(config)
+    if "parallel" in cfg:
+        raise ValueError(
+            "top-level parallel was removed; configure automodel.parallel on each "
+            "model-loading pipeline stage"
+        )
     data = dict(cfg.get("data") or {})
     legacy_varlen_paths = [
         f"{section}.varlen"
@@ -196,7 +201,6 @@ def normalize_pipeline_config(config: DictConfig | dict[str, Any]) -> dict[str, 
     experiment = dict(cfg.get("experiment") or {})
     model = dict(cfg.get("model") or {})
     convert = dict(cfg.get("convert") or {})
-    parallel = dict(cfg.get("parallel") or {})
     library = dict(cfg.get("library") or {})
     width_sanity = dict(cfg.get("width_sanity") or {})
     aiperf = dict(cfg.get("aiperf") or {})
@@ -243,7 +247,6 @@ def normalize_pipeline_config(config: DictConfig | dict[str, Any]) -> dict[str, 
     cfg["data"] = data
     cfg["model"] = model
     cfg["convert"] = convert
-    cfg["parallel"] = parallel
     cfg["library"] = library
     cfg["aiperf"] = aiperf
     cfg["global_distillation"] = global_distillation

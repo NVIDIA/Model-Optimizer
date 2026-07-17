@@ -2,9 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from omegaconf import OmegaConf
 
+import examples.puzzletron.run_axis_diagnostic_worker as axis_worker
+from examples.puzzletron.run_axis_diagnostic_worker import (
+    _axes,
+    _hidden_widths,
+    _validate_worker_topology,
+    _worker_config,
+)
 from modelopt.torch.puzzletron.stages import diagnostics
 from modelopt.torch.puzzletron.stages.diagnostics import _scoring_cfg_for_method
 
@@ -24,7 +32,7 @@ def test_diagnostic_scoring_config_uses_explicit_checkpoint_roles(tmp_path: Path
         hydra_cfg,
         method_dir=method_dir,
         scoring_output_dir=method_dir / "outputs",
-        recipe_path=None,
+        parallel=None,
         source_checkpoint_dir=sorted_parent,
         target_teacher_dir=teacher,
     )
@@ -84,3 +92,109 @@ def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separa
         tolerance=1.0e-3,
         reverse_tolerance=1.0e-3,
     )["passed"]
+
+
+def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: Path):
+    parallel = {
+        "tp": 1,
+        "cp": 1,
+        "pp": 2,
+        "ep": 4,
+        "dp_shard": 4,
+        "dp_replicate": 1,
+        "pipeline_schedule": "1f1b",
+    }
+    config = {
+        "experiment": {"dir": str(tmp_path / "run")},
+        "clean_config_root": str(tmp_path / "clean"),
+        "width_sanity": {
+            "layer_count": 3,
+            "target_count_per_axis": 2,
+            "automodel": {"parallel": parallel},
+        },
+    }
+
+    worker = _worker_config(config, "kv_groups", tmp_path / "production.yaml")
+
+    assert worker["width_sanity"]["layer_count"] == 3
+    assert worker["width_sanity"]["target_count_per_axis"] == 2
+    assert worker["width_sanity"]["automodel"]["parallel"] == parallel
+    assert not any(
+        override.startswith("++width_sanity.automodel.parallel.")
+        for override in worker.get("_runtime", {}).get("overrides", [])
+    )
+
+
+def test_axis_worker_excludes_non_sortable_axes_from_width_diagnostics():
+    config = {
+        "search_space": {
+            "axes": {
+                "moe_experts": {"enabled": True},
+                "moe_top_k": {"enabled": True},
+            }
+        },
+        "width_sanity": {"non_sortable_axes": ["moe_top_k"]},
+    }
+
+    assert _axes(config) == ["moe_experts", "hidden_width"]
+
+
+def test_axis_worker_uses_seven_eighths_and_three_quarters_hidden_widths(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(
+        axis_worker,
+        "load_model_config",
+        lambda *args, **kwargs: SimpleNamespace(hidden_size=2688),
+    )
+    config = {
+        "teacher_dir": str(tmp_path / "teacher"),
+        "embedding_pruning": {"alignment": 128},
+    }
+
+    assert _hidden_widths(config) == [2304, 1920]
+
+
+def test_axis_worker_accepts_pp2_ep2_overlay_on_four_ranks(monkeypatch, tmp_path: Path):
+    parallel = {
+        "tp": 1,
+        "cp": 1,
+        "pp": 2,
+        "ep": 2,
+        "dp_shard": 2,
+        "dp_replicate": 1,
+    }
+    config = {"width_sanity": {"automodel": {"parallel": parallel}}}
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setattr(
+        axis_worker,
+        "load_runtime_hydra_config",
+        lambda _config: OmegaConf.create(
+            {"width_sanity": {"automodel": {"parallel": parallel}}}
+        ),
+    )
+
+    _validate_worker_topology(config, "kv_groups")
+
+
+def test_axis_worker_accepts_the_stage_owned_super_mesh(monkeypatch) -> None:
+    parallel = {
+        "tp": 1,
+        "cp": 1,
+        "pp": 2,
+        "ep": 4,
+        "dp_shard": 4,
+        "dp_replicate": 2,
+        "pipeline_schedule": "1f1b",
+    }
+    config = {"width_sanity": {"automodel": {"parallel": parallel}}}
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.setattr(
+        axis_worker,
+        "load_runtime_hydra_config",
+        lambda _config: OmegaConf.create(
+            {"width_sanity": {"automodel": {"parallel": parallel}}}
+        ),
+    )
+
+    _validate_worker_topology(config, "moe_experts")

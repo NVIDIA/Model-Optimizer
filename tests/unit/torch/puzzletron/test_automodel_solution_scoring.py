@@ -16,9 +16,13 @@
 """CPU tests for the AutoModel replace-1-block scoring building blocks (no distributed)."""
 
 import json
+import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
+import types
 
 import pytest
+from safetensors.torch import save_file
 import torch
 from torch import nn
 from torch.distributed.fsdp import FSDPModule
@@ -38,9 +42,11 @@ from modelopt.torch.puzzletron.plugins.automodel.solution_metrics import (
     score_batch,
 )
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
+    _candidate_execution_context,
     _load_model_config_distributed,
     _source_hidden_channel_indices,
     _solution_prune_target,
+    _solution_prune_targets,
     _solution_hidden_width,
     _validate_parent_equivalence,
 )
@@ -116,6 +122,60 @@ def test_rpc_executor_infers_descriptor_when_config_has_no_override(monkeypatch,
     assert calls == [(str(tmp_path), {"trust_remote_code": True})]
 
 
+def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
+    from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
+        AutoModelReplaceBlockExecutor,
+    )
+    from modelopt.torch.puzzletron.distributed_eval.schema import EvaluationRequest
+
+    teacher_blocks = [
+        BlockConfig(subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)),
+        BlockConfig(subblock_configs=(MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),)),
+    ]
+    children = [
+        BlockConfig(subblock_configs=(MoEConfig(no_op=True),)),
+        BlockConfig(subblock_configs=(MambaConfig(no_op=True),)),
+    ]
+    replacements = [
+        {
+            "parent_layer_indices": [index],
+            "child_block_configs": [child.to_dict()],
+            "weight_paths": [],
+        }
+        for index, child in enumerate(children)
+    ]
+    captured = []
+    executor = AutoModelReplaceBlockExecutor.__new__(AutoModelReplaceBlockExecutor)
+    executor._setup_complete = True
+    executor.source_hidden_width = 8
+    executor.teacher_block_configs = teacher_blocks
+    executor.num_q = 4
+    executor.head_dim = 2
+    executor.params = {"micro_batch_size": 4}
+    executor.sliced_teacher_baseline = {"lm_loss": {"avg": 0.0}}
+    executor.latest_observability = None
+    monkeypatch.setattr(
+        executor,
+        "_score",
+        lambda targets: captured.append(targets) or {"lm_loss": {"avg": 1.0}},
+    )
+    request = EvaluationRequest(
+        campaign_id="campaign",
+        handler="depth_candidate",
+        payload={"hidden_width": 8, "layer_replacements": replacements},
+        model={},
+        data={},
+        metrics={},
+        evaluator_revision="depth-v1",
+    )
+
+    result = executor.evaluate(request)
+
+    assert result.metrics["lm_loss"]["avg"] == 1.0
+    assert [target["layer_idx"] for target in captured[0]] == [0, 1]
+    assert result.provenance["micro_batch_size"] == 4
+
+
 def test_runtime_fingerprint_ignores_distributed_compute_dtype_transition():
     class FSDPLinear(FSDPModule, nn.Linear):
         pass
@@ -146,6 +206,59 @@ def test_teacher_cache_roundtrip():
     # Sealed cache rejects further appends.
     with pytest.raises(AssertionError):
         cache.append_hidden(torch.randn(2, 4, 8))
+
+
+def test_block_checkpoint_overlay_merges_split_hf_experts_and_restores(tmp_path):
+    class GroupedExperts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_and_up_projs = nn.Parameter(torch.zeros(2, 3, 4))
+            self.down_projs = nn.Parameter(torch.zeros(2, 4, 3))
+
+    class Layer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mixer = nn.Module()
+            self.mixer.experts = GroupedExperts()
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    tensors = {}
+    for expert_idx in range(2):
+        tensors[f"backbone.layers.0.mixer.experts.{expert_idx}.up_proj.weight"] = (
+            torch.arange(12, dtype=torch.float32).reshape(4, 3) + 100 * expert_idx
+        )
+        tensors[f"backbone.layers.0.mixer.experts.{expert_idx}.down_proj.weight"] = (
+            torch.arange(12, dtype=torch.float32).reshape(3, 4) + 1000 * expert_idx
+        )
+    save_file(tensors, checkpoint / "model.safetensors")
+
+    layer = Layer()
+    original = {name: value.detach().clone() for name, value in layer.state_dict().items()}
+    recipe = ReplaceBlockScoringRecipe.__new__(ReplaceBlockScoringRecipe)
+    recipe._find_decoder_layer = lambda layer_idx: layer
+    recipe._descriptor_cls = lambda: SimpleNamespace(
+        layer_block_name=lambda layer_idx: f"backbone.layers.{layer_idx}"
+    )
+
+    with recipe.block_checkpoint_overlay_context(checkpoint, 0):
+        expected_up = torch.stack(
+            [
+                tensors[f"backbone.layers.0.mixer.experts.{idx}.up_proj.weight"].T
+                for idx in range(2)
+            ]
+        )
+        expected_down = torch.stack(
+            [
+                tensors[f"backbone.layers.0.mixer.experts.{idx}.down_proj.weight"].T
+                for idx in range(2)
+            ]
+        )
+        torch.testing.assert_close(layer.mixer.experts.gate_and_up_projs, expected_up)
+        torch.testing.assert_close(layer.mixer.experts.down_projs, expected_down)
+
+    for name, value in layer.state_dict().items():
+        torch.testing.assert_close(value, original[name])
 
 
 def test_solution_capture_concatenates_pipeline_microbatches_in_schedule_order():
@@ -266,6 +379,97 @@ def test_native_gate_can_mask_ranked_nonprefix_expert_ids():
     assert set(indices.flatten().tolist()) == {1, 3}
 
 
+def test_native_sigmoid_gate_preserves_correction_bias_selection():
+    gate = nn.Module()
+    gate.weight = nn.Parameter(torch.eye(4))
+    gate.score_func = "sigmoid"
+    gate.topk = 2
+    gate.norm_topk_prob = True
+    gate.route_scale = 1.0
+    gate.gate_precision = None
+    gate.e_score_correction_bias = torch.tensor([0.0, 0.0, 2.0, 0.0])
+    gate.n_groups = 1
+    gate.topk_groups = 1
+    gate.forward = _masked_native_gate_forward(
+        gate,
+        target_num_experts=3,
+        target_top_k=2,
+    )
+
+    _, indices, _ = gate.forward(torch.tensor([[1.0, 0.0, -1.0, 10.0]]))
+
+    assert set(indices.flatten().tolist()) == {0, 2}
+
+
+def test_native_sigmoid_gate_groups_the_compact_expert_prefix():
+    gate = nn.Module()
+    gate.weight = nn.Parameter(torch.eye(8))
+    gate.score_func = "sigmoid"
+    gate.topk = 2
+    gate.norm_topk_prob = True
+    gate.route_scale = 1.0
+    gate.gate_precision = None
+    gate.e_score_correction_bias = None
+    gate.n_groups = 2
+    gate.topk_groups = 1
+    gate.forward = _masked_native_gate_forward(
+        gate,
+        target_num_experts=6,
+        target_top_k=2,
+    )
+
+    _, indices, _ = gate.forward(
+        torch.tensor([[-10.0, -10.0, 5.0, 6.0, 5.0, -10.0, -10.0, -10.0]])
+    )
+
+    assert set(indices.flatten().tolist()) == {3, 4}
+
+
+def test_native_sigmoid_with_bias_masks_unselected_groups_with_negative_infinity():
+    gate = nn.Module()
+    gate.weight = nn.Parameter(torch.eye(4))
+    gate.score_func = "sigmoid_with_bias"
+    gate.topk = 2
+    gate.norm_topk_prob = False
+    gate.route_scale = 1.0
+    gate.gate_precision = None
+    gate.e_score_correction_bias = torch.tensor([-10.0, -10.0, -2.0, -2.0])
+    gate.n_groups = 2
+    gate.topk_groups = 1
+    gate.forward = _masked_native_gate_forward(
+        gate,
+        target_num_experts=4,
+        target_top_k=2,
+    )
+
+    _, indices, _ = gate.forward(torch.zeros(1, 4))
+
+    assert set(indices.flatten().tolist()) == {2, 3}
+
+
+def test_native_gate_does_not_normalize_a_single_selected_expert():
+    gate = nn.Module()
+    gate.weight = nn.Parameter(torch.eye(2))
+    gate.score_func = "sigmoid"
+    gate.topk = 1
+    gate.norm_topk_prob = True
+    gate.route_scale = 1.0
+    gate.gate_precision = None
+    gate.e_score_correction_bias = None
+    gate.n_groups = 1
+    gate.topk_groups = 1
+    gate.forward = _masked_native_gate_forward(
+        gate,
+        target_num_experts=2,
+        target_top_k=1,
+    )
+
+    weights, indices, _ = gate.forward(torch.tensor([[2.0, 0.0]]))
+
+    assert indices.item() == 0
+    torch.testing.assert_close(weights, torch.sigmoid(torch.tensor([[2.0]])))
+
+
 def test_solution_prune_target_uses_prefix_after_parent_experts_are_sorted():
     teacher = BlockConfig(
         subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
@@ -291,6 +495,90 @@ def test_solution_prune_target_uses_prefix_after_parent_experts_are_sorted():
     # ranking.  The scoring parent has already permuted those experts into the
     # leading prefix, so applying the old ids again would select a different set.
     assert target["expert_keep_ids"] is None
+
+
+def test_solution_prune_targets_supports_full_architecture_and_skips_teacher_layers():
+    teacher_blocks = [
+        BlockConfig(
+            subblock_configs=(
+                MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),
+            )
+        ),
+        BlockConfig(
+            subblock_configs=(
+                MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),
+            )
+        ),
+    ]
+    changed = BlockConfig(
+        subblock_configs=(
+            MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),
+        )
+    )
+    solution = {
+        "chosen_replacements": [
+            {
+                "parent_layer_indices": [0],
+                "child_block_configs": [changed.to_dict()],
+                "weight_paths": [],
+            },
+            {
+                "parent_layer_indices": [1],
+                "child_block_configs": [teacher_blocks[1].to_dict()],
+                "weight_paths": [],
+            },
+        ]
+    }
+
+    targets = _solution_prune_targets(
+        solution,
+        teacher_blocks,
+        num_q_heads=2,
+        head_dim=4,
+    )
+
+    assert isinstance(targets, list)
+    assert [target["layer_idx"] for target in targets] == [0]
+
+
+def test_candidate_execution_context_overlays_each_changed_layer_before_pruning():
+    events = []
+
+    @contextmanager
+    def record(label):
+        events.append(("enter", label))
+        try:
+            yield
+        finally:
+            events.append(("exit", label))
+
+    recipe = SimpleNamespace(
+        block_checkpoint_overlay_context=lambda checkpoint, layer, offload_restore=False: record(
+            f"overlay:{checkpoint.name}:{layer}:offload={offload_restore}"
+        ),
+        architecture_context=lambda targets: record(
+            "architecture:" + ",".join(str(target["layer_idx"]) for target in targets)
+        ),
+        prune_block_context=lambda **target: record(f"prune:{target['layer_idx']}"),
+        hidden_width_context=lambda width: record(f"hidden:{width}"),
+    )
+    targets = [{"layer_idx": 3}, {"layer_idx": 7}]
+
+    with _candidate_execution_context(
+        recipe,
+        targets,
+        bypass_checkpoint_dir=SimpleNamespace(name="nested"),
+        hidden_width=2432,
+    ):
+        events.append(("body", "score"))
+
+    assert events[:5] == [
+        ("enter", "overlay:nested:3:offload=True"),
+        ("enter", "overlay:nested:7:offload=True"),
+        ("enter", "architecture:3,7"),
+        ("enter", "hidden:2432"),
+        ("body", "score"),
+    ]
 
 
 def test_diagnostic_annotation_records_ranked_expert_ids(tmp_path):
@@ -401,6 +689,19 @@ def test_source_hidden_channel_indices_reads_sorted_permutation(tmp_path):
 
     assert _source_hidden_channel_indices(tmp_path, 4, 8) == (7, 2, 5, 1)
     assert _source_hidden_channel_indices(tmp_path / "unsorted", 4, 8) == (0, 1, 2, 3)
+
+
+def test_source_hidden_channel_indices_uses_local_basis_for_same_checkpoint(tmp_path):
+    (tmp_path / "sorted_permutations.json").write_text(
+        json.dumps({"embedding.hidden_order": [7, 2, 5, 1, 6, 0, 4, 3]})
+    )
+
+    assert _source_hidden_channel_indices(
+        tmp_path,
+        4,
+        4,
+        source_and_teacher_share_basis=True,
+    ) == (0, 1, 2, 3)
 
 
 def test_aggregate_exposes_explicit_raw_replacement_loss():
@@ -590,7 +891,7 @@ class _GroupedRMSNormMamba(nn.Module):
         )
         self.norm = nn.Module()
         self.norm.weight = nn.Parameter(torch.randn(self.intermediate_size, dtype=torch.float64))
-        self.norm.variance_epsilon = 1e-12
+        self.norm.variance_epsilon = 0.25
         self.norm.group_size = self.intermediate_size // self.n_groups
         self.out_proj = nn.Linear(
             self.intermediate_size,
@@ -621,6 +922,139 @@ class _MambaLayer(nn.Module):
     def __init__(self):
         super().__init__()
         self.mixer = _GroupedRMSNormMamba()
+
+
+class _NativeFusedMamba(_GroupedRMSNormMamba):
+    """Native-shape harness that imports the fused function inside forward."""
+
+    def __init__(self):
+        super().__init__()
+        self.cp = None
+        self.A = nn.Parameter(torch.randn(self.num_heads, dtype=torch.float64))
+        self.D = nn.Parameter(torch.randn(self.num_heads, dtype=torch.float64))
+        self.dt_bias = nn.Parameter(torch.randn(self.num_heads, dtype=torch.float64))
+
+    def forward(self, x):
+        from mamba_ssm.ops.triton.ssd_combined import (
+            mamba_split_conv1d_scan_combined,
+        )
+
+        return mamba_split_conv1d_scan_combined(
+            self.in_proj(x),
+            self.conv1d.weight.squeeze(1),
+            self.conv1d.bias,
+            self.dt_bias,
+            self.A,
+            D=self.D,
+            rmsnorm_weight=self.norm.weight,
+            rmsnorm_eps=self.norm.variance_epsilon,
+            outproj_weight=self.out_proj.weight,
+            outproj_bias=self.out_proj.bias,
+            headdim=self.head_dim,
+            ngroups=self.n_groups,
+        )
+
+
+class _NativeFusedMambaLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mixer = _NativeFusedMamba()
+
+
+@pytest.mark.parametrize(
+    ("target_heads", "target_head_dim", "expected_projection", "expected_conv"),
+    ((2, 2, 14, 8), (4, 1, 16, 8)),
+)
+def test_runtime_mamba_native_fused_call_uses_physically_compact_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    target_heads: int,
+    target_head_dim: int,
+    expected_projection: int,
+    expected_conv: int,
+) -> None:
+    calls = []
+
+    def fake_kernel(
+        projected,
+        conv_weight,
+        conv_bias,
+        dt_bias,
+        A,
+        *,
+        D,
+        rmsnorm_weight,
+        rmsnorm_eps,
+        outproj_weight,
+        outproj_bias,
+        headdim,
+        ngroups,
+        **kwargs,
+    ):
+        calls.append(
+            {
+                "projection": projected.shape[-1],
+                "conv": conv_weight.shape[0],
+                "heads": A.numel(),
+                "head_dim": headdim,
+                "norm": rmsnorm_weight.numel(),
+                "out_proj": outproj_weight.shape[-1],
+                "dt": dt_bias.numel(),
+                "d": D.numel(),
+            }
+        )
+        inner = rmsnorm_weight.numel()
+        gate = projected[..., :inner]
+        value = projected[..., inner : 2 * inner]
+        grouped = value.reshape(*value.shape[:-1], ngroups, -1)
+        grouped = grouped * torch.rsqrt(
+            grouped.square().mean(dim=-1, keepdim=True) + rmsnorm_eps
+        )
+        normalized = grouped.reshape_as(value) * rmsnorm_weight
+        return torch.nn.functional.linear(
+            normalized * torch.nn.functional.silu(gate),
+            outproj_weight,
+            outproj_bias,
+        )
+
+    for name in ("mamba_ssm", "mamba_ssm.ops", "mamba_ssm.ops.triton"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    fake_ssd = types.ModuleType("mamba_ssm.ops.triton.ssd_combined")
+    fake_ssd.mamba_split_conv1d_scan_combined = fake_kernel
+    monkeypatch.setitem(sys.modules, "mamba_ssm.ops.triton.ssd_combined", fake_ssd)
+
+    torch.manual_seed(19)
+    layer = _NativeFusedMambaLayer()
+    teacher = BlockConfig(
+        subblock_configs=(MambaConfig(num_heads=4, head_dim=2, num_groups=2, state_dim=1),)
+    )
+    child = BlockConfig(
+        subblock_configs=(
+            MambaConfig(
+                num_heads=target_heads,
+                head_dim=target_head_dim,
+                num_groups=2,
+                state_dim=1,
+            ),
+        )
+    )
+    handle = apply_runtime_candidate(layer, teacher, child)
+    try:
+        layer.mixer(torch.randn(3, 3, dtype=torch.float64))
+    finally:
+        handle.remove()
+
+    assert calls == [
+        {
+            "projection": expected_projection,
+            "conv": expected_conv,
+            "heads": target_heads,
+            "head_dim": target_head_dim,
+            "norm": target_heads * target_head_dim,
+            "out_proj": target_heads * target_head_dim,
+            "dt": target_heads,
+            "d": target_heads,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -669,7 +1103,7 @@ def test_runtime_mamba_head_slice_matches_physically_compact_group_norm_and_rest
     inner = projected[..., 8:16].index_select(-1, keep)
     physical_group_size = target_heads * target_head_dim // 2
     grouped = inner.reshape(*inner.shape[:-1], 2, physical_group_size)
-    grouped = grouped * torch.rsqrt(grouped.square().mean(dim=-1, keepdim=True) + 1e-12)
+    grouped = grouped * torch.rsqrt(grouped.square().mean(dim=-1, keepdim=True) + 0.25)
     normalized = grouped.reshape_as(inner) * original_norm_weight.index_select(0, keep)
     expected = torch.nn.functional.linear(
         normalized * torch.nn.functional.silu(gate),

@@ -75,7 +75,7 @@ def test_stage_runner_prioritizes_active_venv_torch_libraries() -> None:
 def test_stage_runner_accepts_an_isolated_campaign_venv() -> None:
     runner = Path("examples/puzzletron/run_cross_model_stage.sh").read_text()
 
-    assert 'PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv"}' in runner
+    assert 'PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv_new"}' in runner
     assert 'source "${PUZZLETRON_VENV}/bin/activate"' in runner
 
 
@@ -90,6 +90,33 @@ def test_multinode_runner_uses_slurm_submit_directory_as_repository_root() -> No
     runner = Path("examples/puzzletron/run_multinode_stage.sh").read_text()
 
     assert 'ROOT=${PUZZLETRON_ROOT:-${SLURM_SUBMIT_DIR:-"${SCRIPT_ROOT}"}}' in runner
+
+
+def test_generic_launchers_default_to_the_campaign_venv() -> None:
+    launchers = (
+        Path("examples/puzzletron/run_multinode_stage.sh"),
+        Path("examples/puzzletron/run_single_gpu_replace_scoring.sh"),
+        Path("examples/puzzletron/run_axis_diagnostic_workers.sh"),
+        Path("examples/puzzletron/distributed_eval/worker.sbatch"),
+    )
+
+    for launcher in launchers:
+        contents = launcher.read_text()
+        assert ".venv_new" in contents
+        assert 'PUZZLETRON_VENV' in contents
+        assert 'source "${PUZZLETRON_VENV}/bin/activate"' in contents
+
+
+def test_axis_diagnostic_launcher_uses_one_configured_model_instance_per_worker() -> None:
+    launcher = Path("examples/puzzletron/run_axis_diagnostic_workers.sh").read_text()
+    task = Path("examples/puzzletron/run_axis_diagnostic_task.sh").read_text()
+
+    assert "AXIS_DIAGNOSTIC_NPROC_PER_NODE" in launcher
+    assert "AXIS_DIAGNOSTIC_GPUS_PER_WORKER" in launcher
+    assert "--gpus-per-task=2" not in launcher
+    assert "--ntasks-per-node=4" not in launcher
+    assert '"--nproc-per-node=${AXIS_DIAGNOSTIC_NPROC_PER_NODE}"' in task
+    assert "CUDA_VISIBLE_DEVICES=\"${first_gpu}" not in task
 
 
 def test_launcher_can_resume_from_first_failed_model() -> None:

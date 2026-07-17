@@ -7,7 +7,6 @@ defaults:
   - _self_
 
 puzzle_dir: ${puzzle_root}/qwen3_5/qwen3_5_0_8b/native_smoke_test
-recipe_path: ${clean_config_root}/recipes/automodel.yaml
 
 model:
   force_hf: false

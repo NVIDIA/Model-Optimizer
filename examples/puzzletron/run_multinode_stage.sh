@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-if [[ $# -lt 3 ]]; then
-  echo "usage: $0 STAGE CONFIG_PATH RECIPE_PATH [OVERRIDE ...]" >&2
+if [[ $# -lt 2 ]]; then
+  echo "usage: $0 STAGE CONFIG_PATH [OVERRIDE ...]" >&2
   exit 2
 fi
 
 STAGE=$1
 CONFIG_PATH=$(realpath -m "$2")
-RECIPE_PATH=$(realpath -m "$3")
-shift 3
+shift 2
 OVERRIDES=("$@")
 
 SCRIPT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ROOT=${PUZZLETRON_ROOT:-${SLURM_SUBMIT_DIR:-"${SCRIPT_ROOT}"}}
+PUZZLETRON_VENV=${PUZZLETRON_VENV:-"${ROOT}/.venv_new"}
 : "${PUZZLETRON_IMAGE:?export PUZZLETRON_IMAGE with the container image path}"
 : "${PUZZLETRON_CONTAINER_MOUNTS:?export PUZZLETRON_CONTAINER_MOUNTS for the container}"
 IMAGE=${PUZZLETRON_IMAGE}
@@ -26,7 +26,7 @@ NPROC_PER_NODE=${NPROC_PER_NODE:-8}
 mkdir -p "${LOG_DIR}"
 MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 MASTER_PORT=${MASTER_PORT:-$((29500 + SLURM_JOB_ID % 1000))}
-export ROOT STAGE CONFIG_PATH RECIPE_PATH LOG_DIR NPROC_PER_NODE MASTER_ADDR MASTER_PORT
+export ROOT STAGE CONFIG_PATH LOG_DIR NPROC_PER_NODE MASTER_ADDR MASTER_PORT PUZZLETRON_VENV
 export PUZZLETRON_SETUP_ENV=${PUZZLETRON_SETUP_ENV:-}
 
 srun_args=(--nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1)
@@ -42,7 +42,7 @@ srun "${srun_args[@]}" \
   /bin/bash -lc '
 set -Eeuo pipefail
 if [[ -n "${PUZZLETRON_SETUP_ENV:-}" ]]; then source "${PUZZLETRON_SETUP_ENV}"; fi
-source "${ROOT}/.venv/bin/activate"
+source "${PUZZLETRON_VENV}/bin/activate"
 export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -56,7 +56,6 @@ args=(
   "${ROOT}/examples/puzzletron/main.py"
   --config "${CONFIG_PATH}"
   "${stage_option}" "${STAGE}"
-  --override "recipe_path=${RECIPE_PATH}"
 )
 if [[ "${PUZZLETRON_FORCE_STAGE:-0}" == "1" ]]; then
   args+=(--force)

@@ -16,9 +16,9 @@ from typing import Any
 
 from .campaign import Campaign
 from .config import (
-    DEFAULT_EVALUATOR_REVISION,
     _replacement_scoring_config,
     build_campaign_manifest,
+    distributed_stage_config,
     load_plain_pipeline_config,
     parallelism_from_config,
 )
@@ -41,6 +41,7 @@ def command_init(args) -> int:
         name=args.name,
         evaluator_revision=args.evaluator_revision,
         overrides=_parse_overrides(args),
+        stage=args.stage,
     )
     campaign = Campaign.create(args.campaign_dir, manifest)
     _json_print(
@@ -120,7 +121,9 @@ async def _run_coordinator(args) -> int:
                                 / "replacement_library.json"
                             ),
                             "eval_samples": scoring_data.get("eval_samples"),
-                            "micro_batch_size": scoring_data.get("micro_batch_size"),
+                            "micro_batch_size": result.provenance.get(
+                                "micro_batch_size", scoring_data.get("micro_batch_size")
+                            ),
                             "block_size": scoring_data.get("block_size"),
                         },
                         "i_solution": solution_id,
@@ -150,6 +153,42 @@ def command_coordinator(args) -> int:
     return asyncio.run(_run_coordinator(args))
 
 
+async def _run_depth_coordinator(args) -> int:
+    from .client import AsyncEvaluationClient
+    from .config import load_runtime_config
+    from .depth import depth_rpc_context_from_config, run_iterative_depth_rpc
+
+    campaign = Campaign.open(args.campaign_dir)
+    evaluation_stage = campaign.manifest.metadata.get("evaluation_stage")
+    if evaluation_stage != "depth":
+        raise ValueError(
+            f"depth coordinator requires a depth campaign, got {evaluation_stage!r}"
+        )
+    runtime_cfg = load_runtime_config(args.config, overrides=_parse_overrides(args))
+    context = depth_rpc_context_from_config(runtime_cfg)
+    if args.output_dir is not None:
+        context["output_dir"] = Path(args.output_dir).resolve()
+    client = AsyncEvaluationClient.from_campaign(
+        str(campaign.root),
+        stale_seconds=args.stale_seconds,
+        connect_timeout_seconds=args.connect_timeout_seconds,
+        task_timeout_seconds=args.task_timeout_seconds,
+        retry_initial_seconds=args.retry_initial_seconds,
+        retry_max_seconds=args.retry_max_seconds,
+    )
+    try:
+        async with client:
+            result = await run_iterative_depth_rpc(campaign, client=client, **context)
+    finally:
+        campaign.storage.rebuild_summary()
+    _json_print(result)
+    return 0
+
+
+def command_depth_coordinator(args) -> int:
+    return asyncio.run(_run_depth_coordinator(args))
+
+
 def _default_worker_id() -> str:
     pieces = [socket.gethostname()]
     for name in ("SLURM_JOB_ID", "SLURM_NODEID", "LOCAL_RANK"):
@@ -174,7 +213,11 @@ def command_worker(args) -> int:
             f"rank{os.environ.get('RANK', '0')}.log"
         ).open("a")
         faulthandler.register(signal.SIGUSR1, file=stack_log, all_threads=True)
-    plain_cfg = load_plain_pipeline_config(args.config, overrides=_parse_overrides(args))
+    evaluation_stage = str(campaign.manifest.metadata.get("evaluation_stage", "replace_block"))
+    plain_cfg = distributed_stage_config(
+        load_plain_pipeline_config(args.config, overrides=_parse_overrides(args)),
+        stage=evaluation_stage,
+    )
     actual_parallelism = parallelism_from_config(plain_cfg, world_size=world_size)
     if actual_parallelism != campaign.manifest.parallelism:
         raise ValueError(
@@ -197,6 +240,10 @@ def command_worker(args) -> int:
     import modelopt.torch.utils.distributed as dist
 
     runtime_cfg = load_runtime_config(args.config, overrides=_parse_overrides(args))
+    if evaluation_stage == "depth":
+        from ..depth.iterative import _depth_scoring_config
+
+        runtime_cfg = _depth_scoring_config(runtime_cfg)
     timeout_minutes = int(runtime_cfg.get("nccl_timeout_minutes", 120))
     dist.setup(timeout=timedelta(minutes=timeout_minutes))
     try:
@@ -317,7 +364,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--config", required=True)
     init.add_argument("--world-size", type=int, required=True)
     init.add_argument("--name")
-    init.add_argument("--evaluator-revision", default=DEFAULT_EVALUATOR_REVISION)
+    init.add_argument("--stage", choices=("replace_block", "depth"), default="replace_block")
+    init.add_argument("--evaluator-revision")
     init.add_argument("--override", action="append", default=[])
     init.set_defaults(func=command_init)
 
@@ -335,6 +383,21 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator.add_argument("--retry-initial-seconds", type=float, default=5.0)
     coordinator.add_argument("--retry-max-seconds", type=float, default=60.0)
     coordinator.set_defaults(func=command_coordinator)
+
+    depth_coordinator = subparsers.add_parser(
+        "depth-coordinator",
+        help="score an iterative depth trajectory across persistent workers",
+    )
+    _add_campaign_argument(depth_coordinator)
+    _add_registry_timing(depth_coordinator)
+    depth_coordinator.add_argument("--config", required=True)
+    depth_coordinator.add_argument("--override", action="append", default=[])
+    depth_coordinator.add_argument("--output-dir")
+    depth_coordinator.add_argument("--connect-timeout-seconds", type=float, default=10.0)
+    depth_coordinator.add_argument("--task-timeout-seconds", type=float, default=7200.0)
+    depth_coordinator.add_argument("--retry-initial-seconds", type=float, default=5.0)
+    depth_coordinator.add_argument("--retry-max-seconds", type=float, default=60.0)
+    depth_coordinator.set_defaults(func=command_depth_coordinator)
 
     worker = subparsers.add_parser("worker", help="run one torchrun worker group")
     _add_campaign_argument(worker)

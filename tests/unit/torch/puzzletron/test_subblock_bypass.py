@@ -21,7 +21,15 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.fsdp import fully_shard
 
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
+    NemotronHModelDescriptor,
+)
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+)
 from modelopt.torch.puzzletron.bypass_distillation.subblock_boundaries import (
     install_teacher_subblock_capture_hooks,
     replay_subblock,
@@ -116,6 +124,37 @@ def test_missing_descriptor_boundary_is_a_capability_error():
 
     with pytest.raises(NotImplementedError, match="subblock bypass"):
         resolve_subblock_boundaries({0: _ToyLayer(1.0, 1.0)}, _UnsupportedDescriptor, [_block()])
+
+
+def test_no_op_subblocks_do_not_create_replay_boundaries():
+    block = BlockConfig(
+        subblock_configs=(
+            AttentionConfig(name="attention", num_query_heads=2, num_kv_heads=1),
+            FFNConfig(name="ffn", no_op=True),
+        )
+    )
+
+    boundaries = resolve_subblock_boundaries({0: _ToyLayer(1.0, 1.0)}, _ToyDescriptor, [block])
+
+    assert set(boundaries) == {(0, "attention", "attention")}
+
+
+def test_nemotron_subblock_boundary_resolves_to_native_mixer():
+    layer = nn.Module()
+    layer.mixer = nn.Identity()
+    block = BlockConfig(
+        subblock_configs=(
+            MambaConfig(name="mamba", num_heads=2, head_dim=8),
+            FFNConfig(name="ffn", no_op=True),
+        )
+    )
+
+    boundaries = resolve_subblock_boundaries(
+        {0: layer}, NemotronHModelDescriptor, [block]
+    )
+
+    assert set(boundaries) == {(0, "mamba", "mamba")}
+    assert boundaries[(0, "mamba", "mamba")].module is layer.mixer
 
 
 def test_selected_subblock_kinds_keeps_attention_and_mamba_distinct():

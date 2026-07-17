@@ -197,7 +197,6 @@ def _relocated_semantic_setup(tmp_path: Path) -> tuple[Path, Path, Path, dict, P
             },
             "scoring": {"num_samples": 128, "micro_batch_size": 1},
         },
-        "parallel": {"tp": 1, "cp": 4, "pp": 2, "dp": 1},
         "search_space": {"axes": {"hidden_width": {"values": [4096, 3584]}}},
         "embedding_pruning": {
             "enabled": False,
@@ -211,11 +210,13 @@ def _relocated_semantic_setup(tmp_path: Path) -> tuple[Path, Path, Path, dict, P
             "enabled": True,
             "output_dir": str(source / "pruning/pruning_scores/automodel/full"),
             "micro_batch_size": 1,
+            "automodel": {
+                "parallel": {"tp": 1, "cp": 4, "pp": 2, "ep": 1}
+            },
             "runtime": {
                 "execution": "distributed",
                 "sharding": {"world_size": 8},
                 "topology": {"nodes": 1, "gpus_per_node": 8},
-                "recipe_path": str(Path.cwd() / "examples/puzzletron/configs/clean/recipes/a.yaml"),
             },
         },
         "depth": {},
@@ -232,7 +233,6 @@ def _relocated_semantic_setup(tmp_path: Path) -> tuple[Path, Path, Path, dict, P
 
     target_config = json.loads(json.dumps(source_config))
     target_config["puzzle_dir"] = str(destination)
-    target_config["parallel"] = {"tp": 1, "cp": 1, "pp": 1, "dp": 8}
     target_config["data"]["path"] = "tests/fixtures/puzzletron/dataset.jsonl"
     target_config["data"]["calibration"]["path"] = "tests/fixtures/puzzletron/dataset.jsonl"
     target_config["data"]["calibration"]["micro_batch_size"] = 8
@@ -245,11 +245,20 @@ def _relocated_semantic_setup(tmp_path: Path) -> tuple[Path, Path, Path, dict, P
         "enabled": False,
         "output_dir": str(destination / "pruning/pruning_scores/automodel/full"),
         "micro_batch_size": 8,
+        "automodel": {
+            "parallel": {
+                "tp": 1,
+                "cp": 1,
+                "pp": 1,
+                "ep": 1,
+                "dp_shard": 1,
+                "dp_replicate": 8,
+            }
+        },
         "runtime": {
             "execution": "inline",
             "sharding": {"world_size": 1},
             "topology": {"nodes": 1, "gpus_per_node": 1},
-            "recipe_path": "examples/puzzletron/configs/clean/recipes/b.yaml",
         },
     }
     config_path = tmp_path / "target-config.json"

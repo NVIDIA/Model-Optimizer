@@ -42,15 +42,69 @@ def _cfg(method="independent", eval_samples=200, micro_batch_size=2):
                 "automodel": {
                     "force_hf": True,
                     "eval_iters": 50,
-                    "recipe": {
-                        "model": {"torch_dtype": "bf16"},
-                        "distributed": {"tp_size": 2, "ep_size": 1},
-                        "dataset": {"_target_": "some.dataset"},
+                    "parallel": {
+                        "tp": 2,
+                        "cp": 1,
+                        "pp": 1,
+                        "ep": 1,
+                        "dp_shard": 1,
+                        "dp_replicate": 1,
                     },
                 },
             },
         }
     )
+
+
+def test_build_recipe_config_generates_recipe_from_stage_parallelism(monkeypatch):
+    cfg = _cfg()
+    cfg.pruning.automodel.parallel = {
+        "tp": 1,
+        "cp": 2,
+        "pp": 2,
+        "ep": 4,
+        "dp_shard": 4,
+        "dp_replicate": 2,
+        "sequence_parallel": False,
+        "pipeline_schedule": "1f1b",
+    }
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
+        lambda *args, **kwargs: None,
+    )
+
+    recipe = build_recipe_config(cfg)
+
+    assert recipe["distributed"] == {
+        "dp_size": 8,
+        "dp_replicate_size": 2,
+        "tp_size": 1,
+        "cp_size": 2,
+        "ep_size": 4,
+        "pp_size": 2,
+        "sequence_parallel": False,
+        "pipeline": {
+            "pp_schedule": "1f1b",
+            "pp_microbatch_size": 1,
+            "pp_batch_size": 2,
+        },
+    }
+    assert recipe["dataset"]["_target_"].endswith("make_dummy_dataset")
+    assert recipe["distributed_config"]["activation_checkpointing"] is True
+    assert recipe["optimizer"]["lr"] == 0.0
+
+
+@pytest.mark.parametrize("legacy_key", ["recipe", "recipe_path"])
+def test_build_recipe_config_rejects_removed_recipe_inputs(legacy_key):
+    cfg = _cfg()
+    cfg.pruning.automodel[legacy_key] = {} if legacy_key == "recipe" else "/old.yaml"
+
+    with pytest.raises(ValueError, match="automodel.parallel"):
+        build_recipe_config(cfg)
 
 
 def test_build_recipe_config_injects_model_fields(monkeypatch):
@@ -69,15 +123,15 @@ def test_build_recipe_config_injects_model_fields(monkeypatch):
     assert recipe["dist_env"]["timeout_minutes"] == 90
 
 
-def test_build_recipe_config_respects_explicit_overrides(monkeypatch):
+def test_build_recipe_config_respects_stage_model_overrides(monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
         lambda *args, **kwargs: None,
     )
     cfg = _cfg()
     cfg.pruning.model_name_or_path = "/custom/teacher"
-    cfg.pruning.automodel.recipe.model.anymodel_descriptor = "llama"
-    cfg.pruning.automodel.recipe.model.force_hf = False
+    cfg.descriptor = "llama"
+    cfg.pruning.automodel.force_hf = False
 
     recipe = build_recipe_config(cfg)
     assert recipe["model"]["pretrained_model_name_or_path"] == "/custom/teacher"
@@ -94,7 +148,17 @@ def test_solution_recipe_uses_inferred_runtime_descriptor(monkeypatch):
             "scoring": {
                 "block_size": 32,
                 "micro_batch_size": 1,
-                "automodel": {"force_hf": False, "recipe": {"model": {}}},
+                "automodel": {
+                    "force_hf": False,
+                    "parallel": {
+                        "tp": 1,
+                        "cp": 1,
+                        "pp": 1,
+                        "ep": 1,
+                        "dp_shard": 1,
+                        "dp_replicate": 1,
+                    },
+                },
             },
         }
     )
@@ -119,7 +183,7 @@ def test_build_recipe_config_injects_topology_dependent_model_backend(
     cfg = _cfg()
     cfg.descriptor = "llama"
     cfg.pruning.model_name_or_path = "/converted/llama"
-    cfg.pruning.automodel.recipe.distributed.cp_size = cp_size
+    cfg.pruning.automodel.parallel.cp = cp_size
 
     class Descriptor:
         @staticmethod
@@ -145,8 +209,7 @@ def test_build_recipe_config_uses_torch_linears_for_native_dtensor_tp(monkeypatc
 
     cfg = _cfg()
     cfg.pruning.automodel.force_hf = False
-    cfg.pruning.automodel.recipe.model.force_hf = False
-    cfg.pruning.automodel.recipe.distributed.cp_size = 2
+    cfg.pruning.automodel.parallel.cp = 2
 
     class Descriptor:
         @staticmethod
@@ -192,6 +255,25 @@ def test_pipeline_batch_alignment_counts_ep_when_explicit_dp_is_absent():
     assert recipe["distributed"]["pipeline"]["pp_batch_size"] == 4
     assert recipe["step_scheduler"]["local_batch_size"] == 4
     assert recipe["step_scheduler"]["global_batch_size"] == 8
+
+
+def test_pipeline_batch_alignment_splits_global_batch_by_dp_after_ep_overlay():
+    recipe = {
+        "distributed": {
+            "dp_size": 32,
+            "ep_size": 4,
+            "pp_size": 2,
+            "pipeline": {},
+        },
+        "step_scheduler": {},
+    }
+
+    _align_pipeline_batch_size(recipe, micro_batch_size=8)
+
+    assert recipe["distributed"]["pipeline"]["pp_microbatch_size"] == 1
+    assert recipe["distributed"]["pipeline"]["pp_batch_size"] == 2
+    assert recipe["step_scheduler"]["local_batch_size"] == 2
+    assert recipe["step_scheduler"]["global_batch_size"] == 64
 
 
 def test_build_recipe_config_missing_descriptor_raises():

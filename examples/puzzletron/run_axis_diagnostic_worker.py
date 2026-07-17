@@ -9,8 +9,6 @@ import os
 import re
 from pathlib import Path
 
-from omegaconf import OmegaConf
-
 from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     generate_campaign_progress_report,
 )
@@ -28,10 +26,18 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 
 def _axes(config: dict) -> list[str]:
     search_axes = (config.get("search_space") or {}).get("axes") or {}
+    non_sortable = set(
+        str(axis)
+        for axis in (config.get("width_sanity") or {}).get("non_sortable_axes", ())
+    )
     enabled = [
         str(axis)
         for axis, axis_cfg in search_axes.items()
-        if isinstance(axis_cfg, dict) and bool(axis_cfg.get("enabled", False))
+        if (
+            isinstance(axis_cfg, dict)
+            and bool(axis_cfg.get("enabled", False))
+            and str(axis) not in non_sortable
+        )
     ]
     return [*enabled, "hidden_width"]
 
@@ -56,7 +62,7 @@ def _hidden_widths(config: dict) -> list[int]:
     alignment = int((config.get("embedding_pruning") or {}).get("alignment", 1) or 1)
     from modelopt.torch.puzzletron.stages.diagnostics import _ratio_aligned_hidden_widths
 
-    return _ratio_aligned_hidden_widths(full, (7 / 8, 1 / 4), alignment=alignment)
+    return _ratio_aligned_hidden_widths(full, (7 / 8, 3 / 4), alignment=alignment)
 
 
 def _worker_config(config: dict, axis: str, config_path: Path) -> dict:
@@ -64,20 +70,10 @@ def _worker_config(config: dict, axis: str, config_path: Path) -> dict:
     safe = _safe_axis(axis)
     config["experiment"] = dict(config.get("experiment") or {})
     config["experiment"]["dir"] = str(puzzle_dir / ".axis_workers" / safe)
-    clean_root = Path(config.get("clean_config_root") or config_path.resolve().parents[3])
-    recipe_path = str(clean_root / "recipes" / "automodel_pp2_dp1.yaml")
-    config["recipe_path"] = recipe_path
     runtime = dict(config.get("_runtime") or {})
     runtime_overrides = list(runtime.get("overrides") or ())
-    runtime_overrides.extend(
-        (
-            f"recipe_path={recipe_path}",
-            f"++width_sanity.automodel.recipe_path={recipe_path}",
-        )
-    )
     diagnostic = dict(config.get("width_sanity") or {})
     diagnostic_automodel = dict(diagnostic.get("automodel") or {})
-    diagnostic_automodel["recipe_path"] = recipe_path
     diagnostic.update(
         {
             "enabled": True,
@@ -85,8 +81,8 @@ def _worker_config(config: dict, axis: str, config_path: Path) -> dict:
             "axes": [axis],
             "experiment_id": f"axis_{safe}",
             "one_case_per_axis": False,
-            "target_count_per_axis": 2,
-            "layer_count": 2,
+            "target_count_per_axis": int(diagnostic.get("target_count_per_axis", 2)),
+            "layer_count": int(diagnostic.get("layer_count", 3)),
             "layer_selection": "random",
             "ratios": [0.875, 0.75],
             "overwrite": False,
@@ -127,27 +123,45 @@ def _worker_config(config: dict, axis: str, config_path: Path) -> dict:
 
 def _validate_worker_topology(config: dict, axis: str) -> None:
     diagnostic = config.get("width_sanity") or {}
-    recipe_path = ((diagnostic.get("automodel") or {}).get("recipe_path"))
-    if not recipe_path:
-        raise ValueError("axis diagnostic worker requires width_sanity.automodel.recipe_path")
-    recipe = OmegaConf.to_container(OmegaConf.load(recipe_path), resolve=True)
-    distributed = recipe.get("distributed") or {}
+    parallel = dict((diagnostic.get("automodel") or {}).get("parallel") or {})
+    if not parallel:
+        raise ValueError("axis diagnostic worker requires width_sanity.automodel.parallel")
     sizes = {
-        name: int(distributed.get(f"{name}_size", 1) or 1)
-        for name in ("tp", "cp", "pp", "ep", "dp")
+        name: int(parallel.get(name, 1) or 1)
+        for name in ("tp", "cp", "pp", "ep", "dp_shard", "dp_replicate")
     }
-    expected = sizes["tp"] * sizes["cp"] * sizes["pp"] * sizes["ep"] * sizes["dp"]
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    if expected != world_size or sizes != {"tp": 1, "cp": 1, "pp": 2, "ep": 1, "dp": 1}:
+    invalid = {name: value for name, value in sizes.items() if value < 1}
+    if invalid:
+        raise ValueError(f"axis diagnostic parallel axes must be positive integers: {invalid}")
+    if sizes["dp_shard"] % sizes["ep"]:
         raise ValueError(
-            "axis diagnostic topology must be PP=2 with TP=CP=EP=DP=1: "
-            f"recipe={recipe_path} sizes={sizes} world_size={world_size}"
+            "axis diagnostic dp_shard must be divisible by ep because EP is overlaid "
+            f"on FSDP shards: parallel={parallel}"
+        )
+    expected = (
+        sizes["tp"]
+        * sizes["cp"]
+        * sizes["pp"]
+        * sizes["dp_shard"]
+        * sizes["dp_replicate"]
+    )
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if expected != world_size:
+        raise ValueError(
+            "axis diagnostic worker must use exactly the stage-owned "
+            "width_sanity.automodel.parallel mesh: "
+            f"parallel={parallel} expected_world_size={expected} world_size={world_size}"
         )
     hydra_config = load_runtime_hydra_config(config)
-    if str(hydra_config.recipe_path) != str(recipe_path):
+    runtime_parallel = dict(hydra_config.width_sanity.automodel.parallel)
+    runtime_sizes = {
+        name: int(runtime_parallel.get(name, 1) or 1)
+        for name in ("tp", "cp", "pp", "ep", "dp_shard", "dp_replicate")
+    }
+    if runtime_sizes != sizes:
         raise ValueError(
-            "axis diagnostic recipe did not survive Hydra reconstruction: "
-            f"expected={recipe_path} actual={hydra_config.recipe_path}"
+            "axis diagnostic parallelism did not survive Hydra reconstruction: "
+            f"expected={parallel} actual={runtime_parallel}"
         )
     if axis == "hidden_width" and not bool(hydra_config.embedding_pruning.enabled):
         raise ValueError("hidden-width diagnostic is disabled after Hydra reconstruction")
@@ -220,13 +234,23 @@ def _finalize(config_path: Path) -> None:
     width_summary, slicing_summary = aggregate_width_sanity(
         axis_summaries, metric_specs=metric_specs
     )
+    parallel = dict(
+        ((config.get("width_sanity") or {}).get("automodel") or {}).get("parallel") or {}
+    )
+    sizes = {
+        name: int(parallel.get(name, 1) or 1)
+        for name in ("tp", "cp", "pp", "ep", "dp_shard", "dp_replicate")
+    }
     parallel_execution = {
         "workers": len(axes),
-        "gpus_per_worker": 2,
-        "pp": 2,
-        "dp": 1,
-        "cp": 1,
-        "tp": 1,
+        "gpus_per_worker": (
+            sizes["tp"]
+            * sizes["cp"]
+            * sizes["pp"]
+            * sizes["dp_shard"]
+            * sizes["dp_replicate"]
+        ),
+        **sizes,
     }
     for stage, summary in (
         ("width_sanity", width_summary),

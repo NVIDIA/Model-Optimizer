@@ -7,7 +7,6 @@ defaults:
   - _self_
 
 puzzle_dir: ${puzzle_root}/nemotron3/super_120b_a12b_bf16/Super-Smoke
-recipe_path: ${clean_config_root}/recipes/automodel_pp2_ep4_dp2_smoke.yaml
 skip_realize_model: false
 
 execution:
@@ -43,16 +42,6 @@ tokenize_data:
       seq_length: 256
       shuffle_seed: 445
 
-parallel: {tp: 1, cp: 1, pp: 2, ep: 4, dp: 2}
-distributed:
-  tp_size: 1
-  cp_size: 1
-  pp_size: 2
-  ep_size: 4
-  dp_size: 2
-  sequence_parallel: false
-  activation_checkpointing: true
-
 pruning:
   experiment_id: Super-Smoke
   eval_samples: 2
@@ -60,6 +49,19 @@ pruning:
   block_size: 256
   packed_token_cache_path: ${puzzle_dir}/dataset_cache/train_2x256.tokens
   attention_scored_axes: [kv_groups, q_heads_per_group]
+  automodel:
+    force_hf: false
+    use_puzzletron_dataloader: true
+    # PP2 x combined DP8 = 16 ranks; EP4 leaves two sample-parallel lanes.
+    parallel: &super_scoring_mesh
+      tp: 1
+      cp: 1
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 2
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
 
 search_space:
   axes:
@@ -90,6 +92,8 @@ depth_importance:
   micro_batch_size: 2
   block_size: 256
   packed_token_cache_path: ${puzzle_dir}/dataset_cache/validation_2x256.tokens
+  automodel:
+    parallel: *super_scoring_mesh
 
 vllm_stats:
   enabled: true
@@ -131,6 +135,8 @@ sort_sanity:
   # Reversing all 1024 latent lanes changes BF16 reduction order across every
   # MoE layer; keep the real activation sort on the strict production gate.
   max_abs_reverse_lm_loss_delta: 2.0e-2
+  automodel:
+    parallel: *super_scoring_mesh
 
 width_sanity:
   enabled: true
@@ -167,6 +173,8 @@ width_sanity:
   micro_batch_size: 2
   block_size: 256
   packed_token_cache_path: ${puzzle_dir}/dataset_cache/validation_2x256.tokens
+  automodel:
+    parallel: *super_scoring_mesh
 
 slicing_sanity:
   enabled: true
@@ -175,6 +183,8 @@ slicing_sanity:
   micro_batch_size: 2
   block_size: 256
   packed_token_cache_path: ${puzzle_dir}/dataset_cache/validation_2x256.tokens
+  automodel:
+    parallel: *super_scoring_mesh
 
 bypass_sanity:
   enabled: true
@@ -188,7 +198,16 @@ bypass:
   enabled: true
   backend: automodel
   automodel:
-    recipe_path: ${clean_config_root}/recipes/automodel_pp4_ep4_dp2_smoke.yaml
+    # PP4 keeps the 120B backward pass below the per-GPU memory limit.
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 4
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 2
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
   elastic: true
   find_last_ckpt_for_resume: true
   iter_num: 1
@@ -218,8 +237,16 @@ replacement_scoring:
   micro_batch_size: 2
   block_size: 256
   packed_token_cache_path: ${puzzle_dir}/dataset_cache/validation_2x256.tokens
+  automodel:
+    force_hf: false
+    parallel: *super_scoring_mesh
   distributed_eval:
     gpus_per_task: 16
+
+realize_model:
+  automodel:
+    force_hf: false
+    parallel: *super_scoring_mesh
 
 mip:
   depth_scenario_count: 1
@@ -265,12 +292,8 @@ global_distillation_sanity:
   packed_token_cache_path: ${puzzle_dir}/dataset_cache/train_2x256.tokens
   max_steps: 1
   local_batch_size: 1
-  tp: 1
-  cp: 1
-  pp: 2
-  dp: 2
-  ep: 4
-  sequence_parallel: false
+  automodel:
+    parallel: *super_scoring_mesh
 
 global_distillation:
   enabled: true
@@ -279,15 +302,12 @@ global_distillation:
   evaluation_summary_path: ${puzzle_dir}/artifacts/zero_shot_evaluation/evaluation_summary.json
   output_dir: ${puzzle_dir}/artifacts/global_distillation/profiles/params-090/text-n2-l256-s2-b1-seed444/best-evaluation
   backend: automodel
-  activation_checkpointing: true
+  automodel:
+    activation_checkpointing: true
+    parallel: *super_scoring_mesh
   save_consolidated: true
   force_hf: false
   domain: llm
-  tp: 1
-  cp: 1
-  pp: 2
-  dp: 2
-  ep: 4
   global_batch_size: 2
   local_batch_size: 1
   max_steps: 1

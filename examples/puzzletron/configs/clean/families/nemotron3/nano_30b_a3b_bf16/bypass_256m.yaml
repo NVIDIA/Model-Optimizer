@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - /families/nemotron3/nano_30b_a3b_bf16/production@_global_
+  - _self_
+
+# Approved middle-budget rerun: four times the rejected 67M-token run, using
+# the efficient single-node PP2/EP4 topology and more frequent updates.
+train_token_cache_path: ${puzzle_dir}/dataset_cache/train_262144x8192.tokens
+
+bypass:
+  data:
+    packed_token_cache_path: ${train_token_cache_path}
+  training:
+    # 2^28 tokens / (1 sample x 8192 tokens x GA4) = 8,192 updates.
+    training_tokens: 268435456
+    micro_batch_size: 1
+    val_micro_batch_size: 1
+    grad_accumulation_steps: 4
+    learning_rate: 1.0e-4
+  model:
+    model_overrides:
+      save_interval_seconds: 12000
+      save_interval: 1000000000
+      save_checkpoint_when_done: true
+      delete_old_checkpoints: false

@@ -30,6 +30,7 @@ from examples.puzzletron.acceptance_resume import (
 from examples.puzzletron.main import (
     _completion_is_valid,
     _embedding_followup_stage,
+    _report_model_name,
     _resume_kwargs,
 )
 from modelopt.torch.puzzletron.manifest import (
@@ -65,6 +66,25 @@ def _config(root: Path, **sections: dict) -> dict:
         "mip": {},
         **sections,
     }
+
+
+def test_report_model_name_prefers_display_identity_over_snapshot_path():
+    config = {
+        "display_name": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "model": {"source": "/cache/models--nvidia--Nemotron/snapshots/revision"},
+        "model_info": {"hf_repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"},
+    }
+
+    assert _report_model_name(config) == config["display_name"]
+
+
+def test_report_model_name_uses_hf_repo_before_snapshot_path():
+    config = {
+        "model": {"source": "/cache/models--nvidia--Nemotron/snapshots/revision"},
+        "model_info": {"hf_repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"},
+    }
+
+    assert _report_model_name(config) == config["model_info"]["hf_repo"]
 
 
 def _write_completion(root: Path, stage: str, identity: str) -> Path:

@@ -3,6 +3,7 @@
 
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -274,6 +275,52 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
     )
 
 
+def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
+    (command,) = scenario_worker_commands(
+        config_path="experiment.yaml",
+        config={
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": [768]},
+        },
+        stage="build_library",
+        gpus_per_node=1,
+    )
+
+    assert command[1:4] == ("-m", "torch.distributed.run", "--standalone")
+    assert "--nproc_per_node=1" in command
+
+
+def test_embedding_pipeline_routes_width_local_bypass_overlay(tmp_path):
+    (command,) = scenario_worker_commands(
+        config_path="experiment.yaml",
+        config={
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": [768]},
+            "replacement_scoring": {
+                "granularity": "subblock",
+                "bypass_checkpoint_dir": str(tmp_path / "accepted-bypass"),
+            },
+        },
+        stage="replacement_scoring",
+        gpus_per_node=2,
+    )
+
+    overrides = [
+        command[index + 1] for index, value in enumerate(command) if value == "--override"
+    ]
+    assert (
+        "replacement_scoring.bypass_checkpoint_dir="
+        f"{tmp_path}/scenarios/width-0768/depth-00/ckpts/bypass_overlay"
+    ) in overrides
+
+
+def test_width_scenarios_expose_bypass_overlay_resolver():
+    width_scenarios = sys.modules["examples.puzzletron.prepare_width_scenarios"]
+    resolver = getattr(width_scenarios, "_resolve_bypass_checkpoint", None)
+
+    assert callable(resolver)
+
+
 def test_embedding_pipeline_prepares_subblock_solutions_for_every_width(tmp_path):
     commands = scenario_preparation_commands(
         config={
@@ -382,6 +429,34 @@ def test_width_scenario_destination_reuses_complete_matching_parent(tmp_path):
         overwrite_stale=False,
     )
     assert scenario_dir.exists()
+
+
+def test_width_scenario_destination_rebuilds_changed_bypass_overlay(tmp_path):
+    scenario_dir = tmp_path / "scenarios" / "width-0768" / "depth-00"
+    scenario_dir.mkdir(parents=True)
+    (scenario_dir / "scenario_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "source_checkpoint_fingerprint": "same-parent",
+                "bypass_source_fingerprint": "old-bypass",
+            }
+        )
+    )
+    (scenario_dir / "replacement_library.json").write_text("{}")
+    (scenario_dir / "single_sequence_replacement_solutions.json").write_text("[]")
+    for name in ("sorted_teacher", "bypass_overlay"):
+        checkpoint = scenario_dir / "ckpts" / name
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "config.json").write_text("{}")
+
+    assert _prepare_scenario_destination(
+        scenario_dir,
+        source_checkpoint_fingerprint="same-parent",
+        bypass_source_fingerprint="new-bypass",
+        overwrite_stale=True,
+    )
+    assert not scenario_dir.exists()
 
 
 def test_width_scenarios_resolve_the_fingerprinted_scoring_parent(tmp_path):

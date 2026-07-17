@@ -183,6 +183,7 @@ _stage(
     required=True,
     parents=("bypass",),
     completion_artifacts=("replacement_library.json", "candidate_library.json"),
+    distributed=True,
 )
 _stage(
     "replacement_scoring",

@@ -11,6 +11,22 @@ original teacher checkpoint.
 
 ---
 
+## Reproducible reference campaigns
+
+These configs are experiment-specific entrypoints, not generic model defaults.
+Their tutorials record the workload, search space, parallelism, artifact reuse,
+selection policy, and downstream commands used by the corresponding report.
+
+| Model / experiment | Exact config | Step-by-step tutorial | Current report |
+|---|---|---|---|
+| NVIDIA Nemotron-3 Nano 30B-A3B production | [`production.yaml`](configs/clean/families/nemotron3/nano_30b_a3b_bf16/production.yaml) | [Nano reproduction](docs/nemotron3_nano_30b_a3b_reproduction.md) | [Nano HTML](../../puzzle_runs/nemotron3-nano-30b-a3b-puzzletron-v1/artifacts/campaign_report/campaign_report.html) |
+| Qwen3.5-9B sanity | [`sanity_reproduction.yaml`](configs/clean/families/qwen3_5/qwen3_5_9b/sanity_reproduction.yaml) | [Qwen sanity reproduction](docs/qwen3_5_9b_sanity_reproduction.md) | [Qwen HTML](../../../puzzle_runs/qwen3_5/qwen3_5_9b/sanity_check/artifacts/campaign_report/campaign_report.html) |
+
+The HTML paths are local campaign outputs and are intentionally not committed.
+Regenerate them from the preserved artifacts before sharing.
+
+---
+
 ## Installation
 
 Puzzletron uses one Python environment for **ModelOpt**, the patched **vLLM**
@@ -99,7 +115,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
 
 python -m pip install -e "${AUTOMODEL_ROOT}"
 python -m pip install aiperf
-python -m pip install -e "${MODEL_OPT_ROOT}[hf]"
+python -m pip install -e "${MODEL_OPT_ROOT}[hf,puzzletron]"
 python -m pip install math-verify ray
 ```
 
@@ -364,12 +380,13 @@ export PUZZLETRON_CONTAINER_MOUNTS="/lustre:/lustre"
 
 sbatch --nodes=4 --gpus-per-node=8 \
   examples/puzzletron/run_multinode_stage.sh \
-  scoring path/to/experiment.yaml path/to/recipe.yaml
+  replacement_scoring path/to/experiment.yaml
 ```
 
 The script reads `PUZZLETRON_IMAGE` and `PUZZLETRON_CONTAINER_MOUNTS` from
 the environment — keep concrete cluster paths in an ignored shell export file,
-not in committed configs.
+not in committed configs. Each model-loading stage owns its mesh under
+`<stage>.automodel.parallel`; there is no shared AutoModel recipe YAML.
 
 ### Bare metal (no scheduler)
 
@@ -445,17 +462,20 @@ is updated automatically after each stage. Open it in any browser.
 Regenerate it from existing artifacts without rerunning anything:
 
 ```bash
-python - <<'PY'
-from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
-    generate_campaign_progress_report,
-)
-result = generate_campaign_progress_report(
-    "puzzle_runs/my-experiment",
-    model_name="My Model",
-)
-print(result)
-PY
+python examples/puzzletron/generate_campaign_progress_report.py \
+  --puzzle-dir puzzle_runs/my-experiment \
+  --model-name "My Model"
 ```
+
+Normal generation reuses versioned section snapshots under
+`artifacts/campaign_report/section_cache/` and rebuilds only sections whose inputs changed. Force a
+section and its declared dependents with `--rebuild-section replacement`, or ignore all snapshots
+with `--no-cache`. The selected snapshot identities, cache hits/misses, and extraction timings are
+recorded in `artifacts/campaign_report/report_manifest.json`.
+
+The cache directory and manifest are disposable accelerators. Removing them is safe; the next run
+is a cold rebuild from canonical campaign artifacts. The generated `campaign_report.html` remains
+self-contained, and it is the only file required when sharing the report.
 
 ### What Each Section Shows
 
@@ -472,6 +492,9 @@ PY
 | **Scoring** | Replace-one accuracy drop per candidate. Lower = better (less accuracy lost). |
 | **MIP results** | Pareto front of solutions. Each point is a valid model config that satisfies your hardware constraints. The table lists parameter count, latency, and accuracy for each. |
 | **Zero-shot evaluation** | Benchmark scores for each MIP solution and the teacher. Check the accuracy gap vs. teacher. |
+
+See [MIP profiles](docs/mip_profiles.md) for named workloads, combined
+constraints, restricted search spaces, and homogeneous top-k solutions.
 | **AIPerf** | Throughput (tokens/sec) and latency curves across concurrency values and topology configurations. |
 | **Distillation** | Training loss curves. `main_ce`, `mtp_ce`, `main_kd`, `mtp_kd` are tracked separately. A successful run shows all terms decreasing and overfit on the sanity check. |
 | **Warnings** | Appear in yellow beside affected table cells or stage nodes. A warning does not block a stage, but must be understood before trusting the result. |

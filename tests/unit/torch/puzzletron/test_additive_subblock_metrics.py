@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from immutabledict import immutabledict
+from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
@@ -13,11 +15,17 @@ from modelopt.torch.puzzletron.block_config import (
 from modelopt.torch.puzzletron.diagnostics.html_report import generate_vllm_stats_report
 from modelopt.torch.puzzletron.diagnostics.sweep_data import load_vllm_records
 from modelopt.torch.puzzletron.mip.run_puzzle import _get_block_stats
+from modelopt.torch.puzzletron.subblock_stats import calc_subblock_params_and_memory
+from modelopt.torch.puzzletron.subblock_stats import calc_subblock_stats as stats_module
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory import (
+    calc_subblock_active_params,
     calculate_additive_metrics,
+    calculate_attention_memory,
 )
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
+    _parameter_inventory_key,
     _subblock_stats_already_complete,
+    calculate_subblock_stats,
 )
 
 
@@ -36,6 +44,129 @@ def _metrics(config, *, num_params, active_params, prefill=4, generation=3):
         num_params=num_params,
         active_params=active_params,
     )
+
+
+def test_checkpoint_tensor_count_includes_persistent_buffers():
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(torch.empty(2, 3))
+    module.register_buffer("router_correction", torch.empty(5))
+    module.register_buffer("scratch", torch.empty(7), persistent=False)
+
+    assert calc_subblock_params_and_memory._checkpoint_tensor_count(module) == 11
+
+
+def test_attention_memory_uses_precomputed_parameter_count(monkeypatch):
+    monkeypatch.setattr(
+        calc_subblock_params_and_memory,
+        "calculate_subblock_params",
+        lambda *_args, **_kwargs: pytest.fail("parameter count was recomputed"),
+    )
+    monkeypatch.setattr(
+        calc_subblock_params_and_memory,
+        "calculate_kv_dim",
+        lambda *_args, **_kwargs: 8,
+    )
+
+    result = calculate_attention_memory(
+        AttentionConfig(num_query_heads=8, num_kv_heads=2),
+        SimpleNamespace(),
+        object,
+        batch_size=2,
+        prefill_seq_len=4,
+        generation_seq_len=1,
+        n_embd=32,
+        n_head=8,
+        weights_dtype=torch.bfloat16,
+        kv_cache_dtype=torch.bfloat16,
+        num_params=123,
+    )
+
+    assert result["memory_mib"] == pytest.approx((2 * 5 * 8 * 2 + 123 * 2) / 2**20)
+
+
+def test_dense_active_params_use_precomputed_total(monkeypatch):
+    monkeypatch.setattr(
+        calc_subblock_params_and_memory,
+        "calculate_subblock_params",
+        lambda *_args, **_kwargs: pytest.fail("parameter count was recomputed"),
+    )
+
+    assert (
+        calc_subblock_active_params(
+            FFNConfig(intermediate_size=16),
+            SimpleNamespace(),
+            object,
+            n_embd=32,
+            num_params=123,
+        )
+        == 123
+    )
+
+
+def test_stats_assembly_uses_parameter_inventory_without_model_construction(
+    tmp_path, monkeypatch
+):
+    subblock = FFNConfig(intermediate_size=16)
+    indexed = immutabledict(
+        {"subblock_config": subblock, "parent_layer_indices": (0,)}
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_supported():
+            return False
+
+        @staticmethod
+        def get_language_model_config(config):
+            return config
+
+        @staticmethod
+        def truncate_pattern_for_subblock(_config, _layer):
+            pytest.fail("width config was copied/truncated during inventory assembly")
+
+    monkeypatch.setattr(
+        stats_module,
+        "calculate_subblock_params",
+        lambda *_args, **_kwargs: pytest.fail("parameter count was recomputed"),
+    )
+    inventory = {
+        "identity": "inventory-v1",
+        "rows": [
+            {
+                "inventory_key": _parameter_inventory_key(subblock, 0),
+                "num_params": 123,
+                "active_params": 123,
+            }
+        ],
+        "non_block_params": 45,
+        "non_block_parameter_count_source": "checkpoint_tensor_inventory",
+    }
+
+    result = calculate_subblock_stats(
+        OmegaConf.create({}),
+        teacher_dir=tmp_path,
+        model_config=SimpleNamespace(num_hidden_layers=1),
+        descriptor=Descriptor,
+        master_puzzle_dir=tmp_path,
+        subblock_configs=[indexed],
+        batch_size=1,
+        prefill_seq_len=4,
+        generation_seq_len=1,
+        n_embd=32,
+        n_head=8,
+        vocab_size=64,
+        runtime_stats_enabled=False,
+        use_cuda_graph=False,
+        weights_dtype=torch.bfloat16,
+        activations_dtype=torch.bfloat16,
+        kv_cache_dtype=torch.bfloat16,
+        parameter_inventory=inventory,
+    )
+
+    assert result["subblocks"][0]["num_params"] == 123
+    assert result["subblocks"][0]["active_params"] == 123
+    assert result["non_block"]["num_params"] == 45
+    assert result["args"]["parameter_inventory_identity"] == "inventory-v1"
 
 
 def test_attention_additive_metrics_include_cache_weight_and_phase_flops():

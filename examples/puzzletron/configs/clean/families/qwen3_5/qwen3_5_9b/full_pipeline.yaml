@@ -7,7 +7,6 @@ defaults:
   - _self_
 
 puzzle_dir: ${puzzle_root}/qwen3_5/qwen3_5_9b/full_pipeline
-recipe_path: ${clean_config_root}/recipes/automodel_cp4_pp2_dp1.yaml
 scoring_parent_dir: ${puzzle_dir}/ckpts/sorted_teacher
 train_token_cache_path: ${puzzle_dir}/dataset_cache/nemotron2_train_65536x16384.tokens
 validation_token_cache_path: ${puzzle_dir}/dataset_cache/nemotron2_validation_128x16384.tokens
@@ -42,18 +41,6 @@ tokenize_data:
       seq_length: 16384
       shuffle_seed: 445
 
-# TP=1 is intentional: odd three-group attention candidates remain legal in
-# native AutoModel. CP4 x PP2 x FSDP1 consumes all eight GPUs on one node.
-parallel: {tp: 1, cp: 4, pp: 2, ep: 1, dp: 1}
-distributed:
-  tp_size: 1
-  cp_size: 4
-  pp_size: 2
-  ep_size: 1
-  dp_size: 1
-  sequence_parallel: false
-  activation_checkpointing: true
-
 embedding_pruning:
   enabled: false
   widths: [4096, 3840, 3584]
@@ -79,6 +66,19 @@ pruning:
     [gdn_key_groups, gdn_value_heads_per_group, gdn_key_head_dim, gdn_value_head_dim]
   activation_hooks_kwargs:
     token_chunk_size: 256
+  automodel:
+    force_hf: false
+    use_puzzletron_dataloader: true
+    # TP=1 keeps odd three-group attention candidates legal. CP4 x PP2 uses one node.
+    parallel: &qwen_one_node_mesh
+      tp: 1
+      cp: 4
+      pp: 2
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: interleaved1f1b
 
 sort_sanity:
   enabled: true
@@ -88,6 +88,8 @@ sort_sanity:
   packed_token_cache_path: ${validation_token_cache_path}
   max_abs_lm_loss_delta: 1.0e-3
   max_kl_div: 1.0e-2
+  automodel:
+    parallel: *qwen_one_node_mesh
 
 width_sanity:
   enabled: true
@@ -99,6 +101,8 @@ width_sanity:
   block_size: 4096
   require_beats_random: true
   require_beats_reverse: true
+  automodel:
+    parallel: *qwen_one_node_mesh
 
 bypass_sanity:
   enabled: false
@@ -121,7 +125,15 @@ bypass:
   step_num: 1024
   token_count: 1073741824
   automodel:
-    recipe_path: ${clean_config_root}/recipes/automodel_cp2_pp2_dp2_1f1b.yaml
+    parallel:
+      tp: 1
+      cp: 2
+      pp: 2
+      ep: 1
+      dp_shard: 2
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
   data:
     block_size: 16384
     packed_token_cache_path: ${train_token_cache_path}
@@ -163,7 +175,7 @@ depth_importance:
   block_size: 16384
   packed_token_cache_path: ${validation_token_cache_path}
   automodel:
-    recipe_path: ${recipe_path}
+    parallel: *qwen_one_node_mesh
 
 build_library:
   source_checkpoint_dir: ${scoring_parent_dir}
@@ -204,7 +216,7 @@ replacement_scoring:
   target_teacher_dir: ${scoring_parent_dir}
   automodel:
     force_hf: false
-    recipe_path: ${recipe_path}
+    parallel: *qwen_one_node_mesh
     lm_head_backend: flash_kld
     flash_kld_token_chunk_size: 1024
     flash_kld_reduction_backend: fla
@@ -234,7 +246,7 @@ realize_model:
   packed_token_cache_path: ${validation_token_cache_path}
   automodel:
     force_hf: false
-    recipe_path: ${recipe_path}
+    parallel: *qwen_one_node_mesh
     lm_head_backend: flash_kld
     flash_kld_token_chunk_size: 1024
 
@@ -253,12 +265,16 @@ global_distillation_sanity:
   max_steps: 128
   local_batch_size: 8
   lr: 1.0e-4
-  tp: 1
-  cp: 1
-  pp: 8
-  dp: 1
-  ep: 1
-  sequence_parallel: false
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 8
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
 
 aiperf:
   enabled: true
@@ -285,12 +301,9 @@ global_distillation:
   selection: best_evaluation
   evaluation_summary_path: ${puzzle_dir}/artifacts/zero_shot_evaluation/evaluation_summary.json
   backend: automodel
-  activation_checkpointing: true
-  tp: 1
-  cp: 4
-  pp: 2
-  dp: 1
-  ep: 1
+  automodel:
+    activation_checkpointing: true
+    parallel: *qwen_one_node_mesh
   force_hf: false
   domain: llm
   global_batch_size: 16

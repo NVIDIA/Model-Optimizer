@@ -119,7 +119,25 @@ def _preflight(
         return
     if stage == "convert":
         return
-    parallel_cfg = config.get("parallel") or {}
+    stage_sections = {
+        "width_importance": ("pruning",),
+        "sort": ("pruning",),
+        "depth_importance": ("depth_importance", "depth", "replacement_scoring"),
+        "sort_sanity": ("sort_sanity", "replacement_scoring"),
+        "width_sanity": ("width_sanity", "replacement_scoring"),
+        "bypass_sanity": ("bypass",),
+        "bypass": ("bypass",),
+        "replacement_scoring": ("replacement_scoring", "scoring"),
+        "zero_shot_evaluation": ("replacement_scoring", "scoring"),
+        "post_distillation_evaluation": ("replacement_scoring", "scoring"),
+    }
+    parallel_cfg = {}
+    for section_name in stage_sections.get(stage, (stage,)):
+        section = config.get(section_name) or {}
+        candidate = (section.get("automodel") or {}).get("parallel") or {}
+        if candidate:
+            parallel_cfg = candidate
+            break
     model_cfg = config.get("model") or {}
     library_cfg = config.get("library") or {}
     runtime_stats_cfg = (

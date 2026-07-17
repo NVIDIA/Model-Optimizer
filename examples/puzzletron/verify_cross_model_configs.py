@@ -34,9 +34,8 @@ def main() -> None:
     summary = {"version": 1, "campaign_fingerprint": campaign.fingerprint, "models": []}
     for model in campaign.models:
         path = args.root / "configs" / f"{model.model_id}.yaml"
-        recipe_path = args.root / "recipes" / f"{model.model_id}.yaml"
-        if not path.is_file() or not recipe_path.is_file():
-            raise FileNotFoundError(f"missing generated config/recipe for {model.model_id}")
+        if not path.is_file():
+            raise FileNotFoundError(f"missing generated config for {model.model_id}")
         raw = yaml.safe_load(path.read_text())
         if raw["model"]["force_hf"] is not False:
             raise ValueError(f"{model.model_id}: force_hf must remain false")
@@ -44,12 +43,15 @@ def main() -> None:
             "tp": model.topology.tp,
             "cp": model.topology.cp,
             "pp": model.topology.pp,
-            "dp": model.topology.fsdp,
             "ep": model.topology.ep,
+            "dp_shard": model.topology.ep,
+            "dp_replicate": model.topology.fsdp,
         }
-        if raw["parallel"] != expected_topology:
+        actual_topology = raw["pruning"]["automodel"]["parallel"]
+        actual_axes = {key: actual_topology[key] for key in expected_topology}
+        if actual_axes != expected_topology:
             raise ValueError(
-                f"{model.model_id}: topology mismatch {raw['parallel']} != {expected_topology}"
+                f"{model.model_id}: topology mismatch {actual_axes} != {expected_topology}"
             )
         axes = {entry["axis_id"] for entry in raw["pruning"]["activation_axes"]}
         passes = raw["pruning"]["activation_passes"]

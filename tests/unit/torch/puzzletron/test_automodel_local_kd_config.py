@@ -12,22 +12,18 @@ from modelopt.torch.puzzletron.plugins.automodel import (
 )
 
 
-def test_local_kd_uses_canonical_logical_dp_when_recipe_mesh_includes_ep():
-    cfg = OmegaConf.create(
-        {"parallel": {"dp": 2}, "distributed": {"dp_size": 2}}
-    )
-
+def test_local_kd_derives_logical_dp_after_ep_overlay():
     assert local_kd_config._logical_dp_size(
-        cfg,
+        OmegaConf.create({}),
         {"dp_size": 8, "ep_size": 4},
     ) == 2
 
 
-def test_local_kd_falls_back_to_recipe_dp_without_canonical_topology():
+def test_local_kd_treats_ep_as_an_overlay_not_a_sample_axis():
     assert local_kd_config._logical_dp_size(
         OmegaConf.create({}),
         {"dp_size": 8, "ep_size": 4},
-    ) == 8
+    ) == 2
 
 
 def test_nested_hidden_widths_include_teacher_identity_candidate():
@@ -79,12 +75,12 @@ def test_local_kd_only_requires_publication_validation_when_exporting_hf():
     )
 
 
-def test_local_kd_treats_disabled_data_parallel_axis_as_one(
+def test_local_kd_rejects_a_disabled_data_parallel_axis_with_ep(
     monkeypatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(
         local_kd_config,
-        "_load_recipe",
+        "build_stage_recipe_config",
         lambda _cfg: {
             "model": {},
             "distributed": {
@@ -112,7 +108,16 @@ def test_local_kd_treats_disabled_data_parallel_axis_as_one(
             "model": {"force_hf": False, "trust_remote_code": True},
             "data": {"modality": "text"},
             "bypass": {
-                "automodel": {"recipe_path": "unused.yaml"},
+                "automodel": {
+                    "parallel": {
+                        "tp": 1,
+                        "cp": 1,
+                        "pp": 2,
+                        "ep": 2,
+                        "dp_shard": 2,
+                        "dp_replicate": 1,
+                    }
+                },
                 "elastic": False,
                 "single_batch_overfit": True,
                 "dtype": "bf16",
@@ -132,12 +137,8 @@ def test_local_kd_treats_disabled_data_parallel_axis_as_one(
         }
     )
 
-    recipe = local_kd_config.build_local_kd_recipe_config(cfg)
-
-    assert recipe["step_scheduler"]["global_batch_size"] == 4
-    assert recipe["step_scheduler"]["local_batch_size"] == 2
-    assert recipe["distributed"]["pipeline"]["pp_batch_size"] == 1
-    assert recipe["checkpoint"]["save_consolidated"] is False
+    with pytest.raises(ValueError, match="dp_size must be divisible by ep_size"):
+        local_kd_config.build_local_kd_recipe_config(cfg)
 
 
 def test_local_kd_reads_parallel_size_from_canonical_automodel_recipe() -> None:
