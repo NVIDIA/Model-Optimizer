@@ -33,7 +33,6 @@ from modelopt.torch.distill.doge_megatron_data import (
     _next_doge_batches,
 )
 from modelopt.torch.distill.doge_megatron_loss import (
-    DoGEAlignmentParamScope,
     compute_alignment_scores,
     weighted_source_forward_step,
     zero_weighted_source_forward_step,
@@ -54,7 +53,6 @@ class DoGEForwardStep:
         output_dir: str | Path,
         freeze_student: bool = False,
         freeze_blend: bool = False,
-        alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
@@ -67,8 +65,6 @@ class DoGEForwardStep:
             output_dir: Directory where DoGE writes the weight trajectory.
             freeze_student: Log DoGE scores without updating student weights.
             freeze_blend: Log candidate blend-weight updates without applying them.
-            alignment_param_scope: Parameter scope used for DoGE gradient scoring.
-                ``all_trainable`` is intended for expensive diagnostic runs.
         """
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -79,7 +75,6 @@ class DoGEForwardStep:
         self.trajectory_path = Path(output_dir) / "doge_weights.jsonl"
         self.freeze_student = freeze_student
         self.freeze_blend = freeze_blend
-        self.alignment_param_scope = alignment_param_scope
 
     def write_trajectory_record(
         self,
@@ -168,7 +163,6 @@ class DoGEForwardStep:
             target_batch,
             model,
             self.blend_weights,
-            self.alignment_param_scope,
         )
 
         candidate_blend_weights = dict(
