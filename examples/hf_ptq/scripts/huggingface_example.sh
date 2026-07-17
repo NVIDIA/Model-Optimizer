@@ -111,6 +111,7 @@ if [ -n "$AUTO_QUANTIZE_BITS" ]; then
     PTQ_ARGS+=" --auto_quantize_bits=$AUTO_QUANTIZE_BITS "
     PTQ_ARGS+=" --auto_quantize_method=${AUTO_QUANTIZE_METHOD:-gradient} "
     PTQ_ARGS+=" --auto_quantize_score_size=${AUTO_QUANTIZE_SCORE_SIZE:-128} "
+    PTQ_ARGS+=" --auto_quantize_score_model=${AUTO_QUANTIZE_SCORE_MODEL:-raw} "
     PTQ_ARGS+=" --auto_quantize_cost_model=${AUTO_QUANTIZE_COST_MODEL:-weight} "
     if [ -n "$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO" ]; then
         PTQ_ARGS+=" --auto_quantize_active_moe_expert_ratio=$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO "

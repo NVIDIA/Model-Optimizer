@@ -53,7 +53,11 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
-    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "weight"}
+    assert inputs["constraints"] == {
+        "effective_bits": 5.4,
+        "cost_model": "weight",
+        "score_model": "raw",
+    }
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
     assert inputs["score_size"] == 128
@@ -148,6 +152,8 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
         "active_moe",
         "--auto_quantize_active_moe_expert_ratio",
         "0.03125",
+        "--auto_quantize_score_model",
+        "per_element",
         "--kv_cache_qformat",
         "none",
     )
@@ -156,6 +162,7 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
     assert aq.constraints.effective_bits == 5.4
     assert aq.constraints.cost_model == "active_moe"
     assert aq.constraints.cost.active_moe_expert_ratio == 0.03125
+    assert aq.constraints.score_model == "per_element"
     assert aq.auto_quantize_method == "gradient"
     assert aq.score_size == 128
     # candidates come from --qformat and resolve to their shipped presets.

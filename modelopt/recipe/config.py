@@ -182,6 +182,12 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         title="Cost-model parameters",
         description="Extra cost-model parameters; omit for the 'weight' cost model.",
     )
+    score_model: Literal["raw", "per_element"] = ModeloptField(
+        default="raw",
+        title="Selector score model",
+        description="'raw' uses sensitivity scores directly; 'per_element' normalizes each "
+        "score by the represented weight-element cost before budgeted selection.",
+    )
 
     @field_validator("effective_bits")
     @classmethod
@@ -247,6 +253,14 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 "implicit additional choice). For uniform quantization, use a PTQ recipe instead."
             )
         return v
+
+    @model_validator(mode="after")
+    def _validate_scoring_configuration(self):
+        if self.auto_quantize_method == "kl_div" and self.constraints.score_model != "raw":
+            raise ValueError(
+                "auto_quantize_method='kl_div' requires constraints.score_model='raw'."
+            )
+        return self
 
 
 class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):

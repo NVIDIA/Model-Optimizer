@@ -1726,6 +1726,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert aq.constraints.effective_bits == 4.8
     assert aq.constraints.cost_model == "weight"
     assert aq.constraints.cost is None
+    assert aq.constraints.score_model == "raw"
     assert len(aq.candidate_formats) == 2
 
 
@@ -1754,6 +1755,7 @@ def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
         "effective_bits": 6.0,
         "cost_model": "active_moe",
         "cost": {"active_moe_expert_ratio": 0.03125},
+        "score_model": "raw",
     }
 
 
@@ -1797,6 +1799,31 @@ def test_load_recipe_autoquantize_effective_bits_out_of_range_raises(tmp_path):
     bad.write_text(_AQ_MINIMAL_BODY.replace("effective_bits: 4.8", "effective_bits: 20"))
     with pytest.raises(ValueError, match="effective_bits"):
         load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_per_element_scoring(tmp_path):
+    recipe_file = tmp_path / "per_element.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace(
+            "    effective_bits: 4.8\n",
+            "    effective_bits: 4.8\n    score_model: per_element\n",
+        )
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+    assert aq.constraints.score_model == "per_element"
+
+
+def test_load_recipe_autoquantize_rejects_per_element_kl_div(tmp_path):
+    recipe_file = tmp_path / "per_element_kl_div.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace(
+            "    effective_bits: 4.8\n",
+            "    effective_bits: 4.8\n    score_model: per_element\n",
+        )
+        + "  auto_quantize_method: kl_div\n"
+    )
+    with pytest.raises(ValueError, match=r"requires constraints\.score_model='raw'"):
+        load_recipe(recipe_file)
 
 
 def test_load_recipe_autoquantize_builtin_active_moe():

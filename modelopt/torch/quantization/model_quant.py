@@ -318,11 +318,16 @@ def auto_quantize(
                 constraints = {
                     "effective_bits": 4.8,
                     "cost_model": "active_moe",
+                    "score_model": "per_element",
                     "cost": {
                         "active_moe_expert_ratio": 0.25,
                         "excluded_module_name_patterns": ["*visual*", "*vision_tower*", "*mtp*"],
                     },
                 }
+
+            ``score_model="per_element"`` normalizes each sensitivity score by the
+            number of weight elements represented by that search decision. The default
+            ``"raw"`` preserves the original objective.
 
         quantization_formats: A list of quantization format config dictionaries or string names to search for.
             Each config dictionary should be valid as a ``config`` argument in

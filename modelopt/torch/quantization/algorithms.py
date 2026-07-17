@@ -43,6 +43,9 @@ from . import model_calib
 from ._auto_quantize_cost import (
     ACTIVE_MOE_EXPERT_RATIO_KEY,
     AUTO_QUANTIZE_CONSTRAINT_KEYS,
+    AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT,
+    AUTO_QUANTIZE_SCORE_MODEL_RAW,
+    AUTO_QUANTIZE_SCORE_MODELS,
     COST_MODEL_ACTIVE_MOE,
     COST_MODEL_WEIGHT,
     _get_module_weight_numel,
@@ -516,6 +519,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": "weight",
             "cost": {},
             "active_moe_expert_ratio": None,
+            "score_model": AUTO_QUANTIZE_SCORE_MODEL_RAW,
             "cost_denominator": None,
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
@@ -725,22 +729,25 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, scores, costs = [], [], []
+            formats, scores, costs, element_costs = [], [], [], []
             prev_score = float("inf")
             for recipe in hparam.choices:
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)  # type: ignore [arg-type]
                 cost = hparam.get_cost(recipe)  # type: ignore [arg-type]
+                element_cost = hparam.get_cost(recipe, cost_weight=1.0)  # type: ignore [arg-type]
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
                 costs.append(cost)
+                element_costs.append(element_cost)
                 prev_score = score
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["costs"] = costs
+            self.candidate_stats[name]["element_costs"] = element_costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
@@ -763,6 +770,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         super().before_search()
         self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
+        if (
+            self.method_name != "gradient"
+            and self.constraints["score_model"] != AUTO_QUANTIZE_SCORE_MODEL_RAW
+        ):
+            raise ValueError("score_model='per_element' is supported only with method='gradient'.")
         self.config["cost_model"] = self.constraints["cost_model"]
         self.config["cost"] = self.constraints.get("cost", {})
         self.config["active_moe_expert_ratio"] = self.config["cost"].get(
@@ -791,6 +803,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
+        self.score_model = self.constraints["score_model"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
 
@@ -920,7 +933,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert "effective_bits" in self.constraints and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
-            "`constraints` must contain 'effective_bits' and may contain 'cost_model' and 'cost'. "
+            "`constraints` must contain 'effective_bits' and may contain 'cost_model', 'cost', "
+            "and 'score_model'. "
             f"Got {self.constraints.keys()}."
         )
 
@@ -975,7 +989,10 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             effective_bits_from_search = (best_constraints / total_weight_size) * 16
 
         self.best["recipe"] = best_recipe
-        self.best["constraints"] = {"effective_bits": effective_bits_from_search}
+        self.best["constraints"] = {
+            "effective_bits": effective_bits_from_search,
+            "score_model": self.constraints.get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW),
+        }
         self.best["score"] = best_scores
 
         QuantRecipe.fold_pqs_to_weights(self.model)
@@ -1258,6 +1275,29 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                 max_weight_size, lower_bound
             )
 
+            candidate_scores = [
+                self._candidate_scores_for_search(candidate_stat)
+                for candidate_stat in self.candidate_stats.values()
+            ]
+            requires_objective_rescaling = (
+                getattr(self, "constraints", {}).get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW)
+                == AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT
+            )
+            max_abs_score = (
+                max(
+                    (abs(float(score)) for scores in candidate_scores for score in scores),
+                    default=0.0,
+                )
+                if requires_objective_rescaling
+                else 0.0
+            )
+            if max_abs_score > 0.0:
+                # Per-element coefficients can fall below CBC's objective tolerance. Global
+                # rescaling preserves the optimum without changing the default gradient objective.
+                candidate_scores = [
+                    [score / max_abs_score for score in scores] for scores in candidate_scores
+                ]
+
             lps = LPS(
                 name="AutoQuantize",
                 constraints=constraints,
@@ -1266,9 +1306,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                         candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
                     ]
                 },
-                candidate_scores=[
-                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
-                ],
+                candidate_scores=candidate_scores,
                 objective_type="minimize",
                 verbose=verbose,
             )
@@ -1293,6 +1331,30 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             }
 
         return best_recipes, is_satisfied
+
+    def _candidate_scores_for_search(self, candidate_stat: dict[str, Any]) -> list[float]:
+        """Return objective coefficients for the configured score model."""
+        score_model = getattr(self, "constraints", {}).get(
+            "score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW
+        )
+        if score_model == AUTO_QUANTIZE_SCORE_MODEL_RAW:
+            return candidate_stat["scores"]
+        if score_model == AUTO_QUANTIZE_SCORE_MODEL_PER_ELEMENT:
+            element_costs = candidate_stat.get("element_costs")
+            if element_costs is None:
+                cost_weight = candidate_stat.get("cost_weight", 1.0)
+                element_costs = [
+                    cost / cost_weight if cost_weight > 0 else cost
+                    for cost in candidate_stat["costs"]
+                ]
+            return [
+                score / cost if cost > 0 else score
+                for score, cost in zip(candidate_stat["scores"], element_costs)
+            ]
+        raise ValueError(
+            f"Unsupported AutoQuantize score_model: {score_model}. "
+            f"Expected one of {sorted(AUTO_QUANTIZE_SCORE_MODELS)}."
+        )
 
 
 @torch.compile(dynamic=True)
@@ -1647,6 +1709,17 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost_model": searcher.cost_model,
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
+    }
+    score_model = constraints.get(
+        "score_model", search_state.get("score_model", AUTO_QUANTIZE_SCORE_MODEL_RAW)
+    )
+    if score_model not in AUTO_QUANTIZE_SCORE_MODELS:
+        raise ValueError(
+            f"constraints['score_model'] must be one of {sorted(AUTO_QUANTIZE_SCORE_MODELS)}."
+        )
+    searcher.constraints = {
+        "effective_bits": effective_bits,
+        "score_model": score_model,
     }
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
 

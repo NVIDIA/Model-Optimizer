@@ -352,18 +352,21 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 `AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 `AutoQuantize` is driven by an **AutoQuantize recipe** passed with `--recipe`. The recipe defines the
-candidate formats, the `effective_bits` target, cost model, scoring method, search-disabled layers, and
-cost-excluded layers — see [`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
+candidate formats, the `effective_bits` target, cost model, scoring objective, search-disabled
+layers, and cost-excluded layers — see
+[`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
 
 > *Migration: prefer an AutoQuantize `--recipe`. The `--auto_quantize_bits`, `--auto_quantize_method`,
-> `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and `--auto_quantize_active_moe_expert_ratio`
+> `--auto_quantize_score_size`, `--auto_quantize_score_model`, `--auto_quantize_cost_model`, and
+> `--auto_quantize_active_moe_expert_ratio`
 > CLI flags are **deprecated but still work** — they are converted into an `AutoQuantizeConfig` on the fly
 > (with a `DeprecationWarning`) and will be removed in a future release. They map to recipe fields:
 > `--auto_quantize_bits` → `constraints.effective_bits`, `--auto_quantize_method` → `auto_quantize_method`,
-> `--auto_quantize_score_size` → `score_size`, `--auto_quantize_cost_model` → `constraints.cost_model`,
+> `--auto_quantize_score_size` → `score_size`, `--auto_quantize_score_model` →
+> `constraints.score_model`, `--auto_quantize_cost_model` → `constraints.cost_model`,
 > `--auto_quantize_active_moe_expert_ratio` → `constraints.cost.active_moe_expert_ratio`, and the
 > `--qformat fp8,nvfp4` candidate list → `candidate_formats`. When converted, the shared base
 > `disabled_layers` and `cost_excluded_layers` patterns are appended automatically. `--auto_quantize_checkpoint`
@@ -381,9 +384,11 @@ scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/n
 The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4) and
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
-`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
-`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
-accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
+`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`),
+`constraints.score_model` (`raw` / `per_element`), `score_size`, `disabled_layers` (excluded from
+the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
+towers). `per_element` normalizes each selector coefficient by the represented weight elements and
+is supported by gradient scoring. Recipes can splice a shared base `disabled_layers` set via
 `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
 bf16 (no quantization) is always an implicit per-layer choice, so `candidate_formats` need only list
@@ -407,7 +412,9 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
-> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div` method does not require backpropagation.*
+> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support
+> (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div`
+> method does not require backpropagation.*
 
 ## Real Quant
 

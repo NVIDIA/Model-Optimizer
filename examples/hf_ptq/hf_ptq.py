@@ -383,6 +383,7 @@ def _auto_quantize_config_from_cli(args: argparse.Namespace):
             effective_bits=args.auto_quantize_bits,
             cost_model=args.auto_quantize_cost_model,
             cost=cost,
+            score_model=args.auto_quantize_score_model,
         ),
         candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES[q]) for q in args.qformat.split(",")],
         auto_quantize_method=args.auto_quantize_method,
@@ -1484,6 +1485,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=128,
         help="[Deprecated: use an AutoQuantize --recipe] Number of samples for sensitivity scoring.",
+    )
+    parser.add_argument(
+        "--auto_quantize_score_model",
+        type=str,
+        default="raw",
+        choices=["raw", "per_element"],
+        help="[Deprecated: use an AutoQuantize --recipe] Selector score model.",
     )
     parser.add_argument(
         "--auto_quantize_cost_model",
