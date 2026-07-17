@@ -24,6 +24,7 @@ def test_profile_kd_overfit_worker_uses_canonical_sanity_stage_and_stage_mesh(
     }
     config = {
         "experiment": {"dir": str(tmp_path)},
+        "parallel": {"tp": 1, "cp": 1, "pp": 2, "dp": 1, "ep": 4},
         "global_distillation_sanity": {
             "enabled": True,
             "profile_id": "old-profile",
@@ -72,6 +73,7 @@ def test_profile_kd_overfit_worker_uses_canonical_sanity_stage_and_stage_mesh(
 
     assert captured["stage"] == "global_distillation_sanity"
     assert "distillation_overfit" not in captured["config"]
+    assert "parallel" not in captured["config"]
     sanity = captured["config"]["global_distillation_sanity"]
     assert sanity["profile_id"] == "runtime-075"
     assert sanity["solution_ids"] == ["best"]

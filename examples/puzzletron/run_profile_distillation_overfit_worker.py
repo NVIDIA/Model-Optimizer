@@ -30,6 +30,7 @@ def main() -> None:
     config = dict(manifest.get("config") or (manifest.get("inputs") or {}).get("config") or {})
     if not config:
         raise ValueError(f"manifest contains no resolved config: {manifest_path}")
+    config.pop("parallel", None)
     stage_cfg = dict(config.get("global_distillation_sanity") or {})
     stage_cfg.update(
         {
