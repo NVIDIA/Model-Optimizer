@@ -19,16 +19,15 @@ import inspect
 import io
 
 import numpy as np
-import onnx
 import pytest
 import torch
-from onnx import TensorProto, helper, numpy_helper
 
+onnx = pytest.importorskip("onnx")
 pytest.importorskip("onnxruntime")
-
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_tester
+from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.tensor_quant as tensor_quant
