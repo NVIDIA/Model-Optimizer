@@ -226,7 +226,10 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
             "distillation.automodel.parallel.dp_shard must be divisible by ep; "
             f"got dp_shard={dp_shard}, ep={ep}"
         )
-    logical_dp = _int_value((parallel, "dp_replicate")) * (dp_shard // ep)
+    # AutoModel's ``dp_size`` describes the physical FSDP mesh. EP overlays
+    # its shard axis, so the recipe must retain all shard ranks instead of
+    # collapsing them to the logical sample-DP degree.
+    physical_dp = _int_value((parallel, "dp_replicate")) * dp_shard
     model_cfg = config.get("model") or {}
     runtime_cfg = config.get("_runtime") or {}
     exp_dir = Path((config.get("experiment") or {})["dir"])
@@ -287,7 +290,7 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         pp=_int_value((parallel, "pp")),
         ep=ep,
         cp=_int_value((parallel, "cp")),
-        dp=logical_dp,
+        dp=physical_dp,
         sequence_parallel=bool(parallel.get("sequence_parallel", False)),
         activation_checkpointing=kd_cfg.get(
             "activation_checkpointing",

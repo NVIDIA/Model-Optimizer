@@ -204,6 +204,48 @@ def test_global_distillation_stage_promotes_canonical_namespace(tmp_path):
     assert (kd_config.pp, kd_config.cp, kd_config.dp) == (2, 4, 8)
 
 
+def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.global_automodel._model_recipe",
+        lambda *args, teacher=False, **kwargs: {"teacher": teacher},
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "nemotron_h"},
+        "distillation": {
+            "domain": "llm",
+            "local_batch_size": 2,
+            "global_batch_size": 16,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 2,
+                    "ep": 4,
+                    "dp_shard": 4,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    kd_config = build_global_kd_config(config)
+    recipe = build_automodel_global_kd_recipe(kd_config)
+
+    assert (kd_config.pp, kd_config.ep, kd_config.dp) == (2, 4, 4)
+    assert recipe["distributed"]["dp_size"] == 4
+
+
 def test_teacher_hidden_is_rewrapped_on_equivalent_lm_head_mesh(monkeypatch):
     import torch
 
