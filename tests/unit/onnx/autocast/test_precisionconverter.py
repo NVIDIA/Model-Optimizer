@@ -1854,3 +1854,80 @@ def test_if_subgraph_outer_scope_type_preservation(
     assert len(else_x_info) > 0, "X value_info should be preserved in else branch"
     assert then_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
     assert else_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
+
+
+def test_folded_constant_cast_updates_value_info_type():
+    const_tensor = numpy_helper.from_array(
+        np.array([1.0, 2.0], dtype=np.float32), name="const_value"
+    )
+    const_node = helper.make_node(
+        "Constant", [], ["const_out"], name="const_node", value=const_tensor
+    )
+    cast_node = helper.make_node(
+        "Cast", ["const_out"], ["cast_out"], name="cast_to_fp16", to=TensorProto.FLOAT16
+    )
+    identity_node = helper.make_node("Identity", ["cast_out"], ["Y"], name="identity")
+
+    graph = helper.make_graph(
+        [const_node, cast_node, identity_node],
+        "constant_cast_value_info",
+        [],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [2])],
+        [],
+        value_info=[helper.make_tensor_value_info("const_out", TensorProto.FLOAT, [2])],
+    )
+    model = helper.make_model(graph, producer_name="constant_cast_value_info")
+    model.opset_import[0].version = 19
+    model.ir_version = 10
+
+    folded = onnx_utils.remove_redundant_casts(model)
+
+    assert [node.op_type for node in folded.graph.node] == ["Constant", "Identity"]
+    const_out = next(vi for vi in folded.graph.value_info if vi.name == "const_out")
+    assert const_out.type.tensor_type.elem_type == TensorProto.FLOAT16
+    onnx.shape_inference.infer_shapes(folded, strict_mode=True, check_type=True)
+
+
+def test_custom_op_mode_uses_schema_shape_for_standard_gathernd():
+    data = helper.make_tensor_value_info("data", TensorProto.FLOAT, [1, 4, 2])
+    plugin_in = helper.make_tensor_value_info("plugin_in", TensorProto.FLOAT, [1, 4, 2])
+    indices_init = numpy_helper.from_array(
+        np.array([[[0, 0], [3, 1]]], dtype=np.int64), name="indices"
+    )
+    custom_node = helper.make_node(
+        "FakeTensorRTPlugin", ["plugin_in"], ["plugin_out"], name="fake_plugin"
+    )
+    gather_node = helper.make_node(
+        "GatherND",
+        ["data", "indices"],
+        ["last_token_embed"],
+        name="shape_changing_gathernd",
+        batch_dims=1,
+    )
+    graph = helper.make_graph(
+        [custom_node, gather_node],
+        "custom_op_gathernd_shape",
+        [data, plugin_in],
+        [
+            helper.make_tensor_value_info("plugin_out", TensorProto.FLOAT, [1, 4, 2]),
+            helper.make_tensor_value_info("last_token_embed", TensorProto.FLOAT, None),
+        ],
+        [indices_init],
+    )
+    model = helper.make_model(graph, producer_name="custom_op_gathernd_shape")
+    model.opset_import[0].version = 19
+    model.ir_version = 10
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        custom_ops={"FakeTensorRTPlugin"},
+    )
+    propagated = converter._propagate_types_shapes_custom_ops(model)
+
+    output = next(vi for vi in propagated.graph.output if vi.name == "last_token_embed")
+    assert [dim.dim_value for dim in output.type.tensor_type.shape.dim] == [1, 2]

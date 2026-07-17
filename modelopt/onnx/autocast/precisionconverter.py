@@ -289,6 +289,33 @@ class PrecisionConverter:
     def _propagate_types_shapes_custom_ops(self, model):
         """Propagate types and shapes after insertion of 'Cast' nodes or other graph modifications."""
         logger.info("Propagating tensor shapes and types in model with custom ops.")
+
+        def _get_shape(tensor):
+            if isinstance(tensor, gs.Constant):
+                return list(tensor.values.shape)
+            if not tensor.shape:
+                return None
+            return list(tensor.shape)
+
+        def _infer_gathernd_op_shape(node):
+            if node.op != "GatherND" or len(node.inputs) < 2:
+                return None
+
+            data_shape = _get_shape(node.inputs[0])
+            indices_shape = _get_shape(node.inputs[1])
+            if not data_shape or not indices_shape:
+                return None
+
+            index_rank = indices_shape[-1]
+            batch_dims = node.attrs.get("batch_dims", 0)
+            if not isinstance(index_rank, int) or not isinstance(batch_dims, int):
+                return None
+
+            suffix_start = batch_dims + index_rank
+            if suffix_start > len(data_shape):
+                return None
+            return indices_shape[:-1] + data_shape[suffix_start:]
+
         graph = gs.import_onnx(model)
         traversed_tensors = []
 
@@ -398,7 +425,9 @@ class PrecisionConverter:
 
                 # Set the output shape
                 if not out.shape:
-                    if isinstance(inp, gs.Constant):
+                    if shape := _infer_gathernd_op_shape(node):
+                        out.shape = shape
+                    elif isinstance(inp, gs.Constant):
                         out.shape = inp.values.shape
                     elif inp.inputs and inp.inputs[0].op == "Constant":
                         out.shape = inp.inputs[0].attrs["value"].values.shape
