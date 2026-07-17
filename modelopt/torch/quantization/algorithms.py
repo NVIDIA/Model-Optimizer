@@ -595,6 +595,17 @@ class QuantRecipeHparam(Hparam):
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
 _LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_SELF_ATTN_GROUP_RE = re.compile(r"^((?:.*\.)?self_attn)\.(?:q_proj|k_proj|v_proj|o_proj)$")
+_LINEAR_ATTN_GROUP_RE = re.compile(
+    r"^((?:.*\.)?linear_attn)\.(?:in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)$"
+)
+_FUSED_EXPERTS_PARENT_RE = re.compile(r"^((?:.*\.)?(?:mlp|mixer))\.experts$")
+
+AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL = "local"
+AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP = "group"
+AUTO_QUANTIZE_SCORE_BOUNDARIES = frozenset(
+    {AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL, AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP}
+)
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -605,6 +616,27 @@ def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
 def _linear_attn_ba_group_key(_model, name: str) -> str | None:
     m = _LINEAR_ATTN_BA_RE.match(name)
     return f"{m.group(1)}/ba" if m else None
+
+
+def _self_attn_group_score_module(_model, name: str) -> str | None:
+    match = _SELF_ATTN_GROUP_RE.match(name)
+    return match.group(1) if match else None
+
+
+def _linear_attn_group_score_module(_model, name: str) -> str | None:
+    match = _LINEAR_ATTN_GROUP_RE.match(name)
+    return match.group(1) if match else None
+
+
+def _fused_experts_parent_score_module(model, name: str) -> str | None:
+    match = _FUSED_EXPERTS_PARENT_RE.match(name)
+    if match is None:
+        return None
+    try:
+        module = model.get_submodule(name)
+    except AttributeError:
+        return None
+    return match.group(1) if _is_hf_quant_fused_experts_module(module) else None
 
 
 def _module_search_space_signature(module_search_spaces) -> tuple:
@@ -675,6 +707,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": COST_MODEL_WEIGHT,
             "cost": {},
             "active_moe_expert_ratio": None,
+            "score_boundary": None,
         }
 
     @property
@@ -685,6 +718,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_model": "weight",
             "cost": {},
             "active_moe_expert_ratio": None,
+            "score_boundary": AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL,
             "cost_denominator": None,
             "quantization_formats_signature": None,
             "fixed_quantization_config_signature": None,
@@ -707,7 +741,29 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
+        if config["score_boundary"] is None:
+            config["score_boundary"] = (
+                AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
+                if self.method_name == "kl_div"
+                else AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP
+            )
+        if config["score_boundary"] not in AUTO_QUANTIZE_SCORE_BOUNDARIES:
+            raise ValueError(
+                f"score_boundary must be one of {sorted(AUTO_QUANTIZE_SCORE_BOUNDARIES)}."
+            )
         return config
+
+    def _get_score_module_rules(self):
+        rules = []
+        if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP:
+            rules.extend(
+                [
+                    _self_attn_group_score_module,
+                    _linear_attn_group_score_module,
+                ]
+            )
+        rules.extend(self.score_module_rules)
+        return rules
 
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
@@ -917,7 +973,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             # Apply score_module_rules to determine the score module name, then get the actual module
             score_module_name = name  # Default: score from same module
-            for rule in self.score_module_rules:
+            for rule in self._get_score_module_rules():
                 result = self._apply_score_group_rule(name, rule)
                 if result is not None:
                     score_module_name = result
@@ -1099,6 +1155,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         super().before_search()
         self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
+        if (
+            self.method_name != "gradient"
+            and self.config["score_boundary"] != AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
+        ):
+            raise ValueError("score_boundary='group' is supported only with method='gradient'.")
         self.config["cost_model"] = self.constraints["cost_model"]
         self.config["cost"] = self.constraints.get("cost", {})
         self.config["active_moe_expert_ratio"] = self.config["cost"].get(
@@ -1113,6 +1174,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         restored_cost_model = getattr(self, "cost_model", "weight")
         restored_active_moe_expert_ratio = getattr(self, "active_moe_expert_ratio", None)
+        restored_score_boundary = getattr(
+            self, "score_boundary", AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
+        )
         if self.candidate_stats and (
             restored_cost_model != self.config["cost_model"]
             or restored_active_moe_expert_ratio != self.config["active_moe_expert_ratio"]
@@ -1123,10 +1187,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 f"current=({self.config['cost_model']}, {self.config['active_moe_expert_ratio']}). "
                 "Use a different checkpoint path."
             )
+        if self.candidate_stats and restored_score_boundary != self.config["score_boundary"]:
+            raise ValueError(
+                "Checkpoint AutoQuantize score boundary does not match current search config: "
+                f"checkpoint={restored_score_boundary}, current={self.config['score_boundary']}. "
+                "Use a different checkpoint path."
+            )
         self.method = self.method_name
         self.cost_model = self.config["cost_model"]
         self.cost = self.config["cost"]
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
+        self.score_boundary = self.config["score_boundary"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
 
@@ -1473,11 +1544,16 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     method_name = "gradient"
 
     score_module_rules = [
-        # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
+        # Use the parent MLP output for unfused routed experts.
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        # Apply the same parent boundary to shared-expert projections.
+        r"^((?:.*\.)?mlp)\.shared_expert\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
+        # Fused expert containers are one quant module; preserve the established
+        # expert behavior by measuring their perturbation at the parent MLP output.
+        _fused_experts_parent_score_module,
     ]
 
     # See `register_custom_support` for details
@@ -1553,12 +1629,12 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     @torch.enable_grad()
     def _estimate_auto_quantize_scores(self, is_param_grad_enabled):
         # TODO: remove the no-quant recipe
-        def auto_quantize_score_estimate_forward(module, input, *args, **kwargs):
+        def auto_quantize_score_estimate_forward(module, *args, **kwargs):
             for hparam in module._hparams_for_scoring:
                 if hparam.is_configurable:
                     hparam.active = QuantRecipe(quant_cfg=None)
 
-            output = module._forward_original(input, *args, **kwargs)
+            output = module._forward_original(*args, **kwargs)
 
             # If gradient checkpointing is enabled, gradient will not be enabled in the global forward pass.
             # With gradient checkpointing, gradients are computed in the local forward pass during backward pass
@@ -1576,7 +1652,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                         if recipe == QuantRecipe(quant_cfg=None):
                             continue
                         hparam.active = recipe
-                        output_diff = module._forward_original(input, *args, **kwargs)
+                        output_diff = module._forward_original(*args, **kwargs)
 
                         if isinstance(output_diff, tuple):
                             output_diff = output_diff[0] - output[0]
@@ -1652,20 +1728,27 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             torch.cuda.reset_peak_memory_stats()
             report_memory("AutoQuantize: starting score estimation, ")
 
-        self._run_func(
-            self.config["forward_backward_step"],
-            num_iters=self.config["num_score_steps"],
-            desc="Estimating auto_quantize scores",
+        cache_originals = (
+            _set_model_use_cache(self.model, False)
+            if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP
+            else []
         )
+        try:
+            self._run_func(
+                self.config["forward_backward_step"],
+                num_iters=self.config["num_score_steps"],
+                desc="Estimating auto_quantize scores",
+            )
 
-        if torch.cuda.is_available():
-            report_memory("AutoQuantize: After score estimation")
+            if torch.cuda.is_available():
+                report_memory("AutoQuantize: After score estimation")
+        finally:
+            _restore_model_use_cache(cache_originals)
+            for module in score_modules:
+                cleanup_module_after_score_estimation(module)
 
-        for module in score_modules:
-            cleanup_module_after_score_estimation(module)
-
-        for name, param in self.model.named_parameters():
-            cleanup_params_after_score_estimation(name, param, params_metadata)
+            for name, param in self.model.named_parameters():
+                cleanup_params_after_score_estimation(name, param, params_metadata)
 
         # Delete the params_metadata
         del params_metadata
@@ -1741,6 +1824,40 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             }
 
         return best_recipes, is_satisfied
+
+
+def _get_model_config_objects(model: nn.Module) -> list[Any]:
+    """Return unique model configs that may carry generation cache defaults."""
+    configs = []
+    seen = set()
+    for module in model.modules():
+        for attr_name in ("config", "generation_config"):
+            config = getattr(module, attr_name, None)
+            if config is None or id(config) in seen:
+                continue
+            seen.add(id(config))
+            configs.append(config)
+            for nested_name in ("text_config", "language_config"):
+                nested = getattr(config, nested_name, None)
+                if nested is not None and id(nested) not in seen:
+                    seen.add(id(nested))
+                    configs.append(nested)
+    return configs
+
+
+def _set_model_use_cache(model: nn.Module, use_cache: bool) -> list[tuple[Any, Any]]:
+    """Set use_cache on model configs and return values to restore."""
+    originals = []
+    for config in _get_model_config_objects(model):
+        if hasattr(config, "use_cache"):
+            originals.append((config, config.use_cache))
+            config.use_cache = use_cache
+    return originals
+
+
+def _restore_model_use_cache(originals: list[tuple[Any, Any]]) -> None:
+    for config, use_cache in originals:
+        config.use_cache = use_cache
 
 
 @torch.compile(dynamic=True)

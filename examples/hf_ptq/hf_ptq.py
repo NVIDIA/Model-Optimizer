@@ -371,6 +371,7 @@ def _mtq_inputs_from_auto_quantize_config(
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
+        "score_boundary": aq_config.score_boundary,
         "score_size": aq_config.score_size,
     }
 
@@ -501,6 +502,7 @@ def auto_quantize(
         verbose=True,
         disabled_layers=inputs["disabled_layers"],
         method=inputs["method"],
+        score_boundary=inputs["score_boundary"],
         checkpoint=args.auto_quantize_checkpoint,
     )
 

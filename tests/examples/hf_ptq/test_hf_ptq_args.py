@@ -56,6 +56,7 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "weight"}
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
+    assert inputs["score_boundary"] is None
     assert inputs["score_size"] == 128
     assert inputs["fixed_quantization_config"] is None
     assert inputs["module_search_spaces"] == []
@@ -188,6 +189,7 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
     assert aq.constraints.cost_model == "active_moe"
     assert aq.constraints.cost.active_moe_expert_ratio == 0.03125
     assert aq.auto_quantize_method == "gradient"
+    assert aq.score_boundary is None
     assert aq.score_size == 128
     # candidates come from --qformat and resolve to their shipped presets.
     assert [hf_ptq._match_candidate_to_preset(f)[0] for f in aq.candidate_formats] == [

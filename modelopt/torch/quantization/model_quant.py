@@ -282,6 +282,7 @@ def auto_quantize(
     checkpoint: str | None = None,
     module_search_spaces: list[dict[str, Any]] | None = None,
     fixed_quantization_config: dict[str, Any] | str | None = None,
+    score_boundary: str | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
@@ -442,6 +443,12 @@ def auto_quantize(
             linear programming search, and requires ``loss_func`` or ``forward_backward_step``) and
             ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
             threshold-based binary search, and only requires ``forward_step`` returning logits).
+        score_boundary: Boundary used to measure perturbations. ``"local"``
+            scores attention projections at their leaf outputs. ``"group"`` scores them at the
+            parent self-attention or linear-attention output. Expert projections retain their
+            established parent MLP/mixer score boundary in either mode. This does not group recipe
+            decisions or force attention modules to use the same quantization format. Defaults to
+            ``"group"`` for ``method="gradient"`` and ``"local"`` for ``method="kl_div"``.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -640,6 +647,7 @@ def auto_quantize(
         "forward_backward_step": forward_backward_step,
         "num_calib_steps": num_calib_steps,
         "num_score_steps": num_score_steps,
+        "score_boundary": score_boundary,
         "disabled_layers": disabled_layers,
         "verbose": verbose,
         "checkpoint": checkpoint,

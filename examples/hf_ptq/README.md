@@ -352,7 +352,8 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 `AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 `AutoQuantize` is driven by an **AutoQuantize recipe** passed with `--recipe`. The recipe defines the
-candidate formats, optional fixed PTQ baseline, `effective_bits` target, cost model, scoring method,
+candidate formats, optional fixed PTQ baseline, `effective_bits` target, cost model, scoring method
+and boundary,
 search-disabled layers, and cost-excluded layers — see
 [`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
@@ -360,11 +361,13 @@ recipes (carrying architecture-specific disabled layers — e.g. VL vision tower
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
 
 > *Migration: prefer an AutoQuantize `--recipe`. The `--auto_quantize_bits`, `--auto_quantize_method`,
-> `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and `--auto_quantize_active_moe_expert_ratio`
+> `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and
+> `--auto_quantize_active_moe_expert_ratio`
 > CLI flags are **deprecated but still work** — they are converted into an `AutoQuantizeConfig` on the fly
 > (with a `DeprecationWarning`) and will be removed in a future release. They map to recipe fields:
 > `--auto_quantize_bits` → `constraints.effective_bits`, `--auto_quantize_method` → `auto_quantize_method`,
-> `--auto_quantize_score_size` → `score_size`, `--auto_quantize_cost_model` → `constraints.cost_model`,
+> `--auto_quantize_score_size` → `score_size`,
+> `--auto_quantize_cost_model` → `constraints.cost_model`,
 > `--auto_quantize_active_moe_expert_ratio` → `constraints.cost.active_moe_expert_ratio`, and the
 > `--qformat fp8,nvfp4` candidate list → `candidate_formats`. When converted, the shared base
 > `disabled_layers` and `cost_excluded_layers` patterns are appended automatically. `--auto_quantize_checkpoint`
@@ -385,8 +388,12 @@ keeps the more sensitive ones at higher precision (or unquantized), so the model
 `constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
 `module_search_spaces` (optional per-module candidate overrides), `disabled_layers` (excluded from
 the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
-towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
-`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+towers), and `score_boundary` (`local` / `group`). Group scoring is the default for gradient; it
+changes the measurement boundary but does not force attention projections to share one recipe
+decision. Set `score_boundary: local` in the recipe to restore leaf-output attention scoring;
+expert projections retain their established parent MLP/mixer scoring boundary. Recipes can splice
+a shared base `disabled_layers` set via
+`$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
 AutoQuantize recipes support two mutually exclusive search-space styles:
 
@@ -450,7 +457,9 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
-> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div` method does not require backpropagation.*
+> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support
+> (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div`
+> method does not require backpropagation.*
 
 ## Real Quant
 

@@ -73,6 +73,40 @@ class TransformerBlock(torch.nn.Module):
         return torch.randn(1, 4, 32)
 
 
+class _LinearAttentionLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.in_proj_qkv = torch.nn.Linear(32, 32)
+        self.in_proj_z = torch.nn.Linear(32, 32)
+        self.in_proj_a = torch.nn.Linear(32, 32)
+        self.in_proj_b = torch.nn.Linear(32, 32)
+        self.out_proj = torch.nn.Linear(32, 32)
+
+    def forward(self, x):
+        x = self.in_proj_qkv(x) + self.in_proj_z(x)
+        x = x + self.in_proj_a(x) + self.in_proj_b(x)
+        return self.out_proj(x)
+
+
+class _GroupBoundaryModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            use_cache=True,
+            text_config=SimpleNamespace(use_cache=True),
+        )
+        self.use_cache_seen = []
+        self.self_attn = _AttentionLayer()
+        self.linear_attn = _LinearAttentionLayer()
+
+    def forward(self, x):
+        self.use_cache_seen.append((self.config.use_cache, self.config.text_config.use_cache))
+        return self.linear_attn(x=self.self_attn(x=x))
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
+
+
 class _AutoQuantMoeModel(torch.nn.Module):
     def __init__(self, num_experts_attr="num_experts"):
         super().__init__()
@@ -706,6 +740,137 @@ def test_active_moe_search_prefers_budget_lower_bound():
 
     assert is_satisfied
     assert best_recipes["layers.0.mlp.quant_recipe"]["format"] == "near_budget"
+
+
+def test_auto_quantize_local_boundary_scores_shared_expert_at_parent_mlp():
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.config = {"score_boundary": "local"}
+
+    score_modules = []
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        name = f"model.layers.0.mlp.shared_expert.{projection}"
+        score_module = next(
+            (
+                result
+                for rule in searcher._get_score_module_rules()
+                if (result := searcher._apply_score_group_rule(name, rule)) is not None
+            ),
+            name,
+        )
+        score_modules.append(score_module)
+
+    assert score_modules == ["model.layers.0.mlp"] * 3
+
+
+@pytest.mark.parametrize("parent_name", ["mlp", "mixer"])
+def test_auto_quantize_local_boundary_scores_fused_experts_at_parent(monkeypatch, parent_name):
+    model = torch.nn.Module()
+    parent = torch.nn.Module()
+    parent.experts = torch.nn.Module()
+    setattr(model, parent_name, parent)
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.algorithms._is_hf_quant_fused_experts_module",
+        lambda module: module is parent.experts,
+    )
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.model = model
+    searcher.config = {"score_boundary": "local"}
+
+    score_module = next(
+        result
+        for rule in searcher._get_score_module_rules()
+        if (
+            result := searcher._apply_score_group_rule(
+                f"{parent_name}.experts",
+                rule,
+            )
+        )
+        is not None
+    )
+
+    assert score_module == parent_name
+
+
+def test_auto_quantize_group_score_boundary_does_not_group_recipe_decisions():
+    model = _GroupBoundaryModel()
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="gradient",
+    )
+
+    self_qkv = model.self_attn.q_proj.get_hparam("quant_recipe")
+    self_o = model.self_attn.o_proj.get_hparam("quant_recipe")
+    linear_qkvz = model.linear_attn.in_proj_qkv.get_hparam("quant_recipe")
+    linear_ba = model.linear_attn.in_proj_a.get_hparam("quant_recipe")
+    linear_out = model.linear_attn.out_proj.get_hparam("quant_recipe")
+
+    assert self_qkv is not self_o
+    assert linear_qkvz is not linear_ba
+    assert linear_qkvz is not linear_out
+    assert linear_ba is not linear_out
+    assert self_qkv.score_modules == [model.self_attn]
+    assert self_o.score_modules == [model.self_attn]
+    assert linear_qkvz.score_modules == [model.linear_attn]
+    assert linear_ba.score_modules == [model.linear_attn]
+    assert linear_out.score_modules == [model.linear_attn]
+    assert search_state["score_boundary"] == "group"
+    assert search_state["method"] == "gradient"
+    assert any(
+        score > 0 for stats in search_state["candidate_stats"].values() for score in stats["scores"]
+    )
+    assert model.config.use_cache is True
+    assert model.config.text_config.use_cache is True
+    assert (False, False) in model.use_cache_seen
+
+
+def test_auto_quantize_gradient_defaults_to_group_boundary_and_supports_keyword_calls():
+    model = _GroupBoundaryModel()
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="gradient",
+    )
+
+    assert search_state["score_boundary"] == "group"
+    assert search_state["method"] == "gradient"
+    assert any(
+        score > 0 for stats in search_state["candidate_stats"].values() for score in stats["scores"]
+    )
+    assert model.config.use_cache is True
+    assert model.config.text_config.use_cache is True
+    assert (False, False) in model.use_cache_seen
+
+
+def test_auto_quantize_gradient_local_boundary_opt_out():
+    model = _GroupBoundaryModel()
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="gradient",
+        score_boundary="local",
+    )
+
+    assert search_state["score_boundary"] == "local"
+    assert (False, False) not in model.use_cache_seen
 
 
 # use this config to test custom quantization config
@@ -1434,6 +1599,38 @@ def test_auto_quantize_calibration_only_checkpoint_validates_global_formats_and_
         )
 
 
+def test_auto_quantize_checkpoint_rejects_score_boundary_mismatch(tmp_path):
+    checkpoint_path = str(tmp_path / "autoquant_group_boundary.pth")
+    model = _GroupBoundaryModel()
+    common = {
+        "constraints": {"effective_bits": 8.0},
+        "quantization_formats": [
+            mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+            mtq.INT8_DEFAULT_CFG,
+        ],
+        "forward_step": lambda model, batch: model(batch),
+        "loss_func": lambda output, data: output.sum(),
+        "num_calib_steps": 1,
+        "num_score_steps": 1,
+        "checkpoint": checkpoint_path,
+    }
+    mtq.auto_quantize(
+        model,
+        data_loader=[model.get_input()],
+        score_boundary="group",
+        **common,
+    )
+
+    resumed_model = _GroupBoundaryModel()
+    with pytest.raises(ValueError, match="score boundary does not match"):
+        mtq.auto_quantize(
+            resumed_model,
+            data_loader=[resumed_model.get_input()],
+            score_boundary="local",
+            **common,
+        )
+
+
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 def test_get_auto_quantize_config(method):
     model = TransformerBlock()
@@ -1452,6 +1649,7 @@ def test_get_auto_quantize_config(method):
 
     # Verify search_state has method and module_names
     assert search_state["method"] == method
+    assert search_state["score_boundary"] == ("local" if method == "kl_div" else "group")
     for stats in search_state["candidate_stats"].values():
         assert "module_names" in stats
         assert len(stats["module_names"]) > 0

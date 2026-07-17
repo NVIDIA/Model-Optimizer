@@ -259,6 +259,13 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         title="Sensitivity scoring method",
         description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
     )
+    score_boundary: Literal["local", "group"] | None = ModeloptField(
+        default=None,
+        title="Sensitivity score boundary",
+        description="'local' scores attention projections at their leaf outputs; 'group' scores "
+        "them at the parent attention output. Expert projections retain their established parent "
+        "MLP boundary in either mode. Defaults to 'group' for gradient and 'local' for kl_div.",
+    )
     score_size: int = ModeloptField(
         default=128,
         title="Scoring sample count",
@@ -291,6 +298,15 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
                 "entry. For uniform quantization, use a PTQ recipe instead."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_scoring_configuration(self):
+        boundary = self.score_boundary or (
+            "local" if self.auto_quantize_method == "kl_div" else "group"
+        )
+        if self.auto_quantize_method == "kl_div" and boundary != "local":
+            raise ValueError("auto_quantize_method='kl_div' requires score_boundary='local'.")
         return self
 
 
