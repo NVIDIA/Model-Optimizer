@@ -284,16 +284,6 @@ def test_preflight_preserves_probe_stage_errors_and_partial_metadata() -> None:
     assert "descriptor: unsupported example" in result.models[0].errors
 
 
-def test_canonical_yaml_matches_default_registry() -> None:
-    loaded = load_campaign(
-        Path("examples/puzzletron/configs/clean/campaigns/cross_model_stage_matrix.yaml")
-    )
-    default = default_cross_model_campaign()
-
-    assert loaded == default
-    assert loaded.fingerprint == default.fingerprint
-
-
 def test_mtp_field_scan_accepts_integer_config_keys() -> None:
     config = {"layers": {0: {"mtp_num_hidden_layers": 1}, 1: {"width": 128}}}
 

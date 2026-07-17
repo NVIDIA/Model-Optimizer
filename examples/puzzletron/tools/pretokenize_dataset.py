@@ -34,7 +34,7 @@ block size.
 
 Usage (CPU-only, no GPU; run on a many-core node):
     python examples/puzzletron/tools/pretokenize_dataset.py \
-        --config examples/puzzletron/configs/clean/families/qwen3_5/qwen3_5_0_8b/smoke_test.yaml \
+        --config examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml \
         --output data/Nemotron-Post-Training-Dataset-v2-qwen35-tokenized \
         --num-proc 64
 

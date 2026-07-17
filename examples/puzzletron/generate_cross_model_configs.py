@@ -17,7 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--campaign",
         type=Path,
-        default=Path("examples/puzzletron/configs/clean/campaigns/cross_model_stage_matrix.yaml"),
+        required=True,
+        help="Cross-model campaign YAML to compile.",
     )
     parser.add_argument(
         "--preflight",

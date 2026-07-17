@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ROOT=${PUZZLETRON_ROOT:-${SCRIPT_ROOT}}
-CAMPAIGN=${ROOT}/examples/puzzletron/configs/clean/campaigns/cross_model_stage_matrix.yaml
+: "${PUZZLETRON_CAMPAIGN_CONFIG:?export PUZZLETRON_CAMPAIGN_CONFIG with the campaign YAML path}"
+CAMPAIGN=${PUZZLETRON_CAMPAIGN_CONFIG}
 CAMPAIGN_ROOT=${PUZZLETRON_CAMPAIGN_ROOT:-${ROOT}/puzzle_runs/clean/acceptance/cross-model-stage-matrix}
 PREFLIGHT=${CAMPAIGN_ROOT}/campaign/preflight.json
 RUNNER=${ROOT}/examples/puzzletron/run_cross_model_stage.sh

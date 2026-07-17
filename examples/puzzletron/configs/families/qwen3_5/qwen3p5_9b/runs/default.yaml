@@ -1,0 +1,388 @@
+# @package _global_
+
+defaults:
+  - /base@_global_
+  - /families/qwen3_5/family@_global_
+  - /families/qwen3_5/qwen3p5_9b/model@_global_
+  - _self_
+
+# Canonical current-code reconstruction of the end-to-end tested Qwen campaign.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_9b}
+
+model:
+  force_hf: false
+  revision: main
+data:
+  layout: fixed
+  max_sample_length: 16384
+  packing: null
+embedding_pruning:
+  widths:
+  - 4096
+  alignment: 256
+pruning:
+  experiment_id: qwen35_9b_16k_1b_tokens
+  eval_samples: 65536
+  block_size: 16384
+  activation_hooks_kwargs:
+    token_chunk_size: 256
+  automodel:
+    force_hf: false
+    parallel:
+      cp: 4
+      pp: 2
+      pipeline_schedule: interleaved1f1b
+  packed_token_cache_path: ${train_token_cache_path}
+  activation_checkpoint_interval: 4
+  attention_scored_axes:
+  - kv_groups
+  - q_heads_per_group
+  attention_token_chunk_size: 512
+  gdn_scored_axes:
+  - gdn_key_groups
+  - gdn_value_heads_per_group
+  - gdn_key_head_dim
+  - gdn_value_head_dim
+bypass:
+  granularity: subblock
+  automodel:
+    parallel:
+      pp: 8
+      pipeline_schedule: 1f1b
+  elastic: true
+  iter_num: 1024
+  step_num: 1024
+  token_count: 1073741824
+  data:
+    block_size: 16384
+    max_eval_samples: 128
+    packed_token_cache_path: ${train_token_cache_path}
+    validation_packed_token_cache_path: ${validation_token_cache_path}
+  training:
+    learning_rate: 0.0003
+    training_tokens: 1073741824
+    micro_batch_size: 8
+    val_micro_batch_size: 8
+    weight_decay: 0.0
+    eval_interval: 128
+  find_last_ckpt_for_resume: true
+  model:
+    model_overrides:
+      delete_old_checkpoints: false
+      save_interval_seconds: 12600
+  model_factory:
+    keys_to_learn: entire_block
+  overfit:
+    repetitions: 128
+    modes:
+    - smallest_fixed
+    - diverse_resampled
+    learning_rate: 0.0003
+    grad_accumulation_steps: 1
+  elastic_include_no_op: false
+  elastic_cycle_all_targets: true
+  use_nested_bypassed_checkpoint_for_scoring: false
+build_library:
+  source_checkpoint_dir: ${scoring_parent_dir}
+  enabled: true
+vllm_stats:
+  enabled: true
+  prefill_seq_len: 16384
+  runtime_stats:
+    num_iters: 5
+    num_warmup_iters: 3
+    execution: inline
+    include_noop_baselines: false
+replacement_scoring:
+  granularity: subblock
+  eval_samples: 128
+  block_size: 16384
+  automodel:
+    force_hf: false
+    parallel:
+      cp: 4
+      pp: 2
+      pipeline_schedule: interleaved1f1b
+    lm_head_backend: flash_kld
+    flash_kld_token_chunk_size: 1024
+    flash_kld_reduction_backend: fla
+    gdn_cp_backend: replicated_exact
+  packed_token_cache_path: ${validation_token_cache_path}
+  source_checkpoint_dir: ${scoring_parent_dir}
+  target_teacher_dir: ${scoring_parent_dir}
+  distributed_eval:
+    gpus_per_task: 1
+realize_model:
+  skip_validation: false
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 16384
+  automodel:
+    force_hf: false
+    parallel:
+      cp: 4
+      pp: 2
+      pipeline_schedule: interleaved1f1b
+    lm_head_backend: flash_kld
+    flash_kld_token_chunk_size: 1024
+  packed_token_cache_path: ${validation_token_cache_path}
+mip:
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.subblock_output_dir}}
+  score_granularity: subblock
+  canonical_solutions_path: ${to_path:${replacement_scoring.subblock_solutions_path}}
+  depth_trajectory_path: ${puzzle_dir}/depth/iterative/trajectory.json
+  depth_scenario_count: 7
+  human_constraints:
+    target_latency_ratio: 0.95
+  latency_constraint_profiles:
+  - 0.95
+  grid_budgeting:
+    enabled: false
+  enabled: true
+global_distillation:
+  automodel:
+    activation_checkpointing: true
+    parallel:
+      cp: 4
+      pp: 2
+      dp_replicate: 8
+      pipeline_schedule: 1f1b
+  force_hf: false
+  enabled: true
+  selection: best_evaluation
+  evaluation_summary_path: ${puzzle_dir}/artifacts/zero_shot_evaluation/profiles/latency-095/text-s128-l16384/evaluation_summary.json
+  domain: llm
+  global_batch_size: 16
+  local_batch_size: 2
+  max_steps: 256
+  validation_enabled: false
+  resume: true
+  freeze_policy: projector_and_language
+  objective:
+    main_ce: 0.25
+    main_kd:
+      weight: 0.25
+      metric: kld
+      temperature: 1.0
+      chunk_size: 64
+    mtp_ce: 0.25
+    mtp_kd:
+      weight: 0.25
+      metric: kld
+      temperature: 1.0
+      chunk_size: 64
+  metadata:
+    llm:
+      dataset:
+        target: modelopt.torch.puzzletron.distillation.dataset.make_puzzletron_llm_dataset
+        dataset_path: ${dataset_path}
+        split: train
+        num_samples: 4096
+        seq_length: 16384
+        packed_token_cache_path: ${train_token_cache_path}
+        seed: 444
+      dataloader:
+        target: torchdata.stateful_dataloader.StatefulDataLoader
+        shuffle: false
+        collate_fn: modelopt.torch.puzzletron.distillation.dataset.collate_puzzletron_llm_batch
+  num_best_to_distill: 1
+  profile_id: latency-095
+  checkpoint_every_steps: 128
+  lr: 1.0e-05
+  save_consolidated: false
+  checkpoint_format: torch_save
+zero_shot_evaluation:
+  enabled: true
+  eval_samples: 128
+  block_size: 16384
+  packed_token_cache_path: ${validation_token_cache_path}
+aiperf:
+  enabled: true
+  executable: aiperf
+  checkpoint_source: scenario_grid
+  endpoint_type: completions
+  use_server_token_count: true
+  input_tokens: 16384
+  output_tokens: 4096
+  concurrency:
+  - 1
+  - 4
+  - 16
+  - 64
+  minimum_request_count: 4
+  requests_per_concurrency: 2
+  seed: 42
+  topology:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 2
+    prefill_context_parallel_size: 1
+    decode_context_parallel_size: 1
+    distributed_executor_backend: mp
+    gpu_group_size: 2
+  num_best_to_eval: 1
+  profile_id: latency-095
+  expected_solution_count: 1
+  topology_matrix:
+  - id: tp2
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    expert_parallel_size: 1
+  - id: pp2
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 2
+    data_parallel_size: 1
+    expert_parallel_size: 1
+  - id: dp2
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    data_parallel_size: 2
+    expert_parallel_size: 1
+search_space:
+  no_op:
+    subblocks: []
+    whole_block: false
+    cartesian: false
+scoring_parent_dir: ${puzzle_dir}/ckpts/sorted_teacher
+train_token_cache_path: ${puzzle_dir}/dataset_cache/nemotron2_train_65536x16384.tokens
+validation_token_cache_path: ${puzzle_dir}/dataset_cache/nemotron2_validation_128x16384.tokens
+execution:
+  gpus_per_node: 8
+tokenize_data:
+  enabled: true
+  workers: 64
+  tokenize_batch_size: 64
+  content_field: messages
+  caches:
+  - output: ${train_token_cache_path}
+    split: train
+    num_samples: 65536
+    seq_length: 16384
+    shuffle_seed: 444
+  - output: ${validation_token_cache_path}
+    split: validation
+    num_samples: 128
+    seq_length: 16384
+    shuffle_seed: 445
+sort_sanity:
+  enabled: true
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 16384
+  packed_token_cache_path: ${validation_token_cache_path}
+  max_abs_lm_loss_delta: 0.001
+  max_kl_div: 0.01
+  automodel:
+    parallel:
+      tp: 1
+      cp: 4
+      pp: 2
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: interleaved1f1b
+  include_reverse: true
+width_sanity:
+  enabled: true
+  single_load_parent_sweep: true
+  methods:
+  - activation
+  - random
+  - reverse
+  layer_count: 2
+  ratios:
+  - 0.875
+  - 0.75
+  eval_samples: 32
+  block_size: 4096
+  require_beats_random: true
+  require_beats_reverse: true
+  automodel:
+    parallel:
+      tp: 1
+      cp: 4
+      pp: 2
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: interleaved1f1b
+  one_case_per_axis: false
+  target_count_per_axis: 2
+  layer_selection: random
+  comparison_tolerance: 1.0e-05
+  physical_realization: true
+  hidden_width_diagnostic: true
+bypass_sanity:
+  enabled: true
+  steps: 32
+  fixed_smallest: true
+  diverse_nested: true
+bypass_diagnostic:
+  enabled: false
+depth_importance:
+  enabled: true
+  granularity: subblock
+  source_checkpoint_dir: ${scoring_parent_dir}
+  output_dir: ${puzzle_dir}/depth/iterative
+  max_removals: 6
+  max_subblocks_to_remove: 6
+  expected_initial_sublayers: 64
+  metric: lm_loss
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 16384
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 4
+      pp: 2
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: interleaved1f1b
+global_distillation_sanity:
+  enabled: true
+  profile_id: latency-095
+  sample_count: 8
+  sequence_length: 16384
+  packed_token_cache_path: ${train_token_cache_path}
+  max_steps: 128
+  local_batch_size: 8
+  lr: 0.0001
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 8
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+  registry_path: ${puzzle_dir}/mip/profiles/latency-095/selected_solutions.json
+  solution_ids:
+  - h4096-d4
+  checkpoint_every_steps: 16
+  main_ce_weight: 1.0
+  main_kd_weight: 1.0
+  mtp_ce_weight: 1.0
+  mtp_kd_weight: 1.0
+display_name: Qwen3p5_9B
+artifact_import:
+  source_root: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs}/qwen3_5/qwen3_5_9b/full_pipeline
+  bundles:
+  - width_importance
+  - depth_importance
+  - vllm_stats
+  - replacement_scoring
+  - bypass
+  bypass_evidence_report_only: true
+post_distillation_evaluation:
+  enabled: true
+  eval_samples: 128
+  block_size: 16384
+  packed_token_cache_path: ${validation_token_cache_path}

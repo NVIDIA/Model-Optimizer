@@ -1,0 +1,608 @@
+# @package _global_
+
+defaults:
+  - /base@_global_
+  - /families/nemotron3/family@_global_
+  - /families/nemotron3/nano_30b_a3b_bf16/model@_global_
+  - _self_
+
+# Canonical configuration for the end-to-end tested Nano campaign.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/nemotron3-nano-30b-a3b-puzzletron-v1}
+
+skip_realize_model: true
+model:
+  force_hf: false
+  revision: cbd3fa9f933d55ef16a84236559f4ee2a0526848
+data:
+  layout: fixed
+  max_sample_length: 8192
+  packing: null
+embedding_pruning:
+  enabled: true
+  widths:
+  - 2688
+  - 2560
+  - 2432
+  alignment: 128
+pruning:
+  experiment_id: nano-width-importance-8192x8192
+  eval_samples: 8192
+  block_size: 8192
+  activation_hooks_kwargs:
+    token_chunk_size: 256
+  automodel:
+    force_hf: false
+    parallel:
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      pipeline_schedule: 1f1b
+  activation_passes:
+  - name: hidden_width
+    activation_hooks_kwargs:
+      method: minitron_hidden_width
+  - name: attention_grouped
+    pruning_mixin:
+      _target_: modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsPruningMixIn
+      layer_descriptor:
+        _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHKVHeadsLayerDescriptor
+    hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook}
+    activation_hooks_kwargs:
+      method: grouped_attention_contribution
+      optimize_for: memory
+      target_layer: mixer.o_proj
+      layer_input_descriptors_path: null
+  - name: moe_expert_removal
+    pruning_mixin:
+      _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+      layer_descriptor:
+        _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+        target_name: mixer
+        require_attrs:
+        - gate
+        - experts
+    activation_hooks_kwargs:
+      method: removed_expert_diff
+      target_layer: mixer
+  - name: moe_expert_intermediate
+    pruning_mixin:
+      _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+      layer_descriptor:
+        _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+        target_name: regex:(^|\.)(backbone|model)?\.?layers\.\d+\.mixer\.experts(\.\d+\.down_proj)?$
+    activation_hooks_kwargs:
+      method: moe_channel
+      target_layer: mixer.experts
+  - name: moe_shared_expert_intermediate
+    pruning_mixin:
+      _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MoEPruningMixIn
+      layer_descriptor:
+        _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMoELayerDescriptor
+        target_name: mixer.shared_experts.down_proj
+    activation_hooks_kwargs:
+      method: shared_expert_intermediate_contribution
+      target_layer: mixer.shared_experts.down_proj
+  - name: mamba_head_and_dim
+    pruning_mixin:
+      _target_: modelopt.torch.puzzletron.pruning.moe_mamba_pruning_mixin.MambaPruningMixIn
+      layer_descriptor:
+        _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHMambaLayerDescriptor
+        target_name: mixer.in_proj
+    activation_hooks_kwargs:
+      method: mamba_head_and_dim
+      target_layer: mixer.in_proj
+  packed_token_cache_path: ${train_token_cache_path}
+  attention_scored_axes:
+  - kv_groups
+  - q_heads_per_group
+  attention_token_chunk_size: 512
+bypass:
+  enabled: true
+  granularity: subblock
+  automodel:
+    parallel:
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      pipeline_schedule: 1f1b
+  elastic: true
+  iter_num: 0
+  data:
+    block_size: 8192
+    max_eval_samples: 128
+    packed_token_cache_path: ${train_token_cache_path}
+    validation_packed_token_cache_path: ${validation_token_cache_path}
+  training:
+    learning_rate: 1.0e-06
+    training_tokens: 67108864
+    grad_accumulation_steps: 64
+    weight_decay: 0.0
+    eval_interval: 128
+  find_last_ckpt_for_resume: true
+  model_factory:
+    keys_to_learn: entire_block
+  elastic_include_no_op: false
+  elastic_cycle_all_targets: true
+  use_nested_bypassed_checkpoint_for_scoring: false
+  overfit:
+    repetitions: 128
+    modes:
+    - smallest_fixed
+    - diverse_resampled
+    learning_rate: 0.0003
+    grad_accumulation_steps: 16
+build_library:
+  source_checkpoint_dir: ${scoring_parent_dir}
+  include_bypass: true
+  enabled: true
+vllm_stats:
+  enabled: true
+  batch_sizes:
+  - 4
+  prefill_seq_len: 8192
+  generation_seq_len: 1024
+  model_hidden_sizes:
+  - 2688
+  - 2560
+  - 2432
+  parameter_workers: 3
+  runtime_stats:
+    granularity: subblock
+    num_iters: 5
+    num_warmup_iters: 3
+    max_num_seqs: 4
+    ignore_negatives: true
+    reuse_stats_path: ${puzzle_dir}/evidence/subblock_stats.before_persistent-buffer-count.json
+    execution: sharded
+    include_noop_baselines: false
+    vllm_env:
+      VLLM_USE_FUSED_MOE_GROUPED_TOPK: '1'
+    repeat_block_n_times: 4
+    sparse_sampling:
+      enabled: false
+      max_pairwise_per_family: 0
+      seed: 42
+replacement_scoring:
+  granularity: subblock
+  eval_samples: 128
+  block_size: 8192
+  automodel:
+    force_hf: false
+    parallel:
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      pipeline_schedule: 1f1b
+    lm_head_backend: flash_kld
+    flash_kld_token_chunk_size: 1024
+  source_checkpoint_dir: ${scoring_parent_dir}
+  target_teacher_dir: ${scoring_parent_dir}
+  bypass_checkpoint_dir: ${puzzle_dir}/ckpts/elastic_sorted_teacher
+  packed_token_cache_path: ${validation_token_cache_path}
+  distributed_eval:
+    gpus_per_task: 8
+realize_model:
+  skip_validation: false
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 8192
+  automodel:
+    force_hf: false
+    parallel:
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      pipeline_schedule: 1f1b
+    lm_head_backend: flash_kld
+    flash_kld_token_chunk_size: 1024
+  packed_token_cache_path: ${validation_token_cache_path}
+mip:
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.subblock_output_dir}}
+  score_granularity: subblock
+  canonical_solutions_path: ${to_path:${replacement_scoring.subblock_solutions_path}}
+  enabled: true
+  depth_trajectory_path: ${puzzle_dir}/depth/iterative/trajectory.json
+  depth_scenario_count: 6
+  human_constraints:
+    num_params_ratio: 0.75
+  constraint_profiles:
+  - 0.75
+  latency_constraint_profiles:
+  - 0.75
+  grid_budgeting:
+    enabled: false
+  workloads:
+    serving-8k:
+      isl: 8192
+      osl: 1024
+      batch_size: 4
+      concurrency: 4
+  profiles:
+    params-075:
+      num_homogeneous_solutions: 5
+      constraints:
+        params:
+          min: 73%
+          max: 75%
+      search_space:
+        depth:
+          range:
+          - 0
+          - 5
+        embedding:
+        - 2688
+        - 2560
+        - 2432
+    runtime-075:
+      num_homogeneous_solutions: 5
+      constraints:
+        runtime:
+          at:
+            serving-8k:
+              min: 73%
+              max: 75%
+      search_space:
+        depth:
+          range:
+          - 0
+          - 5
+        embedding:
+        - 2688
+        - 2560
+        - 2432
+    memory-075:
+      num_homogeneous_solutions: 5
+      constraints:
+        memory:
+          at:
+            serving-8k:
+              min: 73%
+              max: 75%
+      search_space:
+        depth:
+          range:
+          - 0
+          - 5
+        embedding:
+        - 2688
+        - 2560
+        - 2432
+    params-075-num-experts-only:
+      num_homogeneous_solutions: 5
+      constraints:
+        params:
+          min: 73%
+          max: 75%
+      search_space:
+        depth:
+          range:
+          - 0
+          - 5
+        embedding:
+        - 2688
+        - 2560
+        - 2432
+        axes_default: teacher
+        axes:
+          n_routed_experts: all
+    params-075-expert-dim-only:
+      num_homogeneous_solutions: 5
+      constraints:
+        params:
+          min: 73%
+          max: 75%
+      search_space:
+        depth:
+          range:
+          - 0
+          - 5
+        embedding:
+        - 2688
+        - 2560
+        - 2432
+        axes_default: teacher
+        axes:
+          moe_intermediate_size: all
+    params-075-num-experts-and-expert-dim:
+      num_homogeneous_solutions: 5
+      constraints:
+        params:
+          min: 73%
+          max: 75%
+      search_space:
+        depth:
+          range:
+          - 0
+          - 5
+        embedding:
+        - 2688
+        - 2560
+        - 2432
+        axes_default: teacher
+        axes:
+          n_routed_experts: all
+          moe_intermediate_size: all
+global_distillation:
+  automodel:
+    activation_checkpointing: true
+    parallel:
+      pp: 4
+      ep: 2
+      dp_shard: 2
+      pipeline_schedule: 1f1b
+  force_hf: false
+  enabled: true
+  profile_id: runtime-075
+  selection: best_evaluation
+  evaluation_summary_path: ${puzzle_dir}/artifacts/zero_shot_evaluation/profiles/runtime-075/text-s128-l8192/evaluation_summary.json
+  save_consolidated: true
+  domain: llm
+  global_batch_size: 64
+  local_batch_size: 4
+  max_steps: 128
+  validation_enabled: false
+  resume: true
+  student_model_kwargs:
+    torch_dtype: float32
+  teacher_model_kwargs:
+    torch_dtype: bfloat16
+  num_best_to_distill: 1
+  freeze_policy: projector_and_language
+  objective:
+    main_ce:
+      weight: 0.5
+    main_kd:
+      weight: 0.5
+      metric: kld
+      temperature: 1.0
+      chunk_size: 64
+    mtp_ce:
+      weight: 0.0
+    mtp_kd:
+      weight: 0.0
+      metric: kld
+      temperature: 1.0
+      chunk_size: 64
+  metadata:
+    llm:
+      dataset:
+        target: modelopt.torch.puzzletron.distillation.dataset.make_puzzletron_llm_dataset
+        dataset_path: ${dataset_path}
+        split: train
+        num_samples: 8192
+        seq_length: 8192
+        packed_token_cache_path: ${train_token_cache_path}
+        seed: 444
+      dataloader:
+        target: torchdata.stateful_dataloader.StatefulDataLoader
+        shuffle: false
+        collate_fn: modelopt.torch.puzzletron.distillation.dataset.collate_puzzletron_llm_batch
+zero_shot_evaluation:
+  enabled: true
+  mode: online_solutions
+  profile_ids:
+  - params-075
+  - runtime-075
+  - memory-075
+  - params-075-num-experts-only
+  - params-075-expert-dim-only
+  - params-075-num-experts-and-expert-dim
+  eval_samples: 128
+  block_size: 8192
+  packed_token_cache_path: ${validation_token_cache_path}
+  num_best_to_eval: -1
+aiperf:
+  enabled: true
+  profile_id: runtime-075
+  executable: aiperf
+  checkpoint_source: scenario_grid
+  endpoint_type: completions
+  use_server_token_count: true
+  input_tokens: 8192
+  output_tokens: 1024
+  concurrency:
+  - 1
+  - 4
+  - 16
+  - 64
+  minimum_request_count: 8
+  requests_per_concurrency: 2
+  seed: 42
+  num_best_to_eval: 1
+  expected_solution_count: 1
+  topology_matrix:
+  - id: tp8
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    expert_parallel_size: 1
+  - id: tp4-pp2
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 2
+    data_parallel_size: 1
+    expert_parallel_size: 1
+  - id: tp2-pp4
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 4
+    data_parallel_size: 1
+    expert_parallel_size: 1
+  - id: tp2-pp2-dp2-ep2
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 2
+    data_parallel_size: 2
+    expert_parallel_size: 2
+  - id: pp2-dp4-ep4
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 2
+    data_parallel_size: 4
+    expert_parallel_size: 4
+  - id: dp8-ep8
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    data_parallel_size: 8
+    expert_parallel_size: 8
+scoring_parent_dir: ${puzzle_dir}/ckpts/sorted_teacher
+train_token_cache_path: ${puzzle_dir}/dataset_cache/train_8192x8192.tokens
+validation_token_cache_path: ${puzzle_dir}/dataset_cache/validation_128x8192.tokens
+execution:
+  gpus_per_node: 8
+tokenize_data:
+  enabled: true
+  workers: 64
+  tokenize_batch_size: 64
+  content_field: messages
+  caches:
+  - output: ${train_token_cache_path}
+    split: train
+    num_samples: 8192
+    seq_length: 8192
+    shuffle_seed: 444
+  - output: ${validation_token_cache_path}
+    split: validation
+    num_samples: 128
+    seq_length: 8192
+    shuffle_seed: 445
+sort:
+  deferred_axes: []
+sort_sanity:
+  enabled: true
+  include_reverse: true
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path: ${validation_token_cache_path}
+  max_abs_lm_loss_delta: 0.001
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+width_sanity:
+  enabled: true
+  single_load_parent_sweep: true
+  one_case_per_axis: false
+  target_count_per_axis: 2
+  layer_count: 3
+  layer_selection: random
+  ratios:
+  - 0.875
+  - 0.75
+  methods:
+  - activation
+  - random
+  - reverse
+  non_sortable_axes:
+  - moe_top_k
+  physical_realization: true
+  cleanup_physical_checkpoints: true
+  reuse_sort_equivalence: true
+  require_beats_random: false
+  require_beats_reverse: false
+  require_physical_equivalence: true
+  physical_equivalence_tolerance: 0.001
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+slicing_sanity:
+  enabled: true
+  backend: distributed_parent_sweep
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+bypass_sanity:
+  enabled: true
+  steps: 128
+  fixed_smallest: true
+  diverse_nested: true
+depth_importance:
+  enabled: true
+  granularity: subblock
+  source_checkpoint_dir: ${teacher_dir}
+  output_dir: ${puzzle_dir}/depth/iterative
+  expected_initial_sublayers: 52
+  max_removals: 5
+  max_subblocks_to_remove: 5
+  metric: lm_loss
+  eval_samples: 128
+  micro_batch_size: 1
+  block_size: 8192
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 2
+      ep: 4
+      dp_shard: 4
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+mip_solution_contract:
+  depth_values:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  hidden_widths:
+  - 2688
+  - 2560
+  - 2432
+  solutions_per_profile: 18
+global_distillation_sanity:
+  enabled: true
+  profile_id: runtime-075
+  selection: best_evaluation
+  sample_count: 16
+  sequence_length: 8192
+  packed_token_cache_path: ${train_token_cache_path}
+  max_steps: 128
+  local_batch_size: 4
+  lr: 0.0001
+  student_model_kwargs:
+    torch_dtype: float32
+  teacher_model_kwargs:
+    torch_dtype: bfloat16
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 4
+      ep: 2
+      dp_shard: 2
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
+post_distillation_evaluation:
+  enabled: true
+  eval_samples: 128
+  block_size: 8192
+  packed_token_cache_path: ${validation_token_cache_path}

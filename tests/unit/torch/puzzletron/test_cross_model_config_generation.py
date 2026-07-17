@@ -37,21 +37,17 @@ from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.stages import pipeline
 
 
-BASE_CONFIG = Path("examples/puzzletron/configs/clean/base.yaml")
+BASE_CONFIG = Path("examples/puzzletron/configs/base.yaml")
 NEMOTRON3_FAMILY_CONFIG = Path(
-    "examples/puzzletron/configs/clean/families/nemotron3/family.yaml"
-)
-SUPER_SMOKE_CONFIG = Path(
-    "examples/puzzletron/configs/clean/families/nemotron3/"
-    "super_120b_a12b_bf16/super_smoke.yaml"
+    "examples/puzzletron/configs/families/nemotron3/family.yaml"
 )
 NANO_PRODUCTION_CONFIG = Path(
-    "examples/puzzletron/configs/clean/families/nemotron3/"
-    "nano_30b_a3b_bf16/production.yaml"
+    "examples/puzzletron/configs/families/nemotron3/"
+    "nano_30b_a3b_bf16/runs/default.yaml"
 )
 QWEN_FULL_PIPELINE_CONFIG = Path(
-    "examples/puzzletron/configs/clean/families/qwen3_5/"
-    "qwen3_5_9b/full_pipeline.yaml"
+    "examples/puzzletron/configs/families/qwen3_5/"
+    "qwen3p5_9b/runs/default.yaml"
 )
 _NANO_ONE_NODE_MESH = {
     "tp": 1,
@@ -63,31 +59,18 @@ _NANO_ONE_NODE_MESH = {
 }
 
 
-def test_super_smoke_downstream_topology_and_distillation_contract() -> None:
-    config = pipeline_config_from_path(SUPER_SMOKE_CONFIG)
+def test_public_puzzletron_sources_do_not_reference_removed_clean_config_tree() -> None:
+    paths = (
+        Path("modelopt/torch/puzzletron/campaigns/config_generation.py"),
+        Path("examples/puzzletron/generate_cross_model_configs.py"),
+        Path("examples/puzzletron/verify_cross_model_configs.py"),
+        Path("examples/puzzletron/launch_cross_model_stage_matrix.sh"),
+        Path("examples/puzzletron/tools/pretokenize_dataset.py"),
+    )
 
-    assert config["embedding_pruning"]["widths"] == [4096, 3840]
-    assert config["aiperf"]["topology"] == {
-        "tensor_parallel_size": 2,
-        "pipeline_parallel_size": 2,
-        "prefill_context_parallel_size": 1,
-        "decode_context_parallel_size": 1,
-        "distributed_executor_backend": "mp",
-        "gpu_group_size": 4,
-        "extra_vllm_args": ["-cc.cudagraph_mode=NONE"],
-    }
-    assert config["mip"]["constraint_profiles"] == [0.9]
-    assert config["zero_shot_evaluation"]["profile_id"] == "params-090"
-    assert config["global_distillation_sanity"]["profile_id"] == "params-090"
-    distillation = config["global_distillation"]
-    assert distillation["profile_id"] == "params-090"
-    assert distillation["selection"] == "best_evaluation"
-    assert distillation["save_consolidated"] is True
-    assert distillation["objective"]["main_ce"]["weight"] == 0.5
-    assert distillation["objective"]["mtp_ce"]["weight"] == 0.0
-    assert distillation["metadata"]["llm"]["dataset"][
-        "packed_token_cache_path"
-    ].endswith("dataset_cache/train_2x256.tokens")
+    stale = [str(path) for path in paths if "configs/clean" in path.read_text()]
+
+    assert stale == []
 
 
 @pytest.mark.parametrize(
@@ -118,10 +101,10 @@ def test_super_smoke_downstream_topology_and_distillation_contract() -> None:
                 },
                 "bypass": {
                     "tp": 1,
-                    "cp": 2,
-                    "pp": 2,
+                    "cp": 1,
+                    "pp": 8,
                     "ep": 1,
-                    "dp_shard": 2,
+                    "dp_shard": 1,
                     "dp_replicate": 1,
                 },
                 "replacement_scoring": {

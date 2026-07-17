@@ -19,7 +19,7 @@ from .schema import CampaignModel, CrossModelCampaign
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_BASE_CONFIG = _REPO_ROOT / "examples/puzzletron/configs/clean/base.yaml"
+_BASE_CONFIG = _REPO_ROOT / "examples/puzzletron/configs/base.yaml"
 _TEXT_DATASET = Path(os.environ.get("PUZZLETRON_TEXT_DATASET", "data/puzzle_kd_text"))
 _VLM_DATASET = Path(
     os.environ.get("PUZZLETRON_MULTIMODAL_DATASET", "data/pinned_intersyn")

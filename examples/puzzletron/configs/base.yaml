@@ -3,8 +3,8 @@
 defaults:
   - _self_
 
-clean_config_root: examples/puzzletron/configs/clean
-puzzle_root: puzzle_runs/clean
+clean_config_root: examples/puzzletron/configs
+puzzle_root: puzzle_runs
 dataset_path: ../Puzzle-KD-Nemotron-Post-Training-Dataset-v2
 nccl_timeout_minutes: 120
 

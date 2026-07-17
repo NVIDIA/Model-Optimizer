@@ -21,7 +21,8 @@ def main() -> None:
     parser.add_argument(
         "--campaign",
         type=Path,
-        default=Path("examples/puzzletron/configs/clean/campaigns/cross_model_stage_matrix.yaml"),
+        required=True,
+        help="Cross-model campaign YAML used to generate the configs.",
     )
     parser.add_argument(
         "--root",
