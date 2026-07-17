@@ -34,49 +34,6 @@ from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from .base_exporter import ONNXQuantExporter
 
 
-def _topologically_sort_graph_nodes(graph: onnx.GraphProto) -> None:
-    """Stable-sort graph nodes so tensor producers precede consumers."""
-    nodes = list(graph.node)
-    producer_by_tensor: dict[str, int] = {}
-    for node_index, node in enumerate(nodes):
-        for output_name in node.output:
-            if not output_name:
-                continue
-            if output_name in producer_by_tensor:
-                raise ValueError(f"Duplicate producer for tensor {output_name!r}.")
-            producer_by_tensor[output_name] = node_index
-
-    dependencies: list[set[int]] = [set() for _ in nodes]
-    dependents: list[set[int]] = [set() for _ in nodes]
-
-    for consumer_index, node in enumerate(nodes):
-        for input_name in node.input:
-            producer_index = producer_by_tensor.get(input_name)
-            if producer_index is None:
-                continue
-            if producer_index == consumer_index:
-                raise ValueError(f"Node {node.name!r} consumes its own output {input_name!r}.")
-            dependencies[consumer_index].add(producer_index)
-            dependents[producer_index].add(consumer_index)
-
-    ready = [node_index for node_index, dependency in enumerate(dependencies) if not dependency]
-    sorted_nodes: list[onnx.NodeProto] = []
-    while ready:
-        node_index = ready.pop(0)
-        sorted_nodes.append(nodes[node_index])
-        for dependent_index in sorted(dependents[node_index]):
-            dependencies[dependent_index].remove(node_index)
-            if not dependencies[dependent_index]:
-                ready.append(dependent_index)
-        ready.sort()
-
-    if len(sorted_nodes) != len(nodes):
-        raise ValueError("Cycle detected while sorting NVFP4 ONNX graph nodes.")
-
-    graph.ClearField("node")
-    graph.node.extend(sorted_nodes)
-
-
 def _cast_fp4(array: np.ndarray) -> np.ndarray:
     """Cast a numpy array to FLOAT4E2M1 using PyTorch.
 
@@ -464,6 +421,6 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         graph.initializer.extend(new_initializers)
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
 
-        _topologically_sort_graph_nodes(graph)
+        utils.topologically_sort_graph_nodes(graph)
 
         return onnx_model
