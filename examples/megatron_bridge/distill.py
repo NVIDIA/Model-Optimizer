@@ -184,6 +184,38 @@ class _HFValidationExportCallback(Callback):
             student_hf_model, trust_remote_code=trust_remote_code
         )
 
+    @contextlib.contextmanager
+    def _detach_distillation_provider_teacher_for_export(
+        self, modules: list[tuple[str, torch.nn.Module]]
+    ):
+        """Protect the live teacher provider while Megatron-Bridge sanitizes export configs.
+
+        Hugging Face export calls Megatron-Bridge config cleanup, which can replace
+        non-pickleable callables such as ``activation_func`` with ``None``. In distillation,
+        ``model.config`` is a ``DistillationProvider`` and its ``__setattr__`` mirrors writes
+        to the teacher provider. Without detaching the teacher here, export can accidentally
+        set the live teacher's ``activation_func=None`` and the next validation/training
+        forward fails inside the teacher MLP.
+        """
+        detached: list[tuple[DistillationProvider, object]] = []
+        seen_config_ids: set[int] = set()
+        for _, root_module in modules:
+            for module in root_module.modules():
+                config = getattr(module, "config", None)
+                if not isinstance(config, DistillationProvider) or id(config) in seen_config_ids:
+                    continue
+                seen_config_ids.add(id(config))
+                teacher = config.teacher
+                if teacher is not None:
+                    config.teacher = None
+                    detached.append((config, teacher))
+
+        try:
+            yield
+        finally:
+            for config, teacher in detached:
+                config.teacher = teacher
+
     def on_eval_end(self, context) -> None:
         """Export the student at the iteration that was just validated."""
         iteration = context.state.train_state.step
@@ -196,16 +228,31 @@ class _HFValidationExportCallback(Callback):
             return
         output_path = self.export_dir / f"iter_{iteration:07d}"
         print_rank_0(f"Exporting validation checkpoint {iteration} to {output_path}")
+        model_chunks = unwrap_model(context.model)
+        distill_chunks = [
+            model_chunk
+            for model_chunk in model_chunks
+            if isinstance(model_chunk, mtd.DistillationModel)
+        ]
+        visible_chunks = [
+            (f"model[{idx}]", model_chunk) for idx, model_chunk in enumerate(model_chunks)
+        ]
 
         # DistillationModel is the student with teacher and KD-loss modules attached. Hide the
         # auxiliary modules temporarily so the Hugging Face export contains only student weights.
+        # Also detach the teacher provider while exporting: Megatron-Bridge export sanitizes
+        # ``model.config`` and can turn non-pickleable callables into ``None``. DistillationProvider
+        # mirrors those config writes to its teacher, which was the root cause of the
+        # ``activation_func=None`` failure in the next teacher forward after validation export.
         # TODO: Replace this with a cleaner student-only export path instead of mutating the
         # distillation wrapper state during export.
-        with contextlib.ExitStack() as stack:
-            for model_chunk in unwrap_model(context.model):
-                if isinstance(model_chunk, mtd.DistillationModel):
-                    stack.enter_context(model_chunk.hide_teacher_model())
-                    stack.enter_context(model_chunk.hide_loss_modules())
+        with (
+            self._detach_distillation_provider_teacher_for_export(visible_chunks),
+            contextlib.ExitStack() as stack,
+        ):
+            for model_chunk in distill_chunks:
+                stack.enter_context(model_chunk.hide_teacher_model())
+                stack.enter_context(model_chunk.hide_loss_modules())
             self.bridge.save_hf_pretrained(
                 context.model,
                 output_path,
