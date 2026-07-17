@@ -1856,7 +1856,8 @@ def test_if_subgraph_outer_scope_type_preservation(
     assert else_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
 
 
-def test_folded_constant_cast_updates_value_info_type():
+@pytest.mark.parametrize("value_info_elem_type", [TensorProto.FLOAT, TensorProto.UNDEFINED])
+def test_folded_constant_cast_updates_value_info_type(value_info_elem_type):
     const_tensor = numpy_helper.from_array(
         np.array([1.0, 2.0], dtype=np.float32), name="const_value"
     )
@@ -1874,7 +1875,7 @@ def test_folded_constant_cast_updates_value_info_type():
         [],
         [helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [2])],
         [],
-        value_info=[helper.make_tensor_value_info("const_out", TensorProto.FLOAT, [2])],
+        value_info=[helper.make_tensor_value_info("const_out", value_info_elem_type, [2])],
     )
     model = helper.make_model(graph, producer_name="constant_cast_value_info")
     model.opset_import[0].version = 19

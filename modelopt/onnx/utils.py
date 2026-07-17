@@ -1535,9 +1535,8 @@ def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.Node
 def _sync_value_info_elem_type(graph: onnx.GraphProto, tensor_name: str, elem_type: int) -> None:
     """Synchronize declarations for a tensor whose producer dtype changed."""
     for value_info in list(graph.value_info) + list(graph.input) + list(graph.output):
-        tensor_type = value_info.type.tensor_type
-        if value_info.name == tensor_name and tensor_type.elem_type:
-            tensor_type.elem_type = elem_type
+        if value_info.name == tensor_name and value_info.type.HasField("tensor_type"):
+            value_info.type.tensor_type.elem_type = elem_type
 
     for node in graph.node:
         for attr in node.attribute:
