@@ -18,9 +18,11 @@
 import inspect
 import io
 
+import numpy as np
 import onnx
 import pytest
 import torch
+from onnx import TensorProto, helper, numpy_helper
 
 pytest.importorskip("onnxruntime")
 
@@ -97,4 +99,69 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
 
     converted_model = NVFP4QuantExporter.process_model(exported_model)
     assert not any(node.op_type == "TRT_FP4QDQ" for node in converted_model.graph.node)
+    onnx.checker.check_model(converted_model)
+
+
+def test_nvfp4_shared_activation_reuses_cast():
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, 32])
+    outputs = [
+        helper.make_tensor_value_info("output0", TensorProto.FLOAT, [4, 64]),
+        helper.make_tensor_value_info("output1", TensorProto.FLOAT, [4, 64]),
+    ]
+    nodes = []
+    initializers = []
+    value_info = []
+
+    for index in range(2):
+        weight_name = f"linear{index}.weight"
+        fp4qdq_output = f"fp4qdq_output{index}"
+        initializers.append(
+            numpy_helper.from_array(
+                np.linspace(-1.0, 1.0, num=32 * 64, dtype=np.float32).reshape(32, 64),
+                weight_name,
+            )
+        )
+        value_info.append(helper.make_tensor_value_info(fp4qdq_output, TensorProto.FLOAT, [32, 64]))
+        nodes.extend(
+            [
+                helper.make_node(
+                    "TRT_FP4QDQ",
+                    inputs=[weight_name],
+                    outputs=[fp4qdq_output],
+                    name=f"weight{index}_fp4qdq",
+                    block_size=16,
+                ),
+                helper.make_node(
+                    "MatMul",
+                    inputs=["input", fp4qdq_output],
+                    outputs=[f"output{index}"],
+                    name=f"matmul{index}",
+                ),
+            ]
+        )
+
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "shared_activation_nvfp4",
+            [input_tensor],
+            outputs,
+            initializers,
+            value_info=value_info,
+        )
+    )
+
+    converted_model = NVFP4QuantExporter.process_model(model)
+    activation_casts = [
+        node
+        for node in converted_model.graph.node
+        if node.op_type == "Cast" and node.input == ["input"]
+    ]
+    assert len(activation_casts) == 1
+    assert activation_casts[0].output == ["input_f16"]
+    assert all(
+        node.input[0] == "input_f16"
+        for node in converted_model.graph.node
+        if node.op_type == "MatMul"
+    )
     onnx.checker.check_model(converted_model)
