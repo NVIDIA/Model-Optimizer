@@ -428,10 +428,21 @@ global_distillation_sanity:
   sequence_length: 8192
   packed_token_cache_path: ${train_token_cache_path}
   max_steps: 128
-  local_batch_size: 1
+  local_batch_size: 4
   lr: 1.0e-4
+  # FSDP2's BF16-compute/FP32-reduction policy needs FP32 student storage.
+  student_model_kwargs: {torch_dtype: float32}
+  teacher_model_kwargs: {torch_dtype: bfloat16}
   automodel:
-    parallel: *one_node_model_mesh
+    parallel: &one_node_kd_mesh
+      tp: 1
+      cp: 1
+      pp: 4
+      ep: 2
+      dp_shard: 2
+      dp_replicate: 1
+      sequence_parallel: false
+      pipeline_schedule: 1f1b
 
 global_distillation:
   enabled: true
@@ -441,15 +452,17 @@ global_distillation:
   backend: automodel
   automodel:
     activation_checkpointing: true
-    parallel: *one_node_model_mesh
+    parallel: *one_node_kd_mesh
   save_consolidated: true
   force_hf: false
   domain: llm
   global_batch_size: 64
-  local_batch_size: 1
+  local_batch_size: 4
   max_steps: 128
   validation_enabled: false
   resume: true
+  student_model_kwargs: {torch_dtype: float32}
+  teacher_model_kwargs: {torch_dtype: bfloat16}
   num_best_to_distill: 1
   freeze_policy: projector_and_language
   objective:

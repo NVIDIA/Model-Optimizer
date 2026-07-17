@@ -898,6 +898,8 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             "output_dir": str(output_dir),
             "teacher_descriptor": teacher_resolution.name,
             "student_descriptor": student_resolution.name,
+            "teacher_model_kwargs": dict(stage_cfg.get("teacher_model_kwargs") or {}),
+            "student_model_kwargs": dict(stage_cfg.get("student_model_kwargs") or {}),
             "teacher_force_hf": False,
             "student_force_hf": False,
             "force_hf": False,

@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+
+import torch
 
 from modelopt.torch.puzzletron.distillation.global_automodel import (
     GlobalKDConfig,
@@ -11,6 +14,77 @@ from modelopt.torch.puzzletron.distillation.global_automodel import (
     build_automodel_global_kd_recipe,
     build_global_kd_config,
 )
+
+
+def test_global_kd_pp_shape_reset_uses_pipeline_activation_dtype(monkeypatch):
+    from modelopt.torch.puzzletron.distillation import global_kd_recipe
+
+    calls = []
+    monkeypatch.setattr(
+        global_kd_recipe,
+        "reset_pp_stage_shapes",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    pp = SimpleNamespace(
+        dtype=torch.bfloat16,
+        pp_microbatch_size=2,
+        info=SimpleNamespace(schedule=object(), stages=[]),
+        parts=[SimpleNamespace(config=object())],
+    )
+
+    global_kd_recipe._reset_global_kd_pp_stage_shapes(pp, seq_len=4096)
+
+    args, kwargs = calls.pop()
+    assert args[3:] == (2, 4096)
+    assert kwargs == {"tensor_dtype": torch.bfloat16}
+
+
+def test_global_kd_pp_hidden_meta_uses_pipeline_activation_dtype():
+    from modelopt.torch.puzzletron.distillation import global_kd_recipe
+
+    submod = torch.nn.Linear(4, 4, dtype=torch.float32)
+    submod._puzzletron_distillation_hidden_output = True
+    stage = SimpleNamespace(
+        submod=submod,
+        is_last=True,
+        inputs_meta=(torch.empty(2, 8, 4, device="meta", dtype=torch.bfloat16),),
+        _outputs_meta=(),
+    )
+    pp = SimpleNamespace(dtype=torch.bfloat16, info=SimpleNamespace(stages=[stage]))
+
+    assert global_kd_recipe._refresh_pp_hidden_output_meta(pp) == 1
+    assert stage._outputs_meta[0].dtype is torch.bfloat16
+
+
+def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
+    monkeypatch,
+):
+    """Checkpoint conversion keeps the student’s per-layer MoE geometry."""
+    from modelopt.torch.puzzletron.anymodel.automodel import AutoModelDescriptorFactory
+    from modelopt.torch.puzzletron.distillation import global_kd_recipe
+
+    observed = []
+
+    class Descriptor:
+        @classmethod
+        @contextmanager
+        def native_state_dict_adapter_context(cls, block_configs):
+            observed.append(block_configs)
+            yield
+
+    monkeypatch.setattr(AutoModelDescriptorFactory, "get", lambda name: Descriptor)
+    part = SimpleNamespace(
+        config=SimpleNamespace(
+            anymodel_descriptor="nemotron_h",
+            block_configs=[{"subblock_configs": []}],
+        )
+    )
+
+    with global_kd_recipe._global_kd_checkpoint_adapter_context([part]):
+        pass
+
+    assert len(observed) == 1
+    assert observed[0][0].to_dict() == {"subblock_configs": []}
 
 
 def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
@@ -35,6 +109,8 @@ def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
 
     def fake_build_global_kd_config(candidate):
         captured["objective"] = candidate["distillation"]["objective"]
+        captured["student_model_kwargs"] = candidate["distillation"]["student_model_kwargs"]
+        captured["teacher_model_kwargs"] = candidate["distillation"]["teacher_model_kwargs"]
         return candidate["distillation"]
 
     def fake_run_global_kd(kd_config):
@@ -65,6 +141,8 @@ def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
             "sequence_length": 8,
             "max_steps": 1,
             "local_batch_size": 1,
+            "student_model_kwargs": {"torch_dtype": "float32"},
+            "teacher_model_kwargs": {"torch_dtype": "bfloat16"},
         },
     }
 
@@ -78,6 +156,8 @@ def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
         "mtp_ce": {"weight": 0.0},
         "mtp_kd": {"weight": 0.0},
     }
+    assert captured["student_model_kwargs"] == {"torch_dtype": "float32"}
+    assert captured["teacher_model_kwargs"] == {"torch_dtype": "bfloat16"}
 
 
 def test_global_distillation_summary_publishes_canonical_training_records(tmp_path):
@@ -218,6 +298,41 @@ def test_global_kd_recipe_publishes_explicit_resume_policy(tmp_path, monkeypatch
     assert build_automodel_global_kd_recipe(GlobalKDConfig(**common, resume=False))[
         "puzzletron_resume"
     ] is False
+
+
+def test_global_kd_config_preserves_per_model_dtype_overrides(tmp_path):
+    from modelopt.torch.puzzletron.distillation import global_automodel
+
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "nemotron_h", "torch_dtype": "bfloat16"},
+        "distillation": {
+            "teacher_dir": str(tmp_path / "teacher"),
+            "student_dir": str(tmp_path / "student"),
+            "output_dir": str(tmp_path / "output"),
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 2,
+                    "ep": 4,
+                    "dp_shard": 4,
+                    "dp_replicate": 1,
+                }
+            },
+            "student_model_kwargs": {"torch_dtype": "float32"},
+            "teacher_model_kwargs": {"torch_dtype": "bfloat16"},
+        },
+    }
+
+    kd = build_global_kd_config(config)
+
+    assert global_automodel._model_recipe(kd, teacher=False, domain="llm")[
+        "torch_dtype"
+    ] == "float32"
+    assert global_automodel._model_recipe(kd, teacher=True, domain="llm")[
+        "torch_dtype"
+    ] == "bfloat16"
 
 
 def test_global_kd_load_checkpoint_honors_resume_policy():

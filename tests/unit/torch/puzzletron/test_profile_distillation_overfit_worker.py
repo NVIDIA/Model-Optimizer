@@ -66,6 +66,16 @@ def test_profile_kd_overfit_worker_uses_canonical_sanity_stage_and_stage_mesh(
             "128",
             "--local-batch-size",
             "1",
+            "--student-torch-dtype",
+            "float32",
+            "--teacher-torch-dtype",
+            "bfloat16",
+            "--pp",
+            "4",
+            "--ep",
+            "2",
+            "--dp-shard",
+            "2",
         ],
     )
 
@@ -83,8 +93,15 @@ def test_profile_kd_overfit_worker_uses_canonical_sanity_stage_and_stage_mesh(
         8192,
         128,
     )
-    assert sanity["automodel"]["parallel"] == mesh
+    assert sanity["automodel"]["parallel"] == {
+        **mesh,
+        "pp": 4,
+        "ep": 2,
+        "dp_shard": 2,
+    }
     assert sanity["lr"] == 2.0e-4
+    assert sanity["student_model_kwargs"] == {"torch_dtype": "float32"}
+    assert sanity["teacher_model_kwargs"] == {"torch_dtype": "bfloat16"}
 
 
 def test_profile_kd_overfit_worker_maps_legacy_sanity_parallelism(monkeypatch, tmp_path: Path):

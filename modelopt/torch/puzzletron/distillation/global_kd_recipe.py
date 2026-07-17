@@ -67,6 +67,64 @@ from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs
 from .flash_kld import TrainingFlashKLD
 
 
+def _config_value(config: Any, name: str) -> Any:
+    """Read one field from an AutoModel config node or plain mapping."""
+
+    if isinstance(config, dict):
+        return config.get(name)
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        value = getter(name, None)
+        if value is not None:
+            return value
+    return getattr(config, name, None)
+
+
+def _global_kd_checkpoint_adapter_context(model_parts, descriptor_name: str | None = None):
+    """Keep heterogeneous AnyModel geometry active during checkpoint conversion.
+
+    AutoModel creates a temporary per-layer adapter context while loading an
+    AnyModel checkpoint.  Its state-dict adapters are invoked again when a KD
+    checkpoint is saved, after that construction context has exited.  Recover
+    the serialized block configs from the active student and re-enter the same
+    descriptor-owned context so physical MoE pruning is exported with each
+    layer's actual expert count.
+    """
+
+    from ..anymodel.automodel import AutoModelDescriptorFactory
+    from ..block_config import maybe_cast_block_configs
+
+    for part in model_parts:
+        candidates = (
+            part,
+            getattr(part, "module", None),
+            getattr(part, "_fsdp_wrapped_module", None),
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            config = getattr(candidate, "config", None)
+            if config is None:
+                continue
+            block_configs = _config_value(config, "block_configs")
+            if not block_configs:
+                text_config = _config_value(config, "text_config")
+                block_configs = _config_value(text_config, "block_configs")
+            if not block_configs:
+                continue
+            active_descriptor = descriptor_name or _config_value(
+                config, "anymodel_descriptor"
+            )
+            if not active_descriptor:
+                continue
+            descriptor = AutoModelDescriptorFactory.get(str(active_descriptor))
+            if descriptor is not None:
+                return descriptor.native_state_dict_adapter_context(
+                    maybe_cast_block_configs(block_configs)
+                )
+    return nullcontext()
+
+
 def install_pp_checkpoint_state_dict_support() -> None:
     """Allow DCP to save and restore disjoint pipeline-stage state dictionaries.
 
@@ -355,6 +413,18 @@ def _distillation_lm_head(model):
     return head if hasattr(head, "_puzzletron_projection_forward") else _get_lm_head_module(model)
 
 
+def _reset_global_kd_pp_stage_shapes(pp, *, seq_len: int) -> None:
+    """Refresh PP metadata with its activation dtype, not parameter storage dtype."""
+    reset_pp_stage_shapes(
+        pp.info.schedule,
+        pp.info.stages,
+        pp.parts[0].config,
+        pp.pp_microbatch_size,
+        seq_len,
+        tensor_dtype=pp.dtype,
+    )
+
+
 def _refresh_pp_hidden_output_meta(pp) -> int:
     """Change precomputed last-stage PP output metadata from logits to hidden states."""
     stages = getattr(getattr(pp, "info", None), "stages", None) or []
@@ -373,10 +443,12 @@ def _refresh_pp_hidden_output_meta(pp) -> int:
         input_meta = inputs_meta[0]
         if input_meta.ndim < 3:
             continue
-        try:
-            dtype = next(part.parameters()).dtype
-        except StopIteration:
-            dtype = input_meta.dtype
+        dtype = pp.dtype
+        if dtype is None:
+            try:
+                dtype = next(part.parameters()).dtype
+            except StopIteration:
+                dtype = input_meta.dtype
         existing_outputs = tuple(getattr(stage, "_outputs_meta", ()) or ())
         hidden_meta = torch.empty(
             *input_meta.shape[:-1],
@@ -837,11 +909,17 @@ class _WeightedObjectiveMixin:
         save_optimizer = self.checkpointer.save_optimizer
 
         def save_model_with_current_parts(*args, **kwargs):
+            descriptor_name = _config_value(
+                _config_value(getattr(self, "cfg", None), "model"), "anymodel_descriptor"
+            )
             if args:
                 args = (self.model_parts, *args[1:])
             else:
                 kwargs["model"] = self.model_parts
-            return save_model(*args, **kwargs)
+            with _global_kd_checkpoint_adapter_context(
+                self.model_parts, descriptor_name=descriptor_name
+            ):
+                return save_model(*args, **kwargs)
 
         def save_optimizer_with_current_parameters(optimizer, model, path, scheduler):
             del model
@@ -1483,13 +1561,7 @@ class KnowledgeDistillationRecipeForNextTokenPrediction(
             # metadata and loss targets must reflect that post-shard shape.
             local_seq_len = input_ids.shape[1]
             for pp_model in (self.teacher_pp, self.pp):
-                reset_pp_stage_shapes(
-                    pp_model.info.schedule,
-                    pp_model.info.stages,
-                    pp_model.parts[0].config,
-                    self.pipeline_config.pp_microbatch_size,
-                    local_seq_len,
-                )
+                _reset_global_kd_pp_stage_shapes(pp_model, seq_len=local_seq_len)
                 _refresh_pp_hidden_output_meta(pp_model)
                 set_pp_vlm_chunk_specs(
                     pp_model.info.schedule,

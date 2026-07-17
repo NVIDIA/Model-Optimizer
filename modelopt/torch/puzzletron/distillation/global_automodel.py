@@ -280,8 +280,14 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         teacher_force_hf=bool(
             teacher.get("force_hf", kd_cfg.get("teacher_force_hf", legacy_force_hf))
         ),
-        student_model_kwargs=dict(student.get("model_kwargs") or {}),
-        teacher_model_kwargs=dict(teacher.get("model_kwargs") or {}),
+        student_model_kwargs={
+            **dict(kd_cfg.get("student_model_kwargs") or {}),
+            **dict(student.get("model_kwargs") or {}),
+        },
+        teacher_model_kwargs={
+            **dict(kd_cfg.get("teacher_model_kwargs") or {}),
+            **dict(teacher.get("model_kwargs") or {}),
+        },
         domain=str(kd_cfg.get("domain", "auto")).lower(),
         trust_remote_code=bool(kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", True))),
         torch_dtype=str(kd_cfg.get("torch_dtype") or model_cfg.get("torch_dtype") or "bf16"),
