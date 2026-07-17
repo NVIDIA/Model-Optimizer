@@ -74,15 +74,13 @@ Call PTQ function
         quantize_mode="int8",
     )
 
-To optimize Q/DQ placement as part of the calibrated ONNX PTQ workflow, enable Autotune on the quantization command or API call. Prefer this path over direct ``modelopt.onnx.quantization.autotune`` when starting from an unquantized model and validating accuracy.
+Optionally enable Autotune for more optimized Q/DQ placement. Note that this will likely increase the time required to calibrate the model.
 
 .. code-block:: python
 
     moq.quantize(
         ...
-        # Optional: increases quantization time, but should produce more optimal
-        # Q/DQ node placements. This uses the default Autotune settings; tune
-        # those with the autotune_* arguments below when needed.
+        # Default Autotune settings, can be tuned with the autotune_* arguments below.
         autotune=True,
     )
 
