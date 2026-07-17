@@ -13,6 +13,30 @@ from pathlib import Path
 from modelopt.torch.puzzletron.stage_runner import run_stage
 
 
+def _ensure_sanity_automodel_parallel(stage_cfg: dict) -> None:
+    """Translate a persisted legacy sanity mesh when no stage-local mesh exists."""
+    automodel = dict(stage_cfg.get("automodel") or {})
+    if (automodel.get("parallel") or {}) or not any(
+        key in stage_cfg for key in ("tp", "cp", "pp", "dp", "ep")
+    ):
+        return
+    ep = int(stage_cfg.get("ep", 1) or 1)
+    dp_shard = int(stage_cfg.get("dp_shard", stage_cfg.get("dp", 1)) or 1)
+    if "dp_shard" not in stage_cfg:
+        dp_shard *= ep
+    automodel["parallel"] = {
+        "tp": int(stage_cfg.get("tp", 1) or 1),
+        "cp": int(stage_cfg.get("cp", 1) or 1),
+        "pp": int(stage_cfg.get("pp", 1) or 1),
+        "ep": ep,
+        "dp_shard": dp_shard,
+        "dp_replicate": int(stage_cfg.get("dp_replicate", 1) or 1),
+        "sequence_parallel": bool(stage_cfg.get("sequence_parallel", False)),
+        "pipeline_schedule": str(stage_cfg.get("pipeline_schedule", "1f1b")),
+    }
+    stage_cfg["automodel"] = automodel
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--puzzle-dir", type=Path, required=True)
@@ -52,6 +76,7 @@ def main() -> None:
         )
         if dataset_path:
             stage_cfg["dataset_path"] = str(dataset_path)
+    _ensure_sanity_automodel_parallel(stage_cfg)
     config["global_distillation_sanity"] = stage_cfg
     result = run_stage(config, "global_distillation_sanity")
     if int(__import__("os").environ.get("RANK", "0")) == 0:

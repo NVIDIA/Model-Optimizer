@@ -85,3 +85,51 @@ def test_profile_kd_overfit_worker_uses_canonical_sanity_stage_and_stage_mesh(
     )
     assert sanity["automodel"]["parallel"] == mesh
     assert sanity["lr"] == 2.0e-4
+
+
+def test_profile_kd_overfit_worker_maps_legacy_sanity_parallelism(monkeypatch, tmp_path: Path):
+    import examples.puzzletron.run_profile_distillation_overfit_worker as worker
+
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "parallel": {"tp": 1, "cp": 1, "pp": 2, "dp": 1, "ep": 4},
+        "global_distillation_sanity": {
+            "enabled": True,
+            "tp": 1,
+            "cp": 1,
+            "pp": 2,
+            "dp": 1,
+            "ep": 4,
+            "sequence_parallel": False,
+        },
+    }
+    manifest = tmp_path / "manifests" / "build_library.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({"config": config}))
+    captured = {}
+
+    def fake_run_stage(actual_config, stage):
+        captured["config"] = actual_config
+        captured["stage"] = stage
+        return SimpleNamespace(manifest_path=tmp_path / "manifests" / "global_kd.json")
+
+    monkeypatch.setattr(worker, "run_stage", fake_run_stage)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_profile_distillation_overfit_worker.py", "--puzzle-dir", str(tmp_path)],
+    )
+
+    worker.main()
+
+    assert captured["stage"] == "global_distillation_sanity"
+    assert captured["config"]["global_distillation_sanity"]["automodel"]["parallel"] == {
+        "tp": 1,
+        "cp": 1,
+        "pp": 2,
+        "ep": 4,
+        "dp_shard": 4,
+        "dp_replicate": 1,
+        "sequence_parallel": False,
+        "pipeline_schedule": "1f1b",
+    }
