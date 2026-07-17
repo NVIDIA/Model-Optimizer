@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "study_id": "qwen36_fp8_granularity_study",
+  "title": "Qwen3.6 FP8 scale-granularity study",
+  "created_at": "2026-07-17T00:00:00-07:00",
+  "updated_at": "2026-07-17T00:00:00-07:00",
+  "status": "prepared_not_submitted",
+  "status_note": "The study design and aws-cmh workspace are prepared. No Qwen3.6 measurements are shown until a successful remote result is copied into results/.",
+  "objective": "Measure Qwen3.6 output distortion under several FP8 numerical-format policies, using ModelOpt fake quantization and token-normalized MSE/KL metrics while making granularity, temporal scaling, activation scope, and scale-encoding confounds explicit.",
+  "models": [
+    {
+      "handle": "Qwen/Qwen3.6-35B-A3B",
+      "short_name": "Qwen3.6-35B-A3B",
+      "architecture": "qwen3_5_moe",
+      "role": "sparse MoE"
+    },
+    {
+      "handle": "Qwen/Qwen3.6-27B",
+      "short_name": "Qwen3.6-27B",
+      "architecture": "qwen3_5",
+      "role": "dense"
+    }
+  ],
+  "candidates": [
+    {
+      "id": "per_tensor_fp8",
+      "label": "Per-tensor FP8",
+      "scope": "W8A8",
+      "value_format": "E4M3",
+      "weight_granularity": "one scale per tensor",
+      "activation_granularity": "one calibrated scale per tensor",
+      "scale_format": "full precision",
+      "calibration": "max",
+      "classification": "shipped ModelOpt preset; deployment-relevant",
+      "effective_bits": "about 8; one scale is amortized over a tensor"
+    },
+    {
+      "id": "per_tensor_fp8_weight_only_control",
+      "label": "Per-tensor FP8 · weight-only control",
+      "scope": "W8A16",
+      "value_format": "E4M3",
+      "weight_granularity": "one scale per tensor",
+      "activation_granularity": "BF16 (not quantized)",
+      "scale_format": "full precision",
+      "calibration": "max",
+      "classification": "controlled numerical variant; activation quantizers disabled",
+      "effective_bits": "about 8 bits/weight; one scale is amortized over a tensor"
+    },
+    {
+      "id": "block128_static_weight_only",
+      "label": "Static block-128 FP8",
+      "scope": "W8A16",
+      "value_format": "E4M3",
+      "weight_granularity": "128 x 128 blocks",
+      "activation_granularity": "BF16 (not quantized)",
+      "scale_format": "full precision",
+      "calibration": "max",
+      "classification": "shipped ModelOpt preset; diagnostic because scope differs",
+      "effective_bits": "about 8.002 bits/weight with a 32-bit scale per 16,384 weights"
+    },
+    {
+      "id": "block128_dynamic_w8a8_research",
+      "label": "Dynamic block-128 FP8",
+      "scope": "W8A8",
+      "value_format": "E4M3",
+      "weight_granularity": "128 x 128 blocks",
+      "activation_granularity": "128-value blocks on the last axis",
+      "scale_format": "full precision",
+      "calibration": "dynamic amax per invocation",
+      "classification": "ModelOpt fake-quant research configuration; per-invocation routed-shape cache refresh; not an export claim",
+      "effective_bits": "weights about 8.002; activations about 8.25 bits/value with FP32 scale overhead"
+    },
+    {
+      "id": "block128_dynamic_weight_only_control",
+      "label": "Dynamic block-128 FP8 · weight-only control",
+      "scope": "W8A16",
+      "value_format": "E4M3",
+      "weight_granularity": "128 x 128 blocks",
+      "activation_granularity": "BF16 (not quantized)",
+      "scale_format": "full precision",
+      "calibration": "dynamic weight amax",
+      "classification": "controlled ModelOpt fake-quant variant; not an export claim",
+      "effective_bits": "about 8.002 bits/weight with a 32-bit scale per 16,384 weights"
+    },
+    {
+      "id": "mxfp8",
+      "label": "MXFP8",
+      "scope": "W8A8",
+      "value_format": "E4M3",
+      "weight_granularity": "32-value blocks on the last axis",
+      "activation_granularity": "32-value blocks on the last axis",
+      "scale_format": "E8M0 power-of-two",
+      "calibration": "dynamic block amax",
+      "classification": "shipped ModelOpt preset; deployment-relevant on supported hardware",
+      "effective_bits": "8.25 bits/value with one 8-bit E8M0 scale per 32 values"
+    },
+    {
+      "id": "mxfp8_weight_only_control",
+      "label": "MXFP8 · weight-only control",
+      "scope": "W8A16",
+      "value_format": "E4M3",
+      "weight_granularity": "32-value blocks on the last axis",
+      "activation_granularity": "BF16 (not quantized)",
+      "scale_format": "E8M0 power-of-two",
+      "calibration": "dynamic block weight amax",
+      "classification": "controlled numerical variant; activation quantizers disabled",
+      "effective_bits": "8.25 bits/weight with one 8-bit E8M0 scale per 32 weights"
+    }
+  ],
+  "methodology": {
+    "calibration_dataset": "a staged local snapshot of the cnn_dailymail training split",
+    "calibration_samples": 128,
+    "pack_calibration": true,
+    "evaluation_samples": 32,
+    "activation_mse_samples": 32,
+    "evaluation_row_offset": 1024,
+    "sequence_length": 512,
+    "batch_size": 1,
+    "evaluation_scope": "A deterministic 32-document slice from the same CNN/DailyMail training split; suitable for a controlled numerical screen, not broad task or corpus generalization.",
+    "fixed_shape_reason": "Outer batch and padded sequence shapes are matched for control; a research-only pre-hook refreshes block reshape caches per invocation for variable fused-MoE routed-token shapes.",
+    "reference_policy": "Generate BF16 reference logits once per exact model/config revision, tokenizer, sample ordering, sequence length, dtype, source/runtime/container/GPU identity, and resolved device map; persist them before in-place fake quantization.",
+    "metric_policy": "Mask padding and aggregate per valid next-token position. Qwen normalized MSE is the mean of tokenwise centered-MSE/reference-variance ratios. Report raw and normalized logit error, forward/reverse KL, Jensen-Shannon divergence, target-token log-probability error, NLL delta, and top-k agreement.",
+    "layer_policy": "Measure every mapped weight and fused-expert slice directly through its ModelOpt TensorQuantizer; use compute_quantization_mse for inputs over 32 packed calibration rows. Retain per-layer plus family summaries and fail on incomplete eligible coverage. Input hook-call averages and family averages are not element-weighted."
+  },
+  "execution": {
+    "cluster": "aws_cmh",
+    "account": "coreai_numerics_edge",
+    "partition": "batch_long",
+    "nodes_per_candidate": 1,
+    "gpus_per_candidate": 4,
+    "gpu_task_slot_walltime": "24:00:00 (one allocation per task slot; paired candidates run sequentially within it)",
+    "remote_root": "/lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study",
+    "remote_subdirectories": [
+      "cache",
+      "configs",
+      "logs",
+      "manifests",
+      "plots",
+      "results",
+      "scripts"
+    ],
+    "hardware_note": "Cluster metadata and observed node naming disagree about the GPU SKU. Each run records nvidia-smi output; no SKU is asserted before that evidence exists.",
+    "source_ref": "codex/qwen36-fp8-granularity-study",
+    "source_base_commit": "d142f7ee1"
+  },
+  "historical_reference": {
+    "label": "Nemotron Nano v3 NEL/Polyphe reference supplied by the requester",
+    "purpose": "serving/evaluation scale and control reference only; not reused as a Qwen quantization result",
+    "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+    "image": "gitlab-master.nvidia.com:5005/omniml/modelopt/vllm-openai:aarch64-20260522-cutlass450",
+    "serving": "TP=1, DP=4, 9 nodes/instances, max model length 131072, max sequences 8",
+    "tasks": "ns_aime2025 x64, ns_gpqa x64, ns_livecodebench x8",
+    "sampling": "temperature 1.0, top_p 0.95, max_new_tokens 65536",
+    "important_difference": "The Nano-v3 reasoning parser, NVFP4 KV cache, vLLM deployment flags, and Polyphe topology are model/deployment-specific and are not assumptions for this aws-cmh fake-quant study."
+  },
+  "interpretation_guardrails": [
+    "Treat the W8A8 matrix as a format-level comparison, not a causal granularity ablation: per-tensor activations use a static calibrated scale, block-128 and MXFP8 activations use dynamic per-invocation scaling, and MXFP8 additionally changes block size and scale encoding.",
+    "The W8A16 controls isolate activation-quantization scope, but they do not isolate every format choice: MXFP8 versus block-128 still combines 32-value versus 128/128x128 scale domains with E8M0 versus full-precision scale representation.",
+    "The 32 CNN/DailyMail evaluation documents form a deterministic same-split numerical screen; do not generalize their ordering to downstream tasks, other corpora, or full model quality.",
+    "Qwen normalized MSE is a mean of per-token ratios. The synthetic toy uses one ratio of global element means, so the two normalized-MSE values are conceptually related but not numerically interchangeable.",
+    "The dynamic block-128 candidate is a numerical simulation using full-precision dynamic scales, not evidence of an exportable or accelerated runtime format.",
+    "Raw vocabulary-logit MSE depends on logit offset and scale; centered/variance-normalized MSE and distribution divergences are the cross-model anchors.",
+    "AutoQuant KL is useful for candidate ranking but is a raw summed internal score; it is not substituted for token-normalized end-to-end KL.",
+    "No Qwen3.6 number appears in the report unless it was parsed from a result artifact."
+  ]
+}

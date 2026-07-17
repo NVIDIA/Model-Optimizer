@@ -107,6 +107,16 @@ if _has_modelopt_src:
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt_recipes"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/examples"))
+    # Keep this study's driver and launcher wrapper in one tracked source tree.  The
+    # explicit path (rather than all of experimental/) bounds the payload sent to
+    # compute nodes and preserves the modules/Model-Optimizer-relative paths used by
+    # its launcher YAMLs.
+    _add_package_path(
+        os.path.join(
+            LAUNCHER_DIR,
+            "modules/Model-Optimizer/experimental/qwen36_fp8_granularity_study",
+        )
+    )
 
 packager = run.PatternPackager(
     include_pattern=_include_pattern,

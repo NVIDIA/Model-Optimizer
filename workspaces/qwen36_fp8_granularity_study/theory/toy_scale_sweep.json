@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "artifact_type": "synthetic_modelopt_scale_granularity_sanity_check",
+  "is_qwen_result": false,
+  "generated_at": "2026-07-17T12:24:54-07:00",
+  "implementation": {
+    "per_tensor_and_block": "modelopt.torch.quantization.qtensor.FP8QTensor",
+    "mxfp8": "modelopt.torch.quantization.qtensor.MXFP8QTensor",
+    "torch_version": "2.11.0",
+    "shape": [
+      64,
+      1024
+    ],
+    "seed": 20260717,
+    "construction": "standard-normal values with one signed outlier per row"
+  },
+  "interpretation": "For one instantaneous tensor, static versus dynamic full-precision block scaling has the same numerical map; calibration across tensors is the additional distinction.",
+  "sweeps": [
+    {
+      "outlier_multiplier": 1,
+      "metrics": {
+        "per_tensor_fp8": {
+          "mse": 0.0006913259858265519,
+          "normalized_mse": 0.0006998241296969354,
+          "kl_forward": 0.0006911588134244084,
+          "kl_reverse": 0.000691329943947494,
+          "js": 0.00017276042490266263,
+          "top1_agreement": 0.84375
+        },
+        "block128_full_precision_scale": {
+          "mse": 0.0006442687008529902,
+          "normalized_mse": 0.0006524263299070299,
+          "kl_forward": 0.0005458971718326211,
+          "kl_reverse": 0.0005461691180244088,
+          "js": 0.00013648300955537707,
+          "top1_agreement": 1.0
+        },
+        "mxfp8_block32_e8m0_scale": {
+          "mse": 0.0006955843418836594,
+          "normalized_mse": 0.0007044139783829451,
+          "kl_forward": 0.000701337237842381,
+          "kl_reverse": 0.0007001348421908915,
+          "js": 0.0001751306845108047,
+          "top1_agreement": 0.875
+        }
+      }
+    },
+    {
+      "outlier_multiplier": 16,
+      "metrics": {
+        "per_tensor_fp8": {
+          "mse": 0.0006956600118428469,
+          "normalized_mse": 0.0005626548081636429,
+          "kl_forward": 0.00031377552659250796,
+          "kl_reverse": 0.00031407797359861434,
+          "js": 7.844758511055261e-05,
+          "top1_agreement": 0.921875
+        },
+        "block128_full_precision_scale": {
+          "mse": 0.0006505181081593037,
+          "normalized_mse": 0.0005259556346572936,
+          "kl_forward": 0.00026746909134089947,
+          "kl_reverse": 0.00026744065689854324,
+          "js": 6.683803803753108e-05,
+          "top1_agreement": 0.96875
+        },
+        "mxfp8_block32_e8m0_scale": {
+          "mse": 0.0006955843418836594,
+          "normalized_mse": 0.0005625023622997105,
+          "kl_forward": 0.0003206515684723854,
+          "kl_reverse": 0.0003204655658919364,
+          "js": 8.010854799067602e-05,
+          "top1_agreement": 0.953125
+        }
+      }
+    },
+    {
+      "outlier_multiplier": 256,
+      "metrics": {
+        "per_tensor_fp8": {
+          "mse": 0.000695660593919456,
+          "normalized_mse": 1.0706852663133759e-05,
+          "kl_forward": 0.0003137648745905608,
+          "kl_reverse": 0.00031393958488479257,
+          "js": 7.84408621257171e-05,
+          "top1_agreement": 0.921875
+        },
+        "block128_full_precision_scale": {
+          "mse": 0.0006505182245746255,
+          "normalized_mse": 1.0008492608903907e-05,
+          "kl_forward": 0.0002674247953109443,
+          "kl_reverse": 0.000267371884547174,
+          "js": 6.683589890599251e-05,
+          "top1_agreement": 0.96875
+        },
+        "mxfp8_block32_e8m0_scale": {
+          "mse": 0.0006955844582989812,
+          "normalized_mse": 1.0703947737056296e-05,
+          "kl_forward": 0.0003205023240298033,
+          "kl_reverse": 0.0003204694949090481,
+          "js": 8.010179590201005e-05,
+          "top1_agreement": 0.953125
+        }
+      }
+    },
+    {
+      "outlier_multiplier": 4096,
+      "metrics": {
+        "per_tensor_fp8": {
+          "mse": 0.0006982408813200891,
+          "normalized_mse": 4.262487252049141e-08,
+          "kl_forward": 0.00031413364922627807,
+          "kl_reverse": 0.00031431354000233114,
+          "js": 7.853349961806089e-05,
+          "top1_agreement": 0.921875
+        },
+        "block128_full_precision_scale": {
+          "mse": 0.0006508229998871684,
+          "normalized_mse": 3.971560502691318e-08,
+          "kl_forward": 0.00026745430659502745,
+          "kl_reverse": 0.000267422990873456,
+          "js": 6.684567051706836e-05,
+          "top1_agreement": 0.96875
+        },
+        "mxfp8_block32_e8m0_scale": {
+          "mse": 0.0006960562895983458,
+          "normalized_mse": 4.248427742936656e-08,
+          "kl_forward": 0.00032055884366855025,
+          "kl_reverse": 0.00032053946051746607,
+          "js": 8.01173155196011e-05,
+          "top1_agreement": 0.953125
+        }
+      }
+    },
+    {
+      "outlier_multiplier": 65536,
+      "metrics": {
+        "per_tensor_fp8": {
+          "mse": 0.006784979719668627,
+          "normalized_mse": 1.6179680928374296e-09,
+          "kl_forward": 0.001571563770994544,
+          "kl_reverse": 0.0015688802814111114,
+          "js": 0.00039235586882568896,
+          "top1_agreement": 0.921875
+        },
+        "block128_full_precision_scale": {
+          "mse": 0.001412268728017807,
+          "normalized_mse": 3.3670682908493177e-10,
+          "kl_forward": 0.0004240977577865124,
+          "kl_reverse": 0.00042447115993127227,
+          "js": 0.00010603483679005876,
+          "top1_agreement": 0.96875
+        },
+        "mxfp8_block32_e8m0_scale": {
+          "mse": 0.0013113007880747318,
+          "normalized_mse": 3.1262614719196335e-10,
+          "kl_forward": 0.00047125472337938845,
+          "kl_reverse": 0.0004725176841020584,
+          "js": 0.00011788919800892472,
+          "top1_agreement": 0.953125
+        }
+      }
+    },
+    {
+      "outlier_multiplier": 1048576,
+      "metrics": {
+        "per_tensor_fp8": {
+          "mse": 0.9184303879737854,
+          "normalized_mse": 8.551693797542725e-10,
+          "kl_forward": 0.35843098163604736,
+          "kl_reverse": 0.36994844675064087,
+          "js": 0.0810224860906601,
+          "top1_agreement": 0.578125
+        },
+        "block128_full_precision_scale": {
+          "mse": 0.11550198495388031,
+          "normalized_mse": 1.07504477542264e-10,
+          "kl_forward": 0.047042615711688995,
+          "kl_reverse": 0.05831533670425415,
+          "js": 0.011705636978149414,
+          "top1_agreement": 0.65625
+        },
+        "mxfp8_block32_e8m0_scale": {
+          "mse": 0.03111833520233631,
+          "normalized_mse": 2.8984462399628264e-11,
+          "kl_forward": 0.010103102773427963,
+          "kl_reverse": 0.00646485760807991,
+          "js": 0.0018061216687783599,
+          "top1_agreement": 0.9375
+        }
+      }
+    }
+  ]
+}
