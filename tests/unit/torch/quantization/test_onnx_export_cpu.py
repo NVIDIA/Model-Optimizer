@@ -15,13 +15,23 @@
 
 """Unit tests for ONNX export for CPU quantization."""
 
+import inspect
+import io
+
+import onnx
 import pytest
 import torch
 
 pytest.importorskip("onnxruntime")
 
 from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_tester
+
+import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.tensor_quant as tensor_quant
+from modelopt.onnx.export import NVFP4QuantExporter
+from modelopt.torch.quantization.utils import is_quantized_linear
 
 
 @pytest.mark.parametrize("model_cls", TEST_MODELS)
@@ -42,3 +52,49 @@ def test_onnx_export_cpu(model_cls, num_bits, per_channel_quantization, constant
     onnx_export_tester(
         model_cls(), "cpu", num_bits, per_channel_quantization, constant_folding, dtype
     )
+
+
+def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
+    def forward_loop(model):
+        model(sample_input)
+
+    def cpu_dynamic_block_quantize(inputs, *args):
+        return inputs
+
+    monkeypatch.setattr(tensor_quant, "dynamic_block_quantize_op", cpu_dynamic_block_quantize)
+
+    model = SimpleLinear().eval()
+    sample_input = model.get_input()
+    model = mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=forward_loop)
+
+    for module in model.modules():
+        assert not isinstance(module, torch.nn.Linear) or is_quantized_linear(module)
+        if isinstance(module, torch.nn.Linear):
+            module.input_quantizer.disable()
+            module.weight_quantizer._onnx_quantizer_type = "static"
+
+    buffer = io.BytesIO()
+    if "enable_onnx_checker" in inspect.signature(torch.onnx.export).parameters:
+        kwargs = {"enable_onnx_checker": False}
+    else:
+        kwargs = {}
+
+    torch.onnx.export(
+        model,
+        sample_input,
+        buffer,
+        input_names=["input"],
+        output_names=["output"],
+        export_params=True,
+        opset_version=21,
+        dynamo=False,
+        **kwargs,
+    )
+
+    buffer.seek(0)
+    exported_model = onnx.load_model_from_string(buffer.read())
+    assert any(node.op_type == "TRT_FP4QDQ" for node in exported_model.graph.node)
+
+    converted_model = NVFP4QuantExporter.process_model(exported_model)
+    assert not any(node.op_type == "TRT_FP4QDQ" for node in converted_model.graph.node)
+    onnx.checker.check_model(converted_model)
