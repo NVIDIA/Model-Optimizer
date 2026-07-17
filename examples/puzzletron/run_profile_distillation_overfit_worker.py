@@ -23,11 +23,6 @@ def main() -> None:
     parser.add_argument("--local-batch-size", type=int, default=4)
     parser.add_argument("--solution-id", action="append", default=[])
     parser.add_argument("--registry-path", type=Path)
-    parser.add_argument("--tp", type=int, default=2)
-    parser.add_argument("--cp", type=int, default=2)
-    parser.add_argument("--pp", type=int, default=2)
-    parser.add_argument("--dp", type=int, default=2)
-    parser.add_argument("--ep", type=int, default=1)
     args = parser.parse_args()
 
     manifest_path = args.puzzle_dir / "manifests" / "build_library.json"
@@ -35,29 +30,29 @@ def main() -> None:
     config = dict(manifest.get("config") or (manifest.get("inputs") or {}).get("config") or {})
     if not config:
         raise ValueError(f"manifest contains no resolved config: {manifest_path}")
-    config["distillation_overfit"] = {
-        "enabled": True,
-        "profile_id": args.profile_id,
-        "solution_ids": args.solution_id,
-        "sample_count": args.sample_count,
-        "sequence_length": args.sequence_length,
-        "max_steps": args.max_steps,
-        "local_batch_size": args.local_batch_size,
-        "tp": int(args.tp),
-        "cp": int(args.cp),
-        "pp": int(args.pp),
-        "dp": int(args.dp),
-        "ep": int(args.ep),
-        "sequence_parallel": True,
-        "lr": 1.0e-4,
-        "dataset_path": str(
-            (config.get("scoring") or {}).get("dataset_path")
-            or config.get("dataset_path")
-        ),
-    }
+    stage_cfg = dict(config.get("global_distillation_sanity") or {})
+    stage_cfg.update(
+        {
+            "enabled": True,
+            "profile_id": args.profile_id,
+            "sample_count": args.sample_count,
+            "sequence_length": args.sequence_length,
+            "max_steps": args.max_steps,
+            "local_batch_size": args.local_batch_size,
+        }
+    )
+    if args.solution_id:
+        stage_cfg["solution_ids"] = args.solution_id
     if args.registry_path is not None:
-        config["distillation_overfit"]["registry_path"] = str(args.registry_path)
-    result = run_stage(config, "distillation_overfit")
+        stage_cfg["registry_path"] = str(args.registry_path)
+    if not stage_cfg.get("dataset_path") and not stage_cfg.get("packed_token_cache_path"):
+        dataset_path = (config.get("scoring") or {}).get("dataset_path") or config.get(
+            "dataset_path"
+        )
+        if dataset_path:
+            stage_cfg["dataset_path"] = str(dataset_path)
+    config["global_distillation_sanity"] = stage_cfg
+    result = run_stage(config, "global_distillation_sanity")
     if int(__import__("os").environ.get("RANK", "0")) == 0:
         print(result.manifest_path)
 

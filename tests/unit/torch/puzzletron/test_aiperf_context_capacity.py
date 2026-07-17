@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _canonical_topology,
@@ -23,6 +24,24 @@ def test_aiperf_server_environment_installs_vllm_torch_compatibility(monkeypatch
     assert env["VLLM_USE_LAYERNAME"] == "0"
     assert Path(paths[0]).name == "vllm_compat"
     assert (Path(paths[0]) / "sitecustomize.py").is_file()
+
+
+def test_aiperf_server_environment_uses_the_active_vllm_package_source(monkeypatch):
+    active_source = Path("/compatible/vllm_new")
+    monkeypatch.setenv("PYTHONPATH", "/existing")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.importlib.util.find_spec",
+        lambda name: SimpleNamespace(
+            submodule_search_locations=[str(active_source / "vllm")]
+        ),
+    )
+
+    env = _clean_subprocess_environment(
+        "0,1", architecture_id="architecture", topology_id="topology"
+    )
+
+    paths = env["PYTHONPATH"].split(":")
+    assert paths[1] == str(active_source)
 
 
 def test_exact_length_defaults_to_ignore_eos_without_overriding_policy():

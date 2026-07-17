@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-import json
 import importlib.metadata
+import importlib.util
+import json
 import os
 import signal
 import shutil
@@ -350,12 +351,14 @@ def _clean_subprocess_environment(
     )
 
     # Editable vLLM installs rely on an import hook in the parent process.  An
-    # explicit source path is more robust for the engine's spawned workers.
-    engineering_root = Path(__file__).resolve().parents[5]
-    vllm_source = engineering_root / "vllm"
+    # explicit path for that active package keeps spawned engine workers on the
+    # same source tree and compiled extensions as the CLI entry point.
+    spec = importlib.util.find_spec("vllm")
+    locations = tuple(spec.submodule_search_locations or ()) if spec is not None else ()
+    vllm_source = Path(locations[0]).parent if len(locations) == 1 else None
     compatibility = Path(__file__).with_name("vllm_compat")
     python_paths = [str(compatibility)]
-    if vllm_source.is_dir():
+    if vllm_source is not None:
         python_paths.append(str(vllm_source))
     existing = env.get("PYTHONPATH", "")
     if existing:
