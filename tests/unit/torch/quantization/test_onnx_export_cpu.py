@@ -32,6 +32,7 @@ from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.tensor_quant as tensor_quant
+from modelopt.onnx import utils
 from modelopt.onnx.export import NVFP4QuantExporter
 from modelopt.torch.quantization.utils import is_quantized_linear
 
@@ -165,3 +166,46 @@ def test_nvfp4_shared_activation_reuses_cast():
         if node.op_type == "MatMul"
     )
     onnx.checker.check_model(converted_model)
+
+
+def test_topologically_sort_graph_nodes_accounts_for_subgraph_captures():
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1])
+    cond_tensor = helper.make_tensor_value_info("cond", TensorProto.BOOL, [])
+    output_tensor = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1])
+    then_output = helper.make_tensor_value_info("then_output", TensorProto.FLOAT, [1])
+    else_output = helper.make_tensor_value_info("else_output", TensorProto.FLOAT, [1])
+
+    then_graph = helper.make_graph(
+        [helper.make_node("Identity", ["captured"], ["then_output"], name="then_use_captured")],
+        "then_branch",
+        [],
+        [then_output],
+    )
+    else_graph = helper.make_graph(
+        [helper.make_node("Identity", ["captured"], ["else_output"], name="else_use_captured")],
+        "else_branch",
+        [],
+        [else_output],
+    )
+    if_node = helper.make_node(
+        "If",
+        ["cond"],
+        ["output"],
+        name="if_uses_captured",
+        then_branch=then_graph,
+        else_branch=else_graph,
+    )
+    producer = helper.make_node("Identity", ["input"], ["captured"], name="producer")
+    model = helper.make_model(
+        helper.make_graph(
+            [if_node, producer],
+            "outer_scope_capture",
+            [input_tensor, cond_tensor],
+            [output_tensor],
+        )
+    )
+
+    utils.topologically_sort_graph_nodes(model.graph)
+
+    assert [node.name for node in model.graph.node] == ["producer", "if_uses_captured"]
+    onnx.checker.check_model(model)

@@ -2030,6 +2030,35 @@ def topologically_sort_graph_nodes(graph: onnx.GraphProto) -> None:
     dtypes such as BF16, which can be misinterpreted as NumPy dtypes during
     conversion.
     """
+
+    def get_graph_outer_scope_inputs(subgraph: onnx.GraphProto) -> set[str]:
+        local_names = {
+            value.name for value in (*subgraph.input, *subgraph.initializer) if value.name
+        }
+        local_names.update(output_name for node in subgraph.node for output_name in node.output)
+
+        outer_scope_inputs = set()
+        for node in subgraph.node:
+            outer_scope_inputs.update(
+                input_name
+                for input_name in node.input
+                if input_name and input_name not in local_names
+            )
+            for attr in node.attribute:
+                graphs = []
+                if attr.type == onnx.AttributeProto.GRAPH:
+                    graphs.append(attr.g)
+                elif attr.type == onnx.AttributeProto.GRAPHS:
+                    graphs.extend(attr.graphs)
+
+                for nested_graph in graphs:
+                    outer_scope_inputs.update(
+                        input_name
+                        for input_name in get_graph_outer_scope_inputs(nested_graph)
+                        if input_name not in local_names
+                    )
+        return outer_scope_inputs
+
     nodes = list(graph.node)
     producer_by_tensor: dict[str, int] = {}
     for node_index, node in enumerate(nodes):
@@ -2044,7 +2073,15 @@ def topologically_sort_graph_nodes(graph: onnx.GraphProto) -> None:
     dependents: list[set[int]] = [set() for _ in nodes]
 
     for consumer_index, node in enumerate(nodes):
-        for input_name in node.input:
+        input_names = set(node.input)
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                input_names.update(get_graph_outer_scope_inputs(attr.g))
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    input_names.update(get_graph_outer_scope_inputs(subgraph))
+
+        for input_name in input_names:
             producer_index = producer_by_tensor.get(input_name)
             if producer_index is None:
                 continue
