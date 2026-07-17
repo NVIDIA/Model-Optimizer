@@ -74,36 +74,6 @@ torchrun --nproc_per_node 8 examples/megatron_bridge/doge_distill.py \
 Use the learned weights as a hypothesis, not as a final result. The final comparison should come
 from a standard `distill.py` run with fixed weights and the same validation setup as the baselines.
 
-## Virtual-step perturbation diagnostics
-
-To debug whether the alignment score predicts target-KD improvement, run DoGE with frozen student
-and frozen blend weights plus candidate virtual-step blends:
-
-```bash
-python examples/megatron_bridge/doge_distill.py \
-    ... \
-    --doge_freeze_student \
-    --doge_freeze_blend \
-    --doge_virtual_step_candidate_weights 95 2.5 2.5 \
-    --doge_virtual_step_candidate_weights 90 5 5 \
-    --doge_virtual_step_candidate_weights 99 0.5 0.5
-```
-
-Each candidate is interpreted in the source order from `--data_paths` and normalized. For each
-candidate, DoGE temporarily applies selected-parameter virtual SGD steps using that candidate's
-mixed source gradient, evaluates target KD on the same target batch, restores the parameters, and
-writes `virtual_step_diagnostics` to `doge_weights.jsonl`, including the virtual update norms for
-each candidate. The virtual-step learning rate defaults to `--lr` and can be overridden with
-`--doge_virtual_step_lr`. The number of repeated virtual steps defaults to 1 and can be changed with
-`--doge_virtual_step_num_steps`; values above 1 recompute source gradients on the same sampled
-source batches after each virtual parameter update. The virtual diagnostic does not change the real
-student weights or real blend weights.
-
-By default, virtual-step diagnostics use the cheap Qwen3-8B final-MLP probe. To test whether that
-proxy is too narrow, pass `--doge_alignment_param_scope all_trainable` to compute and apply virtual
-steps across all trainable local parameter shards. This is much slower and is intended for short
-diagnostic runs.
-
 ## Runtime compared with normal distillation
 
 DoGE is slower per training step because each step computes gradient-alignment probes before the

@@ -34,9 +34,7 @@ from modelopt.torch.distill.doge_megatron_data import (
 )
 from modelopt.torch.distill.doge_megatron_loss import (
     DoGEAlignmentParamScope,
-    DoGEVirtualStepDiagnostic,
     compute_alignment_scores,
-    compute_virtual_step_diagnostics,
     weighted_source_forward_step,
     zero_weighted_source_forward_step,
 )
@@ -56,9 +54,6 @@ class DoGEForwardStep:
         output_dir: str | Path,
         freeze_student: bool = False,
         freeze_blend: bool = False,
-        virtual_step_candidate_weights: list[list[float]] | None = None,
-        virtual_step_lr: float | None = None,
-        virtual_step_num_steps: int = 1,
         alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
@@ -72,12 +67,8 @@ class DoGEForwardStep:
             output_dir: Directory where DoGE writes the weight trajectory.
             freeze_student: Log DoGE scores without updating student weights.
             freeze_blend: Log candidate blend-weight updates without applying them.
-            virtual_step_candidate_weights: Optional source-order candidate blend weights used
-                for frozen-model/frozen-blend virtual-step diagnostics.
-            virtual_step_lr: Learning rate for virtual selected-parameter diagnostic steps.
-            virtual_step_num_steps: Number of repeated virtual updates per candidate diagnostic.
-            alignment_param_scope: Parameter scope used for DoGE gradient scoring and virtual-step
-                diagnostics. ``all_trainable`` is intended for expensive diagnostic runs.
+            alignment_param_scope: Parameter scope used for DoGE gradient scoring.
+                ``all_trainable`` is intended for expensive diagnostic runs.
         """
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -88,11 +79,6 @@ class DoGEForwardStep:
         self.trajectory_path = Path(output_dir) / "doge_weights.jsonl"
         self.freeze_student = freeze_student
         self.freeze_blend = freeze_blend
-        self.virtual_step_candidate_blend_weights = _normalize_virtual_step_candidate_weights(
-            virtual_step_candidate_weights, tuple(self.blend_weights)
-        )
-        self.virtual_step_lr = virtual_step_lr
-        self.virtual_step_num_steps = virtual_step_num_steps
         self.alignment_param_scope = alignment_param_scope
 
     def write_trajectory_record(
@@ -103,7 +89,6 @@ class DoGEForwardStep:
         source_probe_kd_loss: dict[str, float] | None = None,
         target_probe_kd_loss: float | None = None,
         candidate_blend_weights: dict[str, float] | None = None,
-        virtual_step_diagnostics: dict[str, DoGEVirtualStepDiagnostic] | None = None,
     ) -> None:
         """Write one DoGE weight-trajectory record on rank 0."""
         if not dist.is_master():
@@ -124,8 +109,6 @@ class DoGEForwardStep:
             record["source_probe_kd_loss"] = source_probe_kd_loss
         if target_probe_kd_loss is not None:
             record["target_probe_kd_loss"] = target_probe_kd_loss
-        if virtual_step_diagnostics is not None:
-            record["virtual_step_diagnostics"] = virtual_step_diagnostics
 
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         mode = "w" if iteration == 0 else "a"
@@ -143,15 +126,6 @@ class DoGEForwardStep:
         summary = " | ".join(summary_parts)
         if target_probe_kd_loss is not None:
             summary += f" | target_probe_kd={target_probe_kd_loss:.4f}"
-        if virtual_step_diagnostics:
-            best_label, best_diagnostics = min(
-                virtual_step_diagnostics.items(),
-                key=lambda item: item[1]["delta_target_probe_kd"],
-            )
-            summary += (
-                f" | virtual_best={best_label}"
-                f" delta_target_probe_kd={best_diagnostics['delta_target_probe_kd']:.4g}"
-            )
         print_rank_0(f"DoGE iteration {iteration} | {summary}")
 
     def __call__(
@@ -196,22 +170,6 @@ class DoGEForwardStep:
             self.blend_weights,
             self.alignment_param_scope,
         )
-        virtual_step_diagnostics = None
-        if self.virtual_step_candidate_blend_weights:
-            if self.virtual_step_lr is None:
-                raise RuntimeError("DoGE virtual-step diagnostics require virtual_step_lr.")
-            virtual_step_diagnostics = compute_virtual_step_diagnostics(
-                state,
-                source_batches,
-                alignment_result.source_gradients,
-                target_batch,
-                model,
-                self.virtual_step_candidate_blend_weights,
-                self.virtual_step_lr,
-                alignment_result.target_probe_kd_loss,
-                self.alignment_param_scope,
-                self.virtual_step_num_steps,
-            )
 
         candidate_blend_weights = dict(
             self.updater.update(self.blend_weights, alignment_result.scores)
@@ -225,7 +183,6 @@ class DoGEForwardStep:
             alignment_result.source_probe_kd_loss,
             alignment_result.target_probe_kd_loss,
             candidate_blend_weights,
-            virtual_step_diagnostics,
         )
         if self.freeze_student:
             return zero_weighted_source_forward_step(
@@ -247,30 +204,3 @@ class DoGEForwardStep:
             self.blend_weights,
             return_schedule_plan,
         )
-
-
-def _normalize_virtual_step_candidate_weights(
-    candidate_weights: list[list[float]] | None, source_paths: tuple[str, ...]
-) -> dict[str, dict[str, float]]:
-    """Return normalized candidate blend weights keyed by readable candidate labels."""
-    if candidate_weights is None:
-        return {}
-
-    candidates = {}
-    for weights in candidate_weights:
-        if len(weights) != len(source_paths):
-            raise ValueError(
-                "Each --doge_virtual_step_candidate_weights entry must provide one weight per "
-                f"training source: expected {len(source_paths)}, got {len(weights)}."
-            )
-        if any(weight < 0 for weight in weights):
-            raise ValueError("--doge_virtual_step_candidate_weights must be non-negative.")
-        total_weight = sum(weights)
-        if total_weight <= 0:
-            raise ValueError("--doge_virtual_step_candidate_weights must sum to a positive value.")
-
-        label = "/".join(f"{weight:g}" for weight in weights)
-        candidates[label] = {
-            path: weight / total_weight for path, weight in zip(source_paths, weights)
-        }
-    return candidates

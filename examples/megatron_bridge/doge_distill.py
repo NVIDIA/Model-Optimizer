@@ -214,42 +214,11 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Log candidate DoGE blend weights without applying them",
     )
     doge.add_argument(
-        "--doge_virtual_step_candidate_weights",
-        action="append",
-        nargs="+",
-        type=float,
-        metavar="WEIGHT",
-        help=(
-            "Candidate source-order blend weights for virtual-step diagnostics. Repeat this "
-            "argument to evaluate multiple candidates, e.g. "
-            "--doge_virtual_step_candidate_weights 95 2.5 2.5 "
-            "--doge_virtual_step_candidate_weights 90 5 5. Weights are normalized."
-        ),
-    )
-    doge.add_argument(
-        "--doge_virtual_step_lr",
-        type=_positive_float,
-        help=(
-            "Learning rate for virtual selected-parameter diagnostic steps. Defaults to --lr when "
-            "--doge_virtual_step_candidate_weights is provided."
-        ),
-    )
-    doge.add_argument(
-        "--doge_virtual_step_num_steps",
-        type=_positive_int,
-        default=1,
-        help=(
-            "Number of repeated virtual SGD steps per candidate diagnostic. Values above 1 "
-            "recompute source gradients on the same sampled source batches after each virtual "
-            "parameter update."
-        ),
-    )
-    doge.add_argument(
         "--doge_alignment_param_scope",
         choices=("final_mlp", "all_trainable"),
         default="final_mlp",
         help=(
-            "Parameter scope for DoGE gradient scoring and virtual-step diagnostics. "
+            "Parameter scope for DoGE gradient scoring. "
             "'final_mlp' is the cheap Qwen3-8B PoC probe; 'all_trainable' is expensive and "
             "intended only for diagnostics."
         ),
@@ -360,15 +329,6 @@ def main(args: argparse.Namespace) -> None:
         output_dir=args.output_dir,
         freeze_student=args.doge_freeze_student,
         freeze_blend=args.doge_freeze_blend,
-        virtual_step_candidate_weights=args.doge_virtual_step_candidate_weights,
-        virtual_step_lr=(
-            args.doge_virtual_step_lr
-            if args.doge_virtual_step_lr is not None
-            else args.lr
-            if args.doge_virtual_step_candidate_weights
-            else None
-        ),
-        virtual_step_num_steps=args.doge_virtual_step_num_steps,
         alignment_param_scope=args.doge_alignment_param_scope,
     )
 
