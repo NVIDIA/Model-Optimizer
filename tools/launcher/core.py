@@ -541,7 +541,9 @@ def build_slurm_executor(
         partition=slurm_config.partition,
         qos=slurm_config.qos,
         ntasks_per_node=slurm_config.ntasks_per_node,
-        gpus_per_node=slurm_config.gpus_per_node,
+        # CLI overrides cannot round-trip an Optional[int] YAML null. Accept zero as
+        # an explicit no-GRES sentinel and normalize it before NeMo renders sbatch.
+        gpus_per_node=None if slurm_config.gpus_per_node == 0 else slurm_config.gpus_per_node,
         nodes=slurm_config.nodes,
         tunnel=tunnel,
         container_image=slurm_config.container,

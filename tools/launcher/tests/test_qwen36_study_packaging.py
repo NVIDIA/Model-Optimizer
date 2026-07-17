@@ -44,6 +44,7 @@ def test_qwen36_pipelines_have_staging_plus_four_sequential_candidates():
         assert tasks[0]["args"][0] == "stage"
         assert [task["args"][-1] for task in tasks[1:]] == expected_candidates
         assert tasks[0]["slurm_config"]["partition"] == "cpu_datamove"
+        assert tasks[0]["slurm_config"]["gpus_per_node"] == 0
         for task in tasks[1:]:
             slurm = task["slurm_config"]
             assert slurm["account"] == "coreai_numerics_edge"

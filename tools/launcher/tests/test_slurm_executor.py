@@ -31,6 +31,39 @@ class TestBuildSlurmExecutor:
     """Tests for build_slurm_executor mount construction and executor params."""
 
     @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_zero_gpu_sentinel_omits_gpu_gres(self, mock_tunnel, mock_executor):
+        """A CLI-safe zero GPU count becomes None before NeMo renders sbatch."""
+        mock_tunnel.return_value = MagicMock()
+        slurm_config = MagicMock(
+            requeue=False,
+            host="test-host",
+            port=22,
+            account="test_account",
+            partition="cpu_datamove",
+            container="ubuntu:24.04",
+            modelopt_install_path="/opt/modelopt",
+            container_mounts=[],
+            srun_args=[],
+            nodes=1,
+            ntasks_per_node=1,
+            gpus_per_node=0,
+            array=None,
+        )
+
+        build_slurm_executor(
+            user="testuser",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="exp_001",
+            job_dir="/lustre/experiments",
+            task_name="job_0",
+            packager=MagicMock(),
+        )
+
+        assert mock_executor.call_args.kwargs["gpus_per_node"] is None
+
+    @patch("core.run.SlurmExecutor")
     @patch("core.ControlMasterSSHTunnel")
     def test_controlmaster_env_selects_controlmaster_tunnel(
         self, mock_tunnel, mock_executor, monkeypatch
