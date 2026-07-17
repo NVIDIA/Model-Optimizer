@@ -319,6 +319,38 @@ def _build_server() -> FastMCP:
                 )
             ),
         ] = False,
+        enable_mlflow: Annotated[
+            bool,
+            Field(
+                description=(
+                    "If True, create an MLflow run before submission and pass "
+                    "standard MLFLOW_RUN_ID plus MLFLOW_TRACKING_URI into the "
+                    "launched job environment. User code may log metrics/config "
+                    "to that run; call wait_for_experiment(..., "
+                    "finalize_mlflow=True, mlflow_run_id=<id>) to attach final "
+                    "status and launcher logs."
+                )
+            ),
+        ] = False,
+        mlflow_tracking_uri: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional MLflow tracking URI override. Defaults to "
+                    "MLFLOW_TRACKING_URI, MODELOPT_MCP_MLFLOW_TRACKING_URI, "
+                    "or https://mlflow-modelopt.nvidia.com/."
+                )
+            ),
+        ] = None,
+        mlflow_experiment: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional MLflow experiment name. Defaults to "
+                    "MODELOPT_MCP_MLFLOW_EXPERIMENT or ci-tests."
+                )
+            ),
+        ] = None,
     ) -> dict:
         return bridge.submit_job_impl(
             yaml_path=yaml_path,
@@ -343,6 +375,9 @@ def _build_server() -> FastMCP:
             dry_run=dry_run,
             source_ref=source_ref,
             source_repo=source_repo,
+            enable_mlflow=enable_mlflow,
+            mlflow_tracking_uri=mlflow_tracking_uri,
+            mlflow_experiment=mlflow_experiment,
         )
 
     @mcp.tool(
@@ -432,11 +467,64 @@ def _build_server() -> FastMCP:
                 ),
             ),
         ] = 30,
+        finalize_mlflow: Annotated[
+            bool,
+            Field(
+                description=(
+                    "If True, finalize a pre-created MLflow run when the "
+                    "experiment reaches done/failed by logging final status "
+                    "and fetching/uploading Nemo/Slurm logs as artifacts. Requires "
+                    "mlflow_run_id."
+                )
+            ),
+        ] = False,
+        mlflow_run_id: Annotated[
+            str | None,
+            Field(description="MLflow run id returned by submit_job when enable_mlflow=True."),
+        ] = None,
+        mlflow_tracking_uri: Annotated[
+            str | None,
+            Field(description="Optional MLflow tracking URI override for finalization."),
+        ] = None,
     ) -> dict:
         return bridge.wait_for_experiment_impl(
             experiment_id,
             timeout_sec,
             poll_interval_sec,
+            finalize_mlflow=finalize_mlflow,
+            mlflow_run_id=mlflow_run_id,
+            mlflow_tracking_uri=mlflow_tracking_uri,
+        )
+
+    @mcp.tool(
+        name="finalize_mlflow_run",
+        description=(
+            "Fetch terminal Nemo/Slurm logs and attach final status plus "
+            "launcher logs to an MLflow run created by "
+            "submit_job(enable_mlflow=True). Usually you can use "
+            "wait_for_experiment(..., finalize_mlflow=True) instead; this "
+            "tool is useful when the experiment has already reached a "
+            "terminal state."
+        ),
+    )
+    def finalize_mlflow_run(
+        experiment_id: Annotated[
+            str,
+            Field(description="The experiment id returned by submit_job."),
+        ],
+        mlflow_run_id: Annotated[
+            str,
+            Field(description="The MLflow run id returned by submit_job."),
+        ],
+        mlflow_tracking_uri: Annotated[
+            str | None,
+            Field(description="Optional MLflow tracking URI override."),
+        ] = None,
+    ) -> dict:
+        return bridge.finalize_mlflow_run_impl(
+            experiment_id=experiment_id,
+            mlflow_run_id=mlflow_run_id,
+            tracking_uri=mlflow_tracking_uri,
         )
 
     @mcp.tool(
