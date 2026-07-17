@@ -58,6 +58,7 @@ class DoGEForwardStep:
         freeze_blend: bool = False,
         virtual_step_candidate_weights: list[list[float]] | None = None,
         virtual_step_lr: float | None = None,
+        virtual_step_num_steps: int = 1,
         alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
@@ -74,6 +75,7 @@ class DoGEForwardStep:
             virtual_step_candidate_weights: Optional source-order candidate blend weights used
                 for frozen-model/frozen-blend virtual-step diagnostics.
             virtual_step_lr: Learning rate for virtual selected-parameter diagnostic steps.
+            virtual_step_num_steps: Number of repeated virtual updates per candidate diagnostic.
             alignment_param_scope: Parameter scope used for DoGE gradient scoring and virtual-step
                 diagnostics. ``all_trainable`` is intended for expensive diagnostic runs.
         """
@@ -90,6 +92,7 @@ class DoGEForwardStep:
             virtual_step_candidate_weights, tuple(self.blend_weights)
         )
         self.virtual_step_lr = virtual_step_lr
+        self.virtual_step_num_steps = virtual_step_num_steps
         self.alignment_param_scope = alignment_param_scope
 
     def write_trajectory_record(
@@ -199,6 +202,7 @@ class DoGEForwardStep:
                 raise RuntimeError("DoGE virtual-step diagnostics require virtual_step_lr.")
             virtual_step_diagnostics = compute_virtual_step_diagnostics(
                 state,
+                source_batches,
                 alignment_result.source_gradients,
                 target_batch,
                 model,
@@ -206,6 +210,7 @@ class DoGEForwardStep:
                 self.virtual_step_lr,
                 alignment_result.target_probe_kd_loss,
                 self.alignment_param_scope,
+                self.virtual_step_num_steps,
             )
 
         candidate_blend_weights = dict(

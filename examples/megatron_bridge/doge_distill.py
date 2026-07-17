@@ -235,6 +235,16 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     doge.add_argument(
+        "--doge_virtual_step_num_steps",
+        type=_positive_int,
+        default=1,
+        help=(
+            "Number of repeated virtual SGD steps per candidate diagnostic. Values above 1 "
+            "recompute source gradients on the same sampled source batches after each virtual "
+            "parameter update."
+        ),
+    )
+    doge.add_argument(
         "--doge_alignment_param_scope",
         choices=("final_mlp", "all_trainable"),
         default="final_mlp",
@@ -358,6 +368,7 @@ def main(args: argparse.Namespace) -> None:
             if args.doge_virtual_step_candidate_weights
             else None
         ),
+        virtual_step_num_steps=args.doge_virtual_step_num_steps,
         alignment_param_scope=args.doge_alignment_param_scope,
     )
 

@@ -90,12 +90,14 @@ python examples/megatron_bridge/doge_distill.py \
 ```
 
 Each candidate is interpreted in the source order from `--data_paths` and normalized. For each
-candidate, DoGE temporarily applies one selected-parameter virtual step using that candidate's
-mixed source gradient, evaluates target KD on the same target batch, restores the parameter, and
-writes `virtual_step_diagnostics` to `doge_weights.jsonl`, including the virtual update norm for
+candidate, DoGE temporarily applies selected-parameter virtual SGD steps using that candidate's
+mixed source gradient, evaluates target KD on the same target batch, restores the parameters, and
+writes `virtual_step_diagnostics` to `doge_weights.jsonl`, including the virtual update norms for
 each candidate. The virtual-step learning rate defaults to `--lr` and can be overridden with
-`--doge_virtual_step_lr`. The virtual diagnostic does not change the real student weights or real
-blend weights.
+`--doge_virtual_step_lr`. The number of repeated virtual steps defaults to 1 and can be changed with
+`--doge_virtual_step_num_steps`; values above 1 recompute source gradients on the same sampled
+source batches after each virtual parameter update. The virtual diagnostic does not change the real
+student weights or real blend weights.
 
 By default, virtual-step diagnostics use the cheap Qwen3-8B final-MLP probe. To test whether that
 proxy is too narrow, pass `--doge_alignment_param_scope all_trainable` to compute and apply virtual

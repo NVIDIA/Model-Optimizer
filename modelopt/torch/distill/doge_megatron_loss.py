@@ -57,7 +57,7 @@ class DoGEAlignmentDiagnostics:
 
 
 class DoGEVirtualStepDiagnostic(TypedDict):
-    """Target-probe result after one virtual selected-scope step."""
+    """Target-probe result after virtual selected-scope steps."""
 
     blend_weights: dict[str, float]
     target_probe_kd_before: float
@@ -65,7 +65,9 @@ class DoGEVirtualStepDiagnostic(TypedDict):
     delta_target_probe_kd: float
     virtual_gradient_norm: float
     virtual_update_norm: float
+    virtual_total_update_norm: float
     virtual_step_lr: float
+    virtual_step_num_steps: int
 
 
 def _forward_batch(batch: _GPTBatch, model: GPTModel) -> tuple[torch.Tensor, torch.Tensor]:
@@ -459,6 +461,7 @@ def compute_alignment_scores(
 
 def compute_virtual_step_diagnostics(
     state: GlobalState,
+    source_batches: Mapping[str, _GPTBatch],
     source_gradients: Mapping[str, torch.Tensor],
     target_batch: _GPTBatch,
     model: GPTModel,
@@ -466,22 +469,39 @@ def compute_virtual_step_diagnostics(
     virtual_step_lr: float,
     target_probe_kd_loss: float,
     alignment_param_scope: DoGEAlignmentParamScope,
+    virtual_step_num_steps: int,
 ) -> dict[str, DoGEVirtualStepDiagnostic]:
     """Measure target-KD change after virtual selected-scope steps for candidate blends.
 
-    For each candidate blend, this helper mixes the already-computed source gradients, temporarily
-    applies ``param -= virtual_step_lr * mixed_gradient`` to the selected DoGE alignment
-    parameters, evaluates target KD on the same target batch, and restores the original parameter
-    values.
+    For one-step diagnostics, this helper mixes the already-computed source gradients, temporarily
+    applies ``param -= virtual_step_lr * mixed_gradient`` to the selected DoGE alignment parameters,
+    evaluates target KD on the same target batch, and restores the original parameter values.
+    For multi-step diagnostics, it recomputes source gradients on the same source batches after
+    every virtual parameter update before applying the next virtual update.
     The real model and real blend weights are unchanged.
     """
+    if virtual_step_num_steps < 1:
+        raise ValueError("DoGE virtual-step diagnostics require at least one virtual step.")
+
     diagnostics: dict[str, DoGEVirtualStepDiagnostic] = {}
     for label, weights in candidate_blend_weights.items():
-        mixed_gradient = _mix_source_gradients(source_gradients, weights)
-        virtual_gradient_norm = _reduced_vector_norm(mixed_gradient)
-        with _temporary_alignment_parameter_step(
-            model, mixed_gradient, virtual_step_lr, alignment_param_scope
-        ):
+        with _preserve_alignment_parameters(model, alignment_param_scope) as parameters:
+            virtual_gradient_norm = 0.0
+            virtual_total_update_norm = 0.0
+            for _ in range(virtual_step_num_steps):
+                step_source_gradients = (
+                    source_gradients
+                    if virtual_step_num_steps == 1
+                    else _calc_source_gradient_vectors(
+                        state, source_batches, model, alignment_param_scope
+                    )
+                )
+                mixed_gradient = _mix_source_gradients(step_source_gradients, weights)
+                virtual_gradient_norm = _reduced_vector_norm(mixed_gradient)
+                virtual_update_norm = virtual_step_lr * virtual_gradient_norm
+                virtual_total_update_norm += virtual_update_norm
+                _apply_alignment_parameter_step(parameters, mixed_gradient, virtual_step_lr)
+
             target_probe_kd_after = _calc_probe_kd_loss(state, target_batch, model)
         diagnostics[label] = {
             "blend_weights": dict(weights),
@@ -490,9 +510,24 @@ def compute_virtual_step_diagnostics(
             "delta_target_probe_kd": target_probe_kd_after - target_probe_kd_loss,
             "virtual_gradient_norm": virtual_gradient_norm,
             "virtual_update_norm": virtual_step_lr * virtual_gradient_norm,
+            "virtual_total_update_norm": virtual_total_update_norm,
             "virtual_step_lr": virtual_step_lr,
+            "virtual_step_num_steps": virtual_step_num_steps,
         }
     return diagnostics
+
+
+def _calc_source_gradient_vectors(
+    state: GlobalState,
+    source_batches: Mapping[str, _GPTBatch],
+    model: GPTModel,
+    alignment_param_scope: DoGEAlignmentParamScope,
+) -> dict[str, torch.Tensor]:
+    """Recompute selected-scope source KD gradients for the current virtual parameters."""
+    return {
+        path: _calc_alignment_gradient_vector(state, batch, model, alignment_param_scope)[0]
+        for path, batch in source_batches.items()
+    }
 
 
 def _mix_source_gradients(
@@ -528,31 +563,50 @@ def _temporary_alignment_parameter_step(
     alignment_param_scope: DoGEAlignmentParamScope,
 ):
     """Temporarily apply a selected-scope SGD step and restore original values."""
+    with _preserve_alignment_parameters(model, alignment_param_scope) as parameters:
+        _apply_alignment_parameter_step(parameters, gradient_vector, virtual_step_lr)
+        yield
+
+
+@contextlib.contextmanager
+def _preserve_alignment_parameters(
+    model: GPTModel,
+    alignment_param_scope: DoGEAlignmentParamScope,
+):
+    """Preserve selected-scope parameters while virtual diagnostic updates run."""
     parameters = _get_alignment_parameters(model, alignment_param_scope)
     original_values = [parameter.detach().clone() for parameter in parameters]
-    offset = 0
     try:
-        with torch.no_grad():
-            for parameter in parameters:
-                numel = parameter.numel()
-                # ``gradient_vector`` concatenates gradients for all selected parameters. Slice
-                # this parameter's shard and apply one virtual SGD step:
-                #     theta <- theta - virtual_step_lr * grad
-                # PyTorch ``add_(grad, alpha=-lr)`` performs ``theta += -lr * grad`` in place.
-                gradient = gradient_vector[offset : offset + numel].view_as(parameter)
-                parameter.add_(gradient.to(dtype=parameter.dtype), alpha=-virtual_step_lr)
-                offset += numel
-            if offset != gradient_vector.numel():
-                raise RuntimeError(
-                    "DoGE virtual-step gradient vector does not match selected parameter size: "
-                    f"used {offset} values from {gradient_vector.numel()}."
-                )
-        yield
+        yield parameters
     finally:
         with torch.no_grad():
             for parameter, original_value in zip(parameters, original_values):
                 parameter.copy_(original_value)
         _clear_model_grads(model)
+
+
+def _apply_alignment_parameter_step(
+    parameters: list[torch.nn.Parameter],
+    gradient_vector: torch.Tensor,
+    virtual_step_lr: float,
+) -> None:
+    """Apply one virtual SGD step to selected parameters."""
+    offset = 0
+    with torch.no_grad():
+        for parameter in parameters:
+            numel = parameter.numel()
+            # ``gradient_vector`` concatenates gradients for all selected parameters. Slice this
+            # parameter's shard and apply one virtual SGD step:
+            #     theta <- theta - virtual_step_lr * grad
+            # PyTorch ``add_(grad, alpha=-lr)`` performs ``theta += -lr * grad`` in place.
+            gradient = gradient_vector[offset : offset + numel].view_as(parameter)
+            parameter.add_(gradient.to(dtype=parameter.dtype), alpha=-virtual_step_lr)
+            offset += numel
+        if offset != gradient_vector.numel():
+            raise RuntimeError(
+                "DoGE virtual-step gradient vector does not match selected parameter size: "
+                f"used {offset} values from {gradient_vector.numel()}."
+            )
 
 
 def _calc_advantage_debug(
