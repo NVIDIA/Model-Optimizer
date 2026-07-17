@@ -17,6 +17,7 @@
 
 import numpy as np
 import onnx
+import onnx_graphsurgeon as gs
 import torch
 from onnx import numpy_helper
 
@@ -420,5 +421,9 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         graph.ClearField("initializer")
         graph.initializer.extend(new_initializers)
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
+
+        gs_graph = gs.import_onnx(onnx_model)
+        gs_graph.toposort()
+        onnx_model = gs.export_onnx(gs_graph)
 
         return onnx_model
