@@ -33,7 +33,6 @@ __all__ = [
     "DoGEAlignmentDiagnostics",
     "compute_alignment_scores",
     "weighted_source_forward_step",
-    "zero_weighted_source_forward_step",
 ]
 
 
@@ -90,15 +89,6 @@ def _weighted_loss(
     fragile violation of the tensor-valued forward-step contract.
     """
     return loss, num_tokens, report
-
-
-def _zero_weighted_loss(
-    loss_function: partial,
-    output_tensor: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-    """Return a zeroed loss while preserving the full weighted-source backward graph."""
-    loss, num_tokens, report = loss_function(output_tensor)
-    return loss * 0.0, num_tokens, report
 
 
 def weighted_source_forward_step(
@@ -171,30 +161,6 @@ def weighted_source_forward_step(
     # already computed above, so the scalar ``total_loss`` is also used as the ignored dummy output
     # tensor. This is only valid for the current non-pipeline-parallel PoC.
     return total_loss, partial(_weighted_loss, total_loss, loss_num_tokens, total_report)
-
-
-def zero_weighted_source_forward_step(
-    state: GlobalState,
-    source_batches: dict[str, _GPTBatch],
-    model: GPTModel,
-    blend_weights: dict[str, float],
-    return_schedule_plan: bool,
-) -> tuple[torch.Tensor, partial]:
-    """Return the weighted source graph with a zero loss for frozen-student DoGE runs.
-
-    Megatron DDP expects the backward pass to visit the same parameters as a real training step.
-    A scalar zero loss attached to only one parameter leaves DDP's gradient-ready state incomplete,
-    so frozen-student mode builds the normal weighted source loss and zeroes it at the loss-function
-    boundary.
-    """
-    output_tensor, loss_function = weighted_source_forward_step(
-        state,
-        source_batches,
-        model,
-        blend_weights,
-        return_schedule_plan,
-    )
-    return output_tensor, partial(_zero_weighted_loss, loss_function)
 
 
 # The functions below compute selected-scope gradients for the DoGE outer loop.

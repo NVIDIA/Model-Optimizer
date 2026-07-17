@@ -204,11 +204,6 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Learning rate for exponentiated blend-weight updates",
     )
     doge.add_argument(
-        "--doge_freeze_student",
-        action="store_true",
-        help="Log DoGE score diagnostics without updating student weights",
-    )
-    doge.add_argument(
         "--doge_freeze_blend",
         action="store_true",
         help="Log candidate DoGE blend weights without applying them",
@@ -317,7 +312,6 @@ def main(args: argparse.Namespace) -> None:
         target_data_paths=args.target_data_paths,
         meta_lr=args.doge_meta_lr,
         output_dir=args.output_dir,
-        freeze_student=args.doge_freeze_student,
         freeze_blend=args.doge_freeze_blend,
     )
 

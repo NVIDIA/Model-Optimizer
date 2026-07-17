@@ -35,7 +35,6 @@ from modelopt.torch.distill.doge_megatron_data import (
 from modelopt.torch.distill.doge_megatron_loss import (
     compute_alignment_scores,
     weighted_source_forward_step,
-    zero_weighted_source_forward_step,
 )
 from modelopt.torch.utils import print_rank_0
 
@@ -51,7 +50,6 @@ class DoGEForwardStep:
         target_data_paths: list[str],
         meta_lr: float,
         output_dir: str | Path,
-        freeze_student: bool = False,
         freeze_blend: bool = False,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
@@ -63,7 +61,6 @@ class DoGEForwardStep:
                 weights are normalized into ``self.target_blend_weights`` and are not updated.
             meta_lr: Learning rate for exponentiated blend-weight updates.
             output_dir: Directory where DoGE writes the weight trajectory.
-            freeze_student: Log DoGE scores without updating student weights.
             freeze_blend: Log candidate blend-weight updates without applying them.
         """
         self.data_paths = tuple(data_paths)
@@ -73,7 +70,6 @@ class DoGEForwardStep:
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None
         self.trajectory_path = Path(output_dir) / "doge_weights.jsonl"
-        self.freeze_student = freeze_student
         self.freeze_blend = freeze_blend
 
     def write_trajectory_record(
@@ -178,14 +174,6 @@ class DoGEForwardStep:
             alignment_result.target_probe_kd_loss,
             candidate_blend_weights,
         )
-        if self.freeze_student:
-            return zero_weighted_source_forward_step(
-                state,
-                source_batches,
-                model,
-                self.blend_weights,
-                return_schedule_plan,
-            )
 
         # Inner loop: train the student on source batches mixed with the updated DoGE weights.
         # Megatron-Bridge backpropagates the returned loss and performs the optimizer step.
