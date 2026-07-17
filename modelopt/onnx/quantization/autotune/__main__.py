@@ -155,9 +155,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="modelopt.onnx.quantization.autotune",
         description=(
-            "Advanced ONNX Q/DQ placement autotuning with TensorRT latency measurements. "
-            "For end-to-end ONNX post-training quantization that starts from an unquantized "
-            "model and uses calibration data, use "
+            "ONNX Q/DQ placement autotuning with TensorRT latency measurements. "
+            "For end-to-end ONNX quantization, use "
             "`python -m modelopt.onnx.quantization ... --autotune=<mode>`."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
