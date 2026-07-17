@@ -2428,11 +2428,13 @@ def _evaluation_section(data: dict[str, Any]) -> str:
 
 def _aiperf_data(root: Path) -> dict[str, Any]:
     profiles = []
+    merged_profiles = set()
     for path in sorted(
         (root / "artifacts" / "aiperf" / "profiles").glob("*/isl-*-osl-*/aiperf_results.json")
     ):
         payload = _load_optional(path)
         profile_id = str(payload.get("profile_id") or path.parents[1].name)
+        workload_id = path.parent.name
         registry = _profile_registry(root, profile_id)
         styles = {row["solution_id"]: row for row in registry.get("solutions", ())}
         rows = []
@@ -2451,11 +2453,91 @@ def _aiperf_data(root: Path) -> dict[str, Any]:
         profiles.append(
             {
                 "profile_id": profile_id,
-                "workload_id": path.parent.name,
+                "workload_id": workload_id,
                 "workload": workload,
                 "topologies": payload.get("topologies") or [],
                 "solutions": list(styles.values()),
                 "rows": rows,
+                "coverage": {
+                    "source": "merged",
+                    "result_count": len(rows),
+                    "solution_count": len({str(row.get("solution_id")) for row in rows}),
+                    "topology_count": len({str(row.get("topology_id")) for row in rows}),
+                    "concurrencies": sorted(
+                        {int(row["concurrency"]) for row in rows if "concurrency" in row}
+                    ),
+                },
+            }
+        )
+        merged_profiles.add((profile_id, workload_id))
+
+    partial_profiles: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in sorted(
+        (root / "artifacts" / "aiperf" / "profiles").glob(
+            "*/isl-*-osl-*/*/tp*/concurrency_*/puzzletron_aiperf_result.json"
+        )
+    ):
+        row = _load_optional(path)
+        if row.get("failures") != 0 or not isinstance(row.get("metrics"), Mapping):
+            continue
+        profile_id = str(row.get("profile_id") or path.parents[4].name)
+        workload_id = path.parents[3].name
+        key = (profile_id, workload_id)
+        if key in merged_profiles:
+            continue
+        partial = partial_profiles.setdefault(
+            key,
+            {
+                "profile_id": profile_id,
+                "workload": row.get("workload") or {},
+                "topologies": [],
+                "rows": {},
+            },
+        )
+        if not partial["workload"] and row.get("workload"):
+            partial["workload"] = row["workload"]
+        topology = row.get("topology")
+        if isinstance(topology, Mapping) and topology not in partial["topologies"]:
+            partial["topologies"].append(dict(topology))
+        identity = (
+            str(row.get("solution_id")),
+            str(row.get("topology_id")),
+            int(row.get("concurrency", -1)),
+        )
+        partial["rows"].setdefault(identity, row)
+
+    for (profile_id, workload_id), partial in sorted(partial_profiles.items()):
+        registry = _profile_registry(root, profile_id)
+        styles = {row["solution_id"]: row for row in registry.get("solutions", ())}
+        rows = []
+        for raw in partial["rows"].values():
+            style = styles.get(str(raw.get("solution_id")), {})
+            rows.append(
+                {
+                    **raw,
+                    "label": style.get("label", raw.get("solution_id")),
+                    "color": style.get("color", "#4f8cff"),
+                    "marker": style.get("marker", "circle"),
+                    "always_enabled": bool(style.get("always_enabled", False)),
+                }
+            )
+        profiles.append(
+            {
+                "profile_id": profile_id,
+                "workload_id": workload_id,
+                "workload": partial["workload"],
+                "topologies": partial["topologies"],
+                "solutions": list(styles.values()),
+                "rows": rows,
+                "coverage": {
+                    "source": "partial",
+                    "result_count": len(rows),
+                    "solution_count": len({str(row.get("solution_id")) for row in rows}),
+                    "topology_count": len({str(row.get("topology_id")) for row in rows}),
+                    "concurrencies": sorted(
+                        {int(row["concurrency"]) for row in rows if "concurrency" in row}
+                    ),
+                },
             }
         )
     return {"profiles": profiles}
@@ -2488,7 +2570,17 @@ def _aiperf_section(data: dict[str, Any]) -> str:
         f"{html.escape(str(style.get('label', style['solution_id'])))}</label>"
         for style in styles.values()
     )
+    partial_coverage = "".join(
+        "<p class='note'>Partial AIPerf coverage: "
+        f"{int(profile['coverage']['result_count'])} valid measurements across "
+        f"{int(profile['coverage']['solution_count'])} models and "
+        f"{int(profile['coverage']['topology_count'])} topologies. The AIPerf stage remains "
+        "pending until its declared matrix is complete.</p>"
+        for profile in profiles
+        if (profile.get("coverage") or {}).get("source") == "partial"
+    )
     return (
+        f"{partial_coverage}"
         "<div class='vllm-controls'><label>ISL / OSL"
         f"<select id='aiperf-workload-select'>{workload_options}</select></label>"
         "<label>TP / PP / DP / EP / CP"
@@ -3212,6 +3304,7 @@ def _report_section_specs() -> tuple[_ReportSectionSpec, ...]:
         "vllm": 2,
         "mip": 4,
         "evaluation": 2,
+        "aiperf": 2,
     }
     definitions = (
         (
@@ -3481,7 +3574,7 @@ def generate_campaign_progress_report(
     has_replacement = present["replacement_scoring"] or bool(replacement_data.get("records"))
     has_mip = present["mip"]
     has_evaluation = present["zero_shot_evaluation"]
-    has_aiperf = present["aiperf"]
+    has_aiperf = present["aiperf"] or bool(aiperf_data.get("profiles"))
     has_distillation_overfit = present["global_distillation_sanity"]
     has_proper_distillation = bool(proper_distillation_data.get("runs"))
     has_post_distillation_evaluation = present["post_distillation_evaluation"]
@@ -4272,7 +4365,14 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
   }}
   function render(){{
     const profile=selectedProfile();
-    if(summary)summary.textContent=profile?`${{profile.profile_id}} · ${{profile.workload_id}} · ${{topology.value}} · concurrencies 1, 4, 16, 64`:`No AIPerf data for ${{profileId}} / ${{workload.value}}`;
+    if(summary){{
+      if(!profile)summary.textContent=`No AIPerf data for ${{profileId}} / ${{workload.value}}`;
+      else{{
+        const coverage=profile.coverage||{{}},concurrencies=(coverage.concurrencies||[]).join(', ');
+        const scope=coverage.source==='partial'?'partial matrix':'merged matrix';
+        summary.textContent=`${{profile.profile_id}} · ${{profile.workload_id}} · ${{topology.value}} · ${{coverage.result_count||0}} valid measurements · ${{scope}} · concurrencies ${{concurrencies||'N/A'}}`;
+      }}
+    }}
     renderPlot('aiperf-ttft-throughput-plot','ttft_{{stat}}_ms',`${{statistic.value.toUpperCase()}} TTFT (ms)`,'min');
     renderPlot('aiperf-latency-throughput-plot','request_latency_{{stat}}_ms',`${{statistic.value.toUpperCase()}} request latency (ms)`,'min');
     renderPlot('aiperf-interactivity-throughput-plot','output_token_throughput_per_user_{{stat}}','Interactivity (tokens/s/user)','max');

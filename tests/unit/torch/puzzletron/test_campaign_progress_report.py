@@ -788,6 +788,61 @@ def test_progress_report_renders_profile_evaluation_and_aiperf_explorers(tmp_pat
     assert '<option value="PARETO">PARETO</option>' in document
     assert 'data-aiperf-solution="teacher"' in document
     assert "#f5c451" in document
+
+
+def test_progress_report_renders_partial_aiperf_leaf_results(tmp_path: Path):
+    registry = {
+        "profile_id": "params-080",
+        "solutions": [
+            {
+                "solution_id": "teacher",
+                "label": "Teacher",
+                "color": "#f5c451",
+                "marker": "star",
+                "always_enabled": True,
+            },
+            {
+                "solution_id": "h0512-d0",
+                "label": "H=512, Drop=0",
+                "color": "#ff6577",
+                "marker": "circle",
+                "always_enabled": False,
+            },
+        ],
+    }
+    _write(tmp_path / "mip/profiles/params-080/selected_solutions.json", registry)
+    for style in registry["solutions"]:
+        for concurrency in (1, 4):
+            _write(
+                tmp_path
+                / "artifacts/aiperf/profiles/params-080/isl-1024-osl-128"
+                / style["solution_id"]
+                / "tp2-pp1-dp1-ep1-pcp1-dcp1"
+                / f"concurrency_{concurrency}/puzzletron_aiperf_result.json",
+                {
+                    "solution_id": style["solution_id"],
+                    "profile_id": "params-080",
+                    "topology_id": "tp2-pp1-dp1-ep1-pcp1-dcp1",
+                    "concurrency": concurrency,
+                    "failures": 0,
+                    "workload": {"input_tokens": 1024, "output_tokens": 128},
+                    "metrics": {
+                        "output_token_throughput": 10.0 * concurrency,
+                        "ttft_mean_ms": 4.0,
+                        "tpot_mean_ms": 2.0,
+                        "request_latency_mean_ms": 20.0,
+                        "output_token_throughput_per_user_mean": 5.0,
+                    },
+                },
+            )
+
+    result = generate_campaign_progress_report(tmp_path, model_name="Qwen3.5-0.8B")
+    document = Path(result["html"]).read_text(encoding="utf-8")
+
+    assert 'id="aiperf-benchmarks"' in document
+    assert "Partial AIPerf coverage: 4 valid measurements" in document
+    assert 'data-aiperf-solution="teacher"' in document
+    assert 'data-stage="aiperf" data-status="pending"' in document
     assert "id='aiperf-ttft-throughput-plot'" in document
     assert "id='aiperf-latency-throughput-plot'" in document
     assert "id='aiperf-interactivity-throughput-plot'" in document
