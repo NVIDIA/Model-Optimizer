@@ -712,10 +712,12 @@ def _activation_error_coupling_bias(
 
 
 class _LocalHessianAccumulator:
-    """Per-block local Hessian ``H = ΣXᵀX`` for one weight quantizer.
+    """Per-block local Hessian from input-quantizer outputs for one weight quantizer.
 
     Partitioned over ``cin`` into ``cin // block_size`` blocks to match the NVFP4 per-block
-    scale; the buffer is allocated lazily so never-routed experts cost nothing.
+    scale. An enabled input quantizer gives ``H = ΣX_qᵀX_q``; a disabled one returns its
+    input unchanged and gives ``H = ΣXᵀX``. Buffers are allocated lazily so never-routed
+    experts cost nothing.
     """
 
     def __init__(self, cout: int, cin: int, block_size: int):
@@ -733,19 +735,18 @@ class _LocalHessianAccumulator:
 
     @torch.no_grad()
     def accumulate(
-        self, input_tensor: torch.Tensor, quantized_input: torch.Tensor | None = None
+        self, quantizer_output: torch.Tensor, unquantized_input: torch.Tensor | None = None
     ) -> None:
-        """Accumulate the per-block Hessian and optional activation error coupling."""
+        """Accumulate the Hessian and optional coupling to ``unquantized_input``."""
         if not self.is_enabled:
             return
         # fp32 GEMM avoids bf16/fp16 precision loss; (cin, tokens) -> (n_blocks, bs, tokens).
-        x = input_tensor.reshape(-1, self.cin).to(torch.float32).T
-        if quantized_input is not None and quantized_input is not input_tensor:
-            xq = quantized_input.reshape(-1, self.cin).to(torch.float32).T
-            dx = xq - x
-            x = xq
-        else:
-            dx = None
+        x = quantizer_output.reshape(-1, self.cin).to(torch.float32).T
+        dx = (
+            x - unquantized_input.reshape(-1, self.cin).to(torch.float32).T
+            if unquantized_input is not None and unquantized_input is not quantizer_output
+            else None
+        )
         x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)
         hessian_batch = x @ x.transpose(-1, -2)
         if self.hessian_per_block is None:
@@ -759,7 +760,7 @@ class _LocalHessianAccumulator:
                 self.coupling_per_block = coupling_batch
             else:
                 self.coupling_per_block += coupling_batch
-        self.num_samples += input_tensor.numel() // self.cin
+        self.num_samples += quantizer_output.numel() // self.cin
 
     def normalized_hessian(self) -> torch.Tensor | None:
         """Per-cin-block Hessian ``H / num_samples`` (``None`` if no samples).
@@ -878,28 +879,23 @@ def _register_local_hessian_input_hooks(
     """
     handles: list = []
 
-    def _make_expert_pre_hook(expert_module, weight_name, quantizers, enabled):
-        def _expert_hook(_input_quantizer, args):
-            if not args:
-                return
-            idx = expert_module._current_expert_idx
-            if idx in enabled:
-                # Read the weight fresh (valid under accelerate/FSDP re-materialization).
-                capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0])
-
-        return _expert_hook
-
-    def _make_expert_post_hook(expert_module, weight_name, quantizers, enabled):
+    def _make_expert_hook(expert_module, weight_name, quantizers, enabled, capture_coupling):
         def _expert_hook(_input_quantizer, args, output):
             if not args:
                 return
             idx = expert_module._current_expert_idx
             if idx in enabled:
-                capture(quantizers[idx], getattr(expert_module, weight_name)[idx], args[0], output)
+                # Read the weight fresh (valid under accelerate/FSDP re-materialization).
+                capture(
+                    quantizers[idx],
+                    getattr(expert_module, weight_name)[idx],
+                    output,
+                    args[0] if capture_coupling else None,
+                )
 
         return _expert_hook
 
-    def _use_coupling_hook(input_quantizer, layer_name):
+    def _capture_coupling(input_quantizer, layer_name):
         if not activation_error_coupling:
             return False
         reason = _activation_error_coupling_fallback_reason(input_quantizer)
@@ -924,21 +920,23 @@ def _register_local_hessian_input_hooks(
                     name, weight, module.weight_quantizer, block_size, warned
                 )
 
-            def _dense_pre_hook(linear, args):
-                if args:
-                    capture(linear.weight_quantizer, linear.weight, args[0])
-
             input_quantizer = getattr(module, "input_quantizer", None)
-            if _use_coupling_hook(input_quantizer, name):
-                assert isinstance(input_quantizer, TensorQuantizer)
+            if not isinstance(input_quantizer, nn.Module):
+                continue
+            capture_coupling = _capture_coupling(input_quantizer, name)
 
-                def _dense_post_hook(_input_quantizer, args, output, linear=module):
-                    if args:
-                        capture(linear.weight_quantizer, linear.weight, args[0], output)
+            def _dense_hook(
+                _input_quantizer, args, output, linear=module, coupling=capture_coupling
+            ):
+                if args:
+                    capture(
+                        linear.weight_quantizer,
+                        linear.weight,
+                        output,
+                        args[0] if coupling else None,
+                    )
 
-                handles.append(input_quantizer.register_forward_hook(_dense_post_hook))
-            else:
-                handles.append(module.register_forward_pre_hook(_dense_pre_hook))
+            handles.append(input_quantizer.register_forward_hook(_dense_hook))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, name_to_module):
                 first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
@@ -962,18 +960,18 @@ def _register_local_hessian_input_hooks(
                     # all weight quantizers — so we don't capture (and discard) disabled experts.
                     enabled = {i for i, q in enumerate(quantizers) if q.is_enabled}
                     layer_name = f"{name}.{weight_name}"
-                    if _use_coupling_hook(input_quantizer, layer_name):
-                        handles.append(
-                            input_quantizer.register_forward_hook(
-                                _make_expert_post_hook(module, weight_name, quantizers, enabled)
+                    capture_coupling = _capture_coupling(input_quantizer, layer_name)
+                    handles.append(
+                        input_quantizer.register_forward_hook(
+                            _make_expert_hook(
+                                module,
+                                weight_name,
+                                quantizers,
+                                enabled,
+                                capture_coupling,
                             )
                         )
-                    else:
-                        handles.append(
-                            input_quantizer.register_forward_pre_hook(
-                                _make_expert_pre_hook(module, weight_name, quantizers, enabled)
-                            )
-                        )
+                    )
     return handles
 
 
@@ -993,17 +991,18 @@ def local_hessian_calibrate(
 ):
     """Calibrate weight quantizers by minimizing the Hessian-weighted error.
 
-    Minimizes ``(Wq - W)ᵀ H (Wq - W)`` with per-block Hessian ``H = ΣXᵀX`` (approximating the
-    output error ``||WX - WqX||²``), built from a forward with weight fake-quant disabled
-    (input quantizers untouched) and fed to :func:`mse_calibrate`'s weight search via ``error_func``.
+    Minimizes ``(Wq - W)ᵀ H (Wq - W)`` with a per-block Hessian built from the input
+    quantizer output. Thus ``H = ΣXᵀX`` when that quantizer is disabled and
+    ``H = ΣX_qᵀX_q`` when enabled. It is captured with weight fake-quant disabled and fed
+    to :func:`mse_calibrate`'s weight search via ``error_func``.
 
     Like :func:`mse_calibrate`, TensorQuantizer weights are calibrated — with the Hessian
     metric where a weight pairs with its input activations (dense linears and HF fused-MoE
     experts), plain MSE otherwise. Other quantizer types (e.g. SequentialQuantizer) are
     unsupported and left at their max-calibrated scale.
 
-    With ``activation_error_coupling=True``, each local block instead uses
-    ``H = X_qᵀX_q / B`` and adds ``2 ΔWᵀ P W`` with
+    With ``activation_error_coupling=True``, each eligible local block additionally uses
+    ``2 ΔWᵀ P W`` with
     ``P = X_qᵀ(X_q-X) / B``. This is the activation error coupling term in the exact
     block-wise expansion of ``||X_q W_q - X W||²`` after dropping its scale-independent
     constant. The objective can therefore be negative. Both matrices retain only local
@@ -1021,7 +1020,7 @@ def local_hessian_calibrate(
             for NVFP4 per-block quantization (default: True).
         block_size: Block size for local Hessian computation (default: 16).
         activation_error_coupling: Include the activation error coupling term in block-wise
-            output MSE. Default False preserves the existing path exactly.
+            output MSE. Default False omits this additional term.
         debug: If True, retain the per-quantizer Hessian accumulators on the model
             (``model._local_hessian_accumulators``) for inspection.
 
@@ -1041,21 +1040,25 @@ def local_hessian_calibrate(
     # Hessians keyed by id(weight_quantizer); modules pair weights<->activations via the hook.
     accumulators: dict[int, _LocalHessianAccumulator] = {}
 
-    def capture(weight_quantizer, weight, input_tensor, quantized_input=None):
-        input_local = input_tensor.to_local() if hasattr(input_tensor, "to_local") else input_tensor
-        quantized_input_local = (
-            quantized_input.to_local()
-            if quantized_input is not None and hasattr(quantized_input, "to_local")
-            else quantized_input
+    def capture(weight_quantizer, weight, quantizer_output, unquantized_input=None):
+        quantizer_output_local = (
+            quantizer_output.to_local()
+            if hasattr(quantizer_output, "to_local")
+            else quantizer_output
+        )
+        unquantized_input_local = (
+            unquantized_input.to_local()
+            if unquantized_input is not None and hasattr(unquantized_input, "to_local")
+            else unquantized_input
         )
         acc = accumulators.get(id(weight_quantizer))
         if acc is None:
             acc = _LocalHessianAccumulator(weight.shape[0], weight.shape[1], block_size)
             accumulators[id(weight_quantizer)] = acc
-        acc.accumulate(input_local, quantized_input_local)
+        acc.accumulate(quantizer_output_local, unquantized_input_local)
 
-    # Phase 2: capture each weight's input activations during a forward with weight fake-quant
-    # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
+    # Phase 2: capture each input quantizer's output during a forward with weight fake-quant
+    # disabled; enabled input quantizers contribute X_q to H and disabled ones contribute X.
     warned: set = set()
     handles = _register_local_hessian_input_hooks(
         model,

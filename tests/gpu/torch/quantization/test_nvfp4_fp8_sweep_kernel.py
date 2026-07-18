@@ -382,11 +382,11 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
 
 
 def _build_hessian_accumulator(
-    cout, cin, hessian_input, block_size=BLOCK_SIZE, quantized_input=None
+    cout, cin, quantizer_output, block_size=BLOCK_SIZE, unquantized_input=None
 ):
     """Real ``_LocalHessianAccumulator`` so the test exercises the production metric."""
     acc = _LocalHessianAccumulator(cout, cin, block_size)
-    acc.accumulate(hessian_input, quantized_input)
+    acc.accumulate(quantizer_output, unquantized_input)
     return acc
 
 
@@ -519,7 +519,7 @@ def test_activation_error_coupling_hessian_parity(dtype):
     weight = torch.randn(cout, cin, device="cuda", dtype=dtype)
     x = torch.randn(256, cin, device="cuda")
     xq = (x / 0.125).round() * 0.125
-    acc = _build_hessian_accumulator(cout, cin, x, quantized_input=xq)
+    acc = _build_hessian_accumulator(cout, cin, xq, unquantized_input=x)
     x_blocks = weight.reshape(-1, BLOCK_SIZE)
     per_block_amax = x_blocks.float().abs().amax(dim=-1)
     global_amax = per_block_amax.max()

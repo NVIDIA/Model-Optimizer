@@ -127,7 +127,7 @@ class TestLocalHessianAccumulator:
         x = torch.randn(6, cin, dtype=torch.bfloat16)
         xq = (x.float() + 0.1 * torch.randn_like(x.float())).to(torch.bfloat16)
         acc = _LocalHessianAccumulator(cout, cin, bs)
-        acc.accumulate(x, xq)
+        acc.accumulate(xq, x)
 
         xb = x.float().T.reshape(cin // bs, bs, -1)
         xqb = xq.float().T.reshape(cin // bs, bs, -1)
@@ -142,7 +142,7 @@ class TestLocalHessianAccumulator:
         x = xq - 0.2 * torch.randn_like(xq)
         w0 = torch.randn(cout, cin)
         acc = _LocalHessianAccumulator(cout, cin, bs)
-        acc.accumulate(x, xq)
+        acc.accumulate(xq, x)
         hessian = acc.normalized_hessian()[0]
         coupling = acc.normalized_coupling()
         bias = _activation_error_coupling_bias(w0, coupling, cout, bs)[:, 0]
@@ -240,13 +240,30 @@ class TestLocalHessianCalibrateDense:
         assert all(a.coupling_per_block is not None for a in routed)
         assert any(torch.count_nonzero(a.coupling_per_block) for a in routed)
 
-    def test_default_path_does_not_capture_activation_error_coupling(self):
+    @pytest.mark.parametrize("quant_cfg", [INT8_WEIGHT_CFG, INT8_W8A8_CFG])
+    @pytest.mark.parametrize("activation_error_coupling", [False, True])
+    def test_hessian_uses_input_quantizer_output(self, quant_cfg, activation_error_coupling):
         torch.manual_seed(0)
         model = SimpleLinear()
-        forward_loop = _make_forward_loop()
-        mtq.quantize(model, INT8_W8A8_CFG, forward_loop=forward_loop)
-        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
-        assert all(a.coupling_per_block is None for a in model._local_hessian_accumulators.values())
+        x = torch.randn(8, 16)
+        x[:, 0] *= 40.0
+        forward_loop = lambda m: m(x)  # noqa: E731
+        mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
+        local_hessian_calibrate(
+            model,
+            forward_loop,
+            fp8_scale_sweep=False,
+            activation_error_coupling=activation_error_coupling,
+            debug=True,
+        )
+
+        linear = model.net[0]
+        acc = model._local_hessian_accumulators[id(linear.weight_quantizer)]
+        quantizer_output = linear.input_quantizer(x).float().T.reshape(1, 16, -1)
+        expected_hessian = quantizer_output @ quantizer_output.transpose(-1, -2)
+        assert torch.equal(acc.hessian_per_block, expected_hessian)
+        expect_coupling = activation_error_coupling and linear.input_quantizer.is_enabled
+        assert (acc.coupling_per_block is not None) is expect_coupling
 
 
 class TestLocalHessianFallbacks:
