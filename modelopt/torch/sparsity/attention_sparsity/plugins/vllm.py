@@ -45,6 +45,7 @@ from modelopt.torch.kernels.common.attention.decode_attention import (
 )
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
+from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
 
 @functools.cache
@@ -250,6 +251,104 @@ def _resolve_forward(
         v_qdq_amax=v_qdq_amax,
         quant_active=quant_active,
     )
+
+
+def _calibration_active(impl) -> bool:
+    """Return whether skip-softmax calibration mode is enabled on an impl."""
+    return bool(getattr(impl, "_calibrate", False)) and bool(
+        getattr(impl, "_calib_threshold_trials", None)
+    )
+
+
+def _forward_calibrate(
+    impl,
+    *,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    num_actual_tokens: int,
+    output: torch.Tensor,
+) -> torch.Tensor:
+    """Measure per-request tile-skip stats via the paged Triton calibration kernel.
+
+    Each scheduled request is calibrated independently (batch=1) so its KV
+    length is the per-sample length the exponential fit needs, and so the
+    kernel keeps the uniform-length contract it was validated against. The
+    kernel computes full attention, so ``output`` is written densely and the
+    forward pass is numerically unchanged.
+
+    Phase and causality are decided per request: ``q_len == 1`` is a decode
+    step (full-cache, non-causal); ``q_len > 1`` is (chunked) prefill (causal
+    — the kernel offsets the query into the KV span). A mixed prefill/decode
+    batch therefore contributes correctly to both phase fits.
+
+    Records raw per-threshold tile counts (not ratios) on
+    ``impl._calib_records`` so tensor-parallel workers can be aggregated by
+    summing counts before the fit.
+    """
+    if key_cache.dtype not in (torch.float16, torch.bfloat16):
+        raise NotImplementedError(
+            f"skip-softmax calibration requires an fp16/bf16 KV cache, got {key_cache.dtype}"
+        )
+    if key_cache.shape[2] != impl.num_kv_heads:
+        # NHD is the only supported paged layout: [blocks, page, kv_heads, dim].
+        # An HND FlashInfer cache would put kv_heads on axis 1.
+        raise NotImplementedError(
+            f"KV cache layout is not NHD (shape {tuple(key_cache.shape)}, "
+            f"expected axis 2 == num_kv_heads == {impl.num_kv_heads}); "
+            "HND caches are unsupported for calibration"
+        )
+    page_size = key_cache.shape[1]
+    trials = impl._calib_threshold_trials
+    batch = seq_lens.shape[0]
+    b_start_loc = cu_seqlens_q[:batch]
+    b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
+
+    q = query[:num_actual_tokens].contiguous()
+    # Dummy K/V: in paged mode KV is read from the cache via block_table.
+    # Only shape[1] (num_kv_heads) is consulted, to compute the GQA ratio.
+    k_dummy = torch.empty(0, impl.num_kv_heads, impl.head_size, device=q.device, dtype=q.dtype)
+
+    for i in range(batch):
+        q_len = int(b_seq_len[i].item())
+        if q_len <= 0:
+            continue
+        q_start = int(b_start_loc[i].item())
+        seq_k = int(seq_lens[i].item())
+        phase = "decode" if q_len <= 1 else "prefill"
+
+        oi, counters = attention_calibrate(
+            q[q_start : q_start + q_len],
+            k_dummy,
+            k_dummy,
+            b_start_loc=torch.zeros(1, device=q.device, dtype=torch.int32),
+            b_seq_len=b_seq_len[i : i + 1].to(torch.int32),
+            max_input_len=q_len,
+            is_causal=q_len > 1,
+            softmax_scale=impl.scale,
+            b_seq_len_k=seq_lens[i : i + 1].to(torch.int32),
+            max_input_len_k=seq_k,
+            threshold_trials=trials,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            block_table=block_table[i : i + 1],
+            page_size=page_size,
+        )
+        output[q_start : q_start + q_len] = oi
+
+        impl._calib_records.append(
+            {
+                "phase": phase,
+                "sample_length": seq_k,
+                "total_tiles": counters[:, 0].tolist(),
+                "skipped_tiles": counters[:, 1].tolist(),
+            }
+        )
+
+    return output
 
 
 # Resolution guards raw configured transforms; dispatch rechecks effective
@@ -517,6 +616,26 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 )
             return native_result
 
+        if _calibration_active(self):
+            if getattr(attn_metadata, "use_cascade", False):
+                # Cascade splits shared prefixes across requests, so per-request
+                # KV lengths are unavailable; skip measurement for this launch.
+                return native_forward()
+            # vLLM >= 0.15 writes the current K/V to the paged cache before
+            # impl.forward, so the calibrate kernel reads a complete cache.
+            key_cache, value_cache = kv_cache.unbind(0)
+            return _forward_calibrate(
+                self,
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                cu_seqlens_q=attn_metadata.query_start_loc,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+                output=output,
+            )
+
         resolved = _resolve_forward(
             self,
             layer,
@@ -705,6 +824,36 @@ def _flashinfer_forward(
             _maybe_update_flashinfer_cache(layer, key, value, kv_cache, attn_metadata, impl)
             cache_prepared = True
 
+    if _calibration_active(impl):
+        if getattr(attn_metadata, "use_cascade", False):
+            # Cascade splits shared prefixes across requests, so per-request
+            # KV lengths are unavailable; skip measurement for this launch.
+            return dense_fallback()
+        missing = [name for name in _FLASHINFER_METADATA_FIELDS if not hasattr(attn_metadata, name)]
+        if missing:
+            raise NotImplementedError(
+                "FlashInfer metadata is missing the ModelOpt calibration "
+                f"fields: {', '.join(missing)}"
+            )
+        if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:
+            raise ValueError(
+                "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
+            )
+        # Order matters: releases that update the KV cache inside forward must
+        # write the current K/V before the calibrate kernel reads the cache.
+        prepare_modelopt()
+        return _forward_calibrate(
+            impl,
+            query=query,
+            key_cache=kv_cache[:, 0],
+            value_cache=kv_cache[:, 1],
+            block_table=attn_metadata._modelopt_block_table,
+            seq_lens=attn_metadata._modelopt_seq_lens,
+            cu_seqlens_q=attn_metadata._modelopt_query_start_loc,
+            num_actual_tokens=attn_metadata._modelopt_num_actual_tokens,
+            output=output,
+        )
+
     resolved = _resolve_forward(
         impl,
         layer,
@@ -833,3 +982,37 @@ def _clone_sparse_impl(old_impl, new_cls=None):
     new_impl = object.__new__(new_cls)
     new_impl.__dict__.update(old_state)
     return new_impl
+
+
+def iter_sparse_impls(model):
+    """Yield every ModelOpt sparse attention impl reachable from a vLLM model.
+
+    Walks ``model.named_modules()`` and returns the swapped ``impl`` of each
+    attention layer (FlashAttention or FlashInfer adapter). Used by the
+    calibration installer and RPC methods to toggle calibration mode and
+    harvest stats without knowing vLLM's module layout.
+    """
+    for _, module in model.named_modules():
+        impl = getattr(module, "impl", None)
+        if impl is None:
+            continue
+        if isinstance(impl, ModelOptSparseAttentionImpl) or (
+            _FLASHINFER_IMPL_CLS is not None and isinstance(impl, _FLASHINFER_IMPL_CLS)
+        ):
+            yield impl
+
+
+def enable_calibration(impls, threshold_trials: list[float]) -> None:
+    """Put a set of sparse impls into calibration mode and clear prior records."""
+    if not threshold_trials:
+        raise ValueError("threshold_trials must be a non-empty list for calibration.")
+    for impl in impls:
+        impl._calibrate = True
+        impl._calib_threshold_trials = list(threshold_trials)
+        impl._calib_records = []
+
+
+def disable_calibration(impls) -> None:
+    """Turn off calibration mode (collected records are left intact)."""
+    for impl in impls:
+        impl._calibrate = False
