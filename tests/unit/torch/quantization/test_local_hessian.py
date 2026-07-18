@@ -24,9 +24,11 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleLinear
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import calib
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.config import LocalHessianCalibConfig, QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     _FP8_SWEEP_CALIBRATOR_REGISTRY,
+    _activation_error_coupling_bias,
+    _activation_error_coupling_fallback_reason,
     _LocalHessianAccumulator,
     _make_weight_mse_calibrator,
     _register_fp8_sweep_calibrator,
@@ -45,6 +47,15 @@ INT8_WEIGHT_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
         {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+    ],
+    "algorithm": "max",
+}
+
+INT8_W8A8_CFG = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
     ],
     "algorithm": "max",
 }
@@ -110,6 +121,61 @@ class TestLocalHessianAccumulator:
         assert not_divisible.build_error_func() is None
         assert _LocalHessianAccumulator(8, 32, 16).build_error_func() is None  # no samples
 
+    def test_activation_error_coupling_accumulation(self):
+        torch.manual_seed(2)
+        cout, cin, bs = 3, 8, 4
+        x = torch.randn(6, cin, dtype=torch.bfloat16)
+        xq = (x.float() + 0.1 * torch.randn_like(x.float())).to(torch.bfloat16)
+        acc = _LocalHessianAccumulator(cout, cin, bs)
+        acc.accumulate(x, xq)
+
+        xb = x.float().T.reshape(cin // bs, bs, -1)
+        xqb = xq.float().T.reshape(cin // bs, bs, -1)
+        assert acc.coupling_per_block.dtype == torch.float32
+        assert torch.equal(acc.hessian_per_block, xqb @ xqb.transpose(-1, -2))
+        assert torch.equal(acc.coupling_per_block, xqb @ (xqb - xb).transpose(-1, -2))
+
+    def test_activation_error_coupling_objective_matches_output_mse(self):
+        torch.manual_seed(3)
+        samples, cout, cin, bs = 7, 2, 2, 2
+        xq = torch.randn(samples, cin)
+        x = xq - 0.2 * torch.randn_like(xq)
+        w0 = torch.randn(cout, cin)
+        acc = _LocalHessianAccumulator(cout, cin, bs)
+        acc.accumulate(x, xq)
+        hessian = acc.normalized_hessian()[0]
+        coupling = acc.normalized_coupling()
+        bias = _activation_error_coupling_bias(w0, coupling, cout, bs)[:, 0]
+        # The minimizer of the constant-dropped quadratic is deliberately negative.
+        dw = -torch.linalg.solve(hessian, bias.T).T
+        wq = w0 + dw
+
+        objective = acc.build_error_func(keep_buffer=True)(w0, wq)[:, 0]
+        deployed = xq @ wq.T
+        reference = x @ w0.T
+        constant = xq @ w0.T - reference
+        expected = ((deployed - reference).square() - constant.square()).sum(0) / samples
+        assert torch.allclose(objective, expected, atol=2e-5, rtol=2e-5)
+        assert (objective < 0).all()
+
+    def test_default_accumulation_does_not_allocate_coupling(self):
+        acc = _LocalHessianAccumulator(2, 4, 2)
+        x = torch.randn(3, 4)
+        acc.accumulate(x)
+        assert acc.coupling_per_block is None
+        assert acc.normalized_coupling() is None
+
+
+def test_activation_error_coupling_config_and_preset():
+    config = LocalHessianCalibConfig(activation_error_coupling=True)
+    assert config.model_dump()["activation_error_coupling"] is True
+    assert (
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG["algorithm"][
+            "activation_error_coupling"
+        ]
+        is True
+    )
+
 
 class TestLocalHessianCalibrateDense:
     def test_refines_amax_beyond_max_and_plain_mse(self):
@@ -157,6 +223,31 @@ class TestLocalHessianCalibrateDense:
             local_hessian_calibrate(model, forward_loop=None)
         assert all(torch.equal(before[n], a) for n, a in _weight_amaxes(model).items())
 
+    def test_activation_error_coupling_captures_quantized_inputs(self):
+        torch.manual_seed(0)
+        model = SimpleLinear()
+        forward_loop = _make_forward_loop()
+        mtq.quantize(model, INT8_W8A8_CFG, forward_loop=forward_loop)
+        local_hessian_calibrate(
+            model,
+            forward_loop,
+            fp8_scale_sweep=False,
+            activation_error_coupling=True,
+            debug=True,
+        )
+        routed = [a for a in model._local_hessian_accumulators.values() if a.num_samples]
+        assert routed
+        assert all(a.coupling_per_block is not None for a in routed)
+        assert any(torch.count_nonzero(a.coupling_per_block) for a in routed)
+
+    def test_default_path_does_not_capture_activation_error_coupling(self):
+        torch.manual_seed(0)
+        model = SimpleLinear()
+        forward_loop = _make_forward_loop()
+        mtq.quantize(model, INT8_W8A8_CFG, forward_loop=forward_loop)
+        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
+        assert all(a.coupling_per_block is None for a in model._local_hessian_accumulators.values())
+
 
 class TestLocalHessianFallbacks:
     """Weights local-Hessian can't pair with an input fall back to plain MSE (no Hessian)."""
@@ -179,6 +270,25 @@ class TestLocalHessianFallbacks:
         linear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
         local_hessian_calibrate(model, _make_forward_loop(), fp8_scale_sweep=False, debug=True)
         assert id(linear.weight_quantizer) not in model._local_hessian_accumulators
+
+    @pytest.mark.parametrize(
+        ("cfg", "reason"),
+        [
+            ({"num_bits": 8}, "pre_quant_scale"),
+            (
+                {
+                    "num_bits": 8,
+                    "rotate": {"enable": True, "mode": "rotate", "block_size": 8},
+                },
+                "rotation",
+            ),
+        ],
+    )
+    def test_activation_error_coupling_fallback_reasons(self, cfg, reason):
+        q = TensorQuantizer(QuantizerAttributeConfig(**cfg))
+        if reason == "pre_quant_scale":
+            q.pre_quant_scale = torch.ones(16)
+        assert reason in _activation_error_coupling_fallback_reason(q)
 
 
 class TestBlockSizeMismatchWarning:

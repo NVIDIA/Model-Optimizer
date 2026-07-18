@@ -1014,9 +1014,9 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     quantization. It minimizes the output reconstruction error by weighting the loss
     with the local Hessian matrix computed from input activations.
 
-    The local Hessian loss for each block is: ``(dw @ H @ dw.T)`` where:
-    - ``dw = weight - quantized_weight`` (weight reconstruction error per block)
-    - ``H = X @ X.T`` is the local Hessian computed from input activations X
+    The default local Hessian loss is ``ΔWᵀ H ΔW``. The optional activation error coupling
+    extends it to ``ΔWᵀ H ΔW + 2 ΔWᵀ P W0``, where ``ΔW = Wq-W0``,
+    ``H = XqᵀXq / B``, and ``P = Xqᵀ(Xq-X) / B`` for each local cin-block.
 
     """
 
@@ -1059,6 +1059,19 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description="The block size used for computing the local Hessian matrix. "
         "This should match the block size used in the quantization config. "
         "Default is 16 for NVFP4.",
+    )
+
+    activation_error_coupling: bool | None = ModeloptField(
+        default=False,
+        title="Include the activation error coupling term in block-wise output MSE.",
+        description=(
+            "If True, build the local Hessian from fake-quantized activations X_q and add the "
+            "activation error coupling term 2·ΔWᵀ·P·W0, where "
+            "P = (1/B)·X_qᵀ·(X_q - X). This minimizes ‖X_q·W_q - X·W0‖² per block after "
+            "dropping a scale-independent constant, so the relative objective may be negative. "
+            "Layers whose input quantizer is disabled, absent, or uses pre_quant_scale/rotation "
+            "fall back to the Hessian-only objective. Default False preserves existing behavior."
+        ),
     )
 
     distributed_sync: bool | None = ModeloptField(
@@ -1669,6 +1682,9 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG: dict[str, Any] = _load_quantize_config_dict
 NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/nvfp4_w4a4_weight_local_hessian"
 )
+NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_w4a4_weight_local_hessian_act_error_coupling"
+)
 MAMBA_MOE_NVFP4_AGGRESSIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/mamba_moe_nvfp4_aggressive"
 )
@@ -1760,6 +1776,7 @@ choices: set[str] = {
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
     "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
     "NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG",
+    "NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG",
     "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG",
 }
 

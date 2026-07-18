@@ -162,7 +162,7 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 scripts/huggingface_example.sh --model $HF_PATH --quant <QFORMAT> --tp [1|2|4|8]
 ```
 
-Supported `QFORMAT` values: `fp8`, `fp8_pc_pt`, `fp8_pb_wo`, `int8`, `int8_sq`, `int8_wo`, `int4_awq`, `w4a8_awq`, `nvfp4`, `nvfp4_awq`, `nvfp4_mse`, `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4_omlp_only`, `nvfp4_svdquant`, `nvfp4_local_hessian`, `w4a8_nvfp4_fp8`, `w4a8_mxfp4_fp8`, `mxfp8`.
+Supported `QFORMAT` values: `fp8`, `fp8_pc_pt`, `fp8_pb_wo`, `int8`, `int8_sq`, `int8_wo`, `int4_awq`, `w4a8_awq`, `nvfp4`, `nvfp4_awq`, `nvfp4_mse`, `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4_omlp_only`, `nvfp4_svdquant`, `nvfp4_local_hessian`, `nvfp4_w4a4_weight_local_hessian_act_error_coupling`, `w4a8_nvfp4_fp8`, `w4a8_mxfp4_fp8`, `mxfp8`.
 
 > *By default `trust_remote_code` is set to false. Please turn it on if model calibration and eval requires it using `--trust_remote_code`.*
 

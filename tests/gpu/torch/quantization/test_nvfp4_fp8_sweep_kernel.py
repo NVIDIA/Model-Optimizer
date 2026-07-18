@@ -381,10 +381,12 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
 # --------------------------------------------------------------------------------------
 
 
-def _build_hessian_accumulator(cout, cin, hessian_input, block_size=BLOCK_SIZE):
+def _build_hessian_accumulator(
+    cout, cin, hessian_input, block_size=BLOCK_SIZE, quantized_input=None
+):
     """Real ``_LocalHessianAccumulator`` so the test exercises the production metric."""
     acc = _LocalHessianAccumulator(cout, cin, block_size)
-    acc.accumulate(hessian_input)
+    acc.accumulate(hessian_input, quantized_input)
     return acc
 
 
@@ -411,6 +413,7 @@ def _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc):
             global_amax=global_amax,
             quant_func=_reference_quant_func(global_amax),
             hessian=acc.normalized_hessian(),
+            coupling=acc.normalized_coupling(),
         )
         cal.collect(x_blocks)
         return cal.compute_amax()
@@ -501,6 +504,30 @@ def test_hessian_sweep_input_validation():
     # Wrong Hessian block dims.
     with pytest.raises(ValueError, match="hessian must have shape"):
         nvfp4_fp8_scale_sweep_hessian(x, g, torch.randn(4, 8, 8, device=device))
+    with pytest.raises(ValueError, match="coupling_bias must have"):
+        nvfp4_fp8_scale_sweep_hessian(x, g, h, coupling_bias=torch.randn(3, device=device))
+    with pytest.raises(ValueError, match="coupling_bias must be a CUDA"):
+        nvfp4_fp8_scale_sweep_hessian(x, g, h, coupling_bias=torch.randn(x.numel()))
+
+
+@requires_triton
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_activation_error_coupling_hessian_parity(dtype):
+    """Activation error coupling selects equivalent scales in reference and Triton paths."""
+    torch.manual_seed(17)
+    cout, cin = 32, 128
+    weight = torch.randn(cout, cin, device="cuda", dtype=dtype)
+    x = torch.randn(256, cin, device="cuda")
+    xq = (x / 0.125).round() * 0.125
+    acc = _build_hessian_accumulator(cout, cin, x, quantized_input=xq)
+    x_blocks = weight.reshape(-1, BLOCK_SIZE)
+    per_block_amax = x_blocks.float().abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+
+    ref = _run_hessian_reference(x_blocks, per_block_amax, global_amax, acc)
+    tri = _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc)
+    mismatch = (ref != tri).float().mean().item()
+    assert mismatch < 1e-3
 
 
 @requires_triton
