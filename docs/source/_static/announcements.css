@@ -2,14 +2,14 @@
 
 #announcements > h1,
 #announcements > p,
-#announcements > .announcement-toolbar,
-#announcements > .announcement-grid,
-#announcements > .announcement-empty,
-#announcements > .announcement-pager,
-#announcements > .toctree-wrapper {
+.announcement-section {
   max-width: 860px;
   margin-left: auto;
   margin-right: auto;
+}
+
+.announcement-section {
+  width: 100%;
 }
 
 .announcement-toolbar {
