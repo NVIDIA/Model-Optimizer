@@ -34,7 +34,9 @@ order:
 3. **M sweep** — balanced default (recommended): `1 8 64 512`; decode-focused:
    `1 4 16 32`; throughput-focused: `64 256 1024 4096`. M is roughly the
    tokens scheduled per step (decode: active sequences), not endpoint
-   concurrency.
+   concurrency. With EP, an MoE row models one rank's share of the global
+   batch: a global batch of B tokens corresponds to the column M = B/EP, so
+   do not compare different EP values at the same M.
 4. **Shape preview** — always run this before anything else; no FlashInfer or
    GPU needed:
 

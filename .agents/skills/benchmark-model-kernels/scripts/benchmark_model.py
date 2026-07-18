@@ -516,6 +516,13 @@ def _inspect_model(
         if ep != 1 and not problems:
             raise ShapeError("EP requires routed experts")
     else:
+        if ep != 1 and ep % tp:
+            raise ShapeError(
+                f"EP={ep} is not a multiple of TP={tp}; vLLM expert parallelism spans TP x DP, "
+                "so no modeled serving layout matches this combination — if it is intentional "
+                "(e.g. Megatron-style EP), benchmark the per-rank expert shape directly with "
+                "benchmark_via_builtin.py"
+            )
         local_experts = _divide(moe.experts, ep, "expert count")
         intermediate = moe.intermediate
         if ep == 1:
@@ -617,6 +624,13 @@ def main() -> None:
             f"# MoE: H={moe.hidden} F={moe.intermediate} E={moe.experts} "
             f"top_k={moe.top_k}{activation}"
         )
+        if args.ep > 1:
+            print(
+                f"# MoE sharding: EP={args.ep} partitions whole experts; "
+                "expert width stays intact (expert-TP=1)"
+            )
+        elif args.tp > 1:
+            print(f"# MoE sharding: TP={args.tp} shards the expert intermediate width (EP=1)")
     if routing:
         groups = (
             f" n_group={routing.num_expert_group} topk_group={routing.topk_group}"

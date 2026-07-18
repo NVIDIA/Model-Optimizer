@@ -407,6 +407,44 @@ def test_command_names_gemm_shapes_and_merges_duplicates():
     ]
 
 
+def test_moe_sharding_interpretation_is_printed(monkeypatch, capsys):
+    class Expert(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.up_proj = nn.Linear(32, 48, bias=False)
+            self.down_proj = nn.Linear(48, 32, bias=False)
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = nn.ModuleList([Expert() for _ in range(6)])
+
+    model = nn.Module()
+    model.layers = nn.ModuleList([Block()])
+    config = SimpleNamespace(
+        hidden_size=32,
+        num_attention_heads=4,
+        num_experts_per_tok=2,
+        mlp_hidden_act="relu2",
+        model_type="test",
+    )
+    monkeypatch.setattr(benchmark_model, "_load_meta_model", lambda *_: (config, model))
+    monkeypatch.setattr(
+        sys, "argv", [str(SCRIPT), "unused/model", "--tp", "2", "--ep", "2", "--print_only"]
+    )
+
+    benchmark_model.main()
+
+    output = capsys.readouterr().out
+    assert "# MoE sharding: EP=2 partitions whole experts" in output
+
+    # EP that is not a multiple of TP matches no modeled serving layout.
+    with pytest.raises(
+        benchmark_model.ShapeError, match=r"EP=2 is not a multiple of TP=4.*benchmark_via_builtin"
+    ):
+        benchmark_model._inspect_model(model, config, tp=4, ep=2)
+
+
 def test_runner_is_invoked_in_process(tmp_path, monkeypatch):
     model_dir = _save(tmp_path, _llama_config())
     launched = []

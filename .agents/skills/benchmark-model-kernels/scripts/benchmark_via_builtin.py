@@ -22,6 +22,8 @@ padding follows vLLM. A local FlashInfer source checkout is required for its
 benchmark driver and utilities.
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import shlex
@@ -29,18 +31,16 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import flashinfer
-import numpy as np
-import torch
-from flashinfer.testing import bench_gpu_time
+if TYPE_CHECKING:
+    import torch
 
 try:
     from vllm import _custom_ops as vllm_ops
 except ImportError:
     vllm_ops = None
 
-_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
 _ERROR_CASE_PREFIX = "[ERROR] Error running test:"
 _ERROR_MESSAGE_PREFIX = "[ERROR] Error:"
 _FP8_QUANT_UNAVAILABLE = "ERROR: vLLM is unavailable for FP8 activation quantization"
@@ -319,6 +319,8 @@ def _moe_cases(
 
 
 def _nvfp4_runner(tensor: torch.Tensor, layout: str):
+    import flashinfer
+
     global_scale = (448 * 6) / tensor.float().abs().nan_to_num().max()
     sf_layout = (
         flashinfer.SfLayout.layout_128x4 if layout == "128x4" else flashinfer.SfLayout.layout_8x4
@@ -331,7 +333,9 @@ def _nvfp4_runner(tensor: torch.Tensor, layout: str):
 
 
 def _fp8_runner(tensor: torch.Tensor):
-    scale = tensor.abs().max().float() / _FP8_MAX
+    import torch
+
+    scale = tensor.abs().max().float() / torch.finfo(torch.float8_e4m3fn).max
 
     def kernel(value, value_scale):
         quantized, _ = vllm_ops.scaled_fp8_quant(value.contiguous(), value_scale)
@@ -353,6 +357,12 @@ def _quant_times(
                 print(f"[WARN] {_FP8_QUANT_UNAVAILABLE.removeprefix('ERROR: ')}")
                 warned_fp8 = True
             continue
+        # The GPU stack is imported lazily so shape planning, result parsing,
+        # and their tests work without FlashInfer or torch installed.
+        import numpy as np
+        import torch
+        from flashinfer.testing import bench_gpu_time
+
         tensor = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
         runner = (
             _nvfp4_runner(tensor, kind.removeprefix("nvfp4_"))

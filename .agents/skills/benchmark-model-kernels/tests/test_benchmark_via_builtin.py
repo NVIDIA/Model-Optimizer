@@ -20,8 +20,6 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("flashinfer")
-
 SCRIPT = Path(__file__).parents[1] / "scripts" / "benchmark_via_builtin.py"
 SPEC = importlib.util.spec_from_file_location("benchmark_via_builtin", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
