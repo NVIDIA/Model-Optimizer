@@ -432,7 +432,17 @@ ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for 
 
 ### Usage
 
-Multi-node (run on each node):
+#### Slurm (recommended)
+
+Slurm orchestrates launching the job on every node for you, so this is the easiest way to run a multi-node PTQ. A ready-to-run example that quantizes Nemotron-3-Super to NVFP4 is provided in [`slurm/multinode_fsdp2_ptq.slurm`](./slurm/multinode_fsdp2_ptq.slurm). Edit the `CONFIG` block (container image, model path, export path, recipe) and submit:
+
+```bash
+sbatch --nodes=2 slurm/multinode_fsdp2_ptq.slurm
+```
+
+#### Manual (run on each node)
+
+Without Slurm, start `torchrun` on every node yourself:
 
 ```bash
 torchrun \
@@ -441,15 +451,14 @@ torchrun \
     --nproc_per_node=<num_gpus_per_node> \
     hf_ptq.py \
     --pyt_ckpt_path <path_to_model> \
-    --qformat <qformat> \
-    --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
+    --recipe general/ptq/nvfp4_default-kv_fp8_cast \
     --batch_size <calib_batch_size> \
     --calib_size <num_calib_samples> \
     --export_path <export_path> \
     --use_fsdp2
 ```
 
-The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
+See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
