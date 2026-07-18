@@ -985,6 +985,36 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
                     root_module.reshard()
 
 
+@contextmanager
+def materialize_fsdp2_root(model: nn.Module):
+    """Unshard a sharded FSDP2 root's own params (embed/lm_head/norm) for a calibration forward.
+
+    The calibration loop calls ``model.forward(**batch)`` directly (``dataset_utils._forward_loop``)
+    rather than ``model(**batch)``, so ``nn.Module.__call__`` is bypassed and the root's FSDP2
+    forward pre-hook never fires. Its own params (embed/lm_head/norm) stay sharded DTensors and the
+    forward hits ``aten.embedding: mixed Tensor and DTensor``. Decoder layers are unaffected: they are
+    called as ``layer(...)`` inside ``forward``, so their pre-hooks fire and they unshard normally.
+
+    Unshard the root up front so its params are full tensors, then reshard on exit. The bypass also
+    skips the root's post-forward hook, so nothing reshards it mid-calibration and a single unshard
+    holds across all batches. Cheap: only the root's own param group is gathered, not the decoder
+    layers. No-op for non-FSDP2 or already-replicated roots.
+    """
+    root_sharded = False
+    if isinstance(model, FSDPModule):
+        pg = fully_shard.state(model)._fsdp_param_group
+        root_sharded = pg is not None and pg.is_sharded
+    if root_sharded:
+        with enable_fake_quant(model):
+            model.unshard()
+    try:
+        yield
+    finally:
+        if root_sharded:
+            with enable_fake_quant(model):
+                model.reshard()
+
+
 def update_quant_cfg_with_kv_cache_quant(
     quant_cfg: dict[str, Any], kv_cache_quant_cfg: list[QuantizerCfgEntry]
 ) -> dict[str, Any]:
