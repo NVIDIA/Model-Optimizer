@@ -443,7 +443,7 @@ def _refresh_pp_hidden_output_meta(pp) -> int:
         input_meta = inputs_meta[0]
         if input_meta.ndim < 3:
             continue
-        dtype = pp.dtype
+        dtype = getattr(pp, "dtype", None)
         if dtype is None:
             try:
                 dtype = next(part.parameters()).dtype

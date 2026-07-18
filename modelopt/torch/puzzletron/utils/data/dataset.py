@@ -66,10 +66,9 @@ def _format_messages_without_chat_template(messages) -> str:
 def render_messages_to_text(content, tokenizer):
     """Render a raw ``messages``/content value to the text that will be tokenized.
 
-    This is the exact rendering used by ``ConstantLengthDataset.__iter__`` for the
-    not-yet-tokenized path. It is factored out so offline pre-tokenization (see
-    ``examples/puzzletron/tools/pretokenize_dataset.py``) produces token ids that
-    are identical to the on-the-fly path. Non-list content is returned unchanged.
+    This is the exact rendering used by ``ConstantLengthDataset.__iter__`` and by
+    Puzzletron's packed-token cache builder, so offline and on-the-fly tokenization
+    remain identical. Non-list content is returned unchanged.
     """
     sample = content
     if isinstance(sample, list):

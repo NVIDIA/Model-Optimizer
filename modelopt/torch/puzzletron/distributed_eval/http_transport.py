@@ -36,7 +36,7 @@ class AsyncHttpClient:
             except ImportError as error:
                 raise RuntimeError(
                     "Distributed evaluation requires aiohttp. Install "
-                    "examples/puzzletron/distributed_eval/requirements.txt."
+                    "examples/puzzletron/requirements.txt."
                 ) from error
             timeout = aiohttp.ClientTimeout(
                 total=self.task_timeout_seconds,
@@ -83,5 +83,5 @@ def require_aiohttp():
     except ImportError as error:
         raise RuntimeError(
             "Distributed evaluation requires aiohttp. Install "
-            "examples/puzzletron/distributed_eval/requirements.txt."
+            "examples/puzzletron/requirements.txt."
         ) from error

@@ -36,7 +36,6 @@ env/
 venv/
 
 # Machine-local Puzzletron paths
-examples/puzzletron/configs/clean/my_paths.yaml
 /nv-internal/
 /docs/superpowers/
 

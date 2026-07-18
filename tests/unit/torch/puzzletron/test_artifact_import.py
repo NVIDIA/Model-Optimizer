@@ -8,10 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from examples.puzzletron.import_campaign_artifacts import main
 from examples.puzzletron.main import _completion_is_valid
-from examples.puzzletron.inventory_campaign_artifacts import inventory_campaign_artifacts, write_inventory
 from modelopt.torch.puzzletron.artifact_import import ArtifactImportError, import_campaign_artifacts
+from modelopt.torch.puzzletron.artifact_inventory import (
+    inventory_campaign_artifacts,
+    write_inventory,
+)
 from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import StageManifest
 
@@ -818,23 +820,3 @@ def test_final_payload_hashes_match_receipt_and_files_are_read_only(tmp_path):
             path = destination / item["path"]
             assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"]
             assert path.stat().st_mode & 0o222 == 0
-
-
-def test_cli_requires_all_paths_and_dry_run_prints_exact_plan_without_writes(tmp_path, capsys):
-    source, destination, receipt = _setup(tmp_path)
-
-    assert main(
-        [
-            "--source-root",
-            str(source),
-            "--destination-root",
-            str(destination),
-            "--receipt",
-            str(receipt),
-            "--dry-run",
-        ]
-    ) == 0
-
-    output = json.loads(capsys.readouterr().out)
-    assert output["status"] == "planned"
-    assert not destination.exists()

@@ -8,43 +8,152 @@ campaign report.
 
 ## Installation
 
-Puzzletron uses ModelOpt together with compatible AutoModel, vLLM, and AIPerf
-checkouts. Keep the four repositories as siblings so one environment can import
-the exact source being tested:
+Puzzletron uses one Python environment for ModelOpt, the patched vLLM fork,
+AutoModel, and official AIPerf. Install PyTorch first and build every CUDA
+extension against that same installation; mixing PyTorch or CUDA builds can
+cause import failures or incorrect GPU execution. AIPerf uses the official PyPI
+package; no custom AIPerf fork is required.
+
+### 1. Start from the CUDA development image
+
+Use this image for local containers and cluster jobs:
 
 ```text
-workspace/
-├── Model-Optimizer/
-├── Automodel/
+nvcr.io/nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04
+```
+
+For example:
+
+```bash
+export PUZZLETRON_WORKSPACE=/absolute/path/to/workspace
+docker run --gpus all --ipc=host --rm -it \
+  -v "${PUZZLETRON_WORKSPACE}:/workspace" \
+  -w /workspace \
+  nvcr.io/nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04 bash
+```
+
+Inside the container, install Python 3.12 and the build tools used by editable
+packages and optional CUDA extensions:
+
+```bash
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential cmake git ninja-build \
+  python3 python3-dev python3-pip python3-venv
+```
+
+### 2. Clone the tracked forks
+
+Keep ModelOpt and the two Puzzletron forks as siblings:
+
+```bash
+export MODEL_OPT_ROOT=/workspace/modelopt
+export VLLM_ROOT=/workspace/vllm
+export AUTOMODEL_ROOT=/workspace/Automodel
+
+git clone --branch feature/add_anymodel_to_vllm --single-branch \
+  https://github.com/Separius/vllm.git "${VLLM_ROOT}"
+git clone --branch puzzletron --single-branch \
+  https://github.com/Separius/Automodel.git "${AUTOMODEL_ROOT}"
+```
+
+```text
+/workspace/
+├── modelopt/
 ├── vllm/
-└── aiperf/
+└── Automodel/
 ```
 
-Create a virtual environment using a PyTorch/CUDA build supported by all four
-repositories, then install them as one editable unit:
+### 3. Create the environment and install runtime packages
+
+The patched vLLM branch uses PyTorch 2.11.0 with CUDA 12.9. Install that
+combination before anything that compiles CUDA code:
 
 ```bash
-cd Model-Optimizer
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-python -m pip install -e ../Automodel
-python -m pip install -e ../vllm
-python -m pip install -e ../aiperf
-python -m pip install -r examples/puzzletron/requirements.txt
+python3 -m venv /workspace/.venv
+source /workspace/.venv/bin/activate
+
+python -m pip install --upgrade \
+  pip "setuptools>=80,<81" "setuptools-scm>=8" setuptools-rust \
+  wheel "packaging>=24.2" "cmake>=3.26.1" ninja jinja2
+
+python -m pip install \
+  torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+  --index-url https://download.pytorch.org/whl/cu129
+
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
+  python -m pip install --no-build-isolation -e "${VLLM_ROOT}"
+
+python -m pip install -e "${AUTOMODEL_ROOT}"
+python -m pip install aiperf
+python -m pip install -e "${MODEL_OPT_ROOT}[hf]"
+python -m pip install -r "${MODEL_OPT_ROOT}/examples/puzzletron/requirements.txt"
 ```
 
-GPU libraries must come from one mutually compatible environment. After
-installing or rebuilding any compiled dependency, validate imports and one
-unpruned forward pass before starting a campaign.
+Do not add `--no-deps`: the packages need their declared Python dependencies.
+`--no-build-isolation` ensures compiled extensions use the active PyTorch
+installation; it does not disable dependency installation.
 
-The checked-in HTML reports use Git LFS:
+Install only the model-specific kernels required by the target architecture:
 
 ```bash
-git lfs install
-git lfs pull --include='examples/puzzletron/reports/*.html'
+# Mixture of experts
+python -m pip install --no-build-isolation \
+  "git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
+
+# Mamba
+python -m pip install "mamba-ssm[causal-conv1d]" --no-build-isolation
+
+# Linear attention
+python -m pip install "flash-linear-attention[cuda]"
 ```
+
+### 4. Verify the exact environment
+
+Run these checks inside the same container and venv used for Puzzletron jobs:
+
+```bash
+test "$(git -C "${VLLM_ROOT}" remote get-url origin)" = \
+  "https://github.com/Separius/vllm.git"
+test "$(git -C "${VLLM_ROOT}" branch --show-current)" = \
+  "feature/add_anymodel_to_vllm"
+test "$(git -C "${AUTOMODEL_ROOT}" remote get-url origin)" = \
+  "https://github.com/Separius/Automodel.git"
+test "$(git -C "${AUTOMODEL_ROOT}" branch --show-current)" = "puzzletron"
+
+git -C "${MODEL_OPT_ROOT}" rev-parse HEAD
+git -C "${VLLM_ROOT}" rev-parse HEAD
+git -C "${AUTOMODEL_ROOT}" rev-parse HEAD
+```
+
+```bash
+python - <<'PY'
+import importlib.metadata as metadata
+
+import aiperf
+import modelopt
+import nemo_automodel
+import torch
+import vllm
+
+for package in ("torch", "vllm", "nemo-automodel", "aiperf", "nvidia-modelopt"):
+    print(package, metadata.version(package))
+
+print("torch CUDA", torch.version.cuda)
+print("CUDA available", torch.cuda.is_available())
+print("modelopt", modelopt.__file__)
+print("vllm", vllm.__file__)
+
+assert torch.__version__.startswith("2.11.0")
+assert torch.version.cuda == "12.9"
+assert torch.cuda.is_available()
+PY
+
+python -m pip check
+```
+
+Record the three source revisions and verification output with the campaign.
+Re-run verification after pulling either fork or rebuilding a CUDA extension.
 
 ## Run with an agent
 
@@ -106,6 +215,16 @@ python examples/puzzletron/main.py \
 stages with valid manifests and acceptance markers are skipped; use `--force`
 only when intentionally invalidating and rerunning the selected work.
 
+There is one current orchestration boundary to understand before using
+`--stage full`. The canonical `zero_shot_evaluation` handler evaluates realized
+checkpoints, while the Nano experiment uses `mode: online_solutions` to score
+MIP architectures from one resident sorted teacher without materializing every
+candidate. The canonical AIPerf handler also runs one topology, while the tested
+Nano campaign uses a topology matrix. Until these paths are integrated into
+`main.py`, run through `mip`, use the profile commands below, and then invoke
+the canonical KD stages individually. A teacher-only canonical evaluation is
+not completion of an online MIP profile.
+
 On a scheduler, run the same command inside the site's container and launch
 distributed stages with the topology declared by that stage's
 `automodel.parallel` section. Do not assume one parallel recipe is valid for
@@ -151,10 +270,124 @@ Independent DAG branches may run concurrently when they have disjoint writers.
 Long-running stages should resume their durable checkpoints or immutable shards
 rather than restarting completed work.
 
+## Online evaluation and downstream stages
+
+Set the config and campaign directory explicitly so standalone tools and Hydra
+resolve the same artifacts:
+
+```bash
+export CONFIG=examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
+export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/nemotron3-nano
+export PUZZLE_DIR="$PUZZLETRON_RUN_ROOT"
+export PROFILE=runtime-075
+```
+
+After `mip`, prepare one deduplicated online-evaluation plan. Repeat
+`--profile-id` for every configured profile; aliases ensure that an identical
+architecture is evaluated once while remaining visible in every profile.
+
+```bash
+python examples/puzzletron/run_profile_online_evaluation.py \
+  --puzzle-dir "$PUZZLE_DIR" --prepare \
+  --profile-id params-075 \
+  --profile-id runtime-075 \
+  --profile-id memory-075 \
+  --profile-id params-075-num-experts-only \
+  --profile-id params-075-expert-dim-only \
+  --profile-id params-075-num-experts-and-expert-dim
+```
+
+Run every width in the plan. One command is one resident model instance;
+independent instances use distinct shard indices, and each receives the entire
+stage-local AutoModel GPU mesh:
+
+```bash
+torchrun --standalone --nproc-per-node=8 \
+  examples/puzzletron/run_profile_online_evaluation.py \
+  --puzzle-dir "$PUZZLE_DIR" --config "$CONFIG" --run-shard \
+  --width 2688 --shard-index 0 --shard-count 1 \
+  --eval-samples 128 --block-size 8192 --micro-batch-size 4
+```
+
+After every width/shard pair finishes, merge the durable results:
+
+```bash
+python examples/puzzletron/run_profile_online_evaluation.py \
+  --puzzle-dir "$PUZZLE_DIR" --merge \
+  --eval-samples 128 --block-size 8192
+```
+
+Experiments using realized checkpoints instead call the canonical evaluator:
+
+```bash
+python examples/puzzletron/main.py \
+  --config "$CONFIG" --stage zero_shot_evaluation --gpus-per-node 8
+```
+
+Materialize only the best online candidate needed by AIPerf and KD. This verifies
+its physical parameter count and writes a registry containing the candidate and
+teacher:
+
+```bash
+python examples/puzzletron/prepare_online_profile_finalists.py \
+  --puzzle-dir "$PUZZLE_DIR" --config "$CONFIG" \
+  --profile-id "$PROFILE" --count 1
+```
+
+The official AIPerf package installed above provides the default `aiperf`
+executable; set `AIPERF_EXECUTABLE` only to select a different installation.
+
+For one topology, call the canonical AIPerf stage:
+
+```bash
+python examples/puzzletron/main.py \
+  --config "$CONFIG" --stage aiperf --gpus-per-node 8
+```
+
+For the tested all-eight-GPU topology matrix, launch one profile worker per node.
+Under Slurm, each task must see all eight GPUs and derives its shard identity
+from `SLURM_PROCID` and `SLURM_NTASKS`. Merge once after every worker exits:
+
+```bash
+srun --nodes="$NODES" --ntasks="$NODES" --ntasks-per-node=1 \
+  python examples/puzzletron/run_profile_aiperf_worker.py \
+  --puzzle-dir "$PUZZLE_DIR" --profile-id "$PROFILE" \
+  --input-tokens 8192 --output-tokens 1024
+
+python examples/puzzletron/run_profile_aiperf_worker.py \
+  --puzzle-dir "$PUZZLE_DIR" --profile-id "$PROFILE" \
+  --input-tokens 8192 --output-tokens 1024 --merge
+```
+
+Use the same selected registry for KD. Run the frozen-minibatch overfit gate
+before production distillation; use `run_multinode_stage.sh` with these stage
+names when the configured stage mesh spans multiple nodes:
+
+```bash
+python examples/puzzletron/main.py \
+  --config "$CONFIG" --stage global_distillation_sanity --gpus-per-node 8
+
+python examples/puzzletron/main.py \
+  --config "$CONFIG" --stage global_distillation --gpus-per-node 8
+```
+
+Finally evaluate the consolidated global-KD checkpoint:
+
+```bash
+python examples/puzzletron/main.py \
+  --config "$CONFIG" --stage post_distillation_evaluation --gpus-per-node 8
+```
+
 ## Reports
 
-The orchestrator refreshes the report around each stage. It can also be
-regenerated without rerunning model work:
+`main.py` refreshes the report before and after each stage and records the
+currently running stage. Standalone profile workers do not own the DAG, so
+regenerate after online-evaluation merge, finalist realization, AIPerf merge,
+or any other manual artifact publication. The generator is read-only with
+respect to model artifacts and includes valid partial results without marking
+their stage complete.
+
+Regenerate without rerunning model work:
 
 ```bash
 python examples/puzzletron/generate_campaign_progress_report.py \
@@ -164,8 +397,12 @@ python examples/puzzletron/generate_campaign_progress_report.py \
 
 The output is
 `<puzzle-dir>/artifacts/campaign_report/campaign_report.html`. It is a
-self-contained file. Section fingerprints are cached under the campaign so
-unchanged sections can be reused while new or partial results are incorporated.
+self-contained file suitable for sharing. Section source and configuration
+fingerprints are cached under
+`<puzzle-dir>/artifacts/campaign_report/section_cache`, so unchanged sections
+are reused and only affected sections rebuild. Use `--rebuild-section aiperf`
+(repeatable) for selected sections, or `--no-cache` for an intentional full
+rebuild.
 
 ## End-to-end tested models
 

@@ -59,20 +59,6 @@ _NANO_ONE_NODE_MESH = {
 }
 
 
-def test_public_puzzletron_sources_do_not_reference_removed_clean_config_tree() -> None:
-    paths = (
-        Path("modelopt/torch/puzzletron/campaigns/config_generation.py"),
-        Path("examples/puzzletron/generate_cross_model_configs.py"),
-        Path("examples/puzzletron/verify_cross_model_configs.py"),
-        Path("examples/puzzletron/launch_cross_model_stage_matrix.sh"),
-        Path("examples/puzzletron/tools/pretokenize_dataset.py"),
-    )
-
-    stale = [str(path) for path in paths if "configs/clean" in path.read_text()]
-
-    assert stale == []
-
-
 @pytest.mark.parametrize(
     ("path", "expected_by_stage"),
     [
@@ -148,14 +134,9 @@ def test_sharded_runtime_execution_is_deferred_from_library_stage() -> None:
 
 
 def test_scenario_utilities_infer_descriptors_from_checkpoints() -> None:
-    for script in (
-        "examples/puzzletron/prepare_sparse_runtime_stats.py",
-        "examples/puzzletron/prepare_sparse_replacement_scoring.py",
-        "examples/puzzletron/run_width_depth_mips.py",
-    ):
-        source = Path(script).read_text()
-        assert 'cfg["descriptor"]' not in source
-        assert "resolve_descriptor_from_pretrained" in source
+    source = Path("examples/puzzletron/run_width_depth_mips.py").read_text()
+    assert 'cfg["descriptor"]' not in source
+    assert "resolve_descriptor_from_pretrained" in source
 
 
 def _preflight(campaign) -> CampaignPreflight:

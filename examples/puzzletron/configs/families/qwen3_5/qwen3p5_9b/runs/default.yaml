@@ -372,15 +372,6 @@ global_distillation_sanity:
   mtp_ce_weight: 1.0
   mtp_kd_weight: 1.0
 display_name: Qwen3p5_9B
-artifact_import:
-  source_root: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs}/qwen3_5/qwen3_5_9b/full_pipeline
-  bundles:
-  - width_importance
-  - depth_importance
-  - vllm_stats
-  - replacement_scoring
-  - bypass
-  bypass_evidence_report_only: true
 post_distillation_evaluation:
   enabled: true
   eval_samples: 128

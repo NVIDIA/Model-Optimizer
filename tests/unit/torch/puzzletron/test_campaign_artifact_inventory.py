@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.puzzletron.inventory_campaign_artifacts import (
+from modelopt.torch.puzzletron.artifact_inventory import (
     inventory_campaign_artifacts,
     write_inventory,
 )
@@ -42,14 +42,6 @@ def _score_index_entry(result_path: Path, request_id: str) -> dict:
             "candidate_score_identity": f"score:{request_id}",
         },
     }
-
-
-def test_inventory_implementation_is_owned_by_the_core_package():
-    from examples.puzzletron import inventory_campaign_artifacts as example_inventory
-    from modelopt.torch.puzzletron import artifact_inventory
-
-    assert example_inventory.inventory_campaign_artifacts is artifact_inventory.inventory_campaign_artifacts
-    assert example_inventory.write_inventory is artifact_inventory.write_inventory
 
 
 def _complete_campaign(root):
