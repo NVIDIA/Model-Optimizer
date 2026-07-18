@@ -12,7 +12,7 @@ readonly DATASET_ID="abisee/cnn_dailymail"
 readonly DATASET_CONFIG="3.0.0"
 readonly DATASET_SPLIT="train"
 readonly DATASET_REQUESTED_REVISION="main"
-readonly STUDY_CONTAINER_IMAGE="${STUDY_CONTAINER_IMAGE:-nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8}"
+readonly STUDY_CONTAINER_IMAGE="${STUDY_CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh}"
 # Packed calibration requests a conservative 128 * 8 raw-document prefix (packing
 # may fill its rows before every requested document contributes). Unpacked evaluation
 # selects rows [1024, 1056), so the two source pools are guaranteed disjoint.
@@ -93,13 +93,107 @@ esac
 readonly MODEL_ID MODEL_SLUG
 export MODEL_ID MODEL_SLUG
 
+PYTHON_BIN="$(command -v python3 || command -v python || true)"
+readonly PYTHON_BIN
+[[ -n "${PYTHON_BIN}" ]] || {
+    echo "No Python interpreter found in ${STUDY_CONTAINER_IMAGE}" >&2
+    exit 2
+}
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PACKAGED_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+export PYTHONPATH="${PACKAGED_REPO_ROOT}:${PYTHONPATH}"
+
+# ModelOpt's FP8 and MXFP8 fake-quantizers JIT-compile CUDA extensions. Pyxis
+# disables the home mount, so pin all compiler caches to the writable study mount.
+export TORCH_EXTENSIONS_DIR="${REMOTE_STUDY_ROOT}/cache/torch_extensions/${MODEL_SLUG}"
+export CUDA_CACHE_PATH="${REMOTE_STUDY_ROOT}/cache/cuda/${MODEL_SLUG}"
+export TRITON_CACHE_DIR="${REMOTE_STUDY_ROOT}/cache/triton/${MODEL_SLUG}"
+
 mkdir -p \
     "${REMOTE_STUDY_ROOT}/cache" \
+    "${TORCH_EXTENSIONS_DIR}" \
+    "${CUDA_CACHE_PATH}" \
+    "${TRITON_CACHE_DIR}" \
     "${REMOTE_STUDY_ROOT}/manifests/${MODEL_SLUG}" \
     "${REMOTE_STUDY_ROOT}/results/${MODEL_SLUG}"
 
+validate_runtime() {
+    "${PYTHON_BIN}" - "${PACKAGED_REPO_ROOT}" <<'PY'
+import json
+import os
+import pathlib
+import platform
+import shutil
+import sys
+
+import accelerate
+import modelopt
+import torch
+import transformers
+from torch.utils.cpp_extension import CUDA_HOME
+
+repo_root = pathlib.Path(sys.argv[1]).resolve()
+modelopt_file = pathlib.Path(modelopt.__file__).resolve()
+expected_modelopt_root = (repo_root / "modelopt").resolve()
+if not modelopt_file.is_relative_to(expected_modelopt_root):
+    raise RuntimeError(
+        f"Imported ModelOpt from {modelopt_file}, expected packaged source under "
+        f"{expected_modelopt_root}"
+    )
+
+architecture_by_model = {
+    "Qwen/Qwen3.6-35B-A3B": "Qwen3_5MoeForConditionalGeneration",
+    "Qwen/Qwen3.6-27B": "Qwen3_5ForConditionalGeneration",
+}
+architecture = architecture_by_model[os.environ["MODEL_ID"]]
+model_class = getattr(transformers, architecture, None)
+if model_class is None:
+    raise RuntimeError(
+        f"transformers {transformers.__version__} does not expose {architecture}; "
+        "this container cannot load the requested Qwen3.6 model"
+    )
+
+cuda_home = pathlib.Path(CUDA_HOME) if CUDA_HOME else None
+nvcc = cuda_home / "bin" / "nvcc" if cuda_home else None
+missing_build_tools = []
+if shutil.which("c++") is None:
+    missing_build_tools.append("c++")
+if shutil.which("ninja") is None:
+    missing_build_tools.append("ninja")
+if nvcc is None or not nvcc.is_file():
+    missing_build_tools.append("nvcc")
+if missing_build_tools:
+    raise RuntimeError(
+        "Container cannot JIT-build ModelOpt FP8/MXFP8 extensions; missing: "
+        + ", ".join(missing_build_tools)
+    )
+
+payload = {
+    "architecture": platform.machine(),
+    "container_image": os.environ["STUDY_CONTAINER_IMAGE"],
+    "model_class": f"{model_class.__module__}.{model_class.__name__}",
+    "modelopt": str(modelopt_file),
+    "torch": torch.__version__,
+    "transformers": transformers.__version__,
+    "accelerate": accelerate.__version__,
+    "cuda_home": str(cuda_home),
+    "torch_extensions_dir": os.environ["TORCH_EXTENSIONS_DIR"],
+}
+print(json.dumps(payload, indent=2, sort_keys=True))
+
+if torch.cuda.is_available():
+    from modelopt.torch.quantization.extensions import get_cuda_ext_fp8, get_cuda_ext_mx
+
+    # Compile before loading tens of billions of parameters. Later sequential
+    # candidates reuse these binaries from the shared per-model cache.
+    get_cuda_ext_fp8(raise_if_failed=True)
+    get_cuda_ext_mx(raise_if_failed=True)
+PY
+}
+
 ensure_staging_dependencies() {
-    if python -c 'import datasets, huggingface_hub' >/dev/null 2>&1; then
+    if "${PYTHON_BIN}" -c 'import datasets, huggingface_hub' >/dev/null 2>&1; then
         return
     fi
 
@@ -108,8 +202,8 @@ ensure_staging_dependencies() {
     # install path so they cannot partially overwrite the shared target.
     (
         flock 9
-        if ! python -c 'import datasets, huggingface_hub' >/dev/null 2>&1; then
-            python -m pip install \
+        if ! "${PYTHON_BIN}" -c 'import datasets, huggingface_hub' >/dev/null 2>&1; then
+            "${PYTHON_BIN}" -m pip install \
                 --disable-pip-version-check \
                 --target "${SHARED_PYTHON_DIR}" \
                 'datasets>=3.1,<5' \
@@ -123,7 +217,7 @@ stage_inputs() {
     export MODEL_ID MODEL_SLUG REMOTE_STUDY_ROOT
     export DATASET_ID DATASET_CONFIG DATASET_SPLIT DATASET_REQUESTED_REVISION
     export DATASET_SOURCE_ROW_COUNT
-    python - <<'PY'
+    "${PYTHON_BIN}" - <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -302,10 +396,9 @@ run_candidate() {
     local recipe
     recipe="$(driver_recipe "${candidate}")"
 
-    local script_dir repo_root driver staging_manifest resolved_revision dataset_path dataset_sha256
+    local repo_root driver staging_manifest resolved_revision dataset_path dataset_sha256
     local output_dir reference_cache launch_manifest
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    repo_root="$(cd "${script_dir}/../../.." && pwd)"
+    repo_root="${PACKAGED_REPO_ROOT}"
     driver="${repo_root}/experimental/qwen36_fp8_granularity_study/study.py"
     staging_manifest="${REMOTE_STUDY_ROOT}/manifests/${MODEL_SLUG}/staging.json"
     output_dir="${REMOTE_STUDY_ROOT}/results/${MODEL_SLUG}/${candidate}"
@@ -317,7 +410,7 @@ run_candidate() {
     # study.py. The report will show this schema-valid placeholder as pending rather
     # than silently ranking a stale complete artifact.
     export CANDIDATE="${candidate}" DRIVER_RECIPE="${recipe}" OUTPUT_DIR="${output_dir}"
-    python - <<'PY'
+    "${PYTHON_BIN}" - <<'PY'
 import datetime as dt
 import json
 import os
@@ -350,7 +443,7 @@ PY
         return 2
     }
     local staging_values
-    staging_values="$(python - \
+    staging_values="$("${PYTHON_BIN}" - \
         "${staging_manifest}" \
         "${REMOTE_STUDY_ROOT}" \
         "${MODEL_ID}" \
@@ -456,7 +549,7 @@ PY
     export REFERENCE_CACHE="${reference_cache}" RESOLVED_REVISION="${resolved_revision}"
     export DATASET_PATH="${dataset_path}" DATASET_SHA256="${dataset_sha256}"
     export LAUNCH_MANIFEST="${launch_manifest}" STAGING_MANIFEST="${staging_manifest}"
-    python - <<'PY'
+    "${PYTHON_BIN}" - <<'PY'
 import datetime as dt
 import json
 import os
@@ -494,7 +587,7 @@ PY
     echo "===== Qwen3.6 FP8 study preflight ====="
     uname -a
     nvidia-smi
-    python - "${repo_root}" <<'PY'
+    "${PYTHON_BIN}" - "${repo_root}" <<'PY'
 import pathlib
 import sys
 
@@ -518,7 +611,7 @@ PY
 
     local exit_code
     set +e
-    python "${driver}" \
+    "${PYTHON_BIN}" "${driver}" \
         --model "${MODEL_ID}" \
         --revision "${resolved_revision}" \
         --recipe "${recipe}" \
@@ -541,7 +634,7 @@ PY
     set -e
 
     export EXIT_CODE="${exit_code}"
-    python - <<'PY'
+    "${PYTHON_BIN}" - <<'PY'
 import datetime as dt
 import json
 import os
@@ -567,10 +660,12 @@ PY
 case "${MODE}" in
     stage)
         [[ -z "${CANDIDATES}" ]] || usage
+        validate_runtime
         stage_inputs
         ;;
     run)
         [[ -n "${CANDIDATES}" ]] || usage
+        validate_runtime
         IFS=',' read -r -a candidate_list <<< "${CANDIDATES}"
         overall_exit_code=0
         for candidate in "${candidate_list[@]}"; do

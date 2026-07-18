@@ -53,12 +53,40 @@ register_factory("slurm_factory", slurm_factory)
 # Launcher-specific configuration
 # ---------------------------------------------------------------------------
 
-LAUNCHER_DIR = _pkg.PACKAGE_DIR  # tools/launcher/ (dev or installed)
+def _resolve_launcher_dir(package_dir: str) -> str:
+    """Resolve launcher assets from a managed source checkout when one is active.
 
-# Detect dev checkout by probing the actual MODELOPT_ROOT, not the symlink
-# path (which doesn't exist yet in a clean checkout). When running as an
-# installed console script the cluster container already has modelopt
-# pre-installed, so we skip packaging it from source.
+    ``modelopt-mcp`` runs the installed ``modelopt-launcher`` console script, but
+    also exports the exact managed checkout in ``MODELOPT_MCP_SOURCE_ROOT``.  The
+    installed wheel intentionally contains only launcher package data; using its
+    directory as the packager root would therefore omit ModelOpt and study sources.
+    """
+    managed_source_root = os.environ.get("MODELOPT_MCP_SOURCE_ROOT")
+    if managed_source_root is None:
+        return package_dir
+
+    managed_source_root = os.path.abspath(managed_source_root)
+    launcher_dir = os.path.join(managed_source_root, "tools", "launcher")
+    required_paths = (
+        os.path.join(launcher_dir, "launch.py"),
+        os.path.join(launcher_dir, "common"),
+        os.path.join(managed_source_root, "modelopt"),
+    )
+    missing = [path for path in required_paths if not os.path.exists(path)]
+    if missing:
+        raise RuntimeError(
+            "MODELOPT_MCP_SOURCE_ROOT does not identify a complete ModelOpt checkout; "
+            f"missing: {', '.join(missing)}"
+        )
+    return launcher_dir
+
+
+LAUNCHER_DIR = _resolve_launcher_dir(_pkg.PACKAGE_DIR)  # tools/launcher/ (dev or managed)
+
+# Detect a source checkout by probing the actual MODELOPT_ROOT, not the symlink
+# path (which doesn't exist yet in a clean checkout). A standalone installed
+# launcher still packages only examples/common, while a managed-source launch
+# packages and overlays the exact requested ModelOpt revision.
 MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
 _has_modelopt_src = os.path.isdir(os.path.join(MODELOPT_ROOT, "modelopt"))
 

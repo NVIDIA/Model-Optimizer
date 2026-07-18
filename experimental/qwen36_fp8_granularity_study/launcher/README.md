@@ -20,7 +20,11 @@ adding Nemo tasks.
 
 The configs deliberately leave the login host and SSH identity to the `aws_cmh`
 cluster factory. They explicitly pin the Slurm account to `coreai_numerics_edge` and
-mount the persistent study root at `/study`:
+use the cluster-local `qwen36_pr_stack_latest_runtime_only` ARM64 SquashFS, already
+validated on aws-cmh with Transformers 5.8.1, CUDA 13.0, and both Qwen3.6
+architectures. Every task validates the exact model class and the C++/CUDA build
+toolchain before doing expensive work. The configs mount the persistent study root
+at `/study`:
 
 ```text
 /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study
@@ -37,6 +41,10 @@ GPU tasks validate every JSONL row and its SHA-256 before setting
 Hugging Face, Transformers, and Datasets offline modes. They load the staged model
 revision with `--local-files-only` and pass the same local JSONL path to calibration
 and evaluation, so no batch job needs dataset or model network access.
+
+ModelOpt's FP8 and MXFP8 fake-quantization extensions are compiled before model
+loading. Torch, CUDA, and Triton caches live under `/study/cache`, split by model, so
+the sequential jobs reuse compiled binaries despite Pyxis disabling the home mount.
 
 All candidates for a model reuse the same persisted reference-logit cache. The
 initial screen uses 128 packed calibration samples and 32 held-out evaluation samples

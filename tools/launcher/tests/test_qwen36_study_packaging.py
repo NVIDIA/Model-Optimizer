@@ -6,7 +6,35 @@
 import os
 
 import launch
+import pytest
 import yaml
+
+EXPECTED_QWEN36_IMAGE = (
+    "/lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/"
+    "qwen36_pr_stack_latest_runtime_only_20260519_234147/images/"
+    "vllm_qwen36_pr_stack_latest_runtime_only.sqsh"
+)
+
+
+def test_managed_source_root_overrides_installed_launcher_package(monkeypatch, tmp_path):
+    """MCP launches package the exact managed checkout, not wheel-only assets."""
+    source_root = tmp_path / "Model-Optimizer"
+    launcher_dir = source_root / "tools" / "launcher"
+    launcher_dir.mkdir(parents=True)
+    (launcher_dir / "launch.py").touch()
+    (launcher_dir / "common").mkdir()
+    (source_root / "modelopt").mkdir()
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_ROOT", str(source_root))
+
+    assert launch._resolve_launcher_dir("/installed/modelopt_launcher") == str(launcher_dir)
+
+
+def test_incomplete_managed_source_root_fails_closed(monkeypatch, tmp_path):
+    """A stale managed-source contract must not silently create an incomplete tarball."""
+    monkeypatch.setenv("MODELOPT_MCP_SOURCE_ROOT", str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="complete ModelOpt checkout"):
+        launch._resolve_launcher_dir("/installed/modelopt_launcher")
 
 
 def test_qwen36_study_is_packaged_at_runner_relative_path():
@@ -43,6 +71,10 @@ def test_qwen36_pipelines_have_staging_plus_four_sequential_candidates():
         tasks = [config["pipeline"][f"task_{index}"] for index in range(5)]
         assert tasks[0]["args"][0] == "stage"
         assert [task["args"][-1] for task in tasks[1:]] == expected_candidates
+        assert all(
+            task["slurm_config"]["container"] == EXPECTED_QWEN36_IMAGE
+            for task in tasks
+        )
         assert tasks[0]["slurm_config"]["partition"] == "cpu_datamover"
         assert tasks[0]["slurm_config"]["gpus_per_node"] == 0
         for task in tasks[1:]:
@@ -72,6 +104,11 @@ def test_qwen36_runner_stages_and_enforces_offline_dataset_snapshot():
     assert "export HF_HUB_OFFLINE=1" in script
     assert "export TRANSFORMERS_OFFLINE=1" in script
     assert "export STUDY_CONTAINER_IMAGE" in script
+    assert 'PYTHON_BIN="$(command -v python3 || command -v python || true)"' in script
+    assert "Qwen3_5MoeForConditionalGeneration" in script
+    assert "Qwen3_5ForConditionalGeneration" in script
+    assert "get_cuda_ext_mx(raise_if_failed=True)" in script
+    assert 'TORCH_EXTENSIONS_DIR="${REMOTE_STUDY_ROOT}/cache/torch_extensions/${MODEL_SLUG}"' in script
     assert '"status": "launcher_preflight"' in script
     assert "temporary.replace(path)" in script
     assert '--calib-dataset "${dataset_path}"' in script

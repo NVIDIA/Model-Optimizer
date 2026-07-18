@@ -26,7 +26,7 @@ pipeline:
       # Zero is the launcher CLI-safe spelling for no GPU GRES; core normalizes it to None.
       gpus_per_node: 0
       time: "04:00:00"
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8
+      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
 
@@ -48,7 +48,7 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8
+      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
 
@@ -70,7 +70,7 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8
+      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
 
@@ -92,7 +92,7 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8
+      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
 
@@ -114,6 +114,6 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8
+      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
