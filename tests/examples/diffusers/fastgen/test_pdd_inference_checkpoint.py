@@ -205,8 +205,9 @@ def test_bounded_safe_export_round_trip_and_seeded_schedules(tmp_path, monkeypat
         assert source.calls == restored.calls == len(blocks)
         torch.testing.assert_close(_sample(restored, config, noise), actual, rtol=0, atol=0)
 
-    with pytest.raises(ValueError, match="block_size_max"):
-        pdd_config_from_metadata(metadata, blocks=[128], guidance_scale=4.0)
+    arbitrary = pdd_config_from_metadata(metadata, blocks=[1, 127], guidance_scale=4.0)
+    assert arbitrary.inference_blocks == [1, 127]
+    assert arbitrary.student_sample_steps == 2
 
 
 def test_inference_config_preserves_authenticated_nondefault_grid_max_t() -> None:

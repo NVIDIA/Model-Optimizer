@@ -261,12 +261,12 @@ class PDDConfig(DistillationConfig):
     block_size_min: int = ModeloptField(
         default=4,
         title="Minimum training block alignment",
-        description="Alignment of sampled training start indices and inference blocks.",
+        description="Alignment of sampled training start indices.",
     )
     block_size_max: int = ModeloptField(
         default=64,
         title="Maximum trained block size",
-        description="Largest target span and inference block supported by this training run.",
+        description="Largest target span sampled during training.",
     )
     teacher_integrator: Literal["euler", "midpoint"] = ModeloptField(
         default="euler",
@@ -330,16 +330,6 @@ class PDDConfig(DistillationConfig):
         for index, block in enumerate(self.inference_blocks):
             if block <= 0:
                 raise ValueError(f"inference_blocks[{index}] must be > 0, got {block}.")
-            if block % self.block_size_min != 0:
-                raise ValueError(
-                    f"inference_blocks[{index}]={block} must be aligned to "
-                    f"block_size_min={self.block_size_min}."
-                )
-            if block > self.block_size_max:
-                raise ValueError(
-                    f"inference_blocks[{index}]={block} exceeds "
-                    f"block_size_max={self.block_size_max}."
-                )
         if sum(self.inference_blocks) != self.grid_size:
             raise ValueError(
                 f"inference_blocks must sum to grid_size={self.grid_size}, got "
@@ -350,15 +340,6 @@ class PDDConfig(DistillationConfig):
                 "student_sample_steps must equal len(inference_blocks), got "
                 f"{self.student_sample_steps} and {len(self.inference_blocks)}."
             )
-
-        start = 0
-        for index, block in enumerate(self.inference_blocks):
-            if start % self.block_size_min != 0 or start > self.grid_size - self.block_size_min:
-                raise ValueError(
-                    f"inference block {index} starts at {start}, which is not a valid "
-                    f"training start aligned to block_size_min={self.block_size_min}."
-                )
-            start += block
 
         default_sample_t_cfg = SampleTimestepConfig()
         if self.sample_t_cfg.model_dump() != default_sample_t_cfg.model_dump():

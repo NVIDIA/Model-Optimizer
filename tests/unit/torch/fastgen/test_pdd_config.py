@@ -122,8 +122,6 @@ def test_pdd_config_accepts_explicit_grid_max_t_upper_boundary():
         ({"block_size_max": 129}, "block_size_max <= grid_size"),
         ({"grid_size": 130}, "must be divisible"),
         ({"inference_blocks": []}, "at least one block"),
-        ({"inference_blocks": [30, 34, 32, 32]}, "must be aligned"),
-        ({"inference_blocks": [128], "student_sample_steps": 1}, "exceeds block_size_max"),
         ({"inference_blocks": [32, 32, 32]}, "must sum to grid_size"),
         (
             {"inference_blocks": [64, 64], "student_sample_steps": 4},
@@ -134,6 +132,12 @@ def test_pdd_config_accepts_explicit_grid_max_t_upper_boundary():
 def test_pdd_config_rejects_invalid_grid_and_block_boundaries(overrides, message):
     with pytest.raises(ValueError, match=message):
         PDDConfig(**overrides)
+
+
+def test_pdd_config_accepts_inference_partition_outside_training_block_support():
+    config = PDDConfig(inference_blocks=[1, 127], student_sample_steps=2)
+
+    assert config.inference_blocks == [1, 127]
 
 
 @pytest.mark.parametrize(

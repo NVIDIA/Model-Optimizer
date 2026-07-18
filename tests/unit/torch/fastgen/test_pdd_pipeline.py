@@ -413,7 +413,7 @@ def test_sampled_indices_stay_on_exact_uniform_support() -> None:
         assert observed == set(range(n_value, min(n_value + 4, 8)))
 
 
-@pytest.mark.parametrize("blocks", [None, [2, 2, 2, 2]])
+@pytest.mark.parametrize("blocks", [None, [2, 2, 2, 2], [1, 7]])
 def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
     pipeline, adapter = _pipeline()
     noise = torch.tensor([[1.0, -2.0, 0.5], [-0.25, 0.75, 1.5]], dtype=torch.bfloat16)
@@ -511,7 +511,7 @@ def test_pipeline_rejects_invalid_shapes_dtypes_and_blocks() -> None:
         )
     with pytest.raises(TypeError, match="model_kwargs must be a mapping"):
         pipeline.sample(torch.ones(1, 3), model_kwargs=[])  # type: ignore[arg-type]
-    for blocks in ([3, 5], [2, 2], [6, 2], [], [2, 2, 2, 4]):
+    for blocks in ([2, 2], [], [0, 8], [4, 4.0], [2, 2, 2, 4]):
         with pytest.raises(ValueError):
             pipeline.sample(torch.ones(1, 3), blocks=blocks)
 

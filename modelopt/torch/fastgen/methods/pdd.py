@@ -936,24 +936,12 @@ class PDDPipeline(DistillationPipeline):
             resolved = tuple(blocks)
         if not resolved:
             raise ValueError("blocks must contain at least one interval count.")
-        start = 0
         for index, block in enumerate(resolved):
             if type(block) is not int or block <= 0:
                 raise ValueError(f"blocks[{index}] must be a positive integer, got {block!r}.")
-            if block % self.config.block_size_min != 0:
-                raise ValueError(
-                    f"blocks[{index}]={block} must be aligned to "
-                    f"block_size_min={self.config.block_size_min}."
-                )
-            if block > self.config.block_size_max:
-                raise ValueError(
-                    f"blocks[{index}]={block} exceeds block_size_max={self.config.block_size_max}."
-                )
-            if start > self.config.grid_size - self.config.block_size_min:
-                raise ValueError(f"block {index} starts outside the trained support at {start}.")
-            start += block
-        if start != self.config.grid_size:
-            raise ValueError(f"blocks must sum to grid_size={self.config.grid_size}, got {start}.")
+        total = sum(resolved)
+        if total != self.config.grid_size:
+            raise ValueError(f"blocks must sum to grid_size={self.config.grid_size}, got {total}.")
         return resolved
 
     @torch.no_grad()
