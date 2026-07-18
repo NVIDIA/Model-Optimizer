@@ -166,15 +166,15 @@ class TestLocalHessianAccumulator:
         assert acc.normalized_coupling() is None
 
 
-def test_activation_error_coupling_config_and_preset():
+def test_local_hessian_config_and_presets():
     config = LocalHessianCalibConfig(activation_error_coupling=True)
     assert config.model_dump()["activation_error_coupling"] is True
-    assert (
-        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG["algorithm"][
-            "activation_error_coupling"
-        ]
-        is True
-    )
+    presets = [
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG,
+    ]
+    assert all(preset["algorithm"]["layerwise"]["enable"] is True for preset in presets)
+    assert presets[1]["algorithm"]["activation_error_coupling"] is True
 
 
 class TestLocalHessianCalibrateDense:
