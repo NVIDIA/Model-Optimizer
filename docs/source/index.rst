@@ -5,16 +5,17 @@ Release notes, technical updates, examples, and deployment stories from the Mode
 
 .. raw:: html
 
-   <div class="announcement-toolbar">
-     <label class="announcement-search-label" for="announcement-search">Search announcements</label>
-     <input id="announcement-search" class="announcement-search" type="search" placeholder="Search announcements" autocomplete="off" />
-     <div class="announcement-tags" aria-label="Announcement tags">
-       <button class="announcement-tag is-active" type="button" data-tag="all">All</button>
-       <button class="announcement-tag" type="button" data-tag="speculative-decoding">Speculative decoding</button>
-       <button class="announcement-tag" type="button" data-tag="docs">Docs</button>
-       <button class="announcement-tag" type="button" data-tag="github-pages">GitHub Pages</button>
+   <section class="announcement-section" aria-label="Announcement index">
+     <div class="announcement-toolbar">
+       <label class="announcement-search-label" for="announcement-search">Search announcements</label>
+       <input id="announcement-search" class="announcement-search" type="search" placeholder="Search announcements" autocomplete="off" />
+       <div class="announcement-tags" aria-label="Announcement tags">
+         <button class="announcement-tag is-active" type="button" data-tag="all">All</button>
+         <button class="announcement-tag" type="button" data-tag="speculative-decoding">Speculative decoding</button>
+         <button class="announcement-tag" type="button" data-tag="docs">Docs</button>
+         <button class="announcement-tag" type="button" data-tag="github-pages">GitHub Pages</button>
+       </div>
      </div>
-   </div>
 
    <div class="announcement-grid" id="announcement-grid">
      <article class="announcement-card" data-date="2026-07-13" data-title="Model Optimizer announcements are moving to GitHub Pages" data-summary="The public Model Optimizer site is gaining a PR-updated announcements landing page within the existing Sphinx documentation." data-tags="release docs github-pages">
@@ -37,6 +38,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
      <span class="announcement-page-status" id="announcement-page-status"></span>
      <button class="announcement-page-button" id="announcement-next" type="button">Next</button>
    </nav>
+   </section>
 
 .. toctree::
    :hidden:
