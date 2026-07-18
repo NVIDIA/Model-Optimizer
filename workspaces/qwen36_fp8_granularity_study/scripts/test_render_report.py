@@ -93,6 +93,7 @@ def complete_payload(model: str, recipe: str, reference_hash: str, value: float)
     return {
         "schema_version": renderer.STUDY_RESULT_SCHEMA,
         "status": "complete",
+        "plan": {"status": "resolved"},
         "model": model,
         "recipe": recipe,
         "reference": {"signature_hash": reference_hash},
@@ -171,7 +172,7 @@ class RendererTest(unittest.TestCase):
     def write_result(root: Path, name: str, payload: dict) -> None:
         path = root / name / "results.json"
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
     def test_wrong_schema_is_rejected_without_path_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -208,6 +209,22 @@ class RendererTest(unittest.TestCase):
         self.assertIn("Quantizer-level diagnostics", report)
         self.assertNotIn("#1 ·", report)
 
+    def test_top_level_status_wins_over_nested_plan_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = self.manifest["models"][0]["handle"]
+            candidate = self.manifest["candidates"][0]
+            self.write_result(
+                root,
+                "nested-status",
+                complete_payload(model, candidate["id"], "ref-a", 0.01),
+            )
+            records, errors = renderer.load_results(root, self.manifest)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(records[0]["status"], "complete")
+        self.assertTrue(records[0]["valid_complete"])
+
     def test_complete_matrix_renders_rankings_and_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -229,11 +246,28 @@ class RendererTest(unittest.TestCase):
         self.assertTrue(all(record["comparable"] for record in records))
         self.assertIn("All 14 expected, comparable candidate artifacts were parsed", report)
         self.assertIn("Within-scope screen rankings", report)
+        self.assertIn("Measured findings", report)
+        self.assertIn("Matched activation penalty", report)
         self.assertIn("#1 ·", report)
         self.assertIn("Weight MSE coverage", report)
         self.assertIn("Highest named quantizer MSE", report)
         self.assertIn("Phase wall times", report)
         self.assertIn("8.25", report)
+
+    def test_measured_findings_handles_zero_control_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            model = self.manifest["models"][0]
+            for candidate in self.manifest["candidates"]:
+                value = 0.0 if candidate["id"] == "per_tensor_fp8_weight_only_control" else 0.01
+                payload = complete_payload(model["handle"], candidate["id"], "reference-0", value)
+                self.write_result(root, candidate["id"], payload)
+            records, errors = renderer.load_results(root, self.manifest)
+            report = renderer.render(self.manifest, records, errors, None)
+
+        self.assertEqual(errors, [])
+        self.assertIn("Matched activation penalty", report)
+        self.assertIn("<td>—</td>", report)
 
 
 if __name__ == "__main__":

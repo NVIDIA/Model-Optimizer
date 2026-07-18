@@ -160,11 +160,16 @@ def load_results(
             errors.append(f"{display_path}: unsupported or missing study result schema")
             continue
         flat = flatten(payload)
+        artifact_status = payload.get("status")
+        if not isinstance(artifact_status, str):
+            artifact_status = pick_text(flat, ("status", "state")) or "result artifact found"
         record: dict[str, Any] = {
             "path": display_path,
             "model": infer_model(path, flat, manifest["models"]),
             "candidate": infer_candidate(path, flat, manifest["candidates"]),
-            "status": pick_text(flat, ("status", "state")) or "result artifact found",
+            # The study plan also has a nested status (for example, ``resolved``).
+            # The artifact's top-level status is authoritative for report validity.
+            "status": artifact_status,
             "reference_hash": mapping(payload.get("reference")).get("signature_hash"),
             "comparable": False,
             "valid_complete": False,
@@ -719,6 +724,129 @@ def ranking_tables(records: list[dict[str, Any]], candidates: list[dict[str, Any
     return "".join(sections)
 
 
+def quantizer_mean_mse(record: dict[str, Any], role: str) -> float | None:
+    section = mapping(mapping(record.get("quantization_mse")).get(role))
+    values = [
+        float(value)
+        for value in mapping(section.get("by_quantizer")).values()
+        if finite_number(value)
+    ]
+    return sum(values) / len(values) if values else None
+
+
+def safe_ratio(numerator: float, denominator: float) -> float | None:
+    return numerator / denominator if denominator != 0.0 else None
+
+
+def measured_findings(records: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> str:
+    candidate_labels = {candidate["id"]: candidate["label"] for candidate in candidates}
+    expected_ids = set(candidate_labels)
+    matched_families = (
+        ("Per-tensor", "per_tensor_fp8", "per_tensor_fp8_weight_only_control"),
+        (
+            "Dynamic block-128",
+            "block128_dynamic_w8a8_research",
+            "block128_dynamic_weight_only_control",
+        ),
+        ("MXFP8", "mxfp8", "mxfp8_weight_only_control"),
+    )
+    sections = []
+    models = sorted({record["model"] for record in records if record.get("comparable")})
+    for model in models:
+        by_id = {
+            record["candidate"]: record
+            for record in records
+            if record.get("comparable") and record["model"] == model
+        }
+        if not expected_ids.issubset(by_id):
+            continue
+
+        w8a8_ids = [w8a8_id for _, w8a8_id, _ in matched_families]
+        logit_rank = sorted(w8a8_ids, key=lambda candidate_id: by_id[candidate_id]["logit_mse"])
+        kl_rank = sorted(w8a8_ids, key=lambda candidate_id: by_id[candidate_id]["kl_forward"])
+
+        def rank_text(candidate_ids: list[str], metric: str) -> str:
+            return " &lt; ".join(
+                f"{esc(candidate_labels[candidate_id])} ({format_number(by_id[candidate_id][metric])})"
+                for candidate_id in candidate_ids
+            )
+
+        penalty_rows = []
+        for family, w8a8_id, weight_only_id in matched_families:
+            w8a8 = by_id[w8a8_id]
+            weight_only = by_id[weight_only_id]
+            logit_delta = float(w8a8["logit_mse"]) - float(weight_only["logit_mse"])
+            kl_delta = float(w8a8["kl_forward"]) - float(weight_only["kl_forward"])
+            logit_relative = safe_ratio(logit_delta, float(weight_only["logit_mse"]))
+            kl_relative = safe_ratio(kl_delta, float(weight_only["kl_forward"]))
+            logit_share = safe_ratio(logit_delta, float(w8a8["logit_mse"]))
+            kl_share = safe_ratio(kl_delta, float(w8a8["kl_forward"]))
+            penalty_rows.append(
+                "<tr>"
+                f"<td>{esc(family)}</td>"
+                f"<td>{format_number(logit_delta)}</td>"
+                f"<td>{format_number(logit_relative, percent=True)}</td>"
+                f"<td>{format_number(logit_share, percent=True)}</td>"
+                f"<td>{format_number(kl_delta)}</td>"
+                f"<td>{format_number(kl_relative, percent=True)}</td>"
+                f"<td>{format_number(kl_share, percent=True)}</td>"
+                "</tr>"
+            )
+
+        weight_means = [quantizer_mean_mse(by_id[candidate_id], "weight") for candidate_id in w8a8_ids]
+        input_means = [quantizer_mean_mse(by_id[candidate_id], "input") for candidate_id in w8a8_ids]
+        local_mse_note = ""
+        if all(value is not None and value > 0 for value in weight_means + input_means):
+            weight_values = [float(value) for value in weight_means if value is not None]
+            input_values = [float(value) for value in input_means if value is not None]
+            weight_spread = max(weight_values) / min(weight_values) - 1.0
+            local_mse_note = (
+                "<p>Mean weight-quantizer MSE spans only "
+                f"{format_number(min(weight_values))}–{format_number(max(weight_values))} "
+                f"({format_number(weight_spread, percent=True)} max/min spread), while mean "
+                "input-quantizer MSE spans "
+                f"{format_number(min(input_values))}–{format_number(max(input_values))}. "
+                "Neither local mean alone reproduces the downstream ranking; quantizer location, "
+                "scale geometry, and error propagation remain material.</p>"
+            )
+
+        static_record = by_id["block128_static_weight_only"]
+        dynamic_weight_only = by_id["block128_dynamic_weight_only_control"]
+        fixed_weight_note = ""
+        if all(
+            float(static_record[metric]) == float(dynamic_weight_only[metric])
+            for metric in ("logit_mse", "normalized_mse", "kl_forward", "kl_reverse", "js")
+        ):
+            fixed_weight_note = (
+                "<p>Static and dynamic block-128 weight-only controls are numerically identical "
+                "for the reported output metrics, consistent with both quantizing the same fixed "
+                "weights; the dynamic distinction matters in the activation path here.</p>"
+            )
+
+        sections.append(
+            '<div class="panel">'
+            f"<h3>{esc(model)}</h3>"
+            f"<p><strong>W8A8 logit-MSE rank:</strong> {rank_text(logit_rank, 'logit_mse')}<br>"
+            f"<strong>W8A8 forward-KL rank:</strong> {rank_text(kl_rank, 'kl_forward')}</p>"
+            "<h4>Matched activation penalty: W8A8 minus weight-only control</h4>"
+            '<div class="table-wrap"><table><thead><tr><th>Family</th>'
+            "<th>Δ logit MSE</th><th>Relative to W8A16</th><th>Share of W8A8 error</th>"
+            "<th>Δ forward KL</th><th>Relative to W8A16</th><th>Share of W8A8 error</th>"
+            "</tr></thead><tbody>"
+            + "".join(penalty_rows)
+            + "</tbody></table></div>"
+            + fixed_weight_note
+            + local_mse_note
+            + '<p class="small-note">Penalties are paired recipe point estimates on the same '
+            "32-document reference cohort. They isolate activation quantization within each "
+            "matched family, but comparisons across families retain the format-policy confounds "
+            "listed above.</p></div>"
+        )
+    if not sections:
+        return ""
+    return "<h2>Measured findings</h2>" + "".join(sections)
+
+
 def toy_table(toy: dict[str, Any] | None) -> str:
     if not toy:
         return '<div class="chart-empty">Run <code>scripts/toy_scale_sweep.py</code> to generate the synthetic check.</div>'
@@ -966,6 +1094,8 @@ def render(
     <p>{esc(executive_body)}</p>
   </div>
   <div class="callout"><strong>Two linked screens, not one isolated variable.</strong> The W8A8 screen compares format-level bundles: per-tensor uses a static calibrated activation scale, while block-128 and MXFP8 rescale dynamically per invocation; MXFP8 also changes block size and scale encoding. The W8A16 controls remove activation quantization, but MXFP8 versus block-128 still combines a block-size change with E8M0 versus full-precision scales.</div>
+
+  {measured_findings(records, candidates)}
 
   <h2>Candidate matrix</h2>
   <div class="table-wrap"><table><thead><tr><th>Candidate</th><th>Scope</th><th>Values</th><th>Weight scale domain</th><th>Activation scale domain</th><th>Scale representation</th><th>Calibration</th><th>Support boundary</th><th>Approx. storage</th></tr></thead><tbody>{candidate_rows}</tbody></table></div>
