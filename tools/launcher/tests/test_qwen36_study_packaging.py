@@ -10,10 +10,26 @@ import pytest
 import yaml
 
 EXPECTED_QWEN36_IMAGE = (
-    "/lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/"
-    "qwen36_pr_stack_latest_runtime_only_20260519_234147/images/"
-    "vllm_qwen36_pr_stack_latest_runtime_only.sqsh"
+    "/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/"
+    "tensorrt-llm-release-1.3.0rc11.sqsh"
 )
+EXPECTED_QWEN36_PYDEPS_MOUNT = (
+    "/lustre/fsw/portfolios/coreai/users/weimingc/qwen36_ptq/pydeps:"
+    "/qwen36-pydeps:ro"
+)
+EXPECTED_QWEN36_STUDY_MOUNT = (
+    "/lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/"
+    "qwen36_fp8_granularity_study:/study"
+)
+
+
+def test_launcher_project_declares_build_backend():
+    """Managed uv runs install this checkout instead of resolving a global command."""
+    with open(os.path.join(launch.LAUNCHER_DIR, "pyproject.toml")) as file:
+        pyproject = file.read()
+
+    assert "[build-system]" in pyproject
+    assert 'build-backend = "setuptools.build_meta"' in pyproject
 
 
 def test_managed_source_root_overrides_installed_launcher_package(monkeypatch, tmp_path):
@@ -75,6 +91,14 @@ def test_qwen36_pipelines_have_staging_plus_four_sequential_candidates():
             task["slurm_config"]["container"] == EXPECTED_QWEN36_IMAGE
             for task in tasks
         )
+        assert all(
+            EXPECTED_QWEN36_PYDEPS_MOUNT in task["slurm_config"]["container_mounts"]
+            for task in tasks
+        )
+        assert all(
+            EXPECTED_QWEN36_STUDY_MOUNT in task["slurm_config"]["container_mounts"]
+            for task in tasks
+        )
         assert tasks[0]["slurm_config"]["partition"] == "cpu_datamover"
         assert tasks[0]["slurm_config"]["gpus_per_node"] == 0
         for task in tasks[1:]:
@@ -104,10 +128,22 @@ def test_qwen36_runner_stages_and_enforces_offline_dataset_snapshot():
     assert "export HF_HUB_OFFLINE=1" in script
     assert "export TRANSFORMERS_OFFLINE=1" in script
     assert "export STUDY_CONTAINER_IMAGE" in script
+    assert "export QWEN36_PYDEPS" in script
     assert 'PYTHON_BIN="$(command -v python3 || command -v python || true)"' in script
     assert "Qwen3_5MoeForConditionalGeneration" in script
     assert "Qwen3_5ForConditionalGeneration" in script
     assert "get_cuda_ext_mx(raise_if_failed=True)" in script
+    assert "invalidate_staging_manifest" in script
+    assert "require_staging_manifest" in script
+    assert 'previous="${manifest}.previous.${SLURM_JOB_ID:-$$}"' in script
+    early_guard = script.index("# Invalidate stale staging state before any checks that can fail.")
+    python_lookup = script.index('PYTHON_BIN="$(command -v python3 || command -v python || true)"')
+    runtime_validation = script.rindex('case "${MODE}" in')
+    assert early_guard < python_lookup < runtime_validation
+    guard_block = script[early_guard:python_lookup]
+    assert guard_block.index("invalidate_staging_manifest") < guard_block.index(
+        "require_staging_manifest"
+    )
     assert 'TORCH_EXTENSIONS_DIR="${REMOTE_STUDY_ROOT}/cache/torch_extensions/${MODEL_SLUG}"' in script
     assert '"status": "launcher_preflight"' in script
     assert "temporary.replace(path)" in script

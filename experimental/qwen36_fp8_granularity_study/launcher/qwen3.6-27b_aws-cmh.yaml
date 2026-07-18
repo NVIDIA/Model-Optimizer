@@ -26,9 +26,10 @@ pipeline:
       # Zero is the launcher CLI-safe spelling for no GPU GRES; core normalizes it to None.
       gpus_per_node: 0
       time: "04:00:00"
-      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
+      container: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/tensorrt-llm-release-1.3.0rc11.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
+        - /lustre/fsw/portfolios/coreai/users/weimingc/qwen36_ptq/pydeps:/qwen36-pydeps:ro
 
   task_1:
     script: modules/Model-Optimizer/experimental/qwen36_fp8_granularity_study/launcher/run_study.sh
@@ -48,9 +49,10 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
+      container: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/tensorrt-llm-release-1.3.0rc11.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
+        - /lustre/fsw/portfolios/coreai/users/weimingc/qwen36_ptq/pydeps:/qwen36-pydeps:ro
 
   task_2:
     script: modules/Model-Optimizer/experimental/qwen36_fp8_granularity_study/launcher/run_study.sh
@@ -70,9 +72,10 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
+      container: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/tensorrt-llm-release-1.3.0rc11.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
+        - /lustre/fsw/portfolios/coreai/users/weimingc/qwen36_ptq/pydeps:/qwen36-pydeps:ro
 
   task_3:
     script: modules/Model-Optimizer/experimental/qwen36_fp8_granularity_study/launcher/run_study.sh
@@ -92,9 +95,10 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
+      container: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/tensorrt-llm-release-1.3.0rc11.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
+        - /lustre/fsw/portfolios/coreai/users/weimingc/qwen36_ptq/pydeps:/qwen36-pydeps:ro
 
   task_4:
     script: modules/Model-Optimizer/experimental/qwen36_fp8_granularity_study/launcher/run_study.sh
@@ -114,6 +118,7 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 4
       time: "24:00:00"
-      container: /lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh
+      container: /lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/tensorrt-llm-release-1.3.0rc11.sqsh
       container_mounts:
         - /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study:/study
+        - /lustre/fsw/portfolios/coreai/users/weimingc/qwen36_ptq/pydeps:/qwen36-pydeps:ro

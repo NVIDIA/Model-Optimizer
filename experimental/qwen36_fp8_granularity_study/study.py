@@ -936,6 +936,7 @@ def collect_environment() -> dict[str, Any]:
             "HF_HOME",
             "TRANSFORMERS_CACHE",
             "STUDY_CONTAINER_IMAGE",
+            "QWEN36_PYDEPS",
         )
         if key in os.environ
     }
@@ -962,6 +963,8 @@ def reference_runtime_provenance(
     args: argparse.Namespace, full_model: torch.nn.Module, hf_config: Any
 ) -> dict[str, Any]:
     """Return stable execution identity fields that can change BF16 reference logits."""
+    import transformers
+
     gpu_types = []
     if torch.cuda.is_available():
         observed = set()
@@ -1003,6 +1006,8 @@ def reference_runtime_provenance(
         "resolved_hf_device_map": json_safe(getattr(full_model, "hf_device_map", None)),
         "model_config_sha256": canonical_hash(config_payload),
         "container_image": os.environ.get("STUDY_CONTAINER_IMAGE"),
+        "dependency_overlay": os.environ.get("QWEN36_PYDEPS"),
+        "transformers_module": str(Path(transformers.__file__).resolve()),
         "backend_flags": {
             "float32_matmul_precision": torch.get_float32_matmul_precision(),
             "cuda_matmul_allow_tf32": (

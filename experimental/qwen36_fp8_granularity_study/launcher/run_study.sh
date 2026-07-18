@@ -12,7 +12,8 @@ readonly DATASET_ID="abisee/cnn_dailymail"
 readonly DATASET_CONFIG="3.0.0"
 readonly DATASET_SPLIT="train"
 readonly DATASET_REQUESTED_REVISION="main"
-readonly STUDY_CONTAINER_IMAGE="${STUDY_CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/users/weimingc/vllm_container_images/qwen36_pr_stack_latest_runtime_only_20260519_234147/images/vllm_qwen36_pr_stack_latest_runtime_only.sqsh}"
+readonly STUDY_CONTAINER_IMAGE="${STUDY_CONTAINER_IMAGE:-/lustre/fsw/portfolios/coreai/projects/coreai_comparch_aarwlt/users/viraatc/tensorrt-llm-release-1.3.0rc11.sqsh}"
+readonly QWEN36_PYDEPS="${QWEN36_PYDEPS:-/qwen36-pydeps}"
 # Packed calibration requests a conservative 128 * 8 raw-document prefix (packing
 # may fill its rows before every requested document contributes). Unpacked evaluation
 # selects rows [1024, 1056), so the two source pools are guaranteed disjoint.
@@ -29,6 +30,7 @@ export PYTHONPATH="${SHARED_PYTHON_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 export STUDY_CONTAINER_IMAGE
+export QWEN36_PYDEPS
 export HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-60}"
 export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-300}"
 
@@ -93,6 +95,42 @@ esac
 readonly MODEL_ID MODEL_SLUG
 export MODEL_ID MODEL_SLUG
 
+invalidate_staging_manifest() {
+    local manifest previous
+    manifest="${REMOTE_STUDY_ROOT}/manifests/${MODEL_SLUG}/staging.json"
+    if [[ -f "${manifest}" ]]; then
+        previous="${manifest}.previous.${SLURM_JOB_ID:-$$}"
+        mv -- "${manifest}" "${previous}"
+        echo "Preserved prior staging manifest at ${previous}"
+    fi
+}
+
+require_staging_manifest() {
+    local manifest
+    manifest="${REMOTE_STUDY_ROOT}/manifests/${MODEL_SLUG}/staging.json"
+    [[ -f "${manifest}" ]] || {
+        echo "Current staging manifest not found: ${manifest}" >&2
+        return 2
+    }
+}
+
+# Invalidate stale staging state before any checks that can fail. Because the
+# pipeline intentionally uses afterany dependencies, GPU tasks must never accept
+# a manifest left by an older submission when the current staging task fails.
+case "${MODE}" in
+    stage)
+        [[ -z "${CANDIDATES}" ]] || usage
+        invalidate_staging_manifest
+        ;;
+    run)
+        [[ -n "${CANDIDATES}" ]] || usage
+        require_staging_manifest
+        ;;
+    *)
+        usage
+        ;;
+esac
+
 PYTHON_BIN="$(command -v python3 || command -v python || true)"
 readonly PYTHON_BIN
 [[ -n "${PYTHON_BIN}" ]] || {
@@ -102,7 +140,11 @@ readonly PYTHON_BIN
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PACKAGED_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-export PYTHONPATH="${PACKAGED_REPO_ROOT}:${PYTHONPATH}"
+[[ -d "${QWEN36_PYDEPS}" ]] || {
+    echo "Qwen3.6 dependency overlay not mounted at ${QWEN36_PYDEPS}" >&2
+    exit 2
+}
+export PYTHONPATH="${PACKAGED_REPO_ROOT}:${QWEN36_PYDEPS}:${PYTHONPATH}"
 
 # ModelOpt's FP8 and MXFP8 fake-quantizers JIT-compile CUDA extensions. Pyxis
 # disables the home mount, so pin all compiler caches to the writable study mount.
@@ -156,27 +198,30 @@ if model_class is None:
 
 cuda_home = pathlib.Path(CUDA_HOME) if CUDA_HOME else None
 nvcc = cuda_home / "bin" / "nvcc" if cuda_home else None
-missing_build_tools = []
-if shutil.which("c++") is None:
-    missing_build_tools.append("c++")
-if shutil.which("ninja") is None:
-    missing_build_tools.append("ninja")
-if nvcc is None or not nvcc.is_file():
-    missing_build_tools.append("nvcc")
-if missing_build_tools:
-    raise RuntimeError(
-        "Container cannot JIT-build ModelOpt FP8/MXFP8 extensions; missing: "
-        + ", ".join(missing_build_tools)
-    )
+if torch.cuda.is_available():
+    missing_build_tools = []
+    if shutil.which("c++") is None:
+        missing_build_tools.append("c++")
+    if shutil.which("ninja") is None:
+        missing_build_tools.append("ninja")
+    if nvcc is None or not nvcc.is_file():
+        missing_build_tools.append("nvcc")
+    if missing_build_tools:
+        raise RuntimeError(
+            "Container cannot JIT-build ModelOpt FP8/MXFP8 extensions; missing: "
+            + ", ".join(missing_build_tools)
+        )
 
 payload = {
     "architecture": platform.machine(),
     "container_image": os.environ["STUDY_CONTAINER_IMAGE"],
+    "qwen36_pydeps": os.environ.get("QWEN36_PYDEPS", "/qwen36-pydeps"),
     "model_class": f"{model_class.__module__}.{model_class.__name__}",
     "modelopt": str(modelopt_file),
     "torch": torch.__version__,
     "transformers": transformers.__version__,
     "accelerate": accelerate.__version__,
+    "cuda_available": torch.cuda.is_available(),
     "cuda_home": str(cuda_home),
     "torch_extensions_dir": os.environ["TORCH_EXTENSIONS_DIR"],
 }
@@ -659,12 +704,10 @@ PY
 
 case "${MODE}" in
     stage)
-        [[ -z "${CANDIDATES}" ]] || usage
         validate_runtime
         stage_inputs
         ;;
     run)
-        [[ -n "${CANDIDATES}" ]] || usage
         validate_runtime
         IFS=',' read -r -a candidate_list <<< "${CANDIDATES}"
         overall_exit_code=0

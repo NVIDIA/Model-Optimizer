@@ -20,11 +20,13 @@ adding Nemo tasks.
 
 The configs deliberately leave the login host and SSH identity to the `aws_cmh`
 cluster factory. They explicitly pin the Slurm account to `coreai_numerics_edge` and
-use the cluster-local `qwen36_pr_stack_latest_runtime_only` ARM64 SquashFS, already
-validated on aws-cmh with Transformers 5.8.1, CUDA 13.0, and both Qwen3.6
-architectures. Every task validates the exact model class and the C++/CUDA build
-toolchain before doing expensive work. The configs mount the persistent study root
-at `/study`:
+use the cluster-local TensorRT-LLM `release:1.3.0rc11` ARM64 SquashFS, already proven
+for Qwen3.6 FP8 and KL-based PTQ on aws-cmh. A read-only mount supplies the matching
+Qwen3.6 Transformers checkout (5.7.0.dev0 at commit `74a2a4d0c790`) while the packaged
+ModelOpt source remains authoritative. Every task validates the exact model class and
+packaged ModelOpt source; GPU tasks additionally validate the C++/CUDA build toolchain
+and compile both required extensions before loading model weights. The configs mount
+the persistent study root at `/study`:
 
 ```text
 /lustre/fsw/portfolios/coreai/projects/coreai_numerics_edge/users/weimingc/qwen36_fp8_granularity_study
