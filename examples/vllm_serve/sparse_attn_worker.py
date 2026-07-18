@@ -17,12 +17,22 @@
 
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
+from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration import (
+    DEFAULT_THRESHOLD_TRIALS,
+)
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
+    collect_calibration_counts,
+    disable_calibration,
+    enable_calibration,
+    iter_sparse_impls,
+)
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
     install_vllm_nvfp4_attention,
+    install_vllm_skip_softmax_calibration,
     install_vllm_sparse_attention_from_checkpoint,
 )
 
-__all__ = ["SparseAttnWorker", "QuantSparseAttnWorker"]  # noqa: RUF022
+__all__ = ["SparseAttnWorker", "QuantSparseAttnWorker", "SkipSoftmaxCalibWorker"]  # noqa: RUF022
 
 _QUANT_FORMAT_KEYS = ("q_format", "k_format", "p_format", "v_format")
 
@@ -67,6 +77,57 @@ class SparseAttnWorker(BaseWorker):
         super().load_model(*args, **kwargs)
         report = install_vllm_sparse_attention_from_checkpoint(self.model_runner)
         _print_install_report("Sparse attention", report)
+
+
+class SkipSoftmaxCalibWorker(BaseWorker):
+    """Calibrate skip-softmax thresholds through the engine.
+
+    Unlike :class:`SparseAttnWorker` (which serves an already-calibrated
+    ``sparse_attention_config``), this worker *produces* that config. The
+    library installer swaps calibration-capable adapters onto every attention
+    layer at load; measurement starts only when the driver calls
+    ``sparse_calib_enable`` (so warmup launches are never recorded) and raw
+    per-threshold tile counts are harvested with ``sparse_calib_counts`` for
+    the driver to aggregate across TP ranks and fit.
+    """
+
+    def load_model(self, *args, **kwargs) -> None:
+        """Load the model, then install calibration adapters on every layer."""
+        super().load_model(*args, **kwargs)
+        report = install_vllm_skip_softmax_calibration(self.model_runner)
+        print(
+            f"[ModelOpt] Skip-softmax calibration installed on {report.installed_count} "
+            f"attention layers: {dict(report.backend_counts)}"
+        )
+
+    # -- RPC methods (invoked via LLM.collective_rpc) ----------------------
+
+    def sparse_calib_enable(self, threshold_trials: list[float] | None = None) -> int:
+        """Enter calibration mode on all installed impls; returns layer count."""
+        impls = list(iter_sparse_impls(_unwrapped_model(self)))
+        enable_calibration(impls, list(threshold_trials or DEFAULT_THRESHOLD_TRIALS))
+        return len(impls)
+
+    def sparse_calib_status(self) -> dict:
+        """Report active impls and record counts, so the backend is verifiable."""
+        impls = list(iter_sparse_impls(_unwrapped_model(self)))
+        impl_types: dict[str, int] = {}
+        total_records = 0
+        for impl in impls:
+            impl_types[type(impl).__name__] = impl_types.get(type(impl).__name__, 0) + 1
+            total_records += len(getattr(impl, "_calib_records", []))
+        return {
+            "num_sparse_layers": len(impls),
+            "impl_types": impl_types,
+            "calibrating": any(getattr(impl, "_calibrate", False) for impl in impls),
+            "total_records": total_records,
+        }
+
+    def sparse_calib_counts(self) -> dict[str, list[dict]]:
+        """Stop measuring and return this rank's layer-merged raw tile counts."""
+        model = _unwrapped_model(self)
+        disable_calibration(list(iter_sparse_impls(model)))
+        return collect_calibration_counts(model)
 
 
 class QuantSparseAttnWorker(BaseWorker):

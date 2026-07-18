@@ -1016,3 +1016,25 @@ def disable_calibration(impls) -> None:
     """Turn off calibration mode (collected records are left intact)."""
     for impl in impls:
         impl._calibrate = False
+
+
+def collect_calibration_counts(model) -> dict[str, list[dict]]:
+    """Harvest one rank's raw per-phase tile counts from every calibrating impl.
+
+    Sums counts across the rank's layers per aligned sample (every layer sees
+    the same launches in the same order), keeping raw
+    ``{"sample_length", "total_tiles", "skipped_tiles"}`` records per phase.
+    The driver merges these across TP ranks with
+    :func:`~.sparse_attn_calibration.merge_phase_counts` and fits once per
+    phase with :func:`~.sparse_attn_calibration.fit_from_counts` — sparsity
+    ratios are only formed after the global merge.
+    """
+    from .sparse_attn_calibration import merge_count_records, split_records_by_phase
+
+    per_phase_layers: dict[str, list[list[dict]]] = {}
+    for impl in iter_sparse_impls(model):
+        split = split_records_by_phase(getattr(impl, "_calib_records", []))
+        for phase, records in split.items():
+            if records:
+                per_phase_layers.setdefault(phase, []).append(records)
+    return {phase: merge_count_records(layers) for phase, layers in per_phase_layers.items()}

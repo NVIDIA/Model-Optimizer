@@ -80,7 +80,11 @@ def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     worker_module = _load_worker_module("sparse_attn_worker_import_test")
 
-    assert worker_module.__all__ == ["SparseAttnWorker", "QuantSparseAttnWorker"]
+    assert worker_module.__all__ == [
+        "SparseAttnWorker",
+        "QuantSparseAttnWorker",
+        "SkipSoftmaxCalibWorker",
+    ]
 
 
 @pytest.mark.parametrize(
