@@ -348,7 +348,7 @@ def _plan_vllm_attention(
 
     _require_supported_vllm()
     errors = _global_errors(model_runner) if quantize else []
-    mode = _cudagraph_mode(model_runner) if quantize else None
+    mode = _cudagraph_mode(model_runner)
     quant_plugin: Any = _load_quant_plugin() if quantize else None
     plans = []
     for name, module, sparse_kw in candidates:
@@ -365,9 +365,12 @@ def _plan_vllm_attention(
                 reasons.append(f"resolved dtype {dtype} must be fp16 or bf16")
             if capability_error := _device_capability_error(device):
                 reasons.append(capability_error)
-        if quantize:
-            if graph_error := _sparse_graph_error(sparse_kw, mode):
-                reasons.append(graph_error)
+        # Calibrated decode skip-softmax replays through the decode kernel path,
+        # which a FULL decode CUDA graph would capture with a stale threshold.
+        # This holds for sparse-only installs exactly as for quantized ones, so
+        # the guard is not gated on ``quantize``.
+        if graph_error := _sparse_graph_error(sparse_kw, mode):
+            reasons.append(graph_error)
         new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
         if backend_error:
             reasons.append(backend_error)

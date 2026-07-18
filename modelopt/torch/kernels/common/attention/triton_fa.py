@@ -23,6 +23,7 @@ metadata (b_start_loc, b_seq_len). Supports causal masking and autograd.
 """
 
 import math
+import warnings
 from typing import Any
 
 import torch
@@ -1030,17 +1031,47 @@ class _Attention(torch.autograd.Function):
         # kernel dereferences the right pointers instead of triggering an
         # illegal memory access.
         with torch.cuda.device(q.device):
-            if do_measure:
-                # Runtime counters mutate global tensors, so do not run them through
-                # autotune candidate trials. Use one stable config for measurement.
-                _attn_fwd.fn[grid](
-                    *fwd_args,
-                    **fwd_kwargs,
-                    BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
-                    BLOCK_N=_MEASURE_BLOCK_N,
-                    num_warps=_MEASURE_NUM_WARPS,
-                    num_stages=_MEASURE_NUM_STAGES,
-                )
+            if do_measure or apply_skip:
+                # Fixed-tile launches, bypassing autotune:
+                # - Measurement: runtime counters mutate global tensors, so they
+                #   must not run through autotune candidate trials.
+                # - Active skip-softmax: the tile-skip decision depends on the
+                #   (BLOCK_M, BLOCK_N) geometry, and thresholds are calibrated at
+                #   the 128x128 measurement granularity (attention_calibrate and
+                #   flash_skip_softmax both use 128x128 blocks). Autotuned tiles
+                #   (e.g. BLOCK_N=32) would realize a different sparsity than
+                #   calibrated, so skip launches always use the calibration tile.
+                #
+                # If the 128-row tile exceeds the device's shared memory (fp32
+                # inputs on ~100KB-smem GPUs), halve BLOCK_M and retry. BLOCK_N
+                # — the calibrated KV skip granularity — is never reduced.
+                # Smaller BLOCK_M splits the per-tile skip vote into narrower
+                # row groups: per-row numerics stay protected by the same
+                # threshold, but realized sparsity can exceed the calibrated
+                # target, so warn when stepping down.
+                block_m = _P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M
+                while True:
+                    try:
+                        _attn_fwd.fn[grid](
+                            *fwd_args,
+                            **fwd_kwargs,
+                            BLOCK_M=block_m,
+                            BLOCK_N=_MEASURE_BLOCK_N,
+                            num_warps=_MEASURE_NUM_WARPS,
+                            num_stages=_MEASURE_NUM_STAGES,
+                        )
+                        break
+                    except triton.runtime.errors.OutOfResources:
+                        if block_m <= 16:
+                            raise
+                        block_m //= 2
+                        if apply_skip:
+                            warnings.warn(
+                                f"skip-softmax tile BLOCK_M reduced to {block_m} "
+                                "(shared memory limit); realized sparsity may "
+                                "exceed the calibrated target on this device/dtype",
+                                stacklevel=2,
+                            )
             else:
                 _attn_fwd[grid](
                     *fwd_args,
