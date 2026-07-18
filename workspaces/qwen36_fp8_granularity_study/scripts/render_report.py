@@ -240,7 +240,7 @@ def load_results(
                 and finite_number(normalized_bootstrap.get("resamples"))
                 and int(normalized_bootstrap["resamples"]) > 0
             ):
-                missing.append("paired-document NMSE bootstrap interval")
+                missing.append("paired-row NMSE bootstrap interval")
             else:
                 record["normalized_mse_document_bootstrap"] = normalized_bootstrap
             weight_names = coverage_contract.get("weight_quantizer_names")
@@ -434,7 +434,7 @@ def results_table(records: list[dict[str, Any]], candidate_labels: dict[str, str
     return (
         '<div class="table-wrap"><table><thead><tr><th>Model</th><th>Candidate</th>'
         "<th>Status</th><th>Logit MSE</th><th>Token NMSE</th>"
-        "<th>Equal-doc NMSE [95% bootstrap]</th><th>KL ref→quant</th>"
+        "<th>Equal-row NMSE [95% bootstrap]</th><th>KL ref→quant</th>"
         "<th>KL quant→ref</th><th>JS</th><th>Target log-p MSE</th><th>ΔNLL</th>"
         "<th>Top-1</th><th>Artifact</th></tr></thead><tbody>"
         + "".join(rows)
@@ -838,7 +838,9 @@ def measured_findings(records: list[dict[str, Any]], candidates: list[dict[str, 
             + fixed_weight_note
             + local_mse_note
             + '<p class="small-note">Penalties are paired recipe point estimates on the same '
-            "32-document reference cohort. They isolate activation quantization within each "
+            "32-row reference cohort. The rows contain 31 unique texts because staged rows 1026 "
+            "and 1029 duplicate content; deduplicating that repeated text leaves every reported "
+            "rank unchanged. The estimates isolate activation quantization within each "
             "matched family, but comparisons across families retain the format-policy confounds "
             "listed above.</p></div>"
         )
@@ -1127,22 +1129,22 @@ def render(
     <div><strong>Pin inputs</strong><br>Resolve model revision, tokenizer, dataset sample IDs, padding, sequence length, dtype, and random seeds.</div>
     <div><strong>Cache reference</strong><br>Persist BF16 logits and a matching manifest before any in-place quantization.</div>
     <div><strong>Apply one candidate</strong><br>Use ModelOpt fake QDQ; refresh research block-reshape state per invocation for variable routed-MoE shapes.</div>
-    <div><strong>Measure globally</strong><br>Mask padding; compute MSE, normalized MSE, bidirectional KL, JS, target log-p, ΔNLL, top-k agreement, and document bootstrap intervals.</div>
+    <div><strong>Measure globally</strong><br>Mask padding; compute MSE, normalized MSE, bidirectional KL, JS, target log-p, ΔNLL, top-k agreement, and evaluation-row bootstrap intervals.</div>
     <div><strong>Localize error</strong><br>Measure all weight/expert slices directly, hook input quantizers, and retain family summaries, provenance, coverage, and wall times.</div>
   </div>
-  <div class="panel"><strong>Fixed deterministic screen:</strong> {methodology["calibration_samples"]} packed calibration samples and {methodology["evaluation_samples"]} evaluation documents from row offset {methodology["evaluation_row_offset"]} of the same CNN/DailyMail training split; batch {methodology["batch_size"]}; padded sequence length {methodology["sequence_length"]}. The 32-document evaluation slice is a controlled numerical screen, not evidence of broad task or corpus generalization. <span style="color:var(--muted)">{esc(methodology["fixed_shape_reason"])}</span></div>
+  <div class="panel"><strong>Fixed deterministic screen:</strong> {methodology["calibration_samples"]} packed calibration samples and {methodology["evaluation_samples"]} evaluation rows from row offset {methodology["evaluation_row_offset"]} of the same CNN/DailyMail training split; batch {methodology["batch_size"]}; padded sequence length {methodology["sequence_length"]}. The 32 rows contain 31 unique text payloads because staged rows 1026 and 1029 have identical content hashes; deduplicating that repeated text leaves every reported rank unchanged. This is a controlled numerical screen, not evidence of broad task or corpus generalization. <span style="color:var(--muted)">{esc(methodology["fixed_shape_reason"])}</span></div>
 
   <h2>Qwen3.6 experiment results</h2>
 {errors_html}
   {results_table(records, candidate_labels)}
-  <p class="small-note">Token NMSE weights every valid next-token position equally. The adjacent 95% interval bootstraps equal-weight document means from the same 32 paired quantized/reference documents; it quantifies screen sampling uncertainty, not corpus or task generalization.</p>
+  <p class="small-note">Token NMSE weights every valid next-token position equally. The adjacent 95% interval bootstraps equal-weight evaluation-row means from the same 32 paired quantized/reference rows; one text appears twice as disclosed above. The interval quantifies screen-row sampling uncertainty, not corpus or task generalization.</p>
   <h3>Centered / variance-normalized logit MSE</h3>
   <div class="chart">{metric_chart(records, "normalized_mse", candidate_labels)}</div>
   <h3>Forward KL: reference → quantized</h3>
   <div class="chart">{metric_chart(records, "kl_forward", candidate_labels)}</div>
 
   <h3>Within-scope screen rankings</h3>
-  <p>Ranks are computed only among validated artifacts for the same model, W8A8/W8A16 scope, and exact BF16-reference signature. Lower is better for NMSE, KL, and JS; higher is better for top-1 agreement. These are ranks on the deterministic 32-document screen, not general model-quality rankings.</p>
+  <p>Ranks are computed only among validated artifacts for the same model, W8A8/W8A16 scope, and exact BF16-reference signature. Lower is better for NMSE, KL, and JS; higher is better for top-1 agreement. These are ranks on the deterministic 32-row screen, not general model-quality rankings.</p>
   {ranking_tables(records, candidates)}
 
   <h2>Quantizer-level diagnostics</h2>
@@ -1164,7 +1166,9 @@ def render(
     <tr><th>Cluster</th><td>{esc(execution["cluster"])}</td><th>Slurm account</th><td>{esc(execution["account"])}</td></tr>
     <tr><th>Partition</th><td>{esc(execution["partition"])}</td><th>Requested resources</th><td>1 node, {execution["gpus_per_candidate"]} GPUs per running candidate; task-slot walltime {esc(execution["gpu_task_slot_walltime"])}</td></tr>
     <tr><th>Remote root</th><td colspan="3"><code>{esc(execution["remote_root"])}</code></td></tr>
-    <tr><th>Source ref / base</th><td><code>{esc(execution["source_ref"])}</code> from <code>{esc(execution["source_base_commit"])}</code></td><th>Hardware validation</th><td>{esc(execution["hardware_note"])}</td></tr>
+    <tr><th>Source ref / launch SHA</th><td><code>{esc(execution["source_ref"])}</code> at <code>{esc(execution["source_launch_commit"])}</code></td><th>Branch base</th><td><code>{esc(execution["source_base_commit"])}</code></td></tr>
+    <tr><th>Artifact git fields</th><td colspan="3">{esc(execution["artifact_git_note"])}</td></tr>
+    <tr><th>Hardware validation</th><td colspan="3">{esc(execution["hardware_note"])}</td></tr>
   </tbody></table></div>
 
   <h2>Historical NEL reference</h2>

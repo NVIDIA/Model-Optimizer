@@ -252,6 +252,8 @@ class RendererTest(unittest.TestCase):
         self.assertIn("Weight MSE coverage", report)
         self.assertIn("Highest named quantizer MSE", report)
         self.assertIn("Phase wall times", report)
+        self.assertIn("32 rows contain 31 unique text payloads", report)
+        self.assertIn("146d066fbc48a261eaba59a24d0530a1d36e1efe", report)
         self.assertIn("8.25", report)
 
     def test_measured_findings_handles_zero_control_metrics(self) -> None:

@@ -3,9 +3,9 @@
   "study_id": "qwen36_fp8_granularity_study",
   "title": "Qwen3.6 FP8 scale-granularity study",
   "created_at": "2026-07-17T00:00:00-07:00",
-  "updated_at": "2026-07-17T00:00:00-07:00",
-  "status": "prepared_not_submitted",
-  "status_note": "The study design and aws-cmh workspace are prepared. No Qwen3.6 measurements are shown until a successful remote result is copied into results/.",
+  "updated_at": "2026-07-17T20:15:19-07:00",
+  "status": "complete",
+  "status_note": "All 14 expected Qwen3.6 candidates completed successfully on aws-cmh and passed schema, reference-signature, quantizer-coverage, finiteness, and report-comparability validation.",
   "objective": "Measure Qwen3.6 output distortion under several FP8 numerical-format policies, using ModelOpt fake quantization and token-normalized MSE/KL metrics while making granularity, temporal scaling, activation scope, and scale-encoding confounds explicit.",
   "models": [
     {
@@ -116,7 +116,7 @@
     "evaluation_row_offset": 1024,
     "sequence_length": 512,
     "batch_size": 1,
-    "evaluation_scope": "A deterministic 32-document slice from the same CNN/DailyMail training split; suitable for a controlled numerical screen, not broad task or corpus generalization.",
+    "evaluation_scope": "A deterministic 32-row slice from the same CNN/DailyMail training split. It contains 31 unique text payloads because staged rows 1026 and 1029 have identical content hashes; deduplicating that repeated text leaves every reported rank unchanged. This is suitable for a controlled numerical screen, not broad task or corpus generalization.",
     "fixed_shape_reason": "Outer batch and padded sequence shapes are matched for control; a research-only pre-hook refreshes block reshape caches per invocation for variable fused-MoE routed-token shapes.",
     "reference_policy": "Generate BF16 reference logits once per exact model/config revision, tokenizer, sample ordering, sequence length, dtype, source/runtime/container/GPU identity, and resolved device map; persist them before in-place fake quantization.",
     "metric_policy": "Mask padding and aggregate per valid next-token position. Qwen normalized MSE is the mean of tokenwise centered-MSE/reference-variance ratios. Report raw and normalized logit error, forward/reverse KL, Jensen-Shannon divergence, target-token log-probability error, NLL delta, and top-k agreement.",
@@ -141,7 +141,9 @@
     ],
     "hardware_note": "Cluster metadata and observed node naming disagree about the GPU SKU. Each run records nvidia-smi output; no SKU is asserted before that evidence exists.",
     "source_ref": "codex/qwen36-fp8-granularity-study",
-    "source_base_commit": "d142f7ee1"
+    "source_base_commit": "d142f7ee1",
+    "source_launch_commit": "146d066fbc48a261eaba59a24d0530a1d36e1efe",
+    "artifact_git_note": "The tar-launched result JSON files have null git branch/commit fields. Both managed run-3 experiment wrappers pin the exact launch source SHA above."
   },
   "historical_reference": {
     "label": "Nemotron Nano v3 NEL/Polyphe reference supplied by the requester",
@@ -156,7 +158,7 @@
   "interpretation_guardrails": [
     "Treat the W8A8 matrix as a format-level comparison, not a causal granularity ablation: per-tensor activations use a static calibrated scale, block-128 and MXFP8 activations use dynamic per-invocation scaling, and MXFP8 additionally changes block size and scale encoding.",
     "The W8A16 controls isolate activation-quantization scope, but they do not isolate every format choice: MXFP8 versus block-128 still combines 32-value versus 128/128x128 scale domains with E8M0 versus full-precision scale representation.",
-    "The 32 CNN/DailyMail evaluation documents form a deterministic same-split numerical screen; do not generalize their ordering to downstream tasks, other corpora, or full model quality.",
+    "The 32 CNN/DailyMail evaluation rows form a deterministic same-split numerical screen and contain 31 unique texts because rows 1026 and 1029 duplicate content; deduplication leaves every reported rank unchanged. Do not generalize their ordering to downstream tasks, other corpora, or full model quality.",
     "Qwen normalized MSE is a mean of per-token ratios. The synthetic toy uses one ratio of global element means, so the two normalized-MSE values are conceptually related but not numerically interchangeable.",
     "The dynamic block-128 candidate is a numerical simulation using full-precision dynamic scales, not evidence of an exportable or accelerated runtime format.",
     "Raw vocabulary-logit MSE depends on logit offset and scale; centered/variance-normalized MSE and distribution divergences are the cross-model anchors.",
