@@ -42,6 +42,7 @@ from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
 from .utils import is_quantized
+from .utils.core_utils import materialize_fsdp2_root
 
 __all__ = [
     "auto_quantize",
@@ -106,7 +107,9 @@ def calibrate(
     is_training = model.training
     model.eval()
 
-    with forward_with_reshard(model):
+    # materialize_fsdp2_root: calibration calls model.forward directly (bypasses __call__ and the
+    # root's FSDP2 pre-forward hook), so unshard the root's embed/lm_head/norm for the forward.
+    with materialize_fsdp2_root(model), forward_with_reshard(model):
         apply_mode(
             model,
             mode=get_modelike_from_algo_cfg(algorithm),

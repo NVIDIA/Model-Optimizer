@@ -113,6 +113,14 @@ def forward_with_reshard(model: nn.Module):
                 fsdp_state._lazy_init = types.MethodType(_lazy_init_retain_mesh_info, fsdp_state)
 
                 fsdp_states.append(fsdp_state)
+
+    # The calibration loop calls model.forward directly, bypassing model.__call__ and the root's
+    # FSDP2 pre-forward hook, so the root's _lazy_init never runs and decoder layers (called via
+    # __call__) each self-mark as FSDP root — which later breaks get_model_state_dict at export.
+    # Run the root's _lazy_init here so it initializes root-first and marks children non-root.
+    if isinstance(model, FSDPModule):
+        _get_module_state(model)._lazy_init()
+
     yield
     for fsdp_state in fsdp_states:
         if fsdp_state._fsdp_param_group and hasattr(fsdp_state, "_post_forward_mesh_info_after"):
