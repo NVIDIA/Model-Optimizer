@@ -17,29 +17,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 from torch import nn
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-from .artifacts import canonical_json_bytes
 from .export import PDD_INFERENCE_SCHEDULES, pdd_config_from_metadata
-
-_TENSOR_HASH_DOMAINS = {
-    "raw_noise",
-    "initial_state",
-    "full_time_nodes",
-    "boundary_time_nodes",
-}
 
 
 def _dtype_from_name(name: Any) -> torch.dtype:
@@ -184,30 +174,6 @@ def _decode_qwen_latents(pipe: Any, latents: torch.Tensor) -> list[Any]:
     return pipe.image_processor.postprocess(decoded[:, :, 0], output_type="pil")
 
 
-def pdd_tensor_sha256(tensor: torch.Tensor, domain: str) -> str:
-    """Hash one exact FP32 tensor using the evaluation protocol."""
-    if domain not in _TENSOR_HASH_DOMAINS:
-        raise ValueError(f"unknown PDD tensor hash domain {domain!r}.")
-    if not isinstance(tensor, torch.Tensor) or tensor.dtype != torch.float32:
-        raise TypeError("PDD tensor hashing requires a float32 tensor.")
-    if not torch.isfinite(tensor).all().item():
-        raise FloatingPointError("PDD tensor hashing rejects non-finite values.")
-    array = np.ascontiguousarray(tensor.detach().cpu().numpy(), dtype="<f4")
-    if array.dtype.str != "<f4":
-        raise RuntimeError("PDD tensor hash payload is not little-endian float32.")
-    header = {
-        "schema_version": 1,
-        "domain": domain,
-        "dtype": "float32",
-        "shape": list(array.shape),
-        "byte_order": "little",
-        "order": "C",
-    }
-    return hashlib.sha256(
-        canonical_json_bytes(header) + b"\0" + array.tobytes(order="C")
-    ).hexdigest()
-
-
 def save_png(path: Path, image: Any) -> None:
     """Publish one PNG exclusively and durably."""
     if path.is_symlink():
@@ -280,25 +246,6 @@ class QwenPDDInferenceRuntime:
     def sample_decode(self, condition: Any, raw_noise: torch.Tensor) -> list[Any]:
         sampled = self.sampler.sample(raw_noise, condition=condition)
         return _decode_qwen_latents(self.pipe, sampled.to(self.dtype))
-
-    def trajectory_identity(self, raw_noise: torch.Tensor) -> dict[str, Any]:
-        full = self.sampler.time_grid(raw_noise.device).to(device="cpu", dtype=torch.float32)
-        boundaries = [0]
-        for block in self.config.inference_blocks:
-            boundaries.append(boundaries[-1] + block)
-        boundary = full[boundaries]
-        initial = (raw_noise.to(torch.float64) * self.config.grid_max_t).to(torch.float32)
-        return {
-            "raw_noise_sha256": pdd_tensor_sha256(raw_noise, "raw_noise"),
-            "initial_state_sha256": pdd_tensor_sha256(initial, "initial_state"),
-            "full_time_nodes": full.tolist(),
-            "full_time_nodes_sha256": pdd_tensor_sha256(full, "full_time_nodes"),
-            "boundary_indices": boundaries,
-            "boundary_time_nodes": boundary.tolist(),
-            "boundary_time_nodes_sha256": pdd_tensor_sha256(boundary, "boundary_time_nodes"),
-            "first_sigma": float(full[0].item()),
-        }
-
 
 def load_qwen_pdd_runtime(
     export_dir: str | Path, schedule: str, device: str | torch.device

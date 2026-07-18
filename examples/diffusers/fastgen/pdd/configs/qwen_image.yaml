@@ -1,4 +1,4 @@
-# Qwen-Image PDD training recipe. Result-bearing paths/topology remain externally gated.
+# Qwen-Image PDD training recipe.
 
 seed: 42
 
@@ -30,7 +30,7 @@ pdd:
   data_free: false
 
 optim:
-  learning_rate: 2.0e-5
+  learning_rate: 5.0e-5
   optimizer:
     _target_: torch.optim.AdamW
     weight_decay: 0.01
@@ -46,18 +46,15 @@ optim:
 lr_scheduler:
   lr_decay_style: constant
   lr_warmup_steps: 0
-  min_lr: 2.0e-5
+  min_lr: 5.0e-5
 
 step_scheduler:
   max_steps: 10000
   num_epochs: 200
   log_every: 10
   ckpt_every_steps: 1000
-  # Matches the original Qwen PDD per-rank batch. On 16 four-GPU nodes this
-  # gives the project target global batch size of 256 without accumulation.
   local_batch_size: 4
   save_checkpoint_every_epoch: false
-  # Freeze to 256 only after the production-topology/data gate is approved.
   global_batch_size:
 
 training_health:

@@ -49,21 +49,19 @@ has additional read and SHA-256 cost and fails immediately when a hash is missin
 
 Training deterministically derives disjoint train and validation membership from metadata ordinals;
 it does not rewrite the cache or require separate split manifests. The default recipe uses 2,000
-validation samples, learning rate `2e-5`, per-rank batch size 4, 128 heads, start indices aligned by
-4, and target spans from 1 through 64 intervals. The learning rate is the cached-Qwen project
-treatment; the MR210 reference arm uses `5e-5` with 1,000 warmup steps. On 16 four-GPU nodes the
-default per-rank batch gives global batch size 256; other GPU topologies must set per-rank batch to
-`256 / world_size` because this recipe does not use gradient accumulation.
+validation samples, constant learning rate `5e-5`, per-rank batch size 4, 128 heads, start indices
+aligned by 4, and target spans from 1 through 64 intervals. Other GPU topologies can set per-rank
+batch size to obtain the desired global batch size because this recipe does not use gradient
+accumulation.
 Checkpoints include the student, optimizer, scheduler, RNG, trainer, and exact replayable sampler
 state needed to resume the next committed batch. FP32 master parameters and Adam state are sharded
 while forward/backward uses BF16 model parameters and outputs and gradient reduction remains FP32.
 The adapter casts packed image/text inputs to BF16 while preserving FP32 normalized time at the
 FSDP root and Qwen time embedder.
 
-Start with a one-node smoke and scale only after it passes; project training runs are capped at 16
-nodes. Checkpointed training, export, and inference require the remote model ID and exact lowercase
-40-character Hugging Face commit in the provided config; local model directories are limited to
-low-level hermetic setup tests because the frozen teacher is rebuilt rather than checkpointed.
+Checkpointed training, export, and inference require the remote model ID and exact lowercase
+40-character Hugging Face commit in the provided config because the frozen teacher is rebuilt
+rather than checkpointed.
 
 ## Export and inference
 
@@ -84,61 +82,3 @@ python examples/diffusers/fastgen/pdd/inference_qwen_image.py \
   --seed 42 --height 1024 --width 1024 \
   --output /path/to/pdd4.png --result-json /path/to/pdd4.json
 ```
-
-## Repeatable evaluation records
-
-`evaluate_qwen_image.py` loads the authenticated export once and evaluates every ordered
-prompt/seed pair for one of the source-owned `pdd-2`, `pdd-4`, or `pdd-8` schedules. The prompt
-file must be canonical JSON, including its trailing newline. For example:
-
-```json
-{"prompts":[{"prompt":"a small red cube on a white table","prompt_id":"red-cube-0001","seeds":[42]}],"schema_version":1}
-```
-
-```bash
-python examples/diffusers/fastgen/pdd/evaluate_qwen_image.py \
-  --export-dir /path/to/pdd-export \
-  --prompts /path/to/prompts.json --schedule pdd-4 \
-  --output-dir /path/to/evaluation-pdd4 \
-  --result-json /path/to/evaluation-pdd4/result.json \
-  --warmup-runs 1 --measured-runs 5 \
-  --height 1024 --width 1024 --max-sequence-length 512
-```
-
-The runner publishes the output directory atomically. Its canonical result records exact export,
-prompt, raw-noise, initial-state, and grid identities; requested logical blocks; observed scheduler
-calls; actual transformer calls; synchronized end-to-end and transformer timings; throughput; and
-peak CUDA allocation. Warmups execute and validate the same path but are excluded from measured
-arrays. CPU memory entries are `null`. The record deliberately contains no image-quality score or
-effectiveness conclusion.
-
-For a functional standard-teacher baseline, the public Diffusers pipeline can be pinned to the
-same immutable Qwen revision and run for 50 steps:
-
-```python
-import torch
-from diffusers import QwenImagePipeline
-
-revision = "75e0b4be04f60ec59a75f475837eced720f823b6"
-pipe = QwenImagePipeline.from_pretrained(
-    "Qwen/Qwen-Image",
-    revision=revision,
-    torch_dtype=torch.bfloat16,
-    use_safetensors=True,
-).to("cuda")
-generator = torch.Generator(device="cuda").manual_seed(42)
-image = pipe(
-    prompt="a small red cube on a white table",
-    height=1024,
-    width=1024,
-    num_inference_steps=50,
-    generator=generator,
-).images[0]
-image.save("teacher-50.png")
-```
-
-That command is a functional baseline, not matched scientific evidence. A result-bearing study
-must separately freeze the prompt set, seeds, controls, quality metrics, thresholds, and exact
-teacher-50, undistilled Euler-2/4/8, and PDD-2/4/8 trajectory/counter schemas. Those controls and
-conclusions belong to the reviewed external `scripts/pdd_qwen_effectiveness_v1` experiment package,
-not this general ModelOpt example.

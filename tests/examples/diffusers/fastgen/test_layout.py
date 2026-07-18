@@ -57,7 +57,6 @@ _EXPECTED_PDD_FILES = {
     "data.py",
     "export.py",
     "export_qwen_image.py",
-    "evaluate_qwen_image.py",
     "finetune.py",
     "inference_runtime.py",
     "inference_qwen_image.py",
