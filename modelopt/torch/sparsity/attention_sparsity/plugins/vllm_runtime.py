@@ -32,6 +32,7 @@ from .sparse_attn_config import load_from_checkpoint_metadata, match_sparse_conf
 __all__ = [
     "VllmAttentionInstallReport",
     "install_vllm_nvfp4_attention",
+    "install_vllm_skip_softmax_calibration",
     "install_vllm_sparse_attention_from_checkpoint",
 ]
 
@@ -493,6 +494,77 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                         setattr(layer.module, name, value)
             raise
     return _build_report(plan)
+
+
+def _attention_quant_error(module) -> str | None:
+    """Reject calibration on layers with any active attention Q/K/P/V fakequant."""
+    for attr in ("q_bmm_quantizer", "k_bmm_quantizer", "p_bmm_quantizer", "v_bmm_quantizer"):
+        if getattr(getattr(module, attr, None), "is_enabled", False):
+            return f"{attr} is enabled; skip-softmax calibration requires unquantized attention"
+    if getattr(module, "_query_quant_in_kernel", False) or getattr(
+        module, "_value_quant_in_kernel", False
+    ):
+        return (
+            "in-kernel attention quantization flags are set; skip-softmax "
+            "calibration requires unquantized attention"
+        )
+    return None
+
+
+def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallReport:
+    """Install skip-softmax calibration adapters into a loaded vLLM model.
+
+    Swaps the backend-matched ModelOpt adapter onto every attention layer and
+    disables cascade attention, following validation-before-mutation: every
+    known compatibility error — across all layers — is collected and raised
+    before any module is changed. Calibration itself starts separately via
+    :func:`~.vllm.enable_calibration` (typically over a worker RPC), so engine
+    warmup/profiling launches after install are served natively and never
+    pollute the measurement; until then the adapters delegate every forward to
+    the backend's native implementation.
+
+    Requirements validated here: eager execution (``enforce_eager=True`` —
+    the per-request calibration loop cannot be CUDA-graph captured), fp16/bf16
+    model and KV-cache dtypes, no active attention Q/K/P/V fakequant, and a
+    FlashAttention or FlashInfer backend per layer.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    model = _unwrapped_model(model_runner)
+    candidates = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, _VLLM_ATTENTION)
+    ]
+
+    _require_supported_vllm()
+    errors = _global_errors(model_runner)
+    if _cudagraph_mode(model_runner) != CUDAGraphMode.NONE:
+        errors.append(
+            "skip-softmax calibration requires eager execution (enforce_eager=True); "
+            "the per-request calibration loop cannot be CUDA-graph captured"
+        )
+    if not candidates:
+        errors.append("no attention layers were found")
+
+    plans = []
+    for name, module in candidates:
+        reasons = _layer_errors(module)
+        if quant_error := _attention_quant_error(module):
+            reasons.append(quant_error)
+        new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
+        if backend_error:
+            reasons.append(backend_error)
+        if reasons:
+            errors.extend(f"{name or '<root>'}: {reason}" for reason in reasons)
+            continue
+        plans.append(
+            _AttentionPlan(name, module, new_impl, {}, None, None, requires_flashinfer_patch)
+        )
+    _raise_unsupported(errors, "skip-softmax calibration")
+
+    plan = _InstallPlan(model_runner, tuple(plans), False, "SKIP_SOFTMAX_CALIBRATION")
+    return _apply_vllm_attention_plans(plan)
 
 
 def install_vllm_sparse_attention_from_checkpoint(
