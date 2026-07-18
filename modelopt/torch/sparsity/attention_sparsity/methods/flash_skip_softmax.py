@@ -193,6 +193,16 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             dense_blocks_list = []
             block_mask_0 = None
             block_diff = block_max - block_max_cummax
+            # Exclude padded query rows from the keep decision. _reshape_to_blocks
+            # pads the last block row with ``dtype.min``; a fully-padded row then
+            # has ``block_diff == 0`` (min - min), which passes ``> log_threshold``
+            # and forces every block in the last partial block row to be kept
+            # (never skipped) — under-counting sparsity by up to one block row.
+            # Mask those rows to -inf so they vote "skip", matching the Triton
+            # kernel, which drops padding rows from its tile-skip reduction.
+            pad_q = padded_seq_q - seq_q
+            if pad_q > 0:
+                block_diff[:, :, -1, self.br - pad_q :, :] = float("-inf")
             for i, log_threshold in enumerate(log_thresholds):
                 block_mask = (block_diff > log_threshold).any(dim=-2)
 
