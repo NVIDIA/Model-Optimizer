@@ -28,7 +28,13 @@ for path in (_REPO_ROOT, _REPO_ROOT / "tests", _FASTGEN_DIR):
 from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
 from diffusers import QwenImageTransformer2DModel
 from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
-from pdd.recipe import build_pdd_setup, initialize_pdd_distributed, resolve_pdd_recipe_config
+from pdd.recipe import (
+    build_pdd_setup,
+    build_pdd_training_artifacts,
+    initialize_pdd_distributed,
+    resolve_pdd_recipe_config,
+)
+from pdd.training import PDDValidationAssignment, PreparedPDDBatch, run_pdd_validation
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
     CheckpointWrapper,
@@ -375,6 +381,35 @@ def main() -> None:
         dist.all_gather(gathered_losses, actual_loss.detach())
         for value in gathered_losses[1:]:
             torch.testing.assert_close(value, gathered_losses[0], rtol=0, atol=0)
+
+        setup.optimizer.zero_grad(set_to_none=True)
+        training = build_pdd_training_artifacts(setup, config)
+        validation_batch = PreparedPDDBatch(
+            data,
+            condition,
+            negative_condition,
+            (f"post-validation-update-{rank}",),
+        )
+        run_pdd_validation(
+            training.pipeline,
+            [validation_batch],
+            [
+                PDDValidationAssignment(index, f"post-validation-update-{index}", 0, 2)
+                for index in range(dist.get_world_size())
+            ],
+            validation_seed=11,
+        )
+        post_validation = training.trainer.train_step(
+            validation_batch,
+            noise=noise,
+            n=n,
+            k=k,
+        )
+        if (
+            post_validation.pdd_projection_update_ratio is None
+            or post_validation.pdd_projection_update_ratio <= 0
+        ):
+            raise RuntimeError("post-validation FSDP projection update was not measured")
         if rank == 0:
             print(
                 json.dumps(
@@ -382,6 +417,9 @@ def main() -> None:
                         "activation_checkpointing": args.activation_checkpointing,
                         "actual_loss": actual_loss.item(),
                         "reference_loss": reference_loss.item(),
+                        "post_validation_projection_update_ratio": (
+                            post_validation.pdd_projection_update_ratio
+                        ),
                         "student_block_calls": inner_student_calls,
                         "time_0": student_times[0].item(),
                         "world_size": dist.get_world_size(),

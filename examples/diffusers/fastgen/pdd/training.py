@@ -786,6 +786,14 @@ def _raise_collective_validation_error(error: BaseException | None, *, context: 
         raise RuntimeError(f"distributed PDD validation {context} failed; " + "; ".join(failures))
 
 
+def _reshard_fsdp2_modules(model: torch.nn.Module) -> None:
+    from torch.distributed.fsdp import FSDPModule
+
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.reshard()
+
+
 def run_pdd_validation(
     pipeline: PDDPipeline,
     batches: Iterable[PreparedPDDBatch],
@@ -950,6 +958,8 @@ def run_pdd_validation(
     finally:
         pipeline.student.train(student_was_training)
         pipeline.teacher.train(teacher_was_training)
+        _reshard_fsdp2_modules(pipeline.student)
+        _reshard_fsdp2_modules(pipeline.teacher)
 
     gathered: list[list[PDDValidationRecord]]
     if distributed:
