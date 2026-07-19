@@ -58,6 +58,37 @@ class _AttentionLayer(torch.nn.Module):
         return x
 
 
+class _ParallelAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(4, 4, bias=False)
+        self.k_proj = torch.nn.Linear(4, 4, bias=False)
+        self.v_proj = torch.nn.Linear(4, 4, bias=False)
+
+        weight = torch.tensor(
+            [
+                [0.11, -0.37, 0.53, 0.89],
+                [-0.29, 0.47, 0.71, -0.97],
+                [0.19, 0.41, -0.67, 0.83],
+                [0.31, -0.59, 0.73, -0.91],
+            ]
+        )
+        for projection in (self.q_proj, self.k_proj, self.v_proj):
+            projection.weight.data.copy_(weight)
+
+    def forward(self, x):
+        return self.q_proj(x) + self.k_proj(x) + self.v_proj(x)
+
+
+class _ParallelAttentionModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = _ParallelAttention()
+
+    def forward(self, x):
+        return self.attn(x)
+
+
 class TransformerBlock(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -828,6 +859,55 @@ def test_auto_quantize_disabled_layers_no_poison():
     assert not best_model.mlp.input_quantizer.is_enabled
     hparam = best_model.attn.q_proj.get_hparam("quant_recipe")
     assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
+
+
+def test_auto_quantize_qkv_score_uses_attention_output():
+    model = _ParallelAttentionModel()
+    data = torch.tensor([[[0.13, -0.31, 0.79, -0.43], [0.61, 0.17, -0.23, 0.97]]])
+    output_grad = torch.tensor([[[0.7, -1.1, 0.3, 1.3], [-0.5, 0.9, 1.7, -0.2]]])
+
+    model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 16.0},
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
+        data_loader=[data],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, batch: (output * output_grad).sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    hparam = model.attn.q_proj.get_hparam("quant_recipe")
+    assert model.attn.k_proj.get_hparam("quant_recipe") is hparam
+    assert model.attn.v_proj.get_hparam("quant_recipe") is hparam
+    assert hparam.score_modules == [model.attn]
+
+    no_quant_recipe = QuantRecipe(None)
+    int8_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+    hparam.active = no_quant_recipe
+    attention_output = model.attn(data)
+    projection_outputs = [projection(data) for projection in hparam.quant_modules]
+    hparam.active = int8_recipe
+    quantized_attention_output = model.attn(data)
+    quantized_projection_outputs = [projection(data) for projection in hparam.quant_modules]
+
+    expected_score = ((output_grad * (quantized_attention_output - attention_output)) ** 2).sum()
+    old_projection_score = sum(
+        ((output_grad * (quantized - output)) ** 2).sum()
+        for output, quantized in zip(projection_outputs, quantized_projection_outputs)
+    )
+    qkv_stats = next(
+        stats
+        for stats in search_history["candidate_stats"].values()
+        if set(stats["module_names"]) == {"attn.q_proj", "attn.k_proj", "attn.v_proj"}
+    )
+    actual_score = qkv_stats["scores"][qkv_stats["formats"].index(int8_recipe)]
+
+    assert actual_score == pytest.approx(expected_score.item())
+    assert actual_score != pytest.approx(old_projection_score.item())
+    assert qkv_stats["costs"][qkv_stats["formats"].index(no_quant_recipe)] == sum(
+        projection.weight.numel() for projection in hparam.quant_modules
+    )
 
 
 INT4INT8_AWQ_CFG = {
