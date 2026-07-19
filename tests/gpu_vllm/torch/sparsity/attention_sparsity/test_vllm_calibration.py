@@ -22,6 +22,7 @@ import torch
 from torch import nn
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as attention_plugin
@@ -124,6 +125,106 @@ class TestCalibrationInstaller:
         runner = _model_runner(nn.ModuleDict({}))
         with pytest.raises(NotImplementedError, match="no attention layers"):
             vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+
+
+class TestQuantSkipRejection:
+    """Skip-softmax cannot be combined with attention quantization."""
+
+    _CALIBRATED_META = {
+        "config_groups": {
+            "group_0": {
+                "algorithm": "skip_softmax",
+                "threshold_scale_factor": {"prefill": {"a": 7.9, "b": 8.6}},
+            }
+        }
+    }
+    _NM_META = {
+        "config_groups": {
+            "group_0": {"algorithm": "sparse_softmax", "sparsity_n": 2, "sparsity_m": 4}
+        }
+    }
+
+    def test_quantized_install_rejects_calibrated_skip(self):
+        attention = _bare_attention()
+        runner = _model_runner(
+            nn.ModuleDict({"attn": attention}), sparse_metadata=self._CALIBRATED_META
+        )
+        with pytest.raises(
+            NotImplementedError, match="cannot be combined with attention quantization"
+        ):
+            vllm_runtime.install_vllm_nvfp4_attention(runner)
+        assert not isinstance(attention.impl, ModelOptSparseAttentionImpl)
+
+    def test_quantized_plan_allows_nm_sparsity(self, monkeypatch):
+        from modelopt.torch.quantization.plugins import vllm as quant_plugin
+
+        monkeypatch.setattr(
+            quant_plugin,
+            "_get_device_dtype",
+            lambda module: (torch.device("cpu"), torch.float16),
+        )
+        runner = _model_runner(
+            nn.ModuleDict({"attn": _bare_attention()}), sparse_metadata=self._NM_META
+        )
+        plan = vllm_runtime._plan_vllm_attention(runner, quantize=True, sparse_cfg="checkpoint")
+        assert len(plan.layers) == 1
+        assert plan.layers[0].sparse_kw.get("sparsity_n") == 2
+
+
+class TestFlashInferLayoutGuard:
+    """HND FlashInfer caches are rejected via layout metadata, pre-measurement."""
+
+    def test_installer_rejects_hnd_layout(self, monkeypatch):
+        monkeypatch.setattr(attention_plugin, "_flashinfer_kv_cache_layout", lambda: "HND")
+        attention = _bare_attention(FlashInferImpl)
+        original_impl = attention.impl
+        runner = _model_runner(nn.ModuleDict({"attn": attention}))
+        with pytest.raises(NotImplementedError, match="HND"):
+            vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+        assert attention.impl is original_impl
+
+    def test_forward_rejects_hnd_layout_before_cache_write(self, monkeypatch):
+        monkeypatch.setattr(attention_plugin, "_flashinfer_kv_cache_layout", lambda: "HND")
+        writes = []
+        monkeypatch.setattr(
+            attention_plugin,
+            "_maybe_update_flashinfer_cache",
+            lambda *args, **kwargs: writes.append(1),
+        )
+        num_heads, num_kv_heads, head_dim, page = 4, 2, 64, 16
+        impl = SimpleNamespace(
+            num_kv_heads=num_kv_heads,
+            head_size=head_dim,
+            scale=1.0 / (head_dim**0.5),
+            _calibrate=True,
+            _calib_threshold_trials=list(TRIALS),
+            _calib_records=[],
+        )
+        kv_cache = torch.zeros(3, 2, page, num_kv_heads, head_dim, dtype=torch.bfloat16)
+        attn_metadata = SimpleNamespace(
+            _modelopt_block_table=torch.zeros(1, 1, dtype=torch.int32),
+            _modelopt_seq_lens=torch.tensor([8], dtype=torch.int32),
+            _modelopt_query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+            _modelopt_num_actual_tokens=1,
+            _modelopt_max_query_len=1,
+            _modelopt_max_seq_len=8,
+            _modelopt_causal=False,
+            slot_mapping=torch.zeros(1, dtype=torch.int64),
+        )
+        q = torch.zeros(1, num_heads, head_dim, dtype=torch.bfloat16)
+        with pytest.raises(NotImplementedError, match="HND"):
+            attention_plugin._flashinfer_forward(
+                impl,
+                None,
+                None,
+                q,
+                q[:, :num_kv_heads],
+                q[:, :num_kv_heads],
+                kv_cache,
+                attn_metadata,
+                output=torch.empty_like(q),
+            )
+        assert not writes, "layout must be validated before the cache write"
 
 
 class TestSparseOnlyGraphGuard:

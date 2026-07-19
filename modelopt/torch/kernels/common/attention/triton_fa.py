@@ -23,7 +23,6 @@ metadata (b_start_loc, b_seq_len). Supports causal masking and autograd.
 """
 
 import math
-import warnings
 from typing import Any
 
 import torch
@@ -1042,36 +1041,27 @@ class _Attention(torch.autograd.Function):
                 #   (e.g. BLOCK_N=32) would realize a different sparsity than
                 #   calibrated, so skip launches always use the calibration tile.
                 #
-                # If the 128-row tile exceeds the device's shared memory (fp32
-                # inputs on ~100KB-smem GPUs), halve BLOCK_M and retry. BLOCK_N
-                # — the calibrated KV skip granularity — is never reduced.
-                # Smaller BLOCK_M splits the per-tile skip vote into narrower
-                # row groups: per-row numerics stay protected by the same
-                # threshold, but realized sparsity can exceed the calibrated
-                # target, so warn when stepping down.
-                block_m = _P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M
-                while True:
-                    try:
-                        _attn_fwd.fn[grid](
-                            *fwd_args,
-                            **fwd_kwargs,
-                            BLOCK_M=block_m,
-                            BLOCK_N=_MEASURE_BLOCK_N,
-                            num_warps=_MEASURE_NUM_WARPS,
-                            num_stages=_MEASURE_NUM_STAGES,
-                        )
-                        break
-                    except triton.runtime.errors.OutOfResources:
-                        if block_m <= 16:
-                            raise
-                        block_m //= 2
-                        if apply_skip:
-                            warnings.warn(
-                                f"skip-softmax tile BLOCK_M reduced to {block_m} "
-                                "(shared memory limit); realized sparsity may "
-                                "exceed the calibrated target on this device/dtype",
-                                stacklevel=2,
-                            )
+                # The tile is a contract, not a preference: configurations that
+                # cannot compile it (e.g. fp32 inputs on ~100KB-shared-memory
+                # GPUs) are rejected rather than re-tiled, because a different
+                # tile realizes a different sparsity than was calibrated.
+                try:
+                    _attn_fwd.fn[grid](
+                        *fwd_args,
+                        **fwd_kwargs,
+                        BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
+                        BLOCK_N=_MEASURE_BLOCK_N,
+                        num_warps=_MEASURE_NUM_WARPS,
+                        num_stages=_MEASURE_NUM_STAGES,
+                    )
+                except triton.runtime.errors.OutOfResources as err:
+                    raise RuntimeError(
+                        "skip-softmax requires the fixed 128x128 calibration tile, "
+                        f"which exceeds this GPU's shared memory for {q.dtype} "
+                        f"inputs ({err}). Use fp16/bf16 inputs or a device with "
+                        "more shared memory; re-tiling would change the "
+                        "calibrated sparsity contract."
+                    ) from err
             else:
                 _attn_fwd[grid](
                     *fwd_args,
