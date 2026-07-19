@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Add **skip-softmax threshold calibration through vLLM**: ``install_vllm_skip_softmax_calibration`` installs calibration adapters onto every attention layer of a loaded vLLM model (FlashAttention and FlashInfer backends, validation-before-mutation), measures per-request KV-tile skip counts over the paged KV cache with the Triton calibration kernel — full dense attention, so generation is numerically unchanged — for both prefill and decode, aggregates raw counts across tensor-parallel ranks, fits the exponential threshold model once per phase, and writes the same canonical ``sparse_attention_config`` block the HF export produces (existing N:M sparse-softmax groups are preserved). Active skip-softmax serving launches now run on the fixed 128x128 calibration tile instead of autotuned tiles, so the sparsity realized at serve time matches the calibrated ``(a, b)`` model. See ``examples/vllm_serve/calibrate_sparse_attn.py``.
+
 *Quantization*
 
 - Add ``mtq.temporarily_fold_weights`` for repeated frozen-weight inference and ``mtq.preserve_quantizer_attributes_context`` for restoring temporary quantizer property and type changes. Temporary folding snapshots affected fake-quant weights on a configurable device and restores them with their quantizer state; retained pre-quant scales are inactive, while shared weights, shared quantizers, and ``SequentialQuantizer`` weights are unsupported.
