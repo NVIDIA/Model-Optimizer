@@ -85,8 +85,8 @@ class _ParallelAttentionModel(torch.nn.Module):
         super().__init__()
         self.attn = _ParallelAttention()
 
-    def forward(self, x):
-        return self.attn(x)
+    def forward(self, x, input_as_keyword=False):
+        return self.attn(x=x) if input_as_keyword else self.attn(x)
 
 
 class TransformerBlock(torch.nn.Module):
@@ -861,7 +861,8 @@ def test_auto_quantize_disabled_layers_no_poison():
     assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
 
 
-def test_auto_quantize_qkv_score_uses_attention_output():
+@pytest.mark.parametrize("input_as_keyword", [False, True])
+def test_auto_quantize_qkv_score_uses_attention_output(input_as_keyword):
     model = _ParallelAttentionModel()
     data = torch.tensor([[[0.13, -0.31, 0.79, -0.43], [0.61, 0.17, -0.23, 0.97]]])
     output_grad = torch.tensor([[[0.7, -1.1, 0.3, 1.3], [-0.5, 0.9, 1.7, -0.2]]])
@@ -871,7 +872,7 @@ def test_auto_quantize_qkv_score_uses_attention_output():
         constraints={"effective_bits": 16.0},
         quantization_formats=[mtq.INT8_DEFAULT_CFG],
         data_loader=[data],
-        forward_step=lambda model, batch: model(batch),
+        forward_step=lambda model, batch: model(batch, input_as_keyword=input_as_keyword),
         loss_func=lambda output, batch: (output * output_grad).sum(),
         num_calib_steps=1,
         num_score_steps=1,
