@@ -116,27 +116,27 @@ class TestPagedCalibrate:
         """Block IDs whose int32 byte offsets would wrap still read correctly."""
         num_kv_heads, head_dim, page_size = 2, 64, 16
         block_elems = page_size * num_kv_heads * head_dim
-        # Smallest block ID whose element offset exceeds int32.
+        # Smallest block ID whose element offset exceeds int32. V aliases the K
+        # cache storage (same values on both operands), halving the allocation.
         high_block = (2**31) // block_elems + 1
-        bytes_needed = 2 * (high_block + 1) * block_elems * 2  # K and V caches, bf16
+        bytes_needed = (high_block + 1) * block_elems * 2  # one shared K/V cache, bf16
         free, _ = torch.cuda.mem_get_info()
         if free < bytes_needed + (2 << 30):
             pytest.skip(f"needs ~{bytes_needed / 2**30:.1f} GiB free GPU memory")
 
         torch.manual_seed(2)
         num_heads = 4
-        q, k, v = make_qkv(page_size, num_heads, num_kv_heads, head_dim, dtype=torch.bfloat16)
+        q, k, _ = make_qkv(page_size, num_heads, num_kv_heads, head_dim, dtype=torch.bfloat16)
         k_cache = torch.zeros(
             high_block + 1, page_size, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16
         )
-        v_cache = torch.zeros_like(k_cache)
+        v_cache = k_cache  # alias: V reads the same storage (and the same values)
         k_cache[high_block] = k
-        v_cache[high_block] = v
         block_table = torch.tensor([[high_block]], device="cuda", dtype=torch.int32)
         locs, lens = make_varlen_meta([page_size])
 
         out_ref, counters_ref = attention_calibrate(
-            q, k, v, locs, lens, page_size, is_causal=True, threshold_trials=TRIALS
+            q, k, k, locs, lens, page_size, is_causal=True, threshold_trials=TRIALS
         )
         k_dummy = torch.empty(0, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
         out_paged, counters_paged = attention_calibrate(

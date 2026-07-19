@@ -257,9 +257,11 @@ def main():
     print(f"[ModelOpt] Active sparse impls: {status['impl_types']}")
 
     # generate() drives prefill (prefill-phase stats) then decode_tokens decode
-    # steps (decode-phase stats). The calibration kernel computes full attention,
-    # so the generated text is unaffected — only tile-skip counts are recorded.
-    sampling = SamplingParams(temperature=0.0, max_tokens=args.decode_tokens)
+    # steps (decode-phase stats). No sparsification is applied during
+    # calibration — the kernel computes full dense attention while recording
+    # tile-skip counts. ignore_eos forces the full decode length so early EOS
+    # cannot thin the decode-phase statistics.
+    sampling = SamplingParams(temperature=0.0, max_tokens=args.decode_tokens, ignore_eos=True)
     llm.generate(prompts, sampling)
 
     # Aggregate RAW counts from every TP rank (each rank only measures its
@@ -268,12 +270,16 @@ def main():
     merged = merge_phase_counts(rank_counts)
     calibration_params = fit_from_counts(merged, trials, fit_logspace=args.fit_logspace)
 
-    if not calibration_params:
+    requested_phases = ["prefill"] + (["decode"] if args.decode_tokens > 0 else [])
+    missing = [phase for phase in requested_phases if phase not in calibration_params]
+    if missing:
         print(
-            "[ModelOpt] Calibration produced no valid fit — try more/longer prompts "
+            f"[ModelOpt] Calibration FAILED: no valid fit for phase(s) {', '.join(missing)}. "
+            "No config was written — a partially calibrated export would silently serve "
+            "the missing phase dense. Try more/longer prompts (and more decode tokens) "
             "so observed sparsity spans the (10%, 90%) fitting window."
         )
-        return
+        sys.exit(1)
 
     sparse_config = build_sparse_attention_config(
         calibration_params,

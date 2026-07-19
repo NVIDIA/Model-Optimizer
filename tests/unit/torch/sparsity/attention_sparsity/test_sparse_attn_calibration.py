@@ -63,18 +63,29 @@ class TestCountMerging:
         merged = merge_count_records([layer_a, layer_b])
         assert merged == [{"sample_length": 128, "total_tiles": [20, 20], "skipped_tiles": [3, 7]}]
 
-    def test_merge_truncates_to_shortest_source(self):
+    def test_merge_rejects_ragged_sources(self):
         long = [_record("prefill", 1, [1], [0]), _record("prefill", 2, [1], [1])]
         short = [_record("prefill", 1, [1], [1])]
-        merged = merge_count_records([long, short])
-        assert len(merged) == 1
-        assert merged[0]["skipped_tiles"] == [1]
+        with pytest.raises(ValueError, match="disagree on sample count"):
+            merge_count_records([long, short])
 
     def test_merge_rejects_misaligned_sample_lengths(self):
         with pytest.raises(ValueError, match="Misaligned calibration records"):
             merge_count_records(
                 [[_record("prefill", 100, [1], [0])], [_record("prefill", 200, [1], [0])]]
             )
+
+    def test_merge_rejects_threshold_width_mismatch(self):
+        with pytest.raises(ValueError, match="threshold-vector widths"):
+            merge_count_records(
+                [[_record("prefill", 100, [1, 2], [0, 1])], [_record("prefill", 100, [1], [0])]]
+            )
+
+    def test_merge_phase_counts_rejects_rank_phase_mismatch(self):
+        rank0 = {"prefill": [_record("prefill", 64, [5], [1])]}
+        rank1 = {"prefill": []}
+        with pytest.raises(ValueError, match="recorded no 'prefill' samples"):
+            merge_phase_counts([rank0, rank1])
 
     def test_merge_phase_counts_across_ranks(self):
         rank0 = {"prefill": [_record("prefill", 64, [5], [1])], "decode": []}
@@ -186,6 +197,22 @@ class TestBuildSparseAttentionConfig:
         assert layer_cfg["method"] == "triton_skip_softmax"
         assert layer_cfg["threshold_scale_factor"]["decode"] == {"a": 0.12, "b": 9.8}
         assert layer_cfg["target_sparse_ratio"] == {"prefill": 0.5, "decode": 0.3}
+
+    def test_preserves_legacy_toplevel_sparse_softmax(self):
+        existing = {
+            "config_groups": {
+                "group_0": {"algorithm": "sparse_softmax", "sparsity_n": 2, "sparsity_m": 4}
+            },
+            "sparse_softmax": {"sparsity_n": 1, "sparsity_m": 4, "dense_recent_tokens": 128},
+        }
+        config = build_sparse_attention_config(self._PARAMS, 0.5, existing_config=existing)
+        # The serving loader reads the legacy top-level key ahead of group params.
+        assert config["sparse_softmax"] == existing["sparse_softmax"]
+        loaded = load_from_checkpoint_metadata(SimpleNamespace(sparse_attention_config=config))
+        assert loaded is not None
+        layer_cfg = loaded[0]["sparse_cfg"]["*attn*"]
+        assert layer_cfg["sparsity_n"] == 1
+        assert layer_cfg["dense_recent_tokens"] == 128
 
     def test_round_trip_with_preserved_nm_group_activates_both(self):
         existing = {

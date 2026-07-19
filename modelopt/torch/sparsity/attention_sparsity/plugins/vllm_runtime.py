@@ -249,6 +249,13 @@ def _device_capability_error(device) -> str | None:
     return None
 
 
+def _skip_softmax_active(sparse_kw: dict[str, Any]) -> bool:
+    """Return whether a layer's sparse config contains skip-softmax work."""
+    return bool(sparse_kw) and (
+        "skip_softmax_threshold" in sparse_kw or "threshold_scale_factor" in sparse_kw
+    )
+
+
 def _sparse_graph_error(sparse_kw: dict[str, Any], mode) -> str | None:
     from vllm.config.compilation import CUDAGraphMode
 
@@ -354,6 +361,16 @@ def _plan_vllm_attention(
     plans = []
     for name, module, sparse_kw in candidates:
         reasons = _layer_errors(module)
+        if quantize and _skip_softmax_active(sparse_kw):
+            # Quantized Q/K/P change the attention-score distribution the skip
+            # thresholds were calibrated on, so the calibrated sparsity contract
+            # no longer holds. N:M sparse softmax has no calibrated threshold
+            # and composes with quantization.
+            reasons.append(
+                "skip-softmax cannot be combined with attention quantization; "
+                "serve skip-softmax unquantized or drop the skip_softmax group "
+                "(N:M sparse softmax composes with quantization)"
+            )
         device = dtype = None
         if quantize:
             device, dtype = quant_plugin._get_device_dtype(module)
@@ -561,6 +578,12 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
         plans.append(
             _AttentionPlan(name, module, new_impl, {}, None, None, requires_flashinfer_patch)
         )
+    if any(plan.requires_flashinfer_patch for plan in plans):
+        layout = attention_plugin._flashinfer_kv_cache_layout()
+        if layout is not None and layout.upper() != "NHD":
+            errors.append(
+                f"FlashInfer KV-cache layout {layout!r} is unsupported for calibration (NHD only)"
+            )
     _raise_unsupported(errors, "skip-softmax calibration")
 
     plan = _InstallPlan(model_runner, tuple(plans), False, "SKIP_SOFTMAX_CALIBRATION")

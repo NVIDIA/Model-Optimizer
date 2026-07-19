@@ -28,6 +28,7 @@ live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 """
 
 import functools
+import importlib
 import inspect
 import math
 import warnings
@@ -260,6 +261,32 @@ def _calibration_active(impl) -> bool:
     )
 
 
+def _flashinfer_kv_cache_layout() -> str | None:
+    """Best-effort query of vLLM's configured FlashInfer KV-cache layout.
+
+    Returns ``"NHD"`` / ``"HND"`` when the running vLLM exposes the layout
+    (newer releases select HND for some Blackwell FlashInfer paths), or
+    ``None`` when it cannot be determined — callers then fall back to the
+    shape-based check in :func:`_forward_calibrate`.
+    """
+    for module_name in (
+        "vllm.v1.attention.backends.utils",
+        "vllm.attention.backends.utils",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        getter = getattr(module, "get_kv_cache_layout", None)
+        if getter is None:
+            continue
+        try:
+            return str(getter())
+        except Exception:
+            return None
+    return None
+
+
 def _forward_calibrate(
     impl,
     *,
@@ -277,8 +304,9 @@ def _forward_calibrate(
     Each scheduled request is calibrated independently (batch=1) so its KV
     length is the per-sample length the exponential fit needs, and so the
     kernel keeps the uniform-length contract it was validated against. The
-    kernel computes full attention, so ``output`` is written densely and the
-    forward pass is numerically unchanged.
+    kernel computes full attention, so ``output`` is written densely — no
+    sparsification is applied to generation (the dense Triton kernel's
+    numerics may differ slightly from the native backend's).
 
     Phase and causality are decided per request: ``q_len == 1`` is a decode
     step (full-cache, non-causal); ``q_len > 1`` is (chunked) prefill (causal
@@ -839,6 +867,14 @@ def _flashinfer_forward(
             raise ValueError(
                 "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
             )
+        layout = _flashinfer_kv_cache_layout()
+        if layout is not None and layout.upper() != "NHD":
+            # Authoritative layout metadata beats the shape heuristic (which is
+            # ambiguous when page_size equals the per-rank KV-head count).
+            raise NotImplementedError(
+                f"FlashInfer KV-cache layout {layout!r} is unsupported for "
+                "skip-softmax calibration; only NHD is supported"
+            )
         # Order matters: releases that update the KV cache inside forward must
         # write the current K/V before the calibrate kernel reads the cache.
         prepare_modelopt()
@@ -1031,10 +1067,21 @@ def collect_calibration_counts(model) -> dict[str, list[dict]]:
     """
     from .sparse_attn_calibration import merge_count_records, split_records_by_phase
 
-    per_phase_layers: dict[str, list[list[dict]]] = {}
-    for impl in iter_sparse_impls(model):
-        split = split_records_by_phase(getattr(impl, "_calib_records", []))
-        for phase, records in split.items():
-            if records:
-                per_phase_layers.setdefault(phase, []).append(records)
-    return {phase: merge_count_records(layers) for phase, layers in per_phase_layers.items()}
+    splits = [
+        split_records_by_phase(getattr(impl, "_calib_records", []))
+        for impl in iter_sparse_impls(model)
+    ]
+    phases = {phase for split in splits for phase, records in split.items() if records}
+    counts: dict[str, list[dict]] = {}
+    for phase in phases:
+        sources = [split.get(phase, []) for split in splits]
+        empty = sum(1 for source in sources if not source)
+        if empty:
+            # Every layer sees every launch, so a layer with no records for a
+            # phase others measured indicates a collection bug.
+            raise ValueError(
+                f"Misaligned calibration records: {empty}/{len(sources)} attention "
+                f"layer(s) recorded no {phase!r} samples while others did"
+            )
+        counts[phase] = merge_count_records(sources)
+    return counts
