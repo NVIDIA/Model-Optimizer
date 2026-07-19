@@ -32,14 +32,16 @@ the checkpoint config are preserved.
 
 Usage:
     python calibrate_sparse_attn.py <ckpt> \
-        --prompts_file prompts.txt \
         --target_sparse_ratio 0.5 \
         --decode_tokens 32 \
         --update_checkpoint_config
 
-``--prompts_file`` is one prompt per line; longer, varied-length prompts give a
-better fit. With no file, a tiny built-in demo set is used (fine for a smoke
-test, not for a real fit).
+Calibration prompts default to the RULER dataset — the same
+``RulerDatasetBuilder`` the PyTorch (HF) calibration path uses — so both paths
+calibrate on identical data. NIAH tasks need the essay haystack downloaded by
+``examples/llm_sparsity/attention_sparsity/download_ruler_data.sh`` (point
+``--calib_data_dir`` at its ``data`` directory). ``--prompts_file`` (one prompt
+per line) overrides the RULER set with custom calibration data.
 """
 
 import argparse
@@ -55,25 +57,39 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration 
     merge_phase_counts,
 )
 
-_DEMO_PROMPTS = [
-    "Summarize the history of computing in a few paragraphs. " * 40,
-    "Explain how attention works in transformer models. " * 60,
-    "Write a detailed essay about renewable energy sources. " * 80,
-]
 
+def _load_prompts(llm, args) -> list[str]:
+    """Load override prompts from a file, or build the default RULER set."""
+    if args.prompts_file is not None:
+        lines = [
+            ln.strip() for ln in Path(args.prompts_file).read_text().splitlines() if ln.strip()
+        ]
+        if not lines:
+            raise ValueError(f"No prompts found in {args.prompts_file}")
+        print(f"[ModelOpt] Loaded {len(lines)} calibration prompts from {args.prompts_file}")
+        return lines
 
-def _load_prompts(prompts_file: str | None) -> list[str]:
-    if prompts_file is None:
-        print(
-            "[ModelOpt] No --prompts_file given; using a tiny built-in demo set. "
-            "Pass real, varied-length prompts for a usable fit."
-        )
-        return _DEMO_PROMPTS
-    lines = [ln.strip() for ln in Path(prompts_file).read_text().splitlines() if ln.strip()]
-    if not lines:
-        raise ValueError(f"No prompts found in {prompts_file}")
-    print(f"[ModelOpt] Loaded {len(lines)} calibration prompts from {prompts_file}")
-    return lines
+    # Same dataset as the HF calibration path (calibration/calibrate.py), so the
+    # vLLM- and PyTorch-calibrated thresholds are fit on identical data.
+    from modelopt.torch.sparsity.attention_sparsity.calibration.ruler_dataset import (
+        RulerDatasetBuilder,
+    )
+
+    builder = RulerDatasetBuilder(
+        samples=args.calib_samples,
+        max_seqlen=args.calib_max_seqlen,
+        tokenizer_name_or_path=llm.get_tokenizer(),
+        max_length_filter=int(args.calib_max_seqlen * 1.5),
+        data_dir=args.calib_data_dir,
+    )
+    samples = builder.build_calibration_dataset()
+    prompts = [sample["input"] for sample in samples]
+    lengths = sorted(sample["length"] for sample in samples)
+    print(
+        f"[ModelOpt] Built {len(prompts)} RULER calibration prompts "
+        f"(token lengths {lengths[0]}..{lengths[-1]})"
+    )
+    return prompts
 
 
 def _existing_sparse_config(ckpt: str) -> dict | None:
@@ -108,7 +124,33 @@ def _write_config(ckpt: str, sparse_config: dict, update_checkpoint: bool) -> No
 def main():
     parser = argparse.ArgumentParser(description="Calibrate skip-softmax thresholds via vLLM")
     parser.add_argument("model", type=str, help="Path to the HF checkpoint to calibrate")
-    parser.add_argument("--prompts_file", type=str, default=None, help="One prompt per line")
+    parser.add_argument(
+        "--prompts_file",
+        type=str,
+        default=None,
+        help="Optional custom calibration prompts (one per line), overriding the "
+        "default RULER dataset",
+    )
+    parser.add_argument(
+        "--calib_samples",
+        type=int,
+        default=24,
+        help="Total RULER samples, distributed across length bins (HF-path default: 24)",
+    )
+    parser.add_argument(
+        "--calib_max_seqlen",
+        type=int,
+        default=32768,
+        help="Maximum RULER sequence length; length bins descend in powers of 2. "
+        "Must fit within --max_model_len together with --decode_tokens.",
+    )
+    parser.add_argument(
+        "--calib_data_dir",
+        type=str,
+        default=None,
+        help="RULER data directory containing the 'essays' haystack (populated by "
+        "examples/llm_sparsity/attention_sparsity/download_ruler_data.sh)",
+    )
     parser.add_argument(
         "--target_sparse_ratio",
         type=float,
@@ -176,8 +218,6 @@ def main():
 
     from vllm import LLM, SamplingParams
 
-    prompts = _load_prompts(args.prompts_file)
-
     llm_kwargs = {
         "model": args.model,
         "worker_cls": "sparse_attn_worker.SkipSoftmaxCalibWorker",
@@ -206,6 +246,9 @@ def main():
             raise ValueError("--engine_kwargs must be a JSON object")
         llm_kwargs.update(extra)
     llm = LLM(**llm_kwargs)
+
+    # Built after engine init so the RULER builder reuses the engine's tokenizer.
+    prompts = _load_prompts(llm, args)
 
     trials = list(DEFAULT_THRESHOLD_TRIALS)
     n_layers = llm.collective_rpc("sparse_calib_enable", args=(trials,))[0]
