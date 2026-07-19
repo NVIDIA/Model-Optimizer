@@ -161,7 +161,9 @@ def main():
         "--decode_tokens",
         type=int,
         default=32,
-        help="Decode tokens to generate per prompt (drives decode-phase calibration)",
+        help="Decode attention steps per prompt (drives decode-phase calibration). "
+        "Generation runs decode_tokens + 1 output tokens: the first output token "
+        "comes from the prefill forward and performs no decode attention.",
     )
     parser.add_argument(
         "--max_model_len", type=int, default=None, help="vLLM max_model_len override"
@@ -256,12 +258,14 @@ def main():
     print(f"[ModelOpt] Calibration enabled on {n_layers} attention layers")
     print(f"[ModelOpt] Active sparse impls: {status['impl_types']}")
 
-    # generate() drives prefill (prefill-phase stats) then decode_tokens decode
-    # steps (decode-phase stats). No sparsification is applied during
-    # calibration — the kernel computes full dense attention while recording
-    # tile-skip counts. ignore_eos forces the full decode length so early EOS
-    # cannot thin the decode-phase statistics.
-    sampling = SamplingParams(temperature=0.0, max_tokens=args.decode_tokens, ignore_eos=True)
+    # generate() drives prefill (prefill-phase stats) then decode steps
+    # (decode-phase stats). No sparsification is applied during calibration —
+    # the kernel computes full dense attention while recording tile-skip
+    # counts. ignore_eos forces the full decode length so early EOS cannot
+    # thin the decode-phase statistics. max_tokens is decode_tokens + 1: the
+    # first output token comes from the prefill forward, so decode_tokens
+    # decode-attention steps need one extra output token.
+    sampling = SamplingParams(temperature=0.0, max_tokens=args.decode_tokens + 1, ignore_eos=True)
     llm.generate(prompts, sampling)
 
     # Aggregate RAW counts from every TP rank (each rank only measures its
