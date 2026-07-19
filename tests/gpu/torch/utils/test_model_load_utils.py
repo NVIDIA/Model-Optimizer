@@ -92,11 +92,13 @@ def _test_parallel_load_and_export(rank, size, cpu_offload):
         cpu_offload=cpu_offload,
     )
 
-    # Decoder layers are sharded; root params (embed/lm_head) are plain on GPU.
+    # Decoder layers AND root params (embed/lm_head) are sharded DTensors under shard_root=True.
     decoder_params = list(model.model.layers[0].parameters())
     assert any(isinstance(p, DTensor) for p in decoder_params)
-    assert not isinstance(model.model.embed_tokens.weight, DTensor)
-    assert model.model.embed_tokens.weight.device.type == "cuda"
+    assert isinstance(model.model.embed_tokens.weight, DTensor)
+    if not cpu_offload:
+        # Non-offload: the root's local shard lives on GPU.
+        assert model.model.embed_tokens.weight.to_local().device.type == "cuda"
     if cpu_offload:
         # Under cpu_offload the decoder shards live on CPU between forwards.
         decoder_dtensors = [p for p in decoder_params if isinstance(p, DTensor)]
