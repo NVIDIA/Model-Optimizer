@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Sparsity*
+
+- Add **skip-softmax threshold calibration through vLLM**: ``install_vllm_skip_softmax_calibration`` installs calibration adapters onto every attention layer of a loaded vLLM model (FlashAttention and FlashInfer backends, validation-before-mutation), measures per-request KV-tile skip counts over the paged KV cache with the Triton calibration kernel — full dense attention, so generation is numerically unchanged — for both prefill and decode, aggregates raw counts across tensor-parallel ranks, fits the exponential threshold model once per phase, and writes the same canonical ``sparse_attention_config`` block the HF export produces (existing N:M sparse-softmax groups are preserved). Active skip-softmax serving launches now run on the fixed 128x128 calibration tile instead of autotuned tiles, so the sparsity realized at serve time matches the calibrated ``(a, b)`` model. See ``examples/vllm_serve/calibrate_sparse_attn.py``.
+
 *Quantization*
 
 - Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Calibration writes the layer shards; ``finalize()`` on the exporter left on the model adds the tail shard, the index and the config artifacts, and the checkpoint does not load until it runs. ``examples/hf_ptq`` does this for you. Supports FP8 and NVFP4 on single-process models, resident or offloaded, including multimodal models and models with MTP layers; other formats and placements raise ``NotImplementedError`` before calibration starts.
