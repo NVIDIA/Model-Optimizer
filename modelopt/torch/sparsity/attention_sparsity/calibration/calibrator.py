@@ -169,6 +169,12 @@ class DynamicThresholdCalibrator:
         for sample_stat in per_sample_stats:
             length = sample_stat["sample_length"]
             sparsity_list = sample_stat["sparsity"]
+            if len(sparsity_list) != len(self.threshold_trials):
+                # A silent zip would misattribute sparsities to thresholds.
+                raise ValueError(
+                    f"per-sample sparsity has {len(sparsity_list)} entries but "
+                    f"{len(self.threshold_trials)} threshold trials are configured"
+                )
             for threshold, sparsity in zip(self.threshold_trials, sparsity_list):
                 scale_factor = threshold * length
                 all_data_points.append(

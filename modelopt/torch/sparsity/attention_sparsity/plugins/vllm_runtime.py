@@ -361,16 +361,24 @@ def _plan_vllm_attention(
     plans = []
     for name, module, sparse_kw in candidates:
         reasons = _layer_errors(module)
-        if quantize and _skip_softmax_active(sparse_kw):
+        if _skip_softmax_active(sparse_kw):
             # Quantized Q/K/P change the attention-score distribution the skip
             # thresholds were calibrated on, so the calibrated sparsity contract
-            # no longer holds. N:M sparse softmax has no calibrated threshold
-            # and composes with quantization.
-            reasons.append(
-                "skip-softmax cannot be combined with attention quantization; "
-                "serve skip-softmax unquantized or drop the skip_softmax group "
-                "(N:M sparse softmax composes with quantization)"
+            # no longer holds. This guards both installation directions: quantized
+            # installs adding skip, and sparse-only installs onto layers that
+            # already carry active attention quantizers. N:M sparse softmax has
+            # no calibrated threshold and composes with quantization.
+            active = (
+                "attention quantization is being installed"
+                if quantize
+                else _active_attention_quantization(module)
             )
+            if active:
+                reasons.append(
+                    f"skip-softmax cannot be combined with attention quantization ({active}); "
+                    "serve skip-softmax unquantized or drop the skip_softmax group "
+                    "(N:M sparse softmax composes with quantization)"
+                )
         device = dtype = None
         if quantize:
             device, dtype = quant_plugin._get_device_dtype(module)
@@ -513,18 +521,22 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
     return _build_report(plan)
 
 
-def _attention_quant_error(module) -> str | None:
-    """Reject calibration on layers with any active attention Q/K/P/V fakequant."""
+def _active_attention_quantization(module) -> str | None:
+    """Describe any active attention Q/K/P/V quantization on a layer, or None."""
     for attr in ("q_bmm_quantizer", "k_bmm_quantizer", "p_bmm_quantizer", "v_bmm_quantizer"):
         if getattr(getattr(module, attr, None), "is_enabled", False):
-            return f"{attr} is enabled; skip-softmax calibration requires unquantized attention"
+            return f"{attr} is enabled"
     if getattr(module, "_query_quant_in_kernel", False) or getattr(
         module, "_value_quant_in_kernel", False
     ):
-        return (
-            "in-kernel attention quantization flags are set; skip-softmax "
-            "calibration requires unquantized attention"
-        )
+        return "in-kernel attention quantization flags are set"
+    return None
+
+
+def _attention_quant_error(module) -> str | None:
+    """Reject calibration on layers with any active attention Q/K/P/V fakequant."""
+    if active := _active_attention_quantization(module):
+        return f"{active}; skip-softmax calibration requires unquantized attention"
     return None
 
 
