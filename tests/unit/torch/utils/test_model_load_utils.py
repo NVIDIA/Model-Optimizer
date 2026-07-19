@@ -22,6 +22,8 @@ import torch
 from packaging.version import Version
 from safetensors.torch import save_file
 
+pytest.importorskip("accelerate")
+
 from modelopt.torch.utils.plugins.model_load_utils import (
     _conversion_rules,
     _convert_keys,
