@@ -415,6 +415,7 @@ def _apply_to_model_state_dict(
         model.load_state_dict(in_state_dict, strict=False)
     return out_state_dict
 
+
 def mtp_layer_prefixes_from_checkpoint(model_path: str) -> list[str]:
     """MTP exclude-prefixes from a checkpoint's safetensors index (``[]`` if none); reads no tensors.
 
