@@ -426,11 +426,14 @@ def _get_fsdp2_mesh(module: nn.Module):
         return None
 
     fsdp_state = _get_module_state(module)
-    if (
-        fsdp_state._fsdp_param_group
-        and fsdp_state._fsdp_param_group.post_forward_mesh_info is not None
-    ):
-        return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
+    pg = fsdp_state._fsdp_param_group
+    if pg is None:
+        return None
+    # A root FSDP module has reshard_after_forward=False by default, so its
+    # post_forward_mesh_info is None; fall back to the sharding mesh (mesh_info),
+    # which is the same FSDP shard mesh (post_forward_mesh_info is only the reshard target).
+    mesh_info = pg.post_forward_mesh_info or pg.mesh_info
+    return mesh_info.mesh if mesh_info is not None else None
 
 
 def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
