@@ -211,26 +211,22 @@ class TestCalibrationServingTileContract:
         assert out._sparsity_total == calib_total
         assert out._sparsity_skipped == calib_skipped
 
-    def test_skip_composes_with_pv_qdq(self):
-        """Active skip at the fixed tile compiles and runs with P/V QDQ enabled."""
-        if torch.cuda.get_device_capability() < (8, 9):
-            pytest.skip("NVFP4/FP8 QDQ needs compute capability >= 8.9 (E4M3 casts)")
+    @pytest.mark.parametrize("qdq_kw", [{"p_qdq": "nvfp4"}, {"v_qdq": "nvfp4", "v_qdq_amax": 1.0}])
+    def test_skip_rejects_pv_qdq(self, qdq_kw):
+        """Active skip rejects P/V QDQ: quantized operands break the calibrated contract."""
         seq_len, num_heads, num_kv_heads, head_dim = 256, 4, 2, 64
         q, k, v = self._contrasty_qkv(seq_len, num_heads, num_kv_heads, head_dim)
         locs, lens = make_varlen_meta([seq_len])
 
-        out = attention(
-            q,
-            k,
-            v,
-            locs,
-            lens,
-            seq_len,
-            is_causal=True,
-            skip_softmax_threshold=1e-2,
-            p_qdq="nvfp4",
-            p_qdq_amax=1.0,
-            v_qdq="nvfp4",
-            v_qdq_amax=float(v.abs().amax()),
-        )
-        assert torch.isfinite(out).all()
+        with pytest.raises(ValueError, match="cannot be combined with attention quantization"):
+            attention(
+                q,
+                k,
+                v,
+                locs,
+                lens,
+                seq_len,
+                is_causal=True,
+                skip_softmax_threshold=1e-2,
+                **qdq_kw,
+            )

@@ -178,6 +178,12 @@ def fit_from_counts(
     for phase, records in per_phase_counts.items():
         if not records:
             continue
+        for record in records:
+            if len(record["total_tiles"]) != len(threshold_trials):
+                raise ValueError(
+                    f"{phase} record has {len(record['total_tiles'])} counters but "
+                    f"{len(threshold_trials)} threshold trials are configured"
+                )
         calibrator = DynamicThresholdCalibrator(
             threshold_trials=list(threshold_trials), fit_logspace=fit_logspace
         )
@@ -193,8 +199,16 @@ def fit_from_counts(
 
 def _normalize_target_sparsity(target_sparsity: dict[str, float] | float) -> dict[str, float]:
     if isinstance(target_sparsity, int | float):
-        return {phase: float(target_sparsity) for phase in _PHASES}
-    return {phase: float(target_sparsity.get(phase, 0.5)) for phase in _PHASES}
+        values = {phase: float(target_sparsity) for phase in _PHASES}
+    else:
+        values = {phase: float(target_sparsity.get(phase, 0.5)) for phase in _PHASES}
+    for phase, value in values.items():
+        # Same range the HF calibration config enforces.
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"target_sparsity for phase {phase!r} must be between 0.0 and 1.0, got {value}"
+            )
+    return values
 
 
 def build_sparse_attention_config(

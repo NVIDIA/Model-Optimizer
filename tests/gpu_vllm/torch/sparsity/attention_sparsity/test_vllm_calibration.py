@@ -155,6 +155,27 @@ class TestQuantSkipRejection:
             vllm_runtime.install_vllm_nvfp4_attention(runner)
         assert not isinstance(attention.impl, ModelOptSparseAttentionImpl)
 
+    def test_sparse_only_install_rejects_skip_onto_quantized_layer(self):
+        """Sparse-only installs must also refuse skip onto live quantizers."""
+        attention = _bare_attention()
+        attention.q_bmm_quantizer = SimpleNamespace(is_enabled=True)
+        original_impl = attention.impl
+        runner = _model_runner(
+            nn.ModuleDict({"attn": attention}), sparse_metadata=self._CALIBRATED_META
+        )
+        with pytest.raises(
+            NotImplementedError, match="cannot be combined with attention quantization"
+        ):
+            vllm_runtime.install_vllm_sparse_attention_from_checkpoint(runner)
+        assert attention.impl is original_impl
+
+    def test_sparse_only_install_allows_skip_on_unquantized_layer(self):
+        runner = _model_runner(
+            nn.ModuleDict({"attn": _bare_attention()}), sparse_metadata=self._CALIBRATED_META
+        )
+        report = vllm_runtime.install_vllm_sparse_attention_from_checkpoint(runner)
+        assert report.installed_count == 1
+
     def test_quantized_plan_allows_nm_sparsity(self, monkeypatch):
         from modelopt.torch.quantization.plugins import vllm as quant_plugin
 
@@ -173,6 +194,17 @@ class TestQuantSkipRejection:
 
 class TestFlashInferLayoutGuard:
     """HND FlashInfer caches are rejected via layout metadata, pre-measurement."""
+
+    def test_layout_helper_preserves_none(self, monkeypatch):
+        """A getter returning None must not become the truthy string 'None'."""
+        import sys
+
+        fake = SimpleNamespace(get_kv_cache_layout=lambda: None)
+        monkeypatch.setitem(sys.modules, "vllm.v1.attention.backends.utils", fake)
+        assert attention_plugin._flashinfer_kv_cache_layout() is None
+
+        fake.get_kv_cache_layout = lambda: "HND"
+        assert attention_plugin._flashinfer_kv_cache_layout() == "HND"
 
     def test_installer_rejects_hnd_layout(self, monkeypatch):
         monkeypatch.setattr(attention_plugin, "_flashinfer_kv_cache_layout", lambda: "HND")
