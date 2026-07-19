@@ -127,6 +127,15 @@ class TestFitFromCounts:
     def test_empty_phase_produces_no_fit(self):
         assert fit_from_counts({"decode": []}, DEFAULT_THRESHOLD_TRIALS) == {}
 
+    def test_fit_rejects_counter_width_vs_trials_mismatch(self):
+        """Consistent-but-wrong widths must not silently zip against the trials."""
+        short = len(DEFAULT_THRESHOLD_TRIALS) - 1
+        records = [
+            {"sample_length": 4096, "total_tiles": [100] * short, "skipped_tiles": [50] * short}
+        ]
+        with pytest.raises(ValueError, match="threshold trials are configured"):
+            fit_from_counts({"prefill": records}, DEFAULT_THRESHOLD_TRIALS)
+
 
 class TestCalibrateFromStats:
     def _stats(self, trials):
@@ -197,6 +206,12 @@ class TestBuildSparseAttentionConfig:
         assert layer_cfg["method"] == "triton_skip_softmax"
         assert layer_cfg["threshold_scale_factor"]["decode"] == {"a": 0.12, "b": 9.8}
         assert layer_cfg["target_sparse_ratio"] == {"prefill": 0.5, "decode": 0.3}
+
+    def test_rejects_out_of_range_target_sparsity(self):
+        with pytest.raises(ValueError, match=r"between 0\.0 and 1\.0"):
+            build_sparse_attention_config(self._PARAMS, 1.5)
+        with pytest.raises(ValueError, match=r"between 0\.0 and 1\.0"):
+            build_sparse_attention_config(self._PARAMS, {"prefill": 0.5, "decode": -0.1})
 
     def test_preserves_legacy_toplevel_sparse_softmax(self):
         existing = {

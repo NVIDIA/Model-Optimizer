@@ -87,7 +87,6 @@ _FWD_CONFIGS = [
 ]
 
 _MEASURE_BLOCK_M = 128
-_P_QDQ_MEASURE_BLOCK_M = 16
 # 128 so the kernel sparsity-measurement block matches the PyTorch
 # calibration/reference granularity. This is deliberately independent of the
 # autotuned compute tile.
@@ -944,6 +943,16 @@ class _Attention(torch.autograd.Function):
         else:
             apply_skip = False
             skip_threshold_log2 = 0.0
+        if apply_skip and (p_qdq_mode or v_qdq_mode):
+            # Quantized operands change what the calibrated skip thresholds mean,
+            # and P-QDQ additionally uses a different measurement tile geometry.
+            # The vLLM installers reject this composition at plan time; the raw
+            # kernel API rejects it here so no path can serve it.
+            raise ValueError(
+                "skip-softmax cannot be combined with attention quantization "
+                "(P/V QDQ): the calibrated tile-skip contract does not hold "
+                "under quantized operands"
+            )
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
@@ -1046,10 +1055,12 @@ class _Attention(torch.autograd.Function):
                 # GPUs) are rejected rather than re-tiled, because a different
                 # tile realizes a different sparsity than was calibrated.
                 try:
+                    # P/V QDQ is rejected above when skip is active, so the tile
+                    # here is unconditionally the 128x128 calibration geometry.
                     _attn_fwd.fn[grid](
                         *fwd_args,
                         **fwd_kwargs,
-                        BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
+                        BLOCK_M=_MEASURE_BLOCK_M,
                         BLOCK_N=_MEASURE_BLOCK_N,
                         num_warps=_MEASURE_NUM_WARPS,
                         num_stages=_MEASURE_NUM_STAGES,
