@@ -28,6 +28,33 @@ from scipy.optimize import curve_fit
 from ..stats_manager import SparseAttentionStatsManager
 from ..utils import get_sparse_attention_modules
 
+# Canonical skip-softmax threshold sweep — should span sparsities from ~10% to
+# ~95%. Shared by the HF calibration path (this class's default) and the vLLM
+# calibration path (``plugins/sparse_attn_calibration.py``), so both fit on the
+# same trial grid.
+DEFAULT_THRESHOLD_TRIALS = [
+    1e-6,
+    5e-6,
+    1e-5,
+    5e-5,
+    1e-4,
+    5e-4,
+    1e-3,
+    5e-3,
+    1e-2,
+    2e-2,
+    5e-2,
+    1e-1,
+    2e-1,
+    3e-1,
+    5e-1,
+    7e-1,
+    8e-1,
+    9e-1,
+    9.5e-1,
+    9.9e-1,
+]
+
 
 class DynamicThresholdCalibrator:
     """Dynamic threshold calibrator using Exponential model.
@@ -67,28 +94,7 @@ class DynamicThresholdCalibrator:
                 where scale_factors span many orders of magnitude.
         """
         # Default threshold trials if not provided
-        self.threshold_trials = threshold_trials or [
-            1e-6,
-            5e-6,
-            1e-5,
-            5e-5,
-            1e-4,
-            5e-4,
-            1e-3,
-            5e-3,
-            1e-2,
-            2e-2,
-            5e-2,
-            1e-1,
-            2e-1,
-            3e-1,
-            5e-1,
-            7e-1,
-            8e-1,
-            9e-1,
-            9.5e-1,
-            9.9e-1,
-        ]
+        self.threshold_trials = threshold_trials or list(DEFAULT_THRESHOLD_TRIALS)
         self.fit_logspace = fit_logspace
 
     def calibrate(self, model: nn.Module, forward_loop: Callable, phase: str) -> dict[str, Any]:
