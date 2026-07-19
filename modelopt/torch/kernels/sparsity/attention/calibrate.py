@@ -69,6 +69,7 @@ def _attn_fwd_calibrate(
     HEAD_DIM: tl.constexpr,
     NUM_THRESHOLDS: tl.constexpr,
     PADDED_THRESHOLDS: tl.constexpr,  # next_power_of_2(NUM_THRESHOLDS) for tl.arange
+    Q_IS_FP32: tl.constexpr = False,  # match the serving kernel's IEEE fp32 QK dot
     IS_PAGED: tl.constexpr = False,  # Whether K/V are read from a paged KV cache
     K_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged K
     V_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged V
@@ -171,7 +172,13 @@ def _attn_fwd_calibrate(
                 other=0.0,
             )
 
-        scores = tl.dot(q, k) * qk_scale
+        # Match the serving kernel's QK precision: fp32 Q uses the IEEE dot
+        # (default tl.dot is TF32 for fp32 inputs), so near-threshold scores
+        # round to the same skip decisions in calibration and serving.
+        if Q_IS_FP32:
+            scores = tl.dot(q, k.to(tl.float32), input_precision="ieee") * qk_scale
+        else:
+            scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
         tile_row_max = tl.max(scores, 1)
@@ -430,6 +437,7 @@ def attention_calibrate(
             HEAD_DIM=HEAD_DIM,
             NUM_THRESHOLDS=num_thresholds,
             PADDED_THRESHOLDS=triton.next_power_of_2(num_thresholds),
+            Q_IS_FP32=q.dtype == torch.float32,
             IS_PAGED=is_paged,
             K_cache=k_cache,
             V_cache=v_cache,

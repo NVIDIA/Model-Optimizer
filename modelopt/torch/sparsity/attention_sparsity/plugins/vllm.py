@@ -268,9 +268,12 @@ def _flashinfer_kv_cache_layout() -> str | None:
         if getter is None:
             continue
         try:
-            return str(getter())
+            value = getter()
         except Exception:
             return None
+        # Preserve a genuine None (layout unset) so the shape fallback runs;
+        # str(None) would become the truthy string "None" and hard-reject.
+        return None if value is None else str(value)
     return None
 
 
