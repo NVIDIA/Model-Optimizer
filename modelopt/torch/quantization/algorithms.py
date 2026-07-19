@@ -445,6 +445,7 @@ class QuantRecipeHparam(Hparam):
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
 _LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_ATTN_QKV_RULE = r"^(.*?)\.(q_proj|k_proj|v_proj)$"
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -471,7 +472,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     method_name: str | None = None
 
     quant_grouping_rules = [
-        r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
+        _ATTN_QKV_RULE,  # q_proj, k_proj, v_proj for llama like models
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
@@ -1025,6 +1026,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     method_name = "gradient"
 
     score_module_rules = [
+        _ATTN_QKV_RULE,
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
