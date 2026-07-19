@@ -54,6 +54,7 @@ class DoGEForwardStep:
         target_data_paths: list[str],
         meta_lr: float,
         output_dir: str | Path,
+        min_blend_weight: float = 0.0,
         freeze_student: bool = False,
         freeze_blend: bool = False,
         virtual_step_candidate_weights: list[list[float]] | None = None,
@@ -70,6 +71,8 @@ class DoGEForwardStep:
                 weights are normalized into ``self.target_blend_weights`` and are not updated.
             meta_lr: Learning rate for exponentiated blend-weight updates.
             output_dir: Directory where DoGE writes the weight trajectory.
+            min_blend_weight: Optional minimum normalized weight for each source after every DoGE
+                update.
             freeze_student: Log DoGE scores without updating student weights.
             freeze_blend: Log candidate blend-weight updates without applying them.
             virtual_step_candidate_weights: Optional source-order candidate blend weights used
@@ -81,7 +84,7 @@ class DoGEForwardStep:
         """
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
-        self.updater = DoGEWeightUpdater(meta_lr=meta_lr)
+        self.updater = DoGEWeightUpdater(meta_lr=meta_lr, min_weight=min_blend_weight)
         self.blend_weights: dict[str, float] = normalize_data_path_weights(data_paths)
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None

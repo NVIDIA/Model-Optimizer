@@ -98,6 +98,13 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the DoGE distillation command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -202,6 +209,15 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_positive_float,
         required=True,
         help="Learning rate for exponentiated blend-weight updates",
+    )
+    doge.add_argument(
+        "--doge_min_blend_weight",
+        type=_nonnegative_float,
+        default=0.0,
+        help=(
+            "Minimum normalized weight for each DoGE source after every update. Use this to keep "
+            "low-weight sources active while alignment scores evolve."
+        ),
     )
     doge.add_argument(
         "--doge_freeze_student",
@@ -358,6 +374,7 @@ def main(args: argparse.Namespace) -> None:
         target_data_paths=args.target_data_paths,
         meta_lr=args.doge_meta_lr,
         output_dir=args.output_dir,
+        min_blend_weight=args.doge_min_blend_weight,
         freeze_student=args.doge_freeze_student,
         freeze_blend=args.doge_freeze_blend,
         virtual_step_candidate_weights=args.doge_virtual_step_candidate_weights,

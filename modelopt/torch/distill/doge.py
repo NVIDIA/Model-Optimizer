@@ -48,14 +48,18 @@ class DoGEWeightUpdater:
 
     Args:
         meta_lr: Learning rate for exponentiated blend-weight updates.
+        min_weight: Optional minimum normalized weight for each source after every update.
 
     Outputs:
         ``update`` returns normalized blend weights after applying the update.
     """
 
-    def __init__(self, meta_lr: float) -> None:
+    def __init__(self, meta_lr: float, min_weight: float = 0.0) -> None:
         """Initialize the updater."""
+        if min_weight < 0:
+            raise ValueError(f"min_weight must be non-negative, got {min_weight}.")
         self.meta_lr = meta_lr
+        self.min_weight = min_weight
 
     def update(self, weights: Mapping[str, float], scores: Mapping[str, float]) -> dict[str, float]:
         """Return updated blend weights from training-dataset alignment scores.
@@ -68,6 +72,12 @@ class DoGEWeightUpdater:
         Returns:
             Updated normalized blend weights keyed by training dataset name.
         """
+        if self.min_weight * len(weights) >= 1:
+            raise ValueError(
+                "min_weight is too large for the number of sources: "
+                f"{self.min_weight} * {len(weights)} must be less than 1."
+            )
+
         logits: dict[str, float] = {}
         for key, weight in weights.items():
             score = scores[key]
@@ -83,4 +93,12 @@ class DoGEWeightUpdater:
         # logit does not change the final normalized weights.
         unnormalized = {key: math.exp(logit - max_logit) for key, logit in logits.items()}
         total = sum(unnormalized.values())
-        return {key: value / total for key, value in unnormalized.items()}
+        updated = {key: value / total for key, value in unnormalized.items()}
+        if self.min_weight == 0:
+            return updated
+
+        # Reserve a floor for each source, then distribute the remaining mass according to the
+        # normal exponentiated DoGE update. This keeps every source trainable while preserving the
+        # relative preference from the alignment scores in the non-floor probability mass.
+        remaining_weight = 1.0 - self.min_weight * len(updated)
+        return {key: self.min_weight + remaining_weight * value for key, value in updated.items()}
