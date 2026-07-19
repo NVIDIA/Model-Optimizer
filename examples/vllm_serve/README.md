@@ -183,10 +183,16 @@ If the checkpoint has no `sparse_attention_config`, the sparse-only installer pa
 Instead of the HF path in step 1, thresholds can be calibrated directly through vLLM — over the paged KV cache, for both prefill and decode, with tensor parallelism:
 
 ```bash
+# One-time: fetch the RULER essay haystack
+bash ../llm_sparsity/attention_sparsity/download_ruler_data.sh
+
 python calibrate_sparse_attn.py <CKPT> \
-  --prompts_file prompts.txt --target_sparse_ratio 0.5 \
+  --calib_data_dir ../llm_sparsity/attention_sparsity/data \
+  --target_sparse_ratio 0.5 \
   --decode_tokens 32 --tensor_parallel_size 8 --update_checkpoint_config
 ```
+
+Calibration prompts default to the **RULER dataset** via the same `RulerDatasetBuilder` the HF calibration path uses (`--calib_samples` / `--calib_max_seqlen` mirror the HF defaults of 24 / 32768), so vLLM- and PyTorch-calibrated thresholds are fit on identical data. `--prompts_file` (one prompt per line) substitutes custom calibration data.
 
 `install_vllm_skip_softmax_calibration` (called by `sparse_attn_worker.SkipSoftmaxCalibWorker` at model load) swaps calibration adapters onto every attention layer after validating all of them — eager execution is required, model and KV-cache dtypes must be fp16/bf16, and no attention Q/K/P/V fakequant may be active. During `llm.generate`, the paged Triton calibration kernel computes full dense attention (generation is numerically unchanged) while counting, per candidate threshold, how many KV tiles the skip criterion would drop. The driver then collects **raw tile counts from every TP rank** (each rank only measures its head shard), merges them, fits `scale_factor = a * exp(b * sparsity)` once per phase, and writes the same canonical `sparse_attention_config` block the HF export produces — preserving any exported N:M sparse-softmax groups — so the serving workflow above picks it up unchanged.
 
