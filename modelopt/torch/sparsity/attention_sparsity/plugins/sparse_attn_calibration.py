@@ -35,6 +35,10 @@ from typing import Any
 
 import modelopt
 
+# One canonical sweep for both calibration paths: re-exported from the HF-path
+# calibrator so the vLLM path fits on the identical trial grid.
+from ..calibration.calibrator import DEFAULT_THRESHOLD_TRIALS
+
 __all__ = [
     "DEFAULT_THRESHOLD_TRIALS",
     "build_sparse_attention_config",
@@ -43,22 +47,6 @@ __all__ = [
     "merge_phase_counts",
     "split_records_by_phase",
     "stats_from_counts",
-]
-
-# Default threshold sweep — should span sparsities from ~10% to ~95%.
-DEFAULT_THRESHOLD_TRIALS = [
-    1e-4,
-    1e-3,
-    5e-3,
-    1e-2,
-    3e-2,
-    5e-2,
-    1e-1,
-    2e-1,
-    3e-1,
-    5e-1,
-    7e-1,
-    9e-1,
 ]
 
 _PHASES = ("prefill", "decode")
@@ -81,23 +69,39 @@ def merge_count_records(sources: list[list[dict]]) -> list[dict]:
     records for one phase. All sources observe the same launches in the same
     order, so records align by index; tile counts are additive across both
     layers and head-sharded TP ranks.
+
+    Alignment is a contract: every source must report the same number of
+    samples, the same per-sample lengths, and the same threshold-vector width.
+    Any mismatch indicates a collection bug and raises rather than silently
+    dropping records.
     """
-    sources = [source for source in sources if source]
     if not sources:
         return []
-    num_samples = min(len(source) for source in sources)
+    sample_counts = {len(source) for source in sources}
+    if len(sample_counts) != 1:
+        raise ValueError(
+            "Misaligned calibration records: sources disagree on sample count "
+            f"({sorted(sample_counts)})"
+        )
+    num_samples = sample_counts.pop()
     merged = []
     for i in range(num_samples):
         base = sources[0][i]
-        total = [0] * len(base["total_tiles"])
-        skipped = [0] * len(base["skipped_tiles"])
-        for source in sources:
-            record = source[i]
+        width = len(base["total_tiles"])
+        total = [0] * width
+        skipped = [0] * width
+        for record in (source[i] for source in sources):
             if record["sample_length"] != base["sample_length"]:
                 raise ValueError(
                     "Misaligned calibration records: sample lengths differ across "
                     f"sources at index {i} ({record['sample_length']} vs "
                     f"{base['sample_length']})"
+                )
+            if len(record["total_tiles"]) != width or len(record["skipped_tiles"]) != width:
+                raise ValueError(
+                    "Misaligned calibration records: threshold-vector widths differ "
+                    f"across sources at index {i} "
+                    f"({len(record['total_tiles'])}/{len(record['skipped_tiles'])} vs {width})"
                 )
             total = [a + b for a, b in zip(total, record["total_tiles"])]
             skipped = [a + b for a, b in zip(skipped, record["skipped_tiles"])]
@@ -118,13 +122,21 @@ def merge_phase_counts(rank_counts: list[dict[str, list[dict]]]) -> dict[str, li
     ``{"prefill": [...], "decode": [...]}`` dict per rank, as returned by
     ``collect_calibration_counts``). Use ALL ranks: with tensor parallelism
     each rank only measures its attention-head shard, so any single rank's
-    counts are incomplete.
+    counts are incomplete. A phase recorded by some ranks but not others
+    indicates a collection bug and raises.
     """
     phases = {phase for rank in rank_counts for phase in rank}
-    return {
-        phase: merge_count_records([rank.get(phase, []) for rank in rank_counts])
-        for phase in phases
-    }
+    merged: dict[str, list[dict]] = {}
+    for phase in phases:
+        sources = [rank.get(phase, []) for rank in rank_counts]
+        empty = sum(1 for source in sources if not source)
+        if empty and empty != len(sources):
+            raise ValueError(
+                f"Misaligned calibration records: {empty}/{len(sources)} rank(s) "
+                f"recorded no {phase!r} samples while others did"
+            )
+        merged[phase] = merge_count_records([] if empty else sources)
+    return merged
 
 
 def stats_from_counts(count_records: list[dict]) -> list[dict]:
@@ -180,7 +192,7 @@ def fit_from_counts(
 
 
 def _normalize_target_sparsity(target_sparsity: dict[str, float] | float) -> dict[str, float]:
-    if isinstance(target_sparsity, (int, float)):
+    if isinstance(target_sparsity, int | float):
         return {phase: float(target_sparsity) for phase in _PHASES}
     return {phase: float(target_sparsity.get(phase, 0.5)) for phase in _PHASES}
 
@@ -230,7 +242,14 @@ def build_sparse_attention_config(
         for idx, group in enumerate(preserved, start=1):
             config_groups[f"group_{idx}"] = group
 
-    return {
+    result: dict[str, Any] = {
         "config_groups": config_groups,
         "producer": {"name": "modelopt", "version": modelopt.__version__},
     }
+    # Legacy checkpoints carry N:M parameters as a top-level ``sparse_softmax``
+    # dict (read by the serving loader ahead of group params) — preserve it so
+    # recalibration does not silently reset N:M settings to defaults.
+    legacy_sparse_softmax = (existing_config or {}).get("sparse_softmax")
+    if isinstance(legacy_sparse_softmax, dict):
+        result["sparse_softmax"] = legacy_sparse_softmax
+    return result
