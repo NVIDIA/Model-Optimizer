@@ -1416,9 +1416,6 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
-        architectures_override: If set, written into ``config.json`` as
-            ``architectures``. Use this to restore the original architectures list
-            after FSDP2 wrapping, which prefixes class names.
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1440,7 +1437,11 @@ def export_hf_checkpoint(
         )
         return
 
-    is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+    is_distributed = (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and is_fsdp2_model(model)
+    )
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
