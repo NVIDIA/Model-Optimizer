@@ -69,16 +69,19 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
     train_iters = 2
-    # TODO: MoE VLMs run single-GPU: MoE layers require sequence parallelism when TP>1, but VLM distillation
-    # disables SP (the standalone-LM SP fix lands in the nemo:26.08 container). Others use all GPUs.
-    tp_size = 1 if is_moe else num_gpus
+
+    # TODO: VLMs disable sequence parallelism, so tensor parallelism can't be used here.
+    #     Flip to tp_size=num_gpus in nemo:26.08 container
+    tp_size = 1
+    pp_size = num_gpus
 
     # Step 1: PTQ the (language) model to FP8 and save a Megatron checkpoint carrying the ModelOpt state.
     quantize_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={tp_size}", "quantize.py", "--skip_generate"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/fp8_default-kv_fp8",
         tp_size=tp_size,
+        pp_size=pp_size,
         calib_dataset_name="cnn_dailymail",  # text dataset -> (for VLMs) text-only LM calibration
         calib_num_samples=8,
         calib_batch_size=2,
@@ -94,12 +97,13 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
     # quantizers) and distill from the (unquantized) HF teacher. The distilled checkpoint must keep the
     # ModelOpt state so the quantizers survive distillation.
     distill_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={tp_size}", "distill.py", "--use_mock_data"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
         student_hf_path=hf_model_path,
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
         output_dir=distill_output_dir,
         tp_size=tp_size,
+        pp_size=pp_size,
         seq_length=16,
         mbs=1,
         gbs=4,
@@ -123,10 +127,11 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
     # is only written for a quantized model, so its presence confirms the quantizers survived QAD.
     hf_export_path = tmp_path / "qad_fp8_hf"
     export_cmd = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "export_quantized_megatron_to_hf.py"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "export_quantized_megatron_to_hf.py"],
         hf_model_name_or_path=hf_model_path,
         megatron_path=distilled_megatron_path,
         export_unified_hf_path=hf_export_path,
+        pp_size=num_gpus,
     )
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()
