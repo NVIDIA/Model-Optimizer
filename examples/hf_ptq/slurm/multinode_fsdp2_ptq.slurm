@@ -21,8 +21,8 @@
 # spawns one process per GPU. `hf_ptq.py --use_fsdp2` then shards the model across all ranks
 # (world_size = num_nodes * gpus_per_node) for distributed loading, calibration, and export.
 #
-# The defaults below quantize Nemotron-3-Super to NVFP4 with an FP8 KV cache. Edit the CONFIG
-# block for your cluster/model, then submit with e.g.:
+# The defaults below quantize nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 to NVFP4 with an FP8
+# KV cache. Edit the CONFIG block for your cluster/model, then submit with e.g.:
 #
 #   sbatch --nodes=2 multinode_fsdp2_ptq.slurm
 #
@@ -46,8 +46,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 export CONTAINER_IMAGE={container_image}                # e.g. nvcr.io#nvidia/pytorch:25.10-py3
 export MODELOPT_PATH={path_to_modelopt_repo}            # host clone of TensorRT-Model-Optimizer
-export MODEL_PATH={path_to_nemotron3_super}             # local HF checkpoint dir
+export MODEL_PATH=nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16   # HF repo id (auto-downloaded) or a local dir
 export EXPORT_PATH={path_to_export_dir}                 # where the quantized checkpoint is written
+export HF_HOME={path_to_hf_cache}                       # HF cache; persist so a repo id isn't re-downloaded each run
+# export HF_TOKEN={hf_token}                            # required for gated repos (or `huggingface-cli login` on host)
 export RECIPE=general/ptq/nvfp4_default-kv_fp8_cast     # built-in recipe name or /path/to/recipe.yaml
 export CALIB_SIZE=512
 export BATCH_SIZE=4
@@ -56,14 +58,21 @@ export BATCH_SIZE=4
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -1)
 export MASTER_PORT=29531
 
-# Mount the repo (and the model/export dirs) into the container; run from the llm_ptq example dir.
+# Mount the repo, export dir, and HF cache; add the model dir only when MODEL_PATH is a local path
+# (a repo id is downloaded into HF_HOME instead). Run from the hf_ptq example dir.
+CONTAINER_MOUNTS="${MODELOPT_PATH}:/modelopt,${EXPORT_PATH}:${EXPORT_PATH},${HF_HOME}:${HF_HOME}"
+if [ -d "${MODEL_PATH}" ]; then
+    CONTAINER_MOUNTS="${CONTAINER_MOUNTS},${MODEL_PATH}:${MODEL_PATH}"
+fi
 srun --container-image="${CONTAINER_IMAGE}" \
-     --container-mounts="${MODELOPT_PATH}:/modelopt,${MODEL_PATH}:${MODEL_PATH},${EXPORT_PATH}:${EXPORT_PATH}" \
-     --container-workdir=/modelopt/examples/llm_ptq \
+     --container-mounts="${CONTAINER_MOUNTS}" \
+     --container-workdir=/modelopt/examples/hf_ptq \
   bash -c '
     set -euo pipefail
     export PYTHONPATH="/modelopt:${PYTHONPATH:-}"
     export PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    # ModelOpt + its HF deps (transformers/accelerate/datasets/...) from the mounted source, then example extras.
+    pip install -q -e "/modelopt[hf]" --no-build-isolation
     pip install -q -r requirements.txt
 
     torchrun \
