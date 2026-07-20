@@ -517,7 +517,7 @@ class PrecisionConverter:
                     out.dtype = np_type
 
                 # Set the output shape
-                if not out.shape:
+                if out.shape is None:
                     if (shape := _infer_standard_op_shape(node)) is not None:
                         out.shape = shape
                     elif isinstance(inp, gs.Constant):

@@ -2044,3 +2044,37 @@ def test_custom_op_mode_uses_schema_shapes_for_standard_rank_changes():
         4,
     ]
     onnx.checker.check_model(propagated, full_check=True)
+
+
+def test_custom_op_mode_preserves_known_scalar_custom_op_shape():
+    plugin_in = helper.make_tensor_value_info("plugin_in", TensorProto.FLOAT, [4])
+    custom_node = helper.make_node(
+        "FakePlugin", ["plugin_in"], ["plugin_scalar"], name="plugin", domain="test.plugins"
+    )
+    graph = helper.make_graph(
+        [custom_node],
+        "custom_op_known_scalar_shape",
+        [plugin_in],
+        [helper.make_tensor_value_info("plugin_scalar", TensorProto.FLOAT, [])],
+        [],
+    )
+    model = helper.make_model(
+        graph,
+        producer_name="custom_op_known_scalar_shape",
+        opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("test.plugins", 1)],
+        ir_version=10,
+    )
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        custom_ops={"FakePlugin"},
+    )
+    propagated = converter._propagate_types_shapes_custom_ops(model)
+
+    output = next(vi for vi in propagated.graph.output if vi.name == "plugin_scalar")
+    assert [dim.dim_value for dim in output.type.tensor_type.shape.dim] == []
