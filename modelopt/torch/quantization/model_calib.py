@@ -535,6 +535,7 @@ def _make_weight_mse_calibrator(
         not isinstance(weight_quantizer, TensorQuantizer)
         or not weight_quantizer.is_enabled
         or weight_quantizer._dynamic
+        or weight_quantizer.is_mx_format  # MX formats do not use a global scale
         or weight_quantizer._calibrator is None
         or getattr(weight_quantizer, "_amax", None) is None
     ):
