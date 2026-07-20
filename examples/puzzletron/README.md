@@ -1,7 +1,7 @@
 # Puzzletron
 
-For a step-by-step tutorial on the core Puzzletron algorithm, see below. For advanced campaigns with production-scale models, 
-AutoModel-based distributed training, and nested models, see the [experimental Puzzletron
+For a step-by-step tutorial on the core Puzzletron algorithm, see below. For advanced settings with production-scale models, 
+[AutoModel](https://github.com/NVIDIA-NeMo/Automodel/)-based distributed training, and nested models, see the [experimental Puzzletron
 branch](https://github.com/NVIDIA/Model-Optimizer/tree/puzzletron_v2/examples/puzzletron).
 
 # Puzzletron Algorithm Tutorial
