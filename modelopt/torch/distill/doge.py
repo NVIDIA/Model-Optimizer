@@ -15,10 +15,11 @@
 
 """Data-blend weight update API for DoGE distillation."""
 
+import hashlib
 import math
 from collections.abc import Mapping, Sequence
 
-__all__ = ["DoGEWeightUpdater", "normalize_data_path_weights"]
+__all__ = ["DoGEWeightUpdater", "normalize_data_path_weights", "sample_data_path_by_weight"]
 
 
 def normalize_data_path_weights(data_paths: Sequence[str]) -> dict[str, float]:
@@ -41,6 +42,36 @@ def normalize_data_path_weights(data_paths: Sequence[str]) -> dict[str, float]:
 
     total_weight = sum(blend_weights.values())
     return {path: weight / total_weight for path, weight in blend_weights.items()}
+
+
+def sample_data_path_by_weight(weights: Mapping[str, float], iteration: int, seed: int) -> str:
+    """Return a deterministic weighted sample from normalized data-path weights.
+
+    The sample is derived only from ``iteration`` and ``seed``, so tensor-parallel ranks that use
+    the same blend state choose the same source without communication.
+    """
+    if iteration < 0:
+        raise ValueError(f"iteration must be non-negative, got {iteration}.")
+
+    total_weight = sum(weights.values())
+    if total_weight <= 0:
+        raise ValueError("sampled data-blend weights must sum to a positive value.")
+    if any(weight < 0 for weight in weights.values()):
+        raise ValueError("sampled data-blend weights must be non-negative.")
+
+    digest = hashlib.sha256(f"{seed}:{iteration}".encode()).digest()
+    threshold = int.from_bytes(digest[:8], byteorder="big") / 2**64 * total_weight
+    cumulative_weight = 0.0
+    last_path = None
+    for path, weight in weights.items():
+        last_path = path
+        cumulative_weight += weight
+        if threshold < cumulative_weight:
+            return path
+
+    if last_path is None:
+        raise ValueError("sampled data-blend weights cannot be empty.")
+    return last_path
 
 
 class DoGEWeightUpdater:

@@ -19,6 +19,7 @@ import json
 from collections.abc import Iterable
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 import torch
 from megatron.bridge.training.gpt_step import forward_step_modelopt
@@ -26,7 +27,11 @@ from megatron.bridge.training.state import GlobalState
 from megatron.core.models.gpt import GPTModel
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
+from modelopt.torch.distill.doge import (
+    DoGEWeightUpdater,
+    normalize_data_path_weights,
+    sample_data_path_by_weight,
+)
 from modelopt.torch.distill.doge_megatron_data import (
     DoGEDataIterators,
     _build_doge_data_iterators,
@@ -37,12 +42,16 @@ from modelopt.torch.distill.doge_megatron_loss import (
     DoGEVirtualStepDiagnostic,
     compute_alignment_scores,
     compute_virtual_step_diagnostics,
+    sampled_source_forward_step,
     weighted_source_forward_step,
+    zero_sampled_source_forward_step,
     zero_weighted_source_forward_step,
 )
 from modelopt.torch.utils import print_rank_0
 
-__all__ = ["DoGEForwardStep"]
+DoGETrainLossMode = Literal["weighted", "sampled"]
+
+__all__ = ["DoGEForwardStep", "DoGETrainLossMode"]
 
 
 class DoGEForwardStep:
@@ -62,6 +71,8 @@ class DoGEForwardStep:
         virtual_step_lr: float | None = None,
         virtual_step_num_steps: int = 1,
         alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
+        train_loss_mode: DoGETrainLossMode = "weighted",
+        sampling_seed: int = 1234,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
 
@@ -85,7 +96,13 @@ class DoGEForwardStep:
             virtual_step_num_steps: Number of repeated virtual updates per candidate diagnostic.
             alignment_param_scope: Parameter scope used for DoGE gradient scoring and virtual-step
                 diagnostics. ``all_trainable`` is intended for expensive diagnostic runs.
+            train_loss_mode: How to construct the real student-update loss. ``weighted`` computes
+                every source loss each step and combines them by weight. ``sampled`` samples one
+                source by current weights and returns that unweighted loss.
+            sampling_seed: Seed used for deterministic source sampling in ``sampled`` mode.
         """
+        if train_loss_mode not in ("weighted", "sampled"):
+            raise ValueError(f"Unsupported DoGE train loss mode: {train_loss_mode!r}")
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
         self.updater = DoGEWeightUpdater(meta_lr=meta_lr, min_weight=min_blend_weight)
@@ -106,6 +123,8 @@ class DoGEForwardStep:
         self.virtual_step_lr = virtual_step_lr
         self.virtual_step_num_steps = virtual_step_num_steps
         self.alignment_param_scope = alignment_param_scope
+        self.train_loss_mode = train_loss_mode
+        self.sampling_seed = sampling_seed
 
     def write_trajectory_record(
         self,
@@ -116,6 +135,7 @@ class DoGEForwardStep:
         target_probe_kd_loss: float | None = None,
         candidate_blend_weights: dict[str, float] | None = None,
         virtual_step_diagnostics: dict[str, DoGEVirtualStepDiagnostic] | None = None,
+        sampled_source_path: str | None = None,
     ) -> None:
         """Write one DoGE weight-trajectory record on rank 0."""
         if not dist.is_master():
@@ -125,7 +145,10 @@ class DoGEForwardStep:
             "iteration": iteration,
             "alignment_scores": alignment_scores or {},
             "blend_weights": self.blend_weights,
+            "train_loss_mode": self.train_loss_mode,
         }
+        if sampled_source_path is not None:
+            record["sampled_source_path"] = sampled_source_path
         if candidate_blend_weights is not None:
             # Candidate weights are the next blend DoGE would apply from the current scores. They
             # can differ from ``blend_weights`` when ``--doge_freeze_blend`` keeps training fixed.
@@ -155,6 +178,8 @@ class DoGEForwardStep:
         summary = " | ".join(summary_parts)
         if target_probe_kd_loss is not None:
             summary += f" | target_probe_kd={target_probe_kd_loss:.4f}"
+        if sampled_source_path is not None:
+            summary += f" | train_source={Path(sampled_source_path).name}"
         if virtual_step_diagnostics:
             best_label, best_diagnostics = min(
                 virtual_step_diagnostics.items(),
@@ -176,8 +201,8 @@ class DoGEForwardStep:
         """Run as Megatron-Bridge ``pretrain`` forward step for one DoGE iteration.
 
         The DoGE outer loop updates the training blend weights from source-to-target gradient
-        alignment scores. The inner loop returns the weighted source loss that Megatron-Bridge
-        backpropagates with its normal optimizer step.
+        alignment scores. The inner loop returns either the weighted multi-source loss or one
+        sampled source loss for Megatron-Bridge to backpropagate with its normal optimizer step.
         """
         if not model.training:
             # Megatron-Bridge reuses the forward step for validation under no-grad/eval mode.
@@ -231,6 +256,14 @@ class DoGEForwardStep:
         )
         if self.schedule_end_blend_weights is None and not self.freeze_blend:
             self.blend_weights = candidate_blend_weights
+
+        sampled_source_path = None
+        if self.train_loss_mode == "sampled":
+            sampled_source_path = sample_data_path_by_weight(
+                self.blend_weights,
+                iteration=state.train_state.step + 1,
+                seed=self.sampling_seed,
+            )
         self.write_trajectory_record(
             state.train_state.step + 1,
             alignment_result.scores,
@@ -239,7 +272,26 @@ class DoGEForwardStep:
             alignment_result.target_probe_kd_loss,
             candidate_blend_weights,
             virtual_step_diagnostics,
+            sampled_source_path,
         )
+        if self.train_loss_mode == "sampled":
+            if sampled_source_path is None:
+                raise RuntimeError("DoGE sampled train loss did not select a source.")
+            if self.freeze_student:
+                return zero_sampled_source_forward_step(
+                    state,
+                    source_batches,
+                    sampled_source_path,
+                    model,
+                    return_schedule_plan,
+                )
+            return sampled_source_forward_step(
+                state,
+                source_batches,
+                sampled_source_path,
+                model,
+                return_schedule_plan,
+            )
         if self.freeze_student:
             return zero_weighted_source_forward_step(
                 state,
@@ -250,6 +302,8 @@ class DoGEForwardStep:
             )
 
         # Inner loop: train the student on source batches mixed with the updated DoGE weights.
+        # In weighted mode this means one weighted loss from all sources; in sampled mode this
+        # branch is skipped above and only one source contributes to the optimizer step.
         # Megatron-Bridge backpropagates the returned loss and performs the optimizer step.
         # TODO: Reuse source gradients from the outer-loop scoring pass to avoid recomputing source
         # forward/backward work once the PoC no longer relies on Megatron-Bridge's normal loss path.

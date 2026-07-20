@@ -230,6 +230,17 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Log candidate DoGE blend weights without applying them",
     )
     doge.add_argument(
+        "--doge_train_loss_mode",
+        choices=("weighted", "sampled"),
+        default="weighted",
+        help=(
+            "Student-update loss semantics. 'weighted' computes every source each iteration and "
+            "combines losses by the current blend weights. 'sampled' samples one source by the "
+            "current blend weights and returns that unweighted loss, matching normal sampled "
+            "data-blend training more closely."
+        ),
+    )
+    doge.add_argument(
         "--doge_schedule_end_data_paths",
         nargs="+",
         help=(
@@ -397,6 +408,8 @@ def main(args: argparse.Namespace) -> None:
         ),
         virtual_step_num_steps=args.doge_virtual_step_num_steps,
         alignment_param_scope=args.doge_alignment_param_scope,
+        train_loss_mode=args.doge_train_loss_mode,
+        sampling_seed=args.seed,
     )
 
     print("Initial DoGE blend weights:")

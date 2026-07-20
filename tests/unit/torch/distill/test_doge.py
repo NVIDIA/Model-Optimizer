@@ -15,7 +15,11 @@
 
 import pytest
 
-from modelopt.torch.distill.doge import DoGEWeightUpdater, normalize_data_path_weights
+from modelopt.torch.distill.doge import (
+    DoGEWeightUpdater,
+    normalize_data_path_weights,
+    sample_data_path_by_weight,
+)
 
 
 def test_normalize_data_path_weights():
@@ -27,6 +31,22 @@ def test_normalize_data_path_weights():
 def test_normalize_data_path_weights_rejects_duplicate_paths():
     with pytest.raises(ValueError, match="duplicate dataset path"):
         normalize_data_path_weights(["2", "/data/a", "1", "/data/a"])
+
+
+def test_sample_data_path_by_weight_is_deterministic():
+    weights = {"/data/a": 0.25, "/data/b": 0.75}
+
+    assert sample_data_path_by_weight(
+        weights, iteration=7, seed=1234
+    ) == sample_data_path_by_weight(weights, iteration=7, seed=1234)
+
+
+def test_sample_data_path_by_weight_respects_zero_weight():
+    weights = {"/data/a": 1.0, "/data/b": 0.0}
+
+    assert {sample_data_path_by_weight(weights, iteration=i, seed=1234) for i in range(20)} == {
+        "/data/a"
+    }
 
 
 def test_doge_weight_updater_increases_aligned_source():

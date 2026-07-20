@@ -39,7 +39,9 @@ __all__ = [
     "DoGEVirtualStepDiagnostic",
     "compute_alignment_scores",
     "compute_virtual_step_diagnostics",
+    "sampled_source_forward_step",
     "weighted_source_forward_step",
+    "zero_sampled_source_forward_step",
     "zero_weighted_source_forward_step",
 ]
 
@@ -115,11 +117,11 @@ def _weighted_loss(
     return loss, num_tokens, report
 
 
-def _zero_weighted_loss(
+def _zero_loss(
     loss_function: partial,
     output_tensor: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-    """Return a zeroed loss while preserving the full weighted-source backward graph."""
+    """Return a zeroed loss while preserving the backward graph from the real source loss."""
     loss, num_tokens, report = loss_function(output_tensor)
     return loss * 0.0, num_tokens, report
 
@@ -196,6 +198,36 @@ def weighted_source_forward_step(
     return total_loss, partial(_weighted_loss, total_loss, loss_num_tokens, total_report)
 
 
+def sampled_source_forward_step(
+    state: GlobalState,
+    source_batches: dict[str, _GPTBatch],
+    selected_source_path: str,
+    model: GPTModel,
+    return_schedule_plan: bool,
+) -> tuple[torch.Tensor, partial]:
+    """Return Megatron's inner-loop loss for one sampled source.
+
+    Unlike ``weighted_source_forward_step()``, this path computes exactly one source loss and
+    returns it unweighted. Use it when DoGE blend weights should behave like real sampled data
+    probabilities instead of per-step loss coefficients.
+    """
+    if return_schedule_plan:
+        raise NotImplementedError(
+            "DoGE sampled source forward step does not support schedule plans yet."
+        )
+    if selected_source_path not in source_batches:
+        raise ValueError(f"sampled source batch not found: {selected_source_path}")
+
+    output, loss_mask = _forward_batch(source_batches[selected_source_path], model)
+    loss_function = _create_loss_function_modelopt(
+        loss_mask,
+        model,
+        check_for_nan_in_loss=state.cfg.rerun_state_machine.check_for_nan_in_loss,
+        check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
+    )
+    return output, loss_function
+
+
 def zero_weighted_source_forward_step(
     state: GlobalState,
     source_batches: dict[str, _GPTBatch],
@@ -217,7 +249,25 @@ def zero_weighted_source_forward_step(
         blend_weights,
         return_schedule_plan,
     )
-    return output_tensor, partial(_zero_weighted_loss, loss_function)
+    return output_tensor, partial(_zero_loss, loss_function)
+
+
+def zero_sampled_source_forward_step(
+    state: GlobalState,
+    source_batches: dict[str, _GPTBatch],
+    selected_source_path: str,
+    model: GPTModel,
+    return_schedule_plan: bool,
+) -> tuple[torch.Tensor, partial]:
+    """Return a sampled-source graph with a zero loss for frozen-student DoGE runs."""
+    output_tensor, loss_function = sampled_source_forward_step(
+        state,
+        source_batches,
+        selected_source_path,
+        model,
+        return_schedule_plan,
+    )
+    return output_tensor, partial(_zero_loss, loss_function)
 
 
 # The functions below compute selected-scope gradients for the DoGE outer loop.
