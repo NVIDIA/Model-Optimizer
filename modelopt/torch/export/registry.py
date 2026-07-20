@@ -54,8 +54,18 @@ class ExportContext:
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] = field(default_factory=dict)
+    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
+    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # FSDP2 reshards + empties the cache per module during export, so data_ptr()s are
+        # recycled and the data_ptr-keyed dedup falsely aliases distinct weights. Disable it;
+        # ties are still handled by the _tied_weights_keys drop + final postprocess dedup.
+        from modelopt.torch.utils.distributed import is_fsdp2_model
+
+        if is_fsdp2_model(self.model):
+            self.tied_cache = None
+            self.moe_tied_cache = None
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
