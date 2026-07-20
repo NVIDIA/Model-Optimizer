@@ -72,12 +72,15 @@ torchrun \
     --nproc_per_node=$GPUS_PER_NODE \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    examples/llm_ptq/hf_ptq.py \
+    examples/hf_ptq/hf_ptq.py \
         --pyt_ckpt_path <model> \
-        --qformat <format> \
+        --recipe <recipe> \
         --export_path <output> \
         --use_fsdp2
 ```
+
+`--recipe` is the maintained entry point (e.g. `general/ptq/nvfp4_default-kv_fp8_cast`); see the
+Recipe-based Quantization section of `examples/hf_ptq/README.md` for the format and built-in names.
 
 When the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
 
