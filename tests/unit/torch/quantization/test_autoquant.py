@@ -461,6 +461,33 @@ def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypa
     assert searched_model.mlp.get_hparam("quant_recipe").active == QuantRecipe(mtq.FP8_DEFAULT_CFG)
 
 
+def test_auto_quantize_rejects_infeasible_resolved_module_search_space(monkeypatch):
+    def unexpected_calibration(*args, **kwargs):
+        pytest.fail("infeasible search should fail before calibration")
+
+    monkeypatch.setattr(model_quant, "calibrate", unexpected_calibration)
+    model = TransformerBlock()
+
+    with pytest.raises(ValueError, match=r"minimum achievable effective bits is 8\.0000"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*"],
+                    "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+
 def test_auto_quantize_module_search_space_cannot_split_runtime_group():
     model = TransformerBlock()
 
@@ -599,7 +626,7 @@ def test_auto_quantize_disable_layers():
 
     best_model, search_history = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 5.0},
+        constraints={"effective_bits": 8.0},
         quantization_formats=[
             mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
             mtq.INT8_DEFAULT_CFG,
@@ -622,7 +649,7 @@ def test_auto_quantize_disabled_layers_no_poison():
 
     best_model, _ = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 5.0},
+        constraints={"effective_bits": 8.0},
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -1045,6 +1072,86 @@ def test_auto_quantize_calibration_only_checkpoint_validates_module_search_space
                     "allow_no_quant": False,
                 }
             ],
+            data_loader=[resumed_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("initial_disabled", "initial_excluded", "resumed_disabled", "resumed_excluded"),
+    [
+        (["*mlp*"], None, ["*o_proj*"], None),
+        (None, ["*mlp*"], None, ["*o_proj*"]),
+    ],
+    ids=["disabled-layers", "cost-exclusions"],
+)
+def test_auto_quantize_calibration_checkpoint_validates_resolved_search_setup(
+    tmp_path,
+    monkeypatch,
+    initial_disabled,
+    initial_excluded,
+    resumed_disabled,
+    resumed_excluded,
+):
+    checkpoint_path = str(tmp_path / "autoquant_calibration_only_checkpoint.pth")
+    original_estimate_scores = AutoQuantizeGradientSearcher.estimate_sensitivity_scores
+
+    def interrupt_after_calibration(self):
+        raise RuntimeError("interrupt after calibration")
+
+    def constraints(excluded_patterns):
+        result = {"effective_bits": 8.0}
+        if excluded_patterns is not None:
+            result["cost"] = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: excluded_patterns}
+        return result
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        interrupt_after_calibration,
+    )
+    model = TransformerBlock()
+    with pytest.raises(RuntimeError, match="interrupt after calibration"):
+        mtq.auto_quantize(
+            model,
+            constraints=constraints(initial_excluded),
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            disabled_layers=initial_disabled,
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    saved = safe_load(checkpoint_path)
+    assert saved["quantizer_states"]
+    assert saved["resolved_search_setup_signature"]
+    assert not saved["candidate_stats"]
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        original_estimate_scores,
+    )
+    resumed_model = TransformerBlock()
+    with pytest.raises(ValueError, match="resolved search setup does not match"):
+        mtq.auto_quantize(
+            resumed_model,
+            constraints=constraints(resumed_excluded),
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            disabled_layers=resumed_disabled,
             data_loader=[resumed_model.get_input()],
             forward_step=lambda model, batch: model(batch),
             loss_func=lambda output, data: output.sum(),

@@ -408,6 +408,17 @@ class QuantRecipeHparam(Hparam):
         self._apply_quantizer_choice(active)
 
     @property
+    def solver_choices(self) -> list[QuantRecipe]:
+        """Return choices exposed to the LP after removing an internal no-quant baseline."""
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        recipes = []
+        for recipe in self.choices:
+            assert isinstance(recipe, QuantRecipe)
+            if self.allow_no_quant or recipe != no_quant_recipe:
+                recipes.append(recipe)
+        return recipes
+
+    @property
     def importance(self) -> dict:
         """Raises an error since this is not a useful abstraction for AutoQuantize."""
         raise NotImplementedError
@@ -576,6 +587,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "cost_denominator": None,
             "quantization_formats_signature": None,
             "module_search_space_signature": None,
+            "resolved_search_setup_signature": None,
             "disabled_layers": None,
             "candidate_stats": defaultdict(dict),
             "quantizer_states": {},
@@ -828,6 +840,58 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             f"{search_recipes[0]} whose num_bits = {search_recipes[0].num_bits}."
         )
 
+    def _resolved_search_setup_signature(self, quant_recipe_hparams) -> tuple:
+        """Fingerprint the runtime groups, choices, scoring boundaries, and cost weights."""
+        module_names = {id(module): name for name, module in self.model.named_modules()}
+        signature = []
+        for hparam in quant_recipe_hparams:
+            replay_attrs = tuple(
+                (module_name, tuple(attrs))
+                for module_name, attrs in sorted(hparam.quant_module_replay_attrs.items())
+            )
+            score_module_names = tuple(
+                sorted(
+                    module_names.get(id(module), type(module).__qualname__)
+                    for module in hparam.score_modules
+                )
+            )
+            signature.append(
+                (
+                    hparam.name,
+                    tuple(sorted(hparam.quant_module_names)),
+                    replay_attrs,
+                    score_module_names,
+                    tuple(sorted(recipe.checkpoint_signature for recipe in hparam.solver_choices)),
+                    hparam.allow_no_quant,
+                    float(hparam.cost_weight),
+                )
+            )
+        return tuple(sorted(signature, key=repr))
+
+    def _verify_resolved_constraint(self, quant_recipe_hparams) -> None:
+        """Fail before calibration when resolved per-group choices cannot meet the budget."""
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        uncompressed_cost = sum(hparam.get_cost(no_quant_recipe) for hparam in quant_recipe_hparams)
+        if uncompressed_cost <= 0:
+            raise ValueError(
+                "AutoQuantize cost denominator is zero after applying the resolved cost "
+                "constraints. Include at least one quantizable module in the cost model."
+            )
+
+        minimum_cost = sum(
+            min(hparam.get_cost(recipe) for recipe in hparam.solver_choices)
+            for hparam in quant_recipe_hparams
+        )
+        target_cost = uncompressed_cost * self._get_formatted_weight_compression_constraint()
+        tolerance = uncompressed_cost * 1e-12
+        if minimum_cost > target_cost + tolerance:
+            minimum_effective_bits = minimum_cost / uncompressed_cost * 16
+            raise ValueError(
+                f"The effective_bits target {self.constraints['effective_bits']} is infeasible "
+                "for the resolved module search spaces. The minimum achievable effective bits "
+                f"is {minimum_effective_bits:.4f}."
+            )
+
     @abstractmethod
     def estimate_sensitivity_scores(self) -> None:
         """Estimate sensitivity scores and track them with Hparam."""
@@ -841,13 +905,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             formats, scores, costs = [], [], []
             prev_score = float("inf")
-            for recipe in hparam.choices:
-                if recipe == no_quant_recipe and not hparam.allow_no_quant:
-                    continue
+            for recipe in hparam.solver_choices:
                 formats.append(recipe)
 
-                score = hparam.get_score(recipe)  # type: ignore [arg-type]
-                cost = hparam.get_cost(recipe)  # type: ignore [arg-type]
+                score = hparam.get_score(recipe)
+                cost = hparam.get_cost(recipe)
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
@@ -973,15 +1035,38 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             module_search_spaces,
         )
 
-        QuantRecipe.disable_folding_pqs_to_weights()
-
-        # Iterate over the search recipes and calibrate the quantizers for each recipe
-        calibrated_new = False
         quant_recipe_hparams = [
             hparam
             for _, hparam in named_hparams(self.model, unique=True)
             if isinstance(hparam, QuantRecipeHparam)
         ]
+        resolved_search_setup_signature = self._resolved_search_setup_signature(
+            quant_recipe_hparams
+        )
+        restored_resolved_search_setup_signature = getattr(
+            self, "resolved_search_setup_signature", None
+        )
+        if has_restored_calibration_or_scores and restored_resolved_search_setup_signature is None:
+            raise ValueError(
+                "Checkpoint does not record its resolved search setup and cannot be safely "
+                "reused. Use a different checkpoint path."
+            )
+        if (
+            has_restored_calibration_or_scores
+            and restored_resolved_search_setup_signature != resolved_search_setup_signature
+        ):
+            raise ValueError(
+                "Checkpoint resolved search setup does not match the current runtime groups, "
+                "allowed choices, scoring boundaries, or cost weights. Use a different "
+                "checkpoint path."
+            )
+        self.resolved_search_setup_signature = resolved_search_setup_signature
+        self._verify_resolved_constraint(quant_recipe_hparams)
+
+        QuantRecipe.disable_folding_pqs_to_weights()
+
+        # Iterate over the search recipes and calibrate the quantizers for each recipe
+        calibrated_new = False
         try:
             for recipe in search_recipes:
                 if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
