@@ -1,3 +1,9 @@
+# Puzzletron
+
+For a step-by-step tutorial on the core Puzzletron algorithm, see below. For advanced campaigns with production-scale models, 
+AutoModel-based distributed training, and nested models, see the [experimental Puzzletron
+branch](https://github.com/NVIDIA/Model-Optimizer/tree/puzzletron_v2/examples/puzzletron).
+
 # Puzzletron Algorithm Tutorial
 
 This tutorial demonstrates how to compress large language models using the puzzletron algorithm based on the [Puzzle paper](https://arxiv.org/abs/2411.19146).
