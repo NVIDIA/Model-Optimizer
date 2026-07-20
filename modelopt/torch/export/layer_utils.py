@@ -18,6 +18,7 @@
 Some of the logics in this file are empirical and needs constant update if exceptions occur.
 """
 
+import functools
 from warnings import warn
 
 import torch
@@ -690,6 +691,12 @@ def _is_qkv(name) -> bool:
 
 def _get_hidden_act(act_func) -> str:
     """Returns the name of the hidden activation function based on ACT2FN."""
+    if act_func is None:
+        raise ValueError(
+            "Activation function evaluated to None. The exporter must not silently "
+            "generate a linear, non-activated model."
+        )
+
     if isinstance(act_func, str):
         return act_func
 
@@ -710,7 +717,29 @@ def _get_hidden_act(act_func) -> str:
         elif isinstance(act_func, func):
             return name
 
-    return act_func.__name__
+    # Unroll functools.partial wrappers to expose the underlying __name__
+    if isinstance(act_func, functools.partial):
+        func_to_check = act_func.func
+    else:
+        func_to_check = act_func
+
+    if hasattr(func_to_check, "__name__"):
+        name = func_to_check.__name__
+        if name == "<lambda>":
+            raise ValueError(
+                "Activation function is a lambda without a concrete name. "
+                "Cannot serialize to a Hugging Face configuration string."
+            )
+
+        # Strict validation: If it has a name, it MUST be recognized.
+        if name in ACT2FN or name in ["squared_relu", "swiglu", "gelu_fast", "gelu_new"]:
+            return name
+
+    raise ValueError(
+        f"Megatron activation function '{act_func}' is missing from our Hugging Face "
+        f"translation dictionary (ACT2FN) and cannot be mapped. Exporter halted to "
+        f"prevent silent linear degradation."
+    )
 
 
 def build_mlp_config(
@@ -874,15 +903,44 @@ def build_mlp_config(
     if hidden_act is None:
         if hasattr(module, "activation"):
             hidden_act = module.activation
+            if hidden_act is None:
+                raise ValueError(f"Activation for {module} evaluated to None.")
         elif hasattr(module, "activation_func"):
             # MCore activation_func can be swiglu (gated silu) or squared_relu.
-            hidden_act = module.activation_func.__name__.replace("_", "-")
+            act_func = getattr(module, "activation_func", None)
+
+            if act_func is None:
+                raise ValueError(
+                    f"Megatron activation_func for {module} evaluated to None. This usually "
+                    f"happens when Megatron-Bridge config cleanup removes non-pickleable "
+                    f"callables. Halted export to prevent silently generating a linear model."
+                )
+
+            # Unwrap partials to check name if possible
+            func_to_check = act_func.func if isinstance(act_func, functools.partial) else act_func
+
+            if not hasattr(func_to_check, "__name__"):
+                raise ValueError(
+                    f"Megatron activation function {act_func} for {module} is missing a "
+                    f"__name__ attribute and cannot be mapped to an HF equivalent."
+                )
+
+            name = func_to_check.__name__
+            if name == "<lambda>":
+                raise ValueError("Activation function is a lambda without a concrete name.")
+
+            hidden_act = name.replace("_", "-")
             if hidden_act in ["glu", "silu"]:
                 hidden_act = "swiglu" if decoder_type == "gpt" else "silu"
         else:
             for act in ["act", "act_fn", "activation_fn"]:
                 if hasattr(module, act):
-                    hidden_act = _get_hidden_act(getattr(module, act)).split("_")[0]
+                    act_func = getattr(module, act, None)
+                    if act_func is None:
+                        raise ValueError(
+                            f"Activation attribute '{act}' on {module} evaluated to None."
+                        )
+                    hidden_act = _get_hidden_act(act_func).split("_")[0]
                     break
 
     if hidden_act is None and decoder_type == "qwen":

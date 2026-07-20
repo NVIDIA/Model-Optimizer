@@ -113,3 +113,44 @@ def test_get_expert_linear_names_mixtral():
 
 def test_get_expert_linear_names_nemotron():
     assert get_expert_linear_names(_FakeNemotronHMOE()) == ["up_proj", "down_proj"]
+
+
+# ---------------------------------------------------------------------------
+# _get_hidden_act tests (activation_func=None and strict validation)
+# ---------------------------------------------------------------------------
+
+import functools
+
+import pytest
+
+from modelopt.torch.export.layer_utils import _get_hidden_act
+
+
+class TestGetHiddenActStrictValidation:
+    def test_get_hidden_act_none_raises_value_error(self):
+        with pytest.raises(ValueError, match="Activation function evaluated to None"):
+            _get_hidden_act(None)
+
+    def test_get_hidden_act_functools_partial_unwrapped(self):
+        # We need a mock function that has a recognized __name__
+        def silu():
+            pass
+
+        partial_act = functools.partial(silu, inplace=True)
+        # Should unwrap and see "silu" which maps to "silu"
+        result = _get_hidden_act(partial_act)
+        assert result == "silu"
+
+    def test_get_hidden_act_lambda_raises_value_error(self):
+        lambda_act = lambda x: x  # noqa: E731
+        with pytest.raises(ValueError, match="lambda without a concrete name"):
+            _get_hidden_act(lambda_act)
+
+    def test_get_hidden_act_unmapped_raises_value_error(self):
+        def custom_unmapped_func():
+            pass
+
+        with pytest.raises(
+            ValueError, match="missing from our Hugging Face translation dictionary"
+        ):
+            _get_hidden_act(custom_unmapped_func)
