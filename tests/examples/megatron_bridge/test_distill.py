@@ -62,8 +62,10 @@ def test_distill_vlm(tmp_path, num_gpus):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
     #
-    # Distillation runs under tensor parallelism (sequence parallelism is disabled for VLMs -- see
-    # distill.py -- pending the standalone-LM SP fix in the nemo:26.08 container).
+    # Short-term WAR: distill under data parallelism (TP=PP=1, so DP=num_gpus)
+    # TODO: switch to tp_size=num_gpus once the standalone-LM SP fix lands in the nemo:26.08 container.
+    tp_size = 1
+    pp_size = 1
     vlm_hf_path, teacher_model = create_tiny_qwen3_5_vl_dir(
         tmp_path,
         with_tokenizer=True,
@@ -95,8 +97,8 @@ def test_distill_vlm(tmp_path, num_gpus):
         student_hf_path=vlm_hf_path,
         teacher_hf_path=vlm_hf_path,
         output_dir=distill_output_dir,
-        tp_size=num_gpus,
-        pp_size=1,
+        tp_size=tp_size,
+        pp_size=pp_size,
         seq_length=16,
         mbs=1,
         gbs=4,
@@ -112,14 +114,13 @@ def test_distill_vlm(tmp_path, num_gpus):
     assert megatron_ckpt.exists()
 
     # Separately convert the distilled Megatron checkpoint to HF with the standalone export script
-    # TODO: VLMs disable sequence parallelism, so tensor parallelism can't be used here.
-    #     Flip to tp_size=num_gpus in nemo:26.08 container
     export_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "export_distilled_megatron_to_hf.py"],
         student_hf_path=vlm_hf_path,
         megatron_path=megatron_ckpt,
         hf_export_path=distilled_hf_path,
-        pp_size=num_gpus,
+        tp_size=tp_size,
+        pp_size=pp_size,
     )
     run_example_command(export_cmd_parts, example_path="megatron_bridge")
 
