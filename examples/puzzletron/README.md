@@ -6,6 +6,35 @@ mixed-integer search, evaluation, and optional knowledge distillation. Each
 stage writes resumable artifacts and contributes to one self-contained HTML
 campaign report.
 
+## Table of Contents
+
+- [End-to-end tested models](#end-to-end-tested-models)
+- [Installation](#installation)
+- [Run with an agent](#run-with-an-agent)
+- [Configuration](#configuration)
+- [Run the complete pipeline manually](#run-the-complete-pipeline-manually)
+- [Run step by step](#run-step-by-step)
+- [Online evaluation and downstream stages](#online-evaluation-and-downstream-stages)
+- [Reports](#reports)
+
+## End-to-end tested models
+
+The configs below are the exact current-code entry points for the completed
+campaigns. Each verified report is a self-contained HTML file that embeds all
+sanity-check outputs, stage manifests, and evaluation results — they can be
+100s of MB. Download them to disk and open locally rather than previewing in a
+browser tab.
+
+The most important section in every report is **Zero-shot Evaluation**, which
+compares the pruned candidate solutions directly against the full teacher model
+across multiple benchmarks. Use that section first to assess accuracy trade-offs
+before inspecting the serving-performance or sanity-check sections.
+
+| Model | Hugging Face model | Full experiment config | Verified report |
+|---|---|---|---|
+| Nemotron-3 Nano 30B-A3B | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | [default.yaml](configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) | [HTML report](reports/nemotron3_nano_30b_a3b.html) |
+| Qwen3p5_9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
+
 ## Installation
 
 Puzzletron uses one Python environment for ModelOpt, the patched vLLM fork,
@@ -404,12 +433,3 @@ are reused and only affected sections rebuild. Use `--rebuild-section aiperf`
 (repeatable) for selected sections, or `--no-cache` for an intentional full
 rebuild.
 
-## End-to-end tested models
-
-The configs below are the exact current-code entry points for the completed
-campaigns. Reports are stored through Git LFS.
-
-| Model | Hugging Face model | Full experiment config | Verified report |
-|---|---|---|---|
-| Nemotron-3 Nano 30B-A3B | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | [default.yaml](configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) | [HTML report](reports/nemotron3_nano_30b_a3b.html) |
-| Qwen3p5_9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
