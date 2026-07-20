@@ -8,11 +8,19 @@
 #   task_4 (eval):     TRT-LLM evaluation of the exported checkpoint.
 #
 # Requirements:
-#   - Container must include the Megatron-LM offline-logits-kd branch
-#     (github.com/AAnoosheh/Megatron-LM @ aanoosheh/offline-logits-kd).
-#     Set PYTHONPATH=/nemo_run/code/modules/Megatron-LM to override the
-#     container's installed Megatron and use the submodule's version.
-#   - ModelOpt must include the MambaMixer conv1d compat fix (PR #1730).
+#   - nvcr.io/nvidia/nemo:26.06 (ships nvidia-resiliency-ext>=0.6.0, needed
+#     by task_1's --async-save + --use-persistent-ckpt-worker). Tasks 0-3 pin
+#     this container explicitly since the launcher's default slurm_factory
+#     container is a TensorRT-LLM image with no Megatron-LM/NeMo deps.
+#   - GOTCHA: nemo containers install ModelOpt into a venv at /opt/venv, whose
+#     site-packages precede /usr/local on sys.path, so the default
+#     modelopt_install_path is never consulted. Point it at the venv
+#     site-packages so the mounted (submodule-pinned) modelopt actually
+#     overrides the container's.
+#
+# MMLU_LOWER_BOUND=0.0 on task_0 is a temporary bypass — the MMLU gate needs
+# revisiting for this container/branch pairing before this pipeline is used
+# for production runs (see OfflineKD MMLU accuracy note in project history).
 #
 # Usage:
 #   source .env-slurm
@@ -24,17 +32,19 @@ pipeline:
   task_0:
     script: common/megatron_lm/quantize/quantize.sh
     args:
-    - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
-    - --calib-size 32
-    - --calib-max-sequence-length 512
+      - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+      - --calib-size 32
+      - --calib-max-sequence-length 512
     environment:
-    - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-    - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
-    - EP: 4
-    - MMLU_LOWER_BOUND: 0.0
-    - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
+      - EP: 4
+      - MMLU_LOWER_BOUND: 0.0
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
     slurm_config:
       _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
       ntasks_per_node: 8
       gpus_per_node: 8
@@ -42,118 +52,134 @@ pipeline:
   task_1:
     script: common/megatron_lm/train/sft.sh
     args:
-    - --seq-length 8192 --max-position-embeddings 8192
-    - --train-samples 1024
-    - --lr-decay-samples 256
-    - --lr-warmup-samples 128
-    - --sft
-    - --sft-tokenizer-prompt-format identity
-    - --tokenizer-type SFTTokenizer
-    - --no-create-attention-mask-in-dataloader
-    - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
-    - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
-    - --micro-batch-size 1
-    - --attention-dropout 0.0
-    - --hidden-dropout 0.0
-    - --no-check-for-nan-in-loss-and-grad
-    - --recompute-granularity selective
-    - --recompute-modules layernorm moe
-    - --lr 5.0e-5
-    - --min-lr 5.0e-6
-    - --lr-decay-style cosine
-    - --clip-grad 1.0
-    - --weight-decay 0.0
-    - --adam-beta1 0.9
-    - --adam-beta2 0.95
-    - --init-method-std 0.010
-    - --use-distributed-optimizer
-    - --eval-iters 4
-    - --eval-interval 1000
-    - --save-interval 1000
-    - --log-interval 100
-    - --freeze-all-layers
-    - --logits-save-top-k 16
-    - --logits-save-dir /scratchspace/logits
-    - --async-save
-    - --use-persistent-ckpt-worker
+      - --seq-length 8192 --max-position-embeddings 8192
+      - --train-samples 1024
+      - --lr-decay-samples 256
+      - --lr-warmup-samples 128
+      - --sft
+      - --sft-tokenizer-prompt-format identity
+      - --tokenizer-type SFTTokenizer
+      - --no-create-attention-mask-in-dataloader
+      - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
+      - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
+      - --micro-batch-size 1
+      - --attention-dropout 0.0
+      - --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      - --lr 5.0e-5
+      - --min-lr 5.0e-6
+      - --lr-decay-style cosine
+      - --clip-grad 1.0
+      - --weight-decay 0.0
+      - --adam-beta1 0.9
+      - --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      - --eval-iters 4
+      - --eval-interval 1000
+      - --save-interval 1000
+      - --log-interval 100
+      - --freeze-all-layers
+      - --logits-save-top-k 16
+      - --logits-save-dir /scratchspace/logits
+      - --async-save
+      - --use-persistent-ckpt-worker
     environment:
-    - DP: 1
-    - CP: 2
-    - TP: 1
-    - PP: 1
-    - EP: 8
-    - ETP: 1
-    - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-    - MLM_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
-    - MLM_DATA_ARGS: --sft
-    - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
+      - DP: 1
+      - CP: 2
+      - TP: 1
+      - PP: 1
+      - EP: 8
+      - ETP: 1
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
+      - MLM_DATA_ARGS: --sft
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
     slurm_config:
       _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 2
+      ntasks_per_node: 8
+      gpus_per_node: 8
 
   task_2:
     script: common/megatron_lm/train/sft.sh
     args:
-    - --seq-length 8192 --max-position-embeddings 8192
-    - --train-samples 1024
-    - --lr-decay-samples 256
-    - --lr-warmup-samples 128
-    - --sft
-    - --sft-tokenizer-prompt-format identity
-    - --tokenizer-type SFTTokenizer
-    - --no-create-attention-mask-in-dataloader
-    - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
-    - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
-    - --micro-batch-size 1
-    - --global-batch-size 8
-    - --attention-dropout 0.0
-    - --hidden-dropout 0.0
-    - --no-check-for-nan-in-loss-and-grad
-    - --recompute-granularity selective
-    - --recompute-modules layernorm moe
-    - --lr 5.0e-5
-    - --min-lr 5.0e-6
-    - --lr-decay-style cosine
-    - --clip-grad 1.0
-    - --weight-decay 0.0
-    - --adam-beta1 0.9
-    - --adam-beta2 0.95
-    - --init-method-std 0.010
-    - --use-distributed-optimizer
-    - --eval-iters 4
-    - --eval-interval 1000
-    - --save-interval 1000
-    - --log-interval 100
-    - --sequence-parallel
-    - --logits-load-dir /scratchspace/logits
+      - --seq-length 8192 --max-position-embeddings 8192
+      - --train-samples 1024
+      - --lr-decay-samples 256
+      - --lr-warmup-samples 128
+      - --sft
+      - --sft-tokenizer-prompt-format identity
+      - --tokenizer-type SFTTokenizer
+      - --no-create-attention-mask-in-dataloader
+      - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
+      - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
+      - --micro-batch-size 1
+      - --global-batch-size 8
+      - --attention-dropout 0.0
+      - --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      - --lr 5.0e-5
+      - --min-lr 5.0e-6
+      - --lr-decay-style cosine
+      - --clip-grad 1.0
+      - --weight-decay 0.0
+      - --adam-beta1 0.9
+      - --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      - --eval-iters 4
+      - --eval-interval 1000
+      - --save-interval 1000
+      - --log-interval 100
+      - --sequence-parallel
+      - --logits-load-dir /scratchspace/logits
     environment:
-    - DP: 1
-    - CP: 2
-    - TP: 2
-    - PP: 1
-    - EP: 8
-    - ETP: 1
-    - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-    - MLM_DATA_ARGS: --sft
-    - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
+      - DP: 1
+      - CP: 2
+      - TP: 2
+      - PP: 1
+      - EP: 8
+      - ETP: 1
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_DATA_ARGS: --sft
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
     slurm_config:
       _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 2
+      ntasks_per_node: 8
+      gpus_per_node: 8
 
   task_3:
     script: common/megatron_lm/export/export.sh
     environment:
-    - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-    - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-    - PP: 4
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - EXPORT_DIR: /scratchspace/export
+      - PP: 4
     slurm_config:
       _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
       ntasks_per_node: 8
       gpus_per_node: 8
 
   task_4:
     script: common/tensorrt_llm/eval.sh
+    environment:
+      - HF_MODEL_CKPT: /scratchspace/export
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
