@@ -27,7 +27,7 @@ from __future__ import annotations
 import argparse
 import csv
 import shlex
-import subprocess
+import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,7 +145,7 @@ def _run_driver(
     benchmarks_dir: Path, testlist: Path, output: Path, driver_log: Path
 ) -> tuple[int, list[str]]:
     # This invokes the explicitly selected FlashInfer checkout without a shell.
-    process = subprocess.Popen(
+    process = subprocess.Popen(  # nosec B603
         [
             sys.executable,
             "flashinfer_benchmark.py",
