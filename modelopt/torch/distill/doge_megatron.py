@@ -57,6 +57,7 @@ class DoGEForwardStep:
         min_blend_weight: float = 0.0,
         freeze_student: bool = False,
         freeze_blend: bool = False,
+        schedule_end_data_paths: list[str] | None = None,
         virtual_step_candidate_weights: list[list[float]] | None = None,
         virtual_step_lr: float | None = None,
         virtual_step_num_steps: int = 1,
@@ -75,6 +76,9 @@ class DoGEForwardStep:
                 update.
             freeze_student: Log DoGE scores without updating student weights.
             freeze_blend: Log candidate blend-weight updates without applying them.
+            schedule_end_data_paths: Optional final training-data blend in Megatron WEIGHT PATH
+                format. When provided, DoGE linearly interpolates from ``data_paths`` to this
+                blend over the training run and skips adaptive blend updates.
             virtual_step_candidate_weights: Optional source-order candidate blend weights used
                 for frozen-model/frozen-blend virtual-step diagnostics.
             virtual_step_lr: Learning rate for virtual selected-parameter diagnostic steps.
@@ -91,6 +95,11 @@ class DoGEForwardStep:
         self.trajectory_path = Path(output_dir) / "doge_weights.jsonl"
         self.freeze_student = freeze_student
         self.freeze_blend = freeze_blend
+        self.schedule_start_iteration: int | None = None
+        self.schedule_start_blend_weights = dict(self.blend_weights)
+        self.schedule_end_blend_weights = _normalize_schedule_end_weights(
+            schedule_end_data_paths, tuple(self.blend_weights)
+        )
         self.virtual_step_candidate_blend_weights = _normalize_virtual_step_candidate_weights(
             virtual_step_candidate_weights, tuple(self.blend_weights)
         )
@@ -187,6 +196,7 @@ class DoGEForwardStep:
                 self.target_data_paths,
             )
 
+        self._apply_scheduled_blend_weights(state)
         source_batches, target_batch = _next_doge_batches(state, model, self.doge_data_iterators)
 
         # Outer loop: use the target batch to score each source batch and propose a data-blend
@@ -219,7 +229,7 @@ class DoGEForwardStep:
         candidate_blend_weights = dict(
             self.updater.update(self.blend_weights, alignment_result.scores)
         )
-        if not self.freeze_blend:
+        if self.schedule_end_blend_weights is None and not self.freeze_blend:
             self.blend_weights = candidate_blend_weights
         self.write_trajectory_record(
             state.train_state.step + 1,
@@ -251,6 +261,33 @@ class DoGEForwardStep:
             return_schedule_plan,
         )
 
+    def _apply_scheduled_blend_weights(self, state: GlobalState) -> None:
+        """Update ``blend_weights`` from the configured linear schedule, if any."""
+        if self.schedule_end_blend_weights is None:
+            return
+
+        current_iteration = state.train_state.step + 1
+        if self.schedule_start_iteration is None:
+            self.schedule_start_iteration = current_iteration
+
+        end_iteration = state.cfg.train.train_iters
+        if current_iteration >= end_iteration or end_iteration <= self.schedule_start_iteration:
+            progress = 1.0
+        else:
+            progress = (current_iteration - self.schedule_start_iteration) / (
+                end_iteration - self.schedule_start_iteration
+            )
+
+        scheduled_weights = {
+            path: (1.0 - progress) * self.schedule_start_blend_weights[path]
+            + progress * self.schedule_end_blend_weights[path]
+            for path in self.blend_weights
+        }
+        total_weight = sum(scheduled_weights.values())
+        self.blend_weights = {
+            path: weight / total_weight for path, weight in scheduled_weights.items()
+        }
+
 
 def _normalize_virtual_step_candidate_weights(
     candidate_weights: list[list[float]] | None, source_paths: tuple[str, ...]
@@ -277,3 +314,19 @@ def _normalize_virtual_step_candidate_weights(
             path: weight / total_weight for path, weight in zip(source_paths, weights)
         }
     return candidates
+
+
+def _normalize_schedule_end_weights(
+    schedule_end_data_paths: list[str] | None, source_paths: tuple[str, ...]
+) -> dict[str, float] | None:
+    """Return normalized schedule-end weights keyed by the initial source paths."""
+    if schedule_end_data_paths is None:
+        return None
+
+    weights = normalize_data_path_weights(schedule_end_data_paths)
+    if set(weights) != set(source_paths):
+        raise ValueError(
+            "--doge_schedule_end_data_paths must contain exactly the same source paths as "
+            "--data_paths."
+        )
+    return {path: weights[path] for path in source_paths}

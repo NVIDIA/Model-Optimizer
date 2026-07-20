@@ -230,6 +230,15 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Log candidate DoGE blend weights without applying them",
     )
     doge.add_argument(
+        "--doge_schedule_end_data_paths",
+        nargs="+",
+        help=(
+            "Optional final blend in WEIGHT PATH format. When provided, DoGE linearly "
+            "interpolates from --data_paths to this blend over the training run and does not "
+            "apply adaptive blend updates."
+        ),
+    )
+    doge.add_argument(
         "--doge_virtual_step_candidate_weights",
         action="append",
         nargs="+",
@@ -377,6 +386,7 @@ def main(args: argparse.Namespace) -> None:
         min_blend_weight=args.doge_min_blend_weight,
         freeze_student=args.doge_freeze_student,
         freeze_blend=args.doge_freeze_blend,
+        schedule_end_data_paths=args.doge_schedule_end_data_paths,
         virtual_step_candidate_weights=args.doge_virtual_step_candidate_weights,
         virtual_step_lr=(
             args.doge_virtual_step_lr
