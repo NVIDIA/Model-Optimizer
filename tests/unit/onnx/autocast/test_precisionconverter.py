@@ -2034,7 +2034,9 @@ def test_custom_op_mode_uses_schema_shapes_for_standard_rank_changes():
     propagated = converter._propagate_types_shapes_custom_ops(model)
 
     value_infos = {vi.name: vi for vi in [*propagated.graph.value_info, *propagated.graph.output]}
-    assert [dim.dim_value for dim in value_infos["gather_y_pre_cast"].type.tensor_type.shape.dim] == []
+    assert [
+        dim.dim_value for dim in value_infos["gather_y_pre_cast"].type.tensor_type.shape.dim
+    ] == []
     assert [
         dim.dim_value for dim in value_infos["unsqueeze_y_pre_cast"].type.tensor_type.shape.dim
     ] == [1, 4]

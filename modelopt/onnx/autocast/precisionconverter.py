@@ -547,9 +547,7 @@ class PrecisionConverter:
                     f"Cannot restore public graph {io_field} metadata because names changed: "
                     f"{original_names} -> {current_names}"
                 )
-            for current_value, original_value in zip(
-                current_values, original_values, strict=True
-            ):
+            for current_value, original_value in zip(current_values, original_values, strict=True):
                 if (
                     current_value.type.tensor_type.elem_type
                     != original_value.type.tensor_type.elem_type
