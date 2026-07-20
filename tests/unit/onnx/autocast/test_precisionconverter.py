@@ -1974,3 +1974,73 @@ def test_custom_op_mode_preserves_scalar_gathernd_shape():
 
     output = next(vi for vi in propagated.graph.output if vi.name == "selected_scalar")
     assert [dim.dim_value for dim in output.type.tensor_type.shape.dim] == []
+
+
+def test_custom_op_mode_uses_schema_shapes_for_standard_rank_changes():
+    gather_data = helper.make_tensor_value_info("gather_data", TensorProto.FLOAT, [4])
+    unsqueeze_data = helper.make_tensor_value_info("unsqueeze_data", TensorProto.FLOAT, [4])
+    plugin_in = helper.make_tensor_value_info("plugin_in", TensorProto.FLOAT, [1])
+    gather_index = numpy_helper.from_array(np.array(0, dtype=np.int64), "gather_index")
+    unsqueeze_axes = numpy_helper.from_array(np.array([0], dtype=np.int64), "unsqueeze_axes")
+    gather_node = helper.make_node(
+        "Gather", ["gather_data", "gather_index"], ["gather_y_pre_cast"], name="gather"
+    )
+    gather_cast = helper.make_node(
+        "Cast", ["gather_y_pre_cast"], ["gather_y"], name="gather_cast", to=TensorProto.FLOAT
+    )
+    unsqueeze_node = helper.make_node(
+        "Unsqueeze",
+        ["unsqueeze_data", "unsqueeze_axes"],
+        ["unsqueeze_y_pre_cast"],
+        name="unsqueeze",
+    )
+    unsqueeze_cast = helper.make_node(
+        "Cast",
+        ["unsqueeze_y_pre_cast"],
+        ["unsqueeze_y"],
+        name="unsqueeze_cast",
+        to=TensorProto.FLOAT,
+    )
+    custom_node = helper.make_node(
+        "FakePlugin", ["plugin_in"], ["plugin_y"], name="plugin", domain="test.plugins"
+    )
+    graph = helper.make_graph(
+        [gather_node, gather_cast, unsqueeze_node, unsqueeze_cast, custom_node],
+        "custom_op_standard_rank_changes",
+        [gather_data, unsqueeze_data, plugin_in],
+        [
+            helper.make_tensor_value_info("gather_y", TensorProto.FLOAT, []),
+            helper.make_tensor_value_info("unsqueeze_y", TensorProto.FLOAT, [1, 4]),
+            helper.make_tensor_value_info("plugin_y", TensorProto.FLOAT, [1]),
+        ],
+        [gather_index, unsqueeze_axes],
+    )
+    model = helper.make_model(
+        graph,
+        producer_name="custom_op_standard_rank_changes",
+        opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("test.plugins", 1)],
+        ir_version=10,
+    )
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        custom_ops={"FakePlugin"},
+    )
+    propagated = converter._propagate_types_shapes_custom_ops(model)
+
+    value_infos = {vi.name: vi for vi in [*propagated.graph.value_info, *propagated.graph.output]}
+    assert [dim.dim_value for dim in value_infos["gather_y_pre_cast"].type.tensor_type.shape.dim] == []
+    assert [
+        dim.dim_value for dim in value_infos["unsqueeze_y_pre_cast"].type.tensor_type.shape.dim
+    ] == [1, 4]
+    assert [dim.dim_value for dim in value_infos["gather_y"].type.tensor_type.shape.dim] == []
+    assert [dim.dim_value for dim in value_infos["unsqueeze_y"].type.tensor_type.shape.dim] == [
+        1,
+        4,
+    ]
+    onnx.checker.check_model(propagated, full_check=True)

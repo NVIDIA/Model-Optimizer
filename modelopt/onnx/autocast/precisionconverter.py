@@ -139,6 +139,10 @@ class PrecisionConverter:
         self.original_network_io.update(
             {io.name: io.type.tensor_type.elem_type for io in self.model.graph.output}
         )
+        self.original_network_io_metadata = {
+            "input": [deepcopy(io) for io in self.model.graph.input],
+            "output": [deepcopy(io) for io in self.model.graph.output],
+        }
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
         self.trt_plugins = trt_plugins
@@ -276,6 +280,8 @@ class PrecisionConverter:
         # Remove redundant casts
         self._cleanup()
 
+        self._restore_original_io_metadata()
+
         self._sanity_check()
 
         return self.model
@@ -293,9 +299,20 @@ class PrecisionConverter:
         def _get_shape(tensor):
             if isinstance(tensor, gs.Constant):
                 return list(tensor.values.shape)
-            if not tensor.shape:
+            if tensor.shape is None:
                 return None
             return list(tensor.shape)
+
+        def _get_const_values(tensor):
+            if isinstance(tensor, gs.Constant):
+                return tensor.values
+            if tensor.inputs and tensor.inputs[0].op == "Constant":
+                return tensor.inputs[0].attrs["value"].values
+            return None
+
+        def _get_int_attr(node, attr_name, default):
+            value = node.attrs.get(attr_name, default)
+            return value if isinstance(value, int) else None
 
         def _infer_gathernd_op_shape(node):
             if node.op != "GatherND" or len(node.inputs) < 2:
@@ -315,6 +332,82 @@ class PrecisionConverter:
             if suffix_start > len(data_shape):
                 return None
             return indices_shape[:-1] + data_shape[suffix_start:]
+
+        def _infer_gather_op_shape(node):
+            if node.op != "Gather" or len(node.inputs) < 2:
+                return None
+
+            data_shape = _get_shape(node.inputs[0])
+            indices_shape = _get_shape(node.inputs[1])
+            if data_shape is None or indices_shape is None:
+                return None
+
+            axis = _get_int_attr(node, "axis", 0)
+            if axis is None:
+                return None
+            if axis < 0:
+                axis += len(data_shape)
+            if axis < 0 or axis >= len(data_shape):
+                return None
+
+            return data_shape[:axis] + indices_shape + data_shape[axis + 1 :]
+
+        def _infer_unsqueeze_op_shape(node):
+            if node.op != "Unsqueeze" or len(node.inputs) < 2:
+                return None
+
+            data_shape = _get_shape(node.inputs[0])
+            axes = _get_const_values(node.inputs[1])
+            if data_shape is None or axes is None:
+                return None
+
+            axes = [int(axis) for axis in np.asarray(axes).flatten()]
+            output_rank = len(data_shape) + len(axes)
+            normalized_axes = []
+            for axis in axes:
+                if axis < 0:
+                    axis += output_rank
+                if axis < 0 or axis >= output_rank:
+                    return None
+                normalized_axes.append(axis)
+
+            output_shape = list(data_shape)
+            for axis in sorted(normalized_axes):
+                output_shape.insert(axis, 1)
+            return output_shape
+
+        def _infer_shape_op_shape(node):
+            if node.op != "Shape" or not node.inputs:
+                return None
+
+            data_shape = _get_shape(node.inputs[0])
+            if data_shape is None:
+                return None
+
+            rank = len(data_shape)
+            start = _get_int_attr(node, "start", 0)
+            end = _get_int_attr(node, "end", rank)
+            if start is None or end is None:
+                return None
+            if start < 0:
+                start += rank
+            if end < 0:
+                end += rank
+            start = min(max(start, 0), rank)
+            end = min(max(end, 0), rank)
+            return [max(end - start, 0)]
+
+        def _infer_standard_op_shape(node):
+            for infer_shape in (
+                _infer_gathernd_op_shape,
+                _infer_gather_op_shape,
+                _infer_unsqueeze_op_shape,
+                _infer_shape_op_shape,
+            ):
+                shape = infer_shape(node)
+                if shape is not None:
+                    return shape
+            return None
 
         graph = gs.import_onnx(model)
         traversed_tensors = []
@@ -425,19 +518,47 @@ class PrecisionConverter:
 
                 # Set the output shape
                 if not out.shape:
-                    if (shape := _infer_gathernd_op_shape(node)) is not None:
+                    if (shape := _infer_standard_op_shape(node)) is not None:
                         out.shape = shape
                     elif isinstance(inp, gs.Constant):
                         out.shape = inp.values.shape
                     elif inp.inputs and inp.inputs[0].op == "Constant":
                         out.shape = inp.inputs[0].attrs["value"].values.shape
-                    elif inp.shape:
+                    elif node.op in self.custom_ops and inp.shape:
                         out.shape = inp.shape
 
             # Propagate tensor types to the children nodes (until another Cast or Q node is met)
             _propagate_cast_type_through_nodes(node, np_type)
 
         return gs.export_onnx(graph)
+
+    def _restore_original_io_metadata(self) -> None:
+        """Preserve complete public I/O metadata when keep_io_types=True."""
+        if not self.keep_io_types:
+            return
+
+        for io_field in ("input", "output"):
+            current_values = list(getattr(self.model.graph, io_field))
+            original_values = self.original_network_io_metadata[io_field]
+            current_names = [value.name for value in current_values]
+            original_names = [value.name for value in original_values]
+            if current_names != original_names:
+                raise RuntimeError(
+                    f"Cannot restore public graph {io_field} metadata because names changed: "
+                    f"{original_names} -> {current_names}"
+                )
+            for current_value, original_value in zip(
+                current_values, original_values, strict=True
+            ):
+                if (
+                    current_value.type.tensor_type.elem_type
+                    != original_value.type.tensor_type.elem_type
+                ):
+                    raise RuntimeError(
+                        f"Cannot restore public graph {io_field} metadata for {current_value.name}: "
+                        "element type changed"
+                    )
+                current_value.CopyFrom(original_value)
 
     def _is_bf16(self, type: PrecisionTypes = None) -> bool:
         if type is None:
