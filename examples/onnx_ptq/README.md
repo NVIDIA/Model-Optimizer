@@ -225,7 +225,6 @@ python -m modelopt.onnx.quantization \
 
 For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html) and the [Autotune guide](https://nvidia.github.io/Model-Optimizer/guides/9_autotune.html).
 
-
 ## Resources
 
 - 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
