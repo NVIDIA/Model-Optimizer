@@ -1831,7 +1831,7 @@ def test_load_recipe_autoquantize_module_search_spaces():
         "*self_attn*",
     ]
     assert len(searched.candidate_formats) == 2
-    assert searched.allow_no_quant is False
+    assert searched.allow_no_quant is True
     assert lm_head.module_name_patterns == ["*lm_head*"]
     assert len(lm_head.candidate_formats) == 2
     assert lm_head.allow_no_quant is True

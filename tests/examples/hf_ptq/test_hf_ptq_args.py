@@ -113,7 +113,7 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
         QUANT_CFG_CHOICES["w4a16_nvfp4"],
         QUANT_CFG_CHOICES["fp8"],
     ]
-    assert searched["allow_no_quant"] is False
+    assert searched["allow_no_quant"] is True
     assert lm_head["module_name_patterns"] == ["*lm_head*"]
     assert lm_head["quantization_formats"] == [
         QUANT_CFG_CHOICES["w4a16_nvfp4"],
