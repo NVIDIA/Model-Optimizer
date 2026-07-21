@@ -1,5 +1,7 @@
 compressed-tensors
 fire
 flash-attn>=2.6.0
+nvidia-ml-py
+psutil
 transformers_stream_generator
 zstandard

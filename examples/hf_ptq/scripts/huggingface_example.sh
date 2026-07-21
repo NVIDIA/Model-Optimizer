@@ -173,7 +173,16 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         else
             QUANT_SPEC_ARGS="--qformat=${QFORMAT// /,}"
         fi
-        python hf_ptq.py \
+        # Opt-in memory/utilization sidecar: wraps the run and writes a CSV trace +
+        # peak summary under SAVE_PATH. Off by default (no behavior change).
+        MEM_MON_PREFIX=()
+        if [[ "${MEM_MONITOR:-0}" == "1" ]]; then
+            MEM_MON_PREFIX=(python scripts/mem_monitor.py \
+                --gpus "${CUDA_VISIBLE_DEVICES-all}" \
+                --out "$SAVE_PATH/mem_trace.csv" \
+                --summary "$SAVE_PATH/mem_peak.txt" --)
+        fi
+        "${MEM_MON_PREFIX[@]}" python hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
             --sparsity_fmt=$SPARSITY_FMT \
