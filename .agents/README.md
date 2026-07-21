@@ -8,6 +8,7 @@ and holds shared configuration.
 ```text
 .agents/
 ├── skills → ../plugins/modelopt/skills
+├── codex/agents/           # Codex custom role definitions
 ├── plugins/
 │   └── marketplace.json   # Codex marketplace
 ├── scripts/                # shared helper scripts (sync-upstream-skills.sh, …)
@@ -31,10 +32,13 @@ a copy:
 - **Repository agents** use `.agents/skills`, a relative symlink into the
   plugin.
 - **Claude Code and Codex plugins** load `plugins/modelopt/skills` directly.
+- **Codex** discovers custom roles under `.codex/agents/`, a relative symlink
+  to `.agents/codex/agents/`.
 
 ## Editing rules
 
 - **Always edit skills under `plugins/modelopt/skills/`**.
+- Codex custom roles belong in `.agents/codex/agents/`, not `.codex/agents/`.
 - Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
 - New skills go in `plugins/modelopt/skills/<skill-name>/SKILL.md`.
