@@ -8,6 +8,7 @@ Changelog
 
 - Remove the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics) and its references in ``examples/diffusers/README.md``. The example was deprecated in 0.45 and is no longer maintained.
 - Remove the deprecated ``examples/llm_autodeploy`` example (deprecated in 0.45). Use TensorRT-LLM's `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_ directly together with ModelOpt PTQ in ``examples/llm_ptq``.
+- Remove the deprecated ``examples/llm_qad`` Megatron-LM QAD example (deprecated in 0.45). Use the `megatron_bridge QAD example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#quantization-aware-distillation-qad>`_ instead, which provides a simpler Python-based interface and better model coverage.
 
 **Deprecations**
 
@@ -134,6 +135,7 @@ Changelog
   workflow it demonstrates will be removed in a future release; use TensorRT-LLM's
   `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_
   directly together with ModelOpt PTQ in ``examples/llm_ptq``.
+- Deprecate the ``examples/llm_qad`` Megatron-LM QAD example. Use the `megatron_bridge QAD example <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#quantization-aware-distillation-qad>`_ instead, which provides a simpler Python-based interface and better model coverage.
 
 **Bug Fixes**
 
