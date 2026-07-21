@@ -1776,7 +1776,7 @@ def test_load_recipe_autoquantize_empty_candidates_raises(tmp_path):
         "auto_quantize:\n  constraints:\n    effective_bits: 4.8\n"
         "  candidate_formats: []\n"
     )
-    with pytest.raises(ValueError, match="at least 1"):
+    with pytest.raises(ValueError, match="candidate_formats or at least one"):
         load_recipe(bad)
 
 
@@ -1815,16 +1815,16 @@ def test_load_recipe_autoquantize_builtin_active_moe():
 
 
 def test_load_recipe_autoquantize_module_search_spaces():
-    """Qwen module rules resolve imported formats and no-quant selectability."""
+    """Qwen recipe separates its fixed PTQ baseline from explicit search spaces."""
     recipe = load_recipe(
         "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     aq = recipe.auto_quantize
+    assert recipe.quantize is not None
+    assert recipe.quantize == load_config("configs/ptq/presets/model/w4a16_nvfp4")
+    assert aq.candidate_formats == []
     assert len(aq.module_search_spaces) == 2
-    routed, searched = aq.module_search_spaces
-    assert routed.module_name_patterns == ["*mlp.experts*", "*mixer.experts*"]
-    assert len(routed.candidate_formats) == 1
-    assert routed.allow_no_quant is False
+    searched, lm_head = aq.module_search_spaces
     assert searched.module_name_patterns == [
         "*mlp.shared_expert*",
         "*linear_attn*",
@@ -1832,6 +1832,37 @@ def test_load_recipe_autoquantize_module_search_spaces():
     ]
     assert len(searched.candidate_formats) == 2
     assert searched.allow_no_quant is False
+    assert lm_head.module_name_patterns == ["*lm_head*"]
+    assert len(lm_head.candidate_formats) == 2
+    assert lm_head.allow_no_quant is True
+
+
+def test_load_recipe_autoquantize_fixed_baseline_rejects_global_fallback(tmp_path):
+    recipe_file = tmp_path / "fixed-and-global.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n"
+        "auto_quantize:\n  constraints:\n    effective_bits: 6.0\n"
+        "  candidate_formats:\n    - algorithm: max\n      quant_cfg: []\n"
+        "  module_search_spaces:\n"
+        "    - module_name_patterns: ['*mlp*']\n"
+        "      candidate_formats:\n        - algorithm: max\n          quant_cfg: []\n"
+    )
+
+    with pytest.raises(ValueError, match="must omit top-level"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_path):
+    recipe_file = tmp_path / "fixed-only.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n"
+        "auto_quantize:\n  constraints:\n    effective_bits: 6.0\n"
+    )
+
+    with pytest.raises(ValueError, match="candidate_formats or at least one"):
+        load_recipe(recipe_file)
 
 
 @pytest.mark.parametrize(

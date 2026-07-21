@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qwen3.6 MoE AutoQuantize search with module-family-specific candidate spaces.
-# Routed experts are fixed to W4A16 NVFP4 but remain in active-MoE effective-bit
-# accounting. Shared experts and hybrid-attention projections select between
-# W4A16 NVFP4 and FP8. Routed experts remain W4A16 during scoring; searched
-# multi-format families retain BF16 only as an internal scoring baseline.
+# Qwen3.6 MoE AutoQuantize search with a normal W4A16 PTQ baseline and explicit
+# module-family search spaces. Unmatched modules, including routed experts, use
+# the fixed PTQ config and remain in active-MoE effective-bit accounting.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
@@ -20,6 +18,12 @@ metadata:
     shared experts and attention searched over W4A16 NVFP4 and FP8, at 6.0
     active-MoE effective bits.
 
+# Reuse the normal PTQ preset for every module that is not explicitly searched.
+# This baseline remains active during sensitivity scoring and is calibrated,
+# costed, and exported as part of the same AutoQuantize operation.
+quantize:
+  $import: w4a16_nvfp4
+
 auto_quantize:
   constraints:
     effective_bits: 6.0
@@ -27,23 +31,7 @@ auto_quantize:
     cost:
       active_moe_expert_ratio: 0.03125
 
-  # Fallback for unmatched searchable modules, including lm_head. BF16/no-quant
-  # remains an implicit choice only for this fallback search space.
-  candidate_formats:
-    - $import: w4a16_nvfp4
-    - $import: fp8
-
   module_search_spaces:
-    # One selectable format makes routed experts fixed W4A16. allow_no_quant
-    # controls solver choices only; their BF16-equivalent denominator cost and
-    # active-MoE ratio remain part of effective-bit accounting.
-    - module_name_patterns:
-        - "*mlp.experts*"
-        - "*mixer.experts*"
-      candidate_formats:
-        - $import: w4a16_nvfp4
-      allow_no_quant: false
-
     # Search these active/sensitive families only between W4A16 and W8A8/FP8.
     - module_name_patterns:
         - "*mlp.shared_expert*"
@@ -53,6 +41,15 @@ auto_quantize:
         - $import: w4a16_nvfp4
         - $import: fp8
       allow_no_quant: false
+
+    # The old global fallback searched lm_head over W4A16, FP8, and BF16. Keep
+    # that behavior explicit instead of inheriting the W4A16 PTQ disable rule.
+    - module_name_patterns:
+        - "*lm_head*"
+      candidate_formats:
+        - $import: w4a16_nvfp4
+        - $import: fp8
+      allow_no_quant: true
 
   auto_quantize_method: gradient
   score_size: 128

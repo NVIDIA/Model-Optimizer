@@ -15,6 +15,7 @@
 
 """Module for advanced quantization algorithms."""
 
+import copy
 import fnmatch
 import gc
 import types
@@ -122,6 +123,83 @@ def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Modu
     if isinstance(current, nn.ModuleList):
         return nn.ModuleList(TensorQuantizer() for _ in range(len(current)))
     return TensorQuantizer()
+
+
+def _iter_tensor_quantizers(module: nn.Module):
+    if isinstance(module, TensorQuantizer):
+        yield module
+    elif isinstance(module, nn.ModuleList | SequentialQuantizer):
+        for child in module:
+            yield from _iter_tensor_quantizers(child)
+
+
+def _tensor_quantizer_format_signature(quantizer: TensorQuantizer) -> tuple:
+    """Return the numerical-format fields relevant to runtime fusion compatibility."""
+    return (
+        quantizer.is_enabled,
+        quantizer.num_bits,
+        getattr(quantizer, "_effective_bits", None),
+        quantizer.axis,
+        repr(quantizer.block_sizes),
+        getattr(quantizer, "_dynamic", False),
+        quantizer.fake_quant,
+        quantizer.backend,
+        repr(quantizer.backend_extra_args),
+    )
+
+
+def _fixed_module_format_signature(module: nn.Module) -> tuple:
+    return tuple(
+        (
+            _get_replay_quantizer_attr(attr_name),
+            tuple(
+                _tensor_quantizer_format_signature(quantizer)
+                for quantizer in _iter_tensor_quantizers(getattr(module, attr_name))
+            ),
+        )
+        for attr_name in _get_quantizer_attrs(module)
+    )
+
+
+def _fixed_module_weight_compression(
+    module: nn.Module, effective_bits_override: float | None = None
+) -> float:
+    weight_quantizers = []
+    for attr_name in _get_quantizer_attrs(module):
+        if "weight_quantizer" not in attr_name:
+            continue
+        weight_quantizers.extend(_iter_tensor_quantizers(getattr(module, attr_name)))
+
+    if not weight_quantizers or all(not quantizer.is_enabled for quantizer in weight_quantizers):
+        return 1.0
+    if any(not quantizer.is_enabled for quantizer in weight_quantizers):
+        raise ValueError(
+            "The fixed quantize baseline enables only some weight quantizers within one "
+            "quantizable module. Move that module into an explicit AutoQuantize "
+            "module_search_spaces entry."
+        )
+    if effective_bits_override is not None:
+        return effective_bits_override / 16
+
+    compressions = []
+    for quantizer in weight_quantizers:
+        effective_bits = getattr(quantizer, "_effective_bits", None)
+        num_bits = quantizer.num_bits
+        if effective_bits is not None:
+            compressions.append(effective_bits / 16)
+        elif isinstance(num_bits, tuple):
+            compressions.append((sum(num_bits) + 1) / 16)
+        elif isinstance(num_bits, int):
+            compressions.append(num_bits / 16)
+        else:
+            raise ValueError(f"Cannot infer AutoQuantize cost from num_bits={num_bits!r}.")
+
+    if any(abs(value - compressions[0]) > 1e-12 for value in compressions[1:]):
+        raise ValueError(
+            "The fixed quantize baseline assigns different weight formats within one quantizable "
+            "module. Move that module into an explicit AutoQuantize module_search_spaces entry."
+        )
+    return compressions[0]
 
 
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
@@ -306,9 +384,13 @@ class QuantRecipeHparam(Hparam):
         quant_module_names: list[str] | None = None,
         cost_weight: float = 1.0,
         allow_no_quant: bool = True,
+        fixed_recipe: QuantRecipe | None = None,
     ) -> None:
         """Initializes Hparam with internal scoring choices and solver selectability."""
         candidate_choices = sorted(set(choices or []))
+        if fixed_recipe is not None:
+            assert candidate_choices == [fixed_recipe]
+            assert not allow_no_quant
         # A one-format rule with no-quant disallowed is genuinely fixed: keep that
         # format active while other groups are scored. Multi-format rules retain an
         # internal no-quant reference for sensitivity estimation, then filter it out
@@ -329,9 +411,22 @@ class QuantRecipeHparam(Hparam):
         assert cost_weight >= 0.0, "cost_weight must be non-negative."
         self.cost_weight = cost_weight
         self.allow_no_quant = allow_no_quant
+        self.is_fixed = fixed_recipe is not None
 
         self.quant_modules = list(set(quant_modules or []))
         self.score_modules = list(set(score_modules or self.quant_modules))
+
+        fixed_quantizers = (
+            {
+                module: {
+                    attr_name: getattr(module, attr_name)
+                    for attr_name in _get_quantizer_attrs(module)
+                }
+                for module in self.quant_modules
+            }
+            if fixed_recipe is not None
+            else {}
+        )
 
         # This is a hack; We dont want to make the input_quantizer, weight_quantizer, output_quantizer
         # a dynamic attribute for backward compatibility with the model_calib.py
@@ -348,6 +443,11 @@ class QuantRecipeHparam(Hparam):
         for quant_recipe in calibration_recipes:
             for quant_module in self.quant_modules:
                 attr_names = _get_quantizer_attrs(quant_module)
+                if quant_recipe == fixed_recipe:
+                    self._all_quantizer_choices[quant_recipe][quant_module] = fixed_quantizers[
+                        quant_module
+                    ]
+                    continue
                 for attr_name in attr_names:
                     setattr(
                         quant_module,
@@ -411,10 +511,10 @@ class QuantRecipeHparam(Hparam):
     def solver_choices(self) -> list[QuantRecipe]:
         """Return choices exposed to the LP after removing an internal no-quant baseline."""
         no_quant_recipe = QuantRecipe(quant_cfg=None)
-        recipes = []
+        recipes: list[QuantRecipe] = []
         for recipe in self.choices:
             assert isinstance(recipe, QuantRecipe)
-            if self.allow_no_quant or recipe != no_quant_recipe:
+            if self.is_fixed or self.allow_no_quant or recipe != no_quant_recipe:
                 recipes.append(recipe)
         return recipes
 
@@ -490,7 +590,7 @@ class QuantRecipeHparam(Hparam):
     @property
     def attrs(self) -> list[str]:
         """Return the attributes of the hparam for repr."""
-        return ["name", "cost_weight", "allow_no_quant", *super().attrs]
+        return ["name", "cost_weight", "allow_no_quant", "is_fixed", *super().attrs]
 
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
@@ -563,6 +663,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         """Get the default config for the searcher."""
         return {
             "quantization_formats": ["NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"],
+            "fixed_quantization_config": None,
             "module_search_spaces": [],
             "data_loader": None,
             "num_calib_steps": 512,
@@ -586,6 +687,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "active_moe_expert_ratio": None,
             "cost_denominator": None,
             "quantization_formats_signature": None,
+            "fixed_quantization_config_signature": None,
+            "fixed_quantization_config": None,
             "module_search_space_signature": None,
             "resolved_search_setup_signature": None,
             "disabled_layers": None,
@@ -737,8 +840,47 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         return matched_search_spaces[0] if matched_search_spaces else None
 
+    @staticmethod
+    def _resolve_fixed_group_recipe(quant_modules, quant_module_names, fixed_recipe):
+        """Resolve a full-model PTQ baseline to one runtime-group-compatible fixed choice."""
+        format_signatures = [_fixed_module_format_signature(module) for module in quant_modules]
+        if any(signature != format_signatures[0] for signature in format_signatures[1:]):
+            raise ValueError(
+                "The fixed quantize baseline assigns incompatible formats to runtime-grouped "
+                f"modules {quant_module_names}. Move the entire group into one explicit "
+                "AutoQuantize module_search_spaces entry."
+            )
+
+        compressions = [
+            _fixed_module_weight_compression(module, fixed_recipe.config.effective_bits)
+            for module in quant_modules
+        ]
+        if any(abs(value - compressions[0]) > 1e-12 for value in compressions[1:]):
+            raise ValueError(
+                "The fixed quantize baseline assigns different weight costs to runtime-grouped "
+                f"modules {quant_module_names}. Move the entire group into one explicit "
+                "AutoQuantize module_search_spaces entry."
+            )
+
+        compression = compressions[0]
+        if abs(compression - 1.0) <= 1e-12:
+            return QuantRecipe(quant_cfg=None)
+        if abs(compression - fixed_recipe.compression) > 1e-12:
+            raise ValueError(
+                "The fixed quantize baseline resolves some unmatched modules to a different "
+                "numerical format than its effective_bits cost. Use one uniform PTQ format as "
+                "the baseline and put format-specific modules in AutoQuantize "
+                "module_search_spaces."
+            )
+        return fixed_recipe
+
     def insert_hparams_after_merge_rules(
-        self, model, quant_recipes, disabled_layers=None, module_search_spaces=None
+        self,
+        model,
+        quant_recipes,
+        disabled_layers=None,
+        module_search_spaces=None,
+        fixed_recipe=None,
     ):
         """Restrict the search space using the merge rules and insert the hparams for the model."""
         # TRTLLM fuses linear layers such as q_proj, k_proj, v_proj into same layer
@@ -805,12 +947,21 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if disabled:
                 _quant_recipes = None
                 allow_no_quant = True
+                resolved_fixed_recipe = None
             elif search_space is not None:
                 _quant_recipes = search_space["quant_recipes"]
                 allow_no_quant = search_space["allow_no_quant"]
+                resolved_fixed_recipe = None
+            elif fixed_recipe is not None:
+                resolved_fixed_recipe = self._resolve_fixed_group_recipe(
+                    quant_modules, quant_module_names, fixed_recipe
+                )
+                _quant_recipes = [resolved_fixed_recipe]
+                allow_no_quant = False
             else:
                 _quant_recipes = quant_recipes
                 allow_no_quant = True
+                resolved_fixed_recipe = None
             hparam = QuantRecipeHparam(
                 _quant_recipes,
                 quant_modules=quant_modules,
@@ -819,6 +970,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 quant_module_names=quant_module_names,
                 cost_weight=cost_weight,
                 allow_no_quant=allow_no_quant,
+                fixed_recipe=resolved_fixed_recipe,
             )
 
             for module in quant_modules:
@@ -863,6 +1015,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     score_module_names,
                     tuple(sorted(recipe.checkpoint_signature for recipe in hparam.solver_choices)),
                     hparam.allow_no_quant,
+                    hparam.is_fixed,
                     float(hparam.cost_weight),
                 )
             )
@@ -923,6 +1076,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
             self.candidate_stats[name]["allow_no_quant"] = hparam.allow_no_quant
+            self.candidate_stats[name]["is_fixed"] = hparam.is_fixed
             # Keep the no-quant cost as denominator metadata even when no-quant is not
             # solver-selectable for this hparam. Fixed formats must remain in the cost model.
             self.candidate_stats[name]["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
@@ -980,10 +1134,23 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.config["module_search_spaces"]
         )
         default_search_recipes = self._get_search_recipes(self.config["quantization_formats"])
+        fixed_search_recipes = self._get_search_recipes(
+            [self.config["fixed_quantization_config"]]
+            if self.config["fixed_quantization_config"] is not None
+            else []
+        )
+        assert len(fixed_search_recipes) <= 1
+        fixed_recipe = fixed_search_recipes[0] if fixed_search_recipes else None
         quantization_formats_signature = _quantization_formats_signature(default_search_recipes)
+        fixed_quantization_config_signature = (
+            fixed_recipe.checkpoint_signature if fixed_recipe is not None else None
+        )
         module_search_space_signature = _module_search_space_signature(module_search_spaces)
         restored_quantization_formats_signature = getattr(
             self, "quantization_formats_signature", None
+        )
+        restored_fixed_quantization_config_signature = getattr(
+            self, "fixed_quantization_config_signature", None
         )
         restored_module_search_space_signature = getattr(
             self, "module_search_space_signature", None
@@ -1002,6 +1169,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "Checkpoint quantization_formats do not match the current search config. "
                 "Use a different checkpoint path."
             )
+        if (
+            has_restored_calibration_or_scores
+            and restored_fixed_quantization_config_signature != fixed_quantization_config_signature
+        ):
+            raise ValueError(
+                "Checkpoint fixed_quantization_config does not match the current search config. "
+                "Use a different checkpoint path."
+            )
         if has_restored_calibration_or_scores and (
             (restored_module_search_space_signature is None and module_search_space_signature)
             or (
@@ -1014,11 +1189,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 "Use a different checkpoint path."
             )
         self.quantization_formats_signature = quantization_formats_signature
+        self.fixed_quantization_config_signature = fixed_quantization_config_signature
+        self.fixed_quantization_config = (
+            fixed_recipe.config.model_dump() if fixed_recipe is not None else None
+        )
         self.module_search_space_signature = module_search_space_signature
 
         search_recipes = sorted(
             {
                 *default_search_recipes,
+                *fixed_search_recipes,
                 *(
                     recipe
                     for search_space in module_search_spaces
@@ -1033,6 +1213,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             default_search_recipes,
             self.config["disabled_layers"],
             module_search_spaces,
+            fixed_recipe,
         )
 
         quant_recipe_hparams = [
@@ -1820,7 +2001,12 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             return [_cfg_to_dict(c) for c in v]
         return v
 
-    quant_cfg: list[dict] = [{"quantizer_name": "*", "enable": False}]
+    fixed_quantization_config = search_state.get("fixed_quantization_config")
+    quant_cfg: list[dict] = (
+        copy.deepcopy(fixed_quantization_config["quant_cfg"])
+        if fixed_quantization_config is not None
+        else [{"quantizer_name": "*", "enable": False}]
+    )
     quant_cfg.extend(
         {"quantizer_name": pattern, "enable": False}
         for pattern in _as_list(search_state.get("disabled_layers"))
@@ -1835,9 +2021,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     global_entries: dict[str, dict] = {}
 
     for hparam_name, recipe in best_recipe.items():
+        candidate_stat = search_state["candidate_stats"][hparam_name]
+        if candidate_stat.get("is_fixed", False):
+            continue
         if recipe == QuantRecipe(quant_cfg=None):
             continue
-        candidate_stat = search_state["candidate_stats"][hparam_name]
         module_names = candidate_stat["module_names"]
         for module_name in module_names:
             for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):

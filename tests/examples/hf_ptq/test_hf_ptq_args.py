@@ -57,6 +57,7 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
     assert inputs["score_size"] == 128
+    assert inputs["fixed_quantization_config"] is None
     assert inputs["module_search_spaces"] == []
     # disabled_layers come straight from the recipe (no model introspection).
     assert inputs["disabled_layers"] == aq.disabled_layers
@@ -89,19 +90,20 @@ def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
 
 
 def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
-    """Module-specific recipe candidates map to public mtq.auto_quantize inputs."""
+    """Fixed PTQ baseline and explicit recipe candidates map to mtq inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
     )
-    aq = load_recipe(
+    recipe = load_recipe(
         "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
-    ).auto_quantize
-    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+    )
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(
+        recipe.auto_quantize, args, fixed_quantize_config=recipe.quantize
+    )
 
-    routed, searched = inputs["module_search_spaces"]
-    assert routed["module_name_patterns"] == ["*mlp.experts*", "*mixer.experts*"]
-    assert routed["quantization_formats"] == [QUANT_CFG_CHOICES["w4a16_nvfp4"]]
-    assert routed["allow_no_quant"] is False
+    assert inputs["quantization_formats"] == []
+    assert inputs["fixed_quantization_config"] == QUANT_CFG_CHOICES["w4a16_nvfp4"]
+    searched, lm_head = inputs["module_search_spaces"]
     assert searched["module_name_patterns"] == [
         "*mlp.shared_expert*",
         "*linear_attn*",
@@ -112,6 +114,12 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
         QUANT_CFG_CHOICES["fp8"],
     ]
     assert searched["allow_no_quant"] is False
+    assert lm_head["module_name_patterns"] == ["*lm_head*"]
+    assert lm_head["quantization_formats"] == [
+        QUANT_CFG_CHOICES["w4a16_nvfp4"],
+        QUANT_CFG_CHOICES["fp8"],
+    ]
+    assert lm_head["allow_no_quant"] is True
 
 
 def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
