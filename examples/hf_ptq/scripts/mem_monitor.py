@@ -16,8 +16,8 @@
 """Sidecar memory/utilization monitor for HF PTQ runs.
 
 Samples GPU (device-level) and CPU memory + utilization at a fixed interval while
-a *separate* workload process (e.g. ``hf_ptq.py``) runs, appends a CSV timeseries,
-and prints a peak/mean summary on exit. This keeps profiling out of the workload
+a *separate* workload process (e.g. ``hf_ptq.py``) runs, writes a CSV timeseries
+(overwriting any existing file), and prints a peak/mean summary on exit. This keeps profiling out of the workload
 itself, so it can verify per-run budgets (e.g. the single-GPU layerwise target of
 <=80 GB GPU / <=80 GB CPU) without perturbing calibration.
 
@@ -105,6 +105,8 @@ class GpuSampler:
 
     def _init_nvml(self, indices: list[int] | None) -> bool:
         try:
+            # Optional dependency: pynvml (nvidia-ml-py) may be absent; on any failure
+            # the sampler falls back to parsing ``nvidia-smi`` in _init_smi.
             import pynvml
 
             pynvml.nvmlInit()
@@ -269,7 +271,8 @@ def _write_summary(path, duration, metrics: _Metrics):
     lines = [f"duration_s: {duration:.1f}"]
     for i in sorted(metrics.gpu):
         mem_acc, util_acc = metrics.gpu[i]
-        lines.append(f"peak_gpu{i}_used_mb: {mem_acc.peak / MB:.1f}")
+        if mem_acc.seen:
+            lines.append(f"peak_gpu{i}_used_mb: {mem_acc.peak / MB:.1f}")
         if util_acc.seen:
             lines.append(f"mean_gpu{i}_util_pct: {util_acc.mean:.1f}")
     lines.append(f"peak_sys_cpu_used_mb: {metrics.sys_cpu_mem.peak / MB:.1f}")
@@ -280,6 +283,7 @@ def _write_summary(path, duration, metrics: _Metrics):
     text = "\n".join(lines)
     print(text, flush=True)
     if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(text + "\n")
 
 
@@ -290,7 +294,11 @@ def main() -> None:
 
     child = subprocess.Popen(command) if command else None
     target_pid = child.pid if child is not None else args.pid
-    proc = psutil.Process(target_pid) if target_pid else None
+    try:
+        proc = psutil.Process(target_pid) if target_pid else None
+    except psutil.NoSuchProcess:
+        print(f"mem_monitor: --pid {target_pid} is not a running process.", file=sys.stderr)
+        sys.exit(1)
 
     metrics = _Metrics(gpu.indices)
 
@@ -351,7 +359,11 @@ def main() -> None:
 
     if child is not None and child.poll() is None:
         child.terminate()
-        child.wait()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
 
     _write_summary(args.summary, time.monotonic() - start, metrics)
     if child is not None:

@@ -89,6 +89,7 @@ def test_accumulator():
 
 
 def _run(args, **kwargs):
+    kwargs.setdefault("timeout", 30)
     return subprocess.run([sys.executable, str(_SCRIPT), *args], **kwargs)
 
 
