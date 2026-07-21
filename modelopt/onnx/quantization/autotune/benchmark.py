@@ -387,10 +387,10 @@ class TensorRTPyBenchmark(Benchmark):
             self.logger.info(f"Loading TensorRT plugin: {plugin_path}")
 
             try:
-                if hasattr(os, "RTLD_LAZY") and hasattr(os, "RTLD_GLOBAL"):
-                    plugin_handle = ctypes.CDLL(
-                        str(plugin_path), mode=os.RTLD_LAZY | os.RTLD_GLOBAL
-                    )
+                rtld_lazy = getattr(os, "RTLD_LAZY", None)
+                rtld_global = getattr(os, "RTLD_GLOBAL", None)
+                if rtld_lazy is not None and rtld_global is not None:
+                    plugin_handle = ctypes.CDLL(str(plugin_path), mode=rtld_lazy | rtld_global)
                 else:
                     # Fallback for platforms without RTLD flags (e.g., Windows)
                     plugin_handle = ctypes.CDLL(str(plugin_path))

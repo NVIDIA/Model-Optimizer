@@ -30,7 +30,7 @@ import modelopt.torch.utils.distributed as dist
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
 #
-# Note: Bypass is disabled now in the test.
+# The test covers the standard Puzzletron pipeline.
 #
 
 SEED = 1234

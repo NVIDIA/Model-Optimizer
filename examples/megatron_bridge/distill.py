@@ -23,19 +23,14 @@ See `README.md` in this directory for example usage and data preparation instruc
 import argparse
 import contextlib
 import os
-from dataclasses import fields
-from pathlib import Path
 
 import torch
+from _distillation_provider import convert_to_distillation_provider
+from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.distillation_provider import (
-    DistillationProvider,
-    convert_to_distillation_provider,
-)
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
-from megatron.bridge.training.callbacks import Callback
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -47,227 +42,20 @@ from megatron.bridge.training.config import (
     TrainingConfig,
 )
 from megatron.bridge.training.distill import distill
-from megatron.bridge.training.gpt_step import forward_step_modelopt
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
-from megatron.bridge.training.pretrain import pretrain
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
 from transformers import AutoConfig
 
 import modelopt.torch.distill as mtd
-import modelopt.torch.distill.plugins.megatron as mtd_mcore
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
-
-
-def _patched_to_cfg_dict(self):
-    """Patched DistillationProvider.to_cfg_dict method for heterogeneous teacher and student models.
-
-    TODO: Remove once we drop nemo:26.02 container support
-    """
-    from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
-
-    result = {"_target_": f"{self._super_class.__module__}.{self._super_class.__qualname__}"}
-    # Use fields from the actual student provider class, not DistillationProvider.
-    # DistillationProvider's __dataclass_fields__ only includes TransformerConfig fields
-    # (set at class definition time), missing GPTModelProvider-level fields like
-    # vocab_size, share_embeddings_and_output_weights, etc.
-    excluded_fields = {"teacher", "kd_config"}
-    for field in fields(self._super_class):
-        if field.name.startswith("_") or field.name in excluded_fields:
-            continue
-        if hasattr(self, field.name):
-            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
-                getattr(self, field.name)
-            )
-    for field in fields(self):
-        if field.name.startswith("_") or field.name in excluded_fields:
-            continue
-        if field.name not in result:
-            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
-                getattr(self, field.name)
-            )
-    return result
-
-
-DistillationProvider.to_cfg_dict = _patched_to_cfg_dict
-
-
-# TODO: Megatron-Bridge does not (yet) expose a hook to initialize the student before the
-# knowledge-distillation conversion, so we patch ``DistillationProvider.provide`` to do it. Replace
-# this block once a first-class mechanism is available upstream.
-#
-# Maps id(distill_provider) -> megatron_checkpoint_path for providers whose student should be
-# initialized from a Megatron checkpoint. A registry is used (instead of an instance attribute)
-# because a DistillationProvider proxies attribute assignment to its teacher once the teacher is
-# set, so anything stored on the instance would leak onto the teacher.
-_MEGATRON_STUDENT_CKPT_PATHS: dict[int, str] = {}
-
-_original_distill_provide = DistillationProvider.provide
-
-
-def _distill_provide_with_megatron_student(
-    self, pre_process=None, post_process=None, vp_stage=None
-):
-    """Replacement for ``DistillationProvider.provide`` that can initialize the student from a ckpt.
-
-    For providers registered in ``_MEGATRON_STUDENT_CKPT_PATHS``, the student is built and its weights
-    (plus, for a quantized checkpoint, the ModelOpt quantize mode) are restored from the Megatron
-    checkpoint *before* the knowledge-distillation conversion -- otherwise the quantize mode is lost,
-    since ``restore_sharded_modelopt_state`` is a no-op once a model is already converted. The rest
-    mirrors the upstream implementation. Patched at the class level (not the instance) to avoid the
-    teacher-proxying issue described on ``_MEGATRON_STUDENT_CKPT_PATHS``.
-    """
-    if vp_stage is not None:
-        raise ValueError("ModelOpt KD currently does not support virtual-pipeline parallel.")
-
-    megatron_path = _MEGATRON_STUDENT_CKPT_PATHS.get(id(self))
-    if megatron_path is None:
-        # If a path was registered (for some provider) but this provide() call doesn't match,
-        # the provider was likely copied/wrapped between convert_to_distillation_provider() and now,
-        # so the id()-keyed lookup silently misses. Fail loudly rather than train an uninitialized
-        # student (this script only ever builds one DistillationProvider).
-        if _MEGATRON_STUDENT_CKPT_PATHS:
-            raise RuntimeError(
-                "DistillationProvider.provide() found no registered Megatron-student checkpoint path "
-                "for this provider, but one was registered for a different provider id -- the provider "
-                "was likely copied/wrapped. Update this workaround."
-            )
-        return _original_distill_provide(self, pre_process, post_process, vp_stage)
-
-    student_model = self._super_class.provide(self, pre_process, post_process, vp_stage)
-    print_rank_0(f"Loading student weights from Megatron checkpoint {megatron_path}")
-    load_modelopt_megatron_checkpoint([student_model], megatron_path)
-    # Hack to get teacher's pre-wrap hooks called to potentially load HF weights
-    teacher_model = self.teacher.provide_distributed_model(
-        wrap_with_ddp=False, mixed_precision_wrapper=None
-    )[0]
-    kd_cfg = mtd_mcore.setup_distillation_config(
-        self.kd_config, student_model.config, teacher_model.config
-    )
-    modelopt_cfg = {
-        "teacher_model": teacher_model,
-        "criterion": kd_cfg.criterion,
-        "loss_balancer": kd_cfg.loss_balancer,
-    }
-    kd_model = mtd.convert(student_model, mode=[("kd_loss", modelopt_cfg)])
-    mtd_mcore.adjust_distillation_model_for_mcore(kd_model, kd_cfg)
-    return kd_model
-
-
-DistillationProvider.provide = _distill_provide_with_megatron_student
-
-
-class _HFValidationExportCallback(Callback):
-    """Export the live student to Hugging Face format at selected validation stages."""
-
-    def __init__(
-        self,
-        export_dir: str,
-        student_hf_model: str,
-        student_hf_path: str,
-        trust_remote_code: bool,
-        export_interval: int,
-    ) -> None:
-        self.export_dir = Path(export_dir)
-        self.student_hf_path = student_hf_path
-        self.trust_remote_code = trust_remote_code
-        self.export_interval = export_interval
-        self._last_exported_iteration: int | None = None
-        self.bridge = AutoBridge.from_hf_pretrained(
-            student_hf_model, trust_remote_code=trust_remote_code
-        )
-
-    @contextlib.contextmanager
-    def _detach_distillation_provider_teacher_for_export(
-        self, modules: list[tuple[str, torch.nn.Module]]
-    ):
-        """Protect the live teacher provider while Megatron-Bridge sanitizes export configs.
-
-        Hugging Face export calls Megatron-Bridge config cleanup, which can replace
-        non-pickleable callables such as ``activation_func`` with ``None``. In distillation,
-        ``model.config`` is a ``DistillationProvider`` and its ``__setattr__`` mirrors writes
-        to the teacher provider. Without detaching the teacher here, export can accidentally
-        set the live teacher's ``activation_func=None`` and the next validation/training
-        forward fails inside the teacher MLP.
-        """
-        detached: list[tuple[DistillationProvider, object]] = []
-        seen_config_ids: set[int] = set()
-        for _, root_module in modules:
-            for module in root_module.modules():
-                config = getattr(module, "config", None)
-                if not isinstance(config, DistillationProvider) or id(config) in seen_config_ids:
-                    continue
-                seen_config_ids.add(id(config))
-                teacher = config.teacher
-                if teacher is not None:
-                    config.teacher = None
-                    detached.append((config, teacher))
-
-        try:
-            yield
-        finally:
-            for config, teacher in detached:
-                config.teacher = teacher
-
-    def on_eval_end(self, context) -> None:
-        """Export the student at the iteration that was just validated."""
-        iteration = context.state.train_state.step
-        train_iters = context.state.cfg.train.train_iters
-        if iteration % self.export_interval != 0 and iteration != train_iters:
-            return
-        # The final iteration can be validated both on its regular interval and after training.
-        # Avoid exporting and overwriting the same Hugging Face checkpoint twice.
-        if iteration == self._last_exported_iteration:
-            return
-        output_path = self.export_dir / f"iter_{iteration:07d}"
-        print_rank_0(f"Exporting validation checkpoint {iteration} to {output_path}")
-        model_chunks = unwrap_model(context.model)
-        distill_chunks = [
-            model_chunk
-            for model_chunk in model_chunks
-            if isinstance(model_chunk, mtd.DistillationModel)
-        ]
-        visible_chunks = [
-            (f"model[{idx}]", model_chunk) for idx, model_chunk in enumerate(model_chunks)
-        ]
-
-        # DistillationModel is the student with teacher and KD-loss modules attached. Hide the
-        # auxiliary modules temporarily so the Hugging Face export contains only student weights.
-        # Also detach the teacher provider while exporting: Megatron-Bridge export sanitizes
-        # ``model.config`` and can turn non-pickleable callables into ``None``. DistillationProvider
-        # mirrors those config writes to its teacher, which was the root cause of the
-        # ``activation_func=None`` failure in the next teacher forward after validation export.
-        # TODO: Replace this with a cleaner student-only export path instead of mutating the
-        # distillation wrapper state during export.
-        with (
-            self._detach_distillation_provider_teacher_for_export(visible_chunks),
-            contextlib.ExitStack() as stack,
-        ):
-            for model_chunk in distill_chunks:
-                stack.enter_context(model_chunk.hide_teacher_model())
-                stack.enter_context(model_chunk.hide_loss_modules())
-            self.bridge.save_hf_pretrained(
-                context.model,
-                output_path,
-                show_progress=True,
-                strict=True,
-            )
-
-        if dist.rank() == 0:
-            # Preserve the student architecture from student_hf_path, including heterogeneous
-            # layer changes; AutoConfig supports both local paths and Hugging Face model IDs.
-            AutoConfig.from_pretrained(
-                self.student_hf_path, trust_remote_code=self.trust_remote_code
-            ).save_pretrained(output_path)
-        torch.distributed.barrier()
-        self._last_exported_iteration = iteration
 
 
 def get_args():
@@ -345,11 +133,6 @@ def get_args():
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
     parser.add_argument("--lr_warmup_iters", type=int, default=50, help="Number of LR warmup steps")
     parser.add_argument(
-        "--reset_optimizer",
-        action="store_true",
-        help="Do not restore optimizer or scheduler state when resuming from a checkpoint",
-    )
-    parser.add_argument(
         "--recompute_granularity",
         type=str,
         default=None,
@@ -383,11 +166,6 @@ def get_args():
     parser.add_argument(
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
     )
-    parser.add_argument(
-        "--validate_only",
-        action="store_true",
-        help="Run validation on the initial student without training",
-    )
     # Logging arguments
     parser.add_argument("--log_interval", type=int, default=10, help="Write to log every <N> steps")
     parser.add_argument(
@@ -406,30 +184,13 @@ def get_args():
         ),
     )
     parser.add_argument(
-        "--hf_validation_export_path",
-        type=str,
-        default=None,
-        help=(
-            "Path where HuggingFace checkpoints are exported after each validation stage. "
-            "Each checkpoint is saved in an iter_<iteration> subdirectory."
-        ),
-    )
-    parser.add_argument(
-        "--hf_validation_export_interval",
-        type=int,
-        default=None,
-        help=(
-            "Export a HuggingFace checkpoint every <N> training steps. "
-            "The final iteration is always exported."
-        ),
-    )
-    parser.add_argument(
         "--student_hf_model",
         type=str,
         required=False,
         default=None,
-        help="HuggingFace model ID to use as template for export (e.g., Qwen/Qwen3-0.6B). "
-        "Should match the base architecture of the student model if --hf_export_path is provided.",
+        help="Reference HF model with a homogeneous architecture, used as the export template for a "
+        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
+        "correct for homogeneous students; unused for VLMs.",
     )
     args = parser.parse_args()
 
@@ -437,19 +198,8 @@ def get_args():
     if not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
 
-    if args.validate_only and args.hf_export_path:
-        raise ValueError("--hf_export_path cannot be used with --validate_only.")
-    if (args.hf_export_path or args.hf_validation_export_path) and not args.student_hf_model:
-        raise ValueError(
-            "Must provide --student_hf_model when HuggingFace checkpoint export is enabled."
-        )
-    if args.hf_validation_export_interval is not None and not args.hf_validation_export_path:
-        raise ValueError("--hf_validation_export_interval requires --hf_validation_export_path.")
-    if args.hf_validation_export_path:
-        if args.hf_validation_export_interval is None:
-            raise ValueError(
-                "--hf_validation_export_path requires --hf_validation_export_interval."
-            )
+    if args.student_hf_model is None:
+        args.student_hf_model = args.student_hf_path
 
     print_args(args)
 
@@ -497,23 +247,50 @@ def main(args: argparse.Namespace):
         student_provider.gradient_accumulation_fusion = False
     teacher_provider = _build_model_provider(args.teacher_hf_path)
 
-    # Wrap into DistillationProvider
     kd_config = ModelOptDistillConfig(
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
     )
+
+    # VLM detection convention: HF VLM configs expose a ``vision_config``, and Megatron-Bridge nests
+    # the text model under the ``language_model`` submodule (used as ``distill_submodule`` below). If a
+    # future model breaks either convention, the ``getattr(model, "language_model")`` in the provider
+    # will error loudly rather than silently distilling the wrong module.
+    is_vlm = hasattr(
+        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
+        "vision_config",
+    )
+
+    if is_vlm:
+        warn_rank_0(
+            "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
+            "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
+        )
     distill_provider = convert_to_distillation_provider(
-        student_provider, teacher_provider, kd_config
+        student_provider,
+        teacher_provider,
+        kd_config,
+        distill_submodule="language_model" if is_vlm else None,
     )
 
     if args.student_megatron_path:
+        # QAD: restore the quantized student weights + ModelOpt state before the KD conversion (a no-op
+        # once converted). Prepend so this runs before the provider's KD-conversion pre-wrap hook.
         if student_has_modelopt_state:
             print_rank_0(
                 f"Detected ModelOpt state in {args.student_megatron_path}; "
                 "restoring quantizers for Quantization Aware Distillation (QAD)."
             )
-        # Register so the patched DistillationProvider.provide initializes this provider's student
-        # from the Megatron checkpoint (see _distill_provide_with_megatron_student).
-        _MEGATRON_STUDENT_CKPT_PATHS[id(distill_provider)] = args.student_megatron_path
+
+        def _restore_student_hook(model_chunks):
+            print_rank_0(
+                f"Loading student weights from Megatron checkpoint {args.student_megatron_path}"
+            )
+            load_modelopt_megatron_checkpoint(
+                [unwrap_model(model_chunks[0])], args.student_megatron_path
+            )
+            return model_chunks
+
+        distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
@@ -550,7 +327,6 @@ def main(args: argparse.Namespace):
             train_iters=args.train_iters,
             eval_interval=args.eval_interval,
             eval_iters=args.eval_iters,
-            skip_train=args.validate_only,
             global_batch_size=args.gbs,
             micro_batch_size=args.mbs,
             manual_gc=True,
@@ -584,8 +360,7 @@ def main(args: argparse.Namespace):
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
             save=checkpoint_dir,
-            load=None if args.validate_only else checkpoint_dir,
-            load_optim=not args.reset_optimizer,
+            load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
             async_save=True,
@@ -596,36 +371,28 @@ def main(args: argparse.Namespace):
     )
 
     print_rank_0("\nStarting distillation...")
-    if args.hf_validation_export_path:
-        assert isinstance(config.model, DistillationProvider), (
-            "Distillation requires a DistillationProvider"
-        )
-        callback = _HFValidationExportCallback(
-            export_dir=args.hf_validation_export_path,
-            student_hf_model=args.student_hf_model,
-            student_hf_path=args.student_hf_path,
-            trust_remote_code=args.trust_remote_code,
-            export_interval=args.hf_validation_export_interval,
-        )
-        # Megatron-Bridge distill(config) currently only checks DistillationProvider and calls
-        # pretrain(config, forward_step_modelopt). Call pretrain directly here only to attach the
-        # export callback; keep this path behaviorally equivalent to distill(config).
-        # TODO: Use distill(..., callbacks=[callback]) once distill(...) in Megatron-Bridge supports callbacks.
-        pretrain(config, forward_step_modelopt, callbacks=[callback])
-    else:
-        distill(config)
-    if args.validate_only:
-        print_rank_0("\nValidation-only run done!\n")
-    else:
-        print_rank_0(
-            f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
-            " in megatron distributed checkpoint format.\n"
-        )
+    distill(config)
+    print_rank_0(
+        f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
+        " in megatron distributed checkpoint format.\n"
+    )
 
-    # TODO: Extend _HFValidationExportCallback to export --hf_export_path from the in-memory
-    # student at the end of training. This avoids reloading the newly saved Megatron checkpoint
-    # and duplicating large disk I/O.
-    if args.hf_export_path:
+    if args.hf_export_path and is_vlm:
+        # Only the language model was distilled; export it back into the full VLM.
+        print_rank_0(f"Exporting distilled VLM to HF format to {args.hf_export_path}")
+        # ``distill`` tore down the model-parallel groups on exit, so rebuild them.
+        distill_provider.initialize_model_parallel(seed=args.seed)
+        full_student = distill_provider.full_model
+        # Strip the distillation wrapper -> plain trained language model (in place; reassign to be safe).
+        full_student.language_model = mtd.export(full_student.language_model)
+        save_vlm_to_hf(
+            full_student,
+            args.hf_export_path,
+            args.student_hf_path,
+            trust_remote_code=args.trust_remote_code,
+        )
+        print_rank_0(f"Saved distilled VLM to {args.hf_export_path} in HF format")
+    elif args.hf_export_path:
         print_rank_0(f"Exporting final distilled ckpt to HF format to {args.hf_export_path}")
         # Save rank before destroying process group (dist.rank() won't work after destruction)
         is_rank_0 = dist.rank() == 0
@@ -635,21 +402,13 @@ def main(args: argparse.Namespace):
         dist.cleanup()
 
         if is_rank_0:
-            export_bridge = AutoBridge.from_hf_pretrained(
-                args.student_hf_model, trust_remote_code=args.trust_remote_code
-            )
-            # Copy weights and remote code
-            export_bridge.export_ckpt(
+            export_llm_to_hf(
                 megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
-                hf_path=args.hf_export_path,
-                show_progress=True,
-                strict=True,
+                hf_export_path=args.hf_export_path,
+                student_hf_path=args.student_hf_path,
+                template_hf=args.student_hf_model,
+                trust_remote_code=args.trust_remote_code,
             )
-            # Preserve the student architecture from student_hf_path, including heterogeneous
-            # layer changes; AutoConfig supports both local paths and Hugging Face model IDs.
-            AutoConfig.from_pretrained(
-                args.student_hf_path, trust_remote_code=args.trust_remote_code
-            ).save_pretrained(args.hf_export_path)
 
 
 if __name__ == "__main__":

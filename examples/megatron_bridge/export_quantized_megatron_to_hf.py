@@ -26,7 +26,7 @@ during quantization). Use --pp_size to shard a large model across GPUs for expor
 
 Example usage to export an FP8 checkpoint produced by quantize.py:
 
-    torchrun --nproc_per_node 2 export.py \
+    torchrun --nproc_per_node 2 export_quantized_megatron_to_hf.py \
         --hf_model_name_or_path Qwen/Qwen3-8B \
         --megatron_path /tmp/Qwen3-8B-FP8-megatron \
         --pp_size 2 \

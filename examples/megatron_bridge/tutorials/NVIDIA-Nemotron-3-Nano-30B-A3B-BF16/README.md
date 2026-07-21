@@ -323,7 +323,7 @@ Phase 2 starts as a separate run from a fresh HuggingFace student checkpoint, so
 <details>
 <summary>Checkpoint conversion command (click to expand)</summary>
 
-> NOTE: Below command only works for non-quantized checkpoints. For quantized checkpoints, we use the `export.py` script in Section 5 to directly export the quantized checkpoint to Unified HF format for deployment.
+> NOTE: Below command only works for non-quantized checkpoints. For quantized checkpoints, we use the `export_quantized_megatron_to_hf.py` script in Section 5 to directly export the quantized checkpoint to Unified HF format for deployment.
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -394,7 +394,7 @@ We use the same conversion script to convert the Phase 2 final checkpoint to Hug
 <details>
 <summary>Checkpoint conversion command (click to expand)</summary>
 
-> NOTE: Below command only works for non-quantized checkpoints. For quantized checkpoints, we use the `export.py` script in Section 5 to directly export the quantized checkpoint to Unified HF format for deployment.
+> NOTE: Below command only works for non-quantized checkpoints. For quantized checkpoints, we use the `export_quantized_megatron_to_hf.py` script in Section 5 to directly export the quantized checkpoint to Unified HF format for deployment.
 
 ```bash
 python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
@@ -474,7 +474,7 @@ This is done with the `MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`model
 > [!NOTE]
 > You can also quantize to NVFP4 using `--quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG` or `MAMBA_MOE_NVFP4_AGGRESSIVE_CFG` (faster, more accuracy drop). NVFP4 typically needs further [Quantization Aware Distillation (QAD)](../../README.md#quantization-aware-distillation-qad) to recover accuracy, plus a Blackwell GPU for deployment.
 
-Quantization is a two-step flow: `quantize.py` calibrates and saves a Megatron checkpoint, then `export.py` converts it to a deployable HuggingFace checkpoint (the unified HF exporter loads at TP=1, so pipeline parallelism is used to shard across GPUs). Both steps take a few minutes on 8x H100.
+Quantization is a two-step flow: `quantize.py` calibrates and saves a Megatron checkpoint, then `export_quantized_megatron_to_hf.py` converts it to a deployable HuggingFace checkpoint (the unified HF exporter loads at TP=1, so pipeline parallelism is used to shard across GPUs). Both steps take a few minutes on 8x H100.
 
 **Step 1 — calibrate and save the quantized Megatron checkpoint:**
 
@@ -501,7 +501,7 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quanti
 <summary>Export command (click to expand)</summary>
 
 ```bash
-torchrun --nproc_per_node 1 /opt/Model-Optimizer/examples/megatron_bridge/export.py \
+torchrun --nproc_per_node 1 /opt/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py \
     --hf_model_name_or_path /path/to/distill_output_phase2_32k/checkpoints/hf_iter_0000800 \
     --megatron_path /path/to/distill_output_phase2_32k/checkpoints/iter_0000800_fp8_megatron \
     --trust_remote_code \
