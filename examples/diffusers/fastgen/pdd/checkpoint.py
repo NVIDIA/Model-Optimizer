@@ -552,6 +552,7 @@ class PDDCheckpointManager:
         self.trainer = trainer
         self.sampler = sampler
         self.rng = rng
+        self._last_checkpoint: Path | None = None
         self.identity = json.loads(json.dumps(identity, sort_keys=True))
         if self.identity.get("schema_version") != _CHECKPOINT_SCHEMA_VERSION:
             raise ValueError("PDD checkpoint identity has an unsupported schema version.")
@@ -778,7 +779,7 @@ class PDDCheckpointManager:
         if any(state != step_scheduler_state for state in rank_scheduler_states):
             raise RuntimeError("PDD ranks disagree on StepScheduler checkpoint state.")
         final = self.root / f"step_{completed_steps:08d}"
-        parent = self._collective_resolve("LATEST")
+        parent = self._last_checkpoint
 
         prepare_status = None
         if _rank() == 0:
@@ -852,6 +853,7 @@ class PDDCheckpointManager:
             raise RuntimeError(
                 f"rank-0 checkpoint publication failed: {publish_status.get('error')}."
             )
+        self._last_checkpoint = final
         return final
 
     def load(self, restore_from: str | Path | None) -> PDDResumeState | None:
@@ -904,6 +906,7 @@ class PDDCheckpointManager:
         if current_lrs != manifest["learning_rates"]:
             raise RuntimeError("PDD restored learning rate does not match the manifest.")
         self.checkpointer.load_on_dp_ranks(self.rng, "rng", str(checkpoint))
+        self._last_checkpoint = checkpoint
         return PDDResumeState(
             checkpoint_path=checkpoint,
             completed_steps=manifest["completed_steps"],

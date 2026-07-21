@@ -854,3 +854,47 @@ def test_stock_dcp_resume_recovers_rng_scheduler_cursor_and_next_loss(tmp_path) 
     source_checkpointer.close()
     destination_checkpointer.close()
     third_checkpointer.close()
+
+
+def test_save_chains_validated_parent_without_resolving_latest(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("nemo_automodel")
+    rng_module = pytest.importorskip("nemo_automodel.components.training.rng")
+    if not torch.distributed.is_initialized():
+        initialize_pdd_distributed(backend="gloo", timeout_minutes=1)
+    sample_ids = tuple(f"sample-{index}" for index in range(8))
+
+    source = build_toy_lifecycle()
+    source_sampler = _released_sampler(sample_ids)
+    source_manager, source_checkpointer = _manager(
+        tmp_path / "checkpoints",
+        source,
+        source_sampler,
+        rng_module.StatefulRNG(1234, ranked=True),
+    )
+    _run_next(source, source_sampler)
+    first = source_manager.save()
+    assert json.loads((first / "manifest.json").read_text())["parent_checkpoint"] is None
+
+    resumed = build_toy_lifecycle()
+    resumed_sampler = _released_sampler(sample_ids)
+    resumed_manager, resumed_checkpointer = _manager(
+        tmp_path / "checkpoints",
+        resumed,
+        resumed_sampler,
+        rng_module.StatefulRNG(9999, ranked=True),
+    )
+    assert resumed_manager.load("LATEST") is not None
+
+    def fail_resolution(restore_from):
+        raise AssertionError(f"save re-resolved {restore_from}")
+
+    monkeypatch.setattr(resumed_manager, "_collective_resolve", fail_resolution)
+    _run_next(resumed, resumed_sampler)
+    second = resumed_manager.save()
+    _run_next(resumed, resumed_sampler)
+    third = resumed_manager.save()
+
+    assert json.loads((second / "manifest.json").read_text())["parent_checkpoint"] == first.name
+    assert json.loads((third / "manifest.json").read_text())["parent_checkpoint"] == second.name
+    source_checkpointer.close()
+    resumed_checkpointer.close()
