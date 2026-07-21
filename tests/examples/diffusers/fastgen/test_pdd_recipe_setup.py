@@ -30,7 +30,8 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-from pdd.recipe import _validate_prepared_student
+from pdd import recipe as pdd_recipe
+from pdd.recipe import _preserve_fp32_timestep_inputs, _validate_prepared_student
 from pdd.training import PDDFlowMatchingStepAdapter
 
 from modelopt.torch.fastgen import PDDConfig
@@ -77,6 +78,34 @@ def test_prepared_student_width_is_validated_before_training() -> None:
 
     with pytest.raises(ValueError, match="Prepare the Qwen PDD student"):
         _validate_prepared_student(_PreparedStudent(out_features=4), config)
+
+
+def test_pdd_fsdp_preserves_fp32_timestep_inputs(monkeypatch) -> None:
+    def build_manager_args(**kwargs):
+        del kwargs
+        return {"_manager_type": "fsdp2"}
+
+    monkeypatch.setattr(
+        pdd_recipe.automodel_diffusion_train,
+        "_build_diffusion_parallel_manager_args",
+        build_manager_args,
+    )
+    with _preserve_fp32_timestep_inputs():
+        manager_args = pdd_recipe.automodel_diffusion_train._build_diffusion_parallel_manager_args(
+            dtype=torch.float32,
+            compute_dtype=torch.bfloat16,
+            lora_enabled=False,
+        )
+
+    policy = manager_args["mp_policy"]
+    assert policy.param_dtype == torch.bfloat16
+    assert policy.reduce_dtype == torch.float32
+    assert policy.output_dtype == torch.bfloat16
+    assert policy.cast_forward_inputs is False
+    assert (
+        pdd_recipe.automodel_diffusion_train._build_diffusion_parallel_manager_args
+        is build_manager_args
+    )
 
 
 @pytest.mark.parametrize("guidance_scale", [None, 4.0])

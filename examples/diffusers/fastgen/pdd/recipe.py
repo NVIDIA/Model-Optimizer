@@ -18,21 +18,22 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import torch
 import torch.distributed as dist
 from huggingface_hub import snapshot_download
 from torch import nn
+from torch.distributed.fsdp import MixedPrecisionPolicy
 
 try:
+    import nemo_automodel.recipes.diffusion.train as automodel_diffusion_train
     from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
     from nemo_automodel.components.training.rng import ScopedRNG
-    from nemo_automodel.recipes.diffusion.train import (
-        TrainDiffusionRecipe,
-        _build_diffusion_parallel_manager_args,
-    )
+    from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe
 except ImportError as exc:
     raise ImportError(
         "The PDD example requires nemo_automodel. Install "
@@ -46,6 +47,37 @@ from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
 )
 
 from .training import PDDFlowMatchingStepAdapter
+
+
+@contextmanager
+def _preserve_fp32_timestep_inputs() -> Iterator[None]:
+    """Keep Qwen's continuous timestep in FP32 while FSDP computes in BF16."""
+    original_builder = automodel_diffusion_train._build_diffusion_parallel_manager_args
+
+    def build_manager_args(**kwargs: Any) -> dict[str, Any]:
+        manager_args = original_builder(**kwargs)
+        if manager_args.get("_manager_type") != "fsdp2":
+            return manager_args
+
+        compute_dtype = kwargs.get("compute_dtype") or kwargs["dtype"]
+        current_policy = manager_args.get("mp_policy")
+        manager_args["mp_policy"] = MixedPrecisionPolicy(
+            param_dtype=getattr(
+                current_policy,
+                "param_dtype",
+                None if kwargs["lora_enabled"] else compute_dtype,
+            ),
+            reduce_dtype=getattr(current_policy, "reduce_dtype", torch.float32),
+            output_dtype=getattr(current_policy, "output_dtype", compute_dtype),
+            cast_forward_inputs=False,
+        )
+        return manager_args
+
+    automodel_diffusion_train._build_diffusion_parallel_manager_args = build_manager_args
+    try:
+        yield
+    finally:
+        automodel_diffusion_train._build_diffusion_parallel_manager_args = original_builder
 
 
 def _config_mapping(value: Any) -> dict[str, Any]:
@@ -83,20 +115,21 @@ class PDDDiffusionRecipe(TrainDiffusionRecipe):
     """Use AutoModel's native lifecycle with a PDD loss and frozen teacher."""
 
     def setup(self) -> None:
-        super().setup()
+        with _preserve_fp32_timestep_inputs():
+            super().setup()
 
-        raw_pdd = _config_mapping(self.cfg.get("pdd", {}))
-        self.pdd_config = PDDConfig.model_validate(raw_pdd)
+            raw_pdd = _config_mapping(self.cfg.get("pdd", {}))
+            self.pdd_config = PDDConfig.model_validate(raw_pdd)
 
-        # The student artifact is widened before AutoModel creates FSDP and optimizer state.
-        # Binding the MR210 forward here changes behavior only; it creates no parameters.
-        adopt_qwen_image_mr210_forward(self.model)
-        _validate_prepared_student(self.model, self.pdd_config)
-        self.model.enable_gradient_checkpointing()
+            # The student artifact is widened before AutoModel creates FSDP and optimizer state.
+            # Binding the MR210 forward here changes behavior only; it creates no parameters.
+            adopt_qwen_image_mr210_forward(self.model)
+            _validate_prepared_student(self.model, self.pdd_config)
+            self.model.enable_gradient_checkpointing()
 
-        # ``teacher_model`` is the BaseRecipe-recognized frozen reference-model name; native
-        # checkpoint save/load deliberately excludes it while tracking every student state.
-        self.teacher_model = self._load_teacher()
+            # ``teacher_model`` is the BaseRecipe-recognized frozen reference-model name; native
+            # checkpoint save/load deliberately excludes it while tracking every student state.
+            self.teacher_model = self._load_teacher()
         pdd_pipeline = PDDPipeline(
             self.model,
             self.teacher_model,
@@ -110,7 +143,7 @@ class PDDDiffusionRecipe(TrainDiffusionRecipe):
         """Load the frozen PDD target model with AutoModel's diffusion parallelizer."""
         fsdp_cfg = self.cfg.get("fsdp", None)
         ddp_cfg = self.cfg.get("ddp", None)
-        manager_args = _build_diffusion_parallel_manager_args(
+        manager_args = automodel_diffusion_train._build_diffusion_parallel_manager_args(
             fsdp_cfg=fsdp_cfg,
             ddp_cfg=ddp_cfg,
             world_size=self.world_size,
