@@ -187,8 +187,8 @@ How the quantization scales are searched. The default (no suffix) is `max`.
   one decoder layer at a time to **lower peak memory**; same numerics as the
   non-layerwise variant.
 
-These can also be **stacked** when a single method isn't enough — e.g. `mse` +
-`gptq` combines an MSE-searched weight scale with GPTQ's layerwise update.
+To combine a searched weight scale with GPTQ, configure the scale search inside GPTQ:
+`algorithm: {method: gptq, layerwise: true, scale_algorithm: {method: mse}}`.
 
 ---
 

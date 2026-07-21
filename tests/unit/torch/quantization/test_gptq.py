@@ -15,9 +15,139 @@
 
 """CPU unit tests for GPTQ utilities."""
 
-import torch
+from unittest.mock import Mock, create_autospec
 
+import pytest
+import torch
+from torch import nn
+
+import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_calib as model_calib_module
+from modelopt.torch.quantization.config import (
+    GPTQCalibConfig,
+    LocalHessianCalibConfig,
+    MaxCalibConfig,
+    MseCalibConfig,
+)
+from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.utils.calib_utils import update_hessian
+
+
+class TestGPTQScaleAlgorithmConfig:
+    """Tests for GPTQ scale-calibration configuration."""
+
+    def test_default_config(self):
+        cfg = GPTQCalibConfig()
+        assert cfg.scale_algorithm is None
+        assert cfg.model_dump()["scale_algorithm"] is None
+        assert cfg.perc_damp == 0.01
+        assert cfg.block_size == 128
+        assert cfg.fused is False
+
+    def test_old_style_config_dict_restores(self):
+        cfg = GPTQCalibConfig(method="gptq", perc_damp=0.02)
+        assert cfg.scale_algorithm is None
+
+    @pytest.mark.parametrize(
+        ("method", "config_type"),
+        [
+            ("max", MaxCalibConfig),
+            ("mse", MseCalibConfig),
+            ("local_hessian", LocalHessianCalibConfig),
+        ],
+    )
+    def test_scale_algorithm(self, method, config_type):
+        cfg = GPTQCalibConfig(scale_algorithm={"method": method})
+        assert isinstance(cfg.scale_algorithm, config_type)
+
+    def test_unsupported_scale_algorithm(self):
+        with pytest.raises(ValueError):
+            GPTQCalibConfig(scale_algorithm={"method": "smoothquant"})
+
+    def test_local_hessian_activation_error_coupling(self):
+        cfg = GPTQCalibConfig(
+            scale_algorithm={"method": "local_hessian", "activation_error_coupling": True}
+        )
+        assert cfg.model_dump()["scale_algorithm"]["activation_error_coupling"] is True
+
+    def test_scale_algorithm_preserves_sparse_dict(self, monkeypatch):
+        cfg = GPTQCalibConfig(scale_algorithm={"method": "mse", "fp8_scale_sweep": True})
+        assert cfg.model_dump()["scale_algorithm"] == {
+            "method": "mse",
+            "fp8_scale_sweep": True,
+        }
+
+        calibrate = create_autospec(model_calib_module.mse_calibrate)
+        monkeypatch.setattr(model_calib_module, "mse_calibrate", calibrate)
+        model = Mock()
+        model_calib_module._run_scale_calibration(model, None, cfg.scale_algorithm)
+        calibrate.assert_called_once_with(model, forward_loop=None, fp8_scale_sweep=True)
+
+
+@pytest.mark.parametrize(
+    ("scale_algorithm", "expected_func", "expected_kwargs"),
+    [
+        (None, "max", {}),
+        ({"method": "mse", "fp8_scale_sweep": True}, "mse", {"fp8_scale_sweep": True}),
+        (
+            {"method": "local_hessian", "activation_error_coupling": True},
+            "local_hessian",
+            {"activation_error_coupling": True},
+        ),
+    ],
+)
+def test_gptq_scale_algorithm_dispatch(
+    monkeypatch, scale_algorithm, expected_func, expected_kwargs
+):
+    calls = []
+
+    def record(name):
+        def calibrate(model, forward_loop, **kwargs):
+            calls.append((name, model, forward_loop, kwargs))
+
+        return calibrate
+
+    monkeypatch.setattr(model_calib_module, "max_calibrate", record("max"))
+    monkeypatch.setattr(model_calib_module, "mse_calibrate", record("mse"))
+    monkeypatch.setattr(model_calib_module, "local_hessian_calibrate", record("local_hessian"))
+    model = nn.Linear(4, 4)
+
+    def forward_loop(model):
+        pass
+
+    gptq(model, forward_loop=forward_loop, scale_algorithm=scale_algorithm)
+
+    assert calls == [(expected_func, model, forward_loop, expected_kwargs)]
+
+
+@pytest.mark.parametrize("sequential", [False, True])
+def test_gptq_fused_rejects_four_over_six(sequential):
+    model = nn.Linear(32, 32)
+    weight_quantizer_cfg = {
+        "num_bits": (2, 1),
+        "block_sizes": {
+            -1: 16,
+            "type": "static",
+            "scale_bits": (4, 3),
+            "four_over_six": True,
+        },
+    }
+    if sequential:
+        weight_quantizer_cfg = [weight_quantizer_cfg, {"num_bits": (4, 3), "axis": None}]
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": weight_quantizer_cfg,
+            },
+        ],
+        "algorithm": None,
+    }
+    mtq.quantize(model, quant_cfg)
+
+    with pytest.raises(ValueError, match="four_over_six"):
+        gptq(model, forward_loop=lambda m: None, fused=True)
 
 
 def test_update_hessian():

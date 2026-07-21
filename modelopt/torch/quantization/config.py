@@ -1087,6 +1087,16 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
+_ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+
+
+def _serialize_scale_algorithm_sparse(value: _ScaleCalibConfig | None) -> dict | None:
+    """Preserve the sparse public dict shape accepted by ``scale_algorithm`` fields."""
+    if value is None:
+        return None
+    return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
+
+
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).
 
@@ -1237,6 +1247,11 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
     sequentially so that each layer's Hessian is computed from activations that already reflect
     the quantization of preceding layers.
 
+    Scale calibration (max by default) sets the amax values that GPTQ quantizes against. NVFP4
+    four-over-six composes through ``four_over_six`` weight ``block_sizes`` and MSE scale
+    calibration. In layerwise mode, scale calibration runs once per decoder layer. Fused GPTQ is
+    incompatible with four-over-six weight quantization.
+
     The default values are taken from the official GPTQ implementation:
     https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
     """
@@ -1261,6 +1276,20 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         description="""When True, use a fused Triton kernel that combines quantization and
         per-column error propagation into one launch per GPTQ block.""",
     )
+    scale_algorithm: _ScaleCalibConfig | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm run before the GPTQ weight update.",
+        description=(
+            "Dict with 'method' key: 'max', 'mse', or 'local_hessian'. Extra keys are "
+            "forwarded to the calibration function, e.g. 'fp8_scale_sweep' (mse/local_hessian) "
+            "or 'activation_error_coupling' (local_hessian). Defaults to {'method': 'max'} "
+            "if None, preserving historical GPTQ behavior."
+        ),
+    )
+
+    @field_serializer("scale_algorithm")
+    def _serialize_scale_algorithm(self, value: _ScaleCalibConfig | None):
+        return _serialize_scale_algorithm_sparse(value)
 
     @model_validator(mode="after")
     def _gptq_qdq_default(self):
@@ -1276,9 +1305,6 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
                 update={"get_qdq_activations_from_prev_layer": True}
             )
         return self
-
-
-_ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
 
 
 class LSQConfig(QuantizeAlgorithmConfig):
@@ -1356,9 +1382,7 @@ class LSQConfig(QuantizeAlgorithmConfig):
     @field_serializer("scale_algorithm")
     def _serialize_scale_algorithm(self, value: _ScaleCalibConfig | None):
         """Preserve the sparse public dict shape accepted by this field."""
-        if value is None:
-            return None
-        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
+        return _serialize_scale_algorithm_sparse(value)
 
     @model_validator(mode="after")
     def _validate_tied_amax(self):
