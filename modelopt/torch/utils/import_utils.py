@@ -15,6 +15,7 @@
 
 """Handles suppressing import errors for third-party modules that may or may not be available."""
 
+import inspect
 from contextlib import contextmanager
 
 from .logging import warn_rank_0
@@ -23,6 +24,11 @@ from .logging import warn_rank_0
 @contextmanager
 def import_plugin(plugin_name, msg_if_missing=None, verbose=True, success_msg=None):
     """Context manager to import a plugin and suppress ModuleNotFoundError."""
+    # Capture the ``with import_plugin(...)`` call site so warnings point at the plugin
+    # that actually failed rather than at this helper. When ``__enter__`` runs the
+    # generator body, the stack is [0]=here, [1]=contextlib.__enter__, [2]=the caller.
+    caller = inspect.stack()[2]
+    caller_loc = f"{caller.filename}:{caller.lineno}"
     try:
         yield
         if verbose and success_msg is not None:
@@ -33,6 +39,6 @@ def import_plugin(plugin_name, msg_if_missing=None, verbose=True, success_msg=No
     except Exception as e:
         if verbose:
             warn_rank_0(
-                f"Failed to import modelopt {plugin_name} plugin due to: {e!r}. "
-                "You may ignore this warning if you do not need this plugin."
+                f"Failed to import modelopt {plugin_name} plugin (from {caller_loc}) due to: "
+                f"{e!r}. You may ignore this warning if you do not need this plugin."
             )

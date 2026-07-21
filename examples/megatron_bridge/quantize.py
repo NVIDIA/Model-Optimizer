@@ -124,7 +124,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--quant_cfg",
         type=str,
-        default="fp8",
+        default=None,
         help=(
             f"Quantization config. Preset names / short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "

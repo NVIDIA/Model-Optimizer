@@ -100,7 +100,8 @@ def _test_mamba_search_space(rank, size):
         assert isinstance(layer.mixer, _DynamicMambaMixer)
         assert isinstance(layer.mixer.in_proj, _DynamicTELayerNormColumnParallelLinear)
         assert isinstance(layer.mixer.out_proj, _DynamicTERowParallelLinear)
-        assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
+        if hasattr(layer.mixer, "conv1d"):  # nemo:26.06 and earlier
+            assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
         if layer.mixer.rmsnorm:
             assert isinstance(layer.mixer.norm, _DynamicExtendedRMSNorm)
     if is_pipeline_last_stage():

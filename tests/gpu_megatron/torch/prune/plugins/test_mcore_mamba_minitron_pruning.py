@@ -210,7 +210,10 @@ def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
     assert mixer.headdim == pruned_mamba_head_dim
     assert mixer.d_inner == pruned_mamba_num_heads * pruned_mamba_head_dim
     assert mixer.out_proj.out_features == pruned_hidden_size
-    assert mixer.conv1d.in_channels == mixer.conv1d.out_channels == mixer.d_inner + bc
+    if hasattr(mixer, "conv1d"):  # nemo:26.06 and earlier
+        assert mixer.conv1d.in_channels == mixer.conv1d.out_channels == mixer.d_inner + bc
+    else:  # nemo:26.08+
+        assert mixer.conv1d_weight.shape[0] == mixer.conv1d_bias.shape[0] == mixer.d_inner + bc
 
     # Assert model.config is updated for correct save/restoring
     assert model.config.ffn_hidden_size == pruned_ffn_hidden_size

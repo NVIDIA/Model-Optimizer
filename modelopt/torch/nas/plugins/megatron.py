@@ -88,6 +88,9 @@ except ImportError:
 # returns the first match in insertion order: MambaModel is registered first, so
 # MambaModel instances dispatch to MambaModel whether or not MambaModel overrides forward.
 try:
+    from megatron.core.models.hybrid.hybrid_layer_specs import (
+        hybrid_stack_spec as _te_hybrid_stack_spec,
+    )
     from megatron.core.models.hybrid.hybrid_model import HybridModel
 
     SUPPORTED_MODELS[HybridModel] = "megatron.core.models.hybrid.HybridModel"
@@ -99,11 +102,11 @@ except ImportError:
 # Attention module types that _DynamicTransformerLayer converts.
 _ATTENTION_TYPES: tuple[type, ...] = (SelfAttention, MLASelfAttention, GatedDeltaNet)
 
-__all__ = ["get_te_mamba_stack_spec"]
+__all__ = ["get_te_hybrid_stack_spec", "get_te_mamba_stack_spec"]
 
 
 def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
-    """Return the TE Mamba stack spec."""
+    """[Deprecated] Return the TE Mamba stack spec."""
     assert HAS_MAMBA
     if moe_grouped_gemm:
         return _te_mamba_stack_spec
@@ -116,6 +119,21 @@ def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
         use_te=True, num_experts=8, moe_grouped_gemm=False
     )
     return te_mamba_stack_spec
+
+
+def get_te_hybrid_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
+    """Return the TE Hybrid stack spec."""
+    assert HAS_HYBRID
+    if moe_grouped_gemm:
+        return _te_hybrid_stack_spec
+
+    # The upstream TE hybrid stack spec hardcodes TEGroupedMLP for MoE.
+    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
+    te_hybrid_stack_spec = copy.deepcopy(_te_hybrid_stack_spec)
+    te_hybrid_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
+        use_te=True, num_experts=8, moe_grouped_gemm=False
+    )
+    return te_hybrid_stack_spec
 
 
 # Local Parallel Linear DynamicModules ##########################################################################
@@ -1055,8 +1073,12 @@ class _MambaContextParallelProxy:
             return mixer.d_inner
         if name in ("nheads_local_tp", "nheads_local_tpcp"):
             return mixer.nheads
-        if name == "conv1d_cp1":
+        if name == "conv1d_cp1":  # nemo:26.06 and earlier: conv is a module
             return mixer.conv1d
+        if name == "conv1d_weight_cp1":  # nemo:26.08+: raw conv parameters (dynamically sliced)
+            return mixer.conv1d_weight
+        if name == "conv1d_bias_cp1":  # nemo:26.08+
+            return mixer.conv1d_bias
         if name == "dt_bias_cp1":
             return mixer.dt_bias
         if name == "A_log_cp1":
@@ -1122,11 +1144,19 @@ class _DynamicMambaMixer(DynamicModule):
         DMRegistry.convert(self.in_proj, input_size=hidden_size, output_size=in_proj_output_size)
 
         conv_dim = build_concat_hp([d_inner, bc])  # z, B, C
-        DMRegistry.convert(self.conv1d)
-        self.conv1d.in_channels = conv_dim
-        self.conv1d.out_channels = conv_dim
-        ks = self.conv1d.get_hparam("kernel_size")
-        ks.choices = [ks.original]
+        if hasattr(self, "conv1d"):  # nemo:26.06 and earlier: a depthwise `nn.Conv1d` module.
+            DMRegistry.convert(self.conv1d)
+            self.conv1d.in_channels = conv_dim
+            self.conv1d.out_channels = conv_dim
+            ks = self.conv1d.get_hparam("kernel_size")
+            ks.choices = [ks.original]
+        else:  # nemo:26.08+: the conv is stored as raw parameters
+
+            def _slice_conv(mod, val, _hp=conv_dim):
+                return get_sliced_tensor_by_slices(val, [_hp.active_slice])
+
+            self._register_dynamic_attribute("conv1d_weight", _slice_conv)  # [conv_dim, 1, d_conv]
+            self._register_dynamic_attribute("conv1d_bias", _slice_conv)  # [conv_dim]
 
         if self.rmsnorm:
             DMRegistry.convert(self.norm)
@@ -1151,7 +1181,8 @@ class _DynamicMambaMixer(DynamicModule):
         """Export the dynamic module to a torch.nn.Module."""
         self.in_proj.export()
         self.out_proj.export()
-        self.conv1d.export()
+        if hasattr(self, "conv1d"):  # nemo:26.06 and earlier
+            self.conv1d.export()
         if self.rmsnorm:
             self.norm.export()
         return super().export()

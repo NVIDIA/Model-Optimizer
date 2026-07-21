@@ -40,6 +40,7 @@ from megatron.bridge.training.config import (
     RNGConfig,
     TokenizerConfig,
     TrainingConfig,
+    ValidationConfig,
 )
 from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
@@ -325,15 +326,12 @@ def main(args: argparse.Namespace):
         model=distill_provider,
         train=TrainingConfig(
             train_iters=args.train_iters,
-            eval_interval=args.eval_interval,
-            eval_iters=args.eval_iters,
             global_batch_size=args.gbs,
             micro_batch_size=args.mbs,
             manual_gc=True,
             manual_gc_interval=100,
         ),
-        # TODO: Replace validation args in train with validation config once we drop nemo:26.02 container support
-        # validation=ValidationConfig(eval_interval=args.eval_interval, eval_iters=args.eval_iters),
+        validation=ValidationConfig(eval_iters=args.eval_iters, eval_interval=args.eval_interval),
         optimizer=optimizer_config,
         scheduler=scheduler_config,
         ddp=DistributedDataParallelConfig(

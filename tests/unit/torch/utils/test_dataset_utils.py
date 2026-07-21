@@ -699,7 +699,7 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokeniz
     """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
     can't silently exhaust the row budget and drop the other sources.
 
-    Without shuffle, source A's 8x-oversampled docs would all come first in
+    Without shuffle, source A's 16x-oversampled docs would all come first in
     ``all_samples`` and (with sufficient row consumption per doc) fill every row.
     With the deterministic shuffle, both sources appear within the first
     ``total_rows`` worth of consumed samples.
