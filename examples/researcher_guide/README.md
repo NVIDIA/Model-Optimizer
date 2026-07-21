@@ -147,8 +147,9 @@ Interesting observations include:
 - Nemotron 3 produces the strongest MMLU-Pro trajectory, reaching 47.71%.
 - Although Nemotron v2 performs poorly alone, its 50/50 blend with WikiText slightly outperforms WikiText alone
   on both final benchmarks.
-- Nemotron v2 KD continues to decrease, but its MMLU-Pro score remains below the pruned baseline. Understanding
-  this discrepancy could help design better distillation corpora.
+- Nemotron v2 KD continues to decrease, but its MMLU-Pro score remains below the pruned baseline. The severe
+  MMLU-Pro regression appears to come from overfitting to Nemotron v2-style responses, even though MMLU-Pro prompts
+  ask the model to answer in a specific multiple-choice style.
 
 ## Prepare token-budgeted data blends
 
