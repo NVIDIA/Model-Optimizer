@@ -540,3 +540,105 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp.0.hnorm.weight" in mtp_state_dict
     assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
     assert "mtp*" in exporter.exclude_modules
+
+
+class _FakeTEGroupedMLP:
+    """Minimal TEGroupedMLP stand-in exposing num_gemms, weight{i}, and state_dict()."""
+
+    def __init__(self, num_gemms: int, hidden: int = 8, ffn: int = 16, local_expert_indices=None):
+        self.num_gemms = num_gemms
+        self._weights = {
+            f"weight{i}": torch.randn(ffn, hidden, dtype=torch.bfloat16) for i in range(num_gemms)
+        }
+        for k, v in self._weights.items():
+            setattr(self, k, v)
+        if local_expert_indices is not None:
+            self.local_expert_indices = local_expert_indices
+
+    def state_dict(self):
+        return dict(self._weights)
+
+
+def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter._state_dict = {}
+    exporter._get_quantized_state = lambda *a, **k: ({}, None, 0)
+    exporter._get_weight_scales = lambda *a, **k: (None, None)
+    exporter._record_layer_quant_config = lambda *a, **k: None
+    return exporter
+
+
+def test_grouped_mlp_slicing_maps_local_to_global_expert_ids():
+    """EP>1 fix: without global remapping, every EP rank would write experts.0..N-1 and
+    collide on the writer's state_dict.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    # Simulate EP rank 2 of an EP=4 job: this rank owns global experts 4 and 5.
+    module = _FakeTEGroupedMLP(num_gemms=2, local_expert_indices=[4, 5])
+
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.4.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.5.gate_up_proj.weight" in exporter._state_dict
+    # Local indices 0/1 must NOT leak into the exported state_dict.
+    assert "experts.0.gate_up_proj.weight" not in exporter._state_dict
+    assert "experts.1.gate_up_proj.weight" not in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_normalizes_tensor_local_expert_indices():
+    """local_expert_indices may arrive as a torch.Tensor (Megatron path). It must be
+    normalized to list[int] -- a naive `bool(tensor)` on a multi-element tensor raises.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(
+        num_gemms=2, local_expert_indices=torch.tensor([6, 7], dtype=torch.long)
+    )
+
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.6.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.7.gate_up_proj.weight" in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_collects_all_missing_expert_weights():
+    """New collect-then-raise behavior: the error message must name every missing
+    weight{i}, not just the first one hit.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=3)
+    # Drop weight0 AND weight2; only weight1 remains.
+    module.state_dict = lambda: {"weight1": module.weight1}
+
+    with pytest.raises(ValueError) as exc_info:
+        exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    msg = str(exc_info.value)
+    assert "weight0" in msg and "weight2" in msg, (
+        f"error should list all missing weights, got: {msg}"
+    )
+
+
+def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
+    """DP>1 fix predicate: only the DP0/EP0 rank among is_last_stage_main_rank writes
+    sidecar files. Guards the predicate used at three sites in save_pretrained.
+    """
+    import modelopt.torch.export.unified_export_megatron as uem
+
+    # is_last_stage_main_rank=False is never a writer, regardless of DP/EP.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)
+    assert GPTModelExporter._is_sidecar_writer_rank(False) is False
+
+    # DP0/EP0 is the writer.
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is True
+
+    # DP rank != 0 loses the writer role even if is_last_stage_main_rank.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 1)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is False
+
+    # EP rank != 0 loses the writer role.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 1)
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is False

@@ -27,6 +27,7 @@ Actual dynamic module implementations are at :mod:`modelopt.torch.nas.plugins.me
 import io
 import sys
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
@@ -110,6 +111,10 @@ SUPPORTED_HPARAMS = {
     "num_layers",
 }
 
+# Explicit per-layer config patterns (indexed by original 1-indexed layer number) that must be sliced
+# to the surviving layers on depth pruning. Integer/None cadence values are ignored (need no update).
+_PER_LAYER_CONFIG_PATTERNS = ("linear_attention_freq", "moe_layer_freq")
+
 __all__ = [
     "SUPPORTED_HPARAMS",
     "MCoreMinitronConfig",
@@ -118,6 +123,31 @@ __all__ = [
     "drop_mcore_language_model_layers",
     "get_mcore_minitron_config",
 ]
+
+
+def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
+    """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
+
+    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
+    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
+    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
+    checks against a class hierarchy that may shift across MCore versions.
+    """
+    for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
+        if getattr(model, attr, None):
+            return attr
+    return None
+
+
+def _slice_per_layer_pattern(pattern: list | tuple | str, dropped_layers: set[int]):
+    """Slice a per-layer pattern to the surviving layers, preserving its type.
+
+    ``pattern`` is indexed by the original 1-indexed layer number (a list/tuple such as
+    ``linear_attention_freq`` or a hybrid block-type string such as ``"M*M-"``). Entries whose
+    layer number is in ``dropped_layers`` are removed.
+    """
+    kept = [p for i, p in enumerate(pattern) if (i + 1) not in dropped_layers]
+    return "".join(kept) if isinstance(pattern, str) else type(pattern)(kept)
 
 
 def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[int]) -> None:
@@ -173,19 +203,18 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
 
     model.config.num_layers = new_num_layers
 
-
-def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
-    """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
-
-    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
-    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
-    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
-    checks against a class hierarchy that may shift across MCore versions.
-    """
-    for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
-        if getattr(model, attr, None):
-            return attr
-    return None
+    # Slice per-layer patterns to the surviving layers, else their length no longer matches
+    # ``num_layers`` and building/exporting the pruned model fails.
+    dropped = set(layers_to_drop)
+    # Explicit config lists (e.g. linear_attention_freq, moe_layer_freq); integer/None values are left untouched
+    for pattern_attr in _PER_LAYER_CONFIG_PATTERNS:
+        pattern = getattr(model.config, pattern_attr, None)
+        if isinstance(pattern, (list, tuple)):
+            setattr(model.config, pattern_attr, _slice_per_layer_pattern(pattern, dropped))
+    # Hybrid block-type string (Mamba ``hybrid_override_pattern`` / ``hybrid_layer_pattern``).
+    hybrid_key = _get_hybrid_pattern_key(model)
+    if hybrid_key is not None:
+        setattr(model, hybrid_key, _slice_per_layer_pattern(getattr(model, hybrid_key), dropped))
 
 
 def _rprint(*renderables: Any) -> None:
@@ -385,36 +414,55 @@ class MCoreMinitronSearcher(BaseSearcher):
             export_config = self.constraints["export_config"]
 
         # Prune homogeneously
-        self._prune(export_config, prune_depth=True)
-
-        # Update the hybrid block-type pattern if pruning a hybrid model.
-        hybrid_key = _get_hybrid_pattern_key(self.model)
-        if hybrid_key is not None:
-            print_rank_0(f"Original {hybrid_key}: {getattr(self.model, hybrid_key)}")
-            new_num_layers = self.model.config.num_layers
-            assert self.sorted_layers is not None
-            kept_layers_numbers = self.sorted_layers[:new_num_layers]
-            setattr(
-                self.model,
-                hybrid_key,
-                "".join(
-                    c
-                    for i, c in enumerate(getattr(self.model, hybrid_key))
-                    if i + 1 in kept_layers_numbers
-                ),
-            )
-            print_rank_0(f"Pruned {hybrid_key}: {getattr(self.model, hybrid_key)}")
+        self._prune(export_config)
 
         print_mcore_model_stats(
             self.model, "Pruned Model", self.config["seq_length"], self.config["batch_size"]
         )
 
-    def _prune(self, export_config: dict, prune_depth: bool = True) -> None:
+    @contextmanager
+    def _temporarily_pruned(self, export_config: dict):
+        """Prune to ``export_config`` for the duration of the block, then restore the max subnet.
+
+        Used to score a candidate subnet without permanently mutating the model. ``_prune`` drops
+        layers and slices per-layer patterns (config lists + hybrid string) in place; ``sample(max)``
+        only restores hparam-controlled state, so those must be snapshotted and restored here — else
+        the mutations compound across candidates and corrupt the final export.
+        """
+        model = self.model
+        all_layers = model.decoder.layers
+        start_layer_number = all_layers[0].layer_number
+        hybrid_key = _get_hybrid_pattern_key(model)
+        saved_patterns = {
+            attr: getattr(model.config, attr)
+            for attr in _PER_LAYER_CONFIG_PATTERNS
+            if isinstance(getattr(model.config, attr, None), (list, tuple))
+        }
+        saved_hybrid = getattr(model, hybrid_key) if hybrid_key else None
+        try:
+            self._prune(export_config)
+            yield
+        finally:
+            # Reattach the full layer list (with original numbering) BEFORE sampling the max subnet,
+            # so sample(max) reaches every layer -- including the dropped ones -- and resets their
+            # per-layer width hparams (otherwise the detached layers are reattached still holding
+            # their pruned widths). Then restore the in-place-sliced patterns (not hparam-controlled).
+            for offset, layer in enumerate(all_layers):
+                layer.layer_number = start_layer_number + offset
+            model.decoder.layers = all_layers
+            sample(model, sample_func=max)
+            for attr, pattern in saved_patterns.items():
+                setattr(model.config, attr, pattern)
+            if hybrid_key:
+                setattr(model, hybrid_key, saved_hybrid)
+
+    def _prune(self, export_config: dict) -> None:
         """Prune the model homogeneously based on the export_config by setting active choices for configurable hparams.
+
+        Also drops layers and slices all per-layer patterns.
 
         Args:
             export_config: Dictionary mapping hyperparameter names to their pruned values.
-            prune_depth: Whether to drop layers based on sorted_layers (default: True).
         """
         # Prune homogeneously
         for n, hp in named_hparams(self.model, configurable=True):
@@ -422,13 +470,12 @@ class MCoreMinitronSearcher(BaseSearcher):
             if hp_name in export_config:
                 hp.active = export_config[hp_name]
 
-        # Drop layers if depth pruning is enabled
-        if prune_depth:
-            num_layers_hp = self.model.get_hparam("num_layers")
-            if num_layers_hp.active != num_layers_hp.max:
-                assert self.sorted_layers is not None
-                layers_to_drop = self.sorted_layers[num_layers_hp.active :]
-                drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
+        # Drop layers based on sorted_layers
+        num_layers_hp = self.model.get_hparam("num_layers")
+        if num_layers_hp.active != num_layers_hp.max:
+            assert self.sorted_layers is not None
+            layers_to_drop = self.sorted_layers[num_layers_hp.active :]
+            drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
         # Update model config with pruned architecture
         # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
@@ -565,19 +612,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             smoothing=0.7,
         ):
             if candidate.score is None:  # not restored from checkpoint
-                all_layers = self.model.decoder.layers
-                start_layer_number = all_layers[0].layer_number
-
-                self._prune(candidate.ss_config, prune_depth=True)
-                candidate.score = self.eval_score(silent=False)
-                self.save_search_checkpoint(verbose=False)
-
-                # reset to max subnet and revert dropped layers
-                sample(self.model, sample_func=max)
-                for layer in all_layers:
-                    layer.layer_number = start_layer_number
-                    start_layer_number += 1
-                self.model.decoder.layers = all_layers
+                with self._temporarily_pruned(candidate.ss_config):
+                    candidate.score = self.eval_score(silent=False)
+                    self.save_search_checkpoint(verbose=False)
             metrics_str = ", ".join(
                 f"{self._fmt_metric(v, k)} {k}" for k, v in candidate.metrics.items()
             )
