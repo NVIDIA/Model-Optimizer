@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DMD2 text-to-image collate + dataloader builder for the fastgen example.
+"""Shared text-to-image collate and dataloader builder for the FastGen examples.
 
 Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
 
-* :func:`collate_fn_text_to_image` builds the DMD2 batch directly from the vendored
+* :func:`collate_fn_text_to_image` builds the Qwen-Image batch directly from the vendored
   :class:`TextToImageDataset` per-item output (``image_latents`` / ``text_embeddings`` /
   ``text_embeddings_mask`` + an optional broadcast ``negative_text_embeddings`` for CFG). It
   deliberately does **not** call the stock ``collate_fn_production``: released
@@ -32,11 +32,7 @@ Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
 """
 
 import functools
-import hashlib
-import io
 import logging
-from collections.abc import Sequence
-from pathlib import Path
 
 import torch
 from nemo_automodel.components.datasets.diffusion.sampler import SequentialBucketSampler
@@ -44,7 +40,6 @@ from torch.nn.utils.rnn import pad_sequence
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from .paths import resolve_under_root
-from .replayable_sampler import ReplayableBatchSampler
 from .text_to_image_dataset import TextToImageDataset
 
 __all__ = [
@@ -60,14 +55,13 @@ def collate_fn_text_to_image(
     negative_text_embeddings: torch.Tensor | None = None,
     negative_text_embeddings_mask: torch.Tensor | None = None,
 ) -> dict:
-    """Build the DMD2 text-to-image batch (latents + text embeddings/mask + CFG negatives).
+    """Build a text-to-image batch (latents + text embeddings/mask + CFG negatives).
 
     Args:
         batch: Samples from :class:`TextToImageDataset` (pre-encoded ``prompt_embeds`` path).
         negative_text_embeddings: Optional static negative-prompt embedding of shape
             ``[seq, dim]``. When provided it is broadcast across the batch and attached as
-            ``negative_text_embeddings`` (shape ``[B, seq, dim]``); consumed by DMD2 CFG and
-            ignored when ``guidance_scale`` is null.
+            ``negative_text_embeddings`` (shape ``[B, seq, dim]``) for CFG-based objectives.
         negative_text_embeddings_mask: Optional mask for the negative embedding.
 
     Returns:
@@ -83,7 +77,7 @@ def collate_fn_text_to_image(
     resolutions = {tuple(item["crop_resolution"].tolist()) for item in batch}
     assert len(resolutions) == 1, f"Mixed resolutions in batch: {resolutions}"
 
-    # Stack only the keys the DMD2 pipeline consumes, straight from the vendored dataset's
+    # Stack only the keys the FastGen pipelines consume, straight from the vendored dataset's
     # per-item output. We do NOT call the stock ``collate_fn_production`` (see module docstring):
     # released nemo_automodel 0.5.0 unconditionally stacks ``clip_tokens`` / ``t5_tokens``, which
     # the Qwen-Image cache omits.
@@ -103,8 +97,6 @@ def collate_fn_text_to_image(
             "crop_resolution": torch.stack([item["crop_resolution"] for item in batch]),
             "original_resolution": torch.stack([item["original_resolution"] for item in batch]),
             "crop_offset": torch.stack([item["crop_offset"] for item in batch]),
-            "sample_ids": torch.tensor([item["sample_id"] for item in batch], dtype=torch.long),
-            "logical_sample_ids": tuple(str(item["sample_id"]) for item in batch),
         },
     }
     # Optional model-specific embedding fields, when a dataset provides them.
@@ -112,7 +104,7 @@ def collate_fn_text_to_image(
         if key in batch[0]:
             image_batch[key] = torch.stack([item[key] for item in batch])
 
-    # DMD2 text mask: the stock production collate does not stack ``prompt_embeds_mask``.
+    # The stock production collate does not stack ``prompt_embeds_mask``.
     mask_presence = ["prompt_embeds_mask" in item for item in batch]
     if any(mask_presence) and not all(mask_presence):
         raise ValueError("prompt_embeds_mask must be present for every sample or none.")
@@ -143,16 +135,14 @@ def collate_fn_text_to_image(
     return image_batch
 
 
-def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tensor, str]:
+def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tensor]:
     """Load ``(embed, mask)`` from a negative-prompt-embedding file.
 
     Accepts a dict with an ``embed`` tensor (and an optional ``mask`` /
     ``prompt_embeds_mask`` / ``text_mask``) or a bare embedding tensor; a missing mask
     defaults to all-ones.
     """
-    payload_bytes = Path(path).read_bytes()
-    payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
-    payload = torch.load(io.BytesIO(payload_bytes), map_location="cpu", weights_only=True)
+    payload = torch.load(path, map_location="cpu", weights_only=True)
     neg_embed = payload["embed"] if isinstance(payload, dict) else payload
     if not torch.is_tensor(neg_embed):
         raise TypeError(
@@ -173,19 +163,7 @@ def _load_negative_prompt_embedding(path: str) -> tuple[torch.Tensor, torch.Tens
         )
     if neg_mask is None:
         neg_mask = torch.ones(neg_embed.shape[:-1], dtype=torch.long)
-    return neg_embed, neg_mask, payload_sha256
-
-
-def _dataset_snapshot_sha256(metadata_sha256: str, negative_sha256: str | None) -> str:
-    """Bind expected sample content and the static negative condition into one identity."""
-    digest = hashlib.sha256(b"modelopt-fastgen-dataset-snapshot-v1\0")
-    digest.update(bytes.fromhex(metadata_sha256))
-    if negative_sha256 is None:
-        digest.update(b"\0no-negative-prompt")
-    else:
-        digest.update(b"\0negative-prompt\0")
-        digest.update(bytes.fromhex(negative_sha256))
-    return digest.hexdigest()
+    return neg_embed, neg_mask
 
 
 def build_text_to_image_multiresolution_dataloader(
@@ -203,16 +181,13 @@ def build_text_to_image_multiresolution_dataloader(
     pin_memory: bool = True,
     prefetch_factor: int = 2,
     negative_prompt_embedding_path: str | None = None,
-    selected_indices: Sequence[int] | None = None,
     split: str | None = None,
     validation_count: int | None = None,
     split_seed: int = 2026,
-    exact_resume: bool = False,
-    verify_payload_hashes: bool | None = None,
     sampler_seed: int = 42,
     loader_seed: int | None = None,
-) -> tuple[StatefulDataLoader, SequentialBucketSampler | ReplayableBatchSampler]:
-    """Build the DMD2 text-to-image multiresolution dataloader for ``TrainDiffusionRecipe``.
+) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
+    """Build the shared multiresolution dataloader for ``TrainDiffusionRecipe``.
 
     Args:
         cache_dir: Directory with the preprocessed cache (metadata.json, shards, resolution
@@ -229,41 +204,26 @@ def build_text_to_image_multiresolution_dataloader(
         pin_memory: Pin memory for GPU transfer.
         prefetch_factor: Prefetch batches per worker.
         negative_prompt_embedding_path: Optional ``.pt`` with a static negative-prompt
-            embedding, bound into the collate and broadcast to every batch (DMD2 CFG).
-        selected_indices: Optional ordered original metadata ordinals to expose.
+            embedding, bound into the collate and broadcast to every batch.
         split: Optional deterministic ``"train"`` or ``"validation"`` selection.
         validation_count: Number of validation samples when ``split`` is set.
         split_seed: Local seed used to construct deterministic split membership.
-        exact_resume: Wrap the deterministic sampler with a committed cursor that is
-            independent of worker prefetch. Required by the PDD lifecycle.
-        verify_payload_hashes: Require and authenticate each cached tensor against its
-            ``cache_sha256`` metadata before loading. ``None`` preserves the historical
-            builder behavior by following ``exact_resume``; PDD sets this explicitly so
-            replayable cursor state does not require payload hashes.
         sampler_seed: Seed for the released deterministic bucket sampler.
-        loader_seed: Optional dedicated seed for DataLoader worker/base-seed generation. PDD
-            supplies this so recreating an iterator cannot consume its restored training RNG.
+        loader_seed: Optional dedicated seed for DataLoader worker/base-seed generation.
 
     Returns:
         ``(StatefulDataLoader, SequentialBucketSampler)``.
     """
-    if verify_payload_hashes is None:
-        verify_payload_hashes = exact_resume
-    elif type(verify_payload_hashes) is not bool:
-        raise TypeError("verify_payload_hashes must be bool or None.")
-
     dataset = TextToImageDataset(
         cache_dir=cache_dir,
         train_text_encoder=train_text_encoder,
-        selected_indices=selected_indices,
         split=split,
         validation_count=validation_count,
         split_seed=split_seed,
-        verify_payload_hashes=verify_payload_hashes,
     )
     effective_root = dataset.cache_root
 
-    # Optional negative-prompt embedding for DMD2 CFG: load once, bind into the collate.
+    # Load the optional negative-prompt embedding once and bind it into the collate.
     collate_fn = collate_fn_text_to_image
     if negative_prompt_embedding_path is not None:
         negative_path = resolve_under_root(
@@ -271,8 +231,7 @@ def build_text_to_image_multiresolution_dataloader(
             negative_prompt_embedding_path,
             "negative prompt embedding",
         )
-        neg_embed, neg_mask, negative_sha256 = _load_negative_prompt_embedding(str(negative_path))
-        dataset.negative_prompt_embedding_sha256 = negative_sha256
+        neg_embed, neg_mask = _load_negative_prompt_embedding(str(negative_path))
         if dp_rank == 0:
             logger.info(
                 "Loaded negative_prompt_embedding from %s | shape=%s dtype=%s mask_shape=%s",
@@ -286,11 +245,6 @@ def build_text_to_image_multiresolution_dataloader(
             negative_text_embeddings=neg_embed,
             negative_text_embeddings_mask=neg_mask,
         )
-    dataset.dataset_snapshot_sha256 = _dataset_snapshot_sha256(
-        dataset.metadata_sha256,
-        dataset.negative_prompt_embedding_sha256,
-    )
-
     sampler = SequentialBucketSampler(
         dataset,
         base_batch_size=batch_size,
@@ -303,14 +257,13 @@ def build_text_to_image_multiresolution_dataloader(
         num_replicas=dp_world_size,
         rank=dp_rank,
     )
-    batch_sampler = ReplayableBatchSampler(sampler) if exact_resume else sampler
     loader_generator = None
     if loader_seed is not None:
         loader_generator = torch.Generator()
         loader_generator.manual_seed(loader_seed + dp_rank)
     dataloader = StatefulDataLoader(
         dataset,
-        batch_sampler=batch_sampler,
+        batch_sampler=sampler,
         collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -326,9 +279,9 @@ def build_text_to_image_multiresolution_dataloader(
             effective_root,
             len(dataset),
             dataset.total_num_samples,
-            len(batch_sampler),
+            len(sampler),
             batch_size,
             dp_rank,
             dp_world_size,
         )
-    return dataloader, batch_sampler
+    return dataloader, sampler

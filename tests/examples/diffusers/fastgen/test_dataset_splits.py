@@ -32,7 +32,6 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 from fastgen_data import (
-    TextToImageDataset,
     build_text_to_image_multiresolution_dataloader,
     make_train_validation_indices,
 )
@@ -77,25 +76,6 @@ def test_split_rejects_invalid_inputs(num_samples, validation_count, seed, error
         make_train_validation_indices(num_samples, validation_count, seed)
 
 
-@pytest.mark.parametrize(
-    "selected_indices",
-    [[], [0, 0], [-1], [6], [True], [1.5], ["1"]],
-)
-def test_dataset_rejects_invalid_selected_indices(make_fastgen_cache, selected_indices, tmp_path):
-    cache = make_fastgen_cache(tmp_path / "cache")
-    with pytest.raises((TypeError, ValueError)):
-        TextToImageDataset(cache, selected_indices=selected_indices)
-
-
-def test_dataset_preserves_selected_original_ordinals(make_fastgen_cache, tmp_path):
-    cache = make_fastgen_cache(tmp_path / "cache")
-    dataset = TextToImageDataset(cache, selected_indices=[5, 1, 3])
-
-    assert dataset.total_num_samples == 6
-    assert dataset.sample_ids == [5, 1, 3]
-    assert [dataset[index]["sample_id"] for index in range(len(dataset))] == [5, 1, 3]
-
-
 def test_train_and_validation_loaders_are_disjoint_stable_and_read_only(
     make_fastgen_cache, tmp_path
 ):
@@ -124,14 +104,8 @@ def test_train_and_validation_loaders_are_disjoint_stable_and_read_only(
         drop_last=False,
     )
 
-    train_seen = torch.cat([batch["metadata"]["sample_ids"] for batch in train_loader]).tolist()
-    validation_seen = torch.cat(
-        [batch["metadata"]["sample_ids"] for batch in validation_loader]
-    ).tolist()
-
-    assert sorted(train_seen) == train_ids
-    assert sorted(validation_seen) == validation_ids
-    assert set(train_seen).isdisjoint(validation_seen)
+    assert train_loader.dataset.sample_ids == train_ids
+    assert validation_loader.dataset.sample_ids == validation_ids
     assert (
         train_loader.dataset.cache_root == validation_loader.dataset.cache_root == cache.resolve()
     )
@@ -139,11 +113,4 @@ def test_train_and_validation_loaders_are_disjoint_stable_and_read_only(
     assert not validation_sampler.shuffle_buckets
     assert not validation_sampler.shuffle_within_bucket
     assert validation_sampler.drop_last is False
-    assert train_loader.dataset.logical_sample_ids == [str(value) for value in train_ids]
-    assert validation_loader.dataset.logical_sample_ids == [str(value) for value in validation_ids]
-    assert all(
-        batch["metadata"]["sample_ids"].dtype == torch.long
-        and batch["metadata"]["sample_ids"].device.type == "cpu"
-        for batch in validation_loader
-    )
     assert _snapshot(cache) == before

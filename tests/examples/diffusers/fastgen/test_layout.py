@@ -51,15 +51,10 @@ _EXPECTED_DMD2_FILES = {
 _EXPECTED_PDD_FILES = {
     "README.md",
     "__init__.py",
-    "artifacts.py",
-    "checkpoint.py",
     "configs",
-    "data.py",
-    "export.py",
-    "export_qwen_image.py",
     "finetune.py",
-    "inference_runtime.py",
     "inference_qwen_image.py",
+    "prepare_qwen_image.py",
     "recipe.py",
     "training.py",
 }

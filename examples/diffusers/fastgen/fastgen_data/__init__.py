@@ -41,13 +41,11 @@ import re
 try:
     from . import collate_fns as _collate_fns
     from . import paths as _paths
-    from . import replayable_sampler as _replayable_sampler
     from . import resume as _resume
     from . import splits as _splits
     from . import text_to_image_dataset as _text_to_image_dataset
     from .collate_fns import *
     from .paths import *
-    from .replayable_sampler import *
     from .resume import *
     from .splits import *
     from .text_to_image_dataset import *
@@ -65,7 +63,6 @@ __all__: list[str] = []
 for _module in (
     _collate_fns,
     _paths,
-    _replayable_sampler,
     _resume,
     _splits,
     _text_to_image_dataset,

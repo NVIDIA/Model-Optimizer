@@ -36,6 +36,7 @@ __all__ = [
     "adopt_qwen_image_mr210_forward",
     "convert_qwen_image_to_pdd",
     "require_qwen_image_mr210_forward",
+    "restore_qwen_image_pdd_projection",
 ]
 
 QWEN_IMAGE_PDD_EXECUTION = "fastgen_mr210"
@@ -172,6 +173,16 @@ def _qwen_image_mr210_forward(
         max_txt_seq_len=max_txt_seq_len,
         device=hidden_states.device,
     )
+    image_mask = torch.ones(
+        (batch_size, hidden_states.shape[1]),
+        dtype=torch.bool,
+        device=hidden_states.device,
+    )
+    joint_attention_mask = torch.cat(
+        (encoder_hidden_states_mask.to(torch.bool), image_mask),
+        dim=1,
+    )[:, None, None, :]
+    block_attention_kwargs = {"attention_mask": joint_attention_mask}
 
     for block in self.transformer_blocks:
         if torch.is_grad_enabled() and self.gradient_checkpointing:
@@ -179,18 +190,19 @@ def _qwen_image_mr210_forward(
                 block,
                 hidden_states,
                 encoder_hidden_states,
-                encoder_hidden_states_mask,
+                None,
                 temb,
                 image_rotary_emb,
+                block_attention_kwargs,
             )
         else:
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                encoder_hidden_states_mask=encoder_hidden_states_mask,
+                encoder_hidden_states_mask=None,
                 temb=temb,
                 image_rotary_emb=image_rotary_emb,
-                joint_attention_kwargs=attention_kwargs,
+                joint_attention_kwargs=block_attention_kwargs,
             )
 
     hidden_states = self.norm_out(hidden_states, temb)
@@ -230,7 +242,7 @@ def adopt_qwen_image_mr210_forward(transformer: nn.Module) -> nn.Module:
     # Diffusers is an optional dependency used only by the Qwen example.
     from diffusers import QwenImageTransformer2DModel
 
-    if type(transformer) is not QwenImageTransformer2DModel:
+    if not isinstance(transformer, QwenImageTransformer2DModel):
         raise TypeError(
             "MR210 forward adoption requires the supported QwenImageTransformer2DModel, "
             f"got {type(transformer).__name__}."
@@ -309,6 +321,59 @@ def convert_qwen_image_to_pdd(
         transformer.proj_out = projection
         if transformer.get_submodule("proj_out") is not projection:
             raise RuntimeError("Qwen-Image proj_out replacement did not remain registered.")
+    return projection
+
+
+def restore_qwen_image_pdd_projection(
+    transformer: nn.Module,
+    config: PDDConfig,
+) -> PDDOutputProjection:
+    """Restore PDD fusion behavior on a serialized, already-widened Qwen projection."""
+    _validate_qwen_pdd_config(config)
+    if not isinstance(transformer, nn.Module):
+        raise TypeError(f"transformer must be nn.Module, got {type(transformer).__name__}.")
+    if _config_guidance_embeds(transformer):
+        raise ValueError("Qwen-Image PDD does not support transformer guidance embeddings.")
+    try:
+        current = transformer.get_submodule("proj_out")
+    except AttributeError as error:
+        raise ValueError(
+            "Qwen-Image transformer must register an nn.Linear at 'proj_out'."
+        ) from error
+    if not isinstance(current, nn.Linear):
+        raise TypeError(f"Qwen-Image proj_out must be nn.Linear, got {type(current).__name__}.")
+    if isinstance(current, PDDOutputProjection):
+        return PDDOutputProjection.from_linear(
+            current,
+            config.grid_size,
+            QWEN_IMAGE_PDD_LAYER_SPEC,
+        )
+
+    base_out_features = _config_value(transformer, "in_channels")
+    if type(base_out_features) is not int or base_out_features <= 0:
+        raise ValueError("Qwen-Image transformer config must define positive in_channels.")
+    expected_out_features = config.grid_size * base_out_features
+    if current.out_features != expected_out_features:
+        raise ValueError(
+            "Serialized Qwen PDD proj_out has the wrong width: expected "
+            f"{expected_out_features}, got {current.out_features}."
+        )
+
+    projection = PDDOutputProjection(
+        current.in_features,
+        base_out_features,
+        config.grid_size,
+        QWEN_IMAGE_PDD_LAYER_SPEC,
+        bias=current.bias is not None,
+        device="meta",
+        dtype=current.weight.dtype,
+    )
+    projection.weight = current.weight
+    projection.bias = current.bias
+    projection.train(current.training)
+    transformer.proj_out = projection
+    if transformer.get_submodule("proj_out") is not projection:
+        raise RuntimeError("Qwen-Image proj_out replacement did not remain registered.")
     return projection
 
 
@@ -532,24 +597,52 @@ class QwenImagePDDAdapter:
         return unpack_latents(packed, state.shape[2], state.shape[3])
 
     @staticmethod
-    def _projection(model: nn.Module, grid_size: int) -> PDDOutputProjection:
+    def _all_heads_projection(
+        model: nn.Module,
+        grid_size: int,
+        base_out_features: int,
+    ) -> nn.Linear:
         try:
             projection = model.get_submodule("proj_out")
         except AttributeError as error:
             raise ValueError(
-                "Qwen student must register a PDD projection at 'proj_out'."
+                "Qwen student must register an output projection at 'proj_out'."
+            ) from error
+        if not isinstance(projection, nn.Linear):
+            raise TypeError("Qwen student proj_out must be a widened nn.Linear for PDD training.")
+        expected_out_features = grid_size * base_out_features
+        if projection.out_features != expected_out_features:
+            raise ValueError(
+                f"Qwen PDD proj_out has {projection.out_features} outputs; expected "
+                f"{expected_out_features} ({grid_size} heads x {base_out_features})."
+            )
+        if isinstance(projection, PDDOutputProjection):
+            if projection.grid_size != grid_size:
+                raise ValueError(
+                    f"Qwen PDD projection grid_size={projection.grid_size} does not match "
+                    f"config grid_size={grid_size}."
+                )
+            if projection.layer_spec != QWEN_IMAGE_PDD_LAYER_SPEC:
+                raise ValueError("Qwen PDD projection carries an incompatible layer specification.")
+        return projection
+
+    @classmethod
+    def _fused_projection(cls, model: nn.Module, grid_size: int) -> PDDOutputProjection:
+        try:
+            projection = model.get_submodule("proj_out")
+        except AttributeError as error:
+            raise ValueError(
+                "Qwen student must register an output projection at 'proj_out'."
             ) from error
         if not isinstance(projection, PDDOutputProjection):
             raise TypeError(
-                "Qwen student proj_out must be converted to PDDOutputProjection before use."
+                "Qwen fused PDD inference requires proj_out to be a PDDOutputProjection."
             )
-        if projection.grid_size != grid_size:
-            raise ValueError(
-                f"Qwen PDD projection grid_size={projection.grid_size} does not match "
-                f"config grid_size={grid_size}."
-            )
-        if projection.layer_spec != QWEN_IMAGE_PDD_LAYER_SPEC:
-            raise ValueError("Qwen PDD projection carries an incompatible layer specification.")
+        cls._all_heads_projection(
+            model,
+            grid_size,
+            base_out_features=projection.base_out_features,
+        )
         return projection
 
     def student_all_heads(
@@ -562,7 +655,11 @@ class QwenImagePDDAdapter:
         **model_kwargs: Any,
     ) -> torch.Tensor:
         """Return unpacked PDD interval velocities from one Qwen call."""
-        self._projection(model, self.config.grid_size)
+        self._all_heads_projection(
+            model,
+            self.config.grid_size,
+            base_out_features=state.shape[1] * 4,
+        )
         packed = self._call_packed(
             model,
             state,
@@ -586,7 +683,7 @@ class QwenImagePDDAdapter:
         **model_kwargs: Any,
     ) -> torch.Tensor:
         """Run one conditional Qwen call with its final projection fused for a block."""
-        projection = self._projection(model, self.config.grid_size)
+        projection = self._fused_projection(model, self.config.grid_size)
         with projection.fuse_block(start, end, grid):
             packed = self._call_packed(
                 model,

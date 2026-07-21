@@ -258,6 +258,32 @@ def test_unfused_channel_major_output_maps_each_packed_head_in_order() -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_all_head_training_accepts_a_serialized_widened_linear() -> None:
+    student = _TinyQwenTransformer()
+    config = _config()
+    converted = convert_qwen_image_to_pdd(student, config)
+    serialized = nn.Linear(
+        converted.in_features,
+        converted.out_features,
+        bias=converted.bias is not None,
+        dtype=converted.weight.dtype,
+    )
+    serialized.load_state_dict(converted.state_dict())
+    student.proj_out = serialized
+    state, time, condition, _ = _inputs(batch_size=1)
+
+    heads = QwenImagePDDAdapter(config).student_all_heads(
+        student,
+        state,
+        time,
+        condition=condition,
+    )
+    heads.float().square().mean().backward()
+
+    assert heads.shape == (1, 4, 1, 4, 4)
+    assert serialized.weight.grad is not None
+
+
 def test_fused_student_matches_explicit_packed_weight_fusion() -> None:
     student = _TinyQwenTransformer()
     config = _config()
@@ -584,14 +610,23 @@ def _mr210_qwen_forward_oracle(
         max_txt_seq_len=max_txt_seq_len,
         device=hidden_states.device,
     )
+    image_mask = torch.ones(
+        (hidden_states.shape[0], hidden_states.shape[1]),
+        dtype=torch.bool,
+        device=hidden_states.device,
+    )
+    joint_attention_mask = torch.cat(
+        (encoder_hidden_states_mask.to(torch.bool), image_mask),
+        dim=1,
+    )[:, None, None, :]
     for block in model.transformer_blocks:
         encoder_hidden_states, hidden_states = block(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_hidden_states_mask=encoder_hidden_states_mask,
+            encoder_hidden_states_mask=None,
             temb=temb,
             image_rotary_emb=image_rotary_emb,
-            joint_attention_kwargs=None,
+            joint_attention_kwargs={"attention_mask": joint_attention_mask},
         )
     return model.proj_out(model.norm_out(hidden_states, temb))
 
@@ -616,6 +651,7 @@ def test_mr210_real_qwen_loss_and_backward_match_independent_graph() -> None:
     torch.manual_seed(20260716)
     base = _tiny_diffusers_qwen().eval()
     actual_student = adopt_qwen_image_mr210_forward(copy.deepcopy(base))
+    actual_student.enable_gradient_checkpointing()
     actual_teacher = copy.deepcopy(actual_student).eval().requires_grad_(False)
     oracle_student = copy.deepcopy(base)
     oracle_teacher = copy.deepcopy(base).eval().requires_grad_(False)
@@ -747,6 +783,14 @@ def test_conversion_preserves_the_ordinary_diffusers_qwen_root() -> None:
     assert dict(student.config) == config
 
 
+def test_mr210_adoption_accepts_a_dynamic_qwen_subclass() -> None:
+    student = _tiny_diffusers_qwen().eval()
+    student.__class__ = type("FSDPQwenImageTransformer2DModel", (type(student),), {})
+
+    assert adopt_qwen_image_mr210_forward(student) is student
+    assert require_qwen_image_mr210_forward(student) == QWEN_IMAGE_PDD_EXECUTION
+
+
 def test_mr210_adoption_preserves_root_state_and_deepcopy_binding() -> None:
     source = _tiny_diffusers_qwen().eval()
     source_type = type(source)
@@ -842,7 +886,7 @@ def test_mr210_qwen_conversion_preserves_every_initialized_head() -> None:
     torch.testing.assert_close(actual, expected[:, None].expand_as(actual), rtol=0, atol=0)
 
 
-def test_mr210_mask_flow_differs_from_canonical_joint_mask() -> None:
+def test_mr210_joint_mask_ignores_padded_token_values() -> None:
     canonical = _tiny_diffusers_qwen().eval().to(torch.bfloat16)
     student = copy.deepcopy(canonical)
     student = adopt_qwen_image_mr210_forward(student)
@@ -873,8 +917,8 @@ def test_mr210_mask_flow_differs_from_canonical_joint_mask() -> None:
     captured_masks: list[torch.Tensor] = []
 
     def capture_block_mask(_module, _args, kwargs):
-        assert "attention_mask" not in kwargs
-        captured_masks.append(kwargs["encoder_hidden_states_mask"].detach().clone())
+        assert kwargs["encoder_hidden_states_mask"] is None
+        captured_masks.append(kwargs["joint_attention_kwargs"]["attention_mask"].detach().clone())
 
     hook = student.transformer_blocks[0].register_forward_pre_hook(
         capture_block_mask,
@@ -904,9 +948,11 @@ def test_mr210_mask_flow_differs_from_canonical_joint_mask() -> None:
     hook.remove()
 
     torch.testing.assert_close(canonical_poisoned, canonical_baseline, rtol=0, atol=0)
-    assert not torch.equal(strict_poisoned[1], strict_baseline[1])
+    torch.testing.assert_close(strict_poisoned, strict_baseline, rtol=0, atol=0)
     assert len(captured_masks) == 2
-    assert all(torch.equal(captured, mask) for captured in captured_masks)
+    expected_mask = torch.cat((mask.bool(), torch.ones(2, 4, dtype=torch.bool)), dim=1)
+    expected_mask = expected_mask[:, None, None, :]
+    assert all(torch.equal(captured, expected_mask) for captured in captured_masks)
 
 
 def test_mr210_preserves_diffusers_output_and_harmless_call_contract() -> None:
@@ -1060,7 +1106,7 @@ def test_qwen_pdd_rejects_unsupported_config_condition_and_call_contracts() -> N
             negative_condition=condition[0],
         )
     assert transformer.calls == []
-    with pytest.raises(TypeError, match="converted to PDDOutputProjection"):
+    with pytest.raises(ValueError, match="has 4 outputs; expected 16"):
         adapter.student_all_heads(transformer, state, time, condition=condition)
 
     convert_qwen_image_to_pdd(transformer, config)

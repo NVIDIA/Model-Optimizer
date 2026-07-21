@@ -149,7 +149,7 @@ def test_formerly_vendored_files_use_standard_nvidia_header():
 
 
 def test_data_builders_importable_and_accept_shared_cache_options():
-    """The real-data builder exposes the negative embedding and stable-ID selection seams."""
+    """The real-data builder exposes the negative embedding and deterministic split seams."""
     pytest.importorskip("nemo_automodel")
     pytest.importorskip("torch")
 
@@ -158,7 +158,7 @@ def test_data_builders_importable_and_accept_shared_cache_options():
     assert callable(fastgen_data.build_text_to_image_multiresolution_dataloader)
     sig = inspect.signature(fastgen_data.build_text_to_image_multiresolution_dataloader)
     assert "negative_prompt_embedding_path" in sig.parameters
-    assert "selected_indices" in sig.parameters
+    assert "split" in sig.parameters
     # Default None => CFG-less construction works without the negative embedding (it is optional).
     assert sig.parameters["negative_prompt_embedding_path"].default is None
 
@@ -185,7 +185,6 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
         "aspect_ratio": 1.0,
         "prompt_embeds": torch.randn(seq, dim),
         "prompt_embeds_mask": torch.ones(seq, dtype=torch.long),
-        "sample_id": 7,
     }
     batch = [dict(sample), dict(sample)]
     neg = torch.randn(seq, dim)
@@ -198,7 +197,6 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
     assert out["negative_text_embeddings"].shape[0] == len(
         batch
     )  # broadcast [seq,dim]->[B,seq,dim]
-    assert out["metadata"]["sample_ids"].tolist() == [7, 7]
 
 
 def test_collate_zero_pads_variable_length_qwen_embeddings_and_masks():
@@ -219,7 +217,6 @@ def test_collate_zero_pads_variable_length_qwen_embeddings_and_masks():
             "aspect_ratio": 1.0,
             "prompt_embeds": torch.full((sequence_length, 3), float(sample_id)),
             "prompt_embeds_mask": torch.ones(sequence_length, dtype=torch.long),
-            "sample_id": sample_id,
         }
 
     result = collate_fn_text_to_image([sample(1, 5), sample(2, 3)])

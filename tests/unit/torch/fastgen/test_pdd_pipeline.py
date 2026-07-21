@@ -329,6 +329,21 @@ def test_selected_head_low_precision_outputs_use_float32_mse() -> None:
     torch.testing.assert_close(loss, expected)
 
 
+def test_loss_can_skip_optional_diagnostics() -> None:
+    pipeline, _ = _pipeline()
+    data = torch.ones(2, 3)
+
+    _, metrics = pipeline.compute_loss(
+        data,
+        noise=torch.zeros_like(data),
+        n=torch.tensor([0, 2]),
+        k=torch.tensor([1, 3]),
+        collect_metrics=False,
+    )
+
+    assert set(metrics) == {"student_target_mse"}
+
+
 def test_small_grid_accepts_exactly_the_trained_index_support() -> None:
     pipeline, _ = _pipeline()
     data = torch.ones(1, 3)

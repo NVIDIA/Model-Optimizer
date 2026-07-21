@@ -32,7 +32,6 @@ from modelopt.torch.fastgen.flow_matching import (
 from modelopt.torch.fastgen.loader import load_pdd_config
 from modelopt.torch.fastgen.methods.pdd import (
     PDDLayerSpec,
-    PDDMetadata,
     PDDModelAdapter,
     PDDOutputProjection,
     PDDPipeline,
@@ -89,7 +88,6 @@ def test_core_pdd_symbols_are_exported_from_the_public_package() -> None:
     expected = {
         "PDDConfig": PDDConfig,
         "PDDLayerSpec": PDDLayerSpec,
-        "PDDMetadata": PDDMetadata,
         "PDDModelAdapter": PDDModelAdapter,
         "PDDOutputProjection": PDDOutputProjection,
         "PDDPipeline": PDDPipeline,
@@ -132,9 +130,9 @@ import modelopt.torch
 
 baseline = set(sys.modules)
 blocker.attempts.clear()
-from modelopt.torch.fastgen import PDDConfig, PDDMetadata, PDDPipeline
+from modelopt.torch.fastgen import PDDConfig, PDDPipeline
 
-assert all(symbol is not None for symbol in (PDDConfig, PDDMetadata, PDDPipeline))
+assert all(symbol is not None for symbol in (PDDConfig, PDDPipeline))
 assert blocker.attempts == []
 loaded = set(sys.modules) - baseline
 for prefix in (

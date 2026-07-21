@@ -20,7 +20,6 @@ from __future__ import annotations
 import copy
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import replace
 
 import pytest
 import torch
@@ -28,9 +27,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from modelopt.torch.fastgen import (
-    PDDConfig,
     PDDLayerSpec,
-    PDDMetadata,
     PDDOutputProjection,
     convert_to_pdd_output_projection,
     get_module_by_path,
@@ -352,74 +349,3 @@ def test_base_and_widened_checkpoint_load_order_is_strict_and_nonmutating():
     with pytest.raises(RuntimeError, match="size mismatch"):
         _NestedModel().load_state_dict(widened_state, strict=True)
     _assert_state_unchanged(widened_state, widened_original)
-
-
-@pytest.mark.parametrize("layout", ["channel_major", "patch_major"])
-def test_metadata_round_trips_exactly_without_mutating_mapping(layout):
-    projection = PDDOutputProjection.from_linear(_base_linear(), 128, _spec(layout))
-    metadata = PDDMetadata.from_config(PDDConfig(), projection)
-    payload = metadata.to_dict()
-    original = copy.deepcopy(payload)
-
-    restored = PDDMetadata.from_dict(payload)
-
-    assert restored == metadata
-    assert restored.to_dict() == payload
-    assert payload == original
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"schema_version": True},
-        {"grid_max_t": 1},
-        {"flow_shift": 5},
-        {"inference_blocks": [32, 32, 32, 32]},
-        {"projection_bias": 1},
-    ],
-)
-def test_direct_metadata_construction_is_as_strict_as_deserialization(changes):
-    projection = PDDOutputProjection.from_linear(_base_linear(), 128, _spec("channel_major"))
-    metadata = PDDMetadata.from_config(PDDConfig(), projection)
-    with pytest.raises(ValueError):
-        replace(metadata, **changes)
-
-
-def _valid_patch_metadata_payload():
-    projection = PDDOutputProjection.from_linear(_base_linear(), 128, _spec("patch_major"))
-    return PDDMetadata.from_config(PDDConfig(), projection).to_dict()
-
-
-@pytest.mark.parametrize(
-    ("mutate", "message"),
-    [
-        (lambda data: data.update(schema_version=2), "unsupported.*schema_version"),
-        (lambda data: data.update(extra=True), "keys mismatch"),
-        (lambda data: data.update({1: "bad"}), "keys must all be strings"),
-        (lambda data: data.pop("grid_max_t"), "keys mismatch"),
-        (lambda data: data.update(grid_max_t=1), "grid_max_t must be a float"),
-        (lambda data: data.update(grid_max_t=0.0), "0 < grid_max_t <= 1"),
-        (lambda data: data.update(flow_shift=5), "flow_shift must be a float"),
-        (lambda data: data.update(grid_size=124), "inference_blocks must sum"),
-        (lambda data: data.update(inference_blocks=(32, 32, 32, 32)), "list of integers"),
-        (
-            lambda data: data["layer_spec"].update(head_layout="unsupported"),
-            "head_layout must be one of",
-        ),
-        (
-            lambda data: data["base_projection"].update(out_features=5),
-            "must be divisible",
-        ),
-    ],
-)
-def test_metadata_rejects_unsupported_schema_schedule_shape_and_layout(mutate, message):
-    payload = _valid_patch_metadata_payload()
-    mutate(payload)
-    with pytest.raises(ValueError, match=message):
-        PDDMetadata.from_dict(payload)
-
-
-def test_metadata_rejects_projection_config_grid_mismatch():
-    projection = PDDOutputProjection.from_linear(_base_linear(), 64, _spec("channel_major"))
-    with pytest.raises(ValueError, match="does not match projection"):
-        PDDMetadata.from_config(PDDConfig(), projection)

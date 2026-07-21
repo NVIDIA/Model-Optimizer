@@ -95,14 +95,6 @@ def _get_media_files(media_dir: Path, extensions: set) -> list[Path]:
     return sorted(media_files)
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _save_metadata_shards(
     all_metadata: list[dict],
     output_dir: Path,
@@ -136,7 +128,6 @@ def _save_metadata_shards(
             {
                 **item,
                 "cache_file": str(cache_file),
-                "cache_sha256": _sha256_file(cache_file),
             }
         )
 
