@@ -17,10 +17,46 @@
 #     modelopt_install_path is never consulted. Point it at the venv
 #     site-packages so the mounted (submodule-pinned) modelopt actually
 #     overrides the container's.
+#   - task_1's --finetune is required, not optional: MLM_MODEL_CKPT
+#     (/hf-local/.../BF16-MCore) is a shared, multi-tenant path that may hold
+#     another run's completed checkpoint (e.g. iter_0000128 with
+#     consumed_train_samples already at --train-samples). Without --finetune,
+#     Megatron resumes that state instead of starting the frozen dump forward
+#     pass fresh, and MegatronPretrainingSampler asserts "no samples left to
+#     consume" immediately.
+#   - task_0 stays on ModelOpt's default "local spec" (no --export-default-
+#     te-spec): common/megatron_lm/quantize/quantize.sh's inline MMLU/export
+#     sub-steps each overwrite MLM_EXTRA_ARGS with their own hardcoded args,
+#     dropping any custom spec flag, so a save-time-only --export-default-
+#     te-spec would make those sub-steps reload the checkpoint under a
+#     different (mismatched) spec default and hit an _extra_state KeyError.
+#     RUN_MMLU=false / RUN_EXPORT=false skip those sub-steps regardless
+#     (see below), so this isn't strictly load-bearing, but keeps task_0
+#     simple and matches the sibling BF16 PTQ examples for this model family.
+#   - task_2 needs --export-default-te-spec (switches MoE experts to
+#     TEGroupedMLP), for TP=2 + EP=8 together: ModelOpt's default
+#     SequentialMLP quant wrapper hard-disallows TP>1 and EP>1 at the same
+#     time, which is required to avoid an OOM in the KD loss's full-vocab
+#     softmax norm. task_1 doesn't need it: it loads the separate, unquantized
+#     BF16-MCore teacher checkpoint (not task_0's output) at TP=1/EP=8, which
+#     never hits that restriction regardless of spec, and it has completed
+#     successfully without this flag. task_0 stays on the local spec (see
+#     RUN_MMLU/RUN_EXPORT note below), so any task loading a checkpoint
+#     task_2 saved (itself on the TE spec) can hit the same _extra_state key
+#     mismatch the sibling Llama-3.2-1B QAD example hits -- task_2 and task_3
+#     (export, which loads task_2's trained output) both carry
+#     --export-default-te-spec / --dist-ckpt-strictness log_all to build
+#     under the matching spec and tolerate mismatched keys (logs them instead
+#     of hard-raising).
+#   - task_0 sets RUN_MMLU=false and RUN_EXPORT=false: neither inline
+#     sub-step is needed here (the MMLU gate is already bypassed below, and
+#     task_3 does its own dedicated export), and skipping them avoids the
+#     spec-mismatch risk noted above.
 #
-# MMLU_LOWER_BOUND=0.0 on task_0 is a temporary bypass — the MMLU gate needs
-# revisiting for this container/branch pairing before this pipeline is used
-# for production runs (see OfflineKD MMLU accuracy note in project history).
+# MMLU_LOWER_BOUND=0.0 was the temporary bypass on task_0's inline MMLU gate;
+# RUN_MMLU=false now skips that gate entirely (see above), so this value is
+# currently a no-op. Revisit both before this pipeline is used for production
+# runs (see OfflineKD MMLU accuracy note in project history).
 #
 # Usage:
 #   source .env-slurm
@@ -35,11 +71,14 @@ pipeline:
       - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
       - --calib-size 32
       - --calib-max-sequence-length 512
+      - --skip-generate
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
       - EP: 4
       - MMLU_LOWER_BOUND: 0.0
+      - RUN_MMLU: "false"
+      - RUN_EXPORT: "false"
       - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
     slurm_config:
       _factory_: "slurm_factory"
@@ -81,6 +120,7 @@ pipeline:
       - --eval-interval 1000
       - --save-interval 1000
       - --log-interval 100
+      - --finetune
       - --freeze-all-layers
       - --logits-save-top-k 16
       - --logits-save-dir /scratchspace/logits
@@ -138,6 +178,8 @@ pipeline:
       - --eval-interval 1000
       - --save-interval 1000
       - --log-interval 100
+      - --export-default-te-spec
+      - --dist-ckpt-strictness log_all
       - --sequence-parallel
       - --logits-load-dir /scratchspace/logits
     environment:
@@ -160,6 +202,9 @@ pipeline:
 
   task_3:
     script: common/megatron_lm/export/export.sh
+    args:
+      - --export-default-te-spec
+      - --dist-ckpt-strictness log_all
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
