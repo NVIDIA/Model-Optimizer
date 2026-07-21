@@ -20,6 +20,7 @@ from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
+from modelopt.onnx.autocast.convert import convert_to_mixed_precision
 from modelopt.onnx.autocast.logging_config import configure_logging
 from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 
@@ -85,6 +86,106 @@ def test_graph_converter_init(simple_model, use_standalone_type_inference):
     assert converter.value_info_map == value_info_map
     assert converter.initializer_map == initializer_map
     assert converter.keep_io_types
+
+
+def test_convert_preserves_cast_chain_graph_output(tmp_path):
+    x = helper.make_tensor_value_info("in0", TensorProto.FLOAT, [2])
+    y = helper.make_tensor_value_info("t2", TensorProto.FLOAT, [2])
+    cast_to_float16 = helper.make_node(
+        "Cast", ["in0"], ["t1"], name="cast_to_float16", to=TensorProto.FLOAT16
+    )
+    cast_to_float = helper.make_node(
+        "Cast", ["t1"], ["t2"], name="cast_to_float", to=TensorProto.FLOAT
+    )
+    graph = helper.make_graph([cast_to_float16, cast_to_float], "g", [x], [y])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model_path = tmp_path / "cast_chain_output.onnx"
+    onnx.save(model, model_path)
+
+    converted_model = convert_to_mixed_precision(
+        onnx_path=str(model_path), low_precision_type="fp16", providers=["cpu"]
+    )
+
+    onnx.checker.check_model(converted_model)
+    output_producers = [
+        node
+        for node in converted_model.graph.node
+        if converted_model.graph.output[0].name in node.output
+    ]
+    assert len(output_producers) == 1
+    assert output_producers[0].op_type == "Cast"
+
+
+def test_remove_same_type_graph_output_cast_with_stable_producer():
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3, 4])
+    init_weight = numpy_helper.from_array(np.random.randn(3, 4).astype(np.float32), name="weight")
+
+    add_node = helper.make_node("Add", ["X", "weight"], ["add_out"], name="add")
+    cast_node = helper.make_node("Cast", ["add_out"], ["Y"], name="cast", to=TensorProto.FLOAT)
+    graph = helper.make_graph(
+        [add_node, cast_node], "same_type_output_cast", [x], [y], [init_weight]
+    )
+    model = helper.make_model(graph, producer_name="same_type_output_cast")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+    )
+    converter._remove_preexisting_casts()
+
+    onnx.checker.check_model(converter.model)
+    assert all(node.op_type != "Cast" for node in converter.model.graph.node)
+    assert converter.model.graph.node[0].output[0] == "Y"
+
+
+def test_deduplicate_network_output_producers_keeps_consumers_on_cast_output():
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3, 4])
+    z = helper.make_tensor_value_info("Z", TensorProto.FLOAT, [3, 4])
+    init_weight = numpy_helper.from_array(np.random.randn(3, 4).astype(np.float32), name="weight")
+
+    add_node = helper.make_node("Add", ["X", "weight"], ["Y"], name="add")
+    cast_down_node = helper.make_node(
+        "Cast", ["Y"], ["Y_cast_to_fp16"], name="cast_down", to=TensorProto.FLOAT16
+    )
+    cast_up_node = helper.make_node(
+        "Cast", ["Y_cast_to_fp16"], ["Y"], name="cast_up", to=TensorProto.FLOAT
+    )
+    relu_node = helper.make_node("Relu", ["Y"], ["Z"], name="relu")
+    graph = helper.make_graph(
+        [add_node, cast_down_node, cast_up_node, relu_node],
+        "duplicate_output",
+        [x],
+        [y, z],
+        [init_weight],
+    )
+    model = helper.make_model(graph, producer_name="duplicate_output")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+    )
+    converter._deduplicate_network_output_producers()
+
+    onnx.checker.check_model(converter.model)
+    assert converter.model.graph.node[0].output[0] == "Y_pre_cast"
+    assert converter.model.graph.node[1].input[0] == "Y_pre_cast"
+    assert converter.model.graph.node[2].output[0] == "Y"
+    assert converter.model.graph.node[3].input[0] == "Y"
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])

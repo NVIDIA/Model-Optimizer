@@ -15,8 +15,11 @@
 
 """This module contains TensorRT utils."""
 
+import copy
 import ctypes
+import os
 import platform
+import tempfile
 
 import lief
 import onnx
@@ -84,6 +87,28 @@ def _load_trt_plugin(plugin_path: str, registry) -> None:
             ctypes.CDLL(plugin_path)
 
 
+def _requires_file_backed_parse(model: onnx.ModelProto) -> bool:
+    """Return True if the model must be parsed from a file rather than in-memory bytes.
+
+    TensorRT's in-memory ``OnnxParser.parse(bytes)`` can silently return an empty network
+    (0 layers/0 tensors) for models at or above the protobuf 2 GiB limit, even though
+    ``SerializeToString()`` succeeds. In that regime we must serialize to an external-data
+    file and use ``parse_from_file()`` instead. If the size cannot even be computed
+    (e.g. ``ByteSize()`` overflows), we conservatively route through the file path as well.
+
+    Args:
+        model: In-memory ONNX model.
+
+    Returns:
+        True if the model should be parsed via a temporary external-data file.
+    """
+    try:
+        return model.ByteSize() >= onnx.checker.MAXIMUM_PROTOBUF
+    except Exception as e:
+        logger.debug(f"Could not compute model ByteSize ({e}); using file-backed TRT parsing.")
+        return True
+
+
 def get_custom_layers(
     onnx_path: str | onnx.ModelProto,
     trt_plugins: list[str] | None,
@@ -123,11 +148,33 @@ def get_custom_layers(
     )
     logger.debug("Created TensorRT builder and network")
 
-    # Parse ONNX file
+    # Parse ONNX file.
+    #
+    # For an in-memory ModelProto at or above the protobuf 2 GiB limit, TensorRT's
+    # `parser.parse(bytes)` can silently build an empty network (0 layers/0 tensors) even
+    # though `SerializeToString()` succeeds. Route such models through a temporary
+    # external-data file and `parse_from_file()` (the same branch used for string paths, and
+    # matching ModelOpt's file-backed policy in `save_onnx()`/`load_onnx_model()`).
     parser = trt.OnnxParser(network, trt_logger)
-    parser_func = parser.parse_from_file if isinstance(onnx_path, str) else parser.parse
-    onnx_path = onnx_path if isinstance(onnx_path, str) else onnx_path.SerializeToString()
-    if not parser_func(onnx_path):
+    if isinstance(onnx_path, str):
+        parse_ok = parser.parse_from_file(onnx_path)
+    elif _requires_file_backed_parse(onnx_path):
+        with tempfile.TemporaryDirectory(prefix="modelopt_trt_") as tmpdir:
+            model_path = os.path.join(tmpdir, "model.onnx")
+            # Deep-copy so externalization doesn't strip weights from the caller's model.
+            model_copy = copy.deepcopy(onnx_path)
+            onnx.save(
+                model_copy,
+                model_path,
+                save_as_external_data=True,
+                all_tensors_to_one_file=True,
+                location="model.data",
+                size_threshold=0,
+            )
+            parse_ok = parser.parse_from_file(model_path)
+    else:
+        parse_ok = parser.parse(onnx_path.SerializeToString())
+    if not parse_ok:
         error_str = [str(parser.get_error(error)) for error in range(parser.num_errors)]
         raise Exception(f"Failed to parse ONNX file: {''.join(error_str)}")
 

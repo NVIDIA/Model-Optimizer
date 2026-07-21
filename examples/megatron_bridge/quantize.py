@@ -22,10 +22,10 @@ The process is as follows:
   3. (Optional) Compress weights to a real low-bit representation.
   4. Save the quantized model as a Megatron checkpoint (with ModelOpt state). The checkpoint can be
      reloaded for further training (QAT / distillation) or converted to a HuggingFace (unified)
-     checkpoint for deployment with `export.py` (see that script for TensorRT-LLM / vLLM / SGLang).
+     checkpoint for deployment with `export_quantized_megatron_to_hf.py` (for TensorRT-LLM / vLLM / SGLang).
 
 Tensor / pipeline / expert parallelism are all supported here — the Megatron checkpoint is saved
-sharded and can be re-sharded on load (e.g. `export.py` reloads it at TP=1 for the HF export).
+sharded and can be re-sharded on load (e.g. `export_quantized_megatron_to_hf.py` reloads it at TP=1 for the HF export).
 
 Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
     1024 samples from default dataset are used for calibration (sequence length = 4096).
@@ -48,7 +48,8 @@ Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV
         --seq_length 4096 \
         --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
-To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, run `export.py`.
+To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, use
+`export_quantized_megatron_to_hf.py`.
 
 To see the full usage for advanced configurations, run:
     torchrun --nproc_per_node 1 quantize.py --help
@@ -413,10 +414,16 @@ def main(args: argparse.Namespace):
         hf_tokenizer_path=args.hf_model_name_or_path,
         hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
     )
-    print_rank_0(
-        f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. "
-        "To deploy this model (TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export.py"
-    )
+    if is_vlm:
+        print_rank_0(
+            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format "
+            "(HuggingFace unified export of a quantized VLM is not yet supported)."
+        )
+    else:
+        print_rank_0(
+            f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. To deploy this model "
+            "(TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py"
+        )
 
     # Sanity-check generation with the fake-quantized model. Skipped when --compress is set: the
     # weights are now real low-bit and megatron_generate may not support compressed forward for

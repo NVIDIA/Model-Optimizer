@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,13 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Shared helpers for Megatron-Bridge example tests."""
 
-"""Bypass distillation (blockwise local distillation) for the PUZZLE framework.
 
-This module implements Stage 1 of the PUZZLE pipeline: training alternative transformer
-block configurations using per-block knowledge distillation from a teacher model.
-"""
+def qwen35_moe_bridge_supported() -> bool:
+    """Whether MBridge supports Qwen3.5-MoE per-expert weight assembly, i.e. nemo:26.08+.
 
-from .training_loop import launch_bypass_distillation
+    Mount an updated MBridge to run these on 26.06.
+    """
+    try:
+        from megatron.bridge.models.conversion import model_bridge
 
-__all__ = ["launch_bypass_distillation"]
+        return hasattr(model_bridge, "_fuse_per_expert_hf_weight")
+    except Exception:
+        return False

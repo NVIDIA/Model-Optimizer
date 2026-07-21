@@ -533,6 +533,8 @@ for the layout convention and recipe-lookup order.
      - Description
    * - ``huggingface/step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only``
      - NVFP4 MLP-only for Step 3.5 Flash MoE model
+   * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
+     - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
 
 
 Loading recipes

@@ -557,8 +557,14 @@ def _build_and_prune_variant(size, export_config, *, num_attention_heads=4, **mo
 
 
 def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
-    # Qwen3.5-like hybrid MoE LM: GatedDeltaNet + gated full-attention layers. Only hidden_size and
-    # MoE dims are pruned; attention/GDN internal heads and the fused output gate are kept.
+    # Qwen3.5-like hybrid MoE LM: GatedDeltaNet + gated full-attention layers. hidden_size and MoE
+    # dims are width-pruned and num_layers is depth-pruned; attention/GDN internal heads and the fused
+    # output gate are kept. Depth pruning also slices the per-layer ``linear_attention_freq`` list.
+    num_layers = min(size * 2, 8)
+    pruned_num_layers = num_layers // 2
+    # Store the linear-attention pattern in list form (as real Qwen3.5 configs do, unlike the int
+    # cadence default) so depth pruning must slice it: 1 = linear (GatedDeltaNet), 0 = full attention.
+    linear_attention_freq = [0 if (i + 1) % 2 == 0 else 1 for i in range(num_layers)]
     pruned_hidden, pruned_moe_ffn, pruned_moe_shared, pruned_experts = 32, 16, 32, 2
     model = _build_and_prune_variant(
         size,
@@ -567,12 +573,14 @@ def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
             "moe_ffn_hidden_size": pruned_moe_ffn,
             "moe_shared_expert_intermediate_size": pruned_moe_shared,
             "num_moe_experts": pruned_experts,
+            "num_layers": pruned_num_layers,
         },
         num_query_groups=2,
         experimental_attention_variant="gated_delta_net",
         num_moe_experts=4,
         moe_ffn_hidden_size=32,
         moe_shared_expert_intermediate_size=64,
+        linear_attention_freq=linear_attention_freq,
     )
 
     for layer in model.decoder.layers:
@@ -593,6 +601,10 @@ def _test_mcore_qwen35_gdn_moe_pruning(rank, size):
     assert model.config.moe_ffn_hidden_size == pruned_moe_ffn
     assert model.config.moe_shared_expert_intermediate_size == pruned_moe_shared
     assert model.config.num_moe_experts == pruned_experts
+    # Depth pruning must slice the per-layer ``linear_attention_freq`` list to the surviving layers
+    assert model.config.num_layers == pruned_num_layers
+    assert isinstance(model.config.linear_attention_freq, list)
+    assert len(model.config.linear_attention_freq) == pruned_num_layers
 
 
 def test_mcore_qwen35_gdn_moe_pruning(dist_workers):
