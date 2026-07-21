@@ -127,18 +127,15 @@ def test_gptq_export_roundtrip():
     )
 
 
-@pytest.mark.parametrize(
-    "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
-)
-def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
-    model = get_tiny_llama(vocab_size=tiny_tokenizer.vocab_size).to("cuda")
+def _run_gptq_e2e(quant_cfg, algorithm, tokenizer):
+    model = get_tiny_llama(vocab_size=tokenizer.vocab_size).to("cuda")
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"] = {"method": "gptq", "layerwise": True}
+    quant_cfg["algorithm"] = algorithm
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
-        tokenizer=tiny_tokenizer,
+        tokenizer=tokenizer,
         batch_size=2,
         num_samples=8,
         device="cuda",
@@ -147,6 +144,49 @@ def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+    return model
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
+)
+def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
+    _run_gptq_e2e(quant_cfg, {"method": "gptq", "layerwise": True}, tiny_tokenizer)
+
+
+@pytest.mark.parametrize(
+    ("quant_cfg", "scale_algorithm"),
+    [
+        (mtq.NVFP4_DEFAULT_CFG, {"method": "mse", "fp8_scale_sweep": True}),
+        (mtq.NVFP4_DEFAULT_CFG, {"method": "local_hessian"}),
+        (
+            mtq.NVFP4_DEFAULT_CFG,
+            {"method": "local_hessian", "activation_error_coupling": True},
+        ),
+        (
+            mtq.NVFP4_FOUR_OVER_SIX_CFG,
+            {
+                "method": "mse",
+                "fp8_scale_sweep": False,
+                "start_multiplier": 1.0,
+                "stop_multiplier": 1.5,
+                "step_size": 0.5,
+            },
+        ),
+    ],
+    ids=["mse", "local_hessian", "local_hessian_coupled", "four_over_six"],
+)
+def test_gptq_e2e_scale_algorithms(quant_cfg, scale_algorithm, tiny_tokenizer):
+    model = _run_gptq_e2e(
+        quant_cfg,
+        {"method": "gptq", "layerwise": True, "scale_algorithm": scale_algorithm},
+        tiny_tokenizer,
+    )
+
+    assert any(
+        hasattr(module, "weight_quantizer") and module.weight_quantizer.amax is not None
+        for module in model.modules()
+    )
 
 
 # ---------------------------------------------------------------------------

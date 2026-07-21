@@ -2184,6 +2184,7 @@ def gptq(
     perc_damp: float = 0.01,
     block_size: int = 128,
     fused: bool = False,
+    scale_algorithm: dict | None = None,
 ):
     """GPTQ quantization.
 
@@ -2197,7 +2198,8 @@ def gptq(
 
     Per-module steps:
 
-    1. ``max_calibrate`` to set amax values from the current activations.
+    1. Scale calibration (``scale_algorithm``; max by default) to set amax values
+       from the current activations.
     2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
     3. Collect per-linear-layer Hessian matrices via forward hooks.
     4. Blockwise weight updates using the inverse Hessian to compensate for
@@ -2210,11 +2212,31 @@ def gptq(
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
+        scale_algorithm: Calibration algorithm config to run first. Dict with
+            'method' key: 'mse', 'local_hessian', or 'max'. Defaults to
+            {'method': 'max'} if None. Under layerwise mode, calibration runs
+            once per decoder layer.
     """
     total_start = time.time()
 
-    # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
-    max_calibrate(model, forward_loop=forward_loop)
+    if fused and any(
+        is_quantized_linear(m)
+        and m.weight_quantizer.is_enabled
+        and any(
+            isinstance(q, TensorQuantizer) and (q.block_sizes or {}).get("four_over_six")
+            for q in m.weight_quantizer.modules()
+        )
+        for m in model.modules()
+    ):
+        raise ValueError(
+            "GPTQ fused=True is incompatible with four_over_six weight block_sizes: the fused "
+            "NVFP4 kernel assumes a 448-normalized global scale, while 4/6 normalizes by 256. "
+            "Use fused=False."
+        )
+
+    if scale_algorithm is None:
+        scale_algorithm = {"method": "max"}
+    _run_scale_calibration(model, forward_loop, scale_algorithm)
 
     quantized_layers = [
         (n, m)
