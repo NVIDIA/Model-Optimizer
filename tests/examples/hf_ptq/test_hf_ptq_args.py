@@ -103,23 +103,18 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
 
     assert inputs["quantization_formats"] == []
     assert inputs["fixed_quantization_config"] == QUANT_CFG_CHOICES["w4a16_nvfp4"]
-    searched, lm_head = inputs["module_search_spaces"]
+    (searched,) = inputs["module_search_spaces"]
     assert searched["module_name_patterns"] == [
         "*mlp.shared_expert*",
         "*linear_attn*",
         "*self_attn*",
+        "*lm_head*",
     ]
     assert searched["quantization_formats"] == [
         QUANT_CFG_CHOICES["w4a16_nvfp4"],
         QUANT_CFG_CHOICES["fp8"],
     ]
     assert searched["allow_no_quant"] is True
-    assert lm_head["module_name_patterns"] == ["*lm_head*"]
-    assert lm_head["quantization_formats"] == [
-        QUANT_CFG_CHOICES["w4a16_nvfp4"],
-        QUANT_CFG_CHOICES["fp8"],
-    ]
-    assert lm_head["allow_no_quant"] is True
 
 
 def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
