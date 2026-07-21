@@ -54,21 +54,12 @@ split samples across model copies; see the [LM-Eval examples](../llm_eval/README
 ## Track downstream quality over time during distillation
 
 Validation KD and CE losses show whether the student is fitting the teacher and validation data, but they do not
-necessarily predict downstream accuracy. Export the live student at each validation interval and evaluate the
-resulting checkpoints to see when downstream quality improves, plateaus, or regresses.
+necessarily predict downstream accuracy. Keep the Megatron checkpoints saved at validation intervals, export them
+to Hugging Face format, and evaluate the resulting checkpoints to see when downstream quality improves, plateaus,
+or regresses.
 
-Use `--hf_validation_export_path` to choose the output directory and
-`--hf_validation_export_interval` to choose how often `distill.py` saves a Hugging Face checkpoint, as described in
-the [Megatron-Bridge distillation guide](../megatron_bridge/README.md#converting-to-hugging-face-format-optional).
-
-The export path contains one loadable Hugging Face checkpoint per validation iteration:
-
-```text
-hf_validation/
-├── iter_0000100/
-├── iter_0000200/
-└── iter_0000300/
-```
+See the [Megatron-Bridge distillation guide](../megatron_bridge/README.md#converting-to-hugging-face-format-optional)
+for how to retain and export intermediate distillation checkpoints.
 
 Evaluate the teacher, pruned student, and each exported checkpoint. Follow the
 [LM-Eval Harness instructions](../llm_eval/README.md#lm-eval-harness) and use the

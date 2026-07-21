@@ -221,6 +221,33 @@ torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
     --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
 
+Use `--export_iterations` to export multiple saved checkpoints, for example to evaluate how model
+quality changes during distillation. To export multiple iterations, keep those Megatron checkpoints
+during distillation. The default is to keep the last 5 checkpoints; set `--checkpoint_keep_last -1`
+to keep all saved checkpoints.
+
+Then export all retained checkpoints, with one Hugging Face checkpoint written per
+`iter_<iteration>` subdirectory:
+
+```bash
+torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+    --student_hf_path <student_hf_model_or_path> \
+    --megatron_path <distill_output_dir>/checkpoints \
+    --hf_export_path /path/to/save/hf_validation_checkpoints \
+    --export_iterations all
+```
+
+The export path contains one loadable Hugging Face checkpoint per exported iteration:
+
+```text
+hf_validation/
+├── iter_0000100/
+├── iter_0000200/
+└── iter_0000300/
+```
+
+To export selected iterations instead, use `--export_iterations 200 400 600`.
+
 ### Quantization Aware Distillation (QAD)
 
 To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model. We also use a smaller learning rate for QAD:
