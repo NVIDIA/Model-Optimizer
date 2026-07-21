@@ -9,6 +9,7 @@ working in this repository (Claude Code, Codex, Cursor, …).
 .agents/
 ├── skills/                 # SKILL.md files (canonical)
 │   └── <skill-name>/SKILL.md
+├── codex/agents/           # Codex custom role definitions (canonical)
 ├── scripts/                # shared helper scripts (sync-upstream-skills.sh, …)
 └── clusters.yaml.example   # remote-cluster config template
 ```
@@ -31,12 +32,15 @@ a copy:
   and `.claude/clusters.yaml.example → ../.agents/clusters.yaml.example`. These
   follow the same committed-symlink pattern already used elsewhere in this repo
   (e.g. `CLAUDE.md`, `tools/launcher/modules/Model-Optimizer`).
-- **Future agents** (Codex, Cursor, …) add their own symlink or config pointing
-  at `.agents/`.
+- **Codex** discovers custom roles under `.codex/agents/`. That path is a
+  relative symlink to `.agents/codex/agents/`; maintain role definitions only
+  in the canonical `.agents/` path.
+- **Future agents** add their own symlink or config pointing at `.agents/`.
 
 ## Editing rules
 
 - **Always edit files under `.agents/`**.
+- Codex custom roles belong in `.agents/codex/agents/`, not `.codex/agents/`.
 - Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
 - New skills go in `.agents/skills/<skill-name>/SKILL.md` following the
