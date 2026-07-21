@@ -38,6 +38,7 @@ from example_utils import (
     is_nemotron_vl,
     load_mtp_weights,
     needs_checkpoint_path_update,
+    patch_match_named_modules,
     resolve_checkpoint_dir,
     run_nemotron_vl_preview,
 )
@@ -86,6 +87,9 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+
+
+patch_match_named_modules()
 
 
 def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:

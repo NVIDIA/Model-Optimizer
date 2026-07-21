@@ -53,6 +53,103 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
+def patch_match_named_modules() -> None:
+    """Make compressed_tensors ``match_named_modules`` O(modules) for exact-name targets.
+
+    ``compress_model``/``decompress_model`` pass ~69k exact module names as ``targets``; the stock
+    nested ``for target in targets`` loop is O(modules x targets) (~100 min for Kimi) -- this is the
+    "Compressing model..." phase observed at load time. Bucket the exact-name (non-"re:") targets
+    into a set for O(1) membership; regex and class-name targets are still handled exactly as before.
+    The yielded module set is identical (verified on the full model: 69,300 matches, 0.10 s vs
+    ~100 min).
+
+    Idempotent: re-applying is a no-op (it detects the already-patched function and returns). Shared
+    by hf_ptq.py and multinode_ptq.py so the speedup is applied wherever a compressed-tensors
+    checkpoint is loaded.
+    """
+    try:
+        import compressed_tensors.utils.match as _m
+    except Exception:
+        return
+
+    _orig = _m.match_named_modules
+    # Idempotent guard: if we already patched, the bound name is our wrapper, not the original.
+    if getattr(_orig, "_modelopt_fast_match", False):
+        return
+
+    def fast_match_named_modules(model, targets, ignore=None, fused=None, warn_on_fail=False):
+        targets = list(targets or [])
+        ignore = ignore or []
+        # Fall back to the original for the rare/complex cases this fast path doesn't cover.
+        if fused is not None or any(not isinstance(t, str) for t in targets):
+            yield from _orig(model, targets, ignore, fused=fused, warn_on_fail=warn_on_fail)
+            return
+        name_set = {t for t in targets if not t.startswith("re:")}
+        re_targets = [t for t in targets if t.startswith("re:")]
+        # Determine which non-"re:" targets are class names actually present (usually 0-1).
+        class_names, has_linearbase = set(), False
+        for _, mod in model.named_modules():
+            for c in mod.__class__.__mro__:
+                class_names.add(c.__name__)
+                has_linearbase = has_linearbase or c.__name__ == "LinearBase"
+        class_targets = [
+            t for t in name_set if t in class_names or (t == "Linear" and has_linearbase)
+        ]
+        unmatched = set(targets)
+        internal_module_cls = getattr(_m, "InternalModule", None)
+        for name, module in model.named_modules():
+            # Original is_match() excludes InternalModule from target matches; mirror exactly.
+            if internal_module_cls is not None and isinstance(module, internal_module_cls):
+                continue
+            mt = None
+            if name in name_set:
+                mt = name
+            else:
+                for t in class_targets:
+                    if _m._match_class(module, t):
+                        mt = t
+                        break
+                if mt is None:
+                    for t in re_targets:
+                        if _m._match_name(name, t, None):
+                            mt = t
+                            break
+            if mt is not None:
+                unmatched.discard(mt)
+                if not _m.is_match(name, module, ignore, fused=None):
+                    yield name, module
+        if warn_on_fail:
+            import logging as _logging
+
+            for t in unmatched:
+                _logging.getLogger("compressed_tensors").warning(
+                    f"Could not match `{t}` in instance of {model.__class__.__name__}"
+                )
+
+    fast_match_named_modules._modelopt_fast_match = True
+    _m.match_named_modules = fast_match_named_modules
+
+    # `compress_model` (and friends) did `from ...match import match_named_modules`, binding the name
+    # into THEIR module namespace at import time, so patching the `match` module attribute alone does
+    # not reach them -- confirmed via py-spy: compress_model still ran the original O(modules x
+    # targets) matcher despite the patch. Rebind every already-imported module that still holds the
+    # original ref. (Modules imported *after* this point pick up the fast version automatically.)
+    import contextlib
+    import sys
+
+    with contextlib.suppress(Exception):
+        # ensure the key importer is loaded so the sweep below can rebind it
+        import compressed_tensors.compressors.model_compressors.model_compressor  # noqa: F401
+    rebound = []
+    for _modname, _mod in list(sys.modules.items()):
+        if _mod is None:
+            continue
+        if getattr(_mod, "match_named_modules", None) is _orig:
+            _mod.match_named_modules = fast_match_named_modules
+            rebound.append(_modname)
+    print(f"[match-speedup] patched match_named_modules; rebound importers: {rebound}", flush=True)
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
