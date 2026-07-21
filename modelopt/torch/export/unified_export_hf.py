@@ -596,6 +596,14 @@ def _export_quantized_weight(
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)
 
+    if weight.is_meta:
+        raise RuntimeError(
+            f"Weight '{weight_name}' of {type(sub_module).__name__} is a meta tensor during "
+            "export. If the model was loaded with disk/CPU offload, export must run inside an "
+            "enable_weight_access_and_writeback context. Use the offload-aware export path "
+            "(_process_quantized_modules_offloaded) rather than _process_quantized_modules."
+        )
+
     # Capture source identity BEFORE any tensor-creating operation below.
     # For HF-tied weights this matches across all modules sharing the
     # underlying Parameter; the cache lookup at the end of this function
@@ -841,6 +849,20 @@ def _export_quantized_weight(
     torch.cuda.empty_cache()
 
 
+def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContext) -> None:
+    """QLoRA skip, unpack-weight preprocessing, and handler dispatch for one module."""
+    if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
+        return
+    # Restore unpacked weight so the export path can read the live quantizer state.
+    if hasattr(sub_module, "weight_packed") or (
+        "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
+    ):
+        sub_module.unpack_weight()
+    handler = ExportModuleRegistry.match(sub_module)
+    if handler is not None:
+        handler(name, sub_module, ctx)
+
+
 def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
@@ -874,20 +896,72 @@ def _process_quantized_modules(
 
             fsdp_module_to_reshard = sub_module
 
-        # We skip QuantLoraLinear module for modelopt QLoRA
-        if ctx.is_modelopt_qlora and hasattr(sub_module, "base_layer"):
+        _dispatch_export_handler(name, sub_module, ctx)
+
+
+def _has_accelerate_offload(model: nn.Module) -> bool:
+    """Return True if any module in model has a CPU- or disk-offload accelerate hook."""
+    try:
+        from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
+    except ImportError:
+        return False
+    for mod in model.modules():
+        hook = getattr(mod, "_hf_hook", None)
+        if hook is not None and _get_offload_hook(hook) is not None:
+            return True
+    return False
+
+
+def _process_quantized_modules_offloaded(
+    model: nn.Module,
+    dtype: torch.dtype,
+    is_modelopt_qlora: bool = False,
+) -> dict[str, Any]:
+    """Export quantized decoder-layer weights for an offloaded model, one layer at a time.
+
+    Returns a full-model state dict with no meta tensors.
+
+    Limitation: only decoder layers discovered by LayerActivationCollector are
+    materialized. Non-decoder quantized modules (e.g. a quantized lm_head) are
+    collected from model.state_dict() in their current form. Default FP8/NVFP4
+    configs exclude lm_head, so this is typically harmless, but custom configs
+    that quantize non-decoder modules will export those layers without quantization applied.
+    """
+    from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if decoder_layers is None:
+        raise RuntimeError(
+            "Disk/CPU-offloaded export requires discoverable decoder layers. "
+            "The model architecture is not supported by LayerActivationCollector."
+        )
+    decoder_layer_ids = {id(m) for m in decoder_layers}
+
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    layer_tensors: dict[str, torch.Tensor] = {}
+
+    for name, module in model.named_modules():
+        if id(module) not in decoder_layer_ids:
             continue
+        with enable_weight_access_and_writeback(module, module, writeback=True):
+            for sub_name, sub_mod in module.named_modules():
+                full_name = f"{name}.{sub_name}" if sub_name else name
+                _dispatch_export_handler(full_name, sub_mod, ctx)
 
-        # Preprocessing: restore unpacked weight so the export path can read
-        # the live quantizer state. Falls through to the handler dispatch below.
-        if hasattr(sub_module, "weight_packed") or (
-            "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
-        ):
-            sub_module.unpack_weight()
+            # Snapshot inside the context: post-exit, post_forward re-offloads params to meta.
+            prefix = f"{name}." if name else ""
+            for key, tensor in module.state_dict().items():
+                assert not tensor.is_meta, (
+                    f"Expected real tensor for '{prefix + key}' inside materialization context"
+                )
+                layer_tensors[prefix + key] = tensor.detach()
 
-        handler = ExportModuleRegistry.match(sub_module)
-        if handler is not None:
-            handler(name, sub_module, ctx)
+    # model.state_dict() gives real tensors for non-offloaded parts (embed, lm_head, norms, …);
+    # meta placeholders for offloaded decoder layers are overridden by layer_tensors.
+    full_sd = model.state_dict()
+    full_sd.update(layer_tensors)
+    return full_sd
 
 
 def _export_transformers_checkpoint(
@@ -934,13 +1008,18 @@ def _export_transformers_checkpoint(
     # TODO: Handle mixed precision
     requantize_resmooth_fused_llm_layers(model)
 
-    # Remove all hooks from the model
-    try:
-        from accelerate.hooks import remove_hook_from_module
+    # Detect accelerate offload before removing hooks; offloaded models need weights
+    # materialized layer-by-layer during export (hooks must stay alive for that pass).
+    _offloaded = _has_accelerate_offload(model)
 
-        remove_hook_from_module(model, recurse=True)
-    except ImportError:
-        warnings.warn("accelerate is not installed, hooks will not be removed")
+    # Remove all hooks from the model (deferred for offloaded models)
+    if not _offloaded:
+        try:
+            from accelerate.hooks import remove_hook_from_module
+
+            remove_hook_from_module(model, recurse=True)
+        except ImportError:
+            warnings.warn("accelerate is not installed, hooks will not be removed")
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
@@ -978,22 +1057,24 @@ def _export_transformers_checkpoint(
         )
 
     # Process all quantized modules and export weights
-    _process_quantized_modules(model, dtype, is_modelopt_qlora)
-
-    # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    _reconstruct_fused_moe_linear(model)
-
-    if is_fsdp2_model(model):
-        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
-        quantized_state_dict = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
+    if _offloaded:
+        quantized_state_dict = _process_quantized_modules_offloaded(model, dtype, is_modelopt_qlora)
+        # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
+        _reconstruct_fused_moe_linear(model)
     else:
-        # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
-        quantized_state_dict = model.state_dict()
+        _reconstruct_fused_moe_linear(model)
+
+        if is_fsdp2_model(model):
+            # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
+            quantized_state_dict = get_model_state_dict(
+                model,
+                options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+            )
+        else:
+            # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
+            quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448

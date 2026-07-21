@@ -581,6 +581,9 @@ def load_model(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            offload_folder=args.offload_folder,
+            max_cpu_memory_gb=args.max_cpu_memory_gb,
+            max_gpu_memory_gb=args.max_gpu_memory_gb,
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -1624,6 +1627,38 @@ def parse_args() -> argparse.Namespace:
             "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
         ),
     )
+    parser.add_argument(
+        "--offload_folder",
+        type=str,
+        default=None,
+        help=(
+            "Path to a local folder for disk-offloaded model weights. "
+            "When set, activates disk-offload mode: model weights that exceed the GPU+CPU "
+            "budgets are streamed from disk during calibration and export. "
+            "Pair with --max_cpu_memory_gb to cap CPU RAM usage. "
+            "Incompatible with --low_memory_mode and --use_seq_device_map."
+        ),
+    )
+    parser.add_argument(
+        "--max_cpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum CPU RAM budget in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Weights beyond this limit are streamed from disk."
+        ),
+    )
+    parser.add_argument(
+        "--max_gpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum GPU memory budget per device in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Defaults to 80%% of available GPU memory when not specified."
+        ),
+    )
 
     add_mlflow_args(parser)
 
@@ -1661,6 +1696,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
         parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
+
+    if args.offload_folder is not None and args.low_memory_mode:
+        parser.error("--offload_folder (disk-offload) is not compatible with --low_memory_mode.")
+
+    if args.offload_folder is not None and args.use_seq_device_map:
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --use_seq_device_map; "
+            "device_map=auto is used for disk-offload to let accelerate place layers across "
+            "GPU, CPU, and disk."
+        )
 
     return args
 

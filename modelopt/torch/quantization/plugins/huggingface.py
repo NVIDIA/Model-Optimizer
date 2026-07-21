@@ -1750,10 +1750,14 @@ def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
-    if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
-        layers = model.backbone.layers
-        if len(layers) > 0 and hasattr(layers[0], "block_type"):
-            return layers
+    # Custom remote-code checkpoint uses model.backbone.layers;
+    # native transformers NemotronHModel uses model.model.layers.
+    for container_attr in ("backbone", "model"):
+        container = getattr(model, container_attr, None)
+        if container is not None and hasattr(container, "layers"):
+            layers = container.layers
+            if layers and hasattr(layers[0], "block_type"):
+                return layers
 
     return None
 
