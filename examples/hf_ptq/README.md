@@ -425,6 +425,13 @@ set `allow_no_quant: false` to exclude bf16 from the solver choices for matching
 top-level `quantize` baseline, rather than a one-candidate search rule, for modules that are fixed and
 not actually searched.
 
+The fixed baseline may also reuse a model-specific PTQ configuration. For example, the Qwen3.6 MoE
+AutoQuantize recipe imports the same model-specific `quant_cfg` used by
+`huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`, reproduces that recipe's `quantize`
+section, and lists only shared experts, attention, and `lm_head` under `module_search_spaces`. A
+loader test asserts that the inherited fixed baseline remains equal to the original PTQ recipe while
+leaving the original recipe unchanged.
+
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
 

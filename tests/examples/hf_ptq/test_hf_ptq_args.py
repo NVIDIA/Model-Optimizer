@@ -100,9 +100,10 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(
         recipe.auto_quantize, args, fixed_quantize_config=recipe.quantize
     )
+    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
 
     assert inputs["quantization_formats"] == []
-    assert inputs["fixed_quantization_config"] == QUANT_CFG_CHOICES["w4a16_nvfp4"]
+    assert inputs["fixed_quantization_config"] == model_ptq.quantize.model_dump()
     (searched,) = inputs["module_search_spaces"]
     assert searched["module_name_patterns"] == [
         "*mlp.shared_expert*",

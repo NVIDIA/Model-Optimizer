@@ -1820,8 +1820,9 @@ def test_load_recipe_autoquantize_module_search_spaces():
         "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     aq = recipe.auto_quantize
+    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
     assert recipe.quantize is not None
-    assert recipe.quantize == load_config("configs/ptq/presets/model/w4a16_nvfp4")
+    assert recipe.quantize == model_ptq.quantize
     assert aq.candidate_formats == []
     assert len(aq.module_search_spaces) == 1
     (searched,) = aq.module_search_spaces
