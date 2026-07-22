@@ -308,6 +308,7 @@ def _ask_objectives(prompts: PromptSession, detailed: bool) -> list[dict[str, st
     ]
     objectives = []
     while True:
+        objective_checkpoint = prompts.checkpoint()
         metric = prompts.select("MIP objective metric:", choices, default=choices[0][1])
         if metric == "custom":
             metric = prompts.text("Objective metric path:", default="metrics.lm_loss").strip()
@@ -316,6 +317,10 @@ def _ask_objectives(prompts: PromptSession, detailed: bool) -> list[dict[str, st
             [("Minimize", "minimize"), ("Maximize", "maximize")],
             default="minimize",
         )
+        if any(objective["metric"] == metric for objective in objectives):
+            print(f"Objective metric {metric!r} is already included; choose a different metric.")
+            prompts.rewind(objective_checkpoint)
+            continue
         objectives.append({"metric": metric, "direction": direction})
         if not detailed or not prompts.confirm("Add another objective?", default=False):
             return objectives

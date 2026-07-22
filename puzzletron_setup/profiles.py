@@ -185,6 +185,7 @@ class ModelProfile:
     moe: bool = False
     sublayers_per_layer: int = 1
     descriptor_by_model_type: Mapping[str, str] | None = None
+    descriptor_by_architecture: Mapping[str, str] | None = None
 
     def matches(self, config: Mapping[str, Any]) -> bool:
         """Return whether exact model-type or architecture metadata matches."""
@@ -198,6 +199,10 @@ class ModelProfile:
         for model_type in _model_types(config):
             if model_type in aliases:
                 return aliases[model_type]
+        aliases = self.descriptor_by_architecture or {}
+        for architecture in _architectures(config):
+            if architecture in aliases:
+                return aliases[architecture]
         return self.descriptor
 
     def inventory(self, config: Mapping[str, Any]) -> ModelInventory:
@@ -359,6 +364,10 @@ SUPPORTED_PROFILES = (
         axes=_NEMOTRON_AXES,
         moe=True,
         descriptor_by_model_type={"nemotron_h_v2": "nemotron_h_v2"},
+        descriptor_by_architecture={
+            "NemotronHForCausalLM": "nemotron_h",
+            "NemotronHV2ForCausalLM": "nemotron_h_v2",
+        },
     ),
     ModelProfile(
         family="qwen3_5",
@@ -385,6 +394,12 @@ SUPPORTED_PROFILES = (
             "qwen3_6_moe": "qwen3_5_moe",
             "qwen3_6_moe_text": "qwen3_5_moe_text",
         },
+        descriptor_by_architecture={
+            "Qwen3_5MoeForConditionalGeneration": "qwen3_5_moe",
+            "Qwen3_5MoeForCausalLM": "qwen3_5_moe_text",
+            "Qwen3_6MoeForConditionalGeneration": "qwen3_5_moe",
+            "Qwen3_6MoeForCausalLM": "qwen3_5_moe_text",
+        },
     ),
     ModelProfile(
         family="qwen3_5",
@@ -404,6 +419,12 @@ SUPPORTED_PROFILES = (
             "qwen3_5_text": "qwen3_5_text",
             "qwen3_6": "qwen3_6",
             "qwen3_6_text": "qwen3_6_text",
+        },
+        descriptor_by_architecture={
+            "Qwen3_5ForConditionalGeneration": "qwen3_5",
+            "Qwen3_5ForCausalLM": "qwen3_5_text",
+            "Qwen3_6ForConditionalGeneration": "qwen3_6",
+            "Qwen3_6ForCausalLM": "qwen3_6_text",
         },
     ),
 )

@@ -182,7 +182,10 @@ class PromptSession:
         """Choose one value from labels or `(label, value)` pairs."""
         replayed, value = self._replay(message)
         if replayed:
-            return value
+            allowed = [item[1] if isinstance(item, tuple) else item for item in choices]
+            if value in allowed:
+                return value
+            self.rewind(self._cursor - 1)
         self._describe(description)
         questionary = _questionary()
         rendered = [
