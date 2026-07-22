@@ -45,15 +45,16 @@ order:
      --tp <tp> --ep <ep> --ms <m1> <m2> ... --print_only
    ```
 
-   Review the printed shapes, MoE tuple, and derived routing with the user.
+   Review the printed shapes and the MoE tuple with the user.
    `# unsupported:` lines mean the list is partial and the script exits
    nonzero — handle those via **Manual supplements** below.
 5. **FlashInfer checkout and GPU** — the full benchmark needs a FlashInfer
    *source checkout* containing `benchmarks/flashinfer_benchmark.py`; the
    installed wheel alone is not enough. Prefer a clean checkout matching the
    installed `flashinfer` version; ask before cloning or installing anything.
-   On the benchmark machine, check `nvidia-smi` and package versions, and
-   verify CUPTI timing with a tiny `bench_gpu_time(..., enable_cupti=True)`
+   On the benchmark machine, check `nvidia-smi` and package versions, verify
+   the target GPU is idle (concurrent work on the same GPU skews timings),
+   and verify CUPTI timing with a tiny `bench_gpu_time(..., enable_cupti=True)`
    probe — a warning that falls back to CUDA events is a failure (the
    `cupti-python`/`nvidia-cuda-cupti` packages must match PyTorch's CUDA
    major). Ask for a GPU index only when several are visible. Pick a fresh
@@ -77,14 +78,10 @@ order:
 
 Do not restate, re-derive, or override these — the code enforces them:
 
-- `benchmark_model.py` derives `--nks`, `--nk_names`, and all `--moe_*`
-  arguments including the routing method; overrides are rejected.
-- Physical padding follows one rule: pad a dimension if and only if vLLM pads
-  it for that case; otherwise keep the exact shape and let it fail the same
-  way vLLM would. Row labels stay logical — report both shapes when padding
-  changes a dimension.
-- BF16 and FP8 MoE cases run before NVFP4 because a CUDA fault poisons the
-  remaining cases in the same driver process.
+- `benchmark_model.py` derives `--nks` (as `N,K,module-name` triples) and
+  all `--moe_*` arguments; overrides are rejected.
+- Row labels are logical shapes; the runner applies vLLM's physical padding.
+  Report both shapes whenever they differ.
 - A failed case writes FlashInfer's error message (or a pointer to
   `driver.log`) into its `combined_results.csv` cell, and the command exits
   nonzero after the table is written. Never present a partial table as a
@@ -92,11 +89,14 @@ Do not restate, re-derive, or override these — the code enforces them:
 
 ## Known backend and driver limits
 
-- `mm_fp4` TensorRT-LLM needs `N % 128 == 0` (shuffled weight layout). Drivers
-  with the conditional-shuffle fix drop only that backend (its cell reports no
-  result row); stock 0.6.x drivers fail *all* backends for that shape with an
-  empty assertion.
+- `mm_fp4` TensorRT-LLM needs `N % 128 == 0` (shuffled weight layout): its
+  cell reports no result row, or on stock 0.6.x drivers an empty assertion
+  that fails every `mm_fp4` backend for that shape.
 - `mm_fp8` (trtllm_low_latency) needs `K % 128 == 0`.
+- MoE rows cover FlashInfer's CUTLASS fused MoE, the trtllm-gen NVFP4 and
+  per-tensor FP8 MoE, and the CuteDSL NVFP4 MoE. The CuteDSL MoE row appears
+  only for Swiglu models (the kernel supports nothing else); the `cutedsl` and
+  `trtllm` backends require recent GPUs and report per-case errors elsewhere.
 - Gated NVFP4 CUTLASS MoE with `2F % 128 != 0` per rank fails — vLLM raises
   instead of padding — often as a `CUDA error: misaligned address`. Prefer EP
   over TP for the experts to keep the per-rank width legal.
@@ -114,23 +114,32 @@ missing shape:
 CUDA_VISIBLE_DEVICES=<gpu-index> \
 python .agents/skills/benchmark-model-kernels/scripts/benchmark_via_builtin.py \
   --flashinfer_repo <flashinfer-repo> --ms <m1> <m2> ... \
-  --nks <n>,<k> --nk_names <name> --workdir <workdir>
+  --nks <n>,<k>,<name> --workdir <workdir>
 ```
 
-For a manual MoE supplement, also derive and pass the routing arguments
-(`--moe_routing_method` plus the DeepSeek group/scaling/bias flags when
-applicable) — the runner otherwise defaults to `topk`, a different routing
-kernel. Label these rows as manual supplements; this is not a substitute for
-running `benchmark_model.py` first. Shell-quote user-supplied paths.
+Label these rows as manual supplements; this is not a substitute for running
+`benchmark_model.py` first. Shell-quote user-supplied paths.
 
 ## Report
 
 Report the command, GPU, versions, TP/EP, M values, shapes (logical and
 physical where they differ), warnings, and the artifacts: `testlist.txt`,
 `driver.log` (full driver output), `builtin_results.csv` (milliseconds,
-success-only), and `combined_results.csv` (microseconds; GEMM rows grouped
-under `<name>: <NxK>` labels, MoE rows flat). `*_with_quant` rows add a
-separately measured activation-quantization time, except NVFP4 MoE with
-quantization, which is a single fused measurement. These are kernel times
+success-only), and `combined_results.csv` (long form, microseconds: columns `module_name,
+M, N, K, backend, with_quant, runtime` in `GEMM` and `MoE` sections; modules
+fused into one GEMM are joined with `|` in `module_name`, while distinct
+same-shape modules appear as duplicated rows sharing one measurement; MoE
+rows keep the `H= F= E= top_k=` parameter line and leave N/K empty). In quantization-recipe terms:
+`bf16` rows are the unquantized W16A16 baseline, `fp8` rows are per-tensor
+W8A8, and `nvfp4` rows are W4A4. Plain quantized rows time the kernel with
+pre-quantized activations; `*_with_quant` rows add a separately measured
+activation-quantization time in the scale-factor layout that backend
+consumes, except the NVFP4 CUTLASS MoE row, which is a single fused
+measurement. MoE routing is synthetic: uniform expert
+distribution everywhere (real skewed routing is slower), and the trtllm-gen
+rows, which route in-kernel, use a fixed `renormalize` method regardless of
+the model's routing scheme. CUTLASS and CuteDSL MoE rows receive precomputed
+expert indices and exclude routing-selection cost entirely. No row includes
+the router GEMM itself. These are kernel times
 only — never describe them as end-to-end latency or throughput; they omit
 weights, layer frequency, communication, KV cache, and scheduling.
