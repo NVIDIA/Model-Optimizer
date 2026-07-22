@@ -46,6 +46,15 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
+
+try:  # nemo:26.08+
+    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+
+    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
+    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
+except ImportError:  # nemo:26.06 and earlier
+    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
+
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -541,7 +550,7 @@ def main(args: argparse.Namespace):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, MambaModelProvider):
+    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -615,6 +624,8 @@ def main(args: argparse.Namespace):
             if sorted_layers is not None
             else set(range(1, mcore_cfg.num_layers + 1))
         )
+        # layer_types is the HF per-layer attention-cadence field (mcore's linear_attention_freq /
+        # moe_layer_freq have no HF equivalent under those names, so only layer_types needs slicing).
         if hasattr(text_cfg, "layer_types"):
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
@@ -635,7 +646,9 @@ def main(args: argparse.Namespace):
                     "distillation cannot recover this vision-path change -- consider full VLM "
                     "training/distillation instead of LM-only to recover vision quality."
                 )
-        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
+        if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
+            hf_cfg, "hybrid_override_pattern"
+        ):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
         # Mark MTP as disabled on the HF text config written after pruning

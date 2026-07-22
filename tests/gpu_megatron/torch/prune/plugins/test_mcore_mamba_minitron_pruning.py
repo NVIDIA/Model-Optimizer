@@ -53,7 +53,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
     channel_divisor = 64
 
     num_layers = size
-    hybrid_override_pattern = "M" * size
+    hybrid_layer_pattern = "M" * size
     hidden_size = channel_divisor * 4
     mamba_state_dim = channel_divisor
     mamba_head_dim = 16
@@ -67,7 +67,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
         num_layers=num_layers,
-        hybrid_override_pattern=hybrid_override_pattern,
+        hybrid_layer_pattern=hybrid_layer_pattern,
         hidden_size=hidden_size,
         mamba_state_dim=mamba_state_dim,
         mamba_head_dim=mamba_head_dim,
@@ -242,7 +242,7 @@ _NAS_CHANNEL_DIVISOR = 4
 _NAS_BATCH_SIZE = 2
 _NAS_MODEL_KWARGS = {
     "num_layers": 4,
-    "hybrid_override_pattern": "ME*-",
+    "hybrid_layer_pattern": "ME*-",
     "hidden_size": 16,
     "ffn_hidden_size": 32,
     "num_attention_heads": 16,
