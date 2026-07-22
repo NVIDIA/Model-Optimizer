@@ -38,6 +38,7 @@ from modelopt.torch.distill.doge_megatron_data import (
     _next_doge_batches,
 )
 from modelopt.torch.distill.doge_megatron_loss import (
+    DoGEAlignmentDiagnostics,
     DoGEAlignmentParamScope,
     DoGEVirtualStepDiagnostic,
     compute_alignment_scores,
@@ -50,8 +51,9 @@ from modelopt.torch.distill.doge_megatron_loss import (
 from modelopt.torch.utils import print_rank_0
 
 DoGETrainLossMode = Literal["weighted", "sampled"]
+DoGEWeightUpdateStrategy = Literal["alignment", "kd_gap"]
 
-__all__ = ["DoGEForwardStep", "DoGETrainLossMode"]
+__all__ = ["DoGEForwardStep", "DoGETrainLossMode", "DoGEWeightUpdateStrategy"]
 
 
 class DoGEForwardStep:
@@ -72,6 +74,7 @@ class DoGEForwardStep:
         virtual_step_num_steps: int = 1,
         alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
         train_loss_mode: DoGETrainLossMode = "weighted",
+        weight_update_strategy: DoGEWeightUpdateStrategy = "alignment",
         sampling_seed: int = 1234,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
@@ -99,13 +102,19 @@ class DoGEForwardStep:
             train_loss_mode: How to construct the real student-update loss. ``weighted`` computes
                 every source loss each step and combines them by weight. ``sampled`` samples one
                 source by current weights and returns that unweighted loss.
+            weight_update_strategy: How to turn per-source diagnostics into the next blend.
+                ``alignment`` uses the DoGE gradient-alignment update. ``kd_gap`` sets weights
+                proportional to per-source KD loss as a naive PASER-style baseline.
             sampling_seed: Seed used for deterministic source sampling in ``sampled`` mode.
         """
         if train_loss_mode not in ("weighted", "sampled"):
             raise ValueError(f"Unsupported DoGE train loss mode: {train_loss_mode!r}")
+        if weight_update_strategy not in ("alignment", "kd_gap"):
+            raise ValueError(f"Unsupported DoGE weight update strategy: {weight_update_strategy!r}")
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
         self.updater = DoGEWeightUpdater(meta_lr=meta_lr, min_weight=min_blend_weight)
+        self.min_blend_weight = min_blend_weight
         self.blend_weights: dict[str, float] = normalize_data_path_weights(data_paths)
         self.target_blend_weights: dict[str, float] = normalize_data_path_weights(target_data_paths)
         self.doge_data_iterators: DoGEDataIterators | None = None
@@ -124,6 +133,7 @@ class DoGEForwardStep:
         self.virtual_step_num_steps = virtual_step_num_steps
         self.alignment_param_scope = alignment_param_scope
         self.train_loss_mode = train_loss_mode
+        self.weight_update_strategy = weight_update_strategy
         self.sampling_seed = sampling_seed
 
     def write_trajectory_record(
@@ -136,6 +146,7 @@ class DoGEForwardStep:
         candidate_blend_weights: dict[str, float] | None = None,
         virtual_step_diagnostics: dict[str, DoGEVirtualStepDiagnostic] | None = None,
         sampled_source_path: str | None = None,
+        weight_update_scores: dict[str, float] | None = None,
     ) -> None:
         """Write one DoGE weight-trajectory record on rank 0."""
         if not dist.is_master():
@@ -146,6 +157,7 @@ class DoGEForwardStep:
             "alignment_scores": alignment_scores or {},
             "blend_weights": self.blend_weights,
             "train_loss_mode": self.train_loss_mode,
+            "weight_update_strategy": self.weight_update_strategy,
         }
         if sampled_source_path is not None:
             record["sampled_source_path"] = sampled_source_path
@@ -155,6 +167,8 @@ class DoGEForwardStep:
             record["candidate_blend_weights"] = candidate_blend_weights
         if alignment_debug is not None:
             record["alignment_debug"] = alignment_debug
+        if weight_update_scores is not None:
+            record["weight_update_scores"] = weight_update_scores
         if source_probe_kd_loss is not None:
             record["source_probe_kd_loss"] = source_probe_kd_loss
         if target_probe_kd_loss is not None:
@@ -251,9 +265,8 @@ class DoGEForwardStep:
                 self.virtual_step_num_steps,
             )
 
-        candidate_blend_weights = dict(
-            self.updater.update(self.blend_weights, alignment_result.scores)
-        )
+        weight_update_scores = self._get_weight_update_scores(alignment_result)
+        candidate_blend_weights = self._get_candidate_blend_weights(weight_update_scores)
         if self.schedule_end_blend_weights is None and not self.freeze_blend:
             self.blend_weights = candidate_blend_weights
 
@@ -273,6 +286,7 @@ class DoGEForwardStep:
             candidate_blend_weights,
             virtual_step_diagnostics,
             sampled_source_path,
+            weight_update_scores,
         )
         if self.train_loss_mode == "sampled":
             if sampled_source_path is None:
@@ -313,6 +327,30 @@ class DoGEForwardStep:
             model,
             self.blend_weights,
             return_schedule_plan,
+        )
+
+    def _get_weight_update_scores(
+        self, alignment_result: DoGEAlignmentDiagnostics
+    ) -> dict[str, float]:
+        """Return the per-source scores used to propose the next blend."""
+        if self.weight_update_strategy == "alignment":
+            return alignment_result.scores
+        if self.weight_update_strategy == "kd_gap":
+            return alignment_result.source_probe_kd_loss
+        raise RuntimeError(
+            f"Unsupported DoGE weight update strategy: {self.weight_update_strategy!r}"
+        )
+
+    def _get_candidate_blend_weights(
+        self, weight_update_scores: dict[str, float]
+    ) -> dict[str, float]:
+        """Return candidate weights from the configured update strategy."""
+        if self.weight_update_strategy == "alignment":
+            return dict(self.updater.update(self.blend_weights, weight_update_scores))
+        if self.weight_update_strategy == "kd_gap":
+            return _normalize_scores_as_weights(weight_update_scores, self.min_blend_weight)
+        raise RuntimeError(
+            f"Unsupported DoGE weight update strategy: {self.weight_update_strategy!r}"
         )
 
     def _apply_scheduled_blend_weights(self, state: GlobalState) -> None:
@@ -368,6 +406,34 @@ def _normalize_virtual_step_candidate_weights(
             path: weight / total_weight for path, weight in zip(source_paths, weights)
         }
     return candidates
+
+
+def _normalize_scores_as_weights(
+    scores: dict[str, float], min_blend_weight: float = 0.0
+) -> dict[str, float]:
+    """Convert non-negative per-source scores into normalized blend weights."""
+    if not scores:
+        raise ValueError("Cannot normalize empty DoGE weight-update scores.")
+    if min_blend_weight * len(scores) >= 1:
+        raise ValueError(
+            "min_blend_weight is too large for the number of sources: "
+            f"{min_blend_weight} * {len(scores)} must be less than 1."
+        )
+
+    clipped_scores = {path: max(score, 0.0) for path, score in scores.items()}
+    total_score = sum(clipped_scores.values())
+    if total_score == 0:
+        normalized_scores = {path: 1.0 / len(clipped_scores) for path in clipped_scores}
+    else:
+        normalized_scores = {path: score / total_score for path, score in clipped_scores.items()}
+    if min_blend_weight == 0:
+        return normalized_scores
+
+    remaining_weight = 1.0 - min_blend_weight * len(normalized_scores)
+    return {
+        path: min_blend_weight + remaining_weight * weight
+        for path, weight in normalized_scores.items()
+    }
 
 
 def _normalize_schedule_end_weights(

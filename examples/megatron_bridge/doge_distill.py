@@ -241,6 +241,16 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     doge.add_argument(
+        "--doge_weight_update_strategy",
+        choices=("alignment", "kd_gap"),
+        default="alignment",
+        help=(
+            "Signal used to update adaptive blend weights. 'alignment' uses the DoGE "
+            "source-to-target gradient-alignment score. 'kd_gap' sets weights proportional to "
+            "per-source KD loss as a naive PASER-style baseline."
+        ),
+    )
+    doge.add_argument(
         "--doge_schedule_end_data_paths",
         nargs="+",
         help=(
@@ -409,6 +419,7 @@ def main(args: argparse.Namespace) -> None:
         virtual_step_num_steps=args.doge_virtual_step_num_steps,
         alignment_param_scope=args.doge_alignment_param_scope,
         train_loss_mode=args.doge_train_loss_mode,
+        weight_update_strategy=args.doge_weight_update_strategy,
         sampling_seed=args.seed,
     )
 
