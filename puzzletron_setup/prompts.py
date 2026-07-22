@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Union
 
 from . import SetupError
 
 __all__ = ["PromptSession"]
 
-Validator = Callable[[Any], bool | str]
+Validator = Callable[[Any], Union[bool, str]]
 
 
 def _questionary():
