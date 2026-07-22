@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from . import SetupError
 
@@ -79,7 +80,6 @@ class AxisSpec:
 
     def teacher_value(self, config: Mapping[str, Any]) -> int | None:
         """Resolve the teacher value, including derived grouped-head axes."""
-
         language = _language_config(config)
         if self.axis_id == "q_heads_per_group":
             query_heads = _first(language, ("num_attention_heads", "n_head"))
@@ -104,7 +104,6 @@ class AxisSpec:
 
     def options(self, teacher: int, limit: int = 16) -> tuple[int, ...]:
         """Return a compact descending domain containing teacher and half size."""
-
         if teacher < self.minimum:
             return (teacher,)
         legal = list(range(teacher, self.minimum - 1, -self.alignment))
@@ -114,10 +113,7 @@ class AxisSpec:
             return tuple(legal)
         half = min(legal, key=lambda value: (abs(value - teacher / 2), -value))
         required = {teacher, half, legal[-1]}
-        sampled = {
-            legal[round(index * (len(legal) - 1) / (limit - 1))]
-            for index in range(limit)
-        }
+        sampled = {legal[round(index * (len(legal) - 1) / (limit - 1))] for index in range(limit)}
         values = sorted(required | sampled, reverse=True)
         while len(values) > limit:
             removable = [value for value in values if value not in required]
@@ -155,7 +151,6 @@ class ModelInventory:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the inventory to YAML-safe built-in values."""
-
         return asdict(self)
 
 
@@ -163,6 +158,7 @@ class UnsupportedModelError(SetupError):
     """The inspected config does not match an intentionally supported profile."""
 
     def __init__(self, config: Mapping[str, Any]):
+        """Build an onboarding message from detected config identity fields."""
         model_types = _model_types(config) or ("unknown",)
         architectures = _architectures(config) or ("unknown",)
         message = (
@@ -192,7 +188,6 @@ class ModelProfile:
 
     def matches(self, config: Mapping[str, Any]) -> bool:
         """Return whether exact model-type or architecture metadata matches."""
-
         return bool(
             set(_model_types(config)) & set(self.model_types)
             or set(_architectures(config)) & set(self.architectures)
@@ -207,11 +202,8 @@ class ModelProfile:
 
     def inventory(self, config: Mapping[str, Any]) -> ModelInventory:
         """Normalize one supported Hugging Face config dictionary."""
-
         language = _language_config(config)
-        num_layers = int(
-            _first(language, ("num_hidden_layers", "n_layer", "num_layers")) or 0
-        )
+        num_layers = int(_first(language, ("num_hidden_layers", "n_layer", "num_layers")) or 0)
         if num_layers <= 0:
             raise SetupError("The model config does not declare a positive layer count.")
         layer_types = _first(
@@ -236,8 +228,10 @@ class ModelProfile:
         multimodal = bool(
             config.get("vision_config")
             or config.get("visual")
-            or any("ConditionalGeneration" in item for item in _architectures(config))
-            and not all(item.endswith("_text") for item in _model_types(config))
+            or (
+                any("ConditionalGeneration" in item for item in _architectures(config))
+                and not all(item.endswith("_text") for item in _model_types(config))
+            )
         )
         axes = []
         for spec in self.axes:
@@ -406,7 +400,6 @@ SUPPORTED_PROFILES = (
 
 def resolve_profile(config: Mapping[str, Any]) -> ModelProfile:
     """Resolve an exact supported profile or raise an actionable handoff."""
-
     for profile in SUPPORTED_PROFILES:
         if profile.matches(config):
             return profile

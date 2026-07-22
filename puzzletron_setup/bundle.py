@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
@@ -146,8 +147,7 @@ def _model_info(state: Mapping[str, Any]) -> dict[str, Any]:
         "num_hidden_layers": int(inventory.get("num_layers", 0)),
         "layer_counts": _mapping(inventory.get("layer_counts")),
     }
-    for key, value in facts.items():
-        result[key] = value
+    result.update(facts)
     for key in (
         "max_position_embeddings",
         "hybrid_override_pattern",
@@ -180,11 +180,7 @@ def _attention_heads(axes: Mapping[str, Any]) -> list[list[int]]:
         return []
     kv_values = [kv_axis["teacher_value"], *kv_axis.get("values", ())]
     q_values = [q_axis["teacher_value"], *q_axis.get("values", ())]
-    pairs = {
-        (int(kv) * int(q), int(kv))
-        for kv in kv_values
-        for q in q_values
-    }
+    pairs = {(int(kv) * int(q), int(kv)) for kv in kv_values for q in q_values}
     return [list(pair) for pair in sorted(pairs)]
 
 
@@ -244,7 +240,6 @@ def _post_mip_flows(
 
 def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     """Render one fully composed experiment mapping for smoke or production."""
-
     if budget not in {"smoke", "production"}:
         raise ValueError(f"Unknown bundle budget: {budget}")
     smoke = budget == "smoke"
@@ -361,9 +356,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "enabled": bool(_mapping(axes.get("hidden_width")).get("values")),
             "widths": list(_mapping(axes.get("hidden_width")).get("values") or ()),
             "alignment": int(
-                _mapping(_mapping(pruning.get("axes")).get("hidden_width")).get(
-                    "alignment", 1
-                )
+                _mapping(_mapping(pruning.get("axes")).get("hidden_width")).get("alignment", 1)
             ),
             "cycle_widths": True,
         },
@@ -486,7 +479,6 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
 
 def render_runner(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     """Render one existing-schema Slurm or SSH bare-metal runner mapping."""
-
     del budget
     infrastructure = _answers(state, "infrastructure")
     runner_answers = _mapping(infrastructure.get("runner"))
@@ -527,7 +519,6 @@ def render_execution(
     state: Mapping[str, Any], experiment: Mapping[str, Any], budget: str
 ) -> dict[str, Any]:
     """Render scheduler-neutral execution semantics and dynamic node resources."""
-
     del budget
     infrastructure = _answers(state, "infrastructure")
     workers = _mapping(infrastructure.get("workers"))
@@ -538,9 +529,7 @@ def render_execution(
     gpus_per_node = int(infrastructure.get("gpus_per_node", 8))
     pool_workers = int(workers.get("pool", 1))
     sharded_workers = int(workers.get("sharded", 1))
-    embedding_widths = list(
-        _mapping(experiment.get("embedding_pruning")).get("widths") or ()
-    )
+    embedding_widths = list(_mapping(experiment.get("embedding_pruning")).get("widths") or ())
     stages = {
         "convert": {"strategy": "single", "instances": 1, "parallel": common},
         "tokenize_data": {"strategy": "single", "instances": 1},
@@ -630,7 +619,6 @@ def _submission_payload(submission) -> dict[str, Any]:
 
 def dry_run_bundle(bundle_dir: Path) -> str:
     """Compile a bundle and serialize its no-submission execution plan."""
-
     plan = _compile_bundle(bundle_dir)
     submissions = dry_run_plan(plan)
     lines = [
@@ -645,15 +633,12 @@ def dry_run_bundle(bundle_dir: Path) -> str:
             f"{stage.stage_id}: {count} submission(s), strategy={stage.strategy.value}, "
             f"gpus_per_instance={stage.gpus_per_instance}, nodes={stage.nodes}"
         )
-    lines.extend(
-        ["", json.dumps([_submission_payload(item) for item in submissions], indent=2)]
-    )
+    lines.extend(["", json.dumps([_submission_payload(item) for item in submissions], indent=2)])
     return "\n".join(lines) + "\n"
 
 
 def validate_bundle(bundle_dir: Path) -> BundleValidation:
     """Validate and dry-run one bundle without constructing an executor."""
-
     try:
         plan = _compile_bundle(bundle_dir)
         submissions = dry_run_plan(plan)
@@ -697,10 +682,10 @@ def _readme(
         "| Stage group | Instances | GPUs/instance | Nodes |",
         "| --- | ---: | ---: | ---: |",
     ]
-    for row in rows:
-        lines.append(
-            f"| {row['stage']} | {row['instances']} | {row['gpus_per_instance']} | {row['nodes']} |"
-        )
+    lines.extend(
+        (f"| {row['stage']} | {row['instances']} | {row['gpus_per_instance']} | {row['nodes']} |")
+        for row in rows
+    )
     for budget in ("smoke", "production"):
         validation = validations[budget]
         status = (
@@ -745,7 +730,6 @@ def _readme(
 
 def build_bundles(campaign_dir: Path, state: Mapping[str, Any]) -> BundleResult:
     """Generate, independently validate, and dry-run smoke and production bundles."""
-
     campaign_dir = campaign_dir.expanduser().resolve()
     for budget in ("smoke", "production"):
         bundle_dir = campaign_dir / budget
@@ -758,8 +742,7 @@ def build_bundles(campaign_dir: Path, state: Mapping[str, Any]) -> BundleResult:
         _atomic_yaml(execution_path, execution)
 
     validations = {
-        budget: validate_bundle(campaign_dir / budget)
-        for budget in ("smoke", "production")
+        budget: validate_bundle(campaign_dir / budget) for budget in ("smoke", "production")
     }
     for budget, validation in validations.items():
         plan_path = campaign_dir / budget / "dry-run-plan.txt"

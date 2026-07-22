@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Union
+from typing import Any
 
 from . import SetupError
 
 __all__ = ["PromptSession"]
 
-Validator = Callable[[Any], Union[bool, str]]
+Validator = Callable[[Any], bool | str]
 
 
 def _questionary():
@@ -48,7 +48,6 @@ class PromptSession:
         validate: Validator | None = None,
     ) -> str:
         """Ask for a non-cancelled string."""
-
         self._describe(description)
         questionary = _questionary()
         return str(
@@ -95,7 +94,6 @@ class PromptSession:
         description: str | None = None,
     ) -> bool:
         """Ask a yes/no question."""
-
         self._describe(description)
         return bool(_answer(_questionary().confirm(message, default=default)))
 
@@ -108,13 +106,10 @@ class PromptSession:
         description: str | None = None,
     ) -> Any:
         """Choose one value from labels or `(label, value)` pairs."""
-
         self._describe(description)
         questionary = _questionary()
         rendered = [
-            questionary.Choice(title=item[0], value=item[1])
-            if isinstance(item, tuple)
-            else item
+            questionary.Choice(title=item[0], value=item[1]) if isinstance(item, tuple) else item
             for item in choices
         ]
         return _answer(questionary.select(message, choices=rendered, default=default))
@@ -129,7 +124,6 @@ class PromptSession:
         validate: Validator | None = None,
     ) -> list[Any]:
         """Choose multiple values with explicit checked defaults."""
-
         self._describe(description)
         questionary = _questionary()
         checked = set(defaults)
@@ -142,6 +136,4 @@ class PromptSession:
             rendered.append(
                 questionary.Choice(title=str(title), value=value, checked=value in checked)
             )
-        return list(
-            _answer(questionary.checkbox(message, choices=rendered, validate=validate))
-        )
+        return list(_answer(questionary.checkbox(message, choices=rendered, validate=validate)))

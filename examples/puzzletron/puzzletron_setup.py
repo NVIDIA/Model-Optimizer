@@ -15,6 +15,5 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from puzzletron_setup.cli import main  # noqa: E402
 
-
 if __name__ == "__main__":
     raise SystemExit(main())

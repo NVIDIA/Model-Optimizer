@@ -6,16 +6,19 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from . import SetupError
 
-__all__ = ["AnswerState", "SECTIONS"]
+if TYPE_CHECKING:
+    from pathlib import Path
+
+__all__ = ["SECTIONS", "AnswerState"]
 
 SCHEMA_VERSION = 1
 WIZARD_VERSION = "1"
@@ -35,6 +38,14 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
 def _state_path(path: Path) -> Path:
     path = path.expanduser().resolve()
     return path / "answers.yaml" if path.is_dir() or path.suffix == "" else path
@@ -48,9 +59,8 @@ class AnswerState:
     payload: dict[str, Any]
 
     @classmethod
-    def start(cls, campaign_dir: Path, *, detailed: bool) -> "AnswerState":
+    def start(cls, campaign_dir: Path, *, detailed: bool) -> AnswerState:
         """Create fresh answer state in a new or empty campaign directory."""
-
         campaign_dir = campaign_dir.expanduser().resolve()
         if campaign_dir.exists() and any(campaign_dir.iterdir()):
             raise SetupError(
@@ -75,9 +85,8 @@ class AnswerState:
         return state
 
     @classmethod
-    def resume(cls, path: Path) -> "AnswerState":
+    def resume(cls, path: Path) -> AnswerState:
         """Load explicit resume state from a campaign directory or YAML path."""
-
         state_path = _state_path(path)
         if not state_path.is_file():
             raise SetupError(f"Resume state does not exist: {state_path}")
@@ -100,18 +109,15 @@ class AnswerState:
     @property
     def detailed(self) -> bool:
         """Whether this setup session exposes advanced questions."""
-
         return bool(self.payload.get("detailed", False))
 
     def section(self, name: str) -> dict[str, Any]:
         """Return a copy of one normalized answer section."""
-
         value = self.payload.get("answers", {}).get(name, {})
         return dict(value) if isinstance(value, Mapping) else {}
 
     def record(self, section: str, key: str, value: Any) -> None:
         """Record one answer and atomically persist it immediately."""
-
         if section not in SECTIONS:
             raise ValueError(f"Unknown answer section: {section}")
         answers = self.payload.setdefault("answers", {})
@@ -122,7 +128,6 @@ class AnswerState:
 
     def record_many(self, section: str, values: Mapping[str, Any]) -> None:
         """Record a completed group while still using one atomic replacement."""
-
         if section not in SECTIONS:
             raise ValueError(f"Unknown answer section: {section}")
         self.payload.setdefault("answers", {}).setdefault(section, {}).update(values)
@@ -131,7 +136,6 @@ class AnswerState:
 
     def set_model(self, model: Mapping[str, Any], inventory: Mapping[str, Any]) -> None:
         """Persist model identity and normalized inventory."""
-
         self.payload["model"] = dict(model)
         self.payload["inventory"] = dict(inventory)
         self.payload["completed_section"] = "model"
@@ -139,7 +143,6 @@ class AnswerState:
 
     def invalidate_after(self, section: str) -> None:
         """Discard answers derived from sections after the named boundary."""
-
         if section not in SECTIONS:
             raise ValueError(f"Unknown answer section: {section}")
         boundary = SECTIONS.index(section)
@@ -151,13 +154,12 @@ class AnswerState:
 
     def save(self) -> None:
         """Flush state to a sibling temporary file and atomically replace it."""
-
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.payload["updated_at"] = _timestamp()
         temporary = self.path.with_name(f".{self.path.name}.tmp")
         try:
             with temporary.open("w") as stream:
-                yaml.safe_dump(self.payload, stream, sort_keys=False, width=100)
+                yaml.safe_dump(_plain(self.payload), stream, sort_keys=False, width=100)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)

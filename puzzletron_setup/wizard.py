@@ -10,7 +10,7 @@ import re
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -19,6 +19,9 @@ from .inspection import InspectedModel, infer_dataset_modality, inspect_model
 from .profiles import UnsupportedModelError
 from .prompts import PromptSession
 from .state import AnswerState
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__ = ["run_wizard"]
 
@@ -74,11 +77,14 @@ def _inspect_fresh_model(prompts: PromptSession, state: AnswerState) -> Inspecte
         is_local = Path(source).expanduser().exists()
         revision = None
         if not is_local:
-            revision = prompts.text(
-                "Hugging Face revision:",
-                default="main",
-                description="The resolved immutable commit is stored in the campaign.",
-            ).strip() or None
+            revision = (
+                prompts.text(
+                    "Hugging Face revision:",
+                    default="main",
+                    description="The resolved immutable commit is stored in the campaign.",
+                ).strip()
+                or None
+            )
         try:
             model = inspect_model(source, revision)
         except UnsupportedModelError as error:
@@ -233,10 +239,7 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
             }
         )
 
-    print(
-        f"The model has {inventory.num_layers} blocks and "
-        f"{inventory.num_sublayers} subblocks."
-    )
+    print(f"The model has {inventory.num_layers} blocks and {inventory.num_sublayers} subblocks.")
     replacement_granularity = prompts.select(
         "Replace and score one block or subblock at a time?",
         [("Subblock", "subblock"), ("Block", "block")],
@@ -322,9 +325,7 @@ def _constraint_value(prompts: PromptSession, label: str, default: str) -> Any:
             print(f"Invalid value: {error}")
 
 
-def _add_constraint(
-    constraints: dict[str, Any], metric: str, value: Any, workload_id: str
-) -> None:
+def _add_constraint(constraints: dict[str, Any], metric: str, value: Any, workload_id: str) -> None:
     key = "runtime" if metric == "latency" else metric
     if key in {"memory", "runtime", "throughput"}:
         constraints[key] = {"at": {workload_id: value}}
@@ -679,16 +680,12 @@ def _custom_flow(
                 "input_tokens": prompts.integer("AIPerf ISL:", default=int(runtime["isl"])),
                 "output_tokens": prompts.integer("AIPerf OSL:", default=int(runtime["osl"])),
                 "concurrency": [
-                    prompts.integer(
-                        "AIPerf concurrency:", default=int(runtime["concurrency"])
-                    )
+                    prompts.integer("AIPerf concurrency:", default=int(runtime["concurrency"]))
                 ],
             }
             available_metrics.append(f"{node_id}.request_throughput")
         elif node_type == "global_kd":
-            node["config"] = {
-                "max_steps": prompts.integer("Global KD steps:", default=128)
-            }
+            node["config"] = {"max_steps": prompts.integer("Global KD steps:", default=128)}
         elif node_type in {"ptq", "downstream_evaluation"}:
             print(
                 f"{node_type} records the reserved interface, but current orchestration "
@@ -737,8 +734,7 @@ def _ask_mesh(
     defaults = defaults or {}
     print(f"{name} parallel mesh:")
     return {
-        key: prompts.integer(f"  {key}:", default=int(defaults.get(key, 1)))
-        for key in _MESH_KEYS
+        key: prompts.integer(f"  {key}:", default=int(defaults.get(key, 1))) for key in _MESH_KEYS
     }
 
 
@@ -747,9 +743,7 @@ def _validate_mesh(mesh: Mapping[str, int], model: InspectedModel, name: str) ->
         raise SetupError(f"{name} mesh dimensions must all be positive.")
     experts = model.inventory.facts.get("num_experts")
     if experts and int(experts) % int(mesh["ep"]):
-        raise SetupError(
-            f"{name} EP={mesh['ep']} does not divide the model's {experts} experts."
-        )
+        raise SetupError(f"{name} EP={mesh['ep']} does not divide the model's {experts} experts.")
 
 
 def _resource_rows(
@@ -785,7 +779,7 @@ def _print_resource_rows(rows: list[Mapping[str, Any]]) -> None:
     print(f"{'Stage':30} {'Instances':>10} {'GPU/instance':>14} {'Nodes':>8}")
     for row in rows:
         print(
-            f"{str(row['stage']):30} {int(row['instances']):10d} "
+            f"{row['stage']!s:30} {int(row['instances']):10d} "
             f"{int(row['gpus_per_instance']):14d} {int(row['nodes']):8d}"
         )
 
@@ -806,9 +800,7 @@ def _ask_infrastructure(
     venv = prompts.text("Python virtual environment on workers:", default=".venv")
     container = prompts.text("Container image/path (blank for none):", default="").strip()
     mounts = prompts.text("Container mounts (blank for none):", default="").strip()
-    prerun = prompts.text(
-        "Pre-run commands separated by ';;' (blank for none):", default=""
-    )
+    prerun = prompts.text("Pre-run commands separated by ';;' (blank for none):", default="")
     gpus_per_node = prompts.integer("GPUs per node:", default=8)
     common_mesh = _ask_mesh(prompts, "Common")
     if prompts.confirm("Reuse the common mesh for bypass?", default=True):
@@ -830,9 +822,7 @@ def _ask_infrastructure(
     if runner_kind == "slurm":
         runner["slurm"] = {
             "account": prompts.text("Slurm account:", default=""),
-            "partition_interactive": prompts.text(
-                "Interactive partition:", default="interactive"
-            ),
+            "partition_interactive": prompts.text("Interactive partition:", default="interactive"),
             "partition_batch": prompts.text("Batch partition:", default="batch"),
             "time_limit": prompts.text("Default time limit:", default="4:00:00"),
             "qos": prompts.text("QoS (blank for none):", default="").strip() or None,
@@ -900,14 +890,11 @@ def _ask_output(prompts: PromptSession, state: AnswerState) -> None:
 
 def run_wizard(*, detailed: bool, resume: Path | None) -> Path:
     """Run the complete question flow and generate both campaign bundles."""
-
     prompts = PromptSession()
     print("Welcome to Puzzletron — build a model-aware pruning campaign.")
     if resume is None:
         default_name = f"puzzle_runs/setup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        campaign_dir = Path(
-            prompts.text("Campaign directory:", default=default_name)
-        ).expanduser()
+        campaign_dir = Path(prompts.text("Campaign directory:", default=default_name)).expanduser()
         state = AnswerState.start(campaign_dir, detailed=detailed)
         model = _inspect_fresh_model(prompts, state)
     else:

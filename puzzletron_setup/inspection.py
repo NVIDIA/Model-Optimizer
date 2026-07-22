@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 from huggingface_hub import HfApi
@@ -40,7 +41,6 @@ class InspectedModel:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the inspection result to YAML-safe built-in values."""
-
         return asdict(self)
 
 
@@ -84,7 +84,6 @@ def _load_config_dict(source: str, *, revision: str | None, local: bool) -> dict
 
 def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
     """Inspect a local path or Hub URI without loading model weights."""
-
     expanded = Path(source).expanduser()
     is_local = expanded.exists()
     if source.startswith(("./", "../", "/")) and not is_local:
@@ -150,7 +149,6 @@ def _local_dataset_metadata(path: Path) -> Any:
 
 def infer_dataset_modality(source: str) -> ModalityFinding:
     """Infer text versus multimodal data and return explicit evidence."""
-
     path = Path(source).expanduser()
     if path.exists():
         try:

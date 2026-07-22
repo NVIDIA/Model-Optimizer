@@ -30,7 +30,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the setup wizard and return a process exit code."""
-
     args = _parser().parse_args(argv)
     # Setup dependencies are intentionally optional for the rest of ModelOpt;
     # defer their import so ``--help`` remains available before installation.
