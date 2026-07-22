@@ -6,13 +6,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Union
 
 from . import SetupError
 
 __all__ = ["PromptSession"]
 
-Validator = Callable[[Any], bool | str]
+# This alias is evaluated at import time; keep it usable by lightweight Python
+# 3.9 setup environments even though the ModelOpt package itself starts at 3.10.
+Validator = Callable[[Any], Union[bool, str]]  # noqa: UP007
 
 
 def _questionary():
