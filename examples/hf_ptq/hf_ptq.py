@@ -109,6 +109,23 @@ def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
 mto.enable_huggingface_checkpointing()
 
 
+def _is_layerwise_quant_config(obj) -> bool:
+    if isinstance(obj, ModelOptPTQRecipe):
+        return _is_layerwise_quant_config(obj.quantize.algorithm)
+    if isinstance(obj, list):
+        return any(_is_layerwise_quant_config(item) for item in obj)
+    if isinstance(obj, dict):
+        if "quantize" in obj:
+            return _is_layerwise_quant_config(obj["quantize"])
+        if "algorithm" in obj:
+            return _is_layerwise_quant_config(obj["algorithm"])
+        layerwise = obj.get("layerwise")
+        return bool(isinstance(layerwise, dict) and layerwise.get("enable"))
+
+    layerwise = getattr(obj, "layerwise", None)
+    return bool(getattr(layerwise, "enable", False))
+
+
 def extract_and_prepare_language_model_from_vl(full_model):
     """Extract language model from VL model and disable quantization for non-language components.
 
@@ -718,12 +735,30 @@ def mono_quantize(
                     else None,
                 )
 
+        quantization_model = language_model
+        use_layerwise_vlm_calibration = (
+            args.calib_with_images
+            and is_nemotron_vl_model
+            and _is_layerwise_quant_config(quant_cfg)
+        )
+        if use_layerwise_vlm_calibration:
+            quantization_model = full_model
+
         if calibration_only:
-            language_model = mtq.calibrate(
-                language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
+            quantized_model = mtq.calibrate(
+                quantization_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
             )
         else:
-            language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
+            quantized_model = mtq.quantize(
+                quantization_model, quant_cfg, forward_loop=calibrate_loop
+            )
+
+        if use_layerwise_vlm_calibration:
+            quantized_language_model_lineage = get_language_model_from_vl(quantized_model)
+            if quantized_language_model_lineage is not None:
+                language_model = quantized_language_model_lineage[-1]
+        else:
+            language_model = quantized_model
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -1092,15 +1127,7 @@ def quantize_main(
     else:
         aq_config = None
 
-    def _is_layerwise(obj):
-        if isinstance(obj, ModelOptPTQRecipe):
-            return _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, list):
-            return any(_is_layerwise(a) for a in obj)
-        layerwise = getattr(obj, "layerwise", None)
-        return bool(getattr(layerwise, "enable", False))
-
-    is_layerwise = _is_layerwise(recipe)
+    is_layerwise = _is_layerwise_quant_config(recipe)
 
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
