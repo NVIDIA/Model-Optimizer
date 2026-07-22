@@ -39,3 +39,5 @@ quantize:
     - quantizer_name: '*_proj.output_quantizer'
       cfg:
         $import: fp8
+    - quantizer_name: '*score*'
+      enable: false

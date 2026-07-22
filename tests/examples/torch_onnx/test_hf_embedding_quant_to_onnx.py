@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import onnx
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
@@ -39,14 +40,29 @@ _TINY_CONFIG = {
 }
 
 
-@pytest.mark.parametrize("model_kind", list(_MODEL_FACTORIES))
-def test_hf_embedding_quant_to_onnx(tmp_path, model_kind):
+@pytest.mark.parametrize(
+    ("model_kind", "recipe", "expected_op"),
+    [
+        (
+            "embedding",
+            "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj",
+            "TRT_FP4DynamicQuantize",
+        ),
+        (
+            "reranking",
+            "huggingface/nemotron_llama/ptq/fp8_output_quant_proj",
+            "QuantizeLinear",
+        ),
+    ],
+)
+def test_hf_embedding_quant_to_onnx(tmp_path, model_kind, recipe, expected_op):
     model_dir = _MODEL_FACTORIES[model_kind](tmp_path, with_tokenizer=True, **_TINY_CONFIG)
     onnx_save_path = tmp_path / f"{model_kind}_nvfp4.onnx"
 
     cmd_parts = extend_cmd_parts(
         ["python", "hf_embedding_quant_to_onnx.py"],
         model_path=str(model_dir),
+        recipe=recipe,
         onnx_save_path=str(onnx_save_path),
         calibration_data_size="2",
         batch_size="2",
@@ -54,3 +70,7 @@ def test_hf_embedding_quant_to_onnx(tmp_path, model_kind):
     run_example_command(cmd_parts, "torch_onnx")
 
     assert onnx_save_path.exists()
+    op_types = {node.op_type for node in onnx.load(onnx_save_path).graph.node}
+    assert expected_op in op_types
+    if expected_op == "QuantizeLinear":
+        assert "TRT_FP4DynamicQuantize" not in op_types

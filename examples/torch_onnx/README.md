@@ -131,12 +131,14 @@ engines, 5 dynamic-shape profiles up to 32x512), engine activation memory:
 ```bash
 python hf_embedding_quant_to_onnx.py \
     --model_path=nvidia/llama-nemotron-embed-1b-v2 \
+    --trust_remote_code \
     --recipe=huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj \
     --onnx_save_path=llama_nemotron_embed_nvfp4.onnx
 
 # Reranking variant (auto-detected from the model architecture)
 python hf_embedding_quant_to_onnx.py \
     --model_path=nvidia/llama-nemotron-rerank-1b-v2 \
+    --trust_remote_code \
     --onnx_save_path=llama_nemotron_rerank_nvfp4.onnx
 ```
 

@@ -12,31 +12,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Quantize an HF embedding or reranking model and export it to ONNX.
+
+The default recipe quantizes weights, inputs, and projection outputs to NVFP4 so
+TensorRT can keep inter-layer activations in FP4. Embedding models export pooled,
+normalized embeddings; reranking models export relevance logits.
+"""
 
 import argparse
 import os
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from onnx import numpy_helper
+from torch.onnx import register_custom_op_symbolic, symbolic_helper
 from transformers import AutoConfig, AutoModel, AutoModelForSequenceClassification, AutoTokenizer
+from transformers.integrations import sdpa_attention
 
+import modelopt.torch._deploy.utils.torch_onnx as torch_onnx_utils
 import modelopt.torch.quantization as mtq
 from modelopt.recipe import load_recipe
 from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
+from modelopt.torch.quantization.export_onnx import scaled_dot_product_attention
 
-"""
-Quantize an HF embedding or reranking model (bidirectional Llama encoder, e.g.
-nvidia/llama-nemotron-embed-1b-v2 or nvidia/llama-nemotron-rerank-1b-v2) with a
-PTQ recipe and export it to ONNX for TensorRT deployment.
-
-The default recipe quantizes weights and activations to NVFP4 and additionally
-quantizes the projection-Linear outputs so the TensorRT engine keeps
-inter-layer activations in FP4 (see modelopt_recipes/huggingface/nemotron_llama/).
-Embedding models are exported with mean pooling and L2 normalization on top of
-the encoder; reranking (sequence-classification) models are exported to their
-relevance logits. Both graphs take (input_ids, attention_mask) with dynamic
-batch/sequence axes.
-"""
+__all__ = [
+    "EmbeddingModel",
+    "RerankModel",
+    "install_static_extent_fix",
+    "main",
+    "register_bidirectional_sdpa",
+]
 
 DEFAULT_RECIPE = "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj"
 
@@ -95,9 +101,6 @@ def register_bidirectional_sdpa():
     is_causal flag traced by transformers, which prevents TensorRT attention
     fusion. This model is bidirectional, so is_causal is pinned to False.
     """
-    from torch.onnx import register_custom_op_symbolic, symbolic_helper
-
-    from modelopt.torch.quantization.export_onnx import scaled_dot_product_attention
 
     def bidirectional_sdpa(
         g,
@@ -133,8 +136,6 @@ def register_bidirectional_sdpa():
     register_custom_op_symbolic("aten::scaled_dot_product_attention", bidirectional_sdpa, 14)
 
     # Repeat KV heads explicitly: the sdpa symbolic does not implement enable_gqa.
-    from transformers.integrations import sdpa_attention
-
     sdpa_attention.use_gqa_in_sdpa = lambda *args, **kwargs: False
 
 
@@ -145,11 +146,6 @@ def install_static_extent_fix(hidden_size):
     TensorRT's DynamicQuantize requires the blocked (last) axis extent to be known
     at build time, so the trailing -1 is rewired to the hidden size.
     """
-    import numpy as np
-    from onnx import numpy_helper
-
-    import modelopt.torch._deploy.utils.torch_onnx as torch_onnx_utils
-
     orig_quantize_weights = torch_onnx_utils.quantize_weights
 
     def fix_reshapes(onnx_graph):
@@ -193,7 +189,16 @@ def install_static_extent_fix(hidden_size):
     torch_onnx_utils.quantize_weights = quantize_weights_and_fix
 
 
+def positive_int(value):
+    """Parse a strictly positive integer argument."""
+    value = int(value)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value}")
+    return value
+
+
 def main():
+    """Run recipe-driven quantization and ONNX export."""
     parser = argparse.ArgumentParser(
         description="Quantize an HF embedding model with a PTQ recipe and export to ONNX."
     )
@@ -214,32 +219,39 @@ def main():
     )
     parser.add_argument(
         "--calibration_data_size",
-        type=int,
+        type=positive_int,
         default=64,
         help="Number of calibration samples.",
     )
     parser.add_argument(
         "--batch_size",
-        type=int,
+        type=positive_int,
         default=8,
         help="Batch size for calibration.",
+    )
+    parser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow model repositories to execute their custom Python code.",
     )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_path, trust_remote_code=args.trust_remote_code
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(args.model_path, trust_remote_code=args.trust_remote_code)
     is_reranker = any("ForSequenceClassification" in a for a in (config.architectures or []))
     if is_reranker:
         base = AutoModelForSequenceClassification.from_pretrained(
-            args.model_path, trust_remote_code=True, dtype=torch.float32
+            args.model_path, trust_remote_code=args.trust_remote_code, dtype=torch.float32
         )
         model = RerankModel(base).to(device).eval()
     else:
         base = AutoModel.from_pretrained(
-            args.model_path, trust_remote_code=True, dtype=torch.float32
+            args.model_path, trust_remote_code=args.trust_remote_code, dtype=torch.float32
         )
         model = EmbeddingModel(base).to(device).eval()
 

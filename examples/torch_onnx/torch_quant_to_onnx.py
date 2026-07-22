@@ -67,7 +67,7 @@ def load_quant_config(recipe: str) -> dict:
     """
     if "/" not in recipe and not recipe.endswith((".yml", ".yaml")):
         recipe = f"{MODEL_QUANT_PRESET_DIR}/{recipe}"
-    return load_config(recipe, schema_type=QuantizeConfig).model_dump(exclude_unset=True)
+    return load_config(recipe, schema_type=QuantizeConfig).model_dump()
 
 
 _FP8_CONV_OVERRIDE: list = [
@@ -621,7 +621,7 @@ def main():
     # no tactic for that 3-channel Q→Conv fusion. Skip for pure INT8 (unaffected).
     uses_fp8_conv_input = args.quantize_mode in ("fp8", "mxfp8", "nvfp4") or (
         args.quantize_mode == "auto"
-        and any(fmt != "int8" for fmt in args.auto_quantization_formats)
+        and any(fmt not in {"int8", "int4_awq"} for fmt in args.auto_quantization_formats)
     )
     if uses_fp8_conv_input:
         _disable_low_channel_conv_input_quantizers(quantized_model)

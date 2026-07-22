@@ -277,8 +277,8 @@ as the general `nvfp4`/`fp8` presets, plus **output quantizers on the projection
 Linears** (`*_proj.output_quantizer`) so TensorRT engines carry inter-layer
 activations in the low-precision format instead of FP16 — roughly half the
 engine activation memory on these models. The sequence-classification `score`
-head stays unquantized (final heads stay high precision like `lm_head`, and its
-`[1, hidden]` weight cannot be packed by the NVFP4 exporter). *Why special:* the
+head stays unquantized, like `lm_head`. In the NVFP4 recipe, its `[1, hidden]`
+weight cannot be packed by the NVFP4 exporter. *Why special:* the
 general recipes never enable output quantizers, and the pattern must stay scoped
 to GEMM outputs — a `DynamicQuantize` on non-GEMM outputs (embedding lookup,
 pooling) fails to compile in TensorRT.
