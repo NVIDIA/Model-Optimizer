@@ -1,6 +1,11 @@
 Changelog
 =========
 
+Experimental
+^^^^^^^^^^^^^^^^^
+
+- Add pruning examples for Qwen3.5-9B and Nemotron3-Nano using the `new experimental puzzletron branch <https://github.com/NVIDIA/Model-Optimizer/blob/puzzletron_v2/examples/puzzletron/README.md#end-to-end-tested-models>`_, this branch uses `AutoModel <https://github.com/NVIDIA-NeMo/Automodel>`_ for better parallelization and efficiency.
+
 0.46 (2026-08-xx)
 ^^^^^^^^^^^^^^^^^
 
