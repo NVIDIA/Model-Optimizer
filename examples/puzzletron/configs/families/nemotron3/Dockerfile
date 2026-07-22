@@ -31,7 +31,12 @@ RUN python -m pip install aiperf
 COPY . "${MODEL_OPT_ROOT}"/
 RUN python -m pip install -e "${MODEL_OPT_ROOT}[hf]"
 
-# Mixture of experts
+# Tell the build system to proceed without a live GPU
+ARG FORCE_CUDA=1
+# Set TORCH_CUDA_ARCH_LIST so the compiler doesn't need to query hardware.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;10.0"
+
+# Mixture of experts — TORCH_CUDA_ARCH_LIST avoids GPU detection at build time
 RUN python -m pip install --no-build-isolation "git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
 
 # Mamba
