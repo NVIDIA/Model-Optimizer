@@ -530,3 +530,16 @@ def test_full_loss_skips_template_guard():
     tok = _fast_tokenizer_with_template("{{ bos }}")
     ids, mask = hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=False)
     assert mask.sum() == ids.shape[-1]
+
+
+def test_answer_only_loss_rejects_slow_tokenizer_without_recovery():
+    """A slow tokenizer with no registered recovery fails loudly even on a tagged template.
+
+    Assistant-mask alignment needs the fast tokenizer's char_to_token; without the
+    guard apply_chat_template fails downstream with an unrelated-looking error.
+    """
+    tok = _fast_tokenizer_with_template("{{ bos }}{% generation %}{{ c }}")
+    tok.is_fast = False
+    tok.convert_tokens_to_ids.return_value = None  # defeat recovery detect()s
+    with pytest.raises(RuntimeError, match="fast tokenizer"):
+        hf_streaming_dataset._tokenize_with_loss_mask(tok, _CONV, answer_only_loss=True)

@@ -118,9 +118,20 @@ def _tokenize_with_loss_mask(
                 "template has no {% generation %} tags, so apply_chat_template would "
                 "return an all-zero mask and training would silently run at zero loss. "
                 "Pass a tagged template copy via data.chat_template (see "
-                "examples/MiniMaxAI/MiniMax-M3/m3_chat_template_generation.jinja for a "
-                "worked example), register a loss-mask recovery "
+                "tools/launcher/examples/MiniMaxAI/MiniMax-M3/m3_chat_template_generation.jinja "
+                "for a worked example), register a loss-mask recovery "
                 "(modelopt.torch.utils.loss_mask), or set answer_only_loss=false."
+            )
+        if not getattr(tokenizer, "is_fast", False):
+            # A tagged template is not enough on a slow tokenizer: assistant-mask
+            # alignment needs the fast tokenizer's char_to_token, so apply_chat_template
+            # would fail downstream with an unrelated-looking error.
+            raise RuntimeError(
+                "answer_only_loss=True needs assistant masks, but the tokenizer is not a "
+                "fast tokenizer, so apply_chat_template cannot align {% generation %} tags "
+                "to tokens (char_to_token is unavailable). Use a fast tokenizer, register "
+                "a loss-mask recovery (modelopt.torch.utils.loss_mask), or set "
+                "answer_only_loss=false."
             )
     out = tokenizer.apply_chat_template(
         conversations,

@@ -1,3 +1,8 @@
+{# MiniMax-M3 chat template with {% generation %} tags for answer_only_loss training.
+   Adapted from https://huggingface.co/MiniMaxAI/MiniMax-M3/blob/main/chat_template.jinja
+   with {% generation %} / {% endgeneration %} wrapping assistant content (think prefix,
+   content, and eos), so apply_chat_template can return the assistant token mask.
+-#}
 {# ---------- special token variables ---------- #}
 {%- set ns_token               = ']<]minimax[>['                  -%}
 {%- set bod_token              = ']~!b['                          -%}
