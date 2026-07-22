@@ -78,6 +78,7 @@ class AnswerState:
                 "model": {},
                 "inventory": {},
                 "answers": {},
+                "partial_answers": {},
                 "updated_at": _timestamp(),
             },
         )
@@ -102,6 +103,7 @@ class AnswerState:
                 f"this wizard expects {SCHEMA_VERSION}."
             )
         payload.setdefault("answers", {})
+        payload.setdefault("partial_answers", {})
         payload.setdefault("model", {})
         payload.setdefault("inventory", {})
         return cls(path=state_path, payload=payload)
@@ -131,6 +133,7 @@ class AnswerState:
         if section not in SECTIONS:
             raise ValueError(f"Unknown answer section: {section}")
         self.payload.setdefault("answers", {}).setdefault(section, {}).update(values)
+        self.payload.setdefault("partial_answers", {}).pop(section, None)
         self.payload["completed_section"] = section
         self.save()
 
@@ -138,7 +141,27 @@ class AnswerState:
         """Persist model identity and normalized inventory."""
         self.payload["model"] = dict(model)
         self.payload["inventory"] = dict(inventory)
+        self.payload.setdefault("partial_answers", {}).pop("model", None)
         self.payload["completed_section"] = "model"
+        self.save()
+
+    def partial(self, section: str) -> list[dict[str, Any]]:
+        """Return the ordered prompt transcript for an incomplete section."""
+        value = self.payload.setdefault("partial_answers", {}).get(section, [])
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+
+    def record_partial(self, section: str, prompt: str, value: Any) -> None:
+        """Append one completed prompt and atomically persist it immediately."""
+        if section not in SECTIONS:
+            raise ValueError(f"Unknown answer section: {section}")
+        transcript = self.payload.setdefault("partial_answers", {}).setdefault(section, [])
+        transcript.append({"prompt": prompt, "value": value})
+        self.save()
+
+    def truncate_partial(self, section: str, length: int = 0) -> None:
+        """Discard stale prompt answers at or after one transcript position."""
+        transcript = self.payload.setdefault("partial_answers", {}).get(section, [])
+        self.payload.setdefault("partial_answers", {})[section] = transcript[:length]
         self.save()
 
     def invalidate_after(self, section: str) -> None:
@@ -147,8 +170,10 @@ class AnswerState:
             raise ValueError(f"Unknown answer section: {section}")
         boundary = SECTIONS.index(section)
         answers = self.payload.setdefault("answers", {})
+        partial = self.payload.setdefault("partial_answers", {})
         for later in SECTIONS[boundary + 1 :]:
             answers.pop(later, None)
+            partial.pop(later, None)
         self.payload["completed_section"] = section
         self.save()
 

@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, Union
 
 from . import SetupError
+
+if TYPE_CHECKING:
+    from .state import AnswerState
 
 __all__ = ["PromptSession"]
 
@@ -37,6 +40,59 @@ def _answer(question) -> Any:
 class PromptSession:
     """Render consistent prompts while keeping questionary out of wizard logic."""
 
+    def __init__(self) -> None:
+        """Create an unbound session; `begin` attaches persisted section state."""
+        self._state: AnswerState | None = None
+        self._section: str | None = None
+        self._transcript: list[dict[str, Any]] = []
+        self._cursor = 0
+
+    def begin(self, state: AnswerState, section: str) -> None:
+        """Bind prompts to one resumable answer section."""
+        self._state = state
+        self._section = section
+        self._transcript = state.partial(section)
+        self._cursor = 0
+
+    def reset(self) -> None:
+        """Discard the current section transcript after an invalid retry."""
+        if self._state is not None and self._section is not None:
+            self._state.truncate_partial(self._section)
+        self._transcript = []
+        self._cursor = 0
+
+    def checkpoint(self) -> int:
+        """Return a transcript position that can be retried safely."""
+        return self._cursor
+
+    def rewind(self, checkpoint: int) -> None:
+        """Forget answers at and after a checkpoint so invalid input can be corrected."""
+        if checkpoint < 0 or checkpoint > self._cursor:
+            raise ValueError(f"Invalid prompt checkpoint: {checkpoint}")
+        if self._state is not None and self._section is not None:
+            self._state.truncate_partial(self._section, checkpoint)
+        self._transcript = self._transcript[:checkpoint]
+        self._cursor = checkpoint
+
+    def _replay(self, message: str) -> tuple[bool, Any]:
+        if self._cursor >= len(self._transcript):
+            return False, None
+        record = self._transcript[self._cursor]
+        if record.get("prompt") != message:
+            if self._state is not None and self._section is not None:
+                self._state.truncate_partial(self._section, self._cursor)
+            self._transcript = self._transcript[: self._cursor]
+            return False, None
+        self._cursor += 1
+        return True, record.get("value")
+
+    def _record(self, message: str, value: Any) -> Any:
+        if self._state is not None and self._section is not None:
+            self._state.record_partial(self._section, message, value)
+            self._transcript.append({"prompt": message, "value": value})
+            self._cursor += 1
+        return value
+
     def _describe(self, description: str | None) -> None:
         if description:
             print(f"  {description}")
@@ -50,9 +106,15 @@ class PromptSession:
         validate: Validator | None = None,
     ) -> str:
         """Ask for a non-cancelled string."""
+        replayed, value = self._replay(message)
+        if replayed:
+            rendered = str(value)
+            if validate is None or validate(rendered) is True:
+                return rendered
+            self.rewind(self._cursor - 1)
         self._describe(description)
         questionary = _questionary()
-        return str(
+        value = str(
             _answer(
                 questionary.text(
                     message,
@@ -61,6 +123,7 @@ class PromptSession:
                 )
             )
         )
+        return str(self._record(message, value))
 
     def integer(
         self,
@@ -68,6 +131,7 @@ class PromptSession:
         *,
         default: int,
         minimum: int = 1,
+        maximum: int | None = None,
         description: str | None = None,
     ) -> int:
         """Ask for a bounded integer."""
@@ -77,7 +141,11 @@ class PromptSession:
                 parsed = int(value)
             except ValueError:
                 return "Enter an integer."
-            return True if parsed >= minimum else f"Enter a value of at least {minimum}."
+            if parsed < minimum:
+                return f"Enter a value of at least {minimum}."
+            if maximum is not None and parsed > maximum:
+                return f"Enter a value of at most {maximum}."
+            return True
 
         return int(
             self.text(
@@ -96,8 +164,12 @@ class PromptSession:
         description: str | None = None,
     ) -> bool:
         """Ask a yes/no question."""
+        replayed, value = self._replay(message)
+        if replayed:
+            return bool(value)
         self._describe(description)
-        return bool(_answer(_questionary().confirm(message, default=default)))
+        value = bool(_answer(_questionary().confirm(message, default=default)))
+        return bool(self._record(message, value))
 
     def select(
         self,
@@ -108,13 +180,17 @@ class PromptSession:
         description: str | None = None,
     ) -> Any:
         """Choose one value from labels or `(label, value)` pairs."""
+        replayed, value = self._replay(message)
+        if replayed:
+            return value
         self._describe(description)
         questionary = _questionary()
         rendered = [
             questionary.Choice(title=item[0], value=item[1]) if isinstance(item, tuple) else item
             for item in choices
         ]
-        return _answer(questionary.select(message, choices=rendered, default=default))
+        value = _answer(questionary.select(message, choices=rendered, default=default))
+        return self._record(message, value)
 
     def checkbox(
         self,
@@ -126,6 +202,12 @@ class PromptSession:
         validate: Validator | None = None,
     ) -> list[Any]:
         """Choose multiple values with explicit checked defaults."""
+        replayed, value = self._replay(message)
+        if replayed:
+            selected = list(value)
+            if validate is None or validate(selected) is True:
+                return selected
+            self.rewind(self._cursor - 1)
         self._describe(description)
         questionary = _questionary()
         checked = set(defaults)
@@ -138,4 +220,5 @@ class PromptSession:
             rendered.append(
                 questionary.Choice(title=str(title), value=value, checked=value in checked)
             )
-        return list(_answer(questionary.checkbox(message, choices=rendered, validate=validate)))
+        value = list(_answer(questionary.checkbox(message, choices=rendered, validate=validate)))
+        return list(self._record(message, value))

@@ -379,6 +379,12 @@ SUPPORTED_PROFILES = (
         axes=(*_QWEN_AXES, *_MOE_AXES),
         moe=True,
         sublayers_per_layer=2,
+        descriptor_by_model_type={
+            "qwen3_5_moe": "qwen3_5_moe",
+            "qwen3_5_moe_text": "qwen3_5_moe_text",
+            "qwen3_6_moe": "qwen3_5_moe",
+            "qwen3_6_moe_text": "qwen3_5_moe_text",
+        },
     ),
     ModelProfile(
         family="qwen3_5",
@@ -393,7 +399,12 @@ SUPPORTED_PROFILES = (
         family_config="examples/puzzletron/configs/families/qwen3_5/family.yaml",
         axes=_QWEN_AXES,
         sublayers_per_layer=2,
-        descriptor_by_model_type={"qwen3_6": "qwen3_6", "qwen3_6_text": "qwen3_6"},
+        descriptor_by_model_type={
+            "qwen3_5": "qwen3_5",
+            "qwen3_5_text": "qwen3_5_text",
+            "qwen3_6": "qwen3_6",
+            "qwen3_6_text": "qwen3_6_text",
+        },
     ),
 )
 

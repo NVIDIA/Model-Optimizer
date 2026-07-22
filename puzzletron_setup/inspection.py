@@ -89,14 +89,19 @@ def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
     if source.startswith(("./", "../", "/")) and not is_local:
         raise SetupError(f"Local model path does not exist: {expanded}")
     resolved_revision = None
-    effective_source = str(expanded.resolve()) if is_local else source
+    config_source = str(expanded.resolve()) if is_local else source
+    effective_source = (
+        str(expanded.parent.resolve())
+        if is_local and expanded.is_file() and expanded.name == "config.json"
+        else config_source
+    )
     if not is_local:
         try:
             resolved_revision = HfApi().model_info(source, revision=revision).sha
         except Exception as error:
             raise SetupError(f"Cannot resolve Hugging Face model {source!r}: {error}") from error
     config = _load_config_dict(
-        effective_source,
+        config_source,
         revision=resolved_revision or revision,
         local=is_local,
     )

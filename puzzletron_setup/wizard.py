@@ -68,6 +68,7 @@ def _print_inventory(model: InspectedModel) -> None:
 
 
 def _inspect_fresh_model(prompts: PromptSession, state: AnswerState) -> InspectedModel:
+    prompts.begin(state, "model")
     while True:
         source = prompts.text(
             "Model path or Hugging Face URI:",
@@ -99,6 +100,7 @@ def _inspect_fresh_model(prompts: PromptSession, state: AnswerState) -> Inspecte
             raise
         except SetupError as error:
             print(f"Could not inspect that model: {error}")
+            prompts.reset()
             continue
         state.set_model(model.to_dict(), model.inventory.to_dict())
         return model
@@ -121,6 +123,7 @@ def _resume_model(state: AnswerState) -> InspectedModel:
 def _ask_data(prompts: PromptSession, state: AnswerState, model: InspectedModel) -> None:
     if state.section("data"):
         return
+    prompts.begin(state, "data")
     source = prompts.text(
         "Dataset path or Hugging Face dataset URI:",
         validate=lambda value: bool(str(value).strip()) or "Enter a dataset source.",
@@ -134,14 +137,15 @@ def _ask_data(prompts: PromptSession, state: AnswerState, model: InspectedModel)
         if model.inventory.multimodal
         else "text"
     )
+    modality_choices = [("Text", "text")]
+    if model.inventory.multimodal:
+        modality_choices.append(("Multimodal", "multimodal"))
     modality = prompts.select(
         "Data modality:",
-        [("Text", "text"), ("Multimodal", "multimodal")],
+        modality_choices,
         default=default_modality,
         description="Confirm or correct the inferred modality.",
     )
-    if modality == "multimodal" and not model.inventory.multimodal:
-        raise SetupError("A text-only model cannot use multimodal calibration data.")
     layout = prompts.select(
         "Dataset layout:",
         [
@@ -176,6 +180,7 @@ def _axis_defaults(values: tuple[int, ...], teacher: int) -> list[int]:
 def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedModel) -> None:
     if state.section("pruning"):
         return
+    prompts.begin(state, "pruning")
     inventory = model.inventory
     depth_granularity = prompts.select(
         "Depth pruning granularity:",
@@ -193,10 +198,9 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
         "Maximum number to remove:",
         default=max(1, depth_count // 4),
         minimum=0,
+        maximum=depth_count - 1,
         description=f"There are {depth_count} selectable {depth_granularity}s.",
     )
-    if depth_remove >= depth_count:
-        raise SetupError("Depth removal must leave at least one layer or sublayer.")
 
     axes = {}
     for axis in inventory.axes:
@@ -266,6 +270,7 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
 def _ask_runtime(prompts: PromptSession, state: AnswerState) -> None:
     if state.section("runtime"):
         return
+    prompts.begin(state, "runtime")
     data = state.section("data")
     enabled = prompts.confirm(
         "Collect vLLM runtime statistics?",
@@ -336,6 +341,7 @@ def _add_constraint(constraints: dict[str, Any], metric: str, value: Any, worklo
 def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
     if state.section("mip"):
         return
+    prompts.begin(state, "mip")
     runtime = state.section("runtime")
     detailed = state.detailed
     runs: OrderedDict[str, Any] = OrderedDict()
@@ -348,9 +354,9 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
             basis_choices,
             default="params",
         )
-        percentage = prompts.integer("Target percentage of the teacher:", default=75, minimum=1)
-        if percentage > 100:
-            raise SetupError("MIP target percentage must be at most 100.")
+        percentage = prompts.integer(
+            "Target percentage of the teacher:", default=75, minimum=1, maximum=100
+        )
         objectives = _ask_objectives(prompts, detailed)
         homogeneous = prompts.confirm(
             "Include homogeneous candidates?",
@@ -366,15 +372,16 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
         )
         if detailed:
             while prompts.confirm("Add an extra constraint?", default=False):
+                metric_choices = [
+                    ("Parameters", "params"),
+                    ("Memory", "memory"),
+                    ("Experts", "experts"),
+                ]
+                if runtime["vllm_enabled"]:
+                    metric_choices.extend([("Latency", "latency"), ("Throughput", "throughput")])
                 metric = prompts.select(
                     "Constraint metric:",
-                    [
-                        ("Parameters", "params"),
-                        ("Memory", "memory"),
-                        ("Latency", "latency"),
-                        ("Experts", "experts"),
-                        ("Throughput", "throughput"),
-                    ],
+                    metric_choices,
                     default="params",
                 )
                 mode = prompts.select(
@@ -420,7 +427,7 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
                     ),
                     "num_solutions": prompts.integer("MIP solution count:", default=2000),
                     "min_hamming_distance": prompts.integer(
-                        "Minimum Hamming distance:", default=3, minimum=0
+                        "Minimum Hamming distance:", default=3, minimum=1
                     ),
                     "max_seconds_per_solution": prompts.integer(
                         "Seconds per solution:", default=120
@@ -472,6 +479,7 @@ def _default_flow(
     data: Mapping[str, Any],
     *,
     prefix: str,
+    objective: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     def node_id(name: str) -> str:
         return f"{prefix}{name}"
@@ -488,6 +496,10 @@ def _default_flow(
     short_kd = node_id("short_kd")
     final_eval = node_id("final_eval")
     best = node_id("best")
+    if objective is None:
+        objective = next(iter(run.get("objectives") or ()), {})
+    objective_metric = str(objective.get("metric", "metrics.lm_loss"))
+    objective_direction = str(objective.get("direction", "minimize"))
     nodes = OrderedDict(
         [
             (
@@ -496,7 +508,7 @@ def _default_flow(
                     "type": "filter",
                     "mode": "top_k",
                     "metric": "mip.score",
-                    "direction": "minimize",
+                    "direction": objective_direction,
                     "top_k": initial_top_k,
                 },
             ),
@@ -578,7 +590,10 @@ def _default_flow(
             ),
         ]
     )
-    return {"source": {"run": run_id, "variants": "all", "objectives": "all"}, "nodes": nodes}
+    return {
+        "source": {"run": run_id, "variants": "all", "objectives": [objective_metric]},
+        "nodes": nodes,
+    }
 
 
 def _ask_filter_config(prompts: PromptSession, available_metrics: list[str]) -> dict[str, Any]:
@@ -704,26 +719,40 @@ def _custom_flow(
 def _ask_post_mip(prompts: PromptSession, state: AnswerState) -> None:
     if state.section("post_mip"):
         return
+    prompts.begin(state, "post_mip")
     mip_runs = state.section("mip")["runs"]
     runtime = state.section("runtime")
     data = state.section("data")
     flows = OrderedDict()
     used_ids: set[str] = set()
-    for index, (run_id, run) in enumerate(mip_runs.items()):
+    for run_id, run in mip_runs.items():
         if state.detailed and prompts.confirm(
             f"Build a custom post-MIP flow for {run_id}?", default=False
         ):
             flow = _custom_flow(prompts, run_id, runtime, data, used_ids)
+            flows[run_id] = flow
         else:
-            prefix = "" if index == 0 else f"{run_id}_"
-            flow = _default_flow(run_id, run, runtime, data, prefix=prefix)
-            used_ids.update(flow["nodes"])
-        flows[run_id] = flow
+            objectives = list(run.get("objectives") or ())
+            for objective_index, objective in enumerate(objectives):
+                flow_id = run_id
+                if len(objectives) > 1:
+                    flow_id = f"{run_id}-objective-{objective_index + 1}"
+                prefix = "" if not used_ids else f"{flow_id}_"
+                flow = _default_flow(
+                    run_id,
+                    run,
+                    runtime,
+                    data,
+                    prefix=prefix,
+                    objective=objective,
+                )
+                used_ids.update(flow["nodes"])
+                flows[flow_id] = flow
     state.record_many("post_mip", {"flows": dict(flows)})
 
 
 def _mesh_product(mesh: Mapping[str, int]) -> int:
-    return math.prod(int(mesh[key]) for key in _MESH_KEYS)
+    return math.prod(int(mesh[key]) for key in _MESH_KEYS if key != "ep")
 
 
 def _ask_mesh(
@@ -741,6 +770,10 @@ def _ask_mesh(
 def _validate_mesh(mesh: Mapping[str, int], model: InspectedModel, name: str) -> None:
     if any(int(value) < 1 for value in mesh.values()):
         raise SetupError(f"{name} mesh dimensions must all be positive.")
+    if int(mesh["dp_shard"]) % int(mesh["ep"]):
+        raise SetupError(
+            f"{name} DP shard={mesh['dp_shard']} must be divisible by EP={mesh['ep']}."
+        )
     experts = model.inventory.facts.get("num_experts")
     if experts and int(experts) % int(mesh["ep"]):
         raise SetupError(f"{name} EP={mesh['ep']} does not divide the model's {experts} experts.")
@@ -791,6 +824,7 @@ def _ask_infrastructure(
 ) -> None:
     if state.section("infrastructure"):
         return
+    prompts.begin(state, "infrastructure")
     runner_kind = prompts.select(
         "Cluster type:",
         [("Slurm", "slurm"), ("SSH bare metal", "baremetal")],
@@ -802,18 +836,26 @@ def _ask_infrastructure(
     mounts = prompts.text("Container mounts (blank for none):", default="").strip()
     prerun = prompts.text("Pre-run commands separated by ';;' (blank for none):", default="")
     gpus_per_node = prompts.integer("GPUs per node:", default=8)
-    common_mesh = _ask_mesh(prompts, "Common")
-    if prompts.confirm("Reuse the common mesh for bypass?", default=True):
-        bypass_mesh = dict(common_mesh)
-    else:
-        bypass_mesh = _ask_mesh(prompts, "Bypass", common_mesh)
-    if prompts.confirm("Reuse the common mesh for global KD?", default=True):
-        global_kd_mesh = dict(common_mesh)
-    else:
-        global_kd_mesh = _ask_mesh(prompts, "Global KD", common_mesh)
-    _validate_mesh(common_mesh, model, "Common")
-    _validate_mesh(bypass_mesh, model, "Bypass")
-    _validate_mesh(global_kd_mesh, model, "Global KD")
+    mesh_checkpoint = prompts.checkpoint()
+    while True:
+        common_mesh = _ask_mesh(prompts, "Common")
+        if prompts.confirm("Reuse the common mesh for bypass?", default=True):
+            bypass_mesh = dict(common_mesh)
+        else:
+            bypass_mesh = _ask_mesh(prompts, "Bypass", common_mesh)
+        if prompts.confirm("Reuse the common mesh for global KD?", default=True):
+            global_kd_mesh = dict(common_mesh)
+        else:
+            global_kd_mesh = _ask_mesh(prompts, "Global KD", common_mesh)
+        try:
+            _validate_mesh(common_mesh, model, "Common")
+            _validate_mesh(bypass_mesh, model, "Bypass")
+            _validate_mesh(global_kd_mesh, model, "Global KD")
+        except SetupError as error:
+            print(f"Invalid parallel mesh: {error}")
+            prompts.rewind(mesh_checkpoint)
+            continue
+        break
     workers = {
         "pool": prompts.integer("Workers for persistent-pool stages:", default=gpus_per_node),
         "sharded": prompts.integer("Workers for sharded stages:", default=gpus_per_node),
@@ -883,6 +925,7 @@ def _ask_infrastructure(
 def _ask_output(prompts: PromptSession, state: AnswerState) -> None:
     if state.section("output"):
         return
+    prompts.begin(state, "output")
     default_root = state.path.parent / "results"
     result_root = prompts.text("Campaign results location:", default=str(default_root))
     state.record_many("output", {"result_root": result_root})
@@ -910,7 +953,10 @@ def run_wizard(*, detailed: bool, resume: Path | None) -> Path:
     _ask_post_mip(prompts, state)
     _ask_infrastructure(prompts, state, model)
     _ask_output(prompts, state)
+    prompts.begin(state, "output")
+    generate_checkpoint = prompts.checkpoint()
     if not prompts.confirm("Generate smoke and production bundles?", default=True):
+        prompts.rewind(generate_checkpoint)
         raise SetupError(f"Answers saved at {state.path}; no bundle was generated.")
 
     from .bundle import build_bundles
