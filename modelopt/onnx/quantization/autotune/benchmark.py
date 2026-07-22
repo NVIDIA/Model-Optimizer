@@ -287,6 +287,7 @@ class TrtExecBenchmark(Benchmark):
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
         trtexec_args: list[str] | None = None,
+        remote_model_path: str | None = None,
     ):
         """Initialize the trtexec benchmark.
 
@@ -298,6 +299,8 @@ class TrtExecBenchmark(Benchmark):
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
+            remote_model_path: Path for the engine on the remote device. By default, a unique
+                filename is created in the remote user's working directory.
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
         self.trtexec_args = trtexec_args if trtexec_args is not None else []
@@ -310,6 +313,7 @@ class TrtExecBenchmark(Benchmark):
 
         self._remote_benchmark_config: _RemoteBenchmarkConfig | None = None
         self._remote_config_error: str | None = None
+        self.remote_model_path = remote_model_path
         self._base_cmd = [
             f"--avgRuns={self.timing_runs}",
             f"--iterations={self.timing_runs}",
@@ -384,7 +388,9 @@ class TrtExecBenchmark(Benchmark):
         local_log_content: str,
     ) -> subprocess.CompletedProcess | None:
         """Upload, benchmark, and clean up a generated engine on the remote target."""
-        remote_engine_path = f".modelopt_{Path(self.temp_dir).name}.engine.trt"
+        remote_engine_path = (
+            self.remote_model_path or f".modelopt_{Path(self.temp_dir).name}.engine.trt"
+        )
         remote_log = []
         try:
             upload_command = [
@@ -393,7 +399,7 @@ class TrtExecBenchmark(Benchmark):
                 "-P",
                 str(config.port),
                 self.engine_path,
-                f"{config.destination}:{remote_engine_path}",
+                f"{config.destination}:{shlex.quote(remote_engine_path)}",
             ]
             upload_result = _run_network_command(upload_command)
             remote_log.append(

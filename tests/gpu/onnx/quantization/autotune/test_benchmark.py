@@ -26,6 +26,7 @@ Covers:
 
 import contextlib
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -241,7 +242,8 @@ def test_trtexec_remote_config_is_validated_before_version_fallback(tmp_path):
     run_mock.assert_not_called()
 
 
-def test_trtexec_run_returns_remote_safety_latency(tmp_path):
+@pytest.mark.parametrize("remote_model_path", [None, "/data/models/custom engine.trt"])
+def test_trtexec_run_returns_remote_safety_latency(tmp_path, remote_model_path):
     """Remote safety autotuning benchmarks the built engine on the target."""
     remote_url = (
         '"ssh://alice@10.0.0.5:2222?'
@@ -257,6 +259,7 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
                 "--safe",
                 "--skipInference",
             ],
+            remote_model_path=remote_model_path,
         )
 
     model_path = tmp_path / "model.onnx"
@@ -295,9 +298,14 @@ def test_trtexec_run_returns_remote_safety_latency(tmp_path):
     assert upload_command[0] == "scp"
     assert remote_command[0] == "ssh"
     assert cleanup_command[0] == "ssh"
-    remote_engine_path = upload_command[-1].rsplit(":", 1)[1]
-    assert f"--loadEngine={remote_engine_path}" in remote_command[-1]
-    assert cleanup_command[-1] == f"rm -f -- {remote_engine_path}"
+    uploaded_remote_engine_path = upload_command[-1].rsplit(":", 1)[1]
+    if remote_model_path is None:
+        remote_engine_path = uploaded_remote_engine_path
+    else:
+        remote_engine_path = remote_model_path
+        assert uploaded_remote_engine_path == shlex.quote(remote_engine_path)
+    assert shlex.quote(f"--loadEngine={remote_engine_path}") in remote_command[-1]
+    assert cleanup_command[-1] == f"rm -f -- {shlex.quote(remote_engine_path)}"
     assert "/opt/trt/bin/trtexec_safe" in remote_command[-1]
     assert "--useCudaGraph" in remote_command[-1]
     assert "--warmUp=2" in remote_command[-1]

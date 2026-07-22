@@ -92,6 +92,7 @@ def init_benchmark_instance(
     warmup_runs: int = 5,
     timing_runs: int = 20,
     trtexec_args: list[str] | None = None,
+    remote_model_path: str | None = None,
 ):
     """Initialize global TensorRT benchmark instance for model performance measurement.
 
@@ -109,6 +110,8 @@ def init_benchmark_instance(
                     Higher values give more stable median (default: 20)
         trtexec_args: Additional command-line arguments to pass to trtexec as a string (only used if use_trtexec=True).
                      Example: '--fp16 --workspace=4096 --verbose'
+        remote_model_path: Path for the engine on the remote device. By default, a unique
+                           filename is created in the remote user's working directory.
     """
     global _benchmark_instance
     try:
@@ -119,6 +122,7 @@ def init_benchmark_instance(
                 timing_runs=timing_runs,
                 plugin_libraries=plugin_libraries,
                 trtexec_args=trtexec_args,
+                remote_model_path=remote_model_path,
             )
             logger.info("Trtexec benchmark initialized")
         else:
