@@ -77,6 +77,9 @@ __all__ = [
     "svdquant",
 ]
 
+# Any quantizer instance: the leaf TensorQuantizer or a quantizer container.
+_ANY_QUANTIZER = (TensorQuantizer, SequentialQuantizer, GroupedQuantizer)
+
 
 def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
     quantizer(weight)
@@ -383,7 +386,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer | GroupedQuantizer):
+                if isinstance(child, _ANY_QUANTIZER):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
@@ -402,7 +405,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer | GroupedQuantizer):
+                if isinstance(child, _ANY_QUANTIZER):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
