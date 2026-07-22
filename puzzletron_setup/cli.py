@@ -32,8 +32,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run the setup wizard and return a process exit code."""
 
     args = _parser().parse_args(argv)
-    # Deferred until after argument parsing so ``--help`` stays usable when an
-    # optional setup dependency is missing.
+    # Setup dependencies are intentionally optional for the rest of ModelOpt;
+    # defer their import so ``--help`` remains available before installation.
     from .wizard import run_wizard
 
     try:
