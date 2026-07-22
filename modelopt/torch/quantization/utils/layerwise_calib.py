@@ -267,6 +267,16 @@ class LayerActivationCollector:
                     return module_self._original_forward(*args, **kwargs)
                 except _EarlyStopForwardError:
                     return None
+                except RuntimeError as e:
+                    if "meta" not in str(e).lower():
+                        raise
+                    raise RuntimeError(
+                        "Layerwise calibration represents skipped decoder layers with "
+                        "meta-device placeholder outputs, so it does not support models "
+                        "that run real-device operations on the hidden state between "
+                        "decoder blocks. Use non-layerwise calibration for this "
+                        "architecture."
+                    ) from e
 
             bind_forward_method(self.model, _early_stop_forward, "_original_forward")
         except Exception:
