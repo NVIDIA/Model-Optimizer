@@ -9,6 +9,7 @@ campaign report.
 ## Table of Contents
 
 - [End-to-end tested models](#end-to-end-tested-models)
+- [Setup wizard](#setup-wizard)
 - [Installation](#installation)
 - [Run with an agent](#run-with-an-agent)
 - [Configuration](#configuration)
@@ -34,6 +35,43 @@ before inspecting the serving-performance or sanity-check sections.
 |---|---|---|---|
 | Nemotron-3 Nano 30B-A3B | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | [default.yaml](configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) | [HTML report](reports/nemotron3_nano_30b_a3b.html) |
 | Qwen3p5_9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
+
+## Setup wizard
+
+The setup wizard inspects a local checkpoint config or Hugging Face model config
+and generates self-contained smoke and production experiment, runner, and
+execution bundles. Its setup environment does not require PyTorch or model
+weights:
+
+```bash
+python -m pip install -r examples/puzzletron/requirements-setup.txt
+python examples/puzzletron/puzzletron_setup.py
+```
+
+Normal mode asks the model, data, pruning axes, MIP objectives/runs, and cluster
+details while accepting defaults for lower-level tuning. Detailed mode also
+exposes solver controls, extra constraints, custom post-MIP nodes, and resource
+overrides:
+
+```bash
+python examples/puzzletron/puzzletron_setup.py --detailed
+```
+
+Every answer is saved atomically. A new invocation starts fresh; resume is always
+explicit:
+
+```bash
+python examples/puzzletron/puzzletron_setup.py --resume /path/to/campaign
+```
+
+The initial profiles support Nemotron 3 and Qwen 3.5/3.6 dense, MoE, text, and
+multimodal configurations. Unsupported configs exit with detected metadata and
+point to `.agents/skills/running-puzzletron/SKILL.md` for descriptor onboarding.
+
+Each campaign contains independent `smoke/` and `production/` bundles. Both are
+validated and dry-run, but neither is submitted and production is not gated on
+smoke. Slurm and SSH bare-metal runners are supported; use the bare-metal runner
+with `localhost` for a single local host.
 
 ## Installation
 
