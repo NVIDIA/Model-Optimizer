@@ -526,12 +526,13 @@ def render_execution(
     common = _parallel(_mapping(meshes.get("common")))
     bypass = _parallel(_mapping(meshes.get("bypass")))
     global_kd = _parallel(_mapping(meshes.get("global_kd")))
+    single_gpu = _parallel({})
     gpus_per_node = int(infrastructure.get("gpus_per_node", 8))
     pool_workers = int(workers.get("pool", 1))
     sharded_workers = int(workers.get("sharded", 1))
     embedding_widths = list(_mapping(experiment.get("embedding_pruning")).get("widths") or ())
     stages = {
-        "convert": {"strategy": "single", "instances": 1, "parallel": common},
+        "convert": {"strategy": "single", "instances": 1, "parallel": single_gpu},
         "tokenize_data": {"strategy": "single", "instances": 1},
         "vllm_stats": {
             "strategy": "sharded",
