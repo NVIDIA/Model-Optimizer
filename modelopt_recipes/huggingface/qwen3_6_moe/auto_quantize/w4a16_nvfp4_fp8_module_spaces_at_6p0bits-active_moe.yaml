@@ -16,8 +16,8 @@ metadata:
   recipe_type: auto_quantize
   description: >-
     Qwen3.6 MoE module-specific search based on the Qwen3.5-MoE W4A16/FP8 PTQ
-    recipe: shared experts, attention, and lm_head searched over W4A16 NVFP4,
-    FP8, and BF16 at 6.0 active-MoE effective bits.
+    recipe: shared experts, attention, and lm_head searched over W4A16 NVFP4
+    and FP8 at 6.0 active-MoE effective bits.
 
 # Keep this baseline equivalent to the model-specific PTQ recipe without
 # modifying that recipe or duplicating its quantizer rules.
@@ -37,7 +37,8 @@ auto_quantize:
       active_moe_expert_ratio: 0.03125
 
   module_search_spaces:
-    # Search these active/sensitive families over W4A16, W8A8/FP8, and BF16.
+    # Search these active/sensitive families over W4A16 and W8A8/FP8. Keep
+    # every matched group quantized rather than exposing BF16 as a candidate.
     - module_name_patterns:
         - "*mlp.shared_expert*"
         - "*linear_attn*"
@@ -46,7 +47,7 @@ auto_quantize:
       candidate_formats:
         - $import: w4a16_nvfp4
         - $import: fp8
-      allow_no_quant: true
+      allow_no_quant: false
 
   auto_quantize_method: gradient
   score_size: 128

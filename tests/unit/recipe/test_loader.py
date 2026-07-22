@@ -1833,7 +1833,7 @@ def test_load_recipe_autoquantize_module_search_spaces():
         "*lm_head*",
     ]
     assert len(searched.candidate_formats) == 2
-    assert searched.allow_no_quant is True
+    assert searched.allow_no_quant is False
 
 
 def test_load_recipe_autoquantize_fixed_baseline_rejects_global_fallback(tmp_path):

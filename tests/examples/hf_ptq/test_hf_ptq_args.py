@@ -115,7 +115,7 @@ def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
         QUANT_CFG_CHOICES["w4a16_nvfp4"],
         QUANT_CFG_CHOICES["fp8"],
     ]
-    assert searched["allow_no_quant"] is True
+    assert searched["allow_no_quant"] is False
 
 
 def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):
