@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import math
 import re
+import shlex
 from collections import OrderedDict
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 __all__ = ["run_wizard"]
 
-_MESH_KEYS = ("tp", "cp", "pp", "ep", "dp_shard", "dp_replicate")
+_MESH_KEYS = ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
 
 
 def _default(state: AnswerState, section: str, key: str, fallback: Any) -> Any:
@@ -71,8 +71,11 @@ def _inspect_fresh_model(prompts: PromptSession, state: AnswerState) -> Inspecte
     prompts.begin(state, "model")
     while True:
         source = prompts.text(
-            "Model path or Hugging Face URI:",
-            description="Only the model configuration is loaded; weights are not downloaded.",
+            "Model path, Hugging Face repository ID, or URL:",
+            description=(
+                "Examples: /checkpoints/model, Qwen/Qwen3.5-0.8B, or "
+                "https://huggingface.co/Qwen/Qwen3.5-0.8B. Only the configuration is loaded."
+            ),
             validate=lambda value: bool(str(value).strip()) or "Enter a model path or URI.",
         ).strip()
         is_local = Path(source).expanduser().exists()
@@ -224,7 +227,14 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
 
     sort_sanity = prompts.confirm("Run sorting sanity checks?", default=False)
     bypass_sanity = prompts.confirm("Run bypass sanity checks?", default=False)
-    bypass_enabled = prompts.confirm("Compute bypass importance?", default=True)
+    bypass_enabled = prompts.confirm(
+        "Run local distillation (bypass)?",
+        default=True,
+        description=(
+            "Local distillation improves candidate-ranking accuracy, but adds a training pass "
+            "and additional GPU cost."
+        ),
+    )
     bypass = {"enabled": bypass_enabled, "sanity": bypass_sanity}
     data = state.section("data")
     if bypass_enabled:
@@ -300,6 +310,28 @@ def _ask_runtime(prompts: PromptSession, state: AnswerState) -> None:
     )
 
 
+def _infer_objective_direction(metric: str) -> tuple[str, str]:
+    """Infer whether a metric is naturally minimized or maximized."""
+    normalized = metric.lower()
+    minimize_tokens = (
+        "loss",
+        "distance",
+        "divergence",
+        "latency",
+        "memory",
+        "param",
+        "cost",
+        "error",
+        "perplexity",
+    )
+    maximize_tokens = ("throughput", "accuracy", "reward", "precision", "recall", "f1")
+    if token := next((token for token in minimize_tokens if token in normalized), None):
+        return "minimize", f"detected {token!r} metric"
+    if token := next((token for token in maximize_tokens if token in normalized), None):
+        return "maximize", f"detected {token!r} metric"
+    return "minimize", "unknown metric; using the safe default"
+
+
 def _ask_objectives(prompts: PromptSession, detailed: bool) -> list[dict[str, str]]:
     choices = [
         ("Cosine embedding distance", "metrics.cosine_embedding_loss_hidden_states"),
@@ -312,11 +344,8 @@ def _ask_objectives(prompts: PromptSession, detailed: bool) -> list[dict[str, st
         metric = prompts.select("MIP objective metric:", choices, default=choices[0][1])
         if metric == "custom":
             metric = prompts.text("Objective metric path:", default="metrics.lm_loss").strip()
-        direction = prompts.select(
-            "Objective direction:",
-            [("Minimize", "minimize"), ("Maximize", "maximize")],
-            default="minimize",
-        )
+        direction, reason = _infer_objective_direction(metric)
+        print(f"Objective direction: {direction} ({reason}).")
         if any(objective["metric"] == metric for objective in objectives):
             print(f"Objective metric {metric!r} is already included; choose a different metric.")
             prompts.rewind(objective_checkpoint)
@@ -763,13 +792,49 @@ def _mesh_product(mesh: Mapping[str, int]) -> int:
 def _ask_mesh(
     prompts: PromptSession,
     name: str,
+    *,
+    moe: bool,
     defaults: Mapping[str, int] | None = None,
 ) -> dict[str, int]:
     defaults = defaults or {}
     print(f"{name} parallel mesh:")
-    return {
-        key: prompts.integer(f"  {key}:", default=int(defaults.get(key, 1))) for key in _MESH_KEYS
+    labels = {
+        "tp": "Tensor parallel (TP)",
+        "cp": "Context parallel (CP)",
+        "pp": "Pipeline parallel (PP)",
+        "dp_shard": "FSDP shard degree (DP shard)",
+        "dp_replicate": "Data-parallel replicas (DP replicate)",
+        "ep": "Expert parallel (EP; must divide DP shard)",
     }
+    mesh = {
+        key: prompts.integer(f"  {labels[key]}:", default=int(defaults.get(key, 1)))
+        for key in _MESH_KEYS
+        if key != "ep"
+    }
+    mesh["ep"] = (
+        prompts.integer(f"  {labels['ep']}:", default=int(defaults.get("ep", 1))) if moe else 1
+    )
+    print(
+        "  Allocation: "
+        f"{mesh['tp']} TP * {mesh['cp']} CP * {mesh['pp']} PP * "
+        f"{mesh['dp_shard']} DP shard * {mesh['dp_replicate']} DP replicate "
+        f"= {_mesh_product(mesh)} GPU(s) per model instance."
+    )
+    return mesh
+
+
+def _print_mesh_guidance(model: InspectedModel) -> None:
+    print(
+        "Parallel allocation uses TP * CP * PP * DP shard * DP replicate GPUs per model "
+        "instance. EP overlays DP shard and is not multiplied into the GPU count."
+    )
+    if model.inventory.moe:
+        print("For this MoE model, DP shard % EP must equal 0 and EP must divide the experts.")
+    print(
+        "Choose batch, microbatch, and gradient-accumulation counts that schedule evenly "
+        "across PP stages and the resulting data-parallel lanes; for example, the number "
+        "of pipeline microbatches should be divisible by PP."
+    )
 
 
 def _validate_mesh(mesh: Mapping[str, int], model: InspectedModel, name: str) -> None:
@@ -838,20 +903,34 @@ def _ask_infrastructure(
     repository = prompts.text("Repository path on workers:", default=str(Path.cwd()))
     venv = prompts.text("Python virtual environment on workers:", default=".venv")
     container = prompts.text("Container image/path (blank for none):", default="").strip()
-    mounts = prompts.text("Container mounts (blank for none):", default="").strip()
+    mounts = prompts.text(
+        "Container mounts (blank for none):",
+        default="",
+        description=(
+            "Use /host/path:/container/path; separate multiple mounts with commas, for "
+            "example /lustre:/lustre,/datasets:/datasets."
+        ),
+    ).strip()
     prerun = prompts.text("Pre-run commands separated by ';;' (blank for none):", default="")
     gpus_per_node = prompts.integer("GPUs per node:", default=8)
+    _print_mesh_guidance(model)
     mesh_checkpoint = prompts.checkpoint()
     while True:
-        common_mesh = _ask_mesh(prompts, "Common")
-        if prompts.confirm("Reuse the common mesh for bypass?", default=True):
+        common_mesh = _ask_mesh(prompts, "Common", moe=model.inventory.moe)
+        if not state.detailed or prompts.confirm("Reuse the common mesh for bypass?", default=True):
             bypass_mesh = dict(common_mesh)
         else:
-            bypass_mesh = _ask_mesh(prompts, "Bypass", common_mesh)
-        if prompts.confirm("Reuse the common mesh for global KD?", default=True):
+            bypass_mesh = _ask_mesh(
+                prompts, "Bypass", moe=model.inventory.moe, defaults=common_mesh
+            )
+        if not state.detailed or prompts.confirm(
+            "Reuse the common mesh for global KD?", default=True
+        ):
             global_kd_mesh = dict(common_mesh)
         else:
-            global_kd_mesh = _ask_mesh(prompts, "Global KD", common_mesh)
+            global_kd_mesh = _ask_mesh(
+                prompts, "Global KD", moe=model.inventory.moe, defaults=common_mesh
+            )
         try:
             _validate_mesh(common_mesh, model, "Common")
             _validate_mesh(bypass_mesh, model, "Bypass")
@@ -936,13 +1015,41 @@ def _ask_output(prompts: PromptSession, state: AnswerState) -> None:
     state.record_many("output", {"result_root": result_root})
 
 
+def _print_orchestration_commands(campaign_dir: Path, state: AnswerState) -> None:
+    """Print exact dry-run and launch commands for both generated bundles."""
+    infrastructure = state.section("infrastructure")
+    contract = infrastructure.get("execution_contract") or {}
+    orchestrator = Path(str(contract.get("repository", "."))) / "examples/puzzletron/orchestrate.py"
+    print("\nRun orchestration with these exact commands:")
+    for budget in ("smoke", "production"):
+        bundle = campaign_dir / budget
+        base = [
+            "python",
+            str(orchestrator),
+            "--experiment",
+            str(bundle / "experiment.yaml"),
+            "--runner",
+            str(bundle / "runner.yaml"),
+            "--execution",
+            str(bundle / "execution.yaml"),
+            "--stage",
+            "full",
+        ]
+        print(f"\n{budget.title()} dry-run:\n{shlex.join([*base, '--dry-run'])}")
+        print(f"{budget.title()} launch:\n{shlex.join(base)}")
+
+
 def run_wizard(*, detailed: bool, resume: Path | None) -> Path:
     """Run the complete question flow and generate both campaign bundles."""
     prompts = PromptSession()
     print("Welcome to Puzzletron — build a model-aware pruning campaign.")
     if resume is None:
-        default_name = f"puzzle_runs/setup-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        campaign_dir = Path(prompts.text("Campaign directory:", default=default_name)).expanduser()
+        campaign_dir = Path(
+            prompts.text(
+                "Campaign directory:",
+                validate=lambda value: bool(str(value).strip()) or "Enter a campaign directory.",
+            )
+        ).expanduser()
         state = AnswerState.start(campaign_dir, detailed=detailed)
         model = _inspect_fresh_model(prompts, state)
     else:
@@ -967,4 +1074,5 @@ def run_wizard(*, detailed: bool, resume: Path | None) -> Path:
     from .bundle import build_bundles
 
     build_bundles(state.path.parent, state.payload)
+    _print_orchestration_commands(state.path.parent, state)
     return state.path.parent

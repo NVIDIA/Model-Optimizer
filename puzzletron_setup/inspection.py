@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import yaml
 from huggingface_hub import HfApi
@@ -23,9 +24,29 @@ __all__ = [
     "ModalityFinding",
     "infer_dataset_modality",
     "inspect_model",
+    "normalize_model_source",
 ]
 
 _MEDIA_KEYS = {"audio", "image", "images", "pixel_values", "video", "videos", "vision"}
+
+
+def normalize_model_source(source: str) -> str:
+    """Normalize a Hugging Face repository URL to its repository ID."""
+    source = source.strip()
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"}:
+        return source
+    if parsed.netloc.lower() not in {"huggingface.co", "www.huggingface.co"}:
+        raise SetupError(
+            "Model URLs must point to huggingface.co; otherwise enter a local path or "
+            "a repository ID such as Qwen/Qwen3.5-0.8B."
+        )
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if len(parts) != 2:
+        raise SetupError(
+            "Enter a Hugging Face repository URL such as https://huggingface.co/Qwen/Qwen3.5-0.8B."
+        )
+    return "/".join(parts)
 
 
 @dataclass(frozen=True)
@@ -84,6 +105,7 @@ def _load_config_dict(source: str, *, revision: str | None, local: bool) -> dict
 
 def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
     """Inspect a local path or Hub URI without loading model weights."""
+    source = normalize_model_source(source)
     expanded = Path(source).expanduser()
     is_local = expanded.exists()
     if source.startswith(("./", "../", "/")) and not is_local:

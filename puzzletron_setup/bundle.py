@@ -705,12 +705,12 @@ def _readme(
                 f"python {orchestrator} \\",
                 f"  --experiment {bundle / 'experiment.yaml'} \\",
                 f"  --runner {bundle / 'runner.yaml'} \\",
-                f"  --execution {bundle / 'execution.yaml'} --dry-run",
+                f"  --execution {bundle / 'execution.yaml'} --stage full --dry-run",
                 "",
                 f"python {orchestrator} \\",
                 f"  --experiment {bundle / 'experiment.yaml'} \\",
                 f"  --runner {bundle / 'runner.yaml'} \\",
-                f"  --execution {bundle / 'execution.yaml'}",
+                f"  --execution {bundle / 'execution.yaml'} --stage full",
                 "```",
             ]
         )
