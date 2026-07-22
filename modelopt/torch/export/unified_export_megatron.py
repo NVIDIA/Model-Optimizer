@@ -70,6 +70,7 @@ from .quant_utils import (
     process_layer_quant_config,
     to_quantized_weight,
 )
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 
 with import_plugin("transformers", verbose=False):
     import transformers
@@ -1053,24 +1054,11 @@ class GPTModelExporter:
         Reverse of _grouped_mlp_merging in the importer.
         """
         num_experts = module.num_gemms
-
-        # TEGroupedLinear doesn't have module.weight (it has weight0, weight1, ...).
-        # Temporarily assign weight = weight0 so _get_quantized_state can extract
-        # qformat, scales, and input_scale from the module's quantizers.
-        has_weight = hasattr(module, "weight")
-        if not has_weight:
-            module.weight = module.weight0
-        try:
-            name_to_value, qformat, block_size = self._get_quantized_state(
-                module, self.dtype, prefix=prefix
-            )
-            weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
-            name_to_value.pop("weight", None)
-        finally:
-            if not has_weight and hasattr(module, "weight"):
-                delattr(module, "weight")
-
         state_dict = module.state_dict()
+
+        has_weight = hasattr(module, "weight")
+        grouped_wq = getattr(module, "weight_quantizer", None)
+        per_expert_wq = isinstance(grouped_wq, GroupedQuantizer)
 
         ep_size = (
             get_expert_model_parallel_world_size() if torch.distributed.is_initialized() else 1
@@ -1119,48 +1107,78 @@ class GPTModelExporter:
         elif local_missing:
             raise ValueError(f"TEGroupedMLP missing expert weights: {local_missing}")
 
-        # Move shared scales/aux to CPU once so the gather payload avoids GPU clones.
-        weight_scale_cpu = weight_scale.detach().cpu().clone() if weight_scale is not None else None
-        weight_scale_2_cpu = (
-            weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
-        )
-        name_to_value_cpu = {
-            k: v.detach().cpu().clone() for k, v in name_to_value.items() if k != "output_scale"
-        }
+        # Per expert, temporarily assign weight = weight{i} and, for the per-expert
+        # quantizer layout (GroupedQuantizer), swap in that expert's own TensorQuantizer,
+        # so _get_quantized_state extracts each expert's own qformat/scales instead of
+        # applying weight0's scales to every expert.
+        local_expert_state: dict[str, torch.Tensor] = {}
+        seen_qformat = None
+        seen_block_size = None
+        try:
+            for local_id in range(num_experts):
+                global_id = local_expert_indices[local_id]
+                expert_prefix = prefix.format(global_id) + "."
+                weight_key = f"weight{local_id}"
+
+                module.weight = getattr(module, weight_key)
+                if per_expert_wq:
+                    module.weight_quantizer = grouped_wq[min(local_id, len(grouped_wq) - 1)]
+                    # Dynamic-NVFP4 per-expert quantizers carry no stored amax, but
+                    # weight_scale_2 derivation asserts one. Max-calibration weight amax
+                    # is exactly max(|W|), so compute it from this expert's weight.
+                    _wq = module.weight_quantizer
+                    if getattr(_wq, "_amax", None) is None and getattr(_wq, "is_enabled", False):
+                        _wq.amax = module.weight.detach().abs().max().float()
+
+                name_to_value, qformat, block_size = self._get_quantized_state(
+                    module, self.dtype, prefix=prefix
+                )
+                weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+                name_to_value.pop("weight", None)
+                seen_qformat, seen_block_size = qformat, block_size
+
+                weight = state_dict[weight_key].to(self.dtype).cpu()
+                weight_scale_cpu = (
+                    weight_scale.detach().cpu().clone() if weight_scale is not None else None
+                )
+                weight_scale_2_cpu = (
+                    weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
+                )
+
+                if weight_scale_cpu is None:
+                    local_expert_state[expert_prefix + "weight"] = weight
+                else:
+                    local_expert_state[expert_prefix + "weight"] = to_quantized_weight(
+                        weight,
+                        weight_scale_cpu,
+                        qformat,
+                        weight_scale_2_cpu,
+                        block_size,
+                    )
+                    local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
+
+                if weight_scale_2_cpu is not None:
+                    local_expert_state[expert_prefix + "weight_scale_2"] = weight_scale_2_cpu.clone()
+
+                for key, val in name_to_value.items():
+                    if key == "output_scale":
+                        continue
+                    local_expert_state[expert_prefix + key] = val.detach().cpu().clone()
+        finally:
+            if per_expert_wq:
+                module.weight_quantizer = grouped_wq
+            if not has_weight and hasattr(module, "weight"):
+                delattr(module, "weight")
 
         # Record quant config for ALL global experts on every rank; otherwise the writer's
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
         # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
-        num_total_experts = num_experts * ep_size
-        for global_id in range(num_total_experts):
-            self._record_layer_quant_config(prefix.format(global_id) + ".", qformat, block_size)
-
-        local_expert_state: dict[str, torch.Tensor] = {}
-
-        for local_id in range(num_experts):
-            global_id = local_expert_indices[local_id]
-            expert_prefix = prefix.format(global_id) + "."
-            weight_key = f"weight{local_id}"
-
-            weight = state_dict[weight_key].to(self.dtype).cpu()
-
-            if weight_scale_cpu is None:
-                local_expert_state[expert_prefix + "weight"] = weight
-            else:
-                local_expert_state[expert_prefix + "weight"] = to_quantized_weight(
-                    weight,
-                    weight_scale_cpu,
-                    qformat,
-                    weight_scale_2_cpu,
-                    block_size,
+        if seen_qformat is not None:
+            num_total_experts = num_experts * ep_size
+            for global_id in range(num_total_experts):
+                self._record_layer_quant_config(
+                    prefix.format(global_id) + ".", seen_qformat, seen_block_size
                 )
-                local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
-
-            if weight_scale_2_cpu is not None:
-                local_expert_state[expert_prefix + "weight_scale_2"] = weight_scale_2_cpu.clone()
-
-            for key, val in name_to_value_cpu.items():
-                local_expert_state[expert_prefix + key] = val.clone()
 
         if ep_size > 1:
             # all_gather_object pickles trip on quantized uint8 tensors whose
@@ -1175,11 +1193,10 @@ class GPTModelExporter:
             )
             del local_bytes
             for b in gathered_bytes:
-                # weights_only=False: bytes are our own torch.save output from a sibling
-                # EP rank in this job's collective, not user-supplied. weights_only=True
-                # rejects quantized uint8 tensors (custom storage outside the allowlist).
-                s = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
-                self._state_dict.update(s)
+                # weights_only=False: our own torch.save output from a sibling EP rank
+                # in this job's collective, not user-supplied.
+                s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+                self._state_dict.update(s_loaded)
             del gathered_bytes
         else:
             self._state_dict.update(local_expert_state)
