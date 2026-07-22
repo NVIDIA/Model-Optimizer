@@ -25,33 +25,33 @@
 #     pass fresh, and MegatronPretrainingSampler asserts "no samples left to
 #     consume" immediately.
 #   - task_0 stays on ModelOpt's default "local spec" (no --export-default-
-#     te-spec): common/megatron_lm/quantize/quantize.sh's inline MMLU/export
-#     sub-steps each overwrite MLM_EXTRA_ARGS with their own hardcoded args,
-#     dropping any custom spec flag, so a save-time-only --export-default-
-#     te-spec would make those sub-steps reload the checkpoint under a
-#     different (mismatched) spec default and hit an _extra_state KeyError.
-#     RUN_MMLU=false / RUN_EXPORT=false skip those sub-steps regardless
-#     (see below), so this isn't strictly load-bearing, but keeps task_0
-#     simple and matches the sibling BF16 PTQ examples for this model family.
-#   - task_2 needs --export-default-te-spec (switches MoE experts to
-#     TEGroupedMLP), for TP=2 + EP=8 together: ModelOpt's default
-#     SequentialMLP quant wrapper hard-disallows TP>1 and EP>1 at the same
-#     time, which is required to avoid an OOM in the KD loss's full-vocab
-#     softmax norm. task_1 doesn't need it: it loads the separate, unquantized
-#     BF16-MCore teacher checkpoint (not task_0's output) at TP=1/EP=8, which
-#     never hits that restriction regardless of spec, and it has completed
-#     successfully without this flag. task_0 stays on the local spec (see
-#     RUN_MMLU/RUN_EXPORT note below), so any task loading a checkpoint
-#     task_2 saved (itself on the TE spec) can hit the same _extra_state key
-#     mismatch the sibling Llama-3.2-1B QAD example hits -- task_2 and task_3
-#     (export, which loads task_2's trained output) both carry
-#     --export-default-te-spec / --dist-ckpt-strictness log_all to build
-#     under the matching spec and tolerate mismatched keys (logs them instead
-#     of hard-raising).
-#   - task_0 sets RUN_MMLU=false and RUN_EXPORT=false: neither inline
-#     sub-step is needed here (the MMLU gate is already bypassed below, and
-#     task_3 does its own dedicated export), and skipping them avoids the
-#     spec-mismatch risk noted above.
+#     te-spec) and sets RUN_MMLU=false / RUN_EXPORT=false: quantize.sh's
+#     inline MMLU/export sub-steps overwrite MLM_EXTRA_ARGS with their own
+#     args, dropping any custom spec flag, so a save-time-only
+#     --export-default-te-spec would make those sub-steps reload under a
+#     mismatched spec and hit an _extra_state KeyError. Neither sub-step is
+#     needed anyway (task_3 does its own dedicated export).
+#   - task_2 (and task_3, which loads task_2's output) need
+#     --export-default-te-spec + --dist-ckpt-strictness log_all: ModelOpt's
+#     default SequentialMLP quant wrapper hard-disallows TP>1 and EP>1
+#     together, needed here to avoid an OOM in the KD loss's full-vocab
+#     softmax norm, and switching specs risks the same _extra_state mismatch
+#     the sibling Llama-3.2-1B QAD example works around the same way. task_1
+#     doesn't need either (TP=1, and it loads an unrelated, unquantized
+#     checkpoint).
+#   - All node/GPU counts here target 4-GPU nodes (e.g. OCI-HSG's B100 nodes):
+#     task_4's TRT-LLM eval needs native NVFP4 tensor-core support (Blackwell
+#     only) -- on Hopper (H100), TRT-LLM's fused MoE GEMM kernel has no valid
+#     tactic for this model's shapes and segfaults (`FusedMoeRunner::runMoe`).
+#     Since the whole pipeline must share a cluster with task_4, everything
+#     targets 4-GPU nodes.
+#   - task_0/task_1/task_2 use EP=4 (not EP=8) to fit task_2's TP=2 within 2
+#     nodes x 4 GPUs: its expert-eligible pool is world_size/TP = 8/2 = 4.
+#   - No DP env var on task_1/task_2: NeMo Run's SlurmExecutor sets
+#     LAUNCH_SCRIPT=python, bypassing the torchrun/DP-based nproc_per_node
+#     calculation in conf/arguments.sh entirely -- world size comes from
+#     Slurm's nodes x ntasks_per_node, and Megatron derives its own DP from
+#     world_size/(TP*PP*CP), so a DP env var here would be inert.
 #
 # MMLU_LOWER_BOUND=0.0 was the temporary bypass on task_0's inline MMLU gate;
 # RUN_MMLU=false now skips that gate entirely (see above), so this value is
@@ -85,8 +85,8 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 4
+      gpus_per_node: 4
 
   task_1:
     script: common/megatron_lm/train/sft.sh
@@ -102,6 +102,14 @@ pipeline:
       - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
       - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
       - --micro-batch-size 1
+      # Must match task_2's --global-batch-size: the cached teacher logits are
+      # indexed per (iteration, microbatch), so teacher and student must see the
+      # same samples per iteration. Without this, task_1's global batch defaults
+      # to micro_batch*DP (=4 at DP=4 here) while task_2's is 8, and the student
+      # runs past the end of the teacher's dump (IndexError: microbatch index
+      # out of range). It only aligned on CW-DFW by coincidence (teacher DP=8
+      # there made the auto-default equal task_2's 8).
+      - --global-batch-size 8
       - --attention-dropout 0.0
       - --hidden-dropout 0.0
       - --no-check-for-nan-in-loss-and-grad
@@ -127,11 +135,10 @@ pipeline:
       - --async-save
       - --use-persistent-ckpt-worker
     environment:
-      - DP: 1
       - CP: 2
       - TP: 1
       - PP: 1
-      - EP: 8
+      - EP: 4
       - ETP: 1
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - MLM_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
@@ -142,8 +149,8 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 2
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 4
+      gpus_per_node: 4
 
   task_2:
     script: common/megatron_lm/train/sft.sh
@@ -183,11 +190,10 @@ pipeline:
       - --sequence-parallel
       - --logits-load-dir /scratchspace/logits
     environment:
-      - DP: 1
       - CP: 2
       - TP: 2
       - PP: 1
-      - EP: 8
+      - EP: 4
       - ETP: 1
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - MLM_DATA_ARGS: --sft
@@ -197,8 +203,8 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 2
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 4
+      gpus_per_node: 4
 
   task_3:
     script: common/megatron_lm/export/export.sh
@@ -216,8 +222,8 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 4
+      gpus_per_node: 4
 
   task_4:
     script: common/tensorrt_llm/eval.sh
