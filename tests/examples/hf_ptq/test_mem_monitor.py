@@ -64,9 +64,11 @@ def test_split_command():
 
 def test_sample_cpu_system_only():
     stat = mm._sample_cpu(None)
+    assert stat.sys_total > 0
     assert stat.sys_used > 0
-    assert stat.rss is None
+    assert stat.sys_free >= 0
     assert stat.sys_util >= 0.0
+    assert stat.rss is None
     assert stat.proc_util is None
 
 
@@ -81,6 +83,7 @@ def test_accumulator():
     for v in (10, 30, 20):
         acc.add(v)
     assert acc.peak == 30
+    assert acc.min == 10
     assert acc.mean == 20.0
     assert acc.seen
 
@@ -117,7 +120,9 @@ def test_standalone_writes_csv_and_summary(tmp_path):
     assert rows, "expected at least one sample row"
     for col in (
         "elapsed_s",
+        "sys_cpu_total_mb",
         "sys_cpu_used_mb",
+        "sys_cpu_free_mb",
         "sys_cpu_util_pct",
         "proc_rss_mb",
         "proc_cpu_util_pct",
@@ -125,7 +130,9 @@ def test_standalone_writes_csv_and_summary(tmp_path):
         assert col in rows[0]
 
     summary = summary_path.read_text()
+    assert "sys_cpu_total_mb:" in summary
     assert "peak_sys_cpu_used_mb:" in summary
+    assert "min_sys_cpu_free_mb:" in summary
     assert "mean_sys_cpu_util_pct:" in summary
 
 
