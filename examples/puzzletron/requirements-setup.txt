@@ -1,0 +1,5 @@
+# Lightweight, config-only Puzzletron setup environment. No PyTorch is required.
+questionary>=2.1,<3
+PyYAML>=6.0
+huggingface_hub>=0.24
+transformers>=4.56,<5.0
