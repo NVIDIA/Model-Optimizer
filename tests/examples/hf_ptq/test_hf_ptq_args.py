@@ -57,6 +57,8 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
     assert inputs["score_size"] == 128
+    assert inputs["fixed_quantization_config"] is None
+    assert inputs["module_search_spaces"] == []
     # disabled_layers come straight from the recipe (no model introspection).
     assert inputs["disabled_layers"] == aq.disabled_layers
     assert "*output_layer*" in inputs["disabled_layers"]
@@ -85,6 +87,35 @@ def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     # The two exclusions are independent: cost-excluded patterns are also disabled here, but the
     # roles (cost-accounting vs search) are tracked separately.
     assert "*visual*" in inputs["disabled_layers"]
+
+
+def test_autoquant_recipe_maps_module_search_spaces(monkeypatch):
+    """Fixed PTQ baseline and explicit recipe candidates map to mtq inputs."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    recipe = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+    )
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(
+        recipe.auto_quantize, args, fixed_quantize_config=recipe.quantize
+    )
+    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+
+    assert inputs["quantization_formats"] == []
+    assert inputs["fixed_quantization_config"] == model_ptq.quantize.model_dump()
+    (searched,) = inputs["module_search_spaces"]
+    assert searched["module_name_patterns"] == [
+        "*mlp.shared_expert*",
+        "*linear_attn*",
+        "*self_attn*",
+        "*lm_head*",
+    ]
+    assert searched["quantization_formats"] == [
+        QUANT_CFG_CHOICES["w4a16_nvfp4"],
+        QUANT_CFG_CHOICES["fp8"],
+    ]
+    assert searched["allow_no_quant"] is False
 
 
 def test_autoquant_rejects_non_export_safe_candidate(monkeypatch):

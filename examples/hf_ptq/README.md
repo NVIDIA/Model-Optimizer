@@ -352,8 +352,9 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 `AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 `AutoQuantize` is driven by an **AutoQuantize recipe** passed with `--recipe`. The recipe defines the
-candidate formats, the `effective_bits` target, cost model, scoring method, search-disabled layers, and
-cost-excluded layers — see [`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
+candidate formats, optional fixed PTQ baseline, `effective_bits` target, cost model, scoring method,
+search-disabled layers, and cost-excluded layers — see
+[`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
@@ -382,12 +383,54 @@ The recipe quantizes the less accuracy-sensitive layers with the more aggressive
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
 `constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
-`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
-accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
-`$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+`module_search_spaces` (optional per-module candidate overrides), `disabled_layers` (excluded from
+the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
+towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
+`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
-bf16 (no quantization) is always an implicit per-layer choice, so `candidate_formats` need only list
-the quantized options — a single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search.
+AutoQuantize recipes support two mutually exclusive search-space styles:
+
+1. Set top-level `auto_quantize.candidate_formats` to search every unmatched quantizable module, with
+   optional `module_search_spaces` overrides.
+2. Set a normal top-level `quantize` config as the fixed PTQ baseline, omit top-level
+   `candidate_formats`, and use `module_search_spaces` to list only the modules AutoQuantize should
+   search. The fixed and searched modules still run through one integrated calibration, scoring, cost,
+   and export flow.
+
+For example, this keeps unmatched modules at the normal W4A16 NVFP4 PTQ setting while searching only
+attention between W4A16 and FP8:
+
+```yaml
+imports:
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+  fp8: configs/ptq/presets/model/fp8
+
+quantize:
+  $import: w4a16_nvfp4
+
+auto_quantize:
+  constraints:
+    effective_bits: 6.0
+  module_search_spaces:
+    - module_name_patterns: ["*self_attn*", "*linear_attn*"]
+      candidate_formats:
+        - $import: w4a16_nvfp4
+        - $import: fp8
+      allow_no_quant: false
+```
+
+bf16 (no quantization) is an implicit per-layer choice for the top-level `candidate_formats`, so a
+single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search. A `module_search_spaces` rule can
+set `allow_no_quant: false` to exclude bf16 from the solver choices for matching modules. Use the
+top-level `quantize` baseline, rather than a one-candidate search rule, for modules that are fixed and
+not actually searched.
+
+The fixed baseline may also reuse a model-specific PTQ configuration. For example, the Qwen3.6 MoE
+AutoQuantize recipe imports the same model-specific `quant_cfg` used by
+`huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`, reproduces that recipe's `quantize`
+section, and lists only shared experts, attention, and `lm_head` under `module_search_spaces`. A
+loader test asserts that the inherited fixed baseline remains equal to the original PTQ recipe while
+leaving the original recipe unchanged.
 
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
