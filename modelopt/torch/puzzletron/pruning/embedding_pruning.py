@@ -313,6 +313,68 @@ class EmbeddingPruningSpec:
         self._retie(result)
         return result
 
+    def sliced_shape(self, key: str, shape: Sequence[int], width: int) -> tuple[int, ...]:
+        """Return a tensor's exact shape after residual-width slicing."""
+
+        width = self.validate_width(width)
+        source_shape = tuple(int(dim) for dim in shape)
+        rule = self._rule(key)
+        if rule is None:
+            if not self._is_exempt(key) and self.hidden_size in source_shape:
+                raise ValueError(
+                    "embedding pruning found hidden-sensitive tensor without a descriptor "
+                    f"rule: {key!r}"
+                )
+            return source_shape
+
+        target_shape = list(source_shape)
+        target_sizes: dict[int, int] = {}
+
+        def set_target(raw_axis: int, expected: int, target: int, description: str) -> None:
+            axis = raw_axis if raw_axis >= 0 else len(source_shape) + raw_axis
+            if not 0 <= axis < len(source_shape):
+                raise ValueError(
+                    f"{description} axis {raw_axis} for {key!r} is invalid for "
+                    f"shape {source_shape}"
+                )
+            if source_shape[axis] != expected:
+                raise ValueError(
+                    f"{description} axis {axis} for {key!r} has size "
+                    f"{source_shape[axis]}, expected {expected}"
+                )
+            if axis in target_sizes and target_sizes[axis] != target:
+                raise ValueError(
+                    f"embedding pruning tensor {key!r} defines conflicting target sizes "
+                    f"for axis {axis}: {target_sizes[axis]} and {target}"
+                )
+            target_sizes[axis] = target
+
+        for raw_axis in rule.axes:
+            set_target(raw_axis, self.hidden_size, width, "residual")
+        for raw_axis, chunks in rule.chunked_axes:
+            chunks = int(chunks)
+            set_target(
+                raw_axis,
+                self.hidden_size * chunks,
+                width * chunks,
+                "chunked residual",
+            )
+        for raw_axis, group_size in rule.grouped_axes:
+            group_size = int(group_size)
+            if group_size < 1 or self.hidden_size % group_size or width % group_size:
+                raise ValueError(
+                    f"grouped axis for {key!r} has invalid group size {group_size}"
+                )
+            set_target(
+                raw_axis,
+                self.hidden_size // group_size,
+                width // group_size,
+                "grouped residual",
+            )
+        for axis, target in target_sizes.items():
+            target_shape[axis] = target
+        return tuple(target_shape)
+
     def parameter_count(self, state_dict: Mapping[str, torch.Tensor]) -> int:
         tied_aliases: set[str] = set()
         for group in self.tie_groups:

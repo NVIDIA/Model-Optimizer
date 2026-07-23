@@ -17,8 +17,8 @@ from modelopt.torch.puzzletron.pipeline_config import (
 )
 from modelopt.torch.puzzletron.stages.common import experiment_dir
 from modelopt.torch.puzzletron.stages.pipeline import (
+    configure_vllm_stats_widths,
     finalize_vllm_stats_report,
-    prepare_vllm_width_checkpoints,
 )
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
 
@@ -80,7 +80,7 @@ def main() -> None:
     _inject_runtime_descriptor(plain)
     _require_runtime_subblock_library(plain)
     cfg = load_runtime_hydra_config(plain)
-    prepare_vllm_width_checkpoints(plain, cfg)
+    configure_vllm_stats_widths(plain, cfg)
     launch_calc_subblock_stats(cfg)
     if int(shard_index) == 0:
         finalize_vllm_stats_report(plain)

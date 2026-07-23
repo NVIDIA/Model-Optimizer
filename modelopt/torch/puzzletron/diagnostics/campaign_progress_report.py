@@ -29,8 +29,8 @@ from typing import Any, Callable, Iterable, Mapping
 from ..stages.graph import (
     STAGE_SPECS,
     StageSpec,
+    configured_parent_stage_ids,
     configured_stage_ids,
-    selected_parent_stage_ids,
     stage_display_name,
 )
 from .report_section_cache import (
@@ -3174,11 +3174,7 @@ def _stage_dag(
         if stage_id not in dynamic
     }
     parents = {
-        stage_id: tuple(
-            parent
-            for parent in selected_parent_stage_ids(stage_id, merged_config)
-            if parent in specs
-        )
+        stage_id: configured_parent_stage_ids(stage_id, merged_config)
         for stage_id in specs
     }
     parents.update(

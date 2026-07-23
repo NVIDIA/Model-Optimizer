@@ -43,6 +43,7 @@ from modelopt.torch.utils import json_dump
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ..block_config import SUBBLOCK_CLS_DICT, BlockConfig, FFNConfig, SubblockConfig
 from ..distributed_eval.storage import file_lock
+from ..pruning.embedding_pruning import EmbeddingPruningSpec
 from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
@@ -81,8 +82,8 @@ T_DataClass = TypeVar("T_DataClass")
 _SUBBLOCK_KINDS = ("attention", "mla", "mamba", "ffn", "moe")
 _ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
 _FFN_LIKE_KINDS = frozenset(("ffn", "moe"))
-_NON_BLOCK_PARAM_CACHE: dict[tuple[str, str, int], int] = {}
-_PARAMETER_INVENTORY_SCHEMA = 1
+_NON_BLOCK_PARAM_CACHE: dict[tuple[str, str, int, int], int] = {}
+_PARAMETER_INVENTORY_SCHEMA = 2
 
 
 def _atomic_json_dump(value: object, path: Path) -> None:
@@ -100,39 +101,23 @@ def _unique_hidden_sizes(model_hidden_sizes: Iterable[int], teacher_hidden_size:
     return tuple(dict.fromkeys(int(width) for width in (*model_hidden_sizes, teacher_hidden_size)))
 
 
-def _resolve_width_checkpoint(
-    master_puzzle_dir: Path,
-    teacher_dir: Path,
+def _virtual_width_config(
+    teacher_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
     width: int,
     teacher_hidden_size: int,
-) -> Path:
-    """Resolve the physical checkpoint whose config governs one hidden width."""
+    legal_widths: Iterable[int],
+) -> tuple[PretrainedConfig, EmbeddingPruningSpec | None]:
+    """Build the exact child config and slicing contract without writing a checkpoint."""
 
-    scenario = (
-        master_puzzle_dir
-        / "scenarios"
-        / f"width-{int(width):04d}"
-        / "depth-00"
-        / "ckpts"
-        / "sorted_teacher"
+    if int(width) == int(teacher_hidden_size):
+        return teacher_config, None
+    spec = descriptor.embedding_pruning_spec(
+        teacher_config,
+        widths=tuple(dict.fromkeys(int(value) for value in legal_widths)),
+        alignment=1,
     )
-    if (scenario / "config.json").is_file():
-        return scenario
-    runtime_checkpoint = (
-        master_puzzle_dir
-        / "runtime_cache"
-        / "width_checkpoints"
-        / f"width-{int(width):04d}"
-    )
-    if (runtime_checkpoint / "config.json").is_file():
-        return runtime_checkpoint
-    if int(width) == int(teacher_hidden_size) and (teacher_dir / "config.json").is_file():
-        return teacher_dir
-    raise FileNotFoundError(
-        f"No physical width checkpoint for hidden size {width}. Expected {scenario} "
-        f"or {runtime_checkpoint}; "
-        "parameter accounting cannot safely reuse the native-width config."
-    )
+    return spec.update_config_object(teacher_config, int(width)), spec
 
 
 def _parameter_inventory_key(subblock: SubblockConfig | dict, parent_layer_index: int) -> str:
@@ -144,8 +129,9 @@ def _checkpoint_parameter_identity(
     descriptor: Type[ModelDescriptor],
     width: int,
     subblock_configs: list[immutabledict[str, SubblockConfig]],
+    embedding_spec: EmbeddingPruningSpec | None,
 ) -> str:
-    """Build a cheap identity over config/code, checkpoint shapes, and candidates."""
+    """Build a cheap identity over source shapes, virtual slicing, and candidates."""
 
     files = []
     for path in sorted(checkpoint_dir.iterdir()):
@@ -178,7 +164,10 @@ def _checkpoint_parameter_identity(
         "schema": _PARAMETER_INVENTORY_SCHEMA,
         "descriptor": f"{descriptor.__module__}.{descriptor.__qualname__}",
         "width": int(width),
-        "checkpoint": str(checkpoint_dir.resolve()),
+        "source_checkpoint": str(checkpoint_dir.resolve()),
+        "embedding_pruning_spec": (
+            dataclasses.asdict(embedding_spec) if embedding_spec is not None else None
+        ),
         "files": files,
         "candidates": candidates,
     }
@@ -387,37 +376,57 @@ def _checkpoint_non_block_params(
     teacher_dir: Path,
     descriptor: Type[ModelDescriptor],
     num_layers: int,
+    width: int,
+    embedding_spec: EmbeddingPruningSpec | None,
 ) -> int | None:
-    """Count every checkpoint tensor not owned by a decoder subblock.
+    """Count every virtually sliced tensor not owned by a decoder subblock.
 
     This includes ViT, projector, embeddings/head, MTP, and family-specific
-    fixed tensors, so width-specific parameter constraints match physically
-    materialized multimodal checkpoints instead of an LM-only estimate.
+    fixed tensors. Shape-only slicing uses the same descriptor contract as
+    checkpoint materialization without loading weights or writing a child.
     """
-    cache_key = (str(Path(teacher_dir).resolve()), descriptor.__name__, int(num_layers))
+    cache_key = (
+        str(Path(teacher_dir).resolve()),
+        descriptor.__name__,
+        int(num_layers),
+        int(width),
+    )
     if cache_key in _NON_BLOCK_PARAM_CACHE:
         return _NON_BLOCK_PARAM_CACHE[cache_key]
+
+    from safetensors import safe_open
+
+    from ..pruning.sorted_teacher import iter_safetensor_weight_files
+
+    predicates = descriptor.layer_name_predicates(int(num_layers))
+    block_patterns = [
+        pattern for name, pattern in predicates.items() if str(name).startswith("block_")
+    ]
+    total = 0
     try:
-        from safetensors import safe_open
-
-        from ..pruning.sorted_teacher import iter_safetensor_weight_files
-
-        predicates = descriptor.layer_name_predicates(int(num_layers))
-        block_patterns = [
-            pattern for name, pattern in predicates.items() if str(name).startswith("block_")
-        ]
-        total = 0
-        for relative in iter_safetensor_weight_files(teacher_dir):
-            with safe_open(str(Path(teacher_dir) / relative), framework="pt") as handle:
-                for key in handle.keys():
-                    if any(pattern.fullmatch(key) for pattern in block_patterns):
-                        continue
-                    shape = handle.get_slice(key).get_shape()
-                    total += math.prod(int(dim) for dim in shape)
-        _NON_BLOCK_PARAM_CACHE[cache_key] = int(total)
-        return int(total)
-    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        weight_files = iter_safetensor_weight_files(teacher_dir)
+    except (FileNotFoundError, OSError, RuntimeError):
         return None
+    for relative in weight_files:
+        try:
+            with safe_open(str(Path(teacher_dir) / relative), framework="pt") as handle:
+                shapes = {
+                    key: tuple(int(dim) for dim in handle.get_slice(key).get_shape())
+                    for key in handle.keys()
+                }
+        except (FileNotFoundError, OSError, RuntimeError):
+            return None
+        for key, source_shape in shapes.items():
+            target_shape = (
+                embedding_spec.sliced_shape(key, source_shape, int(width))
+                if embedding_spec is not None
+                else source_shape
+            )
+            if any(pattern.fullmatch(key) for pattern in block_patterns):
+                continue
+            total += math.prod(target_shape)
+    _NON_BLOCK_PARAM_CACHE[cache_key] = int(total)
+    return int(total)
 
 
 def _write_parameter_inventory_progress_manifest(
@@ -456,10 +465,11 @@ def _write_parameter_inventory_progress_manifest(
 
 def _calculate_parameter_inventory_for_width(
     *,
-    master_puzzle_dir: Path,
-    checkpoint_dir: Path,
+    teacher_dir: Path,
     descriptor: Type[ModelDescriptor],
     width: int,
+    teacher_hidden_size: int,
+    legal_widths: tuple[int, ...],
     subblock_configs: list[immutabledict[str, SubblockConfig]],
     cache_root: Path,
     progress_every: int,
@@ -468,10 +478,11 @@ def _calculate_parameter_inventory_for_width(
 
     with file_lock(cache_root / f".width-{int(width):04d}.lock"):
         return _calculate_parameter_inventory_for_width_unlocked(
-            master_puzzle_dir=master_puzzle_dir,
-            checkpoint_dir=checkpoint_dir,
+            teacher_dir=teacher_dir,
             descriptor=descriptor,
             width=width,
+            teacher_hidden_size=teacher_hidden_size,
+            legal_widths=legal_widths,
             subblock_configs=subblock_configs,
             cache_root=cache_root,
             progress_every=progress_every,
@@ -480,24 +491,31 @@ def _calculate_parameter_inventory_for_width(
 
 def _calculate_parameter_inventory_for_width_unlocked(
     *,
-    master_puzzle_dir: Path,
-    checkpoint_dir: Path,
+    teacher_dir: Path,
     descriptor: Type[ModelDescriptor],
     width: int,
+    teacher_hidden_size: int,
+    legal_widths: tuple[int, ...],
     subblock_configs: list[immutabledict[str, SubblockConfig]],
     cache_root: Path,
     progress_every: int,
 ) -> dict:
-    """Count one physical width once, publishing resumable progress."""
+    """Count one virtual width once, publishing resumable progress."""
 
     trust_remote_code = descriptor.requires_trust_remote_code()
-    model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
+    teacher_config = load_model_config(teacher_dir, trust_remote_code=trust_remote_code)
+    model_config, embedding_spec = _virtual_width_config(
+        teacher_config,
+        descriptor,
+        width,
+        teacher_hidden_size,
+        legal_widths,
+    )
     lm_config = descriptor.get_language_model_config(model_config)
     actual_width = int(lm_config.hidden_size)
     if actual_width != int(width):
         raise ValueError(
-            f"Physical width checkpoint {checkpoint_dir} has hidden_size={actual_width}, "
-            f"expected {width}."
+            f"Virtual width config has hidden_size={actual_width}, expected {width}."
         )
 
     unique_rows: dict[str, immutabledict[str, SubblockConfig]] = {}
@@ -515,7 +533,11 @@ def _calculate_parameter_inventory_for_width_unlocked(
 
     total = len(unique_rows)
     identity = _checkpoint_parameter_identity(
-        checkpoint_dir, descriptor, width, list(unique_rows.values())
+        teacher_dir,
+        descriptor,
+        width,
+        list(unique_rows.values()),
+        embedding_spec,
     )
     cache_path = cache_root / f"width-{int(width):04d}.json"
     progress_path = cache_root / "progress" / f"width-{int(width):04d}.json"
@@ -561,7 +583,7 @@ def _calculate_parameter_inventory_for_width_unlocked(
             "identity": identity,
             "status": status,
             "width": int(width),
-            "teacher_dir": str(checkpoint_dir.resolve()),
+            "teacher_dir": str(teacher_dir.resolve()),
             "descriptor": f"{descriptor.__module__}.{descriptor.__qualname__}",
             "total": total,
             "elapsed_seconds": elapsed,
@@ -612,15 +634,17 @@ def _calculate_parameter_inventory_for_width_unlocked(
             publish("running")
 
     non_block_params = _checkpoint_non_block_params(
-        checkpoint_dir,
+        teacher_dir,
         descriptor,
         int(lm_config.num_hidden_layers),
+        actual_width,
+        embedding_spec,
     )
     if non_block_params is None:
         non_block_params = calculate_non_block_params(actual_width, int(lm_config.vocab_size))
         non_block_source = "lm_formula_fallback"
     else:
-        non_block_source = "checkpoint_tensor_inventory"
+        non_block_source = "virtual_checkpoint_tensor_inventory"
     publish("complete")
     payload = json.loads(cache_path.read_text())
     payload["non_block_params"] = int(non_block_params)
@@ -647,21 +671,16 @@ def _collect_parameter_inventories(
 ) -> dict[int, dict]:
     cache_root = master_puzzle_dir / "artifacts" / "subblock_stats" / "parameter_inventory"
     cache_root.mkdir(parents=True, exist_ok=True)
-    checkpoints = {
-        width: _resolve_width_checkpoint(
-            master_puzzle_dir, teacher_dir, width, teacher_hidden_size
-        )
-        for width in model_hidden_sizes
-    }
     progress_every = max(1, int(calc_subblock_stats_config.get("parameter_progress_every", 10)))
     requested_workers = max(1, int(calc_subblock_stats_config.get("parameter_workers", 1)))
     num_workers = min(requested_workers, len(model_hidden_sizes))
     kwargs_by_width = {
         width: {
-            "master_puzzle_dir": master_puzzle_dir,
-            "checkpoint_dir": checkpoints[width],
+            "teacher_dir": teacher_dir,
             "descriptor": descriptor,
             "width": width,
+            "teacher_hidden_size": teacher_hidden_size,
+            "legal_widths": model_hidden_sizes,
             "subblock_configs": subblock_configs,
             "cache_root": cache_root,
             "progress_every": progress_every,
@@ -1341,11 +1360,14 @@ def calculate_subblock_stats_for_puzzle_dir(
         for width, inventory in parameter_inventories.items()
     }
     width_model_configs = {
-        width: load_model_config(
-            Path(str(inventory["teacher_dir"])),
-            trust_remote_code=trust_remote_code,
-        )
-        for width, inventory in parameter_inventories.items()
+        width: _virtual_width_config(
+            model_config,
+            descriptor,
+            width,
+            teacher_hidden_size,
+            model_hidden_sizes,
+        )[0]
+        for width in parameter_inventories
     }
 
     subblock_stats_file = master_puzzle_dir / subblock_stats_filename

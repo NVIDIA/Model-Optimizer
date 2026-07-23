@@ -47,7 +47,6 @@ __all__ = [
     "emit_runtime_subblock_library",
     "finalize_vllm_stats_report",
     "prepare_vllm_stats_workspace",
-    "prepare_vllm_width_checkpoints",
     "vllm_stats_stage",
     "scoring_stage",
     "mip_stage",
@@ -273,55 +272,6 @@ def configure_vllm_stats_widths(config: dict[str, Any], hydra_cfg: Any) -> tuple
     return requested_widths
 
 
-def prepare_vllm_width_checkpoints(
-    config: dict[str, Any], hydra_cfg: Any
-) -> dict[int, Path]:
-    """Materialize physical hidden-width parents used by runtime parameter accounting."""
-    requested_widths = configure_vllm_stats_widths(config, hydra_cfg)
-    if not requested_widths:
-        return {}
-
-    from ..anymodel.model_descriptor import ModelDescriptorFactory
-    from ..distributed_eval.storage import file_lock
-    from ..pruning.materialize import materialize_hidden_width_checkpoint
-    from ..tools.checkpoint_utils import load_model_config
-
-    puzzle_dir = _puzzle_dir(config, hydra_cfg)
-    teacher_dir = _teacher_dir(config, hydra_cfg)
-    descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
-    teacher_config = load_model_config(
-        teacher_dir,
-        trust_remote_code=descriptor.requires_trust_remote_code(),
-    )
-    teacher_width = int(
-        descriptor.get_language_model_config(teacher_config).hidden_size
-    )
-    alignment = int((config.get("embedding_pruning") or {}).get("alignment", 1))
-    checkpoint_root = puzzle_dir / "runtime_cache" / "width_checkpoints"
-    checkpoints: dict[int, Path] = {}
-    for width in requested_widths:
-        if int(width) == teacher_width:
-            checkpoints[int(width)] = teacher_dir
-            continue
-        output_dir = checkpoint_root / f"width-{int(width):04d}"
-        with file_lock(checkpoint_root / f".width-{int(width):04d}.lock"):
-            if not (output_dir / "config.json").is_file():
-                print(
-                    f"[vllm-stats] materializing hidden-width checkpoint {width} at "
-                    f"{output_dir}",
-                    flush=True,
-                )
-            materialize_hidden_width_checkpoint(
-                teacher_dir,
-                descriptor,
-                int(width),
-                output_dir,
-                alignment=alignment,
-            )
-        checkpoints[int(width)] = output_dir
-    return checkpoints
-
-
 def prepare_vllm_stats_workspace(config: dict[str, Any], hydra_cfg: Any) -> dict[str, Any]:
     """Validate convert-emitted inputs and enable runtime measurement config."""
     puzzle_dir = _puzzle_dir(config, hydra_cfg)
@@ -335,7 +285,7 @@ def prepare_vllm_stats_workspace(config: dict[str, Any], hydra_cfg: Any) -> dict
         runtime_cfg = hydra_cfg.calc_subblock_stats.runtime_stats
     runtime_cfg.enabled = True
     hydra_cfg.teacher_dir = str(teacher_dir)
-    width_checkpoints = prepare_vllm_width_checkpoints(config, hydra_cfg)
+    configure_vllm_stats_widths(config, hydra_cfg)
 
     subblock_library_path = puzzle_dir / "subblock_library.json"
     if not (subblock_library_path.is_file() and subblock_library_path.stat().st_size > 0):
@@ -365,7 +315,6 @@ def prepare_vllm_stats_workspace(config: dict[str, Any], hydra_cfg: Any) -> dict
         "teacher_dir": teacher_dir,
         "subblock_library_path": subblock_library_path,
         "block_configs": block_configs,
-        "width_checkpoints": width_checkpoints,
         "runtime_cfg": runtime_cfg,
         "sparse_selection": sparse_selection,
     }

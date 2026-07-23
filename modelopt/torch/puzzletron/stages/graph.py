@@ -16,6 +16,7 @@ __all__ = [
     "STAGE_SPECS",
     "ArtifactChoice",
     "StageSpec",
+    "configured_parent_stage_ids",
     "configured_stage_ids",
     "distributed_stage_ids",
     "enabled_stage_ids",
@@ -414,6 +415,32 @@ def selected_parent_stage_ids(stage_id: str, config: Mapping[str, Any]) -> tuple
         if _config_value(config, path) is expected
     )
     return tuple(dict.fromkeys(parents))
+
+
+def configured_parent_stage_ids(
+    stage_id: str,
+    config: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return enabled parents, contracting paths through disabled optional stages."""
+
+    enabled = set(enabled_stage_ids(config))
+
+    def enabled_ancestors(parent_id: str) -> tuple[str, ...]:
+        if parent_id in enabled:
+            return (parent_id,)
+        return tuple(
+            ancestor
+            for grandparent_id in selected_parent_stage_ids(parent_id, config)
+            for ancestor in enabled_ancestors(grandparent_id)
+        )
+
+    return tuple(
+        dict.fromkeys(
+            ancestor
+            for parent_id in selected_parent_stage_ids(stage_id, config)
+            for ancestor in enabled_ancestors(parent_id)
+        )
+    )
 
 
 def topological_stage_ids(specs: Iterable[StageSpec] = STAGE_SPECS) -> tuple[str, ...]:

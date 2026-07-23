@@ -197,7 +197,7 @@ vllm_stats:
   generation_seq_len: 4096
   model_hidden_sizes: []
   ffn_hidden_sizes: []
-  # CPU workers used to inventory unique physical widths before dtype/runtime assembly.
+  # CPU workers used to inventory virtual width shapes before dtype/runtime assembly.
   parameter_workers: 1
   parameter_progress_every: 10
   merge_with_existing_stats: true

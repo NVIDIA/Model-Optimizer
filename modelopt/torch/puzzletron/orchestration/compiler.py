@@ -28,9 +28,9 @@ from .schema import (
     StagePlanNode,
 )
 from .stages import (
+    configured_parent_stage_ids,
     configured_stage_ids,
     distributed_stage_ids,
-    selected_parent_stage_ids,
     topological_mapping_items,
 )
 
@@ -543,7 +543,7 @@ def compile_campaign_plan(
                 parents=(
                     dynamic["parents"]
                     if dynamic is not None
-                    else selected_parent_stage_ids(stage_id, experiment_config)
+                    else configured_parent_stage_ids(stage_id, experiment_config)
                 ),
                 distributed=(
                     False

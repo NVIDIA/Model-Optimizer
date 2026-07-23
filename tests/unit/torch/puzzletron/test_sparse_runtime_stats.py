@@ -22,7 +22,6 @@ from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
     _load_parameter_inventory_cache,
     _parameter_inventory_progress,
     _reuse_runtime_stats,
-    _resolve_width_checkpoint,
     _runtime_measurement_fields,
     _select_runtime_subblock_configs,
     _unique_hidden_sizes,
@@ -57,33 +56,6 @@ def _indexed(config, layer):
 
 def test_parameter_stats_hidden_widths_are_stably_deduplicated():
     assert _unique_hidden_sizes([2688, 2560, 2432], 2688) == (2688, 2560, 2432)
-
-
-def test_parameter_stats_resolve_physical_width_checkpoint(tmp_path):
-    teacher = tmp_path / "teacher"
-    teacher.mkdir()
-    (teacher / "config.json").write_text("{}\n")
-    physical = (
-        tmp_path
-        / "scenarios"
-        / "width-2560"
-        / "depth-00"
-        / "ckpts"
-        / "sorted_teacher"
-    )
-    physical.mkdir(parents=True)
-    (physical / "config.json").write_text("{}\n")
-
-    assert _resolve_width_checkpoint(tmp_path, teacher, 2560, 2688) == physical
-    assert _resolve_width_checkpoint(tmp_path, teacher, 2688, 2688) == teacher
-    with pytest.raises(FileNotFoundError, match="physical width checkpoint"):
-        _resolve_width_checkpoint(tmp_path, teacher, 2432, 2688)
-
-    runtime_physical = tmp_path / "runtime_cache/width_checkpoints/width-2432"
-    runtime_physical.mkdir(parents=True)
-    (runtime_physical / "config.json").write_text("{}\n")
-
-    assert _resolve_width_checkpoint(tmp_path, teacher, 2432, 2688) == runtime_physical
 
 
 def test_parameter_inventory_cache_resumes_only_matching_identity(tmp_path):

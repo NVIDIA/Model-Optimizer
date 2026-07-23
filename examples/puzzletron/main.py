@@ -46,10 +46,10 @@ from modelopt.torch.puzzletron.manifest import (
     write_stage_manifest,
 )
 from modelopt.torch.puzzletron.stages.graph import (
+    configured_parent_stage_ids,
     distributed_stage_ids,
     enabled_stage_ids,
     required_stage_ids,
-    selected_parent_stage_ids,
     stage_ids,
     stage_is_enabled,
     topological_stage_ids,
@@ -266,7 +266,7 @@ def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     upstream = {
         parent: marker_path(puzzle_dir, parent, None, None)
-        for parent in selected_parent_stage_ids(stage, config)
+        for parent in configured_parent_stage_ids(stage, config)
     }
     paths = config.get("paths") or {}
     repositories = tuple(

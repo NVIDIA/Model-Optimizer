@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 __all__ = [
+    "configured_parent_stage_ids",
     "configured_stage_ids",
     "distributed_stage_ids",
     "enabled_stage_ids",
@@ -30,6 +31,7 @@ sys.modules.setdefault(_MODULE_NAME, _GRAPH)
 _SPEC.loader.exec_module(_GRAPH)
 
 configured_stage_ids = _GRAPH.configured_stage_ids
+configured_parent_stage_ids = _GRAPH.configured_parent_stage_ids
 distributed_stage_ids = _GRAPH.distributed_stage_ids
 enabled_stage_ids = _GRAPH.enabled_stage_ids
 selected_parent_stage_ids = _GRAPH.selected_parent_stage_ids
