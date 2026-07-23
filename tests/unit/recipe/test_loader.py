@@ -27,6 +27,8 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    AutoQuantizeConfig,
+    AutoQuantizeConstraints,
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
@@ -35,7 +37,11 @@ from modelopt.recipe.config import (
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
 from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
-from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
+from modelopt.torch.quantization.config import (
+    QuantizeConfig,
+    QuantizerAttributeConfig,
+    normalize_quant_cfg_list,
+)
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -1721,6 +1727,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     aq = recipe.auto_quantize
     assert aq.auto_quantize_method == "gradient"
+    assert aq.score_boundary is None
     assert aq.score_size == 128
     assert aq.kv_cache is None
     assert aq.constraints.effective_bits == 4.8
@@ -1798,6 +1805,16 @@ def test_load_recipe_autoquantize_effective_bits_out_of_range_raises(tmp_path):
     bad.write_text(_AQ_MINIMAL_BODY.replace("effective_bits: 4.8", "effective_bits: 20"))
     with pytest.raises(ValueError, match="effective_bits"):
         load_recipe(bad)
+
+
+def test_load_recipe_autoquantize_rejects_group_boundary_for_kl_div():
+    with pytest.raises(ValueError, match=r"requires score_boundary='local'"):
+        AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(effective_bits=5.4),
+            candidate_formats=[QuantizeConfig(quant_cfg=[])],
+            auto_quantize_method="kl_div",
+            score_boundary="group",
+        )
 
 
 def test_load_recipe_autoquantize_builtin_active_moe():
