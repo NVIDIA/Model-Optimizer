@@ -601,6 +601,7 @@ _LIKELY_ATTENTION_PROJECTION_NAMES = frozenset(
     {
         "c_attn",
         "k_proj",
+        "linear_proj",
         "linear_qkv",
         "o_proj",
         "q_proj",
@@ -610,8 +611,9 @@ _LIKELY_ATTENTION_PROJECTION_NAMES = frozenset(
         "wqkv",
     }
 )
-_MUTABLE_CACHE_INPUT_NAMES = frozenset(
+_MUTABLE_REPLAY_INPUT_NAMES = frozenset(
     {
+        "cache",
         "cache_params",
         "inference_context",
         "inference_params",
@@ -619,6 +621,7 @@ _MUTABLE_CACHE_INPUT_NAMES = frozenset(
         "layer_past",
         "past_key_value",
         "past_key_values",
+        "state",
     }
 )
 
@@ -659,12 +662,39 @@ def _is_attention_module_name(name: str) -> bool:
     return name.lower().endswith(("attention", "attn"))
 
 
-def _attention_parent_score_module(_model, name: str) -> str | None:
-    """Return the nearest attention ancestor for any quantizable descendant."""
+def _module_implements_forward(module: nn.Module) -> bool:
+    """Return whether a module implements a callable forward boundary."""
+    return type(module).forward is not nn.Module.forward
+
+
+def _attention_parent_score_module(model, name: str) -> str | None:
+    """Return the nearest callable attention ancestor for a quantizable descendant."""
     components = name.split(".")
     for idx in range(len(components) - 2, -1, -1):
-        if _is_attention_module_name(components[idx]):
-            return ".".join(components[: idx + 1])
+        if not _is_attention_module_name(components[idx]):
+            continue
+
+        parent_name = ".".join(components[: idx + 1])
+        try:
+            parent = model.get_submodule(parent_name)
+        except AttributeError:
+            return None
+        if _module_implements_forward(parent):
+            return parent_name
+
+        # Some models use a named attention ModuleList/ModuleDict as a container
+        # and invoke one of its children directly. Resolve the first callable
+        # descendant on the path to the quantized projection instead of hooking
+        # the uncalled container.
+        for child_idx in range(idx + 1, len(components) - 1):
+            child_name = ".".join(components[: child_idx + 1])
+            try:
+                child = model.get_submodule(child_name)
+            except AttributeError:
+                return None
+            if _module_implements_forward(child):
+                return child_name
+        return None
     return None
 
 
@@ -690,20 +720,29 @@ def _bound_forward_inputs(forward, args, kwargs) -> dict[str, Any]:
     return inputs
 
 
+def _is_mutable_replay_input_name(name: str) -> bool:
+    name = name.lower()
+    if name == "use_cache":
+        return False
+    return name in _MUTABLE_REPLAY_INPUT_NAMES or name.endswith(("_cache", "_state"))
+
+
 def _validate_group_score_replay_inputs(module: nn.Module, args, kwargs) -> None:
-    """Reject explicit mutable caches before replaying a parent score module."""
+    """Reject explicit mutable cache or recurrent state before replaying a score module."""
     inputs = _bound_forward_inputs(module._forward_original, args, kwargs)
-    cache_inputs = sorted(
-        name for name in _MUTABLE_CACHE_INPUT_NAMES if name in inputs and inputs[name] is not None
+    mutable_inputs = sorted(
+        name
+        for name, value in inputs.items()
+        if value is not None and _is_mutable_replay_input_name(name)
     )
     if inputs.get("use_cache") is True:
-        cache_inputs.append("use_cache=True")
-    if cache_inputs:
+        mutable_inputs.append("use_cache=True")
+    if mutable_inputs:
         raise ValueError(
             "Group-boundary AutoQuantize scoring cannot replay a parent module with explicit "
-            f"cache-bearing inputs ({', '.join(cache_inputs)}). Disable use_cache and omit "
-            "past/cache state in forward_step so every candidate starts from the same sequence "
-            "state."
+            f"mutable state/cache inputs ({', '.join(mutable_inputs)}). Disable use_cache and "
+            "omit past/cache/recurrent state in forward_step so every candidate starts from the "
+            "same sequence state."
         )
 
 
@@ -1789,6 +1828,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             del module._forward_original
 
             module._backward_hook_handle.remove()
+            del module._backward_hook_handle
 
         def cleanup_params_after_score_estimation(name, param, params_metadata):
             param.requires_grad = params_metadata[name]["requires_grad"]
@@ -1818,12 +1858,10 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             torch.cuda.reset_peak_memory_stats()
             report_memory("AutoQuantize: starting score estimation, ")
 
-        cache_originals = (
-            _set_model_use_cache(self.model, False)
-            if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP
-            else []
-        )
+        cache_originals = []
         try:
+            if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP:
+                cache_originals = _set_model_use_cache(self.model, False)
             self._run_func(
                 self.config["forward_backward_step"],
                 num_iters=self.config["num_score_steps"],
@@ -1833,12 +1871,15 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             if torch.cuda.is_available():
                 report_memory("AutoQuantize: After score estimation")
         finally:
-            _restore_model_use_cache(cache_originals)
-            for module in score_modules:
-                cleanup_module_after_score_estimation(module)
-
-            for name, param in self.model.named_parameters():
-                cleanup_params_after_score_estimation(name, param, params_metadata)
+            try:
+                _restore_model_use_cache(cache_originals)
+            finally:
+                try:
+                    for module in score_modules:
+                        cleanup_module_after_score_estimation(module)
+                finally:
+                    for name, param in self.model.named_parameters():
+                        cleanup_params_after_score_estimation(name, param, params_metadata)
 
         # Delete the params_metadata
         del params_metadata
@@ -1936,16 +1977,20 @@ def _get_model_config_objects(model: nn.Module) -> list[Any]:
 
 
 def _set_model_use_cache(model: nn.Module, use_cache: bool) -> list[tuple[Any, Any]]:
-    """Set use_cache on model configs and return values to restore."""
+    """Transactionally set use_cache on model configs and return values to restore."""
     originals = []
-    for config in _get_model_config_objects(model):
-        if hasattr(config, "use_cache"):
-            originals.append((config, config.use_cache))
-            config.use_cache = use_cache
+    try:
+        for config in _get_model_config_objects(model):
+            if hasattr(config, "use_cache"):
+                originals.append((config, config.use_cache))
+                config.use_cache = use_cache
+    except BaseException:
+        _restore_model_use_cache(reversed(originals))
+        raise
     return originals
 
 
-def _restore_model_use_cache(originals: list[tuple[Any, Any]]) -> None:
+def _restore_model_use_cache(originals) -> None:
     for config, use_cache in originals:
         config.use_cache = use_cache
 

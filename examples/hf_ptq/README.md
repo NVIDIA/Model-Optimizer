@@ -393,9 +393,11 @@ changes the measurement boundary but does not force attention projections to sha
 decision. Set `score_boundary: local` in the recipe to restore leaf-output attention scoring;
 expert projections retain their established parent MLP/mixer scoring boundary. Attention parent
 names ending in `attn` or `attention` are recognized across fused and split projection layouts.
-Group scoring rejects explicit past/cache inputs because replaying a mutable cache would compare
-candidates at different sequence states. Recipes can splice a shared base `disabled_layers` set via
-`$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+For attention stored in a `ModuleList` or `ModuleDict`, scoring resolves the invoked child instead
+of the uncalled container. Group scoring rejects explicit past/cache/recurrent-state inputs because
+replaying mutable state would compare candidates at different sequence positions. Recipes can splice
+a shared base `disabled_layers` set via `$import` (see
+`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
 AutoQuantize recipes support two mutually exclusive search-space styles:
 
