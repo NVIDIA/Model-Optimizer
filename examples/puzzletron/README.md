@@ -43,7 +43,45 @@ extension against that same installation; mixing PyTorch or CUDA builds can
 cause import failures or incorrect GPU execution. AIPerf uses the official PyPI
 package; no custom AIPerf fork is required.
 
-### 1. Start from the CUDA development image
+### Quick start
+
+Two automated options are provided. Both are driven by the same script so
+there is no duplication between them:
+
+**Option A — Docker image** (recommended for reproducibility):
+
+```bash
+# Build from the repo root so the full source tree is available as build context
+docker build \
+  -f examples/puzzletron/configs/families/nemotron3/Dockerfile \
+  -t puzzletron-nemotron3 \
+  .
+```
+
+**Option B — Bare-metal / cluster** (no Docker required):
+
+```bash
+export MODEL_OPT_ROOT=/path/to/modelopt   # defaults to repo root when run from there
+export VLLM_ROOT=/workspace/vllm
+export AUTOMODEL_ROOT=/workspace/Automodel
+export VIRTUAL_ENV=/venv
+
+# SKIP_APT=1 if build-essential/cmake/git/ninja are already installed
+bash examples/puzzletron/configs/families/nemotron3/setup_env.sh
+
+source "${VIRTUAL_ENV}/bin/activate"
+```
+
+The script is idempotent: existing git clones and the venv are reused.
+`FORCE_CUDA=1` and `TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;10.0"` are set by
+default so CUDA extensions build without a live GPU.
+
+### Manual setup (reference)
+
+The steps below document what the script does. Follow them if you need to
+customise individual stages or debug a failed install.
+
+#### 1. Start from the CUDA development image
 
 Use this image for local containers and cluster jobs:
 
@@ -71,7 +109,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   python3 python3-dev python3-pip python3-venv
 ```
 
-### 2. Clone the tracked forks
+#### 2. Clone the tracked forks
 
 Keep ModelOpt and the two Puzzletron forks as siblings:
 
@@ -93,7 +131,7 @@ git clone --branch puzzletron --single-branch \
 └── Automodel/
 ```
 
-### 3. Create the environment and install runtime packages
+#### 3. Create the environment and install runtime packages
 
 The patched vLLM branch uses PyTorch 2.11.0 with CUDA 12.9. Install that
 combination before anything that compiles CUDA code:
@@ -116,7 +154,6 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
 python -m pip install -e "${AUTOMODEL_ROOT}"
 python -m pip install aiperf
 python -m pip install -e "${MODEL_OPT_ROOT}[hf]"
-python -m pip install -r "${MODEL_OPT_ROOT}/examples/puzzletron/requirements.txt"
 ```
 
 Do not add `--no-deps`: the packages need their declared Python dependencies.
@@ -127,7 +164,8 @@ Install only the model-specific kernels required by the target architecture:
 
 ```bash
 # Mixture of experts
-python -m pip install --no-build-isolation \
+FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0;10.0" \
+  python -m pip install --no-build-isolation \
   "git+https://github.com/fanshiqing/grouped_gemm@v1.1.4"
 
 # Mamba
@@ -137,7 +175,7 @@ python -m pip install "mamba-ssm[causal-conv1d]" --no-build-isolation
 python -m pip install "flash-linear-attention[cuda]"
 ```
 
-### 4. Verify the exact environment
+#### 4. Verify the exact environment
 
 Run these checks inside the same container and venv used for Puzzletron jobs:
 
