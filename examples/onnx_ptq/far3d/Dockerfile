@@ -13,14 +13,88 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG FAR3D_IMAGE=far3d
-FROM ${FAR3D_IMAGE}
+FROM nvcr.io/nvidia/pytorch:25.06-py3
 
-RUN python -m pip install --no-cache-dir --upgrade \
+ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV UV_PYTHON_INSTALL_DIR=/opt/python
+
+RUN python -m pip install --no-cache-dir uv && \
+    uv python install 3.8 && \
+    uv venv --seed --python 3.8 /opt/far3d
+
+RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
+        torch==1.13.1+cu117 \
+        torchvision==0.14.1+cu117 \
+        torchaudio==0.13.1 \
+        --extra-index-url https://download.pytorch.org/whl/cu117
+
+RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
+        "numpy<1.24" \
+        opencv-python==4.5.5.64 \
+        yapf==0.32.0 \
+        mmcv-full==1.7.0 \
+        -f https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
+
+RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
         av2==0.2.1 \
-        tensorrt==10.11.0.33 \
+        colored \
+        debugpy \
+        einops \
+        "ipython<9" \
+        kornia==0.6.12 \
+        mmdet==2.28.2 \
+        mmsegmentation==0.30.0 \
+        "motmetrics<1.2" \
+        onnx \
+        onnxruntime \
+        onnxsim \
+        "opencv-python-headless<4.6" \
+        refile \
+        tensorrt-cu12-bindings==10.11.0.33 \
         --extra-index-url https://pypi.nvidia.com && \
-    cp /opt/conda/lib/python3.8/site-packages/tensorrt_bindings/__init__.py \
-        /opt/conda/lib/python3.8/site-packages/tensorrt/__init__.py && \
-    cp /opt/conda/lib/python3.8/site-packages/tensorrt_bindings/tensorrt.so \
-        /opt/conda/lib/python3.8/site-packages/tensorrt/tensorrt.so
+    mkdir -p /opt/far3d/lib/python3.8/site-packages/tensorrt && \
+    cp /opt/far3d/lib/python3.8/site-packages/tensorrt_bindings/__init__.py \
+        /opt/far3d/lib/python3.8/site-packages/tensorrt/__init__.py && \
+    cp /opt/far3d/lib/python3.8/site-packages/tensorrt_bindings/tensorrt.so \
+        /opt/far3d/lib/python3.8/site-packages/tensorrt/tensorrt.so
+
+RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
+        "setuptools<81" && \
+    env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
+        --no-build-isolation \
+        mmdet3d==1.0.0rc6
+
+COPY . /opt/modelopt
+RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
+        cppimport \
+        cupy-cuda12x \
+        lief \
+        ml_dtypes \
+        ninja \
+        nvidia-ml-py \
+        omegaconf \
+        "onnx-graphsurgeon>=0.6.1" \
+        "onnx~=1.21.0" \
+        "onnxconverter-common~=1.16.0" \
+        "onnxruntime-gpu~=1.24.2" \
+        onnxscript \
+        "onnxslim>=0.1.76" \
+        "polygraphy>=0.49.22" \
+        "pulp<4.0" \
+        "pydantic>=2.0" \
+        "PyYAML>=6.0" \
+        regex \
+        rich \
+        safetensors \
+        scipy \
+        "setuptools>=80" \
+        tqdm && \
+    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --no-deps -e /opt/modelopt

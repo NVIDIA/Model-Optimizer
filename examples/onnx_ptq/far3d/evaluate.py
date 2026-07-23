@@ -217,7 +217,10 @@ def parse_args():
     parser.add_argument("--cfg-options", nargs="+", action=DictAction)
     parser.add_argument("--eval-options", nargs="+", action=DictAction)
     parser.add_argument("--options", nargs="+", action=DictAction)
+    parser.add_argument("--max-samples", type=int)
     args = parser.parse_args()
+    if args.max_samples is not None and args.max_samples < 1:
+        raise ValueError("--max-samples must be positive")
     if args.options and args.eval_options:
         raise ValueError("--options and --eval-options cannot both be specified")
     if args.options:
@@ -270,6 +273,12 @@ def main():
                 }
             }
         )
+        if args.max_samples is not None and len(outputs) == args.max_samples:
+            break
+
+    if len(outputs) < len(dataset):
+        print(f"Processed {len(outputs)} samples; skipping dataset metrics")
+        return
 
     eval_kwargs = cfg.get("evaluation", {}).copy()
     for key in ("interval", "tmpdir", "start", "gpu_collect", "save_best", "rule"):
