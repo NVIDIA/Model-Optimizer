@@ -15,6 +15,8 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import contextlib
+import itertools
 import json
 import re
 import tempfile
@@ -1016,7 +1018,7 @@ class _StreamingShardWriter:
         self._buffer: dict[str, torch.Tensor] = {}
         self._buffer_bytes: int = 0
         self._part_files: list[Path] = []
-        self._part_bytes: list[int] = []
+        self._total_bytes: int = 0
         # Maps tensor key → part-file index (recorded at flush time)
         self._key_to_part: dict[str, int] = {}
 
@@ -1029,7 +1031,7 @@ class _StreamingShardWriter:
         for key in self._buffer:
             self._key_to_part[key] = part_idx
         self._part_files.append(part_path)
-        self._part_bytes.append(self._buffer_bytes)
+        self._total_bytes += self._buffer_bytes
         self._buffer = {}
         self._buffer_bytes = 0
 
@@ -1063,7 +1065,7 @@ class _StreamingShardWriter:
             key: f"model-{part_idx + 1:05d}-of-{n_shards:05d}.safetensors"
             for key, part_idx in self._key_to_part.items()
         }
-        total_size = sum(self._part_bytes)
+        total_size = self._total_bytes
         index_path = self._export_dir / "model.safetensors.index.json"
         with open(index_path, "w") as f:
             json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
@@ -1076,7 +1078,7 @@ def _parse_shard_size(size: int | str) -> int:
         from transformers.utils import convert_file_size_to_int
 
         return convert_file_size_to_int(size)
-    except (ImportError, Exception):
+    except ImportError:
         pass
     if isinstance(size, int):
         return size
@@ -1258,23 +1260,15 @@ def _export_transformers_checkpoint_streaming(
                 _stream_tensor(full_key, tensor)
 
     # GPU-resident parameters and buffers (not covered by the above loops)
-    for name, param in model.named_parameters():
-        if name in seen_keys or param is None or param.is_meta:
+    for name, tensor in itertools.chain(model.named_parameters(), model.named_buffers()):
+        if name in seen_keys or tensor is None or tensor.is_meta:
             continue
         seen_keys.add(name)
-        _stream_tensor(name, param)
-
-    for name, buf in model.named_buffers():
-        if name in seen_keys or buf is None or buf.is_meta:
-            continue
-        seen_keys.add(name)
-        _stream_tensor(name, buf)
+        _stream_tensor(name, tensor)
 
     writer.finalize()
 
     # Write non-weight artifacts (model.save_pretrained skipped to avoid OOM)
-    import contextlib
-
     _sanitize_generation_config_for_save(model)
     model.config.save_pretrained(str(export_dir))
     gc = getattr(model, "generation_config", None)
@@ -1907,6 +1901,7 @@ def export_hf_checkpoint(
     # Streaming path writes shard files layer-by-layer without accumulating the full
     # state dict in RAM (peak = 1 layer + 1 shard buffer vs. ~764 GiB for Ultra 550B).
     _offloaded = _has_accelerate_offload(model)
+    export_state_dict = None
 
     try:
         if _offloaded:
