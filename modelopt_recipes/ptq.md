@@ -230,7 +230,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `qwen3_5`, `qwen3_5_moe`, `vit` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `phi4mm`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/nvidia/Mistral-Medium-3.5-128B-NVFP4` |
@@ -239,7 +239,12 @@ The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder carries a `README.md` spelling out that delta.
 
-### Architecture-aware `quant_cfg` — `qwen3_5`, `qwen3_5_moe`, `vit`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`
+
+**`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
+linear layers and MSE-calibrated NVFP4 to routed experts, with expert
+`input_scale` fixed to 1.0. The vision branch, routers, `lm_head`, and KV cache
+remain unquantized.
 
 `huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast` (and its MoE twin,
 which shares the same `quant_cfg` snippet) is a **mixed scheme no single general

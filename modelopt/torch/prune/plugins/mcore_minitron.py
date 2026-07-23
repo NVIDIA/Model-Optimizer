@@ -168,7 +168,7 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     assert isinstance(model, supported_model_types), (
         f"Model should have one of {supported_model_types} submodule, got {model}"
     )
-    print_rank_0(f"Dropping decoder layers {layers_to_drop} from model.")
+    print_rank_0(f"Dropping decoder layers {layers_to_drop} (1-indexed) from model.")
 
     # get the number of layers remaining in each pp rank
     layers_remaining_per_pp = torch.zeros(

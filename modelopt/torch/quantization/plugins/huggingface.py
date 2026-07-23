@@ -1772,8 +1772,13 @@ def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
-        return model.model.layers
+    decoder = model
+    if hasattr(decoder, "model"):
+        decoder = decoder.model
+    if hasattr(decoder, "language_model"):
+        decoder = decoder.language_model
+    if hasattr(decoder, "layers"):
+        return decoder.layers
 
     return None
 

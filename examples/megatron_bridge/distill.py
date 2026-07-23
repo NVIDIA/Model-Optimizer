@@ -40,6 +40,7 @@ from megatron.bridge.training.config import (
     RNGConfig,
     TokenizerConfig,
     TrainingConfig,
+    ValidationConfig,
 )
 from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
@@ -166,6 +167,21 @@ def get_args():
     parser.add_argument(
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
     )
+    parser.add_argument(
+        "--validate_only",
+        action="store_true",
+        help="Skip training and run validation at iteration 0.",
+    )
+    parser.add_argument(
+        "--checkpoint_keep_last",
+        type=int,
+        default=5,
+        help=(
+            "Keep only the most recent <N> Megatron checkpoints. Set to -1 to disable "
+            "checkpoint rotation and keep all validation checkpoints, for example for Hugging Face "
+            "export and downstream evaluation."
+        ),
+    )
     # Logging arguments
     parser.add_argument("--log_interval", type=int, default=10, help="Write to log every <N> steps")
     parser.add_argument(
@@ -200,6 +216,10 @@ def get_args():
 
     if args.student_hf_model is None:
         args.student_hf_model = args.student_hf_path
+    if args.checkpoint_keep_last < -1:
+        raise ValueError("--checkpoint_keep_last must be >= -1.")
+    if args.validate_only and (args.eval_interval <= 0 or args.eval_iters <= 0):
+        raise ValueError("--validate_only requires --eval_interval > 0 and --eval_iters > 0.")
 
     print_args(args)
 
@@ -325,15 +345,16 @@ def main(args: argparse.Namespace):
         model=distill_provider,
         train=TrainingConfig(
             train_iters=args.train_iters,
-            eval_interval=args.eval_interval,
-            eval_iters=args.eval_iters,
             global_batch_size=args.gbs,
             micro_batch_size=args.mbs,
             manual_gc=True,
             manual_gc_interval=100,
         ),
-        # TODO: Replace validation args in train with validation config once we drop nemo:26.02 container support
-        # validation=ValidationConfig(eval_interval=args.eval_interval, eval_iters=args.eval_iters),
+        validation=ValidationConfig(
+            eval_iters=args.eval_iters,
+            eval_interval=args.eval_interval,
+            skip_train=args.validate_only,
+        ),
         optimizer=optimizer_config,
         scheduler=scheduler_config,
         ddp=DistributedDataParallelConfig(
@@ -361,7 +382,7 @@ def main(args: argparse.Namespace):
             save_interval=args.eval_interval,
             save=checkpoint_dir,
             load=checkpoint_dir,  # Resume from this directory (if exists)
-            most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
+            most_recent_k=args.checkpoint_keep_last,  # Keeps most recent checkpoints (-1 keeps all)
             ckpt_format="torch_dist",
             async_save=True,
             fully_parallel_save=True,
@@ -372,6 +393,10 @@ def main(args: argparse.Namespace):
 
     print_rank_0("\nStarting distillation...")
     distill(config)
+    if args.validate_only:
+        print_rank_0("\nValidation-only run done! Skipped training and checkpoint export.\n")
+        return
+
     print_rank_0(
         f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
         " in megatron distributed checkpoint format.\n"

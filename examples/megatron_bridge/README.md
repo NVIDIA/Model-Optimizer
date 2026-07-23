@@ -158,6 +158,9 @@ Tensorboard logging is enabled by default and logs are saved to `<output_dir>/te
 To use Weights & Biases for logging, set the `WANDB_API_KEY` environment variable and pass the `--wandb_project` argument.
 Optionally, you can also pass `--wandb_entity` and `--wandb_exp_name` arguments to group runs under a project and experiment name.
 
+To measure the initial student's CE and distillation losses, add `--validate_only` to the command.
+This skips training and evaluates the student at iteration 0.
+
 To see all available arguments:
 
 ```bash
@@ -217,6 +220,33 @@ torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
     --megatron_path <distill_output_dir>/checkpoints/iter_<iter_number> \
     --hf_export_path /path/to/save/distilled_hf_ckpt
 ```
+
+Use `--export_iterations` to export multiple saved checkpoints, for example to evaluate how model
+quality changes during distillation. To export multiple iterations, keep those Megatron checkpoints
+during distillation. The default is to keep the last 5 checkpoints; set `--checkpoint_keep_last -1`
+to keep all saved checkpoints.
+
+Then export all retained checkpoints, with one Hugging Face checkpoint written per
+`iter_<iteration>` subdirectory:
+
+```bash
+torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+    --student_hf_path <student_hf_model_or_path> \
+    --megatron_path <distill_output_dir>/checkpoints \
+    --hf_export_path /path/to/save/hf_validation_checkpoints \
+    --export_iterations all
+```
+
+The export path contains one loadable Hugging Face checkpoint per exported iteration:
+
+```text
+hf_validation/
+├── iter_0000100/
+├── iter_0000200/
+└── iter_0000300/
+```
+
+To export selected iterations instead, use `--export_iterations 200 400 600`.
 
 ### Quantization Aware Distillation (QAD)
 

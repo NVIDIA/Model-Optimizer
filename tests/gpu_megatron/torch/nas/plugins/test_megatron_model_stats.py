@@ -523,7 +523,7 @@ def _test_formula_matches_mamba_model(rank, size, parallelism):
         mamba_head_dim=mamba_head_dim,
         mamba_num_heads=mamba_num_heads,
         vocab_size=128,
-        hybrid_override_pattern=pattern,
+        hybrid_layer_pattern=pattern,
         moe_grouped_gemm=False,
         num_moe_experts=4,
         moe_ffn_hidden_size=64,

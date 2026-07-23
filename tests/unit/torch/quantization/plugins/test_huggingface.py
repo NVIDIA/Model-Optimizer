@@ -288,6 +288,16 @@ def test_is_homogeneous_hf_model_llama():
     assert is_homogeneous_hf_model(model)
 
 
+def test_is_homogeneous_hf_vlm_language_model():
+    model = get_tiny_llama()
+    language_model = nn.Module()
+    language_model.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+    model.model.language_model = language_model
+
+    assert is_homogeneous_hf_model(model)
+    assert get_homogeneous_hf_decoder_layers(model) is language_model.layers
+
+
 def test_is_homogeneous_hf_model_gpt_oss():
     model = get_tiny_gpt_oss(num_hidden_layers=1)
     assert is_homogeneous_hf_model(model)

@@ -303,12 +303,34 @@ def _match_candidate_to_preset(fmt) -> tuple[str | None, dict]:
     return None, fmt.model_dump()
 
 
-def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -> dict:
+def _mtq_candidate_formats(formats) -> list[dict]:
+    """Translate recipe candidate formats to export-compatible mtq configs."""
+    quantization_formats = []
+    for fmt in formats:
+        preset_name, quant_cfg = _match_candidate_to_preset(fmt)
+        if preset_name is not None and preset_name not in _AUTO_QUANTIZE_QFORMATS:
+            raise ValueError(
+                f"AutoQuantize candidate_formats entry '{preset_name}' is not supported for "
+                "unified checkpoint export. Use an export-compatible format."
+            )
+        if preset_name is None:
+            warnings.warn(
+                "An AutoQuantize candidate_formats entry matches no shipped preset; its export "
+                "compatibility cannot be verified. Ensure it is safe for HF checkpoint export."
+            )
+        quantization_formats.append(quant_cfg)
+    return quantization_formats
+
+
+def _mtq_inputs_from_auto_quantize_config(
+    aq_config, args: argparse.Namespace, fixed_quantize_config=None
+) -> dict:
     """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs.
 
-    Single, testable place where a recipe maps to mtq inputs. ``disabled_layers`` and candidate
-    cost come entirely from the recipe (no model introspection). KV cache falls back to
-    ``--kv_cache_qformat`` when the recipe omits it.
+    Single, testable place where a recipe maps to mtq inputs. ``fixed_quantize_config`` is the
+    optional normal PTQ baseline for modules outside explicit search spaces. ``disabled_layers``
+    and candidate cost come entirely from the recipe (no model introspection). KV cache falls back
+    to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
@@ -327,23 +349,25 @@ def _mtq_inputs_from_auto_quantize_config(aq_config, args: argparse.Namespace) -
     # Translate each candidate to its mtq preset dict and, in the same pass, guard export
     # compatibility (fails fast, before the expensive search). Custom configs matching no shipped
     # preset can't be verified, so warn rather than block.
-    quantization_formats = []
-    for fmt in aq_config.candidate_formats:
-        preset_name, quant_cfg = _match_candidate_to_preset(fmt)
-        if preset_name is not None and preset_name not in _AUTO_QUANTIZE_QFORMATS:
-            raise ValueError(
-                f"AutoQuantize candidate_formats entry '{preset_name}' is not supported for "
-                "unified checkpoint export. Use an export-compatible format."
-            )
-        if preset_name is None:
-            warnings.warn(
-                "An AutoQuantize candidate_formats entry matches no shipped preset; its export "
-                "compatibility cannot be verified. Ensure it is safe for HF checkpoint export."
-            )
-        quantization_formats.append(quant_cfg)
+    quantization_formats = _mtq_candidate_formats(aq_config.candidate_formats)
+    fixed_quantization_config = (
+        _mtq_candidate_formats([fixed_quantize_config])[0]
+        if fixed_quantize_config is not None
+        else None
+    )
+    module_search_spaces = [
+        {
+            "module_name_patterns": search_space.module_name_patterns,
+            "quantization_formats": _mtq_candidate_formats(search_space.candidate_formats),
+            "allow_no_quant": search_space.allow_no_quant,
+        }
+        for search_space in aq_config.module_search_spaces
+    ]
     return {
         "constraints": constraints,
         "quantization_formats": quantization_formats,
+        "fixed_quantization_config": fixed_quantization_config,
+        "module_search_spaces": module_search_spaces,
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
@@ -398,11 +422,12 @@ def auto_quantize(
     calib_dataloader: DataLoader,
     aq_config,
     full_model: torch.nn.Module | None = None,
+    fixed_quantize_config=None,
 ):
     """Recipe-driven auto_quantize, organized around an AutoQuantizeConfig.
 
-    The sole AutoQuantize entry point: it is driven entirely by the recipe's AutoQuantizeConfig
-    (candidate formats, constraints, disabled/cost-excluded layers) and wraps ``mtq.auto_quantize``.
+    The sole AutoQuantize entry point: it is driven by the recipe's AutoQuantizeConfig and optional
+    fixed PTQ config, then wraps ``mtq.auto_quantize``.
     """
     if args.calib_with_images:
         raise NotImplementedError(
@@ -413,7 +438,9 @@ def auto_quantize(
         "Auto Quantization is not supported for pipeline parallel size > 1"
     )
 
-    inputs = _mtq_inputs_from_auto_quantize_config(aq_config, args)
+    inputs = _mtq_inputs_from_auto_quantize_config(
+        aq_config, args, fixed_quantize_config=fixed_quantize_config
+    )
 
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -467,6 +494,8 @@ def auto_quantize(
         forward_step=forward_step,
         loss_func=loss_func,
         quantization_formats=inputs["quantization_formats"],
+        fixed_quantization_config=inputs["fixed_quantization_config"],
+        module_search_spaces=inputs["module_search_spaces"],
         num_calib_steps=len(calib_dataloader),
         num_score_steps=min(len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)),
         verbose=True,
@@ -1082,6 +1111,7 @@ def quantize_main(
     # --auto_quantize_* CLI flags converted on the fly. Everything downstream is recipe-driven.
     if isinstance(recipe, ModelOptAutoQuantizeRecipe):
         aq_config = recipe.auto_quantize
+        fixed_quantize_config = recipe.quantize
     elif args.recipe is None and args.auto_quantize_bits is not None:
         warnings.warn(
             "The --auto_quantize_* CLI flags are deprecated; use an AutoQuantize --recipe instead. "
@@ -1089,12 +1119,16 @@ def quantize_main(
             DeprecationWarning,
         )
         aq_config = _auto_quantize_config_from_cli(args)
+        fixed_quantize_config = None
     else:
         aq_config = None
+        fixed_quantize_config = None
 
     def _is_layerwise(obj):
         if isinstance(obj, ModelOptPTQRecipe):
             return _is_layerwise(obj.quantize.algorithm)
+        if isinstance(obj, ModelOptAutoQuantizeRecipe):
+            return obj.quantize is not None and _is_layerwise(obj.quantize.algorithm)
         if isinstance(obj, list):
             return any(_is_layerwise(a) for a in obj)
         layerwise = getattr(obj, "layerwise", None)
@@ -1183,6 +1217,7 @@ def quantize_main(
             calib_dataloader,
             aq_config,
             full_model=full_model,
+            fixed_quantize_config=fixed_quantize_config,
         )
 
     else:
