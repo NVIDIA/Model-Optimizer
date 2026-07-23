@@ -855,6 +855,18 @@ def _export_transformers_checkpoint(
             f"({dtype}), which may lead to numerical errors."
         )
 
+    import os
+    import time
+
+    _phase_timing = os.environ.get("EXPORT_PHASE_TIMING")
+
+    def _mark():
+        if _phase_timing and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return time.perf_counter()
+
+    _t_prep = _mark()
+
     # Handle input quantizers of experts that are not calibrated. Each MoE block is
     # dispatched by its experts container to the matching preparation handler.
     prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
@@ -917,19 +929,42 @@ def _export_transformers_checkpoint(
         )
 
     # Process all quantized modules and export weights
+    _t_pack = _mark()
+    if _phase_timing:
+        _r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        print(f"[export-phase r{_r}] entering PACK", flush=True)
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
     # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
     _reconstruct_fused_moe_linear(model)
+    _t_gather = _mark()
+    if _phase_timing:
+        _r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        print(f"[export-phase r{_r}] entering GATHER", flush=True)
 
-    if is_fsdp2_model(model):
-        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
+    if is_fsdp2_model(model) and os.environ.get("MODELOPT_DISABLE_SHARD_LOCAL"):
+        # Legacy full-pack path (benchmark baseline): weights were unsharded, repacked full, and
+        # resharded per module, so gather the full state_dict as before.
         quantized_state_dict = get_model_state_dict(
             model,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
+    elif is_fsdp2_model(model):
+        # FSDP2 shard-local: each rank packed its own Shard(0) slice (keep-fused for experts, so the
+        # fused weight stays Shard(0)-on-E and gathers like any other weight). Gather every DTensor to
+        # full via full_tensor() (an all-gather -> full on every rank), then split the gathered
+        # keep-fused expert weights into the per-expert deployment keys.
+        from torch.distributed.tensor import DTensor
+
+        from .moe_utils import _split_fused_experts_state_dict
+
+        quantized_state_dict = {
+            k: (v.full_tensor().cpu() if isinstance(v, DTensor) else v.detach().cpu())
+            for k, v in model.state_dict().items()
+        }
+        _split_fused_experts_state_dict(quantized_state_dict, model)
     else:
         # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
         quantized_state_dict = model.state_dict()
@@ -947,6 +982,17 @@ def _export_transformers_checkpoint(
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
+
+    if _phase_timing:
+        _t_end = _mark()
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        mode = "full-pack" if os.environ.get("MODELOPT_DISABLE_SHARD_LOCAL") else "shard-local"
+        print(
+            f"[export-timing r{rank}] mode={mode} prep={_t_pack - _t_prep:.2f}s "
+            f"pack={_t_gather - _t_pack:.2f}s gather+post={_t_end - _t_gather:.2f}s "
+            f"total={_t_end - _t_prep:.2f}s",
+            flush=True,
+        )
 
     return quantized_state_dict, quant_config
 
