@@ -29,10 +29,11 @@ The deprecated `examples/llm_qad` flow is not the default.
 
 ## 2. Establish the gap
 
-When QAD follows `evaluation` or `quant-recipe-search`, reuse its exact PTQ
-checkpoint and complete config or recipe. Preserve the quantization format,
-layer selection, calibration dataset, sample count, sequence length, seed, and
-topology; do not substitute a cheaper or otherwise different PTQ run.
+When QAD follows `evaluation` or `quant-recipe-search`, reuse its complete PTQ
+config or recipe to reproduce PTQ with `examples/megatron_bridge/quantize.py`;
+do not use the usual HF checkpoint as the QAD student. Preserve the quantization
+format, layer selection, calibration dataset, sample count, sequence length,
+seed, and topology; do not substitute a cheaper or otherwise different PTQ run.
 
 Use the `evaluation` and `compare-results` skills to run and validate the same
 benchmark configuration on the BF16 source and the export of the exact
