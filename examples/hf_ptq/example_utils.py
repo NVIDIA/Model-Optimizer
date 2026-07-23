@@ -23,6 +23,8 @@ import os
 import shutil
 import warnings
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -55,18 +57,31 @@ logger = logging.getLogger(__name__)
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
+@dataclass
+class DistributedState:
+    """Example-local distributed state for model loading, dataloader sharding, and rank-0 output."""
+
+    rank: int
+    world_size: int
+    device: torch.device | str
+    is_main: bool
+
+
 def setup_distributed_args(args):
-    """Set ``args.rank``/``world_size``/``device``/``is_main`` (single-process if FSDP2 off)."""
+    """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
     if getattr(args, "use_fsdp2", False):
-        dist_utils.setup()
-        args.rank = dist_utils.rank()
-        args.world_size = dist_utils.size()
-        args.device = torch.device(f"cuda:{dist_utils.local_rank()}")
-        args.is_main = args.rank == 0
+        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
+        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        dist_utils.setup(timeout=timedelta(hours=2))
+        rank = dist_utils.rank()
+        args.dist_state = DistributedState(
+            rank=rank,
+            world_size=dist_utils.size(),
+            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
+            is_main=rank == 0,
+        )
     else:
-        args.rank = 0
-        args.world_size = 1
-        args.is_main = True
+        args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
 
 
 def cleanup_distributed(args):

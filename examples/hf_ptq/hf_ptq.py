@@ -80,6 +80,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -259,7 +260,9 @@ def make_calib_dataloader(
             include_labels=include_labels,
             distributed=args.use_fsdp2,
             sampler_kwargs=(
-                {"num_replicas": args.world_size, "rank": args.rank} if args.use_fsdp2 else None
+                {"num_replicas": args.dist_state.world_size, "rank": args.dist_state.rank}
+                if args.use_fsdp2
+                else None
             ),
         )
     return calib_dataloader, first_text_speech_dataset
@@ -448,10 +451,12 @@ def auto_quantize(
         "Auto Quantization is not supported for pipeline parallel size > 1"
     )
 
-    assert not (args.auto_quantize_bits and args.use_fsdp2), (
-        "Auto Quantization is not supported with --use_fsdp2: mtq.auto_quantize "
-        "is invoked after FSDP2 loading has frozen every parameter."
-    )
+    if args.use_fsdp2:
+        warnings.warn(
+            "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
+            "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
+            "synchronization across ranks); use at your own risk."
+        )
 
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config, args, fixed_quantize_config=fixed_quantize_config
@@ -552,9 +557,9 @@ def load_model(args: argparse.Namespace):
         validate_fsdp2_supported(args, hf_config)
         full_model = parallel_load_and_prepare_fsdp2(
             args.pyt_ckpt_path,
-            args.device,
-            args.rank,
-            args.world_size,
+            args.dist_state.device,
+            args.dist_state.rank,
+            args.dist_state.world_size,
             trust_remote_code=args.trust_remote_code,
             cpu_offload=args.cpu_offload,
             attn_implementation=args.attn_implementation,
@@ -568,7 +573,7 @@ def load_model(args: argparse.Namespace):
     elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
-            args.device,
+            args.dist_state.device,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
@@ -601,7 +606,7 @@ def load_model(args: argparse.Namespace):
     model_type = get_model_type(full_model)
 
     if args.use_fsdp2:
-        device = args.device
+        device = args.dist_state.device
     else:
         device = full_model.device
         if hasattr(full_model, "model"):
@@ -919,21 +924,20 @@ def export_quantized(
             tokenizer.padding_side = default_padding_side
             if default_pad_token is not None:
                 tokenizer.pad_token = default_pad_token
-            if args.is_main:
+            if args.dist_state.is_main:
                 tokenizer.save_pretrained(export_path)
 
         # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
         # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
         # from the source checkpoint take precedence over regenerated ones (which may
         # differ in format due to newer transformers versions).
-        if args.is_main:
+        if args.dist_state.is_main:
             copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
 
         end_time = time.time()
-        if args.is_main:
-            print(
-                f"Quantized model exported to: {export_path}. Total time used {end_time - start_time}s"
-            )
+        print_rank_0(
+            f"Quantized model exported to: {export_path}. Total time used {end_time - start_time}s"
+        )
 
 
 def pre_quantize(
@@ -1032,7 +1036,7 @@ def post_quantize(
         )
         return
 
-    if args.verbose and args.is_main:
+    if args.verbose and args.dist_state.is_main:
         try:
             mtq.print_quant_summary(full_model, args.export_path)
             save_expert_token_count_table(full_model, args.export_path)

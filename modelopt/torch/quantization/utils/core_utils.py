@@ -539,24 +539,26 @@ def fsdp2_weight_access_and_writeback_context(
             assert (
                 fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
             ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        collected = param.redistribute(
+        unsharded_dtensor = param.redistribute(
             placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
             device_mesh=original_device_mesh,
         )
-        local_replicated = collected.to_local()
+        unsharded_tensor = unsharded_dtensor.to_local()
         # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
-        on_cpu = local_replicated.device.type == "cpu" and torch.cuda.is_available()
-        working = local_replicated.to(torch.cuda.current_device()) if on_cpu else local_replicated
-        cpu_mirror = local_replicated if on_cpu else None
+        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+        gpu_tensor = (
+            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
+        )
+        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
         originals[name] = (
             param,
-            collected,
+            unsharded_dtensor,
             original_placements,
             original_device_mesh,
-            cpu_mirror,
-            working,
+            cpu_writeback_tensor,
+            gpu_tensor,
         )
-        _set_parameter(module, name, nn.Parameter(working))
+        _set_parameter(module, name, nn.Parameter(gpu_tensor))
 
     try:
         yield
@@ -565,16 +567,16 @@ def fsdp2_weight_access_and_writeback_context(
         # and exception so the module never lingers with the temporary local params.
         for name, (
             original_param,
-            collected,
+            unsharded_dtensor,
             original_placements,
             original_device_mesh,
-            cpu_local,
-            gpu_working,
+            cpu_writeback_tensor,
+            gpu_tensor,
         ) in originals.items():
-            if cpu_local is not None:
-                cpu_local.data.copy_(gpu_working.data.to(cpu_local.device))
+            if cpu_writeback_tensor is not None:
+                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
             original_param.to_local().data.copy_(
-                collected.redistribute(
+                unsharded_dtensor.redistribute(
                     placements=original_placements, device_mesh=original_device_mesh
                 ).to_local()
             )
@@ -986,36 +988,6 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
             if reshard:
                 with enable_fake_quant(root_module):
                     root_module.reshard()
-
-
-@contextmanager
-def materialize_fsdp2_root(model: nn.Module):
-    """Unshard a sharded FSDP2 root's own params (embed/lm_head/norm) for a calibration forward.
-
-    The calibration loop calls ``model.forward(**batch)`` directly (``dataset_utils._forward_loop``)
-    rather than ``model(**batch)``, so ``nn.Module.__call__`` is bypassed and the root's FSDP2
-    forward pre-hook never fires. Its own params (embed/lm_head/norm) stay sharded DTensors and the
-    forward hits ``aten.embedding: mixed Tensor and DTensor``. Decoder layers are unaffected: they are
-    called as ``layer(...)`` inside ``forward``, so their pre-hooks fire and they unshard normally.
-
-    Unshard the root up front so its params are full tensors, then reshard on exit. The bypass also
-    skips the root's post-forward hook, so nothing reshards it mid-calibration and a single unshard
-    holds across all batches. Cheap: only the root's own param group is gathered, not the decoder
-    layers. No-op for non-FSDP2 or already-replicated roots.
-    """
-    root_sharded = False
-    if isinstance(model, FSDPModule):
-        pg = fully_shard.state(model)._fsdp_param_group
-        root_sharded = pg is not None and pg.is_sharded
-    if root_sharded:
-        with enable_fake_quant(model):
-            model.unshard()
-    try:
-        yield
-    finally:
-        if root_sharded:
-            with enable_fake_quant(model):
-                model.reshard()
 
 
 def update_quant_cfg_with_kv_cache_quant(

@@ -36,13 +36,17 @@ pip install -U transformers
 
 For unlisted models that need unreleased transformers (e.g., from git), see `references/unsupported-models.md` Step A.
 
-**Prefer `PYTHONPATH`** to use the synced ModelOpt source instead of installing inside the container — this avoids risking dependency conflicts (e.g., `pip install -U nvidia-modelopt[hf]` can upgrade PyTorch and break other packages):
+**Prefer `pip install -e ".[hf]" --no-build-isolation`** (run from the Model-Optimizer repo root) to make the synced ModelOpt source importable in the container — this matches how `examples/hf_ptq/slurm/multinode_fsdp2_ptq.slurm` sets up the job, and unlike `PYTHONPATH` it surfaces packaging/build issues instead of masking them. Avoid `pip install -U nvidia-modelopt[hf]` from PyPI, which can upgrade PyTorch and break other packages.
+
+```bash
+pip install -e ".[hf]" --no-build-isolation
+```
+
+If you specifically need to leave the container's installed packages untouched (e.g. to sidestep a dependency conflict), fall back to `PYTHONPATH` — but note it skips the editable install, so a missing compiled extension only surfaces at import time:
 
 ```bash
 export PYTHONPATH=/path/to/Model-Optimizer:$PYTHONPATH
 ```
-
-If `PYTHONPATH` doesn't work due to missing compiled extensions, fall back to `pip install -e ".[hf]" --no-build-isolation` (run from the Model-Optimizer repo root).
 
 **Watch for pip dependency conflicts** — NGC containers set `PIP_CONSTRAINT` to pin versions, causing `ResolutionImpossible` errors. Unset it first so pip can resolve freely:
 
@@ -63,26 +67,11 @@ pip install -U transformers --no-deps
 
 Estimate GPU count from model size and available GPU memory. `hf_ptq.py` uses `device_map="auto"` so it fills GPUs automatically — request only as many as needed.
 
-For multi-node PTQ (200B+ params), use `hf_ptq.py --use_fsdp2` launched via `torchrun`:
+For multi-node PTQ (200B+ params), use `hf_ptq.py --use_fsdp2`. For the launch commands (`sbatch`
+and manual `torchrun`) and the `--recipe` format, see the *Multi-Node Post-Training Quantization with
+FSDP2* section of `examples/hf_ptq/README.md` rather than duplicating them here.
 
-```bash
-torchrun \
-    --nnodes=$NUM_NODES \
-    --node_rank=$SLURM_PROCID \
-    --nproc_per_node=$GPUS_PER_NODE \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    examples/hf_ptq/hf_ptq.py \
-        --pyt_ckpt_path <model> \
-        --recipe <recipe> \
-        --export_path <output> \
-        --use_fsdp2
-```
-
-`--recipe` is the maintained entry point (e.g. `general/ptq/nvfp4_default-kv_fp8_cast`); see the
-Recipe-based Quantization section of `examples/hf_ptq/README.md` for the format and built-in names.
-
-When the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
+Sizing guidance specific to this path: when the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
 
 Use the multi-node template from `skills/common/slurm-setup.md` section 4 as the job script wrapper.
 

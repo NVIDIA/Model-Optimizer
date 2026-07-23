@@ -69,7 +69,6 @@ srun --container-image="${CONTAINER_IMAGE}" \
      --container-workdir=/modelopt/examples/hf_ptq \
   bash -c '
     set -euo pipefail
-    export PYTHONPATH="/modelopt:${PYTHONPATH:-}"
     export PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # ModelOpt + its HF deps (transformers/accelerate/datasets/...) from the mounted source, then example extras.
     pip install -q -e "/modelopt[hf]" --no-build-isolation

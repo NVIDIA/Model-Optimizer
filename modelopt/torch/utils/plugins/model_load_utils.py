@@ -245,58 +245,66 @@ def _read_and_convert(
     return _convert_keys(rules, raw) if rules else raw
 
 
+# One decoder layer's converted weights (param-name suffix -> tensor); the outer dict is keyed
+# by decoder-layer index.
+LayerStateDict = dict[str, torch.Tensor]
+OwnedLayerStateDicts = dict[int, LayerStateDict]
+
+
 def _read_owned_layers(
     resolved_path: str,
     weight_map: dict,
     layer_sources: dict,
-    owned: list[int],
+    owned_layer_indices: list[int],
     rules: dict | None,
-) -> dict:
+) -> OwnedLayerStateDicts:
     """Read + convert this rank's owned decoder layers from disk (ranks read in parallel)."""
     return {
         layer_idx: _read_and_convert(
             resolved_path, weight_map, set(layer_sources[layer_idx]), rules
         )
-        for layer_idx in owned
+        for layer_idx in owned_layer_indices
     }
 
 
 def _broadcast_load_group(
-    group: list[int],
-    src: int,
-    rank: int,
-    owned: dict,
-    decoder_layers: list,
-    layer_prefixes: list,
+    layer_indices: list[int],
+    source_rank: int,
+    current_rank: int,
+    owned_layer_state_dicts: OwnedLayerStateDicts,
+    decoder_layers: list[nn.Module],
+    layer_prefixes: list[str],
     device: torch.device,
     cpu_offload: bool,
 ) -> None:
-    """Broadcast layers ``group`` from rank ``src`` to all ranks and reshard into their FSDP2 shards.
+    """Broadcast ``layer_indices`` from ``source_rank`` to all ranks and reshard into FSDP2 shards.
 
     The owner assembles the group's full tensors; every rank receives them, reshards its local slice,
     then frees the full copy (capping the transient GPU peak). The owner drops its read copy after.
     """
-    big_dict: dict | None = None
-    if rank == src:
-        big_dict = {}
-        for i in group:
-            big_dict.update(owned[i])
-    full = broadcast_state_dict(big_dict, src=src, device=device)
-    for layer_idx in group:
+    group_state_dict: dict | None = None
+    if current_rank == source_rank:
+        group_state_dict = {}
+        for layer_idx in layer_indices:
+            group_state_dict.update(owned_layer_state_dicts[layer_idx])
+    broadcasted_state_dict = broadcast_state_dict(group_state_dict, src=source_rank, device=device)
+    for layer_idx in layer_indices:
         prefix = layer_prefixes[layer_idx]
-        stripped = {k[len(prefix) :]: v for k, v in full.items() if k.startswith(prefix)}
+        layer_state_dict = {
+            k[len(prefix) :]: v for k, v in broadcasted_state_dict.items() if k.startswith(prefix)
+        }
         if cpu_offload:
-            stripped = {k: v.cpu() for k, v in stripped.items()}
+            layer_state_dict = {k: v.cpu() for k, v in layer_state_dict.items()}
         set_model_state_dict(
             decoder_layers[layer_idx],
-            stripped,
+            layer_state_dict,
             options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
         )
-        del stripped
-    del full
-    if rank == src:
-        for i in group:
-            del owned[i]
+        del layer_state_dict
+    del broadcasted_state_dict
+    if current_rank == source_rank:
+        for layer_idx in layer_indices:
+            del owned_layer_state_dicts[layer_idx]
 
 
 def _group_sources_by_layer(
@@ -381,21 +389,23 @@ def parallel_load_and_prepare_fsdp2(
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
-    owned_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
-    owned = _read_owned_layers(resolved_path, weight_map, layer_sources, owned_indices, rules)
+    owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
+    owned_layer_state_dicts = _read_owned_layers(
+        resolved_path, weight_map, layer_sources, owned_layer_indices, rules
+    )
 
     # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
-    for src in range(world_size):
-        src_layers = _layers_for_rank(len(decoder_layers), world_size, src)
-        if not src_layers:
+    for source_rank in range(world_size):
+        source_layer_indices = _layers_for_rank(len(decoder_layers), world_size, source_rank)
+        if not source_layer_indices:
             continue
-        chunk = broadcast_chunk_size or len(src_layers)
-        for start in range(0, len(src_layers), chunk):
+        chunk = broadcast_chunk_size or len(source_layer_indices)
+        for start in range(0, len(source_layer_indices), chunk):
             _broadcast_load_group(
-                src_layers[start : start + chunk],
-                src,
+                source_layer_indices[start : start + chunk],
+                source_rank,
                 rank,
-                owned,
+                owned_layer_state_dicts,
                 decoder_layers,
                 layer_prefixes,
                 device,
@@ -424,5 +434,4 @@ def parallel_load_and_prepare_fsdp2(
         _promote_non_dtensor_to_gpu(model, device)
     if hasattr(model, "tie_weights"):
         model.tie_weights()
-    model.requires_grad_(False)
     return model
