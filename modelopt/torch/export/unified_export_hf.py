@@ -17,7 +17,6 @@
 
 import contextlib
 import json
-import os
 import re
 import tempfile
 import warnings
@@ -53,7 +52,6 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
@@ -858,18 +856,6 @@ def _export_transformers_checkpoint(
             f"({dtype}), which may lead to numerical errors."
         )
 
-    import os
-    import time
-
-    _phase_timing = os.environ.get("EXPORT_PHASE_TIMING")
-
-    def _mark():
-        if _phase_timing and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        return time.perf_counter()
-
-    _t_prep = _mark()
-
     # Handle input quantizers of experts that are not calibrated. Each MoE block is
     # dispatched by its experts container to the matching preparation handler.
     prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
@@ -932,10 +918,6 @@ def _export_transformers_checkpoint(
         )
 
     # Process all quantized modules and export weights
-    _t_pack = _mark()
-    if _phase_timing:
-        _r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        print(f"[export-phase r{_r}] entering PACK", flush=True)
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
     # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
@@ -950,19 +932,7 @@ def _export_transformers_checkpoint(
         # itself), so return an empty dict to keep the tuple[dict, dict] contract for other callers.
         return {}, quant_config
 
-    _t_gather = _mark()
-    if _phase_timing:
-        _r = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        print(f"[export-phase r{_r}] entering GATHER", flush=True)
-
-    if is_fsdp2_model(model) and os.environ.get("MODELOPT_DISABLE_SHARD_LOCAL"):
-        # Legacy full-pack path (benchmark baseline): weights were unsharded, repacked full, and
-        # resharded per module, so gather the full state_dict as before.
-        quantized_state_dict = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
-    elif is_fsdp2_model(model):
+    if is_fsdp2_model(model):
         # FSDP2 shard-local: each rank packed its own Shard(0) slice (keep-fused for experts, so the
         # fused weight stays Shard(0)-on-E and gathers like any other weight). Gather every DTensor to
         # full via full_tensor() (an all-gather -> full on every rank), then split the gathered
@@ -993,17 +963,6 @@ def _export_transformers_checkpoint(
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
-
-    if _phase_timing:
-        _t_end = _mark()
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        mode = "full-pack" if os.environ.get("MODELOPT_DISABLE_SHARD_LOCAL") else "shard-local"
-        print(
-            f"[export-timing r{rank}] mode={mode} prep={_t_pack - _t_prep:.2f}s "
-            f"pack={_t_gather - _t_pack:.2f}s gather+post={_t_end - _t_gather:.2f}s "
-            f"total={_t_end - _t_prep:.2f}s",
-            flush=True,
-        )
 
     return quantized_state_dict, quant_config
 
@@ -1636,18 +1595,8 @@ def _parallel_write_hf_checkpoint(
     (collective) but materializes + writes only the one it owns (``i % world``). Host peak is bounded
     to ~one chunk; writes parallelize across ranks. Rank 0 merges the index + writes metadata.
     """
-    import time
-
     export_dir = Path(export_dir)
     rank, world = _dist.rank(), _dist.size()
-    _phase_timing = os.environ.get("EXPORT_PHASE_TIMING")
-
-    def _mark():
-        if _phase_timing and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        return time.perf_counter()
-
-    _t0 = _mark()
 
     # Phase A — prep + shard-local pack, shared with the standard path (packs in place, all ranks).
     _, quant_config = _export_transformers_checkpoint(
@@ -1655,7 +1604,6 @@ def _parallel_write_hf_checkpoint(
     )
     if getattr(model, "hf_quantizer", None) is not None:
         model.hf_quantizer = None
-    _t_pack = _mark()
 
     kv_fmt = quant_config["quantization"]["kv_cache_quant_algo"]
     id_to_name = {id(m): n for n, m in model.named_modules()}
@@ -1687,8 +1635,6 @@ def _parallel_write_hf_checkpoint(
         esd = {k: v.detach().to("cpu") for k, v in extra_state_dict.items()}
         local_maps.append(_write_owned_shards(esd, export_dir, rank, n, max_shard_size))
 
-    _t_write = _mark()
-
     # Phase C — index + metadata.
     _dist.barrier()
     _finalize_index(local_maps, export_dir, rank, world)
@@ -1697,14 +1643,6 @@ def _parallel_write_hf_checkpoint(
             model, export_dir, quant_config, save_modelopt_state, architectures_override
         )
     _dist.barrier()
-    _t_end = _mark()
-    if _phase_timing:
-        print(
-            f"[export-timing r{rank}] mode=parallel-write prep+pack={_t_pack - _t0:.2f}s "
-            f"gather+write={_t_write - _t_pack:.2f}s finalize={_t_end - _t_write:.2f}s "
-            f"total={_t_end - _t0:.2f}s",
-            flush=True,
-        )
 
 
 def export_hf_checkpoint(
@@ -1766,14 +1704,8 @@ def export_hf_checkpoint(
     )
 
     # FSDP2 shard-local parallel write: each rank writes its owned decoder-layer units concurrently
-    # (host memory bounded to ~a chunk, no rank-0 full gather). Escape hatches fall back to the
-    # standard single-writer gather: MODELOPT_DISABLE_SHARD_LOCAL (legacy full-pack) or
-    # MODELOPT_DISABLE_PARALLEL_WRITE (shard-local pack + whole-model gather + save_pretrained).
-    if (
-        is_distributed
-        and not os.environ.get("MODELOPT_DISABLE_SHARD_LOCAL")
-        and not os.environ.get("MODELOPT_DISABLE_PARALLEL_WRITE")
-    ):
+    # (host memory bounded to ~a chunk, no rank-0 full gather).
+    if is_distributed:
         _parallel_write_hf_checkpoint(
             model,
             dtype,

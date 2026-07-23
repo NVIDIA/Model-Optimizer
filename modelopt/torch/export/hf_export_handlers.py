@@ -16,7 +16,6 @@
 """Built-in module handlers for unified Hugging Face export."""
 
 import collections.abc
-import os
 import warnings
 
 import torch.nn as nn
@@ -39,12 +38,8 @@ def _has_fused_experts_quantizers(module: nn.Module) -> bool:
 
 
 def _use_shard_local(model: nn.Module) -> bool:
-    """Whether to use shard-local packing.
-
-    FSDP2 only; ``MODELOPT_DISABLE_SHARD_LOCAL`` forces the legacy
-    unshard-and-full-pack path for benchmarking/fallback.
-    """
-    return is_fsdp2_model(model) and not os.environ.get("MODELOPT_DISABLE_SHARD_LOCAL")
+    """Whether to use shard-local packing (FSDP2 only)."""
+    return is_fsdp2_model(model)
 
 
 def _export_weight(

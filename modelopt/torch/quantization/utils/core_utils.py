@@ -1083,10 +1083,6 @@ def fsdp2_shard_local_pack(root_model, module):
     group = fully_shard.state(root_module)._fsdp_param_group
     mapping = create_fsdp_param_mapping(group.fsdp_params, root_model)
 
-    import os
-
-    _dbg = os.environ.get("SHARD_LOCAL_DEBUG")
-
     captured = {}
     module._shard_local_start = {}
     for pname, param in list(module.named_parameters(recurse=False)):
@@ -1097,12 +1093,6 @@ def fsdp2_shard_local_pack(root_model, module):
         # shard-local packing does not apply -> leave it for the handler to pack in place (it stays
         # full and passes through the gather unchanged). Only Shard(0) DTensors get the shard-local path.
         if not isinstance(param, DTensor):
-            if _dbg:
-                print(
-                    f"[shard-local r{torch.distributed.get_rank()}] SKIP non-DTensor {name}: "
-                    f"type={type(param).__name__} shape={tuple(param.shape)}",
-                    flush=True,
-                )
             continue
         # Fail fast + clear on uneven sharding rather than deadlocking the gather later. Symmetric
         # (global shape + world are identical on every rank) so this raise can't itself hang.
@@ -1111,20 +1101,11 @@ def fsdp2_shard_local_pack(root_model, module):
             raise NotImplementedError(
                 f"fsdp2_shard_local_pack does not support uneven sharding: '{name}' has dim0="
                 f"{param.shape[0]}, not divisible by world size {world}. Use a world size that "
-                f"divides every sharded dim-0, or set MODELOPT_DISABLE_SHARD_LOCAL=1 to use the "
-                f"legacy unshard-and-full-pack path (which handles uneven shards)."
+                f"divides every sharded dim-0."
             )
         captured[pname] = _ShardInfo(name, mapping[name], param.device_mesh, param.placements)
         module._shard_local_start[pname] = _shard_start(param)
-        _global_shape = tuple(param.shape)
         module._parameters[pname] = nn.Parameter(param.to_local(), requires_grad=False)
-        if _dbg:
-            print(
-                f"[shard-local r{torch.distributed.get_rank()}] {name}: global={_global_shape} "
-                f"-> to_local={tuple(module._parameters[pname].shape)} "
-                f"start={module._shard_local_start[pname]}",
-                flush=True,
-            )
     try:
         yield
     finally:
@@ -1134,12 +1115,6 @@ def fsdp2_shard_local_pack(root_model, module):
                 packed_local = getattr(module, pname)
                 if local_dim0 is None:
                     local_dim0 = packed_local.shape[0]
-                if _dbg:
-                    print(
-                        f"[shard-local r{torch.distributed.get_rank()}] {info.name}: "
-                        f"packed_local={tuple(packed_local.shape)} {packed_local.dtype}",
-                        flush=True,
-                    )
                 mapping[info.name] = _rebuild_fsdp_param_from_shard(info.old, packed_local)
                 info.old._post_load_hook_handle.remove()
         if captured:
