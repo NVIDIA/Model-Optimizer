@@ -15,7 +15,6 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
-import contextlib
 import itertools
 import json
 import re
@@ -1172,8 +1171,15 @@ def _export_transformers_checkpoint_streaming(
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
 
-    # --- Tied alias keys to skip (data_ptr() is unreliable for disk-offloaded weights) ---
-    raw_tied_keys: set[str] = set(getattr(model, "_tied_weights_keys", None) or [])
+    # --- Tied alias keys to skip ---
+    # data_ptr() is unreliable for disk-offloaded weights, so we use _tied_weights_keys.
+    # Only apply when tie_word_embeddings=True: _tied_weights_keys can list keys whose
+    # weights are not actually shared (e.g. if the model was saved with tie_word_embeddings=False
+    # but the attribute was never cleared), which would incorrectly drop lm_head.weight.
+    if getattr(model.config, "tie_word_embeddings", False):
+        raw_tied_keys: set[str] = set(getattr(model, "_tied_weights_keys", None) or [])
+    else:
+        raw_tied_keys: set[str] = set()
 
     # --- Name mapper for per-tensor key reversal ---
     # Tensor names are applied inline; quant config names are handled by the caller.
@@ -1199,6 +1205,14 @@ def _export_transformers_checkpoint_streaming(
         )
     decoder_layer_ids = {id(m) for m in decoder_layers}
 
+    # --- Persistent-buffer predicate (mirrors state_dict() which excludes non-persistent) ---
+    def _is_persistent_buffer(name: str) -> bool:
+        parts = name.split(".")
+        mod: nn.Module = model
+        for part in parts[:-1]:
+            mod = getattr(mod, part, mod)
+        return parts[-1] not in getattr(mod, "_non_persistent_buffers_set", frozenset())
+
     # --- Stream tensors to shard files ---
     shard_size_bytes = _parse_shard_size(max_shard_size)
     writer = _StreamingShardWriter(export_dir, shard_size_bytes)
@@ -1215,7 +1229,7 @@ def _export_transformers_checkpoint_streaming(
             new_key = name_mapper(new_key)
         if new_key in tied_alias_keys:
             return
-        writer.add(new_key, new_value.detach().cpu())
+        writer.add(new_key, new_value.detach().contiguous().cpu())
 
     # Decoder layers (offloaded: materialize one at a time)
     for layer_name, layer_module in model.named_modules():
@@ -1259,8 +1273,12 @@ def _export_transformers_checkpoint_streaming(
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
 
-    # GPU-resident parameters and buffers (not covered by the above loops)
-    for name, tensor in itertools.chain(model.named_parameters(), model.named_buffers()):
+    # GPU-resident parameters and persistent buffers (not covered by the above loops).
+    # named_buffers() includes non-persistent buffers that state_dict() excludes; filter them.
+    for name, tensor in itertools.chain(
+        model.named_parameters(),
+        ((n, b) for n, b in model.named_buffers() if _is_persistent_buffer(n)),
+    ):
         if name in seen_keys or tensor is None or tensor.is_meta:
             continue
         seen_keys.add(name)
@@ -1268,13 +1286,30 @@ def _export_transformers_checkpoint_streaming(
 
     writer.finalize()
 
-    # Write non-weight artifacts (model.save_pretrained skipped to avoid OOM)
+    # Write non-weight artifacts: config.json, generation_config.json, tokenizer, and
+    # the custom modeling *.py files that trust_remote_code models (e.g. NemotronH) need.
+    # model.save_pretrained with an empty state dict is the only reliable way to trigger
+    # transformers' custom-code copy logic without holding the full checkpoint in RAM.
+    # Protect any real shard already written by _StreamingShardWriter (single-shard path
+    # renames its output to model.safetensors, which save_pretrained would overwrite).
+    _single_shard = export_dir / "model.safetensors"
+    _protected = export_dir / "__modelopt_protected_model.safetensors"
+    if _single_shard.exists():
+        _single_shard.rename(_protected)
+
     _sanitize_generation_config_for_save(model)
-    model.config.save_pretrained(str(export_dir))
-    gc = getattr(model, "generation_config", None)
-    if gc is not None:
-        with contextlib.suppress(Exception):
-            gc.save_pretrained(str(export_dir))
+    _patches = _patch_revert_weight_conversion()
+    try:
+        model.save_pretrained(str(export_dir), state_dict={})
+    finally:
+        _unpatch_revert_weight_conversion(_patches)
+
+    # Remove the empty placeholder shard save_pretrained created for state_dict={}.
+    if _single_shard.exists() and _single_shard.stat().st_size < 512:
+        _single_shard.unlink()
+    # Restore the real single-shard if we protected it.
+    if _protected.exists():
+        _protected.rename(_single_shard)
 
     return None, quant_config
 

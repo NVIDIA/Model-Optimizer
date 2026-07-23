@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import contextlib
 import copy
 import glob
 import hashlib
@@ -33,60 +34,6 @@ from typing import Any
 import torch
 import transformers
 import yaml
-
-# Shim for is_torch_fx_available removed in transformers >=5.x; older model files (e.g.
-# DeepSeek-R1 bundled modeling_deepseek.py) import it from transformers.utils.import_utils.
-try:
-    from transformers.utils.import_utils import is_torch_fx_available  # noqa: F401
-except ImportError:
-    import transformers.utils.import_utils as _tui
-
-    _tui.is_torch_fx_available = lambda: False  # type: ignore[attr-defined]
-
-# Shim for broken flash_attn installs (undefined symbol in .so). Probe the actual import;
-# if it fails, force transformers' availability checks to return False so bundled remote-code
-# model files (e.g. modeling_deepseek.py) skip the flash_attn import block.
-# Must patch both transformers.utils.import_utils AND transformers.utils since bundled models
-# import from either location.
-try:
-    import flash_attn as _flash_attn_probe  # noqa: F401
-except Exception:
-    import transformers.utils as _tu
-    import transformers.utils.import_utils as _tui
-
-    for _mod in (_tu, _tui):
-        _mod.is_flash_attn_2_available = lambda: False  # type: ignore[attr-defined]
-        _mod.is_flash_attn_available = lambda: False  # type: ignore[attr-defined]
-        _mod.is_flash_attn_greater_or_equal_2_10 = lambda: False  # type: ignore[attr-defined]
-
-# On nodes without the `kernels` package, DSR1 block-scaled FP8 matmul fails at import.
-# Patch the loader with a BF16 dequant fallback so calibration forward passes succeed
-# (amax collection only — not suitable for production inference).
-try:
-    import transformers.integrations.finegrained_fp8 as _ff8
-
-    try:
-        _ff8._load_finegrained_fp8_kernel()
-    except ImportError:
-
-        class _FP8BF16Fallback:
-            @staticmethod
-            def matmul(input, weight, weight_scale_inv, block_size, output_dtype=None, activation_scale=None):
-                out_f, in_f = weight.shape[-2], weight.shape[-1]
-                nb_out, nb_in = weight_scale_inv.shape[-2], weight_scale_inv.shape[-1]
-                scale = (
-                    weight_scale_inv.float()
-                    .repeat_interleave(out_f // nb_out, -2)
-                    .repeat_interleave(in_f // nb_in, -1)
-                )
-                w_bf16 = (weight.float() * scale).to(torch.bfloat16)
-                out = torch.nn.functional.linear(input.to(torch.bfloat16), w_bf16)
-                return out if output_dtype is None else out.to(output_dtype)
-
-        _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback  # type: ignore[attr-defined]
-except Exception:
-    pass
-
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
@@ -173,6 +120,60 @@ def validate_fsdp2_supported(args, config):
             + "\n  - ".join(issues)
             + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
         )
+
+class _FP8BF16Fallback:
+    """BF16 dequant fallback for block-scaled FP8 matmul when the kernels package is absent.
+
+    Calibration amax collection only — not accurate for production inference.
+    """
+
+    @staticmethod
+    def matmul(input, weight, weight_scale_inv, block_size, output_dtype=None, activation_scale=None):
+        out_f, in_f = weight.shape[-2], weight.shape[-1]
+        nb_out, nb_in = weight_scale_inv.shape[-2], weight_scale_inv.shape[-1]
+        scale = (
+            weight_scale_inv.float()
+            .repeat_interleave(out_f // nb_out, -2)
+            .repeat_interleave(in_f // nb_in, -1)
+        )
+        w_bf16 = (weight.float() * scale).to(torch.bfloat16)
+        out = torch.nn.functional.linear(input.to(torch.bfloat16), w_bf16)
+        return out if output_dtype is None else out.to(output_dtype)
+
+
+def _install_transformers_compat_shims() -> None:
+    """Patch transformers so older remote-code models (e.g. DeepSeek-R1) load on
+    newer/partial installs.  Call once before loading a trust_remote_code checkpoint."""
+    import transformers.utils as _tu
+    import transformers.utils.import_utils as _tui
+
+    # transformers >=5 removed is_torch_fx_available; older bundled model files still import it.
+    if not hasattr(_tui, "is_torch_fx_available"):
+        _tui.is_torch_fx_available = lambda: False  # type: ignore[attr-defined]
+
+    # Broken flash_attn installs (.so undefined-symbol) crash at import time, not find_spec time.
+    # Force transformers' availability checks to False so bundled models skip the flash-attn path.
+    try:
+        import flash_attn  # noqa: F401
+    except Exception:
+        for _mod in (_tu, _tui):
+            for _fn in ("is_flash_attn_2_available", "is_flash_attn_available",
+                        "is_flash_attn_greater_or_equal_2_10"):
+                setattr(_mod, _fn, lambda: False)
+
+    # No `kernels` package → block-scaled FP8 matmul fails; swap in lossy BF16 fallback.
+    with contextlib.suppress(Exception):
+        import transformers.integrations.finegrained_fp8 as _ff8
+        try:
+            _ff8._load_finegrained_fp8_kernel()
+        except ImportError:
+            warnings.warn(
+                "finegrained-fp8 kernel unavailable; using a lossy BF16 dequant fallback "
+                "for FP8 matmul. Suitable for calibration amax collection only.",
+                UserWarning,
+                stacklevel=2,
+            )
+            _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback  # type: ignore[attr-defined]
 
 
 def run_nemotron_vl_preview(
@@ -758,6 +759,7 @@ def get_model(
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
 ):
+    _install_transformers_compat_shims()
     print(f"Initializing model from {ckpt_path}")
 
     _disk_offload = offload_folder is not None
