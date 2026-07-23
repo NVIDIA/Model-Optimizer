@@ -75,12 +75,19 @@ and memory, then choose the smallest topology that fits both student and teacher
 3. Use CP to distribute the 32K context when activation/attention memory is the
    constraint. Prefer CP before TP for a small dense model at long context.
 4. Keep EP=1 for dense models. For MoE, choose EP from expert count, memory, and
-   available ranks; verify expert and data-parallel divisibility.
+   available ranks, and inspect the current `distill.py` value for expert tensor
+   parallelism (ETP); do not assume ETP equals TP.
 5. Add PP only when layer/model state still does not fit.
 
-Verify `DP = world_size / (TP * PP * CP)` is integral and
-`GBS % (MBS * DP) == 0`. Record nodes, GPUs/node, TP/PP/CP/EP/DP, MBS, GPU
-memory, and why each non-one dimension is needed.
+For MoE, Megatron folds two overlapping meshes onto the same ranks within each
+PP stage; EP/ETP do not multiply the dense TP/CP mesh:
+
+- Attention DP: `DP = world_size / (TP * PP * CP)`
+- Expert DP: `EDP = world_size / (ETP * EP * PP)`
+
+Require both divisions to be integral, `num_experts % EP == 0`, and
+`GBS % (MBS * DP) == 0`. Record nodes, GPUs/node, TP/PP/CP/EP/ETP/DP/EDP, MBS,
+GPU memory, and why each non-one dimension is needed.
 
 Example only: for the requested one-node, eight-H100 Qwen3-0.6B validation at
 32K, TP=1, PP=1, CP=4, EP=1, DP=2, MBS=1 is a reasonable starting point. This
