@@ -32,8 +32,19 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
 
-from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
+from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec, get_te_mamba_stack_spec
 from modelopt.torch.utils import print_rank_0
+
+try:  # nemo:26.08+
+    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+
+    HAS_HYBRID = True
+except ImportError:
+    HAS_HYBRID = False
+    HybridModelProvider = None
+    HybridModel = None
+
 
 __all__ = ["load_mbridge_model_from_hf", "load_modelopt_megatron_checkpoint"]
 
@@ -48,9 +59,9 @@ def load_mbridge_model_from_hf(
     load_weights: bool = True,
 ) -> tuple[
     AutoBridge,
-    GPTModelProvider | MambaModelProvider,
+    GPTModelProvider | MambaModelProvider | HybridModelProvider,
     list[MegatronModule],
-    GPTModel | MambaModel,
+    MegatronModule,
     AutoTokenizer,
 ]:
     """Load a Megatron-Bridge model from HF.
@@ -88,8 +99,12 @@ def load_mbridge_model_from_hf(
     # provider (the bridge's native, possibly custom/hybrid spec reads it at build time) rather than
     # replacing the whole layer spec -- overwriting it would drop custom layers (e.g. Qwen3.5's
     # GatedDeltaNet + gated-attention or Gemma3's custom spec).
-    if isinstance(provider, MambaModelProvider):
+    if HAS_HYBRID and isinstance(provider, (HybridModelProvider)):
+        provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+        provider.moe_grouped_gemm = moe_grouped_gemm
+    elif isinstance(provider, (MambaModelProvider)):  # Deprecated in favor of HybridModelProvider
         provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+        provider.moe_grouped_gemm = moe_grouped_gemm
     elif (provider.num_moe_experts or 0) > 0:
         provider.moe_grouped_gemm = moe_grouped_gemm
     provider.finalize()
@@ -100,10 +115,11 @@ def load_mbridge_model_from_hf(
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
     # VLMs (e.g. Qwen3-VL) wrap the language model as ``.language_model``; the pruning target is the
-    # inner GPTModel/MambaModel, but we still return the full wrapper so callers can save the VLM.
+    # inner GPTModel/MambaModel/HybridModel, but we still return the full wrapper so callers can save the VLM.
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    assert isinstance(language_model, (GPTModel, MambaModel)), (
-        f"Expected a GPTModel/MambaModel (optionally wrapped as .language_model), "
+    model_types = (GPTModel, MambaModel, HybridModel) if HAS_HYBRID else (GPTModel, MambaModel)
+    assert isinstance(language_model, model_types), (
+        f"Expected a GPTModel/MambaModel/HybridModel (optionally wrapped as `.language_model`), "
         f"got {type(unwrapped_model)}"
     )
 

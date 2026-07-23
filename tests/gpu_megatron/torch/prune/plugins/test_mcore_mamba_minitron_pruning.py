@@ -53,7 +53,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
     channel_divisor = 64
 
     num_layers = size
-    hybrid_override_pattern = "M" * size
+    hybrid_layer_pattern = "M" * size
     hidden_size = channel_divisor * 4
     mamba_state_dim = channel_divisor
     mamba_head_dim = 16
@@ -67,7 +67,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
         num_layers=num_layers,
-        hybrid_override_pattern=hybrid_override_pattern,
+        hybrid_layer_pattern=hybrid_layer_pattern,
         hidden_size=hidden_size,
         mamba_state_dim=mamba_state_dim,
         mamba_head_dim=mamba_head_dim,
@@ -210,7 +210,10 @@ def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
     assert mixer.headdim == pruned_mamba_head_dim
     assert mixer.d_inner == pruned_mamba_num_heads * pruned_mamba_head_dim
     assert mixer.out_proj.out_features == pruned_hidden_size
-    assert mixer.conv1d.in_channels == mixer.conv1d.out_channels == mixer.d_inner + bc
+    if hasattr(mixer, "conv1d"):  # nemo:26.06 and earlier
+        assert mixer.conv1d.in_channels == mixer.conv1d.out_channels == mixer.d_inner + bc
+    else:  # nemo:26.08+
+        assert mixer.conv1d_weight.shape[0] == mixer.conv1d_bias.shape[0] == mixer.d_inner + bc
 
     # Assert model.config is updated for correct save/restoring
     assert model.config.ffn_hidden_size == pruned_ffn_hidden_size
@@ -239,7 +242,7 @@ _NAS_CHANNEL_DIVISOR = 4
 _NAS_BATCH_SIZE = 2
 _NAS_MODEL_KWARGS = {
     "num_layers": 4,
-    "hybrid_override_pattern": "ME*-",
+    "hybrid_layer_pattern": "ME*-",
     "hidden_size": 16,
     "ffn_hidden_size": 32,
     "num_attention_heads": 16,
