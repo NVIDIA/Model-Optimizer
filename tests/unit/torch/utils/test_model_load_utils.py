@@ -25,9 +25,9 @@ from safetensors.torch import save_file
 pytest.importorskip("accelerate")
 
 from modelopt.torch.utils.plugins.model_load_utils import (
-    _conversion_rules,
+    _conversion_plan,
     _convert_keys,
-    _target_name,
+    _resolve_target,
     read_safetensors_subset,
     weight_map_for,
 )
@@ -121,8 +121,8 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
     single-source path (down_proj is a plain expert stack) in one model.
     """
     model, cfg = _build_tiny_qwen3_moe()
-    rules = _conversion_rules(model)
-    assert rules is not None
+    plan = _conversion_plan(model)
+    assert plan is not None
 
     names = dict(model.named_parameters())
     gname = next(n for n in names if n.endswith("mlp.experts.gate_up_proj"))
@@ -138,7 +138,7 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
         state[f"{prefix}mlp.experts.{e}.up_proj.weight"] = up[e]
         state[f"{prefix}mlp.experts.{e}.down_proj.weight"] = down[e]
 
-    out = _convert_keys(rules, state)
+    out = _convert_keys(plan, state)
 
     # Multi-source: experts stacked (dim 0) then gate|up concatenated (dim 1), gate first.
     gate_up = out[f"{prefix}mlp.experts.gate_up_proj"]
@@ -152,5 +152,5 @@ def test_checkpoint_key_converter_multisource_expert_fusion():
 
     # Name-only mapping routes every source key to the fused target.
     for e in range(n_exp):
-        assert _target_name(rules, f"{prefix}mlp.experts.{e}.gate_proj.weight") == gname
-        assert _target_name(rules, f"{prefix}mlp.experts.{e}.up_proj.weight") == gname
+        assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.gate_proj.weight")[0] == gname
+        assert _resolve_target(plan, f"{prefix}mlp.experts.{e}.up_proj.weight")[0] == gname

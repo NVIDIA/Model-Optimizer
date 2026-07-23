@@ -34,8 +34,9 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 try:
     from transformers.conversion_mapping import get_model_conversion_mapping
-except ImportError:  # transformers<5 has no fused-MoE weight-conversion engine
-    get_model_conversion_mapping = None
+    from transformers.core_model_loading import WeightConverter, dot_natural_key, rename_source_key
+except ImportError:  # transformers<5 has no weight-conversion engine
+    get_model_conversion_mapping = rename_source_key = WeightConverter = dot_natural_key = None
 
 from modelopt.torch.utils.distributed import (
     barrier,
@@ -133,80 +134,69 @@ def _promote_non_dtensor_to_gpu(model: nn.Module, device: torch.device) -> None:
             module._buffers[name] = buf.to(device)
 
 
-def _conversion_rules(model: nn.Module) -> dict | None:
-    """Rename + fuse rules for ``model``, read from transformers' own conversion table.
+def _conversion_plan(model: nn.Module) -> dict | None:
+    """Transformers' own conversion mapping for ``model``, or ``None`` if nothing needs converting.
 
-    Returns ``{"renames": {pattern: repl}, "fuses": [{"src_res", "target", "stack", "cat"}]}``, or
-    ``None`` when nothing needs converting (transformers<5 / already-matching checkpoint). A fuse
-    stacks its per-expert sources on ``stack`` and, when multi-source, concats them on ``cat``.
+    ``legacy_renames`` (``_checkpoint_conversion_mapping``) covers transformers<5; on 5+ the
+    ``renamings``/``converters`` from HF's engine drive renaming + MoE weight fusion directly.
     """
-    renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
-    fuses = []
-    for rule in get_model_conversion_mapping(model) if get_model_conversion_mapping else []:
-        sources, targets = list(rule.source_patterns), list(rule.target_patterns)
-        ops = getattr(rule, "operations", None) or []  # rename-only rules carry none
-        if not ops:
-            renames.update(dict.fromkeys(sources, targets[0]))
-            continue
-        dims = {type(op).__name__: op.dim for op in ops}
-        if len(targets) != 1 or set(dims) - {"MergeModulelist", "Concatenate"}:
-            raise NotImplementedError(
-                f"Unsupported conversion rule {sources} -> {targets} ({set(dims)})"
-            )
-        fuses.append(
-            {
-                "src_res": [re.compile(s.replace("*", "([^.]+)")) for s in sources],
-                "target": targets[0],
-                "stack": dims["MergeModulelist"],
-                "cat": dims.get("Concatenate"),
-            }
-        )
-    return {"renames": renames, "fuses": fuses} if (renames or fuses) else None
+    legacy_renames = dict(getattr(model, "_checkpoint_conversion_mapping", None) or {})
+    renamings, converters = [], []
+    for entry in get_model_conversion_mapping(model) if get_model_conversion_mapping else []:
+        (converters if isinstance(entry, WeightConverter) else renamings).append(entry)
+    if not (legacy_renames or renamings or converters):
+        return None
+    return {
+        "legacy_renames": legacy_renames,
+        "renamings": renamings,
+        "converters": converters,
+        "prefix": model.base_model_prefix,
+        "meta_state_dict": model.state_dict(),
+    }
 
 
-def _rename_key(key: str, renames: dict) -> str:
-    for old, new in renames.items():
+def _resolve_target(plan: dict, key: str) -> tuple[str, str | None]:
+    """Resolve a checkpoint key to ``(target param name, matched converter source pattern)``.
+
+    No tensors are read. ``source_pattern`` is ``None`` for a plain (non-fused) key.
+    """
+    for old, new in plan["legacy_renames"].items():
         key = re.sub(old, new, key)
-    return key
+    if rename_source_key is None:  # transformers<5: legacy renames only, no converters
+        return key, None
+    return rename_source_key(
+        key, plan["renamings"], plan["converters"], plan["prefix"], plan["meta_state_dict"]
+    )
 
 
-def _resolve_fuse_source(key: str, fuses: list):
-    """Where ``key`` lands in a fused param, or ``None`` if it isn't a fuse source.
-
-    On a hit returns ``(target_name, fuse, source_index, expert_idx)``: the fused param name, the
-    matched rule, which source slot matched (e.g. 0=gate, 1=up), and the expert index.
-    """
-    for fuse in fuses:
-        for i, rx in enumerate(fuse["src_res"]):
-            m = rx.search(key)
-            if m:
-                return key[: m.start()] + fuse["target"] + key[m.end() :], fuse, i, m.group(1)
-    return None
-
-
-def _target_name(rules: dict, key: str) -> str:
-    key = _rename_key(key, rules["renames"])
-    hit = _resolve_fuse_source(key, rules["fuses"])
-    return hit[0] if hit else key
-
-
-def _convert_keys(rules: dict, state: dict) -> dict:
-    """Rename 1:1 keys and fuse per-expert keys into the model's fused params."""
-    result, groups = {}, {}  # groups[target] = (fuse, {source_index: {expert_idx: tensor}})
-    for key, tensor in state.items():
-        key = _rename_key(key, rules["renames"])
-        hit = _resolve_fuse_source(key, rules["fuses"])
-        if hit is None:
-            result[key] = tensor
+def _convert_keys(plan: dict, state: dict) -> dict:
+    """Rename 1:1 keys and fuse per-expert keys by driving transformers' own conversion ops."""
+    if rename_source_key is None:  # transformers<5: legacy renames only, no fusion
+        return {_resolve_target(plan, k)[0]: v for k, v in state.items()}
+    result: dict = {}
+    collected: dict = {}  # target -> (converter, {source_pattern: [(sort_key, tensor)]})
+    for key in sorted(state, key=dot_natural_key):
+        renamed, source_pattern = _resolve_target(plan, key)
+        if source_pattern is None:  # plain rename, no fusion
+            result[renamed] = state[key]
             continue
-        target, fuse, i, expert = hit
-        groups.setdefault(target, (fuse, {}))[1].setdefault(i, {})[expert] = tensor
-    for target, (fuse, by_src) in groups.items():
-        stacks = [
-            torch.stack([by_src[i][e] for e in sorted(by_src[i], key=int)], fuse["stack"])
-            for i in range(len(fuse["src_res"]))
-        ]
-        result[target] = stacks[0] if fuse["cat"] is None else torch.cat(stacks, fuse["cat"])
+        conv = next(c for c in plan["converters"] if source_pattern in c.source_patterns)
+        collected.setdefault(renamed, (conv, {}))[1].setdefault(source_pattern, []).append(
+            (dot_natural_key(key), state[key])
+        )
+    for target, (conv, by_src) in collected.items():
+        tensors = {
+            sp: [t for _, t in sorted(lst, key=lambda kt: kt[0])] for sp, lst in by_src.items()
+        }
+        for op in conv.operations:  # transformers runs the fusion math (any op, no whitelist)
+            tensors = op.convert(
+                tensors, source_patterns=conv.source_patterns, target_patterns=conv.target_patterns
+            )
+        if len(tensors) != 1:
+            raise NotImplementedError(
+                f"Only many-to-one conversions supported; got {list(tensors)}"
+            )
+        result[target] = next(iter(tensors.values()))
     return result
 
 
@@ -239,10 +229,10 @@ def _layers_for_rank(n_layers: int, world_size: int, r: int) -> list[int]:
 
 
 def _read_and_convert(
-    resolved_path: str, weight_map: dict, keyset: set[str], rules: dict | None
+    resolved_path: str, weight_map: dict, keyset: set[str], plan: dict | None
 ) -> dict:
     raw = read_safetensors_subset(resolved_path, weight_map, lambda k: k in keyset)
-    return _convert_keys(rules, raw) if rules else raw
+    return _convert_keys(plan, raw) if plan else raw
 
 
 # One decoder layer's converted weights (param-name suffix -> tensor); the outer dict is keyed
@@ -256,13 +246,11 @@ def _read_owned_layers(
     weight_map: dict,
     layer_sources: dict,
     owned_layer_indices: list[int],
-    rules: dict | None,
+    plan: dict | None,
 ) -> OwnedLayerStateDicts:
     """Read + convert this rank's owned decoder layers from disk (ranks read in parallel)."""
     return {
-        layer_idx: _read_and_convert(
-            resolved_path, weight_map, set(layer_sources[layer_idx]), rules
-        )
+        layer_idx: _read_and_convert(resolved_path, weight_map, set(layer_sources[layer_idx]), plan)
         for layer_idx in owned_layer_indices
     }
 
@@ -308,7 +296,7 @@ def _broadcast_load_group(
 
 
 def _group_sources_by_layer(
-    weight_map: dict, rules: dict | None, model_param_names: set[str], layer_prefixes: list[str]
+    weight_map: dict, plan: dict | None, model_param_names: set[str], layer_prefixes: list[str]
 ) -> tuple[dict[int, list[str]], list[str], int]:
     """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
@@ -320,7 +308,7 @@ def _group_sources_by_layer(
     non_layer_sources: list[str] = []
     skipped = 0
     for ckpt_key in weight_map:
-        target = _target_name(rules, ckpt_key) if rules else ckpt_key
+        target = _resolve_target(plan, ckpt_key)[0] if plan else ckpt_key
         if target not in model_param_names:
             skipped += 1
             continue
@@ -373,14 +361,14 @@ def parallel_load_and_prepare_fsdp2(
 
     # transformers>=5 fuses/renames checkpoint keys so they no longer match param names 1:1
     # (None => the pre-5.x identity path).
-    rules = _conversion_rules(model)
+    plan = _conversion_plan(model)
 
     # Valid targets; keys converting to anything else are aux weights (e.g. an MTP head) we skip.
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     # Bucket each checkpoint key by its target's decoder layer (root params go to non_layer_sources).
     layer_sources, non_layer_sources, skipped = _group_sources_by_layer(
-        weight_map, rules, model_param_names, layer_prefixes
+        weight_map, plan, model_param_names, layer_prefixes
     )
     if skipped:
         logger.debug(
@@ -391,7 +379,7 @@ def parallel_load_and_prepare_fsdp2(
 
     owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
     owned_layer_state_dicts = _read_owned_layers(
-        resolved_path, weight_map, layer_sources, owned_layer_indices, rules
+        resolved_path, weight_map, layer_sources, owned_layer_indices, plan
     )
 
     # Smaller broadcast_chunk_size lowers the transient GPU peak (more, smaller collectives).
@@ -416,7 +404,7 @@ def parallel_load_and_prepare_fsdp2(
     # TODO: layerwise support.
     non_layer = None
     if rank == 0:
-        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), rules)
+        non_layer = _read_and_convert(resolved_path, weight_map, set(non_layer_sources), plan)
     non_layer = broadcast_state_dict(non_layer, src=0, device=device)
     if cpu_offload:
         non_layer = {k: v.cpu() for k, v in non_layer.items()}
