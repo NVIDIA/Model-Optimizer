@@ -371,7 +371,9 @@ def _get_sparse_softmax_export_config(module: SparseAttentionModule) -> dict[str
     return sparse_softmax_config
 
 
-def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
+def export_sparse_attention_config(
+    model: nn.Module, *, for_diffusion: bool = False
+) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
     Extracts calibrated skip-softmax parameters and N:M sparse-softmax metadata
@@ -383,12 +385,20 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
 
     Args:
         model: Model with sparse attention applied
+        for_diffusion: Emit the single-phase schema consumed by the TRT-LLM
+            VisualGen runtime (diffusion transformers): coefficients live under
+            ``threshold_scale_factor.coefficients``, ``target_sparsity`` is a
+            scalar, and the optional dense window is the normalized
+            ``disabled_until_timestep`` cutoff. When False (default, LLM path),
+            the phase-keyed schema is emitted instead (``threshold_scale_factor``
+            holds ``prefill``/``decode`` coefficient blocks and ``target_sparsity``
+            is a ``{phase: ratio}`` dict).
 
     Returns:
         Dictionary with sparse attention config for HuggingFace config.json export.
         Returns None if no exportable sparse attention metadata is found.
 
-    Example output::
+    Example output (LLM path, ``for_diffusion=False``)::
 
         {
             "config_groups": {
@@ -420,7 +430,7 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     sparse_softmax_config = None
     target_classes: set[str] = set()
     disabled_layer_names: list[str] = []
-    initial_disabled_steps = 0
+    disabled_until_timestep = None
 
     for name, module in get_named_sparse_attention_modules(model):
         # Get the original wrapped module's class name
@@ -447,8 +457,8 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
             sparse_softmax_config = _get_sparse_softmax_export_config(module)
         # A single run-wide value: take it from the first enabled module that sets it
         # (same harvesting pattern as calibration_params / target_sparse_ratio above).
-        if not initial_disabled_steps:
-            initial_disabled_steps = module._method_config.get("initial_disabled_steps", 0)
+        if disabled_until_timestep is None:
+            disabled_until_timestep = module._method_config.get("disabled_until_timestep")
 
     if calibration_params is None and sparse_softmax_config is None:
         return None
@@ -465,22 +475,44 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
         }
         if disabled_layer_names:
             skip_group["ignore"] = disabled_layer_names
-        if initial_disabled_steps:
-            skip_group["initial_disabled_steps"] = initial_disabled_steps
         # threshold_scale_factor (a * exp(b * target_sparsity)) and target_sparsity are
-        # skip-softmax-specific, so they live in this group.
+        # skip-softmax-specific, so they live in this group. Two consumers, two schemas:
+        # the TRT-LLM VisualGen (diffusion) runtime expects a single coefficient block
+        # under "coefficients" plus a scalar target_sparsity, while the LLM runtime
+        # expects per-phase (prefill/decode) blocks plus a {phase: ratio} dict.
         threshold_scale_factor: dict[str, Any] = {
             "formula": "a * exp(b * target_sparsity)",
         }
-        for phase in ["prefill", "decode"]:
-            if phase in calibration_params:
-                threshold_scale_factor[phase] = {
-                    "a": calibration_params[phase]["a"],
-                    "b": calibration_params[phase]["b"],
+        if for_diffusion:
+            phase_coeffs = calibration_params.get("prefill") or (
+                next(iter(calibration_params.values())) if calibration_params else None
+            )
+            if phase_coeffs is not None:
+                threshold_scale_factor["coefficients"] = {
+                    "a": phase_coeffs["a"],
+                    "b": phase_coeffs["b"],
                 }
-        skip_group["threshold_scale_factor"] = threshold_scale_factor
-        if target_sparse_ratio is not None:
-            skip_group["target_sparsity"] = target_sparse_ratio
+            skip_group["threshold_scale_factor"] = threshold_scale_factor
+            if target_sparse_ratio is not None:
+                scalar_sparsity = (
+                    target_sparse_ratio.get("prefill")
+                    if isinstance(target_sparse_ratio, dict)
+                    else target_sparse_ratio
+                )
+                if scalar_sparsity is not None:
+                    skip_group["target_sparsity"] = scalar_sparsity
+            if disabled_until_timestep is not None:
+                skip_group["disabled_until_timestep"] = disabled_until_timestep
+        else:
+            for phase in ["prefill", "decode"]:
+                if phase in calibration_params:
+                    threshold_scale_factor[phase] = {
+                        "a": calibration_params[phase]["a"],
+                        "b": calibration_params[phase]["b"],
+                    }
+            skip_group["threshold_scale_factor"] = threshold_scale_factor
+            if target_sparse_ratio is not None:
+                skip_group["target_sparsity"] = target_sparse_ratio
         config_groups[f"group_{group_idx}"] = skip_group
         group_idx += 1
 

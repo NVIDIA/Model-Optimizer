@@ -180,7 +180,7 @@ def test_wan22_calibrated_export(tmp_path):
             "skip_softmax_threshold": 0.1,
             "backend": "triton",
             "is_causal": False,
-            "initial_disabled_steps": 5,
+            "disabled_until_timestep": 0.8,
             "enable": True,
         },
         "*.attn2*": {"enable": False},
@@ -231,14 +231,17 @@ def test_wan22_calibrated_export(tmp_path):
         assert "ignore" in group_0
         assert any(".attn2" in name for name in group_0["ignore"])
 
-        # Opt-in initial_disabled_steps metadata is carried through (exported only when > 0).
-        assert group_0["initial_disabled_steps"] == 5
+        # Opt-in disabled_until_timestep metadata is carried through (exported only when set).
+        assert group_0["disabled_until_timestep"] == 0.8
 
         # threshold_scale_factor lives inside the skip_softmax group.
         tsf = group_0["threshold_scale_factor"]
         assert tsf["formula"] == "a * exp(b * target_sparsity)"
-        assert tsf["prefill"]["a"] == pytest.approx(math.exp(test_log_a))
-        assert tsf["prefill"]["b"] == pytest.approx(test_b)
+        assert tsf["coefficients"]["a"] == pytest.approx(math.exp(test_log_a))
+        assert tsf["coefficients"]["b"] == pytest.approx(test_b)
+
+        # Diffusion/VisualGen schema: scalar target_sparsity (not a {phase: ratio} dict).
+        assert group_0["target_sparsity"] == pytest.approx(0.5)
 
         # Calibrated mode — no raw_threshold.
         assert "raw_threshold" not in group_0

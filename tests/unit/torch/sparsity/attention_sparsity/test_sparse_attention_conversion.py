@@ -387,6 +387,36 @@ class TestExportSparseAttentionConfig:
         assert group_0["target_sparsity"] == {"prefill": 0.4, "decode": 0.6}
         assert out["producer"]["name"] == "modelopt"
 
+    def test_exports_diffusion_visual_gen_format(self):
+        """for_diffusion=True emits the single-phase TRT-LLM VisualGen schema."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        for module in model.modules():
+            if isinstance(module, SparseAttentionModule):
+                module._sparse_method_instance.calibration_params = {
+                    "prefill": {"a": 3.14, "b": 7.5},
+                    "decode": {"a": 0.5, "b": 9.0},
+                }
+                module._sparse_method_instance.target_sparse_ratio = {
+                    "prefill": 0.4,
+                    "decode": 0.6,
+                }
+                module._method_config["disabled_until_timestep"] = 0.8
+
+        out = export_sparse_attention_config(model, for_diffusion=True)
+        assert out is not None
+        group_0 = out["config_groups"]["group_0"]
+        tsf = group_0["threshold_scale_factor"]
+        # Single coefficient block under "coefficients" (no prefill/decode nesting).
+        assert tsf["formula"] == "a * exp(b * target_sparsity)"
+        assert tsf["coefficients"] == {"a": 3.14, "b": 7.5}
+        assert "prefill" not in tsf and "decode" not in tsf
+        # Scalar target_sparsity (the prefill value), not a {phase: ratio} dict.
+        assert group_0["target_sparsity"] == 0.4
+        # Normalized denoising-timestep cutoff carried through.
+        assert group_0["disabled_until_timestep"] == 0.8
+
     def test_exports_sparse_softmax_metadata(self):
         """N:M sparse-softmax params are exported without calibration metadata."""
         model = SimpleAttentionModel()
