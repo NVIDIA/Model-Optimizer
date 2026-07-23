@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -15,9 +16,11 @@ from . import SetupError
 __all__ = [
     "AxisInventory",
     "AxisSpec",
+    "CandidateCounts",
     "ModelInventory",
     "ModelProfile",
     "UnsupportedModelError",
+    "count_candidate_options",
     "resolve_profile",
 ]
 
@@ -152,6 +155,27 @@ class ModelInventory:
     def to_dict(self) -> dict[str, Any]:
         """Convert the inventory to YAML-safe built-in values."""
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CandidateCounts:
+    """Exact vLLM configuration and replace-one solution counts."""
+
+    vllm_subblock: int
+    vllm_block: int
+    replacement_subblock_per_width: int
+    replacement_block_per_width: int
+    width_count: int
+
+    @property
+    def replacement_subblock_total(self) -> int:
+        """Return subblock replacement solutions across all selected widths."""
+        return self.replacement_subblock_per_width * self.width_count
+
+    @property
+    def replacement_block_total(self) -> int:
+        """Return block replacement solutions across all selected widths."""
+        return self.replacement_block_per_width * self.width_count
 
 
 class UnsupportedModelError(SetupError):
@@ -354,6 +378,25 @@ _NEMOTRON_AXES = (
     AxisSpec("mamba_head_dim", "Mamba head dimension", ("mamba_head_dim",), 8, 8),
 )
 
+_SUBBLOCK_AXES = {
+    "attention": ("kv_groups", "q_heads_per_group"),
+    "gdn": (
+        "gdn_key_groups",
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+    ),
+    "ffn": ("ffn_intermediate",),
+    "moe": (
+        "moe_experts",
+        "moe_expert_intermediate",
+        "moe_shared_expert_intermediate",
+        "moe_top_k",
+        "moe_latent_dim",
+    ),
+    "mamba": ("mamba_heads", "mamba_head_dim"),
+}
+
 SUPPORTED_PROFILES = (
     ModelProfile(
         family="nemotron3",
@@ -428,6 +471,102 @@ SUPPORTED_PROFILES = (
         },
     ),
 )
+
+
+def _axis_domain_size(axes: Mapping[str, Any], axis_id: str) -> int:
+    axis = _mapping(axes.get(axis_id))
+    if not axis or not bool(axis.get("enabled", True)):
+        return 1
+    values = tuple(dict.fromkeys(int(value) for value in axis.get("values") or ()))
+    return len(values) or 1
+
+
+def _qwen_block_families(
+    config: Mapping[str, Any], *, moe: bool
+) -> tuple[tuple[str, ...], ...]:
+    language = _language_config(config)
+    layer_types = tuple(str(value) for value in language.get("layer_types") or ())
+    num_layers = int(language.get("num_hidden_layers", 0))
+    if not layer_types:
+        interval = int(language.get("full_attention_interval", 0))
+        if interval <= 0 or num_layers <= 0:
+            raise SetupError(
+                "Qwen candidate counting requires layer_types or full_attention_interval."
+            )
+        layer_types = tuple(
+            "full_attention" if (index + 1) % interval == 0 else "linear_attention"
+            for index in range(num_layers)
+        )
+    if len(layer_types) != num_layers:
+        raise SetupError("Qwen layer_types does not match num_hidden_layers.")
+    feed_forward = "moe" if moe else "ffn"
+    mapping = {
+        "full_attention": ("attention", feed_forward),
+        "linear_attention": ("gdn", feed_forward),
+    }
+    try:
+        return tuple(mapping[layer_type] for layer_type in layer_types)
+    except KeyError as error:
+        raise SetupError(f"Unsupported Qwen layer type: {error.args[0]}") from error
+
+
+def _nemotron_block_families(config: Mapping[str, Any]) -> tuple[tuple[str, ...], ...]:
+    language = _language_config(config)
+    pattern = str(language.get("hybrid_override_pattern") or "")
+    mapping = {
+        "*": ("attention",),
+        "M": ("mamba",),
+        "E": ("moe",),
+        "-": ("ffn",),
+    }
+    if len(pattern) != int(language.get("num_hidden_layers", 0)):
+        raise SetupError("Nemotron hybrid pattern does not match num_hidden_layers.")
+    try:
+        return tuple(mapping[character] for character in pattern)
+    except KeyError as error:
+        raise SetupError(f"Unsupported Nemotron hybrid marker: {error.args[0]}") from error
+
+
+def count_candidate_options(
+    config: Mapping[str, Any],
+    inventory: ModelInventory,
+    axes: Mapping[str, Any],
+) -> CandidateCounts:
+    """Count exact configuration-only vLLM and replace-one candidates."""
+    if inventory.family == "qwen3_5":
+        layer_families = _qwen_block_families(config, moe=inventory.moe)
+    elif inventory.family == "nemotron3":
+        layer_families = _nemotron_block_families(config)
+    else:
+        raise SetupError(f"Candidate counting is not implemented for {inventory.family}")
+
+    active_subblocks = {subblock for family in layer_families for subblock in family}
+    domains = {
+        subblock: math.prod(
+            _axis_domain_size(axes, axis_id) for axis_id in _SUBBLOCK_AXES[subblock]
+        )
+        for subblock in active_subblocks
+    }
+    unique_block_families = tuple(dict.fromkeys(layer_families))
+    vllm_subblock = sum(domains[subblock] for subblock in active_subblocks)
+    vllm_block = sum(
+        math.prod(domains[subblock] for subblock in family) for family in unique_block_families
+    )
+    replacement_subblock = sum(
+        sum(domains[subblock] - 1 for subblock in family) for family in layer_families
+    )
+    replacement_block = sum(
+        math.prod(domains[subblock] for subblock in family) - 1 for family in layer_families
+    )
+    hidden = _mapping(axes.get("hidden_width"))
+    widths = tuple(dict.fromkeys(int(value) for value in hidden.get("values") or ()))
+    return CandidateCounts(
+        vllm_subblock=vllm_subblock,
+        vllm_block=vllm_block,
+        replacement_subblock_per_width=replacement_subblock,
+        replacement_block_per_width=replacement_block,
+        width_count=len(widths) or 1,
+    )
 
 
 def resolve_profile(config: Mapping[str, Any]) -> ModelProfile:
