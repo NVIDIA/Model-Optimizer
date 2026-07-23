@@ -27,21 +27,20 @@ Treat them as the source of truth for mutable flags, containers, model support,
 and checkpoint formats. Do not copy their full command lines into new wrappers.
 The deprecated `examples/llm_qad` flow is not the default.
 
-## 2. Establish the gap
+## 2. Reuse or establish the gap
 
-When QAD follows `evaluation` or `quant-recipe-search`, reuse its complete PTQ
-config or recipe to reproduce PTQ with `examples/megatron_bridge/quantize.py`;
-do not use the usual HF checkpoint as the QAD student. Preserve the quantization
-format, layer selection, calibration dataset, sample count, sequence length,
-seed, and topology; do not substitute a cheaper or otherwise different PTQ run.
+When QAD follows `evaluation`, `compare-results`, or `quant-recipe-search`,
+reuse the validated BF16/PTQ scores and exact benchmark configuration; do not
+rerun valid baselines. Record their run IDs, metric, direction, uncertainty, and
+acceptable delta. Use `evaluation` and `compare-results` only for missing,
+unvalidated, or non-comparable results. Stop if the gap is not material.
 
-Use the `evaluation` and `compare-results` skills to run and validate the same
-benchmark configuration on the BF16 source and the export of the exact
-quantized Megatron checkpoint that will initialize QAD. If the existing PTQ
-result came from another checkpoint or its lineage is unclear, export and
-benchmark the intended Megatron checkpoint first. Record its path or identifier,
-metric, direction, uncertainty, and acceptable delta. Stop if the gap is not
-material or the runs are not comparable.
+Reuse the preceding PTQ config or recipe to reproduce PTQ with
+`examples/megatron_bridge/quantize.py`; do not use the usual HF checkpoint as
+the QAD student. Preserve the quantization format, layer selection, calibration
+dataset, sample count, sequence length, and seed. Choose Megatron execution
+topology separately without changing quantization semantics. If any quantization
+setting must change, treat it as a new PTQ candidate and evaluate it before QAD.
 
 ## 3. Set up Slurm execution
 
@@ -58,11 +57,11 @@ target is not Slurm.
 Use the common account, partition, registry-auth, submission, and monitoring
 procedures in either case.
 
-Keep BF16, the exact benchmarked PTQ Megatron checkpoint and its export, QAD
-Megatron, exported checkpoints, data, logs, and benchmark results in the same
-session/model workspace. QAD must start from the checkpoint produced by
-`examples/megatron_bridge/quantize.py` because it carries the ModelOpt state; an
-exported HF PTQ checkpoint is not a substitute.
+Keep the reused BF16/PTQ run references and configs with the reproduced PTQ
+Megatron checkpoint, QAD checkpoints, data, logs, exports, and new benchmark
+results in the same session/model workspace. QAD must start from the checkpoint
+produced by `examples/megatron_bridge/quantize.py` because it carries the
+ModelOpt state; an exported HF PTQ checkpoint is not a substitute.
 
 ## 4. Choose topology explicitly
 
@@ -112,11 +111,13 @@ The supported real-data `GPTDatasetConfig` shuffles documents and concatenates
 them into fixed-length 32K samples, so sequences are packed instead of padded.
 Do not use mock data as training evidence.
 
-## 6. Retain PTQ lineage, then run staged QAD
+## 6. Reproduce PTQ, then run staged QAD
 
-Use the exact PTQ Megatron checkpoint established in step 2, or produce and
-benchmark it before QAD. Follow the current Megatron Bridge README for PTQ, QAD,
-resume, and export commands. Apply these QAD defaults:
+Produce the required Megatron checkpoint with the PTQ config or recipe preserved
+in step 2. Reuse a valid preceding PTQ evaluation; run a new PTQ evaluation only
+when the baseline is missing, invalid, or non-comparable, or a quantization
+setting changed. Follow the current Megatron Bridge README for PTQ, QAD, resume,
+and export commands. Apply these QAD defaults:
 
 | Setting | Default |
 | --- | --- |
@@ -145,7 +146,9 @@ At the initial exit:
 1. Confirm finite QAD/KD loss, sensible learning rate, non-pathological gradient
    norm, and an iteration-150 checkpoint.
 2. Export that QAD checkpoint with the current quantized Megatron exporter.
-3. Run the identical benchmark on BF16, the step-2 PTQ export, and QAD-150.
+3. Evaluate QAD-150 with the exact step-2 benchmark configuration. Reuse
+   validated, comparable BF16/PTQ results; run only missing, invalid, or
+   non-comparable baselines.
 4. Calculate the original gap and recovery. For higher-is-better metrics:
    `gap = BF16 - PTQ`, `recovered = QAD - PTQ`, and
    `recovery_fraction = recovered / gap`.
@@ -161,6 +164,7 @@ the 1000-step cap without explicit user direction.
 
 Report exact source revision, commands, Slurm job/account/partition, container,
 paths, topology derivation, dataset configs/seed/token budget/materialized
-counts, PTQ format, checkpoint iterations, loss/LR/grad trend, scheduler state,
-and BF16/PTQ/QAD benchmark scores. Support success with both scheduler and log
-evidence; identify the first real error when a run fails.
+counts, PTQ format, reused evaluation run IDs, checkpoint iterations,
+loss/LR/grad trend, scheduler state, and BF16/PTQ/QAD benchmark scores. State
+which scores were reused versus newly evaluated. Support success with both
+scheduler and log evidence; identify the first real error when a run fails.
