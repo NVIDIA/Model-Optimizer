@@ -112,6 +112,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
         lr_warmup_iters=2,
         eval_interval=early_exit_iter,
         eval_iters=1,
+        save_interval=1,
         log_interval=1,
         exit_interval=early_exit_iter,
         exit_duration_in_mins=60,
@@ -120,6 +121,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
     distilled_megatron_path = distill_output_dir / "checkpoints"
     tracker = distilled_megatron_path / "latest_checkpointed_iteration.txt"
     assert tracker.read_text(encoding="utf-8").strip() == str(early_exit_iter)
+    assert (distilled_megatron_path / "iter_0000001").is_dir()
     assert list(distilled_megatron_path.rglob("modelopt_state")), (
         "Expected modelopt_state to be preserved in the distilled (QAD) checkpoint"
     )

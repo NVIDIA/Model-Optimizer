@@ -161,11 +161,15 @@ def get_args():
         help="Modules to recompute with --recompute_granularity=selective. Defaults to ['core_attn']. "
         "Allowed: core_attn, mlp, moe, moe_act, layernorm, mla_up_proj, shared_experts.",
     )
-    parser.add_argument(
-        "--eval_interval", type=int, default=100, help="Validate + checkpoint every <N> steps"
-    )
+    parser.add_argument("--eval_interval", type=int, default=100, help="Validate every <N> steps")
     parser.add_argument(
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
+    )
+    parser.add_argument(
+        "--save_interval",
+        type=int,
+        default=None,
+        help="Checkpoint every <N> steps; defaults to --eval_interval",
     )
     parser.add_argument(
         "--exit_interval",
@@ -370,7 +374,9 @@ def main(args: argparse.Namespace):
             tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
         ),
         checkpoint=CheckpointConfig(
-            save_interval=args.eval_interval,
+            save_interval=(
+                args.save_interval if args.save_interval is not None else args.eval_interval
+            ),
             save=checkpoint_dir,
             load=checkpoint_dir,  # Resume from this directory (if exists)
             most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)

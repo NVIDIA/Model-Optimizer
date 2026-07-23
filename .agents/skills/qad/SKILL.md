@@ -1,18 +1,18 @@
 ---
 name: qad
 description: >-
-  Recover a measured BF16-to-PTQ accuracy gap on Slurm with ModelOpt
-  Quantization-Aware Distillation (QAD) through Megatron Bridge. Use when PTQ
-  has already been benchmarked against the matching BF16 model and the
-  quantized checkpoint needs short, evidence-driven distillation; also use for
-  QAD topology, data preparation, Slurm launch, resume, checkpoint export, or
-  recovery decisions.
+  Run explicitly requested ModelOpt Quantization-Aware Distillation (QAD) on
+  Slurm through Megatron Bridge to recover a measured BF16-to-PTQ accuracy gap.
+  Use only when the user explicitly asks for QAD, including its topology, data
+  preparation, Slurm launch, resume, checkpoint export, or recovery decisions.
 ---
 
 # ModelOpt Quantization-Aware Distillation
 
-Use QAD only to recover a material, apples-to-apples PTQ benchmark gap. Do not
-train merely because a quantized checkpoint exists.
+QAD is expensive. Use it only to recover a material, apples-to-apples PTQ
+benchmark gap and only when the user explicitly requests QAD for the target
+model or run. Do not infer permission from a quantized checkpoint, evaluation
+gap, or recipe-search result.
 
 ## 1. Read the supported workflow
 
@@ -116,7 +116,16 @@ for Megatron's train/validation split.
 Pass the generated `data_blend.txt` entries as `distill.py --data_paths`.
 The supported real-data `GPTDatasetConfig` shuffles documents and concatenates
 them into fixed-length 32K samples, so sequences are packed instead of padded.
-Do not use mock data as training evidence.
+It deterministically holds out 1% of those shuffled documents for validation
+with `split="99,1,0"`; bounded materialization uses shuffle seed 42, while the
+training seed controls ordering within the Megatron splits. Do not download a
+duplicate validation copy. With the defaults, two GBS-512 32K validation
+batches consume 33.6M tokens from the nominal 26M-token holdout, so about 1.3
+passes per validation event is accepted. Recalculate this ratio when changing
+GBS, sequence length, or `eval_iters`, and increase the token budget rather than
+allowing substantially more repetition. Treat this loss as a training-health
+signal; the independent benchmark remains the recovery gate. Do not use mock
+data as training evidence.
 
 ## 6. Reproduce PTQ, then run staged QAD
 
@@ -134,24 +143,39 @@ and export commands. Apply these QAD defaults:
 | Training cap | 1000 iterations |
 | Global batch size | 512 |
 | Dataset | `nvidia/Nemotron-Cascade-2-SFT-Data` |
-| Initial eval/save/exit | iteration 150 |
+| Validation | every 25 iterations; deterministic 1% holdout; 2 batches |
+| Checkpoint interval | 50 iterations |
+| Initial benchmark/exit | iteration 150 |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
 Keep `train_iters=1000` from the first run so the cosine schedule has a stable
-horizon. Set `eval_interval=150`, `exit_interval=150`, and
-`exit_duration_in_mins=220` for the initial stage. The duration exit is a
+horizon. Set `save_interval=50`, `eval_interval=25`, `eval_iters=2`,
+`exit_interval=150`, and `exit_duration_in_mins=220` for the initial stage. This
+preserves checkpoints at iterations 50, 100, and 150. The duration exit is a
 checkpointing safety margin, not the training target.
 
 Use one result-bearing Slurm job per stage and put Pyxis container flags on the
 final `srun`. Fold startup validation into that job; do not submit separate GPU
 preflight or smoke jobs.
 
-## 7. Benchmark before continuing
+## 7. Monitor loss, then benchmark
+
+Monitor the running log instead of waiting for the stage to finish. Record total
+or logits-distillation loss every log interval. The expected signal is a
+decreasing smoothed trend, not a decrease at every noisy step:
+
+1. From iteration 100 onward, compare the median loss in each 50-step window
+   with the preceding window.
+2. Treat non-finite loss, NaN iterations, repeated skipped iterations, or a
+   sharp sustained increase as immediate failure.
+3. Flag one flat or rising window. If a second consecutive window also fails to
+   decrease, stop at the checkpoint ending that second window. Preserve the
+   latest known-good checkpoint and diagnose before resuming.
 
 At the initial exit:
 
-1. Confirm finite QAD/KD loss, sensible learning rate, non-pathological gradient
-   norm, and an iteration-150 checkpoint.
+1. Confirm the smoothed QAD/KD loss decreased, learning rate is sensible,
+   gradient norm is non-pathological, and checkpoints 50, 100, and 150 exist.
 2. Export that QAD checkpoint with the current quantized Megatron exporter.
 3. Evaluate QAD-150 with the exact step-2 benchmark configuration. Reuse
    validated, comparable BF16/PTQ results; run only missing, invalid, or
@@ -163,9 +187,10 @@ At the initial exit:
 Continue only if benchmark recovery is positive beyond run noise and loss is
 stable. Choose the next absolute checkpoint from the evidence (for example 300,
 500, 750, or 1000), resume the same output directory with `train_iters=1000`,
-and set both `eval_interval` and `exit_interval` to that target. Stop on
-recovered gap, plateau, regression, divergence, or iteration 1000. Never raise
-the 1000-step cap without explicit user direction.
+retain `eval_interval=25`, `eval_iters=2`, and `save_interval=50`, and set only
+`exit_interval` to that target. Stop on recovered gap, plateau, regression,
+divergence, or iteration 1000. Never raise the 1000-step cap without explicit
+user direction.
 
 ## 8. Report evidence
 
