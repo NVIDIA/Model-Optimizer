@@ -51,7 +51,7 @@ from modelopt.torch.distill.doge_megatron_loss import (
 from modelopt.torch.utils import print_rank_0
 
 DoGETrainLossMode = Literal["weighted", "sampled"]
-DoGEWeightUpdateStrategy = Literal["alignment", "kd_gap"]
+DoGEWeightUpdateStrategy = Literal["alignment", "kd_gap", "target_kd_gap"]
 
 __all__ = ["DoGEForwardStep", "DoGETrainLossMode", "DoGEWeightUpdateStrategy"]
 
@@ -105,11 +105,13 @@ class DoGEForwardStep:
             weight_update_strategy: How to turn per-source diagnostics into the next blend.
                 ``alignment`` uses the DoGE gradient-alignment update. ``kd_gap`` sets weights
                 proportional to per-source KD loss as a naive PASER-style baseline.
+                ``target_kd_gap`` applies the KD-gap update only to sources that are also in the
+                target blend and sets non-target source weights to zero.
             sampling_seed: Seed used for deterministic source sampling in ``sampled`` mode.
         """
         if train_loss_mode not in ("weighted", "sampled"):
             raise ValueError(f"Unsupported DoGE train loss mode: {train_loss_mode!r}")
-        if weight_update_strategy not in ("alignment", "kd_gap"):
+        if weight_update_strategy not in ("alignment", "kd_gap", "target_kd_gap"):
             raise ValueError(f"Unsupported DoGE weight update strategy: {weight_update_strategy!r}")
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -335,7 +337,7 @@ class DoGEForwardStep:
         """Return the per-source scores used to propose the next blend."""
         if self.weight_update_strategy == "alignment":
             return alignment_result.scores
-        if self.weight_update_strategy == "kd_gap":
+        if self.weight_update_strategy in ("kd_gap", "target_kd_gap"):
             return alignment_result.source_probe_kd_loss
         raise RuntimeError(
             f"Unsupported DoGE weight update strategy: {self.weight_update_strategy!r}"
@@ -349,6 +351,13 @@ class DoGEForwardStep:
             return dict(self.updater.update(self.blend_weights, weight_update_scores))
         if self.weight_update_strategy == "kd_gap":
             return _normalize_scores_as_weights(weight_update_scores, self.min_blend_weight)
+        if self.weight_update_strategy == "target_kd_gap":
+            return _normalize_target_scores_as_weights(
+                weight_update_scores,
+                self.blend_weights,
+                self.target_blend_weights,
+                self.min_blend_weight,
+            )
         raise RuntimeError(
             f"Unsupported DoGE weight update strategy: {self.weight_update_strategy!r}"
         )
@@ -434,6 +443,28 @@ def _normalize_scores_as_weights(
         path: min_blend_weight + remaining_weight * weight
         for path, weight in normalized_scores.items()
     }
+
+
+def _normalize_target_scores_as_weights(
+    scores: dict[str, float],
+    blend_weights: dict[str, float],
+    target_blend_weights: dict[str, float],
+    min_blend_weight: float = 0.0,
+) -> dict[str, float]:
+    """Normalize KD-gap scores only over sources that are also target sources."""
+    target_scores = {
+        path: scores[path]
+        for path in blend_weights
+        if path in target_blend_weights and path in scores
+    }
+    if not target_scores:
+        raise ValueError(
+            "target_kd_gap requires at least one identical path in --data_paths and "
+            "--target_data_paths."
+        )
+
+    target_weights = _normalize_scores_as_weights(target_scores, min_blend_weight)
+    return {path: target_weights.get(path, 0.0) for path in blend_weights}
 
 
 def _normalize_schedule_end_weights(

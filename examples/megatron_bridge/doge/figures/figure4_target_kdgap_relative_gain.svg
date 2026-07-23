@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="520" viewBox="0 0 980 520">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#222}.title{font-size:20px;font-weight:700}.subtitle{font-size:13px;fill:#555}.label{font-size:13px}.tick{font-size:11px;fill:#666}.value{font-size:12px;font-weight:700}.axis{stroke:#222;stroke-width:1}.grid{stroke:#ddd;stroke-width:1}.avg{stroke:#1f77b4;stroke-width:2;stroke-dasharray:5 4}</style>
+<text class="title" x="490.0" y="30" text-anchor="middle">Target KD-gap adaptive blend: relative gain by target source</text>
+<text class="subtitle" x="490.0" y="52" text-anchor="middle">Final 40 iterations, relative KD-loss reduction vs 24-source uniform baseline</text>
+<line class="grid" x1="190.0" y1="68" x2="190.0" y2="483"/>
+<text class="tick" x="190.0" y="513" text-anchor="middle">0%</text>
+<line class="grid" x1="306.7" y1="68" x2="306.7" y2="483"/>
+<text class="tick" x="306.7" y="513" text-anchor="middle">1%</text>
+<line class="grid" x1="423.3" y1="68" x2="423.3" y2="483"/>
+<text class="tick" x="423.3" y="513" text-anchor="middle">2%</text>
+<line class="grid" x1="540.0" y1="68" x2="540.0" y2="483"/>
+<text class="tick" x="540.0" y="513" text-anchor="middle">3%</text>
+<line class="grid" x1="656.7" y1="68" x2="656.7" y2="483"/>
+<text class="tick" x="656.7" y="513" text-anchor="middle">4%</text>
+<line class="grid" x1="773.3" y1="68" x2="773.3" y2="483"/>
+<text class="tick" x="773.3" y="513" text-anchor="middle">5%</text>
+<line class="grid" x1="890.0" y1="68" x2="890.0" y2="483"/>
+<text class="tick" x="890.0" y="513" text-anchor="middle">6%</text>
+<line class="axis" x1="190" y1="493" x2="890" y2="493"/>
+<text class="subtitle" x="540.0" y="498" text-anchor="middle">Relative KD-loss reduction vs uniform (%)</text>
+<line class="avg" x1="475.3" y1="68" x2="475.3" y2="483"/>
+<text class="subtitle" x="483.3" y="61" text-anchor="start" fill="#1f77b4">avg 2.45%</text>
+<text class="label" x="178" y="97.0" text-anchor="end">PT-v2 Math</text>
+<rect x="190" y="78" width="579.7" height="28" rx="3" fill="#2ca02c"/>
+<text class="value" x="777.7" y="97.0" text-anchor="start">+5.0%</text>
+<title>PT-v2 Math: uniform KD 0.1300, target KD-gap KD 0.1235, gain 4.97%</title>
+<text class="label" x="178" y="138.0" text-anchor="end">PT-v2 Multi JA</text>
+<rect x="190" y="119" width="436.6" height="28" rx="3" fill="#2ca02c"/>
+<text class="value" x="634.6" y="138.0" text-anchor="start">+3.7%</text>
+<title>PT-v2 Multi JA: uniform KD 0.2094, target KD-gap KD 0.2016, gain 3.74%</title>
+<text class="label" x="178" y="179.0" text-anchor="end">PT-v2 STEM</text>
+<rect x="190" y="160" width="363.7" height="28" rx="3" fill="#2ca02c"/>
+<text class="value" x="561.7" y="179.0" text-anchor="start">+3.1%</text>
+<title>PT-v2 STEM: uniform KD 0.2521, target KD-gap KD 0.2443, gain 3.12%</title>
+<text class="label" x="178" y="220.0" text-anchor="end">PT-v2 Code</text>
+<rect x="190" y="201" width="343.4" height="28" rx="3" fill="#2ca02c"/>
+<text class="value" x="541.4" y="220.0" text-anchor="start">+2.9%</text>
+<title>PT-v2 Code: uniform KD 0.2123, target KD-gap KD 0.2061, gain 2.94%</title>
+<text class="label" x="178" y="261.0" text-anchor="end">PT-v1 STEM</text>
+<rect x="190" y="242" width="322.7" height="28" rx="3" fill="#2ca02c"/>
+<text class="value" x="520.7" y="261.0" text-anchor="start">+2.8%</text>
+<title>PT-v1 STEM: uniform KD 0.2377, target KD-gap KD 0.2311, gain 2.77%</title>
+<text class="label" x="178" y="302.0" text-anchor="end">PT-v2 Multi DE</text>
+<rect x="190" y="283" width="314.2" height="28" rx="3" fill="#2ca02c"/>
+<text class="value" x="512.2" y="302.0" text-anchor="start">+2.7%</text>
+<title>PT-v2 Multi DE: uniform KD 0.1984, target KD-gap KD 0.1931, gain 2.69%</title>
+<text class="label" x="178" y="343.0" text-anchor="end">PT-v2 Multi ES</text>
+<rect x="190" y="324" width="280.1" height="28" rx="3" fill="#86bf91"/>
+<text class="value" x="478.1" y="343.0" text-anchor="start">+2.4%</text>
+<title>PT-v2 Multi ES: uniform KD 0.1928, target KD-gap KD 0.1881, gain 2.40%</title>
+<text class="label" x="178" y="384.0" text-anchor="end">PT-v2 Multi IT</text>
+<rect x="190" y="365" width="217.2" height="28" rx="3" fill="#86bf91"/>
+<text class="value" x="415.2" y="384.0" text-anchor="start">+1.9%</text>
+<title>PT-v2 Multi IT: uniform KD 0.1836, target KD-gap KD 0.1801, gain 1.86%</title>
+<text class="label" x="178" y="425.0" text-anchor="end">PT-v2 Multi FR</text>
+<rect x="190" y="406" width="118.6" height="28" rx="3" fill="#86bf91"/>
+<text class="value" x="316.6" y="425.0" text-anchor="start">+1.0%</text>
+<title>PT-v2 Multi FR: uniform KD 0.1929, target KD-gap KD 0.1909, gain 1.02%</title>
+<text class="label" x="178" y="466.0" text-anchor="end">PT-v2 Chat</text>
+<rect x="190" y="447" width="75.2" height="28" rx="3" fill="#86bf91"/>
+<text class="value" x="273.2" y="466.0" text-anchor="start">+0.6%</text>
+<title>PT-v2 Chat: uniform KD 0.3382, target KD-gap KD 0.3360, gain 0.64%</title>
+</svg>

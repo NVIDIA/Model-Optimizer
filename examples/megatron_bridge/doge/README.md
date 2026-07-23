@@ -10,9 +10,9 @@ normal `distill.py` run.
 Goal: find data-blend weights that best recover the accuracy of a Qwen3-8B 0.7x
 memory-compressed/pruned student during teacher distillation.
 
-Tuning data-blend weights for distillation improved KD loss by up to 5.9% on individual target data
-sources and by 2.32% on average across 10 target data sources, compared with uniform blending
-(Figure 1). The experiment used 24 training data sources (Figure 2), and the learned weights shifted
+Tuning data-blend weights for distillation improved KD loss by up to 5.0% on individual target data
+sources and by 2.45% on average across 10 target data sources, compared with uniform blending
+(Figure 4). The experiment used 24 training data sources (Figure 2), and the learned weights shifted
 toward more useful sources during distillation (Figure 3). In the earlier setup with only 3 target
 data sources, the gain was larger, around 7%.
 
@@ -29,6 +29,12 @@ almost unseen, even if its weighted loss still provides a strong gradient signal
 closer to real distillation, we changed the training loss to sample from the data-source mixture
 instead of always computing a weighted mixture loss over all sources.
 
+The best adaptive result so far uses a target-domain KD-gap update: compute KD-gap scores for the
+intersection of source domains and target domains, normalize only those target-domain scores into
+blend weights, and set non-target source weights to zero. This avoids the failure mode of a naive
+KD-gap update over all sources, where high-gap but irrelevant non-target sources can receive too
+much mass.
+
 We rejected the [CLIMB](https://arxiv.org/abs/2504.13161)-style approach for now because it is too
 expensive. CLIMB runs a guided grid search by distilling many smaller proxy models to estimate good
 blend weights, which adds substantial extra training cost before the final distillation run.
@@ -38,8 +44,13 @@ an MVP and validating it at scale across many compressed models. Current expecta
 1-2% downstream improvement on average, but the value could be higher when distilling for a specific
 target task or when a compressed model has a regression concentrated in a small number of domains.
 
-Next step: run a few more targeted ablations, then decide whether the signal is strong enough to
-invest in an MVP and larger-scale validation.
+Next steps:
+
+1. Rerun the best target-domain KD-gap setup with a different seed to check repeatability.
+2. Test a controlled auxiliary-data variant: keep the target-domain KD-gap core, but reserve a
+   small non-target budget, for example 5-10%, spread uniformly or by alignment score.
+3. If repeatable, decide whether the signal is strong enough to invest in an MVP and larger-scale
+   validation.
 
 Figure captions:
 
@@ -48,12 +59,16 @@ Figure captions:
 - Figure 2: Data sources used during data-blend weight tuning.
 - Figure 3: Evolution of learned data-blend weights during distillation, showing mass shifting
   toward useful target domains and away from less useful sources.
+- Figure 4: Relative KD-loss improvement from target-domain KD-gap adaptive weights versus uniform
+  blending across 10 target data sources.
 
 ![Figure 1: Relative KD-loss improvement from tuned data-blend weights versus uniform blending across 10 target data sources.](figures/figure1_relative_kd_improvement.svg)
 
 ![Figure 2: Data sources used during data-blend weight tuning.](figures/figure2_data_sources.svg)
 
 ![Figure 3: Evolution of learned data-blend weights during distillation.](figures/figure3_learned_weight_trajectory.svg)
+
+![Figure 4: Relative KD-loss improvement from target-domain KD-gap adaptive weights versus uniform blending across 10 target data sources.](figures/figure4_target_kdgap_relative_gain.svg)
 
 ## How DoGE works
 
@@ -177,30 +192,32 @@ post-training target objective. All runs used 400 continuation iterations from t
 Wiki-recovered checkpoint, `gbs=mbs=1`, `eval_iters=256`, sequence length 4096, and eight H100 80GB
 GPUs.
 
-Lower KD is better. The best tuned fixed blend improved the last-40-iteration average KD loss by
-2.32% relative to the 24-source uniform baseline.
+Lower KD is better. The best adaptive blend improved the last-40-iteration average KD loss by 2.45%
+relative to the 24-source uniform baseline.
 
 | Run | Last-40 target KD | Relative improvement vs uniform |
 |---|---:|---:|
 | 24-source uniform fixed blend | 0.2147 | 0.00% |
 | Sampling DoGE | 0.2145 | 0.13% |
+| Naive KD-gap over all sources | 0.2129 | 0.84% |
 | Target-only fixed blend | 0.2108 | 1.83% |
-| Sampling DoGE + KD-gap correction | 0.2098 | 2.32% |
+| Manual chat-heavy target-only correction | 0.2098 | 2.32% |
+| Target-domain KD-gap adaptive blend | 0.2095 | 2.45% |
 
-The per-target-source gains for the best tuned blend were:
+The per-target-source gains for the best adaptive blend were:
 
 | Target source | Relative improvement vs uniform |
 |---|---:|
-| Nemotron-Post-Training-v2 code | 5.9% |
-| Nemotron-Post-Training-v2 multilingual DE | 2.6% |
-| Nemotron-Post-Training-v2 math | 2.2% |
-| Nemotron-Post-Training-v2 chat | 2.1% |
-| Nemotron-Post-Training-v2 multilingual ES | 2.1% |
-| Nemotron-Post-Training-v2 multilingual JA | 2.1% |
-| Nemotron-Post-Training-v1 STEM | 1.7% |
-| Nemotron-Post-Training-v2 STEM | 1.7% |
-| Nemotron-Post-Training-v2 multilingual FR | 1.6% |
-| Nemotron-Post-Training-v2 multilingual IT | 1.2% |
+| Nemotron-Post-Training-v2 math | 5.0% |
+| Nemotron-Post-Training-v2 multilingual JA | 3.7% |
+| Nemotron-Post-Training-v2 STEM | 3.1% |
+| Nemotron-Post-Training-v2 code | 2.9% |
+| Nemotron-Post-Training-v1 STEM | 2.8% |
+| Nemotron-Post-Training-v2 multilingual DE | 2.7% |
+| Nemotron-Post-Training-v2 multilingual ES | 2.4% |
+| Nemotron-Post-Training-v2 multilingual IT | 1.9% |
+| Nemotron-Post-Training-v2 multilingual FR | 1.0% |
+| Nemotron-Post-Training-v2 chat | 0.6% |
 
 The earlier three-source target setup used WikiText, Nemotron-v2 math, and Nemotron-v2 STEM. In
 that smaller setup, tuning data-blend weights produced a larger gain, around 7%.
@@ -212,5 +229,7 @@ that smaller setup, tuning data-blend weights produced a larger gain, around 7%.
 - Pipeline parallelism and broader model-family support are not validated.
 - The expected downstream-task gain is still estimated from KD loss and needs validation with
   downstream evaluations.
+- The current best target-domain KD-gap result sets non-target source weights to zero; this may
+  exclude useful auxiliary data, so a small non-target budget is the next ablation to test.
 - The current result is from one compressed model; validating the method requires larger-scale
   experiments across multiple compressed models and target objectives.
