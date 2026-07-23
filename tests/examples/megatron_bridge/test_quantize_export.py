@@ -12,14 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for quantize.py and export.py scripts."""
+"""Tests for quantize.py and export_quantized_megatron_to_hf.py scripts."""
 
 from pathlib import Path
 
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.transformers_models import create_tiny_qwen3_5_vl_dir, create_tiny_qwen3_dir
+from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
+# NOTE: Qwen3.5-VL covered by test_qad.py
 def test_quantize_and_export(tmp_path: Path, num_gpus):
     """Quantize a tiny Qwen3 via a YAML recipe and export it to a unified HF checkpoint."""
     # Use a vLLM-friendly head_dim (64) since the default tiny config (head_dim=2) is unsupported.
@@ -56,7 +57,7 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
 
     # Step 2: export to HF
     export_cmd = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "export.py"],
+        ["torchrun", "--nproc_per_node=1", "export_quantized_megatron_to_hf.py"],
         hf_model_name_or_path=hf_model_path,
         megatron_path=megatron_path,
         export_unified_hf_path=hf_export_path,
@@ -80,41 +81,3 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
     # )
     # outputs = llm.generate(["Hello!"], vllm.SamplingParams(max_tokens=4))
     # assert outputs and outputs[0].outputs and outputs[0].outputs[0].text
-
-
-def test_quantize_vlm(tmp_path: Path, num_gpus):
-    """Quantize a tiny Qwen3.5-VL's language model and save a Megatron checkpoint.
-
-    Only the language model is quantized (vision quantizers disabled, ModelOpt state on the root); a
-    text calibration dataset infers text-only calibration. Saves Megatron format only -- HF unified
-    export of a VLM is unsupported, matching Megatron-Bridge's quantize_vlm.py.
-    """
-    hf_model_path = create_tiny_qwen3_5_vl_dir(
-        tmp_path,
-        with_processor=True,
-        hidden_size=128,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_hidden_layers=2,
-        intermediate_size=256,
-        max_position_embeddings=512,
-    )
-    megatron_path = tmp_path / "qwen3_5_vl_fp8_megatron"
-
-    quantize_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
-        hf_model_name_or_path=hf_model_path,
-        recipe="general/ptq/fp8_default-kv_fp8",
-        tp_size=num_gpus,
-        # A text dataset on a VLM infers text-only calibration of its language model (ablation path).
-        calib_dataset_name="cnn_dailymail",
-        calib_num_samples=4,
-        calib_batch_size=2,
-        seq_length=16,
-        export_megatron_path=megatron_path,
-    )
-    run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
-    assert (megatron_path / "latest_checkpointed_iteration.txt").exists()
-    assert list(megatron_path.rglob("modelopt_state")), (
-        "Expected modelopt_state in the Megatron checkpoint"
-    )

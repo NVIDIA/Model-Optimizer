@@ -16,7 +16,7 @@
 # limitations under the License.
 
 # Megatron-Bridge HF -> Megatron checkpoint import.
-# Assumes nvcr.io/nvidia/nemo:26.02+ container (megatron-bridge preinstalled at /opt/Megatron-Bridge).
+# Assumes nvcr.io/nvidia/nemo:26.04+ container (megatron-bridge preinstalled at /opt/Megatron-Bridge).
 #
 # Required env: HF_MODEL_ID  (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16)
 # Optional env:

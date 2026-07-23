@@ -763,7 +763,7 @@ def get_dataset_dataloader(
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset (interpreted as number of *output
             rows* in both ``pack=False`` and ``pack=True`` modes — in packed mode the
-            loader oversamples raw text 4x to ensure enough docs to fill all rows).
+            loader oversamples raw text 16x to ensure enough docs to fill all rows).
         max_sample_length: Maximum length of a sample (or per-row length under ``pack=True``).
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader (ignored when
@@ -837,9 +837,9 @@ def get_dataset_dataloader(
 
     # Sample count semantics:
     # - pack=False: gather exactly `num_sample` raw docs per source, one per output row.
-    # - pack=True:  oversample 8x per source to ensure enough raw docs to fill all rows,
+    # - pack=True:  oversample 16x per source to ensure enough raw docs to fill all rows,
     #               since each row greedily packs multiple docs.
-    sample_multiplier = 8 if pack else 1
+    sample_multiplier = 16 if pack else 1
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
@@ -862,10 +862,11 @@ def get_dataset_dataloader(
         )
         if input_ids.shape[0] < total_rows:
             warn_rank_0(
-                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
-                f"requested — raw text exhausted before filling all rows (8x oversample "
-                f"of num_samples was insufficient). Increase `num_samples` or shorten "
-                f"`max_sample_length`."
+                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} requested — "
+                f"raw text exhausted before filling all rows ({sample_multiplier}x oversample of "
+                "num_samples was insufficient). Shorten `max_sample_length` or supply longer, "
+                "more token-dense samples; increasing `num_samples` only helps if the source can "
+                "provide additional useful content."
             )
         if device:
             input_ids = input_ids.to(device)

@@ -46,6 +46,15 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
+
+try:  # nemo:26.08+
+    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+
+    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
+    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
+except ImportError:  # nemo:26.06 and earlier
+    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
+
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -71,6 +80,11 @@ from modelopt.torch.utils.plugins.megatron_calibration import (
 )
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
 from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
+
+# isort: off
+# Register Megatron-Bridge model-specific NAS/pruning plugins here to avoid a circular import
+import modelopt.torch.nas.plugins.mbridge  # noqa: F401
+# isort: on
 
 # Default calibration datasets when --calib_dataset_name is not set
 DEFAULT_TEXT_CALIB_DATASET = "nemotron-post-training-dataset-v2"
@@ -536,7 +550,7 @@ def main(args: argparse.Namespace):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, MambaModelProvider):
+    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -544,22 +558,17 @@ def main(args: argparse.Namespace):
         )
         setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
 
-    if args.output_megatron_path is not None:
-        print_rank_0(
-            f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
-        )
+    # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR.
+    architectures = getattr(bridge.hf_pretrained.config, "architectures", None) or []
+    use_fast_tokenizer = "NemotronHForCausalLM" in architectures
+    tokenizer_kwargs = {"trust_remote_code": args.trust_remote_code, "use_fast": use_fast_tokenizer}
 
-        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR.
-        architectures = getattr(bridge.hf_pretrained.config, "architectures", None) or []
-        use_fast_tokenizer = "NemotronHForCausalLM" in architectures
+    if args.output_megatron_path is not None:
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
             hf_tokenizer_path=args.hf_model_name_or_path,
-            hf_tokenizer_kwargs={
-                "trust_remote_code": args.trust_remote_code,
-                "use_fast": use_fast_tokenizer,
-            },
+            hf_tokenizer_kwargs=tokenizer_kwargs,
         )
         print_rank_0(
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
@@ -567,7 +576,9 @@ def main(args: argparse.Namespace):
     else:
         print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
 
-        # [WAR] Hacky way to save pruned HF model until Megatron-Bridge natively supports it
+        # [WAR] Save the pruned HF model by hand until Megatron-Bridge natively supports it.
+        # TODO: Replace this whole block with ``AutoBridge.from_auto_config(...).save_hf_weights(...)``
+        #     once the Megatron-Bridge fix ships (nemo:26.08).
         bridge.hf_pretrained.save_artifacts(args.output_hf_path)
         hf_cfg = AutoConfig.from_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
@@ -613,6 +624,8 @@ def main(args: argparse.Namespace):
             if sorted_layers is not None
             else set(range(1, mcore_cfg.num_layers + 1))
         )
+        # layer_types is the HF per-layer attention-cadence field (mcore's linear_attention_freq /
+        # moe_layer_freq have no HF equivalent under those names, so only layer_types needs slicing).
         if hasattr(text_cfg, "layer_types"):
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
@@ -633,7 +646,9 @@ def main(args: argparse.Namespace):
                     "distillation cannot recover this vision-path change -- consider full VLM "
                     "training/distillation instead of LM-only to recover vision quality."
                 )
-        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
+        if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
+            hf_cfg, "hybrid_override_pattern"
+        ):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
         # Mark MTP as disabled on the HF text config written after pruning

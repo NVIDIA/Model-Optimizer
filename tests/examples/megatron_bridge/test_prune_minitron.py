@@ -16,6 +16,7 @@
 
 import pytest
 import torch
+from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
@@ -109,6 +110,10 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
                 max_position_embeddings=1024,
             ),
             id="qwen3_5_moe_vl",
+            marks=pytest.mark.skipif(
+                not qwen35_moe_bridge_supported(),
+                reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
+            ),
         ),
     ],
 )

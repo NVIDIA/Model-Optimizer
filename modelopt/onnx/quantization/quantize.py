@@ -63,7 +63,7 @@ from modelopt.onnx.quantization.graph_utils import (
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
-from modelopt.onnx.quantization.ort_utils import update_trt_ep_support
+from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile, update_trt_ep_support
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     remove_graph_input_q,
@@ -92,6 +92,25 @@ def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
         return "float4_e2m1fn"
     # For "int8", "fp8", etc., return as-is (fp8 falls back to BASE_MIN_OPSET which is correct)
     return quantize_mode
+
+
+def _realign_input_shapes_profile(
+    input_shapes_profile: Sequence[dict[str, str]],
+    original_calibration_eps: list[str],
+    calibration_eps: list[str],
+) -> Sequence[dict[str, str]]:
+    """Keep per-EP profiles aligned after ``calibration_eps`` is updated."""
+    assert len(input_shapes_profile) == len(original_calibration_eps), (
+        "Number of calibration EPs and number of input-shapes-profile don't match"
+    )
+    assert len(set(original_calibration_eps)) == len(original_calibration_eps), (
+        "Calibration EPs must be unique when input_shapes_profile is provided"
+    )
+    if original_calibration_eps == calibration_eps:
+        return input_shapes_profile
+
+    profiles_by_ep = dict(zip(original_calibration_eps, input_shapes_profile, strict=True))
+    return [profiles_by_ep.get(ep, {}) for ep in calibration_eps]
 
 
 def _preprocess_onnx(
@@ -358,6 +377,8 @@ def quantize(
     simplify: bool = False,
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    model_id: str | None = None,
+    trust_remote_code: bool = False,
     direct_io_types: bool = False,
     opset: int | None = None,
     target_dla: bool = False,
@@ -492,6 +513,12 @@ def quantize(
             If None of the calibration_eps require any such shapes profile for model inputs, then nothing needs to be
             set for this "input_shapes_profile" parameter.
             Default value is None.
+        model_id:
+            Hugging Face model ID, local config directory, or local ``config.json`` path used to infer input shape
+            profiles when ``input_shapes_profile`` is not provided.
+        trust_remote_code:
+            Whether to allow custom code to be loaded when resolving ``model_id`` with Hugging Face transformers.
+            Defaults to False.
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
@@ -603,7 +630,17 @@ def quantize(
         quantize_mode,
         opset,
     )
+    original_calibration_eps = list(calibration_eps)
     trt_plugins = update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins)  # type: ignore[arg-type]
+
+    if input_shapes_profile is not None:
+        input_shapes_profile = _realign_input_shapes_profile(
+            input_shapes_profile, original_calibration_eps, calibration_eps
+        )
+    elif model_id:
+        input_shapes_profile = create_input_shapes_profile(
+            model_id, calibration_eps, trust_remote_code=trust_remote_code
+        )
 
     if calibration_data_reader is None:
         # Use random scales if calibration data is not supplied
@@ -635,6 +672,7 @@ def quantize(
             intermediate_generated_files,
             calibration_data_reader,
             calibration_eps,
+            input_shapes_profile,
         )
 
     if calibrate_per_node and not calibration_shapes:
@@ -697,6 +735,7 @@ def quantize(
             direct_io_types=direct_io_types,
             opset=opset,
             autotune=autotune,
+            input_shapes_profile=input_shapes_profile,
             **kwargs,
         )
 

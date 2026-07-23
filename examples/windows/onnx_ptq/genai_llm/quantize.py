@@ -27,63 +27,11 @@ from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
+from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile
 
 logging.getLogger().setLevel(logging.INFO)
 
 pt_to_np = {"torch.int64": np.int64, "torch.float32": np.float32, "torch.float16": np.float16}
-
-
-def prepare_input_shapes_string(
-    batch_size, seq_len, past_seq_len, num_layers, num_kv_heads, head_dim
-):
-    shapes = ""
-
-    shapes += f"input_ids:{batch_size}x{seq_len}"
-    shapes += f",attention_mask:{batch_size}x{seq_len}"
-
-    for i in range(num_layers):
-        key_name = f"past_key_values.{i}.key"
-        value_name = f"past_key_values.{i}.value"
-        shapes += f",{key_name}:{batch_size}x{num_kv_heads}x{past_seq_len}x{head_dim}"
-        shapes += f",{value_name}:{batch_size}x{num_kv_heads}x{past_seq_len}x{head_dim}"
-
-    return shapes
-
-
-def get_input_shapes_profile(model_name_or_path):
-    config = AutoConfig.from_pretrained(model_name_or_path)
-
-    head_dim = config.hidden_size // config.num_attention_heads
-    if hasattr(config, "head_dim") and config.head_dim is not None:
-        head_dim = config.head_dim
-    num_kv_heads = config.num_key_value_heads
-    num_layers = config.num_hidden_layers
-
-    min_shapes = prepare_input_shapes_string(1, 1, 0, num_layers, num_kv_heads, head_dim)
-    max_shapes = prepare_input_shapes_string(1, 1024, 1024, num_layers, num_kv_heads, head_dim)
-    opt_shapes = prepare_input_shapes_string(1, 512, 512, num_layers, num_kv_heads, head_dim)
-
-    return min_shapes, max_shapes, opt_shapes
-
-
-def make_input_shapes_profile_for_ep_list(ep_list, model_name_or_path):
-    # Input-shapes-profile will be used in provider-options for ORT session creation.
-    # Provider options (even if {}) are needed for all EPs when we provide for any one of them.
-    # Using empty shapes_profile for non-NvTensorRtRtx EPs.
-    input_shapes_profile_sequence = []
-    for ep in ep_list:
-        if ep == "NvTensorRtRtx":
-            min_shapes, max_shapes, opt_shapes = get_input_shapes_profile(model_name_or_path)
-            input_shapes_profile = {
-                "nv_profile_min_shapes": min_shapes,
-                "nv_profile_max_shapes": max_shapes,
-                "nv_profile_opt_shapes": opt_shapes,
-            }
-            input_shapes_profile_sequence.append(input_shapes_profile)
-        else:
-            input_shapes_profile_sequence.append({})
-
-    return input_shapes_profile_sequence
 
 
 def make_model_input(
@@ -414,10 +362,14 @@ def main(args):
     )
 
     input_shapes_profile_data = None
-    if "NvTensorRtRtx" in args.calibration_eps and (args.algo not in ["rtn", "rtn_dq"]):
-        # NvTensorRtRtx EP uses (min, max, opt) profile for dynamic shapes in the model's inputs.
-        input_shapes_profile_data = make_input_shapes_profile_for_ep_list(
-            args.calibration_eps, args.model_name
+    if any(ep in ["NvTensorRtRtx", "trt"] for ep in args.calibration_eps) and (
+        args.algo not in ["rtn", "rtn_dq"]
+    ):
+        # TRT EPs use min/opt/max profiles for dynamic model inputs.
+        input_shapes_profile_data = create_input_shapes_profile(
+            args.model_name,
+            args.calibration_eps,
+            trust_remote_code=args.trust_remote_code,
         )
     print(
         f"\n--Quantize-Script-- input_shapes_profile is None? - {input_shapes_profile_data is None}\n"
