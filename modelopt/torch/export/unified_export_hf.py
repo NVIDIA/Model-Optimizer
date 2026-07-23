@@ -15,9 +15,11 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import contextlib
 import itertools
 import json
 import re
+import shutil
 import tempfile
 import warnings
 from builtins import ValueError
@@ -1286,30 +1288,29 @@ def _export_transformers_checkpoint_streaming(
 
     writer.finalize()
 
-    # Write non-weight artifacts: config.json, generation_config.json, tokenizer, and
-    # the custom modeling *.py files that trust_remote_code models (e.g. NemotronH) need.
-    # model.save_pretrained with an empty state dict is the only reliable way to trigger
-    # transformers' custom-code copy logic without holding the full checkpoint in RAM.
-    # Protect any real shard already written by _StreamingShardWriter (single-shard path
-    # renames its output to model.safetensors, which save_pretrained would overwrite).
-    _single_shard = export_dir / "model.safetensors"
-    _protected = export_dir / "__modelopt_protected_model.safetensors"
-    if _single_shard.exists():
-        _single_shard.rename(_protected)
-
+    # Write non-weight artifacts: config.json, generation_config.json, and the custom
+    # modeling *.py files that trust_remote_code models (e.g. NemotronH) need.
+    # We avoid model.save_pretrained(state_dict={}) here because MoE models (e.g. DSR1)
+    # have expert weights that share underlying storage across layers; safetensors' shared-
+    # tensor check fires even when saving an empty state dict, crashing the export after
+    # all shards are already written correctly.
     _sanitize_generation_config_for_save(model)
     _patches = _patch_revert_weight_conversion()
     try:
-        model.save_pretrained(str(export_dir), state_dict={})
+        model.config.save_pretrained(str(export_dir))
     finally:
         _unpatch_revert_weight_conversion(_patches)
+    if hasattr(model, "generation_config") and model.generation_config is not None:
+        with contextlib.suppress(Exception):
+            model.generation_config.save_pretrained(str(export_dir))
 
-    # Remove the empty placeholder shard save_pretrained created for state_dict={}.
-    if _single_shard.exists() and _single_shard.stat().st_size < 512:
-        _single_shard.unlink()
-    # Restore the real single-shard if we protected it.
-    if _protected.exists():
-        _protected.rename(_single_shard)
+    # Copy custom modeling *.py files for trust_remote_code checkpoints.
+    _src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
+    if _src_dir.is_dir():
+        for _py in _src_dir.glob("*.py"):
+            _dst = export_dir / _py.name
+            if not _dst.exists():
+                shutil.copy2(_py, _dst)
 
     return None, quant_config
 
