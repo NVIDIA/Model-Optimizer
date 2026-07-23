@@ -85,8 +85,10 @@ def test_distill_validate_only(tmp_path, num_gpus):
         log_interval=1,
         hf_export_path=hf_export_path,
     )
-    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+    output = run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
+    assert "skipping training ..." in output
+    assert "iteration 0 on validation set" in output
     assert not (output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
     assert not (hf_export_path / "config.json").exists()
 
