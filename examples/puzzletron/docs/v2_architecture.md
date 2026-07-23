@@ -159,7 +159,7 @@ flowchart TB
     end
 
     subgraph cp["Scheduler-neutral control plane"]
-        graph["Stage contract<br/>modelopt/torch/puzzletron/stages/graph.py"]
+        stageGraph["Stage contract<br/>modelopt/torch/puzzletron/stages/graph.py"]
         compile["Plan compilation and schemas<br/>orchestration/compiler.py<br/>orchestration/schema.py<br/>orchestration/mesh.py"]
         drive["Durable control loop<br/>orchestration/controller.py<br/>orchestration/state.py<br/>orchestration/progress.py"]
         adapt["Work decomposition<br/>orchestration/adapters/"]
@@ -201,7 +201,7 @@ flowchart TB
 
     setup --> config --> public
     public --> light --> compile
-    graph --> compile --> drive --> adapt --> execute
+    stageGraph --> compile --> drive --> adapt --> execute
 
     adapt --> desc
     desc --> autoDesc
@@ -232,7 +232,7 @@ flowchart TB
     post --> identity
     kd --> identity
     bench --> identity
-    graph --> reports
+    stageGraph --> reports
     drive --> reports
     identity --> reports
 
@@ -242,7 +242,7 @@ flowchart TB
     classDef durablePlane fill:#f2f2f2,stroke:#666,color:#111;
 
     class setup,config,public author;
-    class graph,compile,drive,adapt,execute,light controlPlane;
+    class stageGraph,compile,drive,adapt,execute,light controlPlane;
     class desc,autoDesc,data,hooks,sort,sanity,slice,bypass,depth,replace,runtime,mip,post,kd,bench dataPlane;
     class identity,reports durablePlane;
 ```
