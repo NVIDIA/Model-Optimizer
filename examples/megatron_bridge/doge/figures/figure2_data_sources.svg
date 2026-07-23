@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="760" viewBox="0 0 1120 760">
+<rect width="100%" height="100%" fill="white"/>
+<text x="60" y="36" font-family="Arial" font-size="24" font-weight="700">Data sources used during data-blend weight tuning</text>
+<text x="60" y="62" font-family="Arial" font-size="14" fill="#555">24 candidate training sources used for the Qwen3-8B 0.7x distillation PoC</text>
+<rect x="52" y="67" width="470" height="24" fill="#f7f7f7"/>
+<text x="60" y="84" font-family="Arial" font-size="13" fill="#333">01. WikiText</text>
+<rect x="52" y="91" width="470" height="24" fill="#ffffff"/>
+<text x="60" y="108" font-family="Arial" font-size="13" fill="#333">02. Nemotron-Post-Training-v2 Math</text>
+<rect x="52" y="115" width="470" height="24" fill="#f7f7f7"/>
+<text x="60" y="132" font-family="Arial" font-size="13" fill="#333">03. Nemotron-Post-Training-v2 STEM</text>
+<rect x="52" y="139" width="470" height="24" fill="#ffffff"/>
+<text x="60" y="156" font-family="Arial" font-size="13" fill="#333">04. Nemotron3 Pretraining-SFT Code</text>
+<rect x="52" y="163" width="470" height="24" fill="#f7f7f7"/>
+<text x="60" y="180" font-family="Arial" font-size="13" fill="#333">05. Nemotron3 Pretraining-SFT General</text>
+<rect x="52" y="187" width="470" height="24" fill="#ffffff"/>
+<text x="60" y="204" font-family="Arial" font-size="13" fill="#333">06. Nemotron3 Pretraining-SFT Math</text>
+<rect x="52" y="211" width="470" height="24" fill="#f7f7f7"/>
+<text x="60" y="228" font-family="Arial" font-size="13" fill="#333">07. Nemotron3 Math-v2 High</text>
+<rect x="52" y="235" width="470" height="24" fill="#ffffff"/>
+<text x="60" y="252" font-family="Arial" font-size="13" fill="#333">08. Nemotron3 SFT Math-v3</text>
+<rect x="52" y="259" width="470" height="24" fill="#f7f7f7"/>
+<text x="60" y="276" font-family="Arial" font-size="13" fill="#333">09. Nemotron3 Competitive Programming Python</text>
+<rect x="52" y="283" width="470" height="24" fill="#ffffff"/>
+<text x="60" y="300" font-family="Arial" font-size="13" fill="#333">10. Nemotron3 Competitive Programming C++</text>
+<rect x="52" y="307" width="470" height="24" fill="#f7f7f7"/>
+<text x="60" y="324" font-family="Arial" font-size="13" fill="#333">11. Nemotron-Post-Training-v1 STEM</text>
+<rect x="52" y="331" width="470" height="24" fill="#ffffff"/>
+<text x="60" y="348" font-family="Arial" font-size="13" fill="#333">12. Nemotron3 Science MCQ</text>
+<rect x="582" y="67" width="470" height="24" fill="#f7f7f7"/>
+<text x="590" y="84" font-family="Arial" font-size="13" fill="#333">13. Nemotron3 Science RQA</text>
+<rect x="582" y="91" width="470" height="24" fill="#ffffff"/>
+<text x="590" y="108" font-family="Arial" font-size="13" fill="#333">14. Nemotron3 Instruction Chat Reasoning On</text>
+<rect x="582" y="115" width="470" height="24" fill="#f7f7f7"/>
+<text x="590" y="132" font-family="Arial" font-size="13" fill="#333">15. Nemotron3 Instruction Chat Reasoning Off</text>
+<rect x="582" y="139" width="470" height="24" fill="#ffffff"/>
+<text x="590" y="156" font-family="Arial" font-size="13" fill="#333">16. Nemotron3 Agentic Tool Calling</text>
+<rect x="582" y="163" width="470" height="24" fill="#f7f7f7"/>
+<text x="590" y="180" font-family="Arial" font-size="13" fill="#333">17. Nemotron-Post-Training-v2 Chat</text>
+<rect x="582" y="187" width="470" height="24" fill="#ffffff"/>
+<text x="590" y="204" font-family="Arial" font-size="13" fill="#333">18. Nemotron-Post-Training-v2 Code</text>
+<rect x="582" y="211" width="470" height="24" fill="#f7f7f7"/>
+<text x="590" y="228" font-family="Arial" font-size="13" fill="#333">19. Nemotron-Post-Training-v2 Multilingual DE</text>
+<rect x="582" y="235" width="470" height="24" fill="#ffffff"/>
+<text x="590" y="252" font-family="Arial" font-size="13" fill="#333">20. Nemotron-Post-Training-v2 Multilingual ES</text>
+<rect x="582" y="259" width="470" height="24" fill="#f7f7f7"/>
+<text x="590" y="276" font-family="Arial" font-size="13" fill="#333">21. Nemotron-Post-Training-v2 Multilingual FR</text>
+<rect x="582" y="283" width="470" height="24" fill="#ffffff"/>
+<text x="590" y="300" font-family="Arial" font-size="13" fill="#333">22. Nemotron-Post-Training-v2 Multilingual IT</text>
+<rect x="582" y="307" width="470" height="24" fill="#f7f7f7"/>
+<text x="590" y="324" font-family="Arial" font-size="13" fill="#333">23. Nemotron-Post-Training-v2 Multilingual JA</text>
+<rect x="582" y="331" width="470" height="24" fill="#ffffff"/>
+<text x="590" y="348" font-family="Arial" font-size="13" fill="#333">24. Synth/random tokens</text>
+</svg>

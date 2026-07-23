@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="780" viewBox="0 0 1280 780">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Arial,Helvetica,sans-serif;font-size:12px;fill:#222}.title{font-size:18px;font-weight:600}.subtitle{font-size:13px;fill:#555}.axis{stroke:#333;stroke-width:1.2}.grid{stroke:#ddd;stroke-width:1}.target{font-weight:600}</style>
+<text class="title" x="640.0" y="28" text-anchor="middle">Post-training target DoGE: source weights by 40-iteration window</text>
+<text class="subtitle" x="640.0" y="48" text-anchor="middle">Individual source weights; window-averaged. Bold legend entries are target sources.</text>
+<line class="grid" x1="85" y1="695.0" x2="950" y2="695.0"/>
+<text x="75" y="699.0" text-anchor="end">0.00</text>
+<line class="grid" x1="85" y1="568.0" x2="950" y2="568.0"/>
+<text x="75" y="572.0" text-anchor="end">0.02</text>
+<line class="grid" x1="85" y1="441.0" x2="950" y2="441.0"/>
+<text x="75" y="445.0" text-anchor="end">0.04</text>
+<line class="grid" x1="85" y1="314.0" x2="950" y2="314.0"/>
+<text x="75" y="318.0" text-anchor="end">0.06</text>
+<line class="grid" x1="85" y1="187.0" x2="950" y2="187.0"/>
+<text x="75" y="191.0" text-anchor="end">0.08</text>
+<line class="grid" x1="85" y1="60.0" x2="950" y2="60.0"/>
+<text x="75" y="64.0" text-anchor="end">0.10</text>
+<line class="grid" x1="85.0" y1="60" x2="85.0" y2="695"/>
+<text x="85.0" y="719" text-anchor="middle">440</text>
+<line class="grid" x1="181.1" y1="60" x2="181.1" y2="695"/>
+<text x="181.1" y="719" text-anchor="middle">480</text>
+<line class="grid" x1="277.2" y1="60" x2="277.2" y2="695"/>
+<text x="277.2" y="719" text-anchor="middle">520</text>
+<line class="grid" x1="373.3" y1="60" x2="373.3" y2="695"/>
+<text x="373.3" y="719" text-anchor="middle">560</text>
+<line class="grid" x1="469.4" y1="60" x2="469.4" y2="695"/>
+<text x="469.4" y="719" text-anchor="middle">600</text>
+<line class="grid" x1="565.6" y1="60" x2="565.6" y2="695"/>
+<text x="565.6" y="719" text-anchor="middle">640</text>
+<line class="grid" x1="661.7" y1="60" x2="661.7" y2="695"/>
+<text x="661.7" y="719" text-anchor="middle">680</text>
+<line class="grid" x1="757.8" y1="60" x2="757.8" y2="695"/>
+<text x="757.8" y="719" text-anchor="middle">720</text>
+<line class="grid" x1="853.9" y1="60" x2="853.9" y2="695"/>
+<text x="853.9" y="719" text-anchor="middle">760</text>
+<line class="grid" x1="950.0" y1="60" x2="950.0" y2="695"/>
+<text x="950.0" y="719" text-anchor="middle">800</text>
+<line class="axis" x1="85" y1="60" x2="85" y2="695"/>
+<line class="axis" x1="85" y1="695" x2="950" y2="695"/>
+<text x="517.5" y="752" text-anchor="middle">Training iteration window end</text>
+<text transform="translate(24,377.5) rotate(-90)" text-anchor="middle">Blend weight</text>
+<polyline fill="none" stroke="#4C78A8" stroke-width="2.4" opacity="0.95" points="85.0,371.4 181.1,269.7 277.2,211.4 373.3,195.8 469.4,153.4 565.6,160.8 661.7,136.9 757.8,127.6 853.9,100.1 950.0,103.1"/>
+<polyline fill="none" stroke="#F58518" stroke-width="2.4" opacity="0.95" points="85.0,402.0 181.1,337.8 277.2,315.2 373.3,277.4 469.4,243.9 565.6,246.0 661.7,217.9 757.8,166.3 853.9,182.3 950.0,194.4"/>
+<polyline fill="none" stroke="#54A24B" stroke-width="2.4" opacity="0.95" points="85.0,383.9 181.1,303.3 277.2,279.9 373.3,236.4 469.4,188.1 565.6,177.2 661.7,164.2 757.8,161.5 853.9,157.7 950.0,172.7"/>
+<polyline fill="none" stroke="#E45756" stroke-width="1.5" opacity="0.55" points="85.0,408.8 181.1,357.5 277.2,309.0 373.3,282.6 469.4,309.1 565.6,242.9 661.7,226.4 757.8,240.0 853.9,190.4 950.0,213.7"/>
+<polyline fill="none" stroke="#72B7B2" stroke-width="1.5" opacity="0.55" points="85.0,413.3 181.1,389.8 277.2,386.5 373.3,354.4 469.4,333.8 565.6,342.3 661.7,322.2 757.8,276.3 853.9,279.4 950.0,264.1"/>
+<polyline fill="none" stroke="#B279A2" stroke-width="2.4" opacity="0.95" points="85.0,395.4 181.1,340.2 277.2,306.1 373.3,270.6 469.4,242.3 565.6,235.6 661.7,279.1 757.8,291.5 853.9,291.9 950.0,258.6"/>
+<polyline fill="none" stroke="#FF9DA6" stroke-width="2.4" opacity="0.95" points="85.0,424.4 181.1,439.5 277.2,438.4 373.3,402.7 469.4,375.4 565.6,331.6 661.7,287.5 757.8,311.0 853.9,305.1 950.0,268.7"/>
+<polyline fill="none" stroke="#9D755D" stroke-width="2.4" opacity="0.95" points="85.0,388.0 181.1,361.9 277.2,366.8 373.3,358.3 469.4,367.1 565.6,345.3 661.7,331.5 757.8,314.6 853.9,293.0 950.0,277.4"/>
+<polyline fill="none" stroke="#BAB0AC" stroke-width="1.5" opacity="0.55" points="85.0,398.6 181.1,362.0 277.2,351.1 373.3,316.9 469.4,336.2 565.6,331.1 661.7,322.6 757.8,303.3 853.9,301.9 950.0,307.5"/>
+<polyline fill="none" stroke="#8CD17D" stroke-width="2.4" opacity="0.95" points="85.0,418.3 181.1,375.0 277.2,327.5 373.3,303.9 469.4,304.8 565.6,326.6 661.7,318.5 757.8,309.9 853.9,304.3 950.0,315.8"/>
+<polyline fill="none" stroke="#499894" stroke-width="1.5" opacity="0.55" points="85.0,415.3 181.1,409.1 277.2,401.1 373.3,387.3 469.4,404.4 565.6,410.3 661.7,402.9 757.8,390.2 853.9,390.2 950.0,382.5"/>
+<polyline fill="none" stroke="#D37295" stroke-width="1.5" opacity="0.55" points="85.0,408.2 181.1,395.0 277.2,383.9 373.3,402.3 469.4,426.7 565.6,438.9 661.7,453.9 757.8,456.8 853.9,445.6 950.0,442.8"/>
+<polyline fill="none" stroke="#FABFD2" stroke-width="1.5" opacity="0.55" points="85.0,406.9 181.1,403.4 277.2,401.1 373.3,431.1 469.4,425.3 565.6,433.5 661.7,455.6 757.8,454.3 853.9,453.4 950.0,446.5"/>
+<polyline fill="none" stroke="#B6992D" stroke-width="2.4" opacity="0.95" points="85.0,449.3 181.1,461.8 277.2,458.1 373.3,463.5 469.4,444.6 565.6,456.4 661.7,471.4 757.8,498.2 853.9,515.3 950.0,515.0"/>
+<polyline fill="none" stroke="#F2CF5B" stroke-width="2.4" opacity="0.95" points="85.0,442.1 181.1,472.8 277.2,489.5 373.3,501.8 469.4,489.4 565.6,485.0 661.7,496.7 757.8,503.5 853.9,515.9 950.0,519.5"/>
+<polyline fill="none" stroke="#86BCB6" stroke-width="1.5" opacity="0.55" points="85.0,396.8 181.1,397.1 277.2,433.7 373.3,450.6 469.4,499.8 565.6,514.1 661.7,522.8 757.8,519.7 853.9,530.0 950.0,533.2"/>
+<polyline fill="none" stroke="#A0CBE8" stroke-width="1.5" opacity="0.55" points="85.0,439.8 181.1,500.4 277.2,526.7 373.3,563.8 469.4,576.7 565.6,568.0 661.7,565.9 757.8,572.3 853.9,583.8 950.0,590.9"/>
+<polyline fill="none" stroke="#FFBE7D" stroke-width="1.5" opacity="0.55" points="85.0,449.5 181.1,485.5 277.2,514.0 373.3,540.7 469.4,536.3 565.6,544.1 661.7,561.5 757.8,576.5 853.9,590.0 950.0,596.6"/>
+<polyline fill="none" stroke="#59A14F" stroke-width="1.5" opacity="0.55" points="85.0,470.3 181.1,538.7 277.2,574.5 373.3,604.5 469.4,611.6 565.6,617.6 661.7,619.2 757.8,630.4 853.9,632.4 950.0,633.3"/>
+<polyline fill="none" stroke="#EDC948" stroke-width="1.5" opacity="0.55" points="85.0,461.6 181.1,498.1 277.2,518.5 373.3,555.3 469.4,566.4 565.6,588.6 661.7,606.6 757.8,623.6 853.9,633.9 950.0,641.5"/>
+<polyline fill="none" stroke="#AF7AA1" stroke-width="1.5" opacity="0.55" points="85.0,485.2 181.1,537.6 277.2,553.2 373.3,575.1 469.4,590.6 565.6,602.0 661.7,618.7 757.8,630.7 853.9,641.3 950.0,644.6"/>
+<polyline fill="none" stroke="#FF9DA7" stroke-width="2.4" opacity="0.95" points="85.0,468.0 181.1,513.2 277.2,549.7 373.3,576.3 469.4,590.2 565.6,610.7 661.7,622.0 757.8,631.2 853.9,641.1 950.0,647.8"/>
+<polyline fill="none" stroke="#9C755F" stroke-width="1.5" opacity="0.55" points="85.0,509.5 181.1,581.9 277.2,605.1 373.3,628.2 469.4,645.6 565.6,651.7 661.7,655.5 757.8,663.5 853.9,669.4 950.0,673.5"/>
+<polyline fill="none" stroke="#D4A6C8" stroke-width="1.5" opacity="0.55" points="85.0,523.6 181.1,598.5 277.2,629.1 373.3,650.5 469.4,668.1 565.6,669.8 661.7,670.6 757.8,677.1 853.9,681.7 950.0,686.3"/>
+<line x1="970" y1="68" x2="992" y2="68" stroke="#4C78A8" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="72">* PT-v2 Multi FR</text>
+<line x1="970" y1="89" x2="992" y2="89" stroke="#F58518" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="93">* PT-v2 Multi DE</text>
+<line x1="970" y1="110" x2="992" y2="110" stroke="#54A24B" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="114">* PT-v2 Multi IT</text>
+<line x1="970" y1="131" x2="992" y2="131" stroke="#E45756" stroke-width="3" opacity="0.85"/>
+<text class="" x="998" y="135">  N3 Math-v2</text>
+<line x1="970" y1="152" x2="992" y2="152" stroke="#72B7B2" stroke-width="3" opacity="0.85"/>
+<text class="" x="998" y="156">  N3 CP C++</text>
+<line x1="970" y1="173" x2="992" y2="173" stroke="#B279A2" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="177">* PT-v2 Math</text>
+<line x1="970" y1="194" x2="992" y2="194" stroke="#FF9DA6" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="198">* PT-v2 Code</text>
+<line x1="970" y1="215" x2="992" y2="215" stroke="#9D755D" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="219">* PT-v2 Multi JA</text>
+<line x1="970" y1="236" x2="992" y2="236" stroke="#BAB0AC" stroke-width="3" opacity="0.85"/>
+<text class="" x="998" y="240">  N3 Math-v3</text>
+<line x1="970" y1="257" x2="992" y2="257" stroke="#8CD17D" stroke-width="3" opacity="0.85"/>
+<text class="target" x="998" y="261">* PT-v2 Multi ES</text>
+<line x1="970" y1="278" x2="992" y2="278" stroke="#499894" stroke-width="3" opacity="0.85"/>
+<text class="" x="998" y="282">  N3 CP Python</text>
+<line x1="970" y1="299" x2="992" y2="299" stroke="#D37295" stroke-width="3" opacity="0.85"/>
+<text class="" x="998" y="303">  N3 Science RQA</text>
+<line x1="1125" y1="68" x2="1147" y2="68" stroke="#FABFD2" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="72">  N3 Science MCQ</text>
+<line x1="1125" y1="89" x2="1147" y2="89" stroke="#B6992D" stroke-width="3" opacity="0.85"/>
+<text class="target" x="1153" y="93">* PT-v2 STEM</text>
+<line x1="1125" y1="110" x2="1147" y2="110" stroke="#F2CF5B" stroke-width="3" opacity="0.85"/>
+<text class="target" x="1153" y="114">* PT-v1 STEM</text>
+<line x1="1125" y1="131" x2="1147" y2="131" stroke="#86BCB6" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="135">  nvidia--Nemotron-Pretrai</text>
+<line x1="1125" y1="152" x2="1147" y2="152" stroke="#A0CBE8" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="156">  nvidia--Nemotron-Pretrai</text>
+<line x1="1125" y1="173" x2="1147" y2="173" stroke="#FFBE7D" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="177">  N3 Reasoning On</text>
+<line x1="1125" y1="194" x2="1147" y2="194" stroke="#59A14F" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="198">  nvidia--Nemotron-Pretrai</text>
+<line x1="1125" y1="215" x2="1147" y2="215" stroke="#EDC948" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="219">  N3 Reasoning Off</text>
+<line x1="1125" y1="236" x2="1147" y2="236" stroke="#AF7AA1" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="240">  N3 Tool Calling</text>
+<line x1="1125" y1="257" x2="1147" y2="257" stroke="#FF9DA7" stroke-width="3" opacity="0.85"/>
+<text class="target" x="1153" y="261">* PT-v2 Chat</text>
+<line x1="1125" y1="278" x2="1147" y2="278" stroke="#9C755F" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="282">  WikiText</text>
+<line x1="1125" y1="299" x2="1147" y2="299" stroke="#D4A6C8" stroke-width="3" opacity="0.85"/>
+<text class="" x="1153" y="303">  Synth random</text>
+<text x="970" y="342" fill="#555">* target source</text>
+</svg>

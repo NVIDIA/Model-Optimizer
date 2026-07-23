@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="620" viewBox="0 0 1120 620">
+<rect width="100%" height="100%" fill="white"/>
+<text x="230" y="32" font-family="Arial" font-size="22" font-weight="700">Sampling DoGE + KD-gap correction vs uniform</text>
+<text x="230" y="58" font-family="Arial" font-size="14" fill="#555">Last 40 iterations; relative improvement in target-source probe KD loss. Overall mixed-target gain: +2.32%; average per-source gain: +2.33%</text>
+<line x1="230.0" y1="86" x2="230.0" y2="535" stroke="#eeeeee"/>
+<text x="230.0" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">0%</text>
+<line x1="332.5" y1="86" x2="332.5" y2="535" stroke="#eeeeee"/>
+<text x="332.5" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">1%</text>
+<line x1="435.0" y1="86" x2="435.0" y2="535" stroke="#eeeeee"/>
+<text x="435.0" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">2%</text>
+<line x1="537.5" y1="86" x2="537.5" y2="535" stroke="#eeeeee"/>
+<text x="537.5" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">3%</text>
+<line x1="640.0" y1="86" x2="640.0" y2="535" stroke="#eeeeee"/>
+<text x="640.0" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">4%</text>
+<line x1="742.5" y1="86" x2="742.5" y2="535" stroke="#eeeeee"/>
+<text x="742.5" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">5%</text>
+<line x1="845.0" y1="86" x2="845.0" y2="535" stroke="#eeeeee"/>
+<text x="845.0" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">6%</text>
+<line x1="947.5" y1="86" x2="947.5" y2="535" stroke="#eeeeee"/>
+<text x="947.5" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">7%</text>
+<line x1="1050.0" y1="86" x2="1050.0" y2="535" stroke="#eeeeee"/>
+<text x="1050.0" y="557" text-anchor="middle" font-family="Arial" font-size="12" fill="#555">8%</text>
+<line x1="230" y1="86" x2="230" y2="535" stroke="#333"/>
+<line x1="230" y1="535" x2="1050" y2="535" stroke="#333"/>
+<text x="218" y="126.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Code</text>
+<rect x="230.0" y="107.5" width="601.8" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="839.8" y="126.5" font-family="Arial" font-size="13" fill="#333">+5.9%</text>
+<text x="1046" y="126.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.2123 → 0.1999</text>
+<text x="218" y="168.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Multi DE</text>
+<rect x="230.0" y="149.5" width="263.8" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="501.8" y="168.5" font-family="Arial" font-size="13" fill="#333">+2.6%</text>
+<text x="1046" y="168.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.1984 → 0.1933</text>
+<text x="218" y="210.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Math</text>
+<rect x="230.0" y="191.5" width="222.0" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="460.0" y="210.5" font-family="Arial" font-size="13" fill="#333">+2.2%</text>
+<text x="1046" y="210.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.1300 → 0.1272</text>
+<text x="218" y="252.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Chat</text>
+<rect x="230.0" y="233.5" width="218.0" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="456.0" y="252.5" font-family="Arial" font-size="13" fill="#333">+2.1%</text>
+<text x="1046" y="252.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.3382 → 0.3310</text>
+<text x="218" y="294.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Multi JA</text>
+<rect x="230.0" y="275.5" width="217.5" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="455.5" y="294.5" font-family="Arial" font-size="13" fill="#333">+2.1%</text>
+<text x="1046" y="294.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.2094 → 0.2050</text>
+<text x="218" y="336.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Multi ES</text>
+<rect x="230.0" y="317.5" width="215.9" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="453.9" y="336.5" font-family="Arial" font-size="13" fill="#333">+2.1%</text>
+<text x="1046" y="336.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.1928 → 0.1887</text>
+<text x="218" y="378.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v1 STEM</text>
+<rect x="230.0" y="359.5" width="176.5" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="414.5" y="378.5" font-family="Arial" font-size="13" fill="#333">+1.7%</text>
+<text x="1046" y="378.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.2377 → 0.2336</text>
+<text x="218" y="420.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 STEM</text>
+<rect x="230.0" y="401.5" width="176.1" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="414.1" y="420.5" font-family="Arial" font-size="13" fill="#333">+1.7%</text>
+<text x="1046" y="420.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.2521 → 0.2478</text>
+<text x="218" y="462.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Multi FR</text>
+<rect x="230.0" y="443.5" width="167.8" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="405.8" y="462.5" font-family="Arial" font-size="13" fill="#333">+1.6%</text>
+<text x="1046" y="462.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.1929 → 0.1897</text>
+<text x="218" y="504.5" text-anchor="end" font-family="Arial" font-size="13" fill="#333">PT-v2 Multi IT</text>
+<rect x="230.0" y="485.5" width="125.4" height="28" fill="#2ca02c" opacity="0.85"/>
+<text x="363.4" y="504.5" font-family="Arial" font-size="13" fill="#333">+1.2%</text>
+<text x="1046" y="504.5" text-anchor="end" font-family="Arial" font-size="11" fill="#666">0.1836 → 0.1813</text>
+<text x="640.0" y="598" text-anchor="middle" font-family="Arial" font-size="13" fill="#333">Relative KD-loss improvement vs uniform; higher is better</text>
+</svg>

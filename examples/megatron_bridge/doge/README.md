@@ -5,6 +5,56 @@ Megatron-Bridge distillation. Use it to run a short proxy distillation experimen
 source weights against a fixed target blend, and decide which fixed blend is worth validating with a
 normal `distill.py` run.
 
+## PoC goal and status
+
+Goal: find data-blend weights that best recover the accuracy of a Qwen3-8B 0.7x
+memory-compressed/pruned student during teacher distillation.
+
+Tuning data-blend weights for distillation improved KD loss by up to 5.9% on individual target data
+sources and by 2.32% on average across 10 target data sources, compared with uniform blending
+(Figure 1). The experiment used 24 training data sources (Figure 2), and the learned weights shifted
+toward more useful sources during distillation (Figure 3). In the earlier setup with only 3 target
+data sources, the gain was larger, around 7%.
+
+The current PoC combines two ideas:
+
+- [DoGE](https://arxiv.org/abs/2310.15393)-style update: adjust data-blend weights using the
+  estimated effect of each source on the next distillation step.
+- [PASER](https://arxiv.org/abs/2502.12594)-style signal: give more weight to sources where the
+  student still has a larger KD gap from the teacher.
+
+One important implementation detail: vanilla DoGE effectively assumes unlimited data from every
+source and optimizes a weighted mixture loss. A source with a very small sampling weight may be
+almost unseen, even if its weighted loss still provides a strong gradient signal. To make the PoC
+closer to real distillation, we changed the training loss to sample from the data-source mixture
+instead of always computing a weighted mixture loss over all sources.
+
+We rejected the [CLIMB](https://arxiv.org/abs/2504.13161)-style approach for now because it is too
+expensive. CLIMB runs a guided grid search by distilling many smaller proxy models to estimate good
+blend weights, which adds substantial extra training cost before the final distillation run.
+
+It is still unclear whether the expected downstream-task improvement justifies turning this PoC into
+an MVP and validating it at scale across many compressed models. Current expectation is roughly
+1-2% downstream improvement on average, but the value could be higher when distilling for a specific
+target task or when a compressed model has a regression concentrated in a small number of domains.
+
+Next step: run a few more targeted ablations, then decide whether the signal is strong enough to
+invest in an MVP and larger-scale validation.
+
+Figure captions:
+
+- Figure 1: Relative KD-loss improvement from tuned data-blend weights versus uniform blending
+  across 10 target data sources.
+- Figure 2: Data sources used during data-blend weight tuning.
+- Figure 3: Evolution of learned data-blend weights during distillation, showing mass shifting
+  toward useful target domains and away from less useful sources.
+
+![Figure 1: Relative KD-loss improvement from tuned data-blend weights versus uniform blending across 10 target data sources.](figures/figure1_relative_kd_improvement.svg)
+
+![Figure 2: Data sources used during data-blend weight tuning.](figures/figure2_data_sources.svg)
+
+![Figure 3: Evolution of learned data-blend weights during distillation.](figures/figure3_learned_weight_trajectory.svg)
+
 ## How DoGE works
 
 [DoGE](https://arxiv.org/abs/2310.15393) is a bilevel data-weighting method. The inner loop trains
@@ -19,8 +69,8 @@ At each DoGE step in this PoC:
    similarity.
 4. Increase the relative weight of better-aligned sources and decrease the relative weight of
    weaker or opposed sources with a normalized exponentiated update.
-5. Return the weighted source KD loss to Megatron-Bridge so the normal optimizer step updates the
-   student.
+5. Return either a weighted source KD loss or a sampled-source KD loss to Megatron-Bridge so the
+   normal optimizer step updates the student.
 
 The output is a weight trajectory in `doge_weights.jsonl`. Treat the learned weights as a hypothesis:
 validate them with a standard fixed-blend distillation run and compare against fixed-blend baselines.
@@ -121,43 +171,46 @@ update blend weights, while normal distillation only performs the training updat
 
 ## Qwen3-8B 0.7x PoC result
 
-The initial PoC tuned a three-source blend for a Qwen3-8B teacher and Qwen3-8B 0.7x pruned
-student. The target validation blend was fixed at 50% WikiText, 25% Nemotron-v2 math, and 25%
-Nemotron-v2 stem. All runs below used 2448 iterations, `gbs=mbs=1`, `eval_iters=256`, sequence
-length 4096, and eight H100 80GB GPUs.
+The current PoC tunes data-blend weights for a Qwen3-8B teacher and Qwen3-8B 0.7x
+memory-compressed/pruned student. The larger experiment used 24 training sources and a 10-source
+post-training target objective. All runs used 400 continuation iterations from the same
+Wiki-recovered checkpoint, `gbs=mbs=1`, `eval_iters=256`, sequence length 4096, and eight H100 80GB
+GPUs.
 
-The DoGE run started from 5% WikiText, 5% math, and 90% stem. It converged to approximately
-99.877% WikiText, 0.123% math, and 0.00035% stem. Those learned weights were then evaluated by
-running normal `distill.py` with the fixed learned blend.
+Lower KD is better. The best tuned fixed blend improved the last-40-iteration average KD loss by
+2.32% relative to the 24-source uniform baseline.
 
-The following trajectory was read from `doge_weights.jsonl`. Values are blend weights in percent.
+| Run | Last-40 target KD | Relative improvement vs uniform |
+|---|---:|---:|
+| 24-source uniform fixed blend | 0.2147 | 0.00% |
+| Sampling DoGE | 0.2145 | 0.13% |
+| Target-only fixed blend | 0.2108 | 1.83% |
+| Sampling DoGE + KD-gap correction | 0.2098 | 2.32% |
 
-| Iteration | WikiText | Nemotron-v2 math | Nemotron-v2 stem |
-|---:|---:|---:|---:|
-| 0 | 5.000 | 5.000 | 90.000 |
-| 1 | 5.305 | 4.989 | 89.706 |
-| 100 | 35.506 | 6.169 | 58.325 |
-| 500 | 98.995 | 0.366 | 0.639 |
-| 1000 | 99.983 | 0.009 | 0.007 |
-| 1500 | 99.997 | 0.003 | 0.001 |
-| 2000 | 99.992 | 0.008 | 0.000 |
-| 2448 | 99.877 | 0.123 | 0.000 |
+The per-target-source gains for the best tuned blend were:
 
-| Run | Training blend | Train CE | Train KD | Target CE | Target KD |
-|---|---|---:|---:|---:|---:|
-| 50/25/25 baseline, previous | 50% WikiText / 25% math / 25% stem | 1.794982 | 0.256528 | 1.806069 | 0.251977 |
-| 50/25/25 baseline, rerun | 50% WikiText / 25% math / 25% stem | 1.753319 | 0.284975 | 1.764029 | 0.277251 |
-| DoGE initial | 5% WikiText / 5% math / 90% stem | 1.273813 | 0.262383 | 1.821381 | 0.332609 |
-| DoGE final learned | 99.877% WikiText / 0.123% math / ~0% stem | 2.614528 | 0.331276 | 1.817401 | 0.401323 |
+| Target source | Relative improvement vs uniform |
+|---|---:|
+| Nemotron-Post-Training-v2 code | 5.9% |
+| Nemotron-Post-Training-v2 multilingual DE | 2.6% |
+| Nemotron-Post-Training-v2 math | 2.2% |
+| Nemotron-Post-Training-v2 chat | 2.1% |
+| Nemotron-Post-Training-v2 multilingual ES | 2.1% |
+| Nemotron-Post-Training-v2 multilingual JA | 2.1% |
+| Nemotron-Post-Training-v1 STEM | 1.7% |
+| Nemotron-Post-Training-v2 STEM | 1.7% |
+| Nemotron-Post-Training-v2 multilingual FR | 1.6% |
+| Nemotron-Post-Training-v2 multilingual IT | 1.2% |
 
-Lower KD is better. In this PoC, the DoGE-learned final blend did not beat the fixed 50/25/25
-baseline on the target validation blend. The baseline rerun was close to the previous run, while
-the learned near-WikiText blend was clearly worse on target KD.
+The earlier three-source target setup used WikiText, Nemotron-v2 math, and Nemotron-v2 STEM. In
+that smaller setup, tuning data-blend weights produced a larger gain, around 7%.
 
 ## Current PoC limitations
 
 - Only `gbs == mbs` is supported.
 - Alignment scoring currently uses a hardcoded Qwen3-8B final MLP projection parameter.
 - Pipeline parallelism and broader model-family support are not validated.
-- The learned weights collapsed toward WikiText in the Qwen3-8B 0.7x PoC.
-- Future work: investigate why the learned weights collapsed.
+- The expected downstream-task gain is still estimated from KD loss and needs validation with
+  downstream evaluations.
+- The current result is from one compressed model; validating the method requires larger-scale
+  experiments across multiple compressed models and target objectives.
