@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  recipe_type: ptq
+  description: >
+    Nemotron 3 mixed PTQ, W4A4 variant of the W4A16 recipe.
+    Attention and Mamba projection weights keep W8A16 MXFP8. All other target
+    linears, including routed/shared experts, move from W4A16 to W4A4 dynamic
+    NVFP4 (weights + activations); activation global scales are calibrated
+    with the nvfp4_act_max algorithm (B_min-anchored, b_min_percentile=1).
+    lm_head stays W4A16 NVFP4 weight-only. KV cache uses FP8 casting with
+    constant amax. Routers, convolutions, unsupported operators, and MTP
+    layers remain BF16.
+quantize:
+  algorithm:
+    method: nvfp4_act_max
+    rho: 16384
+    b_min_percentile: 1
+    b_max_percentile: 99.99
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+
+    - quantizer_name: '*weight_quantizer'
+      enable: true
+      cfg: &nvfp4_cfg
+        block_sizes:
+          -1: 16
+          type: dynamic
+          scale_bits: e4m3
+        num_bits: e2m1
+
+    # W4A4: NVFP4 activation quantizers wherever NVFP4 weights apply.
+    - quantizer_name: '*input_quantizer'
+      enable: true
+      cfg: *nvfp4_cfg
+
+    - quantizer_name: '*mixer.q_proj*weight_quantizer'
+      enable: true
+      cfg: &mxfp8_weight_cfg
+        num_bits: e4m3
+        block_sizes:
+          -1: 32
+          type: dynamic
+          scale_bits: e8m0
+    - quantizer_name: '*mixer.k_proj*weight_quantizer'
+      enable: true
+      cfg: *mxfp8_weight_cfg
+    - quantizer_name: '*mixer.v_proj*weight_quantizer'
+      enable: true
+      cfg: *mxfp8_weight_cfg
+    - quantizer_name: '*mixer.o_proj*weight_quantizer'
+      enable: true
+      cfg: *mxfp8_weight_cfg
+    - quantizer_name: '*mixer.in_proj*weight_quantizer'
+      enable: true
+      cfg: *mxfp8_weight_cfg
+    - quantizer_name: '*mixer.out_proj*weight_quantizer'
+      enable: true
+      cfg: *mxfp8_weight_cfg
+
+    # Attention and Mamba projections stay W8A16 (weight-only, no act quant).
+    - quantizer_name: '*mixer.q_proj*input_quantizer'
+      enable: false
+    - quantizer_name: '*mixer.k_proj*input_quantizer'
+      enable: false
+    - quantizer_name: '*mixer.v_proj*input_quantizer'
+      enable: false
+    - quantizer_name: '*mixer.o_proj*input_quantizer'
+      enable: false
+    - quantizer_name: '*mixer.in_proj*input_quantizer'
+      enable: false
+    - quantizer_name: '*mixer.out_proj*input_quantizer'
+      enable: false
+
+    # lm_head stays W4A16 (weight-only, no act quant).
+    - quantizer_name: '*lm_head*input_quantizer'
+      enable: false
+
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+        axis:
+        use_constant_amax: true
+    - quantizer_name: '*mixer.gate*'
+      enable: false
+    - quantizer_name: '*mixer.conv1d*'
+      enable: false
+    - quantizer_name: '*block_sparse_moe.gate*'
+      enable: false
+    - quantizer_name: '*mlp.gate.*'
+      enable: false
+    - quantizer_name: '*mlp.shared_expert_gate.*'
+      enable: false
+    - quantizer_name: '*shared_expert_gate*'
+      enable: false
+    - quantizer_name: '*router*'
+      enable: false
+    - parent_class: 'nn.BatchNorm1d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm2d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.BatchNorm3d'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.Embedding'
+      quantizer_name: '*'
+      enable: false
+    - parent_class: 'nn.LeakyReLU'
+      quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*mtp*'
+      enable: false
