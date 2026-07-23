@@ -167,6 +167,18 @@ def get_args():
     parser.add_argument(
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
     )
+    parser.add_argument(
+        "--exit_interval",
+        type=int,
+        default=None,
+        help="Save a checkpoint and exit when the iteration is divisible by this value",
+    )
+    parser.add_argument(
+        "--exit_duration_in_mins",
+        type=int,
+        default=None,
+        help="Save a checkpoint and exit after this many minutes",
+    )
     # Logging arguments
     parser.add_argument("--log_interval", type=int, default=10, help="Write to log every <N> steps")
     parser.add_argument(
@@ -328,6 +340,8 @@ def main(args: argparse.Namespace):
             train_iters=args.train_iters,
             global_batch_size=args.gbs,
             micro_batch_size=args.mbs,
+            exit_interval=args.exit_interval,
+            exit_duration_in_mins=args.exit_duration_in_mins,
             manual_gc=True,
             manual_gc_interval=100,
         ),

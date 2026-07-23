@@ -68,7 +68,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
     hf_model_path = create_student(tmp_path)
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
-    train_iters = 2
+    train_iters = 3
+    early_exit_iter = 2
 
     # TODO: VLMs disable sequence parallelism, so tensor parallelism can't be used here.
     #     Flip to tp_size=num_gpus in nemo:26.08 container
@@ -109,13 +110,16 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
         gbs=4,
         train_iters=train_iters,
         lr_warmup_iters=2,
-        eval_interval=train_iters,
+        eval_interval=early_exit_iter,
         eval_iters=1,
         log_interval=1,
+        exit_interval=early_exit_iter,
+        exit_duration_in_mins=60,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
     distilled_megatron_path = distill_output_dir / "checkpoints"
-    assert (distilled_megatron_path / "latest_checkpointed_iteration.txt").exists()
+    tracker = distilled_megatron_path / "latest_checkpointed_iteration.txt"
+    assert tracker.read_text(encoding="utf-8").strip() == str(early_exit_iter)
     assert list(distilled_megatron_path.rglob("modelopt_state")), (
         "Expected modelopt_state to be preserved in the distilled (QAD) checkpoint"
     )
