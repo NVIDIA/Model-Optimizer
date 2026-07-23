@@ -959,6 +959,89 @@ def from_quantized_weight(
     raise NotImplementedError(f"quantization format {quantization} not supported")
 
 
+def _postprocess_single_tensor(
+    key: str,
+    value: torch.Tensor,
+    kv_cache_max_bound: float,
+    kv_cache_format: str | None,
+    is_modelopt_qlora: bool = False,
+) -> tuple[str | None, torch.Tensor | None]:
+    """Per-tensor subset of :func:`postprocess_state_dict`, for streaming export.
+
+    Returns ``(new_key, new_value)`` to emit, or ``(None, None)`` to skip.
+    Tied-weight dedup is NOT performed here; callers should pre-compute alias
+    keys from ``model._tied_weights_keys`` and filter them at the call site.
+    """
+    replacements = {
+        "k_bmm_quantizer._amax": "k_proj.k_scale",
+        "v_bmm_quantizer._amax": "v_proj.v_scale",
+        "k_bmm_quantizer._bias_value": "k_proj.k_bias",
+        "v_bmm_quantizer._bias_value": "v_proj.v_bias",
+        "input_quantizer._pre_quant_scale": "pre_quant_scale",
+    }
+    skip_keys = [
+        "output_quantizer",
+        "_amax",
+        "_bias_value",
+        "input_quantizer._pre_quant_scale",
+        "weight_shape",
+    ]
+    if is_modelopt_qlora:
+        replacements.update(
+            {
+                "base_layer.weight": "weight",
+                "base_layer.input_scale": "input_scale",
+                "base_layer.weight_scale": "weight_scale",
+            }
+        )
+        skip_keys.append("base_layer")
+
+    # Skip problematic VL model parameters
+    if key == "vision_model.radio_model.summary_idxs":
+        return None, None
+
+    # Skip real quant parameters
+    if any(key.endswith("weight_quantizer." + q) for q in RealQuantLinear.list_of_scale_tensors):
+        return None, None
+
+    # Skip LoRA adapters for QLoRA models
+    if is_modelopt_qlora and "lora" in key:
+        return None, None
+
+    # Keys not related to quantizers: keep as-is
+    if all(sk not in key for sk in skip_keys):
+        if "scale" in key and isinstance(value, torch.Tensor) and value.dim() == 3 and value.shape[0] == 1:
+            value = value.squeeze(0)
+        return key, value
+
+    # Apply replacements if the key matches any suffix in the replacements dict
+    for old_suffix, new_suffix in replacements.items():
+        if key.endswith(old_suffix):
+            prefix = key[: -len(old_suffix)]
+            if "_amax" in key:
+                assert kv_cache_format in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
+                    "Invalid KV cache quantization format."
+                )
+                assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
+                value = value.float() / kv_cache_max_bound
+                if kv_cache_format == KV_CACHE_FP8 and value.item() > 0.5:
+                    logger.warning(
+                        "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
+                    )
+            new_key = prefix + new_suffix
+            if (
+                "scale" in new_key
+                and isinstance(value, torch.Tensor)
+                and value.dim() == 3
+                and value.shape[0] == 1
+            ):
+                value = value.squeeze(0)
+            return new_key, value
+
+    # Key has a skip_key but no replacement matched — drop it
+    return None, None
+
+
 def postprocess_state_dict(
     state_dict: dict,
     maxbound: float,

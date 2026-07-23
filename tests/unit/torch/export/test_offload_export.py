@@ -15,9 +15,14 @@
 
 """Unit tests for offload-aware unified HF export helpers (CPU-only, no GPU required)."""
 
+import json
+import tempfile
+from pathlib import Path
+
 import pytest
 import torch
 import torch.nn as nn
+from safetensors import safe_open
 
 try:
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
@@ -26,12 +31,13 @@ except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _has_accelerate_offload,
     _process_quantized_modules_offloaded,
+    _StreamingShardWriter,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -187,3 +193,126 @@ def test_non_decoder_offloaded_tensors_are_collected():
     for key, val in result.items():
         if isinstance(val, torch.Tensor):
             assert not val.is_meta, f"meta tensor found for key '{key}'"
+
+
+# ---------------------------------------------------------------------------
+# _StreamingShardWriter
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_shard_writer_single_shard():
+    """Small tensors that fit in one shard produce model.safetensors without an index."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("a", torch.ones(4, 4))
+        writer.add("b", torch.zeros(2, 2))
+        weight_map = writer.finalize()
+
+        single = Path(tmpdir) / "model.safetensors"
+        index = Path(tmpdir) / "model.safetensors.index.json"
+        assert single.exists(), "model.safetensors not written"
+        assert not index.exists(), "index file must not exist for single-shard export"
+        assert set(weight_map.values()) == {"model.safetensors"}
+        assert set(weight_map.keys()) == {"a", "b"}
+
+
+def test_streaming_shard_writer_multi_shard():
+    """Tensors exceeding max_shard_size produce multiple shards and an index file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # One float32 4x4 tensor = 64 bytes; set limit to 64 so each tensor goes to a new shard
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=64)
+        writer.add("x", torch.ones(4, 4))
+        writer.add("y", torch.ones(4, 4))
+        weight_map = writer.finalize()
+
+        index_path = Path(tmpdir) / "model.safetensors.index.json"
+        assert index_path.exists(), "model.safetensors.index.json not written"
+        assert weight_map["x"] != weight_map["y"], "keys must be in different shards"
+
+        with open(index_path) as f:
+            index = json.load(f)
+        assert "weight_map" in index
+        assert "metadata" in index
+        assert index["metadata"]["total_size"] > 0
+
+
+def test_streaming_shard_writer_tensors_readable():
+    """Tensors written by the shard writer can be read back correctly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        t = torch.randn(8, 8)
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("weight", t)
+        weight_map = writer.finalize()
+
+        shard_file = Path(tmpdir) / weight_map["weight"]
+        with safe_open(str(shard_file), framework="pt") as f:
+            recovered = f.get_tensor("weight")
+        assert torch.allclose(recovered, t), "recovered tensor does not match original"
+
+
+# ---------------------------------------------------------------------------
+# _postprocess_single_tensor
+# ---------------------------------------------------------------------------
+
+
+def test_postprocess_passthrough_normal_key():
+    """Non-quantizer weights pass through unchanged."""
+    key, val = _postprocess_single_tensor("model.layers.0.self_attn.q_proj.weight", torch.randn(4, 4), 448.0, None)
+    assert key == "model.layers.0.self_attn.q_proj.weight"
+    assert val is not None
+    assert val.shape == (4, 4)
+
+
+def test_postprocess_amax_dropped():
+    """weight_quantizer._amax matches skip_keys but has no replacement — dropped."""
+    key, val = _postprocess_single_tensor("model.layers.0.weight_quantizer._amax", torch.tensor(1.0), 448.0, None)
+    assert key is None
+    assert val is None
+
+
+def test_postprocess_output_quantizer_dropped():
+    """output_quantizer keys are always dropped."""
+    key, val = _postprocess_single_tensor(
+        "model.layers.0.output_quantizer._amax", torch.tensor(0.5), 448.0, None
+    )
+    assert key is None
+
+
+def test_postprocess_kv_scale_renamed_and_divided():
+    """k_bmm_quantizer._amax is renamed to k_proj.k_scale and divided by maxbound."""
+    from modelopt.torch.export.model_config import KV_CACHE_FP8
+
+    key, val = _postprocess_single_tensor(
+        "model.layers.0.self_attn.k_bmm_quantizer._amax",
+        torch.tensor(224.0),
+        448.0,
+        KV_CACHE_FP8,
+    )
+    assert key == "model.layers.0.self_attn.k_proj.k_scale"
+    assert abs(val.item() - 0.5) < 1e-5
+
+
+def test_postprocess_scale_squeezed():
+    """3D scale tensors with shape[0]==1 are squeezed."""
+    t = torch.ones(1, 4, 4)
+    key, val = _postprocess_single_tensor("model.weight_scale", t, 448.0, None)
+    assert key == "model.weight_scale"
+    assert val.shape == (4, 4), f"expected (4, 4), got {val.shape}"
+
+
+def test_postprocess_real_quant_param_dropped():
+    """Keys matching RealQuantLinear scale tensors are dropped."""
+    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
+
+    for q_key in RealQuantLinear.list_of_scale_tensors:
+        full_key = f"model.layers.0.weight_quantizer.{q_key}"
+        key, val = _postprocess_single_tensor(full_key, torch.tensor(1.0), 448.0, None)
+        assert key is None, f"expected None for real quant key '{full_key}'"
+
+
+def test_postprocess_vision_model_summary_idxs_dropped():
+    """The vision model summary_idxs parameter is always skipped."""
+    key, val = _postprocess_single_tensor(
+        "vision_model.radio_model.summary_idxs", torch.tensor([0, 1]), 448.0, None
+    )
+    assert key is None

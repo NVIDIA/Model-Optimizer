@@ -99,6 +99,7 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import (
+    _postprocess_single_tensor,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -999,6 +1000,291 @@ def _process_quantized_modules_offloaded(
     return full_sd
 
 
+class _StreamingShardWriter:
+    """Write tensors to safetensors shard files without accumulating the full state dict.
+
+    Buffers tensors up to ``max_shard_size`` bytes, flushes to a numbered temp file, then
+    at :meth:`finalize` renames temp files to canonical shard names once the total shard
+    count is known.
+
+    Peak memory = 1 layer (being materialized) + 1 shard buffer, not the full checkpoint.
+    """
+
+    def __init__(self, export_dir: Path | str, max_shard_size: int) -> None:
+        self._export_dir = Path(export_dir)
+        self._max_shard_size = max_shard_size
+        self._buffer: dict[str, torch.Tensor] = {}
+        self._buffer_bytes: int = 0
+        self._part_files: list[Path] = []
+        self._part_bytes: list[int] = []
+        # Maps tensor key → part-file index (recorded at flush time)
+        self._key_to_part: dict[str, int] = {}
+
+    def _flush(self) -> None:
+        if not self._buffer:
+            return
+        part_idx = len(self._part_files)
+        part_path = self._export_dir / f"__shard_part_{part_idx:05d}.safetensors"
+        save_file(self._buffer, str(part_path))
+        for key in self._buffer:
+            self._key_to_part[key] = part_idx
+        self._part_files.append(part_path)
+        self._part_bytes.append(self._buffer_bytes)
+        self._buffer = {}
+        self._buffer_bytes = 0
+
+    def add(self, key: str, tensor: torch.Tensor) -> None:
+        """Buffer a tensor, flushing the current shard to disk when it is full."""
+        self._buffer[key] = tensor
+        self._buffer_bytes += tensor.nbytes
+        if self._buffer_bytes >= self._max_shard_size:
+            self._flush()
+
+    def finalize(self) -> dict[str, str]:
+        """Flush remaining buffer, rename part files, write model.safetensors.index.json.
+
+        Returns the weight_map ``{key: shard_filename}`` written to the index.
+        Single-shard exports use ``model.safetensors`` without an index file.
+        """
+        self._flush()
+        n_shards = len(self._part_files)
+        if n_shards == 0:
+            return {}
+
+        if n_shards == 1:
+            final_name = "model.safetensors"
+            self._part_files[0].rename(self._export_dir / final_name)
+            return dict.fromkeys(self._key_to_part, final_name)
+
+        for i, part_path in enumerate(self._part_files):
+            part_path.rename(self._export_dir / f"model-{i + 1:05d}-of-{n_shards:05d}.safetensors")
+
+        weight_map = {
+            key: f"model-{part_idx + 1:05d}-of-{n_shards:05d}.safetensors"
+            for key, part_idx in self._key_to_part.items()
+        }
+        total_size = sum(self._part_bytes)
+        index_path = self._export_dir / "model.safetensors.index.json"
+        with open(index_path, "w") as f:
+            json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
+        return weight_map
+
+
+def _parse_shard_size(size: int | str) -> int:
+    """Convert a shard-size string (e.g. ``"10GB"``, ``"500MB"``) to bytes."""
+    try:
+        from transformers.utils import convert_file_size_to_int
+
+        return convert_file_size_to_int(size)
+    except (ImportError, Exception):
+        pass
+    if isinstance(size, int):
+        return size
+    s = size.strip().upper()
+    if s.endswith("GIB"):
+        return int(float(s[:-3]) * 1024**3)
+    if s.endswith("GB"):
+        return int(float(s[:-2]) * 1024**3)
+    if s.endswith("MIB"):
+        return int(float(s[:-3]) * 1024**2)
+    if s.endswith("MB"):
+        return int(float(s[:-2]) * 1024**2)
+    return int(s)
+
+
+def _export_transformers_checkpoint_streaming(
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    export_dir: Path | str = ".",
+    max_shard_size: int | str = "10GB",
+    **kwargs,
+) -> tuple[None, dict[str, Any]]:
+    """Export a disk/CPU-offloaded model by streaming tensors layer-by-layer to shard files.
+
+    Peak memory = 1 decoder layer + 1 shard buffer, rather than the full quantized state
+    dict accumulated in RAM (which reaches ~764 GiB for Ultra 550B).
+
+    Returns ``(None, quant_config)``; shard files, ``config.json``, and
+    ``generation_config.json`` are written to ``export_dir`` directly.  The caller is
+    responsible for writing ``hf_quant_config.json`` and updating ``config.json`` with
+    ``quantization_config``.
+    """
+    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    export_dir = Path(export_dir)
+
+    # --- Same model-level setup as _export_transformers_checkpoint ---
+    if dtype is None:
+        dtype = model.config.torch_dtype
+    elif dtype != model.config.torch_dtype:
+        warnings.warn(
+            f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
+            f"({dtype}), which may lead to numerical errors."
+        )
+
+    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    for name, sub_module in model.named_modules():
+        if is_moe(sub_module) and hasattr(sub_module, "experts"):
+            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
+            if handler is None:
+                raise NotImplementedError(
+                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
+                    f"Please file an issue or add support for this model architecture."
+                )
+            handler(name, sub_module, prepare_ctx)
+
+    requantize_resmooth_fused_llm_layers(model)
+
+    quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+
+    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
+    if mtp_layer_prefixes:
+        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
+        for prefix in mtp_layer_prefixes:
+            pattern = f"{prefix}*"
+            if pattern not in exclude_modules:
+                exclude_modules.append(pattern)
+                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+
+    synced = sync_moe_gate_up_amax(model)
+    if synced:
+        warnings.warn(
+            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
+            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
+            f"This typically means the dummy forward did not activate these experts. "
+            f"Taking element-wise max of amaxes for serving-engine fusion."
+        )
+
+    synced_input = sync_tied_input_amax(model)
+    if synced_input:
+        print(
+            f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
+            f"{synced_input} tied module group(s)"
+        )
+
+    # --- Per-tensor constants ---
+    kv_cache_max_bound = 448
+    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+
+    # --- Tied alias keys to skip (data_ptr() is unreliable for disk-offloaded weights) ---
+    raw_tied_keys: set[str] = set(getattr(model, "_tied_weights_keys", None) or [])
+
+    # --- Name mapper for per-tensor key reversal ---
+    # Tensor names are applied inline; quant config names are handled by the caller.
+    name_mapper = None
+    try:
+        name_mapper = build_reverse_name_mapper(model)
+    except Exception as exc:
+        warnings.warn(
+            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
+            "the original HF hub checkpoint."
+        )
+
+    tied_alias_keys: set[str] = (
+        {name_mapper(k) for k in raw_tied_keys} if name_mapper is not None else raw_tied_keys
+    )
+
+    # --- Decoder layers ---
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if decoder_layers is None:
+        raise RuntimeError(
+            "Streaming export requires discoverable decoder layers. "
+            "The model architecture is not supported by LayerActivationCollector."
+        )
+    decoder_layer_ids = {id(m) for m in decoder_layers}
+
+    # --- Stream tensors to shard files ---
+    shard_size_bytes = _parse_shard_size(max_shard_size)
+    writer = _StreamingShardWriter(export_dir, shard_size_bytes)
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    seen_keys: set[str] = set()
+
+    def _stream_tensor(full_key: str, tensor: torch.Tensor) -> None:
+        new_key, new_value = _postprocess_single_tensor(
+            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
+        )
+        if new_key is None:
+            return
+        if name_mapper is not None:
+            new_key = name_mapper(new_key)
+        if new_key in tied_alias_keys:
+            return
+        writer.add(new_key, new_value.detach().cpu())
+
+    # Decoder layers (offloaded: materialize one at a time)
+    for layer_name, layer_module in model.named_modules():
+        if id(layer_module) not in decoder_layer_ids:
+            continue
+        with enable_weight_access_and_writeback(layer_module, layer_module, writeback=False):
+            for sub_name, sub_mod in layer_module.named_modules():
+                full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
+                _dispatch_export_handler(full_name, sub_mod, ctx)
+            _reconstruct_fused_moe_linear(layer_module)
+            prefix = f"{layer_name}." if layer_name else ""
+            for key, tensor in layer_module.state_dict().items():
+                full_key = prefix + key
+                if full_key in seen_keys:
+                    continue
+                seen_keys.add(full_key)
+                _stream_tensor(full_key, tensor)
+
+    # Non-decoder modules with offload hooks (embed_tokens, norm, lm_head, etc.)
+    for name, module in model.named_modules():
+        if id(module) in decoder_layer_ids:
+            continue
+        if not hasattr(module, "_hf_hook"):
+            continue
+        if _get_offload_hook(module._hf_hook) is None:
+            continue
+        if not (
+            any(p is not None and p.is_meta for p in module._parameters.values())
+            or any(b is not None and b.is_meta for b in module._buffers.values())
+        ):
+            continue
+        with enable_weight_access_and_writeback(module, module, writeback=False):
+            for sub_name, sub_mod in module.named_modules():
+                full_name = f"{name}.{sub_name}" if sub_name else name
+                _dispatch_export_handler(full_name, sub_mod, ctx)
+            prefix = f"{name}." if name else ""
+            for key, tensor in module.state_dict().items():
+                full_key = prefix + key
+                if full_key in seen_keys or tensor.is_meta:
+                    continue
+                seen_keys.add(full_key)
+                _stream_tensor(full_key, tensor)
+
+    # GPU-resident parameters and buffers (not covered by the above loops)
+    for name, param in model.named_parameters():
+        if name in seen_keys or param is None or param.is_meta:
+            continue
+        seen_keys.add(name)
+        _stream_tensor(name, param)
+
+    for name, buf in model.named_buffers():
+        if name in seen_keys or buf is None or buf.is_meta:
+            continue
+        seen_keys.add(name)
+        _stream_tensor(name, buf)
+
+    writer.finalize()
+
+    # Write non-weight artifacts (model.save_pretrained skipped to avoid OOM)
+    import contextlib
+
+    _sanitize_generation_config_for_save(model)
+    model.config.save_pretrained(str(export_dir))
+    gc = getattr(model, "generation_config", None)
+    if gc is not None:
+        with contextlib.suppress(Exception):
+            gc.save_pretrained(str(export_dir))
+
+    return None, quant_config
+
+
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -1618,14 +1904,38 @@ def export_hf_checkpoint(
         and torch.distributed.is_initialized()
         and is_fsdp2_model(model)
     )
+    # Streaming path writes shard files layer-by-layer without accumulating the full
+    # state dict in RAM (peak = 1 layer + 1 shard buffer vs. ~764 GiB for Ultra 550B).
+    _offloaded = _has_accelerate_offload(model)
+
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
+        if _offloaded:
+            if save_modelopt_state:
+                warnings.warn(
+                    "save_modelopt_state=True is not supported in the streaming offload export "
+                    "path and will be ignored."
+                )
+            if extra_state_dict:
+                warnings.warn(
+                    "extra_state_dict is not supported in the streaming offload export path "
+                    "and will be ignored."
+                )
+            _, hf_quant_config = _export_transformers_checkpoint_streaming(
+                model,
+                dtype,
+                export_dir=export_dir,
+                max_shard_size=max_shard_size,
+                **kwargs,
+            )
+        else:
+            post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
-        export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
+        if not _offloaded:
+            export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
 
         # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
         # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
@@ -1640,7 +1950,10 @@ def export_hf_checkpoint(
         # weights and config so they stay mutually consistent.
         try:
             name_mapper = build_reverse_name_mapper(model)
-            export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+            if not _offloaded:
+                # Streaming path applies per-tensor renaming inline inside
+                # _export_transformers_checkpoint_streaming; skip full-dict reversal here.
+                export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
             if name_mapper is not None and hf_quant_config:
                 revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
         except Exception as exc:
@@ -1673,24 +1986,25 @@ def export_hf_checkpoint(
         else:
             hf_quant_config = None
 
-        # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
-        # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
-        # scale tensors). Patch both the source and importing module since modeling_utils does
-        # `from core_model_loading import revert_weight_conversion`.
-        _patches = _patch_revert_weight_conversion()
+        if not _offloaded:
+            # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
+            # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
+            # scale tensors). Patch both the source and importing module since modeling_utils does
+            # `from core_model_loading import revert_weight_conversion`.
+            _patches = _patch_revert_weight_conversion()
 
-        _sanitize_generation_config_for_save(model)
+            _sanitize_generation_config_for_save(model)
 
-        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
-        try:
-            model.save_pretrained(
-                export_dir,
-                state_dict=export_state_dict,
-                save_modelopt_state=save_modelopt_state,
-                max_shard_size=max_shard_size,
-            )
-        finally:
-            _unpatch_revert_weight_conversion(_patches)
+            # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
+            try:
+                model.save_pretrained(
+                    export_dir,
+                    state_dict=export_state_dict,
+                    save_modelopt_state=save_modelopt_state,
+                    max_shard_size=max_shard_size,
+                )
+            finally:
+                _unpatch_revert_weight_conversion(_patches)
 
         original_config = f"{export_dir}/config.json"
         config_data = {}
