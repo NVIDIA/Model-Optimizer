@@ -75,13 +75,16 @@ def _to_number(value: str, cast):
         return None
 
 
-def _resolve_gpu_indices(spec: str) -> list[int] | None:
-    """Parse ``--gpus``: ``none``/empty -> [], ``all`` -> None (all devices), else CSV of indices.
+def _resolve_gpu_indices(spec) -> list[int] | None:
+    """Parse ``--gpus``: ``none``/empty -> [], ``all`` -> None (all devices), else GPU indices.
 
-    Non-integer tokens (e.g. the GPU-UUID / MIG ids that ``CUDA_VISIBLE_DEVICES`` may
-    hold) cannot be mapped to NVML indices, so GPU monitoring is disabled with a
-    warning rather than crashing the wrapped workload.
+    ``spec`` may be a single string (CSV like ``"2,3"``) or a list of argparse tokens
+    (space-separated like ``["2", "3"]``); both are accepted. Non-integer tokens (e.g. the
+    GPU-UUID / MIG ids that ``CUDA_VISIBLE_DEVICES`` may hold) cannot be mapped to NVML
+    indices, so GPU monitoring is disabled with a warning rather than crashing the workload.
     """
+    if isinstance(spec, (list, tuple)):
+        spec = ",".join(spec)
     spec = (spec or "").strip()
     if spec.lower() in ("", "none"):
         return []
@@ -209,7 +212,11 @@ class GpuSampler:
 
 
 def _sample_cpu(proc: psutil.Process | None) -> CpuStat:
-    """System memory (total/used/free) + CPU%, and (if ``proc`` given) tree RSS + process CPU%."""
+    """System memory (total/used/free) + CPU%, and (if ``proc`` given) tree RSS + process CPU%.
+
+    ``sys_free`` is ``virtual_memory().available`` (allocatable memory incl. reclaimable page
+    cache), not raw ``.free`` -- the right headroom measure for a budget monitor.
+    """
     vm = psutil.virtual_memory()
     sys_util = psutil.cpu_percent(None)
     if proc is None:
@@ -287,8 +294,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=1.0, help="Sampling interval in seconds.")
     parser.add_argument(
         "--gpus",
-        default="all",
-        help="Physical GPU indices to monitor: 'all', 'none', or a CSV like '2,3'.",
+        nargs="+",
+        default=["all"],
+        metavar="GPU",
+        help="GPUs to monitor: 'all', 'none', or physical indices as CSV ('2,3') or "
+        "space-separated ('2 3').",
     )
     parser.add_argument(
         "--pid",
@@ -320,10 +330,12 @@ def _write_summary(path, duration, metrics: _Metrics):
             lines.append(f"peak_gpu{i}_temp_c: {acc['temp'].peak:.0f}")
     if metrics.sys_total.seen:
         lines.append(f"sys_cpu_total_mb: {metrics.sys_total.peak / MB:.1f}")
-    lines.append(f"peak_sys_cpu_used_mb: {metrics.sys_used.peak / MB:.1f}")
+    if metrics.sys_used.seen:
+        lines.append(f"peak_sys_cpu_used_mb: {metrics.sys_used.peak / MB:.1f}")
     if metrics.sys_free.min is not None:
         lines.append(f"min_sys_cpu_free_mb: {metrics.sys_free.min / MB:.1f}")
-    lines.append(f"mean_sys_cpu_util_pct: {metrics.sys_util.mean:.1f}")
+    if metrics.sys_util.seen:
+        lines.append(f"mean_sys_cpu_util_pct: {metrics.sys_util.mean:.1f}")
     if metrics.rss.seen:
         lines.append(f"peak_proc_rss_mb: {metrics.rss.peak / MB:.1f}")
         lines.append(f"mean_proc_cpu_util_pct: {metrics.proc_util.mean:.1f}")

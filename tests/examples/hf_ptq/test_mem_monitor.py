@@ -47,6 +47,22 @@ def test_resolve_gpu_indices():
     assert mm._resolve_gpu_indices(" 2 , 3 ") == [2, 3]
     # UUID / MIG ids can't map to NVML indices -> disable GPU monitoring, never crash.
     assert mm._resolve_gpu_indices("GPU-abcd,MIG-0") == []
+    # argparse nargs tokens: space-separated (--gpus 2 3) and single CSV token both work.
+    assert mm._resolve_gpu_indices(["2", "3"]) == [2, 3]
+    assert mm._resolve_gpu_indices(["2,3"]) == [2, 3]
+    assert mm._resolve_gpu_indices(["all"]) is None
+
+
+def test_gpus_accepts_space_separated_and_csv():
+    # --gpus 0 1 2 3 (space-separated) no longer crashes argparse; CSV still works.
+    assert mm._resolve_gpu_indices(mm.parse_args(["--gpus", "0", "1", "2", "3"]).gpus) == [
+        0,
+        1,
+        2,
+        3,
+    ]
+    assert mm._resolve_gpu_indices(mm.parse_args(["--gpus", "2,3"]).gpus) == [2, 3]
+    assert mm._resolve_gpu_indices(mm.parse_args([]).gpus) is None  # default 'all'
 
 
 def test_gpu_sampler_disabled():
