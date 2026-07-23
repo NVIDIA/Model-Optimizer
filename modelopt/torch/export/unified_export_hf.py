@@ -957,8 +957,40 @@ def _process_quantized_modules_offloaded(
                 )
                 layer_tensors[prefix + key] = tensor.detach()
 
-    # model.state_dict() gives real tensors for non-offloaded parts (embed, lm_head, norms, …);
-    # meta placeholders for offloaded decoder layers are overridden by layer_tensors.
+    # Also collect direct parameters of non-decoder modules that are disk-offloaded.
+    # model.state_dict() returns meta for ANY disk-offloaded tensor, including
+    # embed_tokens, final norms, and lm_head.  After revert_weight_conversion renames
+    # these to hub-original names (e.g. backbone.*), transformers' save_pretrained
+    # looks them up in the model by hub name and crashes if they are still meta.
+    # Fix: materialize each such module in-place and capture the real tensor.
+    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
+
+    for name, module in model.named_modules():
+        if id(module) in decoder_layer_ids:
+            continue
+        if not hasattr(module, "_hf_hook"):
+            continue
+        if _get_offload_hook(module._hf_hook) is None:
+            continue
+        # Only handle modules that have DIRECT meta parameters/buffers.
+        # Child decoder layers (already quantized above) must not be re-collected.
+        if not (
+            any(p is not None and p.is_meta for p in module._parameters.values())
+            or any(b is not None and b.is_meta for b in module._buffers.values())
+        ):
+            continue
+        with enable_weight_access_and_writeback(module, module, writeback=False):
+            prefix = f"{name}." if name else ""
+            for pname, param in module._parameters.items():
+                if param is not None and not param.is_meta:
+                    layer_tensors[prefix + pname] = param.data.detach().cpu()
+            for bname, buf in module._buffers.items():
+                if buf is not None and not buf.is_meta:
+                    layer_tensors[prefix + bname] = buf.detach().cpu()
+
+    # model.state_dict() fills in non-offloaded parts (GPU-resident tensors).
+    # layer_tensors overrides both decoder-layer placeholders and non-decoder
+    # offloaded placeholders so the returned dict contains no meta tensors.
     full_sd = model.state_dict()
     full_sd.update(layer_tensors)
     return full_sd
