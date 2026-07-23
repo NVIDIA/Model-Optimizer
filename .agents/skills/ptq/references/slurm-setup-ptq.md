@@ -69,7 +69,7 @@ Estimate GPU count from model size and available GPU memory. `hf_ptq.py` uses `d
 
 For multi-node PTQ (200B+ params), use `hf_ptq.py --use_fsdp2`. For the launch commands (`sbatch`
 and manual `torchrun`) and the `--recipe` format, see the *Multi-Node Post-Training Quantization with
-FSDP2* section of `examples/hf_ptq/README.md` rather than duplicating them here.
+FSDP2* section of `examples/hf_ptq/README.md`.
 
 Sizing guidance specific to this path: when the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
 
