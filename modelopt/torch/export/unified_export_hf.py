@@ -827,6 +827,19 @@ def _process_quantized_modules(
             handler(name, sub_module, ctx)
 
 
+def _diffusion_quantization_target_types(model: nn.Module) -> list[str]:
+    """Return stable type targets for homogeneous NVFP4 diffusion modules."""
+    target_types = set()
+    for sub_module in model.modules():
+        if get_quantization_format(sub_module) != QUANTIZATION_NVFP4:
+            continue
+        if any(cls.__name__ == "WanCausalConv3d" for cls in type(sub_module).__mro__):
+            target_types.add("Conv3d")
+        elif is_quantlinear(sub_module):
+            target_types.add("Linear")
+    return sorted(target_types)
+
+
 def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
@@ -1165,6 +1178,16 @@ def _export_diffusers_checkpoint(
             is_qwen_component = "qwen" in type(component).__name__.lower()
             _fuse_qkv_linears_diffusion(component, strict=is_qwen_component)
 
+            target_types = _diffusion_quantization_target_types(component)
+            if "Conv3d" in target_types and (
+                kwargs.get("padding_strategy") is not None
+                or kwargs.get("enable_swizzle_layout", False)
+            ):
+                raise NotImplementedError(
+                    "NVFP4 GEMM padding/swizzling is not defined for Conv3d exports. "
+                    "Export without padding_strategy/enable_swizzle_layout."
+                )
+
             # Process quantized modules (convert weights, register scales)
             _process_quantized_modules(component, component_dtype, is_modelopt_qlora=False)
 
@@ -1187,7 +1210,9 @@ def _export_diffusers_checkpoint(
                         if svdquant_rank is not None:
                             quantization_details["lora_rank"] = svdquant_rank
                 hf_quant_config = (
-                    convert_hf_quant_config_format(quant_config) if quant_config else None
+                    convert_hf_quant_config_format(quant_config, target_types=target_types)
+                    if quant_config
+                    else None
                 )
 
                 # Save the component

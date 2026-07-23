@@ -18,14 +18,22 @@
 import collections.abc
 import warnings
 
+import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
+from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
-from .model_config import QUANTIZATION_NONE
+from .model_config import QUANTIZATION_NONE, QUANTIZATION_NVFP4
 from .moe_utils import _export_fused_experts
-from .quant_utils import get_quantization_format
+from .quant_utils import (
+    get_activation_scaling_factor,
+    get_quantization_format,
+    get_weight_block_size,
+    to_quantized_weight,
+)
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__: list[str] = []
@@ -150,6 +158,146 @@ def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> No
         raise AssertionError(
             f"Failed to export module '{name}' (type={type(module).__name__}): {e}"
         ) from e
+
+
+def _validate_dynamic_nvfp4_quantizer(
+    quantizer: TensorQuantizer | None,
+    role: str,
+) -> TensorQuantizer:
+    """Validate the exact quantizer contract used by Conv3d implicit GEMM."""
+    if not isinstance(quantizer, TensorQuantizer):
+        raise NotImplementedError(
+            f"Conv3d {role} quantizer must be a TensorQuantizer, got "
+            f"{type(quantizer).__name__ if quantizer is not None else 'None'}."
+        )
+    if not quantizer.is_enabled or not quantizer._if_quant:
+        raise NotImplementedError(f"Conv3d {role} quantizer must be enabled for quantization.")
+    if (
+        not quantizer.is_nvfp4_dynamic
+        or quantizer.block_sizes.get(-1) != 16
+        or quantizer.axis is not None
+    ):
+        raise NotImplementedError(
+            f"Conv3d {role} quantizer must use per-tensor dynamic block-16 NVFP4."
+        )
+    return quantizer
+
+
+def _export_quantized_conv3d_weight(
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+) -> None:
+    """Export a supported Conv3d as logical flattened-K dynamic NVFP4 tensors.
+
+    The only supported contract is an ordinary, ungrouped Conv3d with full
+    NVFP4 weight/input quantization and a dynamic weight quantizer. Other
+    formats fail closed because their live fake-quant path does not share this
+    canonical flattened reduction axis.
+    """
+    if not isinstance(sub_module, nn.Conv3d):
+        raise TypeError(f"Expected nn.Conv3d, got {type(sub_module).__name__}.")
+    if sub_module.groups != 1:
+        raise NotImplementedError(
+            f"Grouped Conv3d export is not supported; got groups={sub_module.groups}."
+        )
+
+    quantizer_attrs = quantizer_attr_names(weight_name)
+    weight: nn.Parameter = getattr(sub_module, weight_name)
+    if weight.ndim != 5:
+        raise ValueError(f"Conv3d weight must be rank 5, got shape {tuple(weight.shape)}.")
+    if not weight.is_floating_point():
+        raise ValueError(f"Conv3d weight must be floating point, got {weight.dtype}.")
+
+    weight_quantizer = _validate_dynamic_nvfp4_quantizer(
+        getattr(sub_module, quantizer_attrs.weight_quantizer, None), "weight"
+    )
+    input_quantizer = _validate_dynamic_nvfp4_quantizer(
+        getattr(sub_module, quantizer_attrs.input_quantizer, None), "input"
+    )
+    output_quantizer = getattr(sub_module, quantizer_attrs.output_quantizer, None)
+    if output_quantizer is not None and getattr(output_quantizer, "is_enabled", False):
+        raise NotImplementedError("Conv3d output quantization is not supported for export.")
+    quantization_format = get_quantization_format(sub_module)
+    if quantization_format != QUANTIZATION_NVFP4:
+        raise NotImplementedError(
+            "Conv3d export supports only full dynamic NVFP4; "
+            f"got quantization format {quantization_format!r}."
+        )
+
+    block_size = get_weight_block_size(sub_module, weight_name)
+    weight_flat = weight.reshape(weight.shape[0], -1)
+    k_flat = weight_flat.shape[-1]
+    k_padded = ((k_flat + block_size - 1) // block_size) * block_size
+    if k_padded != k_flat:
+        weight_flat = torch.nn.functional.pad(weight_flat, (0, k_padded - k_flat))
+
+    weight_scale_2 = None
+    if weight_quantizer.amax is not None:
+        if weight_quantizer.amax.numel() != 1 or not torch.all(
+            torch.isfinite(weight_quantizer.amax) & (weight_quantizer.amax > 0)
+        ):
+            raise ValueError(
+                "Conv3d weight quantizer amax must be a finite positive scalar when calibrated."
+            )
+        weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
+    if weight_scale_2 is None:
+        weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2(weight_flat)
+    weight_scale_2 = weight_scale_2.to(device=weight.device, dtype=torch.float32).squeeze()
+    if not torch.all(torch.isfinite(weight_scale_2)) or not torch.all(weight_scale_2 > 0):
+        raise ValueError(
+            f"Conv3d weight_scale_2 must be finite and positive, got {weight_scale_2}."
+        )
+    weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+        weight_flat,
+        block_size=block_size,
+        weights_scaling_factor_2=weight_scale_2,
+    )[0]
+    quantized_weight = to_quantized_weight(
+        weight_flat.to(dtype),
+        weight_scale,
+        QUANTIZATION_NVFP4,
+        weight_scale_2,
+        block_size,
+    )
+
+    if input_quantizer.amax is None:
+        raise ValueError("Conv3d input quantizer must be calibrated before export.")
+    if input_quantizer.amax.numel() != 1 or not torch.all(
+        torch.isfinite(input_quantizer.amax) & (input_quantizer.amax > 0)
+    ):
+        raise ValueError("Conv3d input quantizer amax must be a finite positive scalar.")
+    input_scale = get_activation_scaling_factor(
+        sub_module, input_quantizer_name=quantizer_attrs.input_quantizer
+    )
+
+    # Commit only after every validation and tensor conversion succeeds.
+    setattr(sub_module, weight_name, nn.Parameter(quantized_weight, requires_grad=False))
+    sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
+    sub_module.register_buffer(quantizer_attrs.weight_scale_2, weight_scale_2)
+    sub_module.register_buffer(quantizer_attrs.input_scale, input_scale.squeeze())
+
+    torch.cuda.empty_cache()
+
+
+@ExportModuleRegistry.register(
+    "WanCausalConv3d", predicate=lambda module: hasattr(module, "weight_quantizer")
+)
+def _export_quant_conv3d(name: str, module: nn.Module, ctx: ExportContext) -> None:
+    """Export a supported quantized Wan Conv3d through its MRO registry match."""
+    quantizers = [
+        getattr(module, attr, None)
+        for attr in ("weight_quantizer", "input_quantizer", "output_quantizer")
+    ]
+    if not any(getattr(quantizer, "is_enabled", False) for quantizer in quantizers):
+        return
+
+    try:
+        with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
+            _export_quantized_conv3d_weight(module, ctx.dtype)
+    except (AssertionError, NotImplementedError, TypeError, ValueError) as e:
+        message = f"Failed to export Conv3d '{name}' (type={type(module).__name__}): {e}"
+        raise type(e)(message) from e
 
 
 @ExportModuleRegistry.register(
