@@ -107,6 +107,27 @@ class _GroupBoundaryModel(torch.nn.Module):
         return torch.randn(1, 4, 32)
 
 
+class _ExplicitCacheGroupBoundaryModel(torch.nn.Module):
+    class CacheAwareAttention(_AttentionLayer):
+        def forward(self, x, cache_params=None):
+            if cache_params is not None:
+                cache_params["positions"].append(len(cache_params["positions"]) + 1)
+            return super().forward(x)
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(use_cache=False)
+        self.cache = {"positions": []}
+        self.self_attn = self.CacheAwareAttention()
+
+    def forward(self, x):
+        # Pass the mutable cache positionally to verify signature binding, not just kwargs.
+        return self.self_attn(x, self.cache)
+
+    def get_input(self):
+        return torch.randn(1, 4, 32)
+
+
 class _AutoQuantMoeModel(torch.nn.Module):
     def __init__(self, num_experts_attr="num_experts"):
         super().__init__()
@@ -791,6 +812,62 @@ def test_auto_quantize_local_boundary_scores_fused_experts_at_parent(monkeypatch
     assert score_module == parent_name
 
 
+@pytest.mark.parametrize(
+    ("module_name", "expected_parent"),
+    [
+        ("model.layers.0.self_attn.qkv_proj", "model.layers.0.self_attn"),
+        ("model.layers.0.self_attn.o_proj", "model.layers.0.self_attn"),
+        ("decoder.layers.0.self_attention.linear_qkv", "decoder.layers.0.self_attention"),
+        ("decoder.layers.0.self_attention.linear_proj", "decoder.layers.0.self_attention"),
+        ("transformer.h.0.attn.c_attn", "transformer.h.0.attn"),
+        ("transformer.h.0.crossattention.c_attn", "transformer.h.0.crossattention"),
+        ("encoder.layer.0.attention.self.query", "encoder.layer.0.attention"),
+        ("model.layers.0.linear_attn.in_proj_qkv", "model.layers.0.linear_attn"),
+    ],
+)
+def test_auto_quantize_group_boundary_maps_supported_attention_layouts(
+    module_name, expected_parent
+):
+    searcher = AutoQuantizeGradientSearcher()
+    searcher.model = torch.nn.Module()
+    searcher.config = {"score_boundary": "group"}
+
+    score_module = next(
+        result
+        for rule in searcher._get_score_module_rules()
+        if (result := searcher._apply_score_group_rule(module_name, rule)) is not None
+    )
+
+    assert score_module == expected_parent
+
+
+def test_auto_quantize_group_boundary_warns_on_unmapped_attention_projection():
+    class RootAttentionProjection(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(32, 32)
+
+        def forward(self, x):
+            return self.q_proj(x)
+
+    model = RootAttentionProjection()
+    batch = torch.randn(1, 4, 32)
+    with pytest.warns(UserWarning, match=r"could not map.*q_proj"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_WEIGHT_ONLY_CFG,
+            ],
+            data_loader=[batch],
+            forward_step=lambda model, data: model(data),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+
 def test_auto_quantize_group_score_boundary_does_not_group_recipe_decisions():
     model = _GroupBoundaryModel()
     _, search_state = mtq.auto_quantize(
@@ -828,6 +905,30 @@ def test_auto_quantize_group_score_boundary_does_not_group_recipe_decisions():
     assert model.config.use_cache is True
     assert model.config.text_config.use_cache is True
     assert (False, False) in model.use_cache_seen
+
+
+def test_auto_quantize_group_boundary_rejects_explicit_mutable_cache_before_replay():
+    model = _ExplicitCacheGroupBoundaryModel()
+
+    with pytest.raises(ValueError, match=r"cache-bearing inputs \(cache_params\)"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_WEIGHT_ONLY_CFG,
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            method="gradient",
+        )
+
+    # Each format runs one calibration forward. The parent replay must fail before a third,
+    # baseline/candidate forward can mutate and reuse the same cache.
+    assert model.cache["positions"] == [1, 2]
 
 
 def test_auto_quantize_gradient_defaults_to_group_boundary_and_supports_keyword_calls():
@@ -871,6 +972,50 @@ def test_auto_quantize_gradient_local_boundary_opt_out():
 
     assert search_state["score_boundary"] == "local"
     assert (False, False) not in model.use_cache_seen
+
+
+@pytest.mark.parametrize(
+    ("method", "score_boundary", "match"),
+    [
+        ("gradient", "unsupported", "score_boundary must be one of"),
+        ("kl_div", "group", "supported only with method='gradient'"),
+    ],
+)
+def test_auto_quantize_validates_score_boundary_before_mutating_model(
+    method, score_boundary, match
+):
+    model = TransformerBlock()
+    original_mlp_type = type(model.mlp)
+
+    with pytest.raises(ValueError, match=match):
+        mtq.auto_quantize(model, method=method, score_boundary=score_boundary)
+
+    assert type(model.mlp) is original_mlp_type
+    assert not hasattr(model.mlp, "weight_quantizer")
+
+
+def test_auto_quantize_can_retry_after_rejected_score_boundary():
+    model = TransformerBlock()
+    with pytest.raises(ValueError, match="supported only with method='gradient'"):
+        mtq.auto_quantize(model, method="kl_div", score_boundary="group")
+
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[
+            mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+            mtq.INT8_WEIGHT_ONLY_CFG,
+        ],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+        method="gradient",
+        score_boundary="local",
+    )
+
+    assert search_state["score_boundary"] == "local"
 
 
 # use this config to test custom quantization config

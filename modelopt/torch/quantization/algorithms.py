@@ -18,6 +18,7 @@
 import copy
 import fnmatch
 import gc
+import inspect
 import types
 import warnings
 from abc import ABC, abstractmethod
@@ -595,17 +596,53 @@ class QuantRecipeHparam(Hparam):
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
 _LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
-_SELF_ATTN_GROUP_RE = re.compile(r"^((?:.*\.)?self_attn)\.(?:q_proj|k_proj|v_proj|o_proj)$")
-_LINEAR_ATTN_GROUP_RE = re.compile(
-    r"^((?:.*\.)?linear_attn)\.(?:in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)$"
-)
 _FUSED_EXPERTS_PARENT_RE = re.compile(r"^((?:.*\.)?(?:mlp|mixer))\.experts$")
+_LIKELY_ATTENTION_PROJECTION_NAMES = frozenset(
+    {
+        "c_attn",
+        "k_proj",
+        "linear_qkv",
+        "o_proj",
+        "q_proj",
+        "qkv_proj",
+        "query_key_value",
+        "v_proj",
+        "wqkv",
+    }
+)
+_MUTABLE_CACHE_INPUT_NAMES = frozenset(
+    {
+        "cache_params",
+        "inference_context",
+        "inference_params",
+        "kv_cache",
+        "layer_past",
+        "past_key_value",
+        "past_key_values",
+    }
+)
 
 AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL = "local"
 AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP = "group"
 AUTO_QUANTIZE_SCORE_BOUNDARIES = frozenset(
     {AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL, AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP}
 )
+
+
+def _resolve_auto_quantize_score_boundary(method: str, score_boundary: str | None) -> str:
+    if method not in {"gradient", "kl_div"}:
+        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+    if score_boundary is None:
+        score_boundary = (
+            AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
+            if method == "kl_div"
+            else AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP
+        )
+    if score_boundary not in AUTO_QUANTIZE_SCORE_BOUNDARIES:
+        raise ValueError(f"score_boundary must be one of {sorted(AUTO_QUANTIZE_SCORE_BOUNDARIES)}.")
+    if method != "gradient" and score_boundary != AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL:
+        raise ValueError("score_boundary='group' is supported only with method='gradient'.")
+    return score_boundary
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -618,14 +655,56 @@ def _linear_attn_ba_group_key(_model, name: str) -> str | None:
     return f"{m.group(1)}/ba" if m else None
 
 
-def _self_attn_group_score_module(_model, name: str) -> str | None:
-    match = _SELF_ATTN_GROUP_RE.match(name)
-    return match.group(1) if match else None
+def _is_attention_module_name(name: str) -> bool:
+    return name.lower().endswith(("attention", "attn"))
 
 
-def _linear_attn_group_score_module(_model, name: str) -> str | None:
-    match = _LINEAR_ATTN_GROUP_RE.match(name)
-    return match.group(1) if match else None
+def _attention_parent_score_module(_model, name: str) -> str | None:
+    """Return the nearest attention ancestor for any quantizable descendant."""
+    components = name.split(".")
+    for idx in range(len(components) - 2, -1, -1):
+        if _is_attention_module_name(components[idx]):
+            return ".".join(components[: idx + 1])
+    return None
+
+
+def _looks_like_unmapped_attention_projection(name: str) -> bool:
+    return name.rsplit(".", 1)[-1].lower() in _LIKELY_ATTENTION_PROJECTION_NAMES
+
+
+def _bound_forward_inputs(forward, args, kwargs) -> dict[str, Any]:
+    """Best-effort map of positional and keyword inputs for a bound forward method."""
+    inputs = dict(kwargs)
+    try:
+        signature = inspect.signature(forward)
+        bound = signature.bind_partial(*args, **kwargs)
+    except (TypeError, ValueError):
+        return inputs
+
+    for name, value in bound.arguments.items():
+        parameter = signature.parameters[name]
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD and isinstance(value, dict):
+            inputs.update(value)
+        else:
+            inputs[name] = value
+    return inputs
+
+
+def _validate_group_score_replay_inputs(module: nn.Module, args, kwargs) -> None:
+    """Reject explicit mutable caches before replaying a parent score module."""
+    inputs = _bound_forward_inputs(module._forward_original, args, kwargs)
+    cache_inputs = sorted(
+        name for name in _MUTABLE_CACHE_INPUT_NAMES if name in inputs and inputs[name] is not None
+    )
+    if inputs.get("use_cache") is True:
+        cache_inputs.append("use_cache=True")
+    if cache_inputs:
+        raise ValueError(
+            "Group-boundary AutoQuantize scoring cannot replay a parent module with explicit "
+            f"cache-bearing inputs ({', '.join(cache_inputs)}). Disable use_cache and omit "
+            "past/cache state in forward_step so every candidate starts from the same sequence "
+            "state."
+        )
 
 
 def _fused_experts_parent_score_module(model, name: str) -> str | None:
@@ -741,27 +820,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         assert config["forward_step"] is not None, (
             "`forward_step` must be provided for `auto_quantize`."
         )
-        if config["score_boundary"] is None:
-            config["score_boundary"] = (
-                AUTO_QUANTIZE_SCORE_BOUNDARY_LOCAL
-                if self.method_name == "kl_div"
-                else AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP
-            )
-        if config["score_boundary"] not in AUTO_QUANTIZE_SCORE_BOUNDARIES:
-            raise ValueError(
-                f"score_boundary must be one of {sorted(AUTO_QUANTIZE_SCORE_BOUNDARIES)}."
-            )
+        assert self.method_name is not None
+        config["score_boundary"] = _resolve_auto_quantize_score_boundary(
+            self.method_name, config["score_boundary"]
+        )
         return config
 
     def _get_score_module_rules(self):
         rules = []
         if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP:
-            rules.extend(
-                [
-                    _self_attn_group_score_module,
-                    _linear_attn_group_score_module,
-                ]
-            )
+            rules.append(_attention_parent_score_module)
         rules.extend(self.score_module_rules)
         return rules
 
@@ -951,6 +1019,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # Map from group key to list of (quant_module, name, disabled, score_module)
         search_map: dict[str, list[tuple[nn.Module, str, bool, nn.Module]]] = {}
 
+        unmapped_attention_projections = []
         for name, module in model.named_modules():
             if not self._is_auto_quantize_module(module):
                 continue
@@ -973,12 +1042,20 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             # Apply score_module_rules to determine the score module name, then get the actual module
             score_module_name = name  # Default: score from same module
+            score_rule_matched = False
             for rule in self._get_score_module_rules():
                 result = self._apply_score_group_rule(name, rule)
                 if result is not None:
                     score_module_name = result
+                    score_rule_matched = True
                     # We support only one rule for matching per module
                     break
+            if (
+                self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP
+                and not score_rule_matched
+                and _looks_like_unmapped_attention_projection(name)
+            ):
+                unmapped_attention_projections.append(name)
 
             # Get the actual score module object immediately
             score_module = self._get_score_module_from_name(model, score_module_name, module)
@@ -987,6 +1064,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 search_map[group_key] = [(module, name, disabled, score_module)]
             else:
                 search_map[group_key].append((module, name, disabled, score_module))
+
+        if unmapped_attention_projections:
+            warnings.warn(
+                "Group-boundary AutoQuantize scoring could not map these likely attention "
+                "projections to a parent attention module and will score them locally: "
+                f"{unmapped_attention_projections}. Use a conventional attention parent name "
+                "(for example, attn, self_attn, self_attention, or linear_attn), register a "
+                "model-specific score rule, or set score_boundary='local'.",
+                stacklevel=2,
+            )
 
         for group_key, module_info_list in search_map.items():
             quant_modules = [module for module, _, _, _ in module_info_list]
@@ -1630,6 +1717,9 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     def _estimate_auto_quantize_scores(self, is_param_grad_enabled):
         # TODO: remove the no-quant recipe
         def auto_quantize_score_estimate_forward(module, *args, **kwargs):
+            if self.config["score_boundary"] == AUTO_QUANTIZE_SCORE_BOUNDARY_GROUP:
+                _validate_group_score_replay_inputs(module, args, kwargs)
+
             for hparam in module._hparams_for_scoring:
                 if hparam.is_configurable:
                     hparam.active = QuantRecipe(quant_cfg=None)

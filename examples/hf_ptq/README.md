@@ -391,8 +391,10 @@ the search), and `cost_excluded_layers` (kept out of the bit-budget accounting â
 towers), and `score_boundary` (`local` / `group`). Group scoring is the default for gradient; it
 changes the measurement boundary but does not force attention projections to share one recipe
 decision. Set `score_boundary: local` in the recipe to restore leaf-output attention scoring;
-expert projections retain their established parent MLP/mixer scoring boundary. Recipes can splice
-a shared base `disabled_layers` set via
+expert projections retain their established parent MLP/mixer scoring boundary. Attention parent
+names ending in `attn` or `attention` are recognized across fused and split projection layouts.
+Group scoring rejects explicit past/cache inputs because replaying a mutable cache would compare
+candidates at different sequence states. Recipes can splice a shared base `disabled_layers` set via
 `$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
 AutoQuantize recipes support two mutually exclusive search-space styles:

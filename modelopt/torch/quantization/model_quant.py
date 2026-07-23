@@ -36,7 +36,12 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.utils import atomic_print
 
-from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+from .algorithms import (
+    AutoQuantizeGradientSearcher,
+    AutoQuantizeKLDivSearcher,
+    QuantRecipe,
+    _resolve_auto_quantize_score_boundary,
+)
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
@@ -445,10 +450,14 @@ def auto_quantize(
             threshold-based binary search, and only requires ``forward_step`` returning logits).
         score_boundary: Boundary used to measure perturbations. ``"local"``
             scores attention projections at their leaf outputs. ``"group"`` scores them at the
-            parent self-attention or linear-attention output. Expert projections retain their
-            established parent MLP/mixer score boundary in either mode. This does not group recipe
-            decisions or force attention modules to use the same quantization format. Defaults to
-            ``"group"`` for ``method="gradient"`` and ``"local"`` for ``method="kl_div"``.
+            nearest parent attention output. Attention parent names ending in ``attn`` or
+            ``attention`` are recognized, covering
+            common Hugging Face and Megatron layouts. Expert projections retain their established
+            parent MLP/mixer score boundary in either mode. This does not group recipe decisions
+            or force attention modules to use the same quantization format. Parent replay rejects
+            explicit mutable cache inputs; omit past/cache state from ``forward_step``. Defaults
+            to ``"group"`` for ``method="gradient"`` and ``"local"`` for
+            ``method="kl_div"``.
         checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
             If the checkpoint file exists, the search state will be restored from it, skipping the
             expensive score estimation step.
@@ -513,6 +522,9 @@ def auto_quantize(
         might not be readily deployable to TensorRT-LLM yet.
 
     """
+    # Validate and resolve this before any quantization mode is applied. A rejected call must leave
+    # the caller's model untouched so it can be retried with corrected configuration.
+    score_boundary = _resolve_auto_quantize_score_boundary(method, score_boundary)
 
     def _process_quantization_formats(formats, custom_name_prefix):
         processed = []
@@ -627,10 +639,9 @@ def auto_quantize(
     # Select the appropriate searcher based on method
     if method == "gradient":
         searcher = AutoQuantizeGradientSearcher()
-    elif method == "kl_div":
-        searcher = AutoQuantizeKLDivSearcher()
     else:
-        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+        assert method == "kl_div"
+        searcher = AutoQuantizeKLDivSearcher()
 
     model = apply_mode(
         model,
