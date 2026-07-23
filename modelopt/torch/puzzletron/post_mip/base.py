@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import html
 from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -93,19 +92,12 @@ class PostMIPNode(ABC):
         return ()
 
     @classmethod
-    def render_report(cls, node: CompiledPostMIPNode, payload: Mapping[str, Any]) -> str:
-        status = html.escape(str(payload.get("status", "pending")))
-        input_count = int(payload.get("input_count", 0))
-        output_count = int(payload.get("output_count", 0))
-        metrics = ", ".join(str(value) for value in payload.get("metric_names") or ())
-        metric_text = f"<p>metrics={html.escape(metrics)}</p>" if metrics else ""
-        return (
-            f"<h3>{html.escape(node.node_id)}</h3>"
-            f"<p>type={html.escape(node.node_type)} · status={status} · "
-            f"candidates={input_count}→{output_count} · "
-            f"model source={html.escape(node.model_source)}</p>"
-            f"{metric_text}"
-        )
+    def render_report(
+        cls, node: CompiledPostMIPNode, payload: Mapping[str, Any]
+    ) -> str | None:
+        """Return a report fragment, or ``None`` for DAG-only node types."""
+
+        return None
 
 
 def _artifact_label(values: set[ArtifactKind]) -> str:
@@ -279,7 +271,7 @@ def compile_post_mip_flows(config: Mapping[str, Any]) -> tuple[CompiledPostMIPNo
 
 def render_post_mip_node_report(
     node: CompiledPostMIPNode, payload: Mapping[str, Any]
-) -> str:
+) -> str | None:
     """Render one node using the report hook owned by its registered class."""
 
     return _REGISTRY[node.node_type].render_report(node, payload)

@@ -16,8 +16,9 @@
 import json
 from pathlib import Path
 
-import modelopt.torch.puzzletron.diagnostics.campaign_progress_report as report_module
 import pytest
+
+import modelopt.torch.puzzletron.diagnostics.campaign_progress_report as report_module
 from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     _activation_diagnostic_summary,
     _campaign_options_data,
@@ -32,8 +33,8 @@ from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     _vllm_section,
     generate_campaign_progress_report,
 )
-from modelopt.torch.puzzletron.stages.graph import STAGE_REGISTRY
 from modelopt.torch.puzzletron.stages.diagnostics import _PRIMARY_METRICS
+from modelopt.torch.puzzletron.stages.graph import STAGE_REGISTRY
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -107,6 +108,23 @@ def test_report_has_clean_header_and_only_artifact_backed_sections(tmp_path: Pat
     assert "Subblock Bypass" in document
     assert "Nested bypass" not in document
     assert "MIP solutions" not in document
+
+
+def test_pipeline_dag_only_contains_configured_stages(tmp_path: Path):
+    config = {
+        "bypass": {"enabled": False},
+        "vllm_stats": {"enabled": False},
+        "zero_shot_evaluation": {"enabled": False},
+        "aiperf": {"enabled": False},
+    }
+
+    document = report_module._stage_dag(tmp_path, config, {}, {})
+
+    assert 'data-stage="convert"' in document
+    assert 'data-stage="bypass"' not in document
+    assert 'data-stage="vllm_stats"' not in document
+    assert 'data-stage="zero_shot_evaluation"' not in document
+    assert 'data-stage="aiperf"' not in document
 
 
 def test_progress_report_renders_canonical_sort_sanity_metrics(tmp_path: Path):
@@ -1416,9 +1434,7 @@ def test_report_explorers_use_per_axis_filter_javascript(tmp_path: Path):
 
 
 def test_diverse_bypass_gate_uses_decreasing_per_width_trends_and_diversity():
-    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
-        _overfit_summary_card,
-    )
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import _overfit_summary_card
 
     card = _overfit_summary_card(
         "diverse_resampled",
@@ -1440,9 +1456,7 @@ def test_diverse_bypass_gate_uses_decreasing_per_width_trends_and_diversity():
 
 
 def test_bypass_gate_findings_render_warning_tooltip():
-    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
-        _overfit_summary_card,
-    )
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import _overfit_summary_card
 
     message = "local KD acceptance loss did not decrease"
     card = _overfit_summary_card(

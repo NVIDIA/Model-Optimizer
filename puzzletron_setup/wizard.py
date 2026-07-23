@@ -665,6 +665,8 @@ def _default_flow(
                         "input_tokens": int(runtime["isl"]),
                         "output_tokens": int(runtime["osl"]),
                         "concurrency": [int(runtime["concurrency"])],
+                        "use_server_token_count": True,
+                        "benchmark_timeout": 600,
                     },
                 },
             ),
@@ -818,6 +820,10 @@ def _custom_flow(
                 "concurrency": [
                     prompts.integer("AIPerf concurrency:", default=int(runtime["concurrency"]))
                 ],
+                "use_server_token_count": True,
+                "benchmark_timeout": prompts.integer(
+                    "Per-candidate AIPerf timeout (seconds):", default=600
+                ),
             }
             available_metrics.append(f"{node_id}.request_throughput")
         elif node_type == "global_kd":
@@ -946,14 +952,44 @@ def _resource_rows(
     gpus_per_node: int,
     workers: Mapping[str, int],
 ) -> list[dict[str, Any]]:
+    from .bundle import _post_mip_candidate_limits
+
     rows = []
     single_gpu = dict.fromkeys(_MESH_KEYS, 1)
+    flows = state.section("post_mip").get("flows") or {}
+    candidate_limits = _post_mip_candidate_limits({"post_mip": {"flows": flows}})
+
+    def post_mip_instances(node_type: str, worker_limit: int, default: int) -> int:
+        instances = []
+        for flow_id, flow in flows.items():
+            for node_id, node in (flow.get("nodes") or {}).items():
+                if node.get("type") != node_type:
+                    continue
+                candidate_limit = candidate_limits[f"post.{flow_id}.{node_id}"]
+                instances.append(
+                    worker_limit
+                    if candidate_limit is None
+                    else min(worker_limit, candidate_limit)
+                )
+        return max(instances, default=default)
+
+    sharded_workers = int(workers["sharded"])
+    aiperf_workers = int(workers.get("aiperf", 2 * gpus_per_node))
     stages = [
         ("importance/scoring", common, int(workers["pool"])),
-        ("vLLM/AIPerf", single_gpu, int(workers["sharded"])),
-        ("evaluation", common, int(workers["sharded"])),
+        ("vLLM stats", single_gpu, int(workers["sharded"])),
+        (
+            "AIPerf",
+            single_gpu,
+            post_mip_instances("aiperf", aiperf_workers, aiperf_workers),
+        ),
+        (
+            "evaluation",
+            common,
+            post_mip_instances("evaluation", sharded_workers, sharded_workers),
+        ),
         ("bypass", bypass, 1),
-        ("global KD", global_kd, 1),
+        ("global KD", global_kd, post_mip_instances("global_kd", sharded_workers, 1)),
     ]
     for name, mesh, instances in stages:
         gpus = _mesh_product(mesh)
@@ -1034,6 +1070,7 @@ def _ask_infrastructure(
     workers = {
         "pool": prompts.integer("Workers for persistent-pool stages:", default=gpus_per_node),
         "sharded": prompts.integer("Workers for sharded stages:", default=gpus_per_node),
+        "aiperf": 2 * gpus_per_node,
     }
     runner: dict[str, Any] = {"kind": runner_kind}
     if runner_kind == "slurm":

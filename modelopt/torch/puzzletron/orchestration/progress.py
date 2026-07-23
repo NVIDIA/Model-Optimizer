@@ -440,7 +440,15 @@ def _post_mip_progress(
     }
     completed = len(rows_by_revision)
     failed = sum(row.get("status") == "failed" for row in rows_by_revision.values())
-    suffix = f", {failed} failed" if failed else ""
+    timed_out = sum(
+        row.get("status") == "timed_out" for row in rows_by_revision.values()
+    )
+    outcomes = []
+    if failed:
+        outcomes.append(f"{failed} failed")
+    if timed_out:
+        outcomes.append(f"{timed_out} timed out")
+    suffix = f", {', '.join(outcomes)}" if outcomes else ""
     return (
         f"{labels.get(node_type, 'processed')} {completed}/{len(revision_ids)} candidates"
         f"{suffix}"

@@ -28,8 +28,8 @@ from .schema import (
     StagePlanNode,
 )
 from .stages import (
+    configured_stage_ids,
     distributed_stage_ids,
-    enabled_stage_ids,
     selected_parent_stage_ids,
     topological_mapping_items,
 )
@@ -49,15 +49,6 @@ _DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
     "zero_shot_evaluation": ExecutionStrategy.SHARDED,
     "aiperf": ExecutionStrategy.SHARDED,
 }
-
-_LEGACY_POST_MIP_STAGES = {
-    "zero_shot_evaluation",
-    "aiperf",
-    "global_distillation_sanity",
-    "global_distillation",
-    "post_distillation_evaluation",
-}
-
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
@@ -433,13 +424,11 @@ def compile_campaign_plan(
         or (experiment_config.get("experiment") or {}).get("dir")
         or "."
     )
-    enabled = enabled_stage_ids(experiment_config)
     post_mip_stages = _post_mip_stage_metadata(experiment_config)
-    if post_mip_stages:
-        enabled = tuple(
-            stage_id for stage_id in enabled if stage_id not in _LEGACY_POST_MIP_STAGES
-        )
-    enabled = (*enabled, *(row["stage_id"] for row in post_mip_stages))
+    enabled = configured_stage_ids(
+        experiment_config,
+        dynamic_post_mip_stage_ids=(row["stage_id"] for row in post_mip_stages),
+    )
     if stage_filter and stage_filter != "full":
         if stage_filter not in enabled:
             raise ValueError(f"Stage {stage_filter!r} is not enabled in the experiment config")

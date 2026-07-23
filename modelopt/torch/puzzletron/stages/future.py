@@ -408,7 +408,7 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
                 executable=_aiperf_executable(stage_cfg),
                 endpoint_type=str(stage_cfg.get("endpoint_type", "chat")),
                 extra_inputs=dict(stage_cfg.get("extra_inputs") or {}),
-                use_server_token_count=bool(stage_cfg.get("use_server_token_count", False)),
+                use_server_token_count=bool(stage_cfg.get("use_server_token_count", True)),
                 seed=int(stage_cfg.get("seed", 42)),
             )
         finally:

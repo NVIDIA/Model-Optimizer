@@ -11,10 +11,12 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 __all__ = [
+    "LEGACY_POST_MIP_STAGE_IDS",
     "STAGE_REGISTRY",
     "STAGE_SPECS",
     "ArtifactChoice",
     "StageSpec",
+    "configured_stage_ids",
     "distributed_stage_ids",
     "enabled_stage_ids",
     "required_stage_ids",
@@ -26,6 +28,16 @@ __all__ = [
     "topological_mapping_items",
     "topological_stage_ids",
 ]
+
+LEGACY_POST_MIP_STAGE_IDS = frozenset(
+    {
+        "zero_shot_evaluation",
+        "aiperf",
+        "global_distillation_sanity",
+        "global_distillation",
+        "post_distillation_evaluation",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -360,6 +372,22 @@ def enabled_stage_ids(config: Mapping[str, Any]) -> tuple[str, ...]:
     """Return configured stages in deterministic topological order."""
 
     return tuple(stage_id for stage_id in topological_stage_ids() if stage_is_enabled(stage_id, config))
+
+
+def configured_stage_ids(
+    config: Mapping[str, Any],
+    *,
+    dynamic_post_mip_stage_ids: Iterable[str] = (),
+) -> tuple[str, ...]:
+    """Return the exact campaign DAG after replacing the legacy post-MIP tail."""
+
+    dynamic = tuple(dict.fromkeys(str(stage_id) for stage_id in dynamic_post_mip_stage_ids))
+    enabled = enabled_stage_ids(config)
+    if dynamic:
+        enabled = tuple(
+            stage_id for stage_id in enabled if stage_id not in LEGACY_POST_MIP_STAGE_IDS
+        )
+    return (*enabled, *dynamic)
 
 
 def _choice_matches(choice: ArtifactChoice, config: Mapping[str, Any]) -> bool:

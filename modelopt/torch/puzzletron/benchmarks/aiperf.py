@@ -9,8 +9,8 @@ import importlib.metadata
 import importlib.util
 import json
 import os
-import signal
 import shutil
+import signal
 import socket
 import subprocess  # nosec B404
 import tempfile
@@ -383,10 +383,10 @@ def run_aiperf_sweep(
     executable: str | Path = "aiperf",
     endpoint_type: str = "chat",
     extra_inputs: dict[str, Any] | None = None,
-    use_server_token_count: bool = False,
+    use_server_token_count: bool = True,
     seed: int = 42,
     readiness_timeout: float = 1200,
-    benchmark_timeout: float = 7200,
+    benchmark_timeout: float = 600,
     gpu_telemetry: str | None = "pynvml",
 ) -> list[BenchmarkResult]:
     """Run multiple concurrencies against one persistent vLLM server."""
@@ -512,7 +512,13 @@ def run_aiperf_sweep(
                 if not export.is_file():
                     raise FileNotFoundError(f"AIPerf did not produce {export}")
                 metrics, failures = _parse_export(export)
-                if round(metrics.get("input_sequence_length", -1)) != input_tokens:
+                # Server-reported chat prompt counts include the rendered chat
+                # template, while input_tokens describes the synthetic message.
+                exact_input_length = endpoint_type != "chat" or not use_server_token_count
+                if (
+                    exact_input_length
+                    and round(metrics.get("input_sequence_length", -1)) != input_tokens
+                ):
                     raise RuntimeError(
                         "AIPerf input length drift: "
                         f"{metrics.get('input_sequence_length')} != {input_tokens}"

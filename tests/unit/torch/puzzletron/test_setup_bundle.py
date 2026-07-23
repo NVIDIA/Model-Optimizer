@@ -155,6 +155,56 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
     assert execution["post.run.materialized"]["instances"] == 1
 
 
+def test_render_execution_caps_post_mip_workers_at_upstream_top_k() -> None:
+    common = {
+        "tp": 1,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 2,
+        "dp_replicate": 1,
+    }
+    state = {
+        "answers": {
+            "infrastructure": {
+                "gpus_per_node": 8,
+                "workers": {"pool": 8, "sharded": 8, "aiperf": 16},
+                "meshes": {"common": common, "bypass": common, "global_kd": common},
+            }
+        }
+    }
+    experiment = {
+        "post_mip": {
+            "flows": {
+                "run": {
+                    "nodes": {
+                        "fastest": {
+                            "type": "filter",
+                            "mode": "top_k",
+                            "metric": "serving.request_throughput",
+                            "direction": "maximize",
+                            "top_k": 4,
+                        },
+                        "short_kd": {
+                            "type": "global_kd",
+                            "input": "fastest",
+                        },
+                        "final_eval": {
+                            "type": "evaluation",
+                            "input": "short_kd",
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    execution = render_execution(state, experiment, "production")["execution"]["stages"]
+
+    assert execution["post.run.short_kd"]["instances"] == 4
+    assert execution["post.run.final_eval"]["instances"] == 4
+
+
 def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
     state = {
         "answers": {
@@ -392,6 +442,53 @@ def test_resource_summary_separates_serving_and_evaluation_meshes(tmp_path) -> N
         "instances": 8,
         "gpus_per_instance": 2,
         "nodes": 2,
+    }
+
+
+def test_resource_summary_caps_global_kd_at_upstream_top_k(tmp_path) -> None:
+    state = AnswerState.start(tmp_path / "campaign", detailed=False)
+    state.record_many(
+        "post_mip",
+        {
+            "flows": {
+                "run": {
+                    "nodes": {
+                        "fastest": {
+                            "type": "filter",
+                            "mode": "top_k",
+                            "metric": "serving.request_throughput",
+                            "direction": "maximize",
+                            "top_k": 4,
+                        },
+                        "short_kd": {"type": "global_kd", "input": "fastest"},
+                    }
+                }
+            }
+        },
+    )
+
+    rows = _resource_rows(
+        state,
+        common={"tp": 1, "cp": 1, "pp": 1, "dp_shard": 2, "dp_replicate": 1, "ep": 1},
+        bypass={"tp": 1, "cp": 1, "pp": 1, "dp_shard": 2, "dp_replicate": 1, "ep": 1},
+        global_kd={
+            "tp": 1,
+            "cp": 1,
+            "pp": 1,
+            "dp_shard": 2,
+            "dp_replicate": 1,
+            "ep": 1,
+        },
+        gpus_per_node=8,
+        workers={"pool": 8, "sharded": 8, "aiperf": 16},
+    )
+
+    global_kd = next(row for row in rows if row["stage"] == "global KD")
+    assert global_kd == {
+        "stage": "global KD",
+        "instances": 4,
+        "gpus_per_instance": 2,
+        "nodes": 1,
     }
 
 

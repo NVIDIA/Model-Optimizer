@@ -227,6 +227,7 @@ def _post_mip_flows(
                         common_mesh, int(config.get("micro_batch_size", 1))
                     )
             elif node_type == "aiperf":
+                config.setdefault("use_server_token_count", True)
                 config["topology"] = {
                     "tensor_parallel_size": int(common_mesh.get("tp", 1)),
                     "pipeline_parallel_size": int(common_mesh.get("pp", 1)),
@@ -518,6 +519,48 @@ def render_runner(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     return {"runner": runner}
 
 
+def _post_mip_candidate_limits(experiment: Mapping[str, Any]) -> dict[str, int | None]:
+    """Return known upper bounds on candidates entering each post-MIP stage."""
+    limits: dict[str, int | None] = {}
+    flows = _mapping(_mapping(experiment.get("post_mip")).get("flows"))
+    for flow_id, flow in flows.items():
+        pending = _mapping(flow.get("nodes"))
+        output_limits: dict[str, int | None] = {"source": None}
+        while pending:
+            progressed = False
+            for node_id, raw_node in tuple(pending.items()):
+                node = _mapping(raw_node)
+                input_id = str(node.get("input", "source"))
+                if input_id not in output_limits:
+                    continue
+                output_limit = output_limits[input_id]
+                if node.get("type") == "filter" and node.get("mode") in {
+                    "top_k",
+                    "aggregate_rank",
+                }:
+                    top_k = node.get("top_k", 1)
+                    filter_limit = (
+                        sum(int(value) for value in top_k.values())
+                        if isinstance(top_k, Mapping)
+                        else int(top_k)
+                    )
+                    output_limit = (
+                        filter_limit
+                        if output_limit is None
+                        else min(output_limit, filter_limit)
+                    )
+                output_limits[str(node_id)] = output_limit
+                limits[f"post.{flow_id}.{node_id}"] = output_limit
+                pending.pop(node_id)
+                progressed = True
+            if not progressed:
+                unresolved = ", ".join(sorted(str(node_id) for node_id in pending))
+                raise SetupError(
+                    f"Cannot resolve post-MIP candidate limits for {flow_id}: {unresolved}"
+                )
+    return limits
+
+
 def _dynamic_stage_entries(
     experiment: Mapping[str, Any],
     workers: Mapping[str, Any],
@@ -527,14 +570,24 @@ def _dynamic_stage_entries(
     cpu_partition: str | None,
 ) -> dict[str, Any]:
     entries = {}
+    candidate_limits = _post_mip_candidate_limits(experiment)
     for flow_id, flow in _mapping(_mapping(experiment.get("post_mip")).get("flows")).items():
         for node_id, node in _mapping(flow.get("nodes")).items():
             node_type = str(node.get("type"))
             selector = node_type in {"filter", "manual_filter"}
             cpu_stage = selector or node_type == "materialize"
+            worker_limit = int(workers.get("sharded", 1))
+            if node_type == "aiperf":
+                worker_limit = int(workers.get("aiperf", 2 * gpus_per_node))
+            candidate_limit = candidate_limits[f"post.{flow_id}.{node_id}"]
+            instances = (
+                worker_limit
+                if candidate_limit is None
+                else min(worker_limit, candidate_limit)
+            )
             entry = {
                 "strategy": "single" if selector else "sharded",
-                "instances": 1 if cpu_stage else int(workers.get("sharded", 1)),
+                "instances": 1 if cpu_stage else max(1, instances),
                 "gpus_per_node": gpus_per_node,
             }
             if cpu_stage and cpu_partition:

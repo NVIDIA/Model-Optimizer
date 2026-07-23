@@ -9,6 +9,8 @@ import copy
 import json
 import math
 import os
+import subprocess
+import traceback
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -63,6 +65,35 @@ def _atomic_json(path: Path, payload: Any) -> Path:
     finally:
         temporary.unlink(missing_ok=True)
     return path
+
+
+def _worker_group() -> tuple[int, int]:
+    """Return the rank and size of the innermost candidate process group."""
+
+    rank = int(os.environ.get("RANK", os.environ.get("PUZZLETRON_GROUP_RANK", "0")))
+    size = max(
+        int(os.environ.get("WORLD_SIZE", "1")),
+        int(os.environ.get("PUZZLETRON_GROUP_SIZE", "1")),
+    )
+    return rank, size
+
+
+def _exception_diagnostics(error: Exception) -> dict[str, str]:
+    """Keep candidate failures actionable after worker logs are aggregated."""
+
+    message = str(error)
+    return {
+        "error": f"{type(error).__name__}: {message}" if message else type(error).__name__,
+        "traceback": "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        ),
+    }
+
+
+def _needs_puzzletron_process_group(node_type: str) -> bool:
+    """Return whether Puzzletron, rather than the node runtime, owns initialization."""
+
+    return node_type == "evaluation"
 
 
 def _node_root(config: Mapping[str, Any], node: CompiledPostMIPNode) -> Path:
@@ -292,7 +323,7 @@ def _evaluate_config(
 def _evaluate_checkpoint(
     config: dict[str, Any], node: CompiledPostMIPNode, source, execution_identity: str
 ) -> dict[str, Any]:
-    from ..manifest import StageManifest
+    from ..manifest import StageManifest, semantic_stage_config
     from ..stages.future import evaluation_stage
 
     candidate = copy.deepcopy(config)
@@ -304,7 +335,12 @@ def _evaluate_checkpoint(
         output_dir=str(output),
     )
     candidate["zero_shot_evaluation"] = settings
-    manifest = StageManifest(stage=node.stage_id, inputs={"config": candidate}, config=candidate)
+    manifest = StageManifest(
+        stage=f"{node.stage_id}.{source.architecture_id}",
+        inputs={"config": candidate},
+        config=candidate,
+        semantic_config=semantic_stage_config(candidate, "zero_shot_evaluation"),
+    )
     evaluation_stage(candidate, manifest)
     rows = json.loads((output / "evaluation_summary.json").read_text())
     checkpoint = str(source.artifact["checkpoint"])
@@ -363,6 +399,23 @@ def _aiperf(
     }
 
 
+def _post_mip_kd_settings(
+    config: Mapping[str, Any],
+    node_settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve KD settings while preserving the transformer's checkpoint contract."""
+
+    settings = copy.deepcopy(dict(config.get("global_distillation") or {}))
+    settings.update(copy.deepcopy(dict(node_settings)))
+    if str(settings.get("save_consolidated", False)).strip().lower() in {
+        "false",
+        "0",
+        "none",
+    }:
+        settings["save_consolidated"] = True
+    return settings
+
+
 def _global_kd(
     config: dict[str, Any], node: CompiledPostMIPNode, source, execution_identity: str
 ) -> dict[str, Any]:
@@ -370,8 +423,7 @@ def _global_kd(
     from ..stages.future import _write_global_distillation_summary
 
     candidate = copy.deepcopy(config)
-    settings = copy.deepcopy(dict(candidate.get("global_distillation") or {}))
-    settings.update(dict(node.config.get("config") or {}))
+    settings = _post_mip_kd_settings(config, node.config.get("config") or {})
     output = (
         _execution_root(config, node, execution_identity)
         / "checkpoints"
@@ -429,10 +481,10 @@ def _distributed_shard(
 ) -> Iterator[None]:
     """Keep one process group alive across every candidate in a distributed shard."""
 
-    if int(os.environ.get("WORLD_SIZE", "1")) <= 1 or node.node_type not in {
-        "evaluation",
-        "global_kd",
-    }:
+    if (
+        int(os.environ.get("WORLD_SIZE", "1")) <= 1
+        or not _needs_puzzletron_process_group(node.node_type)
+    ):
         yield
         return
 
@@ -458,7 +510,8 @@ def run_post_mip_node_shard(
         / "shards"
         / f"shard_{shard_index:05d}.json"
     )
-    distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    group_rank, group_size = _worker_group()
+    distributed = group_size > 1
     rows = []
     with _distributed_shard(config, node):
         for revision_id in revision_ids:
@@ -470,22 +523,38 @@ def run_post_mip_node_shard(
                     "execution_identity": execution_identity,
                 }
             except Exception as error:
+                timed_out = node.node_type == "aiperf" and isinstance(
+                    error, (subprocess.TimeoutExpired, TimeoutError)
+                )
                 row = {
                     "input_revision_id": revision_id,
                     "source_revision_id": revision_id,
                     "architecture_id": ledger.revisions[revision_id].architecture_id,
-                    "status": "failed",
-                    "error": f"{type(error).__name__}: {error}",
+                    "status": "timed_out" if timed_out else "failed",
                     "execution_identity": execution_identity,
+                    **_exception_diagnostics(error),
                 }
+                if timed_out:
+                    timeout_field = (
+                        "benchmark_timeout"
+                        if isinstance(error, subprocess.TimeoutExpired)
+                        else "readiness_timeout"
+                    )
+                    default_timeout = 600 if timeout_field == "benchmark_timeout" else 1200
+                    row["timeout_seconds"] = float(
+                        getattr(error, "timeout", None)
+                        or (node.config.get("config") or {}).get(
+                            timeout_field, default_timeout
+                        )
+                    )
                 rows.append(row)
-                if int(os.environ.get("RANK", "0")) == 0:
+                if group_rank == 0:
                     _atomic_json(output_path, rows)
                 if distributed or node.config.get("failure_policy") == "strict":
                     raise
             else:
                 rows.append(row)
-                if int(os.environ.get("RANK", "0")) == 0:
+                if group_rank == 0:
                     _atomic_json(output_path, rows)
     return output_path
 
@@ -525,6 +594,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     ledger.ingest_mip(_puzzle_dir(config))
     input_set = _input_set(ledger, config, node)
     execution_identity = _execution_identity(config, node, input_set, ledger)
+    timed_out_candidates = []
     if node.node_type == "filter":
         observations, output_set = _aggregate_filter(
             ledger, node, input_set, execution_identity
@@ -588,6 +658,15 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
         output_ids = []
         for input_revision_id in input_set.revision_ids:
             row = by_input[input_revision_id]
+            if row["status"] == "timed_out":
+                timed_out_candidates.append(
+                    {
+                        "architecture_id": row["architecture_id"],
+                        "input_revision_id": input_revision_id,
+                        "timeout_seconds": row.get("timeout_seconds"),
+                        "error": row.get("error"),
+                    }
+                )
             output_revision_id = input_revision_id
             if row["status"] == "success" and node.capabilities.kind is NodeKind.TRANSFORMER:
                 artifact_kind = ArtifactKind(row["artifact_kind"])
@@ -659,6 +738,8 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
             for status in sorted({observation.status for observation in observations})
         },
     }
+    if timed_out_candidates:
+        summary["timed_out_candidates"] = timed_out_candidates
     execution_summary = _execution_root(config, node, execution_identity) / "summary.json"
     if execution_summary.is_file():
         if json.loads(execution_summary.read_text()) != canonicalize(summary):

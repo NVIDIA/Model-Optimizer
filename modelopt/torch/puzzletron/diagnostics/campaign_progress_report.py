@@ -20,15 +20,16 @@ from __future__ import annotations
 import html
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
-import time
 from typing import Any, Callable, Iterable, Mapping
 
 from ..stages.graph import (
     STAGE_SPECS,
     StageSpec,
+    configured_stage_ids,
     selected_parent_stage_ids,
     stage_display_name,
 )
@@ -2267,8 +2268,11 @@ def _mip_section(data: dict[str, Any]) -> str:
         if constraint.get("constraint_type") == "named_profile":
             bands = []
             for metric, bounds in (constraint.get("constraints") or {}).items():
-                lower, upper = bounds
-                bands.append(f"{metric}: {_fmt(lower)}–{_fmt(upper)}")
+                if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+                    lower, upper = bounds
+                    bands.append(f"{metric}: {_fmt(lower)}–{_fmt(upper)}")
+                else:
+                    bands.append(f"{metric}: ≤ {_fmt(bounds)}")
             return "Resource band", "; ".join(bands) or "N/A"
         if constraint.get("constraint_type") == "latency_ratio":
             return "Latency limit", f"{_fmt(constraint.get('latency_limit_ms'))} ms"
@@ -3158,8 +3162,17 @@ def _stage_dag(
 ) -> str:
     """Render the configured scheduler-neutral stage graph as a navigable SVG."""
 
-    specs = {spec.stage_id: spec for spec in STAGE_SPECS}
     dynamic = {node.stage_id: node for node in post_mip_nodes}
+    configured = configured_stage_ids(
+        merged_config,
+        dynamic_post_mip_stage_ids=dynamic,
+    )
+    specs_by_id = {spec.stage_id: spec for spec in STAGE_SPECS}
+    specs = {
+        stage_id: specs_by_id[stage_id]
+        for stage_id in configured
+        if stage_id not in dynamic
+    }
     parents = {
         stage_id: tuple(
             parent
@@ -3578,22 +3591,26 @@ def generate_campaign_progress_report(
     # Defer the post-MIP registry because report generation is also used by
     # lightweight legacy campaigns that never configure these node plugins.
     from ..post_mip import compile_post_mip_flows, render_post_mip_node_report
+    from ..post_mip.reporting import build_post_mip_report_payloads
 
     post_mip_nodes = compile_post_mip_flows(merged_config)
     granularity_data = _granularity_data(root, merged_config)
     statuses = {
         spec.stage_id: _pipeline_state(root, spec, merged_config) for spec in STAGE_SPECS
     }
-    post_mip_payloads = {}
+    post_mip_payloads = build_post_mip_report_payloads(root, post_mip_nodes)
+    post_mip_report_bodies = {}
     for node in post_mip_nodes:
-        node_root = root / "artifacts" / "post_mip" / "nodes" / node.node_id
-        payload = _load_optional(node_root / "summary.json")
-        if not payload:
-            payload = _load_optional(node_root / "manual_review.json")
-        post_mip_payloads[node.stage_id] = payload
-        statuses[node.stage_id] = (
-            "completed" if payload.get("status") == "success" else "pending"
-        )
+        payload = post_mip_payloads[node.stage_id]
+        status = str(payload.get("status") or "pending")
+        statuses[node.stage_id] = {
+            "success": "completed",
+            "failed": "failed",
+            "running": "running",
+        }.get(status, "pending")
+        body = render_post_mip_node_report(node, payload)
+        if body:
+            post_mip_report_bodies[node.stage_id] = body
     present = {spec.stage_id: _stage_artifact_present(root, spec) for spec in STAGE_SPECS}
     section_specs = _report_section_specs()
     forced_sections = _forced_report_sections(section_specs, rebuild_sections)
@@ -3660,20 +3677,47 @@ def generate_campaign_progress_report(
     aiperf_data = section_data["aiperf"]
     distillation_overfit_data = section_data["distillation_overfit"]
     proper_distillation_data = section_data["proper_distillation"]
-    has_sort_diagnosis = present["sort_sanity"]
-    has_activation_diagnosis = present["width_sanity"] or present["slicing_sanity"]
-    has_bypass_overfit = present["bypass_sanity"]
-    has_nested_bypass = present["bypass"]
-    has_depth = present["depth_importance"]
-    has_library = present["build_library"]
-    has_vllm = present["vllm_stats"]
-    has_replacement = present["replacement_scoring"] or bool(replacement_data.get("records"))
-    has_mip = present["mip"]
-    has_evaluation = present["zero_shot_evaluation"]
-    has_aiperf = present["aiperf"] or bool(aiperf_data.get("profiles"))
-    has_distillation_overfit = present["global_distillation_sanity"]
-    has_proper_distillation = bool(proper_distillation_data.get("runs"))
-    has_post_distillation_evaluation = present["post_distillation_evaluation"]
+    configured_stages = set(
+        configured_stage_ids(
+            merged_config,
+            dynamic_post_mip_stage_ids=(node.stage_id for node in post_mip_nodes),
+        )
+    )
+    has_sort_diagnosis = "sort_sanity" in configured_stages and present["sort_sanity"]
+    has_activation_diagnosis = any(
+        stage_id in configured_stages and present[stage_id]
+        for stage_id in ("width_sanity", "slicing_sanity")
+    )
+    has_bypass_overfit = (
+        "bypass_sanity" in configured_stages and present["bypass_sanity"]
+    )
+    has_nested_bypass = "bypass" in configured_stages and present["bypass"]
+    has_depth = "depth_importance" in configured_stages and present["depth_importance"]
+    has_library = "build_library" in configured_stages and present["build_library"]
+    has_vllm = "vllm_stats" in configured_stages and present["vllm_stats"]
+    has_replacement = "replacement_scoring" in configured_stages and (
+        present["replacement_scoring"] or bool(replacement_data.get("records"))
+    )
+    has_mip = "mip" in configured_stages and present["mip"]
+    has_evaluation = (
+        "zero_shot_evaluation" in configured_stages
+        and present["zero_shot_evaluation"]
+    )
+    has_aiperf = "aiperf" in configured_stages and (
+        present["aiperf"] or bool(aiperf_data.get("profiles"))
+    )
+    has_distillation_overfit = (
+        "global_distillation_sanity" in configured_stages
+        and present["global_distillation_sanity"]
+    )
+    has_proper_distillation = (
+        "global_distillation" in configured_stages
+        and bool(proper_distillation_data.get("runs"))
+    )
+    has_post_distillation_evaluation = (
+        "post_distillation_evaluation" in configured_stages
+        and present["post_distillation_evaluation"]
+    )
     stage_targets: dict[str, str] = {}
     if has_sort_diagnosis:
         stage_targets["sort_sanity"] = "sort-sanity"
@@ -3707,7 +3751,10 @@ def generate_campaign_progress_report(
     if has_post_distillation_evaluation:
         stage_targets["post_distillation_evaluation"] = "post-distillation-evaluation"
     for node in post_mip_nodes:
-        stage_targets[node.stage_id] = "post-mip-pipeline"
+        if node.stage_id in post_mip_report_bodies:
+            stage_targets[node.stage_id] = str(
+                post_mip_payloads[node.stage_id]["section_id"]
+            )
     dag = _stage_dag(
         root, merged_config, statuses, stage_targets, post_mip_nodes=post_mip_nodes
     )
@@ -3838,14 +3885,13 @@ def generate_campaign_progress_report(
         )
         if enabled
     )
-    if post_mip_nodes:
-        post_mip_body = "".join(
-            render_post_mip_node_report(node, post_mip_payloads[node.stage_id])
-            for node in post_mip_nodes
-        )
-        result_sections += _report_section(
-            "post-mip-pipeline", "Post-MIP Pipeline", post_mip_body, expanded=True
-        )
+    for node in post_mip_nodes:
+        body = post_mip_report_bodies.get(node.stage_id)
+        if not body:
+            continue
+        section_id = str(post_mip_payloads[node.stage_id]["section_id"])
+        title = node.node_id.replace("_", " ").title()
+        result_sections += _report_section(section_id, title, body, expanded=True)
     embedded = json.dumps(
         {
             "model": model_name,
@@ -3893,7 +3939,7 @@ main{{max-width:1280px;margin:auto;padding:32px}} h1{{font-size:30px;margin:0 0 
 pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;border-radius:12px;padding:16px;color:#cfe0ff;white-space:pre-wrap}}
 .summary-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}} .summary-grid article{{display:flex;min-height:86px;flex-direction:column;justify-content:center;gap:7px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:#0a1421}} .summary-grid span{{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}} .summary-grid strong{{color:#cfe0ff;font-size:16px}}
 .dag-scroll{{overflow-x:auto;padding:6px 0 12px}} .stage-dag{{display:block;min-width:100%;font-family:Inter,ui-sans-serif,system-ui,sans-serif}} .dag-edge{{fill:none;stroke:#4f8cff88;stroke-width:2;marker-end:url(#dag-arrow)}} .dag-edge.muted{{stroke:#55647a55;stroke-dasharray:5 6}} .dag-node rect{{fill:#0b1421;stroke:#34445e;stroke-width:1.5;transition:fill .15s,stroke .15s}} .dag-node.optional rect{{stroke-dasharray:6 4}} .dag-node circle{{fill:#55647a}} .dag-node .dag-label{{fill:var(--ink);font-size:11px;font-weight:650}} .dag-node .dag-status{{fill:var(--muted);font-size:9px;letter-spacing:.08em}} .dag-node.completed circle{{fill:var(--green)}} .dag-node.completed rect{{stroke:#35d07f99}} .dag-node.pending circle{{fill:var(--amber)}} .dag-node.pending rect{{stroke:#ffbd4577}} .dag-node.disabled{{opacity:.38}} .stage-dag a:hover .dag-node rect{{fill:#101d30;stroke:var(--blue)}} .dag-legend{{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:5px}} .dag-legend span::before{{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#55647a}} .dag-legend .completed::before{{background:var(--green)}} .dag-legend .pending::before{{background:var(--amber)}} .dag-legend .disabled::before{{background:#55647a;opacity:.45}} .dag-type-legend span::before{{width:13px;height:9px;border-radius:2px;background:transparent;border:1.5px solid #93a4bd}} .dag-type-legend .optional-node::before{{border-style:dashed}}
-@keyframes pulse{{50%{{transform:scale(1.7);box-shadow:0 0 18px #ffbd45aa}}}} .table-wrap{{overflow:auto}} table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right}} th:first-child{{text-align:left}} thead th{{color:#a9bee0;background:#0a1421;position:sticky;top:0}} td.warning-cell{{background:#ffbd4524;color:#ffe3a3;box-shadow:inset 0 0 0 1px #ffbd4570}} .warning-value{{cursor:help;outline-offset:3px}} #warning-tooltip{{position:fixed;z-index:10000;max-width:min(420px,calc(100vw - 24px));padding:9px 11px;border:1px solid #ffbd4588;border-radius:8px;background:#241b0d;color:#ffe3a3;font-size:12px;line-height:1.4;box-shadow:0 10px 30px #0009;pointer-events:none;white-space:pre-wrap}} .gate{{display:inline-block;border-radius:999px;padding:5px 10px;background:#1b2839}} .gate.passed{{color:var(--green)}} .empty,.note{{color:var(--muted)}} select{{margin:0 18px 18px 8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#0a1421;color:var(--ink)}} .selector-label{{color:var(--muted)}} code{{color:#bcd2ff}} .probe-summaries{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}} .probe-summary{{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0a1421}} .probe-summary.passed{{border-color:#35d07f66}} .probe-summary.failed{{border-color:#ff657766}} .probe-summary h3{{margin:0 0 10px}} .probe-summary dl{{display:grid;grid-template-columns:1fr auto;gap:5px 14px;margin:0}} .probe-summary dt{{color:var(--muted)}} .probe-summary dd{{margin:0;text-align:right}} .probe-plots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px}} .probe-plot-panel{{min-width:0;border:1px solid var(--line);border-radius:12px;padding:12px;background:#091321}} .probe-plot-panel h3{{margin:0 0 4px}} .plotly-chart{{width:100%;height:390px}} .depth-chart{{height:460px}}
+@keyframes pulse{{50%{{transform:scale(1.7);box-shadow:0 0 18px #ffbd45aa}}}} .table-wrap{{overflow:auto}} table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right}} th:first-child{{text-align:left}} thead th{{color:#a9bee0;background:#0a1421;position:sticky;top:0}} tr.selected-candidate{{background:#4f8cff18}} tr.selected-candidate td{{box-shadow:inset 0 1px #4f8cff44,inset 0 -1px #4f8cff44}} .candidate-swatch{{display:inline-block;width:10px;height:10px;margin-right:8px;border-radius:50%}} td.warning-cell{{background:#ffbd4524;color:#ffe3a3;box-shadow:inset 0 0 0 1px #ffbd4570}} .warning-value{{cursor:help;outline-offset:3px}} #warning-tooltip{{position:fixed;z-index:10000;max-width:min(420px,calc(100vw - 24px));padding:9px 11px;border:1px solid #ffbd4588;border-radius:8px;background:#241b0d;color:#ffe3a3;font-size:12px;line-height:1.4;box-shadow:0 10px 30px #0009;pointer-events:none;white-space:pre-wrap}} .gate{{display:inline-block;border-radius:999px;padding:5px 10px;background:#1b2839}} .gate.passed{{color:var(--green)}} .empty,.note{{color:var(--muted)}} select{{margin:0 18px 18px 8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#0a1421;color:var(--ink)}} .selector-label{{color:var(--muted)}} code{{color:#bcd2ff}} .probe-summaries{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}} .probe-summary{{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0a1421}} .probe-summary.passed{{border-color:#35d07f66}} .probe-summary.failed{{border-color:#ff657766}} .probe-summary h3{{margin:0 0 10px}} .probe-summary dl{{display:grid;grid-template-columns:1fr auto;gap:5px 14px;margin:0}} .probe-summary dt{{color:var(--muted)}} .probe-summary dd{{margin:0;text-align:right}} .probe-plots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px}} .probe-plot-panel{{min-width:0;border:1px solid var(--line);border-radius:12px;padding:12px;background:#091321}} .probe-plot-panel h3{{margin:0 0 4px}} .plotly-chart{{width:100%;height:390px}} .depth-chart{{height:460px}}
 .vllm-overview-cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:16px 0}} .vllm-overview-cards article{{display:flex;flex-direction:column;padding:14px;border:1px solid var(--line);border-radius:10px;background:#0a1421}} .vllm-overview-cards strong{{font-size:24px;color:#cfe0ff}} .vllm-overview-cards span{{color:var(--muted)}} .vllm-panel{{margin:14px 0}} .vllm-controls{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:14px 0}} .vllm-controls>span{{display:contents}} .vllm-controls label{{display:flex;flex-direction:column;gap:5px;color:var(--muted)}} .vllm-controls select{{margin:0}}
 .vllm-connect-toggle{{display:flex;align-items:center;gap:7px;margin:8px 0 12px;color:var(--muted)}} .vllm-connect-toggle input{{accent-color:#4f8cff}}
 .replacement-layer-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:6px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:10px;background:#091321}} .layer-toggle,.replacement-connect-toggle,.replacement-all-toggle{{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}} .layer-toggle input,.replacement-connect-toggle input,.replacement-all-toggle input{{accent-color:#4f8cff}} .replacement-connect-toggle{{margin:8px 0}} .replacement-layer-toolbar{{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:10px 0}} .replacement-all-toggle{{font-weight:600;color:var(--ink)}} .replacement-layer-color-key{{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}} .replacement-layer-color-key i{{display:block;width:min(280px,32vw);height:8px;border-radius:999px;background:linear-gradient(90deg,#ff6577,#4f8cff)}}
@@ -4567,7 +4613,7 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
     head.querySelectorAll('[data-mip-sort]').forEach(button=>button.addEventListener('click',()=>{{const name=button.dataset.mipSort;if(sortColumn===name)sortDirection=sortDirection==='asc'?'desc':'asc';else{{sortColumn=name;sortDirection='asc';}}render();}}));
     const constraint=profile.constraint||{{}},runtime=profile.runtime_profile||{{}},concurrency=runtime.max_num_seqs||runtime.batch_size||'N/A';
     let constraintText;
-    if(constraint.constraint_type==='named_profile')constraintText=Object.entries(constraint.constraints||{{}}).map(([metric,bounds])=>`${{metric}} ${{numeric.format(bounds[0])}}–${{numeric.format(bounds[1])}}`).join(' · ');
+    if(constraint.constraint_type==='named_profile')constraintText=Object.entries(constraint.constraints||{{}}).map(([metric,bounds])=>Array.isArray(bounds)&&bounds.length===2?`${{metric}} ${{numeric.format(bounds[0])}}–${{numeric.format(bounds[1])}}`:`${{metric}} ≤ ${{numeric.format(bounds)}}`).join(' · ');
     else if(constraint.constraint_type==='latency_ratio')constraintText=`limit ${{numeric.format(constraint.latency_limit_ms)}} ms · denominator ${{numeric.format(constraint.latency_denominator_ms)}} ms`;
     else constraintText=`limit ${{numeric.format(constraint.parameter_limit)}} parameters · denominator ${{numeric.format(constraint.parameter_denominator)}}`;
     if(summary)summary.textContent=`${{profile.label}} · ${{constraintText}} · ISL ${{runtime.prefill_seq_len??'N/A'}} · OSL ${{runtime.generation_seq_len??'N/A'}} · concurrency ${{concurrency}}`;
@@ -4624,6 +4670,62 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
       mode:'lines',line:{{color:run.color||'#4f8cff',width:2}},
       hovertemplate:`step=%{{x}}<br>${{metric}}=%{{y:.7g}}<extra></extra>`
     }}],{{...charts.theme,title:{{text:metric,font:{{size:15}}}},xaxis:{{...charts.theme.xaxis,title:'Optimizer step'}},yaxis:{{...charts.theme.yaxis,title:metric}},hovermode:'closest'}},charts.config);
+  }});
+}})();
+</script>
+<script>
+(()=>{{
+  const charts=window.PuzzletronCharts;
+  if(!charts)return;
+  const payloads=window.PuzzletronReport.post_mip||{{}};
+  const finite=value=>Number.isFinite(Number(value));
+  const label=row=>row.label||row.architecture_id||'candidate';
+  const selected=row=>(row.selected_by||[]).length>0;
+  Object.values(payloads).forEach(payload=>{{
+    const section=payload.section_id;
+    if(!section)return;
+    const observations=payload.observations||[];
+    const throughput=document.getElementById(`${{section}}-throughput`);
+    if(throughput){{
+      const points=observations.filter(row=>row.status==='success'&&finite((row.metrics||{{}}).output_token_throughput)&&finite((row.metrics||{{}}).request_throughput));
+      const groups=[
+        ['Candidates',points.filter(row=>!selected(row))],
+        ['Selected by downstream filter',points.filter(selected)],
+      ];
+      const traces=groups.filter(([,rows])=>rows.length).map(([name,rows],index)=>({{
+        x:rows.map(row=>Number(row.metrics.output_token_throughput)),
+        y:rows.map(row=>Number(row.metrics.request_throughput)),
+        text:rows.map(label),customdata:rows.map(row=>[row.metrics.ttft_mean_ms,row.metrics.tpot_mean_ms]),
+        mode:'markers',type:'scatter',name,
+        marker:{{size:index?15:9,color:rows.map(row=>row.color||'#4f8cff'),symbol:index?'diamond-open':'circle',line:{{color:index?'#ffffff':'rgba(0,0,0,0)',width:index?2:0}}}},
+        hovertemplate:'%{{text}}<br>output=%{{x:.6g}} tokens/s<br>requests=%{{y:.6g}}/s<br>TTFT=%{{customdata[0]:.6g}} ms<br>TPOT=%{{customdata[1]:.6g}} ms<extra></extra>'
+      }}));
+      Plotly.react(throughput,traces,{{...charts.theme,title:charts.chartTitle('Output throughput vs request throughput',16),xaxis:{{...charts.theme.xaxis,title:'Output token throughput (tokens/s)'}},yaxis:{{...charts.theme.yaxis,title:'Request throughput (requests/s)'}},hovermode:'closest'}},charts.config);
+    }}
+    const metricsPlot=document.getElementById(`${{section}}-metrics`);
+    if(metricsPlot){{
+      const numeric=[...new Set(observations.flatMap(row=>Object.entries(row.metrics||{{}}).filter(([,value])=>finite(value)).map(([name])=>name)))];
+      const preferred=['kl_div','lm_loss','cosine_embedding_loss_hidden_states'];
+      const metricNames=[...preferred.filter(name=>numeric.includes(name)),...numeric.filter(name=>!preferred.includes(name))].slice(0,3);
+      const valid=observations.filter(row=>row.status==='success');
+      const traces=metricNames.map(metric=>({{
+        x:valid.map(label),y:valid.map(row=>finite((row.metrics||{{}})[metric])?Number(row.metrics[metric]):null),
+        name:metric,mode:'markers',type:'scatter',
+        marker:{{size:valid.map(row=>selected(row)?14:9),color:valid.map(row=>row.color||'#4f8cff'),symbol:valid.map(row=>selected(row)?'diamond-open':'circle')}},
+        hovertemplate:`%{{x}}<br>${{metric}}=%{{y:.7g}}<extra></extra>`
+      }}));
+      Plotly.react(metricsPlot,traces,{{...charts.theme,title:charts.chartTitle('Candidate evaluation metrics',16),xaxis:{{...charts.theme.xaxis,title:'Candidate'}},yaxis:{{...charts.theme.yaxis,title:'Metric value'}},hovermode:'closest'}},charts.config);
+    }}
+    const runs=payload.runs||[];
+    for(const [metric,suffix,title] of [['loss','loss','Total loss'],['kd_loss','kd-loss','KD loss']]){{
+      const element=document.getElementById(`${{section}}-${{suffix}}`);
+      if(!element)continue;
+      const traces=runs.map(run=>{{
+        const rows=(run.records||[]).filter(row=>finite(row[metric]??(metric==='loss'?row.train_loss:null)));
+        return {{x:rows.map((row,index)=>Number(row.step??row.global_step??index)),y:rows.map(row=>Number(row[metric]??row.train_loss)),name:run.label||run.architecture_id,mode:'lines+markers',line:{{color:run.color||'#4f8cff',width:2}},marker:{{color:run.color||'#4f8cff',size:5}},hovertemplate:`${{run.label||run.architecture_id}}<br>step=%{{x}}<br>${{metric}}=%{{y:.7g}}<extra></extra>`}};
+      }}).filter(trace=>trace.x.length);
+      Plotly.react(element,traces,{{...charts.theme,title:charts.chartTitle(title),xaxis:{{...charts.theme.xaxis,title:'Optimizer step'}},yaxis:{{...charts.theme.yaxis,title}},hovermode:'closest'}},charts.config);
+    }}
   }});
 }})();
 </script>

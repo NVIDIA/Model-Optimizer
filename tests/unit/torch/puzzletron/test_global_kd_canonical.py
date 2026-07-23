@@ -117,7 +117,7 @@ def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
         training_log = Path(kd_config["output_dir"]) / "checkpoints" / "training.jsonl"
         training_log.parent.mkdir(parents=True)
         training_log.write_text(json.dumps({"step": 1, "loss": 1.0}) + "\n")
-        return SimpleNamespace(to_dict=lambda: {})
+        return SimpleNamespace(to_dict=dict)
 
     monkeypatch.setattr(
         future,
@@ -215,9 +215,7 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
 
 
 def test_global_kd_metric_logger_flushes_every_optimizer_step():
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-        _WeightedObjectiveMixin,
-    )
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     logger = type("Logger", (), {"buffer_size": 100, "flush": False})()
     recipe = object.__new__(_WeightedObjectiveMixin)
@@ -270,6 +268,64 @@ def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(
     )
 
 
+def test_global_kd_auto_domain_uses_canonical_text_dataset(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.global_automodel._model_recipe",
+        lambda *args, teacher=False, **kwargs: {"teacher": teacher},
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "qwen3_5"},
+        "data": {
+            "path": str(tmp_path / "dataset"),
+            "modality": "text",
+            "layout": "fixed",
+            "max_sample_length": 1024,
+            "calibration": {"num_samples": 4096},
+            "replacement_scoring": {"num_samples": 128},
+        },
+        "train_token_cache_path": str(tmp_path / "train.tokens"),
+        "validation_token_cache_path": str(tmp_path / "validation.tokens"),
+        "distillation": {
+            "domain": "auto",
+            "max_steps": 128,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 2,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    recipe = build_automodel_global_kd_recipe(build_global_kd_config(config))
+
+    assert recipe["recipe"] == "KnowledgeDistillationRecipeForNextTokenPrediction"
+    assert recipe["dataset"] == {
+        "_target_": (
+            "modelopt.torch.puzzletron.distillation.dataset."
+            "make_puzzletron_llm_dataset"
+        ),
+        "dataset_path": str(tmp_path / "dataset"),
+        "split": "train",
+        "num_samples": 4096,
+        "seq_length": 1024,
+        "seed": 1111,
+        "packed_token_cache_path": str(tmp_path / "train.tokens"),
+    }
+    assert recipe["validation_dataset"]["packed_token_cache_path"] == str(
+        tmp_path / "validation.tokens"
+    )
+
+
 def test_global_kd_recipe_publishes_explicit_resume_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
@@ -283,14 +339,14 @@ def test_global_kd_recipe_publishes_explicit_resume_policy(tmp_path, monkeypatch
         "modelopt.torch.puzzletron.distillation.global_automodel._model_recipe",
         lambda *args, **kwargs: {},
     )
-    common = dict(
-        teacher_dir=tmp_path / "teacher",
-        student_dir=tmp_path / "student",
-        output_dir=tmp_path / "output",
-        descriptor="qwen3_5",
-        domain="llm",
-        pp=1,
-    )
+    common = {
+        "teacher_dir": tmp_path / "teacher",
+        "student_dir": tmp_path / "student",
+        "output_dir": tmp_path / "output",
+        "descriptor": "qwen3_5",
+        "domain": "llm",
+        "pp": 1,
+    }
 
     assert build_automodel_global_kd_recipe(GlobalKDConfig(**common, resume=True))[
         "puzzletron_resume"
@@ -610,9 +666,7 @@ def test_teacher_mtp_projection_unshards_fsdp_but_preserves_tp_vocab(monkeypatch
 def test_gradient_groups_are_observed_at_optimizer_step():
     import torch
 
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-        _WeightedObjectiveMixin,
-    )
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     class Student(torch.nn.Module):
         def __init__(self):
@@ -640,9 +694,7 @@ def test_gradient_groups_are_observed_at_optimizer_step():
 
 
 def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-        _WeightedObjectiveMixin,
-    )
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     calls = []
 
@@ -686,9 +738,7 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
 def test_global_kd_optimizer_save_uses_the_actual_pipeline_model_parts():
     import torch
 
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-        _WeightedObjectiveMixin,
-    )
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     original = torch.nn.Linear(2, 2, bias=False)
     empty_tracked_model = torch.nn.Identity()
@@ -725,9 +775,7 @@ def test_global_kd_optimizer_save_uses_the_actual_pipeline_model_parts():
 
 
 def test_global_kd_objective_setup_initializes_text_observability_buffers():
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-        _WeightedObjectiveMixin,
-    )
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     recipe = object.__new__(_WeightedObjectiveMixin)
     recipe.cfg = {"objective": {}}
@@ -741,9 +789,7 @@ def test_global_kd_objective_setup_initializes_text_observability_buffers():
 def test_global_kd_text_optimizer_excludes_inactive_modality_branches():
     import torch
 
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-        _WeightedObjectiveMixin,
-    )
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     class ToyModel(torch.nn.Module):
         def __init__(self):
@@ -878,7 +924,7 @@ def test_llm_pp_optimizer_step_publishes_every_weighted_objective(monkeypatch):
         "mtp_ce": [torch.tensor(6.0)],
         "mtp_kd": [torch.tensor(8.0)],
     }
-    recipe._objective_step_cursor = {name: 0 for name in recipe._objective_buffers}
+    recipe._objective_step_cursor = dict.fromkeys(recipe._objective_buffers, 0)
     recipe._gradient_squared = {
         name: torch.tensor(0.0)
         for name in ("vision", "projector", "language", "mtp")

@@ -7,9 +7,10 @@ import json
 import logging
 import math
 import os
+import struct
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-import time
 from statistics import median
 from typing import Any, Literal
 
@@ -257,6 +258,10 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
     legacy_temperature = float(kd_cfg.get("temperature", 1.0))
     main_kd_node = dict(objective.get("main_kd") or {})
     mtp_kd_node = dict(objective.get("mtp_kd") or {})
+    data = dict(config.get("data") or {})
+    for cache_key in ("train_token_cache_path", "validation_token_cache_path"):
+        if config.get(cache_key):
+            data.setdefault(cache_key, config[cache_key])
 
     def _weight(name: str, legacy: str | None, default: float) -> float:
         value = objective.get(name)
@@ -330,7 +335,7 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         validation_split=str(kd_cfg.get("validation_split", "validation")),
         resume=bool(kd_cfg.get("resume", True)),
         metadata=dict(kd_cfg.get("metadata") or {}),
-        data=dict(config.get("data") or {}),
+        data=data,
         freeze_policy=str(kd_cfg.get("freeze_policy", "vision_frozen")),
     )
 
@@ -338,6 +343,9 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
 def _resolve_domain(kd_config: GlobalKDConfig) -> Literal["llm", "vlm"]:
     if kd_config.domain != "auto":
         return kd_config.domain
+    if kd_config.data:
+        data_spec = PuzzletronDataSpec.from_mapping(kd_config.data)
+        return "vlm" if data_spec.modality is Modality.MULTIMODAL else "llm"
     config_path = kd_config.student_dir / "config.json"
     if config_path.is_file():
         try:
@@ -623,30 +631,97 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
 
     domain_metadata = _materialize_target_keys(dict(kd_config.metadata.get(domain) or {}))
     if domain == "llm":
-        recipe.update(
-            dataset={
-                "_target_": "nemo_automodel.components.datasets.llm.squad.make_squad_dataset",
-                "dataset_name": kd_config.dataset_name,
-                "split": kd_config.dataset_split,
-            },
-            dataloader={
+        if kd_config.data:
+            data_spec = PuzzletronDataSpec.from_mapping(kd_config.data)
+
+            def _dataset(split: str, samples_key: str, cache_key: str) -> dict[str, Any]:
+                sample_config = dict(kd_config.data.get(samples_key) or {})
+                dataset = {
+                    "_target_": (
+                        "modelopt.torch.puzzletron.distillation.dataset."
+                        "make_puzzletron_llm_dataset"
+                    ),
+                    "dataset_path": str(kd_config.data.get("path") or ""),
+                    "split": split,
+                    "num_samples": int(
+                        sample_config.get(
+                            "num_samples",
+                            kd_config.max_steps * kd_config.global_batch_size,
+                        )
+                    ),
+                    "seq_length": int(data_spec.sequence_length),
+                    "seed": kd_config.seed,
+                }
+                if kd_config.data.get(cache_key):
+                    dataset["packed_token_cache_path"] = str(
+                        kd_config.data[cache_key]
+                    )
+                return dataset
+
+            dataloader = {
                 "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
-                "collate_fn": "nemo_automodel.components.datasets.utils.default_collater",
+                "collate_fn": (
+                    "modelopt.torch.puzzletron.distillation.dataset."
+                    "collate_puzzletron_llm_batch"
+                ),
                 "shuffle": False,
-            },
-        )
-        if kd_config.validation_enabled:
+                "num_workers": 0,
+                "pin_memory": True,
+            }
             recipe.update(
-                validation_dataset={
-                    "_target_": "nemo_automodel.components.datasets.llm.squad.make_squad_dataset",
+                dataset=_dataset(
+                    kd_config.dataset_split,
+                    "calibration",
+                    "train_token_cache_path",
+                ),
+                dataloader=dict(dataloader),
+            )
+            if kd_config.validation_enabled:
+                recipe.update(
+                    validation_dataset=_dataset(
+                        kd_config.validation_split,
+                        "replacement_scoring",
+                        "validation_token_cache_path",
+                    ),
+                    validation_dataloader=dict(dataloader),
+                )
+        else:
+            recipe.update(
+                dataset={
+                    "_target_": (
+                        "nemo_automodel.components.datasets.llm.squad."
+                        "make_squad_dataset"
+                    ),
                     "dataset_name": kd_config.dataset_name,
-                    "split": kd_config.validation_split,
+                    "split": kd_config.dataset_split,
                 },
-                validation_dataloader={
+                dataloader={
                     "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
-                    "collate_fn": "nemo_automodel.components.datasets.utils.default_collater",
+                    "collate_fn": (
+                        "nemo_automodel.components.datasets.utils.default_collater"
+                    ),
+                    "shuffle": False,
                 },
             )
+            if kd_config.validation_enabled:
+                recipe.update(
+                    validation_dataset={
+                        "_target_": (
+                            "nemo_automodel.components.datasets.llm.squad."
+                            "make_squad_dataset"
+                        ),
+                        "dataset_name": kd_config.dataset_name,
+                        "split": kd_config.validation_split,
+                    },
+                    validation_dataloader={
+                        "_target_": (
+                            "torchdata.stateful_dataloader.StatefulDataLoader"
+                        ),
+                        "collate_fn": (
+                            "nemo_automodel.components.datasets.utils.default_collater"
+                        ),
+                    },
+                )
         metadata_keys = ["dataset", "dataloader"]
         if kd_config.validation_enabled:
             metadata_keys.extend(("validation_dataset", "validation_dataloader"))
@@ -864,6 +939,93 @@ def _reconcile_global_kd_training_log(checkpoint_root: Path) -> None:
     os.replace(temporary, training_log)
 
 
+def _preserve_inactive_mtp_weights(source: Path, consolidated: Path) -> tuple[str, ...]:
+    """Restore unchanged MTP tensors omitted from a consolidated KD checkpoint."""
+
+    source_index_path = source / "model.safetensors.index.json"
+    consolidated_index_path = consolidated / "model.safetensors.index.json"
+    if not source_index_path.is_file() or not consolidated_index_path.is_file():
+        return ()
+
+    source_index = json.loads(source_index_path.read_text())
+    consolidated_index = json.loads(consolidated_index_path.read_text())
+    source_weight_map = dict(source_index.get("weight_map") or {})
+    consolidated_weight_map = dict(consolidated_index.get("weight_map") or {})
+    missing = sorted(
+        key
+        for key in source_weight_map
+        if key.startswith("mtp.") and key not in consolidated_weight_map
+    )
+    if not missing:
+        return ()
+
+    tensor_headers = {}
+    tensor_payloads = []
+    total_size = 0
+    by_shard: dict[str, list[str]] = {}
+    for key in missing:
+        by_shard.setdefault(source_weight_map[key], []).append(key)
+    for shard_name, keys in by_shard.items():
+        with (source / shard_name).open("rb") as stream:
+            header_size = struct.unpack("<Q", stream.read(8))[0]
+            header = json.loads(stream.read(header_size))
+            data_offset = 8 + header_size
+            for key in keys:
+                tensor_header = dict(header[key])
+                start, stop = tensor_header["data_offsets"]
+                stream.seek(data_offset + start)
+                payload = stream.read(stop - start)
+                tensor_header["data_offsets"] = [total_size, total_size + len(payload)]
+                tensor_headers[key] = tensor_header
+                tensor_payloads.append(payload)
+                total_size += len(payload)
+
+    preserved_name = "model-puzzletron-preserved-mtp.safetensors"
+    preserved_path = consolidated / preserved_name
+    temporary_weights = preserved_path.with_name(
+        f".{preserved_path.name}.{os.getpid()}.tmp"
+    )
+    output_header = json.dumps(
+        {"__metadata__": {"format": "pt"}, **tensor_headers},
+        separators=(",", ":"),
+    ).encode()
+    output_header += b" " * (-len(output_header) % 8)
+    with temporary_weights.open("wb") as stream:
+        stream.write(struct.pack("<Q", len(output_header)))
+        stream.write(output_header)
+        for payload in tensor_payloads:
+            stream.write(payload)
+    os.replace(temporary_weights, preserved_path)
+
+    consolidated_weight_map.update(dict.fromkeys(missing, preserved_name))
+    metadata = dict(consolidated_index.get("metadata") or {})
+    if isinstance(metadata.get("total_size"), int):
+        metadata["total_size"] += total_size
+    consolidated_index.update(metadata=metadata, weight_map=consolidated_weight_map)
+    temporary_index = consolidated_index_path.with_name(
+        f".{consolidated_index_path.name}.{os.getpid()}.tmp"
+    )
+    temporary_index.write_text(json.dumps(consolidated_index, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary_index, consolidated_index_path)
+    return tuple(missing)
+
+
+def _preserve_global_kd_inactive_weights(kd_config: GlobalKDConfig) -> tuple[str, ...]:
+    if kd_config.mtp_ce_weight > 0 or kd_config.mtp_kd_weight > 0:
+        return ()
+    if str(kd_config.save_consolidated).strip().lower() in {"false", "0", "none"}:
+        return ()
+
+    preserved = set()
+    for config_path in kd_config.output_dir.glob(
+        "checkpoints/epoch_*_step_*/model/consolidated/config.json"
+    ):
+        preserved.update(
+            _preserve_inactive_mtp_weights(kd_config.student_dir, config_path.parent)
+        )
+    return tuple(sorted(preserved))
+
+
 def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     _configure_fla_smoke_autotune()
     try:
@@ -922,6 +1084,17 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     trainer = recipe_cls(cfg)
     trainer.setup()
     trainer.run_train_validation_loop()
+    import torch.distributed as torch_dist
+
+    if global_rank == 0:
+        preserved_mtp = _preserve_global_kd_inactive_weights(kd_config)
+        if preserved_mtp:
+            logger.info(
+                "Preserved %d inactive MTP tensors in consolidated global-KD checkpoints",
+                len(preserved_mtp),
+            )
+    if torch_dist.is_available() and torch_dist.is_initialized():
+        torch_dist.barrier()
     observability = (
         trainer.observability_metadata()
         if hasattr(trainer, "observability_metadata")
@@ -931,7 +1104,6 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     for name, values in getattr(trainer, "_objective_buffers", {}).items():
         local_terms[name] = [float(value.detach().float().cpu()) for value in values]
     gathered_terms = [local_terms]
-    import torch.distributed as torch_dist
 
     if torch_dist.is_available() and torch_dist.is_initialized():
         gathered_terms = [None] * torch_dist.get_world_size()
