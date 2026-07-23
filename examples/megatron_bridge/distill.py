@@ -167,6 +167,11 @@ def get_args():
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
     )
     parser.add_argument(
+        "--validate_only",
+        action="store_true",
+        help="Skip training and run validation at iteration 0.",
+    )
+    parser.add_argument(
         "--checkpoint_keep_last",
         type=int,
         default=5,
@@ -212,6 +217,8 @@ def get_args():
         args.student_hf_model = args.student_hf_path
     if args.checkpoint_keep_last < -1:
         raise ValueError("--checkpoint_keep_last must be >= -1.")
+    if args.validate_only and (args.eval_interval <= 0 or args.eval_iters <= 0):
+        raise ValueError("--validate_only requires --eval_interval > 0 and --eval_iters > 0.")
 
     print_args(args)
 
@@ -339,6 +346,7 @@ def main(args: argparse.Namespace):
             train_iters=args.train_iters,
             eval_interval=args.eval_interval,
             eval_iters=args.eval_iters,
+            skip_train=True if args.validate_only else None,
             global_batch_size=args.gbs,
             micro_batch_size=args.mbs,
             manual_gc=True,
@@ -384,6 +392,10 @@ def main(args: argparse.Namespace):
 
     print_rank_0("\nStarting distillation...")
     distill(config)
+    if args.validate_only:
+        print_rank_0("\nValidation-only run done! Skipped training and checkpoint export.\n")
+        return
+
     print_rank_0(
         f"\nDistillation done! Saved checkpoint to {checkpoint_dir}"
         " in megatron distributed checkpoint format.\n"
