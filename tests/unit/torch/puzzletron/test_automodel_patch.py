@@ -196,6 +196,7 @@ def test_qwen35_moe_has_native_descriptor_and_maps_moe_fields():
                     num_experts=64,
                     expert_intermediate_size=1024,
                     top_k=4,
+                    shared_expert_intermediate_size=512,
                 ),
             )
         )
@@ -203,6 +204,8 @@ def test_qwen35_moe_has_native_descriptor_and_maps_moe_fields():
     assert overrides["num_experts"] == 64
     assert overrides["moe_intermediate_size"] == 1024
     assert overrides["num_experts_per_tok"] == 4
+    assert overrides["shared_expert_intermediate_size"] == 512
+    assert "moe_shared_expert_intermediate_size" not in overrides
 
 
 def test_qwen_native_constructor_preserves_mtp_layer_types_outside_decoder_configs():
@@ -220,6 +223,54 @@ def test_qwen_native_constructor_preserves_mtp_layer_types_outside_decoder_confi
 
     patched(SimpleNamespace(), 1, config, None, None)
     assert config.layer_types == ["full_attention", "full_attention"]
+
+
+def test_qwen_native_constructor_copies_and_patches_per_layer_moe_config():
+    descriptor = AutoModelDescriptorFactory.get("qwen3_5_moe")
+    config = SimpleNamespace(hidden_size=2048)
+    shared_moe_config = SimpleNamespace(
+        n_routed_experts=256,
+        n_activated_experts=8,
+        dim=4096,
+        moe_inter_dim=512,
+        shared_expert_inter_dim=512,
+    )
+    block_config = BlockConfig(
+        subblock_configs=(
+            MoEConfig(
+                num_experts=128,
+                expert_intermediate_size=256,
+                top_k=4,
+                shared_expert_intermediate_size=128,
+            ),
+        )
+    )
+
+    class NativeBlock:
+        pass
+
+    def original_init(self, layer_idx, config, moe_config, backend):
+        del backend
+        self.config = config
+        self.layer_idx = layer_idx
+        self.moe_config = moe_config
+
+    patched = descriptor.make_patched_init(original_init, [block_config])
+    layer = NativeBlock()
+    patched(layer, 0, config, shared_moe_config, None)
+
+    assert layer.moe_config is not shared_moe_config
+    assert layer.moe_config.n_routed_experts == 128
+    assert layer.moe_config.n_activated_experts == 4
+    assert layer.moe_config.dim == 2048
+    assert layer.moe_config.moe_inter_dim == 256
+    assert layer.moe_config.shared_expert_inter_dim == 128
+    assert shared_moe_config.n_routed_experts == 256
+    assert shared_moe_config.n_activated_experts == 8
+    assert shared_moe_config.moe_inter_dim == 512
+    assert layer.config.num_experts == 128
+    assert layer.config.moe_intermediate_size == 256
+    assert layer.config.shared_expert_intermediate_size == 128
 
 
 def test_nemotron_native_constructor_copies_and_patches_per_layer_moe_config():

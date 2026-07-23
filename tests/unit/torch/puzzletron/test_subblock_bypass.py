@@ -24,11 +24,15 @@ from torch.distributed.fsdp import fully_shard
 from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
     NemotronHModelDescriptor,
 )
+from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+    Qwen3P5MoeVLModelDescriptor,
+)
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
     MambaConfig,
+    MoEConfig,
 )
 from modelopt.torch.puzzletron.bypass_distillation.subblock_boundaries import (
     install_teacher_subblock_capture_hooks,
@@ -155,6 +159,25 @@ def test_nemotron_subblock_boundary_resolves_to_native_mixer():
 
     assert set(boundaries) == {(0, "mamba", "mamba")}
     assert boundaries[(0, "mamba", "mamba")].module is layer.mixer
+
+
+def test_qwen_moe_subblock_boundaries_include_linear_attention_and_moe():
+    layer = nn.Module()
+    layer.linear_attn = nn.Linear(2, 2)
+    layer.mlp = nn.Linear(2, 2)
+    block = BlockConfig(
+        subblock_configs=(
+            MambaConfig(name="gdn", num_heads=2, head_dim=8),
+            MoEConfig(name="moe", num_experts=4, expert_intermediate_size=8),
+        )
+    )
+
+    boundaries = resolve_subblock_boundaries(
+        {0: layer}, Qwen3P5MoeVLModelDescriptor, [block]
+    )
+
+    assert boundaries[(0, "mamba", "gdn")].module is layer.linear_attn
+    assert boundaries[(0, "moe", "moe")].module is layer.mlp
 
 
 def test_selected_subblock_kinds_keeps_attention_and_mamba_distinct():

@@ -1302,6 +1302,24 @@ class _Qwen3P5MoeModelDescriptor(GenericContractModelDescriptor):
     _IS_VLM = False
 
     @classmethod
+    def local_kd_subblock_module_paths(
+        cls, block_config: BlockConfig, *, layer_idx: int
+    ) -> dict[tuple[str, str], str]:
+        """Map hybrid Qwen MoE subblocks to their exclusive residual branches."""
+
+        del cls, layer_idx
+        module_by_kind = {
+            "attention": "self_attn",
+            "mamba": "linear_attn",
+            "ffn": "mlp",
+            "moe": "mlp",
+        }
+        return {
+            (subblock.kind, subblock.name): module_by_kind[subblock.kind]
+            for subblock in block_config.subblock_configs
+        }
+
+    @classmethod
     def get_language_model_config(cls, config):
         """Accept the native nested VLM config and synthetic flat text config."""
         return config.text_config if hasattr(config, "text_config") else config
@@ -1347,6 +1365,9 @@ class _Qwen3P5MoeModelDescriptor(GenericContractModelDescriptor):
             ),
             "moe_fused_gate_up_subnames": ("experts.gate_up_proj",),
             "moe_fused_down_subnames": ("experts.down_proj",),
+            # HF Qwen MoE uses singular ``shared_expert`` with unfused gate/up.
+            "moe_shared_expert_subname": "shared_expert",
+            "moe_shared_gate_subname": "gate_proj",
         }
 
     @classmethod

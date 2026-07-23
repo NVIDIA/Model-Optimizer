@@ -166,6 +166,22 @@ class CandidateCounts:
     replacement_subblock_per_width: int
     replacement_block_per_width: int
     width_count: int
+    vllm_width_count: int | None = None
+
+    @property
+    def effective_vllm_width_count(self) -> int:
+        """Return physical widths measured by vLLM, including the teacher baseline."""
+        return self.vllm_width_count or self.width_count
+
+    @property
+    def vllm_subblock_total(self) -> int:
+        """Return subblock runtime configurations across all measured widths."""
+        return self.vllm_subblock * self.effective_vllm_width_count
+
+    @property
+    def vllm_block_total(self) -> int:
+        """Return block runtime configurations across all measured widths."""
+        return self.vllm_block * self.effective_vllm_width_count
 
     @property
     def replacement_subblock_total(self) -> int:
@@ -481,9 +497,7 @@ def _axis_domain_size(axes: Mapping[str, Any], axis_id: str) -> int:
     return len(values) or 1
 
 
-def _qwen_block_families(
-    config: Mapping[str, Any], *, moe: bool
-) -> tuple[tuple[str, ...], ...]:
+def _qwen_block_families(config: Mapping[str, Any], *, moe: bool) -> tuple[tuple[str, ...], ...]:
     language = _language_config(config)
     layer_types = tuple(str(value) for value in language.get("layer_types") or ())
     num_layers = int(language.get("num_hidden_layers", 0))
@@ -560,12 +574,17 @@ def count_candidate_options(
     )
     hidden = _mapping(axes.get("hidden_width"))
     widths = tuple(dict.fromkeys(int(value) for value in hidden.get("values") or ()))
+    teacher_width = hidden.get("teacher_value")
+    vllm_widths = tuple(
+        dict.fromkeys((*widths, *((int(teacher_width),) if teacher_width is not None else ())))
+    )
     return CandidateCounts(
         vllm_subblock=vllm_subblock,
         vllm_block=vllm_block,
         replacement_subblock_per_width=replacement_subblock,
         replacement_block_per_width=replacement_block,
         width_count=len(widths) or 1,
+        vllm_width_count=len(vllm_widths) or 1,
     )
 
 

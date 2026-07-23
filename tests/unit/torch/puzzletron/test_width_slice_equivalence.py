@@ -925,3 +925,45 @@ def test_stage_selects_generic_multimodal_processor_collator_loader(
     assert result.status == "success"
     assert selected["checkpoint_dir"] == sorted_dir
     assert selected["data_layout"] == "fixed"
+
+
+def test_distributed_slicing_verdict_warns_without_failing_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    summary_path = tmp_path / "artifacts" / "slicing_sanity" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    finding = {
+        "stage": "slicing_sanity",
+        "severity": "warning",
+        "message": "runtime and physical slices differ",
+        "evidence": {},
+    }
+    summary_path.write_text(
+        json.dumps(
+            {
+                "passed": False,
+                "axes": ["moe_experts"],
+                "rows": [{"axis": "moe_experts", "method": "physical"}],
+                "findings": [finding],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.pipeline_config.load_runtime_hydra_config",
+        lambda config: SimpleNamespace(puzzle_dir=str(tmp_path)),
+    )
+    manifest = StageManifest(stage="slicing_sanity")
+
+    result = width_slice_equivalence_stage(
+        {
+            "puzzle_dir": str(tmp_path),
+            "experiment": {"dir": str(tmp_path)},
+            "slicing_sanity": {"backend": "distributed_parent_sweep"},
+        },
+        manifest,
+    )
+
+    assert result.status == "success"
+    assert manifest.status == "success"
+    assert manifest.outputs["passed"] is False
+    assert manifest.outputs["findings"] == [finding]

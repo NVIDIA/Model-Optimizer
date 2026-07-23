@@ -161,6 +161,12 @@ def test_iterative_depth_rpc_ranks_each_round_and_writes_resumable_trajectory(tm
     assert json.loads((tmp_path / "iteration_01/ranking.json").read_text())["baseline"] == 1.1
     assert len(client.requests) == 4
 
+    # A reduced target must reconcile an existing trajectory even when the
+    # selected prefix already has the requested length.
+    trajectory["status"] = "running"
+    trajectory["max_removals"] = 5
+    (tmp_path / "trajectory.json").write_text(json.dumps(trajectory))
+
     class NoSubmitClient:
         async def submit_many(self, requests):
             raise AssertionError(f"completed trajectory resubmitted {list(requests)}")
@@ -180,6 +186,9 @@ def test_iterative_depth_rpc_ranks_each_round_and_writes_resumable_trajectory(tm
         )
     )
     assert resumed == result
+    reconciled = json.loads((tmp_path / "trajectory.json").read_text())
+    assert reconciled["status"] == "complete"
+    assert reconciled["max_removals"] == 2
 
 
 def test_distributed_eval_cli_exposes_depth_campaign_and_coordinator():

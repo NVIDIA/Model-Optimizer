@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import threading
 
@@ -93,6 +94,21 @@ def test_scoring_parent_artifact_rejects_stale_checkpoint_identity(tmp_path):
 
     with pytest.raises(RuntimeError, match="stale scoring parent"):
         load_scoring_parent(artifact)
+
+
+def test_checkpoint_identity_ignores_weight_file_mtime(tmp_path):
+    from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
+
+    checkpoint = _checkpoint(tmp_path / "checkpoint", "teacher")
+    weight = checkpoint / "model.safetensors"
+    weight.write_bytes(b"weights")
+    before = checkpoint_identity(checkpoint)
+    stat = weight.stat()
+    os.utime(weight, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    after = checkpoint_identity(checkpoint)
+
+    assert after == before
 
 
 def test_ensure_scoring_parent_writes_and_reuses_valid_artifact(tmp_path):

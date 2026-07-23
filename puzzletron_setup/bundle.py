@@ -133,6 +133,13 @@ def _parallel(mesh: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _aligned_batch_size(mesh: Mapping[str, Any], requested: int = 1) -> int:
+    """Round a batch up to the mesh's minimum pipeline/DP scheduling unit."""
+    unit = int(mesh.get("pp", 1)) * int(mesh.get("dp_shard", 1)) * int(mesh.get("dp_replicate", 1))
+    requested = max(int(requested), 1)
+    return max(unit, ((requested + unit - 1) // unit) * unit)
+
+
 def _model_info(state: Mapping[str, Any]) -> dict[str, Any]:
     model = _mapping(state.get("model"))
     inventory = _mapping(state.get("inventory"))
@@ -164,7 +171,7 @@ def _axis_config(pruning: Mapping[str, Any]) -> dict[str, Any]:
     for axis_id, raw in _mapping(pruning.get("axes")).items():
         axis = _mapping(raw)
         teacher = int(axis["teacher_value"])
-        values = [int(value) for value in axis.get("values") or () if int(value) != teacher]
+        values = list(dict.fromkeys(int(value) for value in axis.get("values") or ()))
         axes[axis_id] = {
             "enabled": bool(axis.get("enabled", True)),
             "teacher_value": teacher,
@@ -189,7 +196,7 @@ def _mip_runs(state: Mapping[str, Any], *, smoke: bool) -> dict[str, Any]:
     if smoke:
         for run in runs.values():
             solver = _mapping(run.get("solver"))
-            solver["num_solutions"] = min(int(solver.get("num_solutions", 2000)), 64)
+            solver["num_solutions"] = min(int(solver.get("num_solutions", 3)), 64)
             solver["max_seconds_per_solution"] = min(
                 int(solver.get("max_seconds_per_solution", 120)), 30
             )
@@ -215,6 +222,10 @@ def _post_mip_flows(
             config = _mapping(node.get("config"))
             if node_type in {"evaluation", "materialize"}:
                 config.setdefault("automodel", {})["parallel"] = _parallel(common_mesh)
+                if node_type == "evaluation":
+                    config["micro_batch_size"] = _aligned_batch_size(
+                        common_mesh, int(config.get("micro_batch_size", 1))
+                    )
             elif node_type == "aiperf":
                 config["topology"] = {
                     "tensor_parallel_size": int(common_mesh.get("tp", 1)),
@@ -285,6 +296,9 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     bypass_samples = int(bypass.get("samples", 4096))
     if smoke:
         bypass_samples = min(bypass_samples, 64)
+    scoring_batch_size = _aligned_batch_size(common_mesh)
+    bypass_batch_size = _aligned_batch_size(bypass_mesh, int(bypass.get("batch_size", 8)))
+    bypass_sequence_length = int(bypass.get("sequence_length", sequence_length))
 
     train_cache = f"{puzzle_dir}/dataset_cache/train.tokens"
     validation_cache = f"{puzzle_dir}/dataset_cache/validation.tokens"
@@ -320,12 +334,12 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "calibration": {
                 "path": data["source"],
                 "num_samples": width_samples,
-                "micro_batch_size": 1,
+                "micro_batch_size": scoring_batch_size,
                 "seq_len": sequence_length,
             },
             "replacement_scoring": {
                 "num_samples": replacement_samples,
-                "micro_batch_size": 1,
+                "micro_batch_size": scoring_batch_size,
             },
         },
         "train_token_cache_path": train_cache,
@@ -362,7 +376,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         },
         "pruning": {
             "eval_samples": width_samples,
-            "micro_batch_size": 1,
+            "micro_batch_size": scoring_batch_size,
             "block_size": sequence_length,
             "dataset_path": data["source"],
             "activation_passes": activation_passes,
@@ -390,14 +404,17 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "enabled": bool(bypass.get("enabled", False)),
             "granularity": bypass.get("granularity", "subblock"),
             "automodel": {"parallel": _parallel(bypass_mesh)},
-            "iter_num": max(1, bypass_samples // max(1, int(bypass.get("batch_size", 8)))),
-            "step_num": max(1, bypass_samples // max(1, int(bypass.get("batch_size", 8)))),
+            "iter_num": 1,
+            "step_num": 1,
             "data": {
-                "block_size": int(bypass.get("sequence_length", sequence_length)),
+                "block_size": bypass_sequence_length,
                 "max_eval_samples": bypass_samples,
                 "packed_token_cache_path": train_cache,
             },
-            "training": {"micro_batch_size": int(bypass.get("batch_size", 8))},
+            "training": {
+                "training_tokens": bypass_samples * bypass_sequence_length,
+                "micro_batch_size": bypass_batch_size,
+            },
         },
         "depth_importance": {
             "enabled": int(pruning.get("depth_remove", 0)) > 0,
@@ -409,7 +426,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "max_subblocks_to_remove": int(pruning.get("depth_remove", 0)),
             "metric": "lm_loss",
             "eval_samples": replacement_samples,
-            "micro_batch_size": 1,
+            "micro_batch_size": scoring_batch_size,
             "block_size": sequence_length,
             "packed_token_cache_path": validation_cache,
             "automodel": {"parallel": model_parallel},
@@ -422,6 +439,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "enabled": True,
             "granularity": pruning.get("replacement_granularity", "subblock"),
             "eval_samples": replacement_samples,
+            "micro_batch_size": scoring_batch_size,
             "block_size": sequence_length,
             "dataset_path": data["source"],
             "packed_token_cache_path": validation_cache,
@@ -429,18 +447,21 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         },
         "vllm_stats": {
             "enabled": bool(runtime.get("vllm_enabled", False)),
+            "model_hidden_sizes": list(_mapping(axes.get("hidden_width")).get("values") or ()),
             "batch_sizes": [int(runtime.get("concurrency", 1))],
             "prefill_seq_len": int(runtime.get("isl", sequence_length)),
             "generation_seq_len": int(runtime.get("osl", 1024)),
             "runtime_stats": {
                 "enabled": bool(runtime.get("vllm_enabled", False)),
+                "granularity": runtime.get("granularity", "subblock"),
                 "max_num_seqs": int(runtime.get("concurrency", 1)),
+                "fixed_overhead_relative_tolerance": 0.6,
                 "topology": {
-                    "tensor_parallel_size": int(common_mesh.get("tp", 1)),
-                    "pipeline_parallel_size": int(common_mesh.get("pp", 1)),
-                    "prefill_context_parallel_size": int(common_mesh.get("cp", 1)),
-                    "decode_context_parallel_size": int(common_mesh.get("cp", 1)),
-                    "gpu_group_size": int(common_mesh.get("tp", 1)),
+                    "tensor_parallel_size": 1,
+                    "pipeline_parallel_size": 1,
+                    "prefill_context_parallel_size": 1,
+                    "decode_context_parallel_size": 1,
+                    "gpu_group_size": 1,
                 },
             },
         },
@@ -501,17 +522,28 @@ def _dynamic_stage_entries(
     experiment: Mapping[str, Any],
     workers: Mapping[str, Any],
     gpus_per_node: int,
+    common: Mapping[str, Any],
+    single_gpu: Mapping[str, Any],
+    cpu_partition: str | None,
 ) -> dict[str, Any]:
     entries = {}
     for flow_id, flow in _mapping(_mapping(experiment.get("post_mip")).get("flows")).items():
         for node_id, node in _mapping(flow.get("nodes")).items():
             node_type = str(node.get("type"))
             selector = node_type in {"filter", "manual_filter"}
-            entries[f"post.{flow_id}.{node_id}"] = {
+            cpu_stage = selector or node_type == "materialize"
+            entry = {
                 "strategy": "single" if selector else "sharded",
-                "instances": 1 if selector else int(workers.get("sharded", 1)),
+                "instances": 1 if cpu_stage else int(workers.get("sharded", 1)),
                 "gpus_per_node": gpus_per_node,
             }
+            if cpu_stage and cpu_partition:
+                entry.update(resource="cpu", partition=cpu_partition)
+            if node_type == "evaluation":
+                entry["parallel"] = dict(common)
+            elif node_type in {"aiperf", "materialize"}:
+                entry["parallel"] = dict(single_gpu)
+            entries[f"post.{flow_id}.{node_id}"] = entry
     return entries
 
 
@@ -528,6 +560,8 @@ def render_execution(
     global_kd = _parallel(_mapping(meshes.get("global_kd")))
     single_gpu = _parallel({})
     gpus_per_node = int(infrastructure.get("gpus_per_node", 8))
+    runner = _mapping(infrastructure.get("runner"))
+    cpu_partition = str(_mapping(runner.get("slurm")).get("partition_cpu") or "").strip() or None
     pool_workers = int(workers.get("pool", 1))
     sharded_workers = int(workers.get("sharded", 1))
     embedding_widths = list(_mapping(experiment.get("embedding_pruning")).get("widths") or ())
@@ -537,7 +571,7 @@ def render_execution(
         "vllm_stats": {
             "strategy": "sharded",
             "instances": sharded_workers,
-            "parallel": common,
+            "parallel": single_gpu,
         },
         "depth_importance": {
             "strategy": "persistent_pool",
@@ -545,15 +579,19 @@ def render_execution(
             "parallel": common,
         },
         "width_importance": {"strategy": "single", "instances": 1, "parallel": common},
-        "sort": {"strategy": "single", "instances": 1, "parallel": common},
+        "sort": {"strategy": "single", "instances": 1, "parallel": single_gpu},
         "sort_sanity": {"strategy": "single", "instances": 1, "parallel": common},
         "bypass_sanity": {"strategy": "single", "instances": 1, "parallel": bypass},
         "bypass": {
-            "strategy": "persistent_pool",
-            "instances": pool_workers,
+            "strategy": "single",
+            "instances": 1,
             "parallel": bypass,
         },
-        "build_library": {"strategy": "single", "instances": 1, "parallel": common},
+        "build_library": {
+            "strategy": "single",
+            "instances": 1,
+            "parallel": single_gpu,
+        },
         "replacement_scoring": {
             "strategy": "sharded" if len(embedding_widths) > 1 else "persistent_pool",
             "instances": sharded_workers if len(embedding_widths) > 1 else pool_workers,
@@ -561,7 +599,20 @@ def render_execution(
         },
         "mip": {"strategy": "single", "instances": 1},
     }
-    stages.update(_dynamic_stage_entries(experiment, workers, gpus_per_node))
+    stages.update(
+        _dynamic_stage_entries(
+            experiment,
+            workers,
+            gpus_per_node,
+            common,
+            single_gpu,
+            cpu_partition,
+        )
+    )
+    cpu_stage_ids = {"convert", "tokenize_data", "sort", "build_library", "mip"}
+    if cpu_partition:
+        for stage_id in cpu_stage_ids:
+            stages[stage_id].update(resource="cpu", partition=cpu_partition)
     for stage_id, stage in stages.items():
         stage.setdefault("gpus_per_node", gpus_per_node)
         if "short_kd" in stage_id or "global_kd" in stage_id:

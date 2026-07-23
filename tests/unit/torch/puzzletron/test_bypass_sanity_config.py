@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from modelopt.torch.puzzletron.stages.pipeline import _bypass_sanity_overfit_config
+import json
+
+from modelopt.torch.puzzletron.stages.pipeline import (
+    _bypass_sanity_overfit_config,
+    _finalize_bypass_sanity_summary,
+)
 
 
 def test_public_bypass_sanity_config_drives_legacy_overfit_probe():
@@ -60,3 +65,39 @@ def test_public_bypass_sanity_uses_overfit_specific_optimizer_defaults():
         "weight_decay": 0.0,
         "minimum_relative_decrease": 0.05,
     }
+
+
+def test_bypass_sanity_summary_preserves_nonblocking_findings(tmp_path):
+    history_path = (
+        tmp_path
+        / "artifacts"
+        / "bypass"
+        / "overfit_probe"
+        / "smallest_fixed"
+        / "local_kd_loss_history.json"
+    )
+    history_path.parent.mkdir(parents=True)
+    finding = {
+        "stage": "bypass_sanity",
+        "severity": "warning",
+        "message": "loss did not decrease",
+        "evidence": {},
+    }
+    history_path.write_text(
+        json.dumps(
+            {
+                "records": [{"step": 1, "loss": 1.0}, {"step": 2, "loss": 1.1}],
+                "summary": {"passed": False, "findings": [finding]},
+            }
+        )
+    )
+
+    summary_path = _finalize_bypass_sanity_summary(
+        tmp_path, ["smallest_fixed"], repetitions=2
+    )
+
+    assert summary_path is not None
+    summary = json.loads(summary_path.read_text())
+    assert summary["passed"] is False
+    assert summary["verdict"] == "warning"
+    assert summary["findings"] == [finding]

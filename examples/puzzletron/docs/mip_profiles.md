@@ -1,156 +1,172 @@
-# MIP Profiles
+# MIP runs
 
-Puzzletron MIP profiles describe resource constraints, the workloads used to
-measure them, and optional restrictions on the architecture search space. A
-profile may produce the normal heterogeneous solution and a separate ranked
-set of homogeneous solutions.
+Puzzletron separates MIP configuration into independent runs, variants within a
+run, and concrete solves. A concrete solve is one run × variant × matrix row ×
+objective. Results keep all four identities, so unrelated experiments never get
+mixed together.
 
 ## Complete example
 
 ```yaml
 mip:
+  defaults:
+    objectives: metrics.cosine_embedding_loss_hidden_states
+    solver:
+      backend: auto
+      num_solutions: 1000
+      min_hamming_distance: 2
+      max_seconds_per_solution: 60
+    homogeneous:
+      enabled: false
+      keep: all
+      rank_by: objective
+
   workloads:
-    isl-heavy:
-      isl: 8192
-      osl: 128
-      batch_size: 4
-    osl-heavy:
-      isl: 1024
-      osl: 8192
-      batch_size: 4
-    serving:
+    serving-8k:
       isl: 8192
       osl: 1024
+      batch_size: 4
       concurrency: 4
 
-  profiles:
-    memory-under-two-workloads:
-      num_homogeneous_solutions: 3
+  runs:
+    memory-050:
+      objectives:
+        - metrics.cosine_embedding_loss_hidden_states
+        - {metric: metrics.lm_loss, direction: minimize}
 
+      # Every variant retains this primary constraint.
       constraints:
-        params: "75%"
-        active_params:
-          min: "70%"
-          max: "90%"
         memory:
           at:
-            isl-heavy: "80%"
-            osl-heavy:
-              max: "70%"
-        runtime:
-          at:
-            serving:
-              max: "75%"
+            serving-8k: 50%
 
       search_space:
-        depth: {range: [0, 5]}
-        embedding: [2688, 2560, 2432]
-        axes_default: all
-        axes:
-          num_key_value_heads: null
-          n_routed_experts: [128, 112, 96, 80, 64]
+        embedding: all
+        depth: all
+
+      variants:
+        primary-only: {}
+
+        params-too:
+          constraints:
+            params: 50%
+
+        expert-bands:
+          homogeneous:
+            enabled: true
+            keep: 100
+            rank_by:
+              constraint_closeness:
+                weights:
+                  memory: 2
+                  experts: 1
+          matrix:
+            constraints.experts:
+              - {range: [128, 144]}
+              - {range: [144, 160]}
+              - {min: 160}
 ```
 
-All constraints in a profile are combined with AND. Each entry under `at` is
-also an independent constraint that the same architecture must satisfy.
+All constraints in a concrete solve are combined with AND. Matrix fields form a
+Cartesian product and create separately named concrete solves. An objective list
+does the same, but each objective is optimized in an independent solver run.
 
-## Constraint values
+## Runs, variants, and matrices
 
-A scalar is a directional bound. It is a maximum for costs such as parameters,
-memory, and runtime, and a minimum for benefits such as throughput.
+Use a new entry under `mip.runs` when two searches are conceptually independent.
+Use variants when searches share a primary target but add different restrictions.
+Run-level `constraints`, `objectives`, `search_space`, `solver`, and `homogeneous`
+settings are inherited by every variant; variant settings override or extend them.
+Set an inherited run to `false` in a derived config to disable it.
+
+The explicit `matrix` is for intentional loops. Supported paths are `embedding`,
+`depth`, `constraints.*`, `solver.*`, and `homogeneous.*`.
 
 ```yaml
-params: "75%"       # at most 75% of the teacher
-params: 22.5B       # at most 22.5 billion parameters
-throughput: 5000    # at least 5000 tokens/s
+variants:
+  sweep:
+    matrix:
+      embedding: [4096, 3840, 3584]
+      depth: [0, 2, 4]
+      solver.min_hamming_distance: [1, 4]
 ```
 
-Use an object for intervals or equality:
+Search-space lists choose options within one solve. Matrix lists create multiple
+solves. This distinction keeps generated result identities predictable.
+
+## Objectives and solver controls
+
+An objective is a metric string, which minimizes by default, or a mapping with an
+explicit direction. Put `objectives` under `mip.defaults` to share it, or override
+it on a run or variant:
 
 ```yaml
-active_params: {min: "70%", max: "90%"}
-params: {eq: 22.5B}
+objectives:
+  - metrics.cosine_embedding_loss_hidden_states
+  - {metric: metrics.lm_loss, direction: minimize}
 ```
 
-Use `values` to expand one named profile into multiple derived profiles. Lists
-on multiple constraints form a Cartesian product.
+Every objective gets its own solution pool. `num_solutions` is the requested pool
+size. After each solution, Puzzletron adds a diversity constraint based on final
+per-layer block configurations. `min_hamming_distance` is the minimum number of
+layers whose final configuration must differ from every earlier solution.
 
 ```yaml
-params: {values: ["70%", "75%", 22.5B]}
+solver:
+  backend: cuopt       # auto, pulp/cbc, or cuopt
+  num_solutions: 2000
+  min_hamming_distance: 3
+  max_seconds_per_solution: 120
 ```
 
-Percentages are measured against the original full-width, depth-zero teacher.
-For a workload-dependent constraint, the denominator is the teacher measured
-at that same named workload. Numbers are absolute values; supported unit
-suffixes include `K`, `M`, `B`, and `T` for parameters, `MiB` and `GiB` for
-memory, and `ms` and `s` for time.
+The solver may return fewer solutions when the feasible diverse pool is exhausted
+or a time limit is reached.
 
-Friendly constraint names include `params`, `active_params`, `memory`,
-`runtime`, `prefill_runtime`, `throughput`, and `kv_heads`. A raw `stats.*`
-metric may be used when no friendly name exists.
+## Constraints
 
-## Named workloads
+A scalar is a directional bound: a maximum for costs and a minimum for benefits.
 
-Workloads are declared once under `mip.workloads` and referenced by name with
-`at`. The statistics artifact must contain an exact matching measurement.
-Missing workload names or measurements are configuration errors.
+```yaml
+params: 75%                   # at most 75% of the teacher
+params: 22.5B                 # at most 22.5 billion parameters
+experts: {range: [128, 144]}
+throughput:
+  at:
+    serving-8k: 5000          # at least 5000 tokens/s
+```
+
+Use `min`, `max`, `eq`, or `range` for explicit bounds. Percentages are relative
+to the full-width, depth-zero teacher, measured at the same workload when the
+metric is workload-dependent. Friendly names are `params`, `active_params`,
+`memory`, `runtime`, `prefill_runtime`, `throughput`, `kv_heads`, and `experts`.
+A raw `stats.*` metric can be used when no friendly name exists.
+
+Memory, runtime, prefill runtime, and throughput must select a named workload:
 
 ```yaml
 constraints:
   memory:
     at:
-      isl-heavy: "80%"
-      osl-heavy: "70%"
+      serving-8k: {min: 48%, max: 50%}
 ```
 
-The same mechanism applies to `memory`, `runtime`, `prefill_runtime`, and
-`throughput`. Internally, each measurement remains distinct, for example
-`stats.memory_mib@isl-heavy` and `stats.memory_mib@osl-heavy`.
-
-## Search-space restrictions
-
-Search-space lists restrict candidates within one solve; unlike constraint
-`values`, they do not create profiles.
+## Search space
 
 ```yaml
 search_space:
-  depth: [0, 1, 4]
-  embedding: [2688, 2560]
+  depth: {range: [0, 5]}
+  embedding: [2688, 2560, 2432]
   axes_default: teacher
   axes:
     n_routed_experts: all
+    moe_intermediate_size: [4096, 3072]
 ```
 
-For depth, embedding, and pruning axes:
+`all` selects every measured option. A scalar or list selects exact options, and
+`{range: [low, high]}` selects an inclusive measured range. With
+`axes_default: teacher`, omitted pruning axes stay at the teacher value.
 
-- `all` selects all measured options.
-- `null` or `teacher` selects only the teacher value.
-- A scalar selects one value.
-- A list selects discrete values.
-- `{range: [low, high]}` selects measured values in an inclusive range.
-- An omitted axis inherits `axes_default`, which defaults to `all`.
-
-Using `axes_default: teacher` and setting one axis to `all` creates a restricted
-per-axis MIP experiment. Nano models without latent MoE projections simply omit
-that axis.
-
-### Typed sublayer depth selections
-
-The existing scalar, list, and range forms for `depth` select prefixes from the
-global iterative depth ranking. The following profile considers exactly two and
-three total removals:
-
-```yaml
-search_space:
-  depth:
-    total: [2, 3]
-```
-
-`total` is an explicit spelling of the existing global-prefix behavior. It cannot
-be combined with sublayer-type keys.
-
-When depth importance uses `granularity: subblock`, a profile may instead select
-counts by sublayer type:
+Depth can also select typed subblock prefixes:
 
 ```yaml
 search_space:
@@ -159,29 +175,45 @@ search_space:
     moe: [1, 2]
 ```
 
-Lists on multiple type keys form a Cartesian product. This example creates two
-depth scenarios: four attention removals plus one MoE removal, and four attention
-removals plus two MoE removals. Omitted types contribute zero removals.
+Typed depth requires subblock granularity. It filters the existing global depth
+trajectory by type; it does not run a separate importance ranking.
 
-Typed selections reuse the single global iterative depth ranking; they do not run
-a type-specific reranking. For each requested type, Puzzletron filters the global
-ranking, takes the requested prefix, then combines the selected removals while
-preserving their original global order. The scenario manifest records both the
-typed counts and exact forced removals.
+## Homogeneous search
 
-A typed count must be available in the collected global trajectory. Unknown types,
-counts beyond the collected entries of that type, mixed `total` and typed keys, and
-typed selectors with block-granularity depth importance are configuration errors.
+Homogeneous search enumerates candidates that use one consistent choice for each
+applicable pruning axis across layers. It is separate from the heterogeneous MIP
+pool and is configured explicitly:
 
-## Homogeneous solutions
+```yaml
+homogeneous:
+  enabled: true
+  keep: 100            # positive integer or all
+  rank_by: objective
+```
 
-`num_homogeneous_solutions` controls a separate search in which each applicable
-layer uses the same selected value for an axis:
+`rank_by: objective` orders feasible homogeneous candidates using the current MIP
+objective. To favor candidates near constraint boundaries instead, use:
 
-- `0` disables homogeneous search and is the default.
-- A positive integer retains the top-k feasible homogeneous solutions.
-- `-1` retains every feasible homogeneous solution.
+```yaml
+rank_by:
+  constraint_closeness:
+    weights:
+      memory: 2
+      params: 1
+```
 
-Homogeneous solutions use the same constraints and replacement-loss objective
-as the heterogeneous MIP. Their ranking and output remain separate; when model
-realization is enabled, every retained solution is materialized.
+For multiple constraints, closeness is the weighted worst normalized distance to
+the requested boundary (or interval midpoint). Objective value is the tie-breaker.
+This keeps the policy deterministic without introducing another objective model.
+
+MIP and homogeneous outputs may contain thousands of candidates. Candidate
+deduplication and filtering belong to the configurable post-MIP pipeline; see
+`post_mip_pipeline.md`.
+
+Each completed invocation writes `mip/active_profiles.json`, the authoritative
+snapshot of concrete profile IDs and their execution identity. Old profile directories
+remain available as history, but post-MIP source selection only reads candidates from
+this active snapshot. Changing constraints, objectives, search dimensions, solver-pool
+settings, or materialization mode invalidates the corresponding cached scenario.
+The identity also snapshots upstream score, statistics, library, teacher-control,
+and stage-manifest artifacts, so regenerating MIP inputs invalidates old solutions.

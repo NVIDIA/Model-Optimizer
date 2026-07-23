@@ -262,8 +262,10 @@ Site-specific paths can be overridden without editing the checked-in config:
 export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
 ```
 
-Named resource constraints and homogeneous/restricted search settings are
-documented in [MIP profiles](docs/mip_profiles.md).
+Independent runs, variants, solution pools, resource constraints, and
+homogeneous search are documented in [MIP runs](docs/mip_profiles.md). Configure
+candidate evaluation, filtering, materialization, and distillation with
+[post-MIP pipelines](docs/post_mip_pipeline.md).
 
 ## Run the complete pipeline manually
 
@@ -296,6 +298,80 @@ On a scheduler, run the same command inside the site's container and launch
 distributed stages with the topology declared by that stage's
 `automodel.parallel` section. Do not assume one parallel recipe is valid for
 all stages.
+
+## Campaign orchestrator (v2)
+
+The v2 orchestrator lives in
+[`modelopt/torch/puzzletron/orchestration/`](../../modelopt/torch/puzzletron/orchestration/)
+and is launched through
+[`examples/puzzletron/orchestrate.py`](orchestrate.py). It separates:
+
+- experiment semantics (`--experiment`, the existing Puzzletron YAML);
+- runner infrastructure (`--runner`, Slurm or bare-metal inventory plus container/venv);
+- execution semantics (`--execution`, per-stage strategy, `instances`, and optional mesh overrides).
+
+The controller import path is independent of `modelopt.torch`; it requires only
+Python 3.10+, PyYAML, and Rich. This lets it run on a Slurm login node while GPU jobs
+use the full environment declared by the runner:
+
+```bash
+python3 -m venv .venv-orchestrator
+source .venv-orchestrator/bin/activate
+python -m pip install -r examples/puzzletron/requirements-orchestrator.txt
+```
+
+The login-node environment must expose `sbatch`, `squeue`, and `sacct`. It does
+not need PyTorch, Hydra, ModelOpt installation, CUDA, or the worker container.
+
+Each stage reads its AutoModel mesh from the experiment config
+(`tp`, `cp`, `pp`, `ep`, `dp_shard`, `dp_replicate`). The orchestrator derives
+`gpus_per_instance = PP × DP_REPLICATE × DP_SHARD × CP × TP` (EP overlays
+`dp_shard`) and packs `instances` independent model copies onto nodes. For
+example, sixteen one-GPU `vllm_stats` shards on an eight-GPU node type allocate
+two nodes and dispatch sixteen shard commands.
+
+Example dry-run:
+
+```bash
+python examples/puzzletron/orchestrate.py \
+  --experiment examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml \
+  --runner examples/puzzletron/configs/orchestration/runner.slurm.example.yaml \
+  --execution examples/puzzletron/configs/orchestration/execution.example.yaml \
+  --dry-run
+```
+
+Submit on Slurm or bare metal:
+
+```bash
+python examples/puzzletron/orchestrate.py \
+  --experiment "$CONFIG" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full
+```
+
+The launch command is a blocking foreground controller: it submits every
+dependency-ready branch concurrently, polls scheduler state, and exits when the
+selected plan completes or fails. Progress is colorized automatically on a TTY.
+Interactive terminals show a live stage table with status, nodes/tasks/GPUs,
+elapsed time, and best-effort ETA when a stage exposes current/total progress.
+Completed stages remain visible; dependency waits, failed stages, and descendants
+blocked by failures are labeled explicitly. Redirected output falls back to
+timestamped one-line progress updates.
+Press `q` or Ctrl-C in an interactive terminal to choose between cancelling all
+active jobs and quitting, leaving jobs running and detaching the controller, or
+resuming the campaign. Non-interactive Ctrl-C and SIGTERM retain the safe
+cancel-and-quit behavior. A detached controller preserves durable handles, so the
+same command recovers the running jobs.
+Use `--color always` when piping through `tee`, `--color never` for plain logs,
+and `--poll-interval SECONDS` to change the default five-second scheduler poll.
+
+Durable controller state is written under `${puzzle_dir}/orchestration/`. The
+controller supports `single`, `sharded`, and `persistent_pool` strategies,
+stdlib-first Slurm and SSH executors, attempt recovery, and semantic stage
+validation through WorkAdapters. See
+[`configs/orchestration/`](configs/orchestration/) for starter runner and
+execution files.
 
 ## Run step by step
 
@@ -470,4 +546,3 @@ fingerprints are cached under
 are reused and only affected sections rebuild. Use `--rebuild-section aiperf`
 (repeatable) for selected sections, or `--no-cache` for an intentional full
 rebuild.
-

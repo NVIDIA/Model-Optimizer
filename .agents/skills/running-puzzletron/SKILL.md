@@ -50,6 +50,65 @@ Read each applicable reference completely before acting:
 9. Regenerate and semantically verify the cumulative report after each stage.
 10. Preserve or quarantine incompatible artifacts; never silently overwrite or
     merge them.
+11. Use the v2 campaign orchestrator for Slurm and bare-metal execution; do not
+    reconstruct scheduler submission with ad hoc shell loops.
+
+## Orchestrator Contract
+
+Use `examples/puzzletron/orchestrate.py` as the public campaign entry point and
+`modelopt/torch/puzzletron/orchestration/` as the scheduler-neutral control
+plane, exposed through the dependency-light `puzzletron_orchestrator` import
+path. The controller requires only Python and PyYAML; do not install PyTorch or
+the full ModelOpt runtime on a login node. The orchestrator binds three separate
+inputs:
+
+- the canonical Puzzletron experiment YAML, which owns algorithm semantics and
+  every stage-local `automodel.parallel` mesh;
+- a runner YAML, which owns exactly one Slurm or bare-metal environment plus
+  the repository, venv, container, mounts, setup contract, and optional
+  `prerun_commands` / `postrun_commands` shell hooks; and
+- an execution YAML, which owns each stage's `single`, `sharded`, or
+  `persistent_pool` strategy, independent `instances`, and failure policy.
+
+Treat `instances` as independent model/process-group copies. Never multiply it
+into AutoModel DP. Derive one instance's allocation as
+`PP * DP_REPLICATE * DP_SHARD * CP * TP`; EP overlays `DP_SHARD` and requires
+`DP_SHARD % EP == 0`. Let the orchestrator pack independent instances onto
+nodes—for example, sixteen one-GPU vLLM-statistics instances on eight-GPU nodes
+must resolve to two fully utilized nodes.
+
+Before any real submission:
+
+1. parse the experiment with the pipeline loader;
+2. run the orchestrator with `--dry-run`;
+3. verify every stage's strategy, instance count, mesh, node/GPU allocation,
+   command, artifact writer, and DAG dependency;
+4. verify Slurm account/partition/time limit/container/mounts or every
+   bare-metal host/GPU lease and rendezvous input; and
+5. run the smoke bundle before the production bundle.
+
+Canonical commands are:
+
+```bash
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full
+```
+
+Use `${puzzle_dir}/orchestration/` for controller state, attempt provenance,
+recovery, and logs. Resume with the same three hashed inputs and command; do not
+fall back to `main.py --stage full` or manual `sbatch`/SSH commands when the
+orchestrator supports the stage. Stop if dry-run emits an invalid command,
+incorrect packing, unresolved path, unsupported adapter, or conflicting
+canonical writer.
 
 ## Phase 1: Infrastructure and Goals
 
@@ -111,20 +170,25 @@ campaign.
 Create separate `smoke` and `production` namespaces. Each contains:
 
 - one canonical experiment YAML accepted by `examples/puzzletron/main.py`;
+- one runner YAML and one execution YAML accepted by
+  `examples/puzzletron/orchestrate.py`;
 - stage-local `automodel.parallel` meshes (never a shared AutoModel recipe YAML), data
   manifests, exact revisions, and execution contract;
 - resolved immutable snapshot plus hash and deterministic artifact identities;
-- exact launch, resume, monitor, report-only, and safe cleanup commands;
+- exact orchestrator dry-run, launch, resume, monitor, report-only, and safe
+  cleanup commands;
 - a stage/resource table with dependencies, topology, outputs, and status.
 
-Parse both configs with the pipeline loader before presenting them. Keep a live
-task tracker and a reproduction tutorial from the start; the reporting
-reference defines when each may be updated.
+Parse both experiment configs with the pipeline loader and compile both
+orchestrator plans before presenting them. Keep a live task tracker and a
+reproduction tutorial from the start; the reporting reference defines when
+each may be updated.
 
 ## Execute and Validate
 
 Use `modelopt/torch/puzzletron/stages/graph.py` as the dependency authority.
-Schedule independent branches concurrently when artifact writers do not
+Launch the DAG through `examples/puzzletron/orchestrate.py`. The controller
+schedules independent branches concurrently when artifact writers do not
 conflict. One writer publishes each canonical identity; immutable worker shards
 are aggregated transactionally.
 
@@ -149,7 +213,7 @@ Before production, present:
 - exact config paths and hashes;
 - resource/topology estimates and total cost envelope;
 - resumability/checkpoint plan;
-- launch, monitor, and resume commands.
+- orchestrator dry-run, launch, monitor, and resume commands.
 
 Ask for one explicit approval. After approval, operate autonomously inside the
 authorized cost, monitor long jobs, diagnose from first-rank evidence, resume
@@ -172,6 +236,8 @@ Stop and request direction rather than silently reducing coverage when:
 ## Repository Navigation
 
 Start with `examples/puzzletron/README.md`, `examples/puzzletron/main.py`, and
+`examples/puzzletron/orchestrate.py`, then read
+`modelopt/torch/puzzletron/orchestration/` and
 `modelopt/torch/puzzletron/stages/graph.py`. Read the cluster guide when present
 and `nv-internal/PUZZLETRON_V2_ENGINEERING_GUIDE.md` for historical findings,
 validating each claim against current source. Use symbol search because paths

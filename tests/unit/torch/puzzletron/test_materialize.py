@@ -15,6 +15,9 @@
 
 """CPU tests for materialize-from-sorted-teacher (slice/merge -> smaller real weights)."""
 
+import json
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 
@@ -25,6 +28,10 @@ from modelopt.torch.puzzletron.block_config import (
     MLAConfig,
     MambaConfig,
     MoEConfig,
+)
+from modelopt.torch.puzzletron.checkpoint_transactions import (
+    REALIZATION_MANIFEST,
+    prepare_realization_retry,
 )
 from modelopt.torch.puzzletron.pruning.materialize import (
     BlockTarget,
@@ -399,6 +406,72 @@ def test_materialize_fused_expert_count_and_grouped_intermediate_prefixes() -> N
     )
 
 
+def test_materialize_qwen_style_shared_expert_unfused_intermediate() -> None:
+    """Qwen MoE shared experts use singular ``shared_expert`` + unfused gate/up."""
+
+    experts, shared_inter, hidden = 4, 8, 6
+    prefix = f"{P}.mlp"
+    state = {
+        f"{prefix}.gate.weight": torch.randn(experts, hidden),
+        f"{prefix}.experts.gate_up_proj": torch.randn(experts, 2 * 4, hidden),
+        f"{prefix}.experts.down_proj": torch.randn(experts, hidden, 4),
+        f"{prefix}.shared_expert.gate_proj.weight": torch.arange(
+            shared_inter * hidden, dtype=torch.float32
+        ).reshape(shared_inter, hidden),
+        f"{prefix}.shared_expert.up_proj.weight": torch.arange(
+            shared_inter * hidden, dtype=torch.float32
+        ).reshape(shared_inter, hidden)
+        + 100,
+        f"{prefix}.shared_expert.down_proj.weight": torch.arange(
+            hidden * shared_inter, dtype=torch.float32
+        ).reshape(hidden, shared_inter)
+        + 200,
+    }
+    layouts = build_layer_layouts(
+        [
+            BlockConfig(
+                subblock_configs=(
+                    MoEConfig(
+                        num_experts=experts,
+                        expert_intermediate_size=4,
+                        shared_expert_intermediate_size=shared_inter,
+                    ),
+                )
+            )
+        ],
+        layer_prefix_tmpl="model.layers.{i}",
+        num_attention_heads=2,
+        head_dim=4,
+        moe_fused_expert_subnames=("experts.gate_up_proj", "experts.down_proj"),
+        moe_fused_gate_up_subnames=("experts.gate_up_proj",),
+        moe_fused_down_subnames=("experts.down_proj",),
+        moe_shared_expert_subname="shared_expert",
+        moe_shared_gate_subname="gate_proj",
+    )
+    keep = 3
+    result = materialize_solution_state_dict(
+        state,
+        layouts,
+        {0: BlockTarget(target_shared_expert_intermediate=keep)},
+    )
+
+    assert result[f"{prefix}.shared_expert.gate_proj.weight"].shape == (keep, hidden)
+    assert result[f"{prefix}.shared_expert.up_proj.weight"].shape == (keep, hidden)
+    assert result[f"{prefix}.shared_expert.down_proj.weight"].shape == (hidden, keep)
+    torch.testing.assert_close(
+        result[f"{prefix}.shared_expert.gate_proj.weight"],
+        state[f"{prefix}.shared_expert.gate_proj.weight"][:keep],
+    )
+    torch.testing.assert_close(
+        result[f"{prefix}.shared_expert.up_proj.weight"],
+        state[f"{prefix}.shared_expert.up_proj.weight"][:keep],
+    )
+    torch.testing.assert_close(
+        result[f"{prefix}.shared_expert.down_proj.weight"],
+        state[f"{prefix}.shared_expert.down_proj.weight"][:, :keep],
+    )
+
+
 def test_untargeted_layers_unchanged():
     sd, layouts = _state(), _layouts()
     out = materialize_solution_state_dict(sd, layouts, {})  # no targets
@@ -442,3 +515,27 @@ def test_shard_rewrite_detection_is_layer_scoped_unless_pruning_is_global():
         target_layer_prefixes=(),
         global_slice=True,
     )
+
+
+def test_realization_retry_reconstructs_only_missing_checkpoint(tmp_path: Path):
+    completed = tmp_path / "completed"
+    completed.mkdir()
+    (completed / "config.json").write_text("{}\n")
+    (completed / "model.safetensors").write_text("weights\n")
+    identity = {
+        "sorted_teacher_identity": "teacher",
+        "solution_identity": "solution",
+        "config_identity": "config",
+    }
+    (completed / REALIZATION_MANIFEST).write_text(
+        json.dumps({"status": "complete", **identity}) + "\n"
+    )
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    (partial / "config.json").write_text("{}\n")
+
+    assert prepare_realization_retry(completed, expected_identity=identity) is False
+    assert prepare_realization_retry(partial, expected_identity=identity) is True
+    assert completed.is_dir()
+    assert not partial.exists()
+    assert next(tmp_path.glob(".partial.realization_quarantine.*")).is_dir()

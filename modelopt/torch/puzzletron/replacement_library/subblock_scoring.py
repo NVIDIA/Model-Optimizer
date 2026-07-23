@@ -25,10 +25,42 @@ if TYPE_CHECKING:
 from ..block_config import BlockConfig, SubblockConfig
 from .replacement_utils import parse_layer_replacement
 
-__all__ = ["build_subblock_replacement_solutions"]
+__all__ = [
+    "build_subblock_replacement_payload",
+    "build_subblock_replacement_solutions",
+]
 
 
 SubblockIdentity = tuple[str, str]
+
+
+def build_subblock_replacement_payload(
+    replacement_library: dict[str, Any],
+    teacher_block_configs: Sequence[BlockConfig],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build an annotated replace-one-subblock catalog and its manifest."""
+
+    entries = replacement_library.get("entries")
+    if replacement_library.get("version") != 2 or not isinstance(entries, list):
+        raise ValueError("subblock scoring requires a v2 replacement library with entries")
+    solutions = build_subblock_replacement_solutions(entries, teacher_block_configs)
+    annotation = {
+        key: replacement_library[key]
+        for key in ("hidden_width", "teacher_hidden_width", "scenario")
+        if key in replacement_library
+    }
+    for solution in solutions:
+        solution.update(annotation)
+    manifest = {
+        "version": 1,
+        "mode": "replace_one_subblock",
+        "canonical_entry_count": len(entries),
+        "subblock_solution_count": len(solutions),
+        "teacher_layer_count": len(teacher_block_configs),
+        "full_search_space_preserved": True,
+        **annotation,
+    }
+    return manifest, solutions
 
 
 def _subblocks_by_identity(block: BlockConfig) -> dict[SubblockIdentity, SubblockConfig]:

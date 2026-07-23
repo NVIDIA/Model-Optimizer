@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Example runner and execution configs for the v2 orchestrator."""
+
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 8
+  stages:
+    convert:
+      strategy: single
+      instances: 1
+    tokenize_data:
+      strategy: single
+      instances: 1
+    vllm_stats:
+      strategy: sharded
+      instances: 16
+    width_importance:
+      strategy: single
+      instances: 1
+    depth_importance:
+      strategy: persistent_pool
+      instances: 8
+    replacement_scoring:
+      strategy: persistent_pool
+      instances: 8
+    zero_shot_evaluation:
+      strategy: sharded
+      instances: 8
+    aiperf:
+      strategy: sharded
+      instances: 8

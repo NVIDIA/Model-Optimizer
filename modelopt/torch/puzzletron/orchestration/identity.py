@@ -6,12 +6,36 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import sys
+from pathlib import Path
 from typing import Any, Mapping
 
 from .schema import ExecutionContract, RunnerEnvironment
 
-__all__ = ["execution_contract_hash", "hash_payload"]
+__all__ = [
+    "artifact_snapshot_identity",
+    "canonicalize",
+    "execution_contract_hash",
+    "hash_payload",
+    "mip_input_artifact_paths",
+    "stable_hash",
+]
+
+_CORE_IDENTITY_NAME = "_puzzletron_core_identity"
+_CORE_IDENTITY_PATH = Path(__file__).resolve().parents[1] / "identity.py"
+_CORE_IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    _CORE_IDENTITY_NAME, _CORE_IDENTITY_PATH
+)
+if _CORE_IDENTITY_SPEC is None or _CORE_IDENTITY_SPEC.loader is None:
+    raise ImportError(f"Unable to load Puzzletron identity helpers from {_CORE_IDENTITY_PATH}")
+_CORE_IDENTITY = importlib.util.module_from_spec(_CORE_IDENTITY_SPEC)
+sys.modules.setdefault(_CORE_IDENTITY_NAME, _CORE_IDENTITY)
+_CORE_IDENTITY_SPEC.loader.exec_module(_CORE_IDENTITY)
+
+canonicalize = _CORE_IDENTITY.canonicalize
+stable_hash = _CORE_IDENTITY.stable_hash
 
 
 def hash_payload(payload: Mapping[str, Any]) -> str:
@@ -19,6 +43,77 @@ def hash_payload(payload: Mapping[str, Any]) -> str:
 
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def mip_input_artifact_paths(
+    puzzle_dir: str | Path, widths: list[int], score_granularity: str
+) -> dict[str, Path]:
+    """Return the scored/statistical artifacts that determine a MIP execution."""
+
+    root = Path(puzzle_dir)
+    score_name = {
+        "block": "single_sequence_replacement_solutions--validation",
+        "subblock": "single_subblock_replacement_solutions--validation",
+    }[str(score_granularity).lower()]
+    paths = {
+        f"manifest/{stage}": root / "manifests" / f"{stage}.json"
+        for stage in (
+            "sort",
+            "width_importance",
+            "depth_importance",
+            "build_library",
+            "vllm_stats",
+            "replacement_scoring",
+        )
+    }
+    for width in widths:
+        base = root / "scenarios" / f"width-{int(width):04d}" / "depth-00"
+        paths.update(
+            {
+                f"width/{width}/stats": base / "subblock_stats.json",
+                f"width/{width}/scores": base / score_name,
+                f"width/{width}/canonical": base
+                / "single_sequence_replacement_solutions.json",
+                f"width/{width}/library": base / "replacement_library.json",
+                f"width/{width}/teacher_config": base
+                / "ckpts"
+                / "sorted_teacher"
+                / "config.json",
+                f"width/{width}/teacher_index": base
+                / "ckpts"
+                / "sorted_teacher"
+                / "model.safetensors.index.json",
+            }
+        )
+    return paths
+
+
+def artifact_snapshot_identity(paths: Mapping[str, str | Path]) -> str:
+    """Fingerprint input artifacts by path, metadata, and small control-file content."""
+
+    rows = []
+    for label, raw_path in sorted(paths.items()):
+        path = Path(raw_path)
+        members = (
+            sorted(item for item in path.rglob("*") if item.is_file())
+            if path.is_dir()
+            else [path]
+        )
+        if not path.exists():
+            rows.append({"label": label, "missing": True})
+            continue
+        for member in members:
+            stat = member.stat()
+            row = {
+                "label": label,
+                "path": str(member.relative_to(path)) if path.is_dir() else path.name,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+            if member.suffix.lower() in {".json", ".yaml", ".yml"} and stat.st_size <= 1 << 20:
+                row["sha256"] = hashlib.sha256(member.read_bytes()).hexdigest()
+            rows.append(row)
+    return hash_payload({"artifacts": rows})
 
 
 def execution_contract_hash(runner: RunnerEnvironment) -> str:
@@ -42,6 +137,7 @@ def execution_contract_hash(runner: RunnerEnvironment) -> str:
             "partition": runner.slurm.partition,
             "partition_interactive": runner.slurm.partition_interactive,
             "partition_batch": runner.slurm.partition_batch,
+            "partition_cpu": runner.slurm.partition_cpu,
             "interactive_max_nodes": runner.slurm.interactive_max_nodes,
             "max_nodes": runner.slurm.max_nodes,
             "time_limit": runner.slurm.time_limit,

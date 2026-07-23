@@ -40,6 +40,7 @@ from ..tools.checkpoint_utils_hf import load_model_config
 from ..tools.logger import mprint
 from ..utils.parsing import format_global_config
 from .replacement_utils import is_replacement_identical_to_teacher, parse_layer_replacement
+from .subblock_scoring import build_subblock_replacement_payload
 
 __all__ = [
     "build_replacement_library_from_sorted_teacher",
@@ -359,9 +360,28 @@ def build_replacement_library_from_sorted_teacher(
         solution["scenario"] = f"width-{hidden_width:04d}"
     json_dump(solutions, master_puzzle_dir / "single_sequence_replacement_solutions.json")
 
+    subblock_manifest, subblock_solutions = build_subblock_replacement_payload(
+        library_v2,
+        block_configs,
+    )
+    subblock_solutions_path = master_puzzle_dir / "single_subblock_replacement_solutions.json"
+    subblock_manifest_path = master_puzzle_dir / "subblock_replacement_manifest.json"
+    subblock_manifest.update(
+        {
+            "replacement_library": str(
+                (master_puzzle_dir / "replacement_library.json").resolve()
+            ),
+            "teacher_dir": str(sorted_teacher_dir),
+            "solutions": str(subblock_solutions_path.resolve()),
+        }
+    )
+    json_dump(subblock_solutions, subblock_solutions_path)
+    json_dump(subblock_manifest, subblock_manifest_path)
+
     mprint(
         f"Sorted-teacher replacement library: {len(entries_serializable)} entries, "
         f"{student_count} pruned entries, {len(solutions)} one-replacement solutions, "
+        f"{len(subblock_solutions)} one-subblock solutions, "
         f"hidden_width={hidden_width}, sorted_teacher_dir={sorted_teacher_dir}"
     )
 

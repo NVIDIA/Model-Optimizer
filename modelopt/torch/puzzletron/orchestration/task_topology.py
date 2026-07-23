@@ -36,24 +36,31 @@ def resolve_task_topology(attempt: AttemptSpec) -> ResolvedTaskTopology:
     nodes = int(attempt.allocation_nodes)
     if nodes < 1:
         raise ValueError(f"task topology requires positive nodes; got N={nodes}")
-    default_gpus_per_node = max(1, attempt.allocation_gpus // nodes)
+    default_gpus_per_node = attempt.allocation_gpus // nodes
     gpus_per_node = int(attempt.metadata.get("gpus_per_node", default_gpus_per_node))
-    if gpus_per_node < 1:
+    if gpus_per_node < 0:
         raise ValueError(
-            f"task topology requires positive GPUs per node; got K={gpus_per_node}"
+            f"task topology requires non-negative GPUs per node; got K={gpus_per_node}"
         )
     gpus_per_task = int(
         declared.gpus_per_task
         if declared.gpus_per_task is not None
         else min(attempt.allocation_gpus, gpus_per_node)
     )
-    if not 1 <= gpus_per_task <= gpus_per_node:
+    if not 0 <= gpus_per_task <= gpus_per_node:
         raise ValueError(
             f"gpus_per_task={gpus_per_task} exceeds gpus_per_node={gpus_per_node}"
         )
     task_count = int(declared.task_count)
     tasks_per_group = int(declared.tasks_per_group)
-    tasks_per_node = gpus_per_node // gpus_per_task
+    if gpus_per_task == 0:
+        if gpus_per_node != 0:
+            raise ValueError("CPU tasks require gpus_per_node=0")
+        if declared.launcher is not TaskLauncher.DIRECT:
+            raise ValueError("CPU tasks require the direct launcher")
+        tasks_per_node = task_count
+    else:
+        tasks_per_node = gpus_per_node // gpus_per_task
     task_capacity = nodes * tasks_per_node
     if not 1 <= task_count <= task_capacity:
         raise ValueError(f"task_count={task_count} exceeds capacity={task_capacity}")

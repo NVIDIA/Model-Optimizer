@@ -139,6 +139,7 @@ def depth_rpc_context_from_config(hydra_cfg) -> dict[str, Any]:
     import json
 
     from ..anymodel.model_descriptor import ModelDescriptorFactory
+    from ..anymodel.registry import resolve_descriptor_from_pretrained
     from ..block_config import maybe_cast_block_configs
     from ..depth.iterative import _available_removals, _depth_scoring_config
     from ..granularity import resolve_granularity
@@ -152,7 +153,23 @@ def depth_rpc_context_from_config(hydra_cfg) -> dict[str, Any]:
     source = Path(scoring.source_checkpoint_dir)
     if not (source / "config.json").is_file():
         raise FileNotFoundError(f"iterative-depth source checkpoint is incomplete: {source}")
-    descriptor = ModelDescriptorFactory.get(cfg.descriptor)
+    # Match AutoModelReplaceBlockExecutor: configs may omit top-level
+    # ``descriptor`` (Qwen MoE did) and only resolve it from the checkpoint.
+    descriptor_name = (
+        cfg.get("descriptor", None)
+        or scoring.get("descriptor", None)
+        or (cfg.get("model", {}) or {}).get("descriptor_override", None)
+    )
+    if descriptor_name:
+        descriptor = ModelDescriptorFactory.get(str(descriptor_name))
+    else:
+        model_cfg = cfg.get("model", {}) or {}
+        resolution = resolve_descriptor_from_pretrained(
+            str(source),
+            trust_remote_code=bool(model_cfg.get("trust_remote_code", False)),
+        )
+        descriptor = resolution.descriptor
+        cfg.descriptor = resolution.name
     model_config = load_model_config(
         source,
         trust_remote_code=descriptor.requires_trust_remote_code(),
@@ -223,6 +240,25 @@ async def run_iterative_depth_rpc(
     selected_keys = [(item.layer_idx, item.kind) for item in selected]
     if len(selected_keys) != len(set(selected_keys)) or not set(selected_keys) <= available_keys:
         raise RuntimeError("trajectory contains duplicate or unavailable depth removals")
+
+    def publish_trajectory() -> None:
+        atomic_write_json(
+            trajectory_path,
+            _trajectory_payload(
+                selected=selected,
+                available_count=len(available),
+                max_removals=max_removals,
+                source_checkpoint_dir=source_checkpoint_dir,
+                parent_checkpoint_identity=parent_checkpoint_identity,
+                data_identity=data_identity,
+                hidden_width=hidden_width,
+                granularity=granularity,
+            ),
+        )
+
+    # Reconcile a resumed trajectory with the current target even when no new
+    # iteration is needed (for example, reducing max_removals from five to two).
+    publish_trajectory()
 
     for iteration in range(len(selected), max_removals):
         prefix = tuple(selected)
@@ -317,19 +353,7 @@ async def run_iterative_depth_rpc(
         chosen = SublayerRemoval.model_validate(ranked[0]["candidate"])
         selected.append(chosen)
         selected_keys.append((chosen.layer_idx, chosen.kind))
-        atomic_write_json(
-            trajectory_path,
-            _trajectory_payload(
-                selected=selected,
-                available_count=len(available),
-                max_removals=max_removals,
-                source_checkpoint_dir=source_checkpoint_dir,
-                parent_checkpoint_identity=parent_checkpoint_identity,
-                data_identity=data_identity,
-                hidden_width=hidden_width,
-                granularity=granularity,
-            ),
-        )
+        publish_trajectory()
 
     return {
         "trajectory_path": str(trajectory_path),

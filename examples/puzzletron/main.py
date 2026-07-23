@@ -166,22 +166,39 @@ def build_worker_command(
 
 
 def refresh_campaign_report(config: dict, running_stage: str | None = None) -> None:
-    """Refresh the stable campaign report from rank zero."""
+    """Refresh the stable campaign report from rank zero.
+
+    Report generation must never fail a completed stage: the installed
+    ``nvidia-modelopt`` wheel can shadow the local checkout and omit newer
+    diagnostics modules.
+    """
 
     if int(os.environ.get("RANK", "0")) != 0:
         return
     puzzle_dir = config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir")
     if not puzzle_dir:
         return
-    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
-        generate_campaign_progress_report,
-    )
-
-    generate_campaign_progress_report(
-        puzzle_dir,
-        model_name=_report_model_name(config),
-        running_stage=running_stage,
-    )
+    try:
+        from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
+            generate_campaign_progress_report,
+        )
+    except Exception as exc:  # noqa: BLE001 - report is best-effort
+        print(
+            f"warning: skipping campaign progress report ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
+        return
+    try:
+        generate_campaign_progress_report(
+            puzzle_dir,
+            model_name=_report_model_name(config),
+            running_stage=running_stage,
+        )
+    except Exception as exc:  # noqa: BLE001 - report is best-effort
+        print(
+            f"warning: campaign progress report failed ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
 
 
 def _report_model_name(config: dict) -> str:
@@ -223,10 +240,25 @@ def _stage_output_patterns(config: dict, stage: str) -> tuple[str, ...]:
             return ("artifacts/slicing_sanity/summary.json",)
     patterns = REQUIRED_OUTPUT_PATTERNS.get(stage, ())
     if stage == "build_library":
-        return tuple(
+        resolved = [
             _runtime_stats_filename(config) if pattern == "subblock_stats.json" else pattern
             for pattern in patterns
-        )
+        ]
+        embedding = config.get("embedding_pruning") or {}
+        if bool(embedding.get("enabled", False)):
+            resolved.append("scenarios/width_scenarios.json")
+            for configured_width in embedding.get("widths", ()):
+                scenario = f"scenarios/width-{int(configured_width):04d}/depth-00"
+                resolved.extend(
+                    (
+                        f"{scenario}/scenario_manifest.json",
+                        f"{scenario}/replacement_library.json",
+                        f"{scenario}/candidate_library.json",
+                        f"{scenario}/{_runtime_stats_filename(config)}",
+                        f"{scenario}/manifests/build_library.json",
+                    )
+                )
+        return tuple(resolved)
     return patterns
 
 

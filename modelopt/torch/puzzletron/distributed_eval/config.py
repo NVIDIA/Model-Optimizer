@@ -178,9 +178,10 @@ def checkpoint_identity(checkpoint_dir: str | Path) -> dict[str, Any]:
     weight_files = []
     for path in sorted(checkpoint_dir.glob("*.safetensors")):
         stat = path.stat()
-        weight_files.append(
-            {"name": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-        )
+        # Modification times are not checkpoint content.  They can differ for
+        # the same Lustre file across container and process views, which made
+        # distributed readers intermittently reject an unchanged checkpoint.
+        weight_files.append({"name": path.name, "size": stat.st_size})
     payload = {"manifests": manifests, "weights": weight_files}
     fingerprint = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

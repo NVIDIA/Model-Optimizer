@@ -116,6 +116,8 @@ def test_qwen_moe_contract_combines_moe_gdn_attention_vlm_and_mtp() -> None:
         ),
         "moe_fused_gate_up_subnames": ("experts.gate_up_proj",),
         "moe_fused_down_subnames": ("experts.down_proj",),
+        "moe_shared_expert_subname": "shared_expert",
+        "moe_shared_gate_subname": "gate_proj",
     }
 
 

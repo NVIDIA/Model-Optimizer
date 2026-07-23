@@ -8,6 +8,7 @@ import json
 import math
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import asdict
 from pathlib import Path
 from queue import Queue
 from typing import TYPE_CHECKING, Any
@@ -938,6 +939,28 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
                 f"distillation overfit {solution_id} expected {max_steps} records, "
                 f"found {len(records)} in {training_log}"
             )
+        invalid_losses = [
+            (index, record.get("loss"))
+            for index, record in enumerate(records)
+            if not isinstance(record.get("loss"), (int, float))
+            or not math.isfinite(float(record["loss"]))
+        ]
+        if invalid_losses:
+            raise RuntimeError(
+                f"distillation overfit {solution_id} has missing or non-finite loss records: "
+                f"{invalid_losses}"
+            )
+        from ..diagnostics.campaign_findings import loss_trend_findings
+
+        findings = [
+            asdict(finding)
+            for finding in loss_trend_findings(
+                stage="global_distillation_sanity",
+                records=({**record, "solution_id": solution_id} for record in records),
+                group_key="solution_id",
+                window=int(stage_cfg.get("trend_window", 4)),
+            )
+        ]
         summary = {
             "solution_id": solution_id,
             "label": solution.get("label", solution_id),
@@ -952,6 +975,9 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             "frozen_minibatch": True,
             "result": result.to_dict(),
             "records": records,
+            "passed": not findings,
+            "findings": findings,
+            "verdict": "passed" if not findings else "warning",
         }
         if global_rank == 0:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -962,6 +988,11 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
         summaries.append(summary)
 
     summary_path = root / "global_distillation_sanity_summary.json"
+    findings = [
+        finding
+        for solution_summary in summaries
+        for finding in solution_summary.get("findings", ())
+    ]
     if global_rank == 0:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = summary_path.with_suffix(".json.tmp")
@@ -973,6 +1004,9 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
                     "sequence_length": sequence_length,
                     "max_steps": max_steps,
                     "frozen_minibatch": True,
+                    "passed": not findings,
+                    "findings": findings,
+                    "verdict": "passed" if not findings else "warning",
                     "solutions": summaries,
                 },
                 indent=2,
@@ -981,7 +1015,9 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             + "\n"
         )
         temporary.replace(summary_path)
-    return complete_stage(
+    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+    return complete_sanity_stage(
         config,
         manifest,
         outputs={
@@ -990,4 +1026,5 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             "summary_path": str(summary_path),
             "frozen_minibatch": True,
         },
+        verdict=SanityVerdict(passed=not findings, findings=findings),
     )

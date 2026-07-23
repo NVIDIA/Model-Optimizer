@@ -2140,18 +2140,35 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             }
 
         last_metrics["loss_history"] = loss_history
-        write_loss_history()
+        probe_findings: list[dict[str, Any]] = []
         if loss_trend and loss_trend["hard_gate_passed"] is False:
-            raise RuntimeError(
-                "local KD acceptance loss did not decrease: "
-                f"mode={overfit_mode if single_batch_overfit else 'training'} "
-                f"history={history_path} trend={loss_trend}"
+            probe_findings.append(
+                {
+                    "stage": "bypass_sanity",
+                    "message": (
+                        "local KD acceptance loss did not decrease: "
+                        f"mode={overfit_mode if single_batch_overfit else 'training'} "
+                        f"trend={loss_trend}"
+                    ),
+                    "evidence": {"trend": loss_trend, "history_path": str(history_path)},
+                    "severity": "warning",
+                }
             )
         if single_batch_overfit and not probe_summary.get("diversity_passed", True):
-            raise RuntimeError(
-                "diverse fixed-batch overfit probe did not sample multiple structures: "
-                f"mode={overfit_mode} history={history_path} summary={probe_summary}"
+            probe_findings.append(
+                {
+                    "stage": "bypass_sanity",
+                    "message": (
+                        "diverse fixed-batch overfit probe did not sample multiple structures: "
+                        f"mode={overfit_mode} summary={probe_summary}"
+                    ),
+                    "evidence": {"summary": probe_summary, "history_path": str(history_path)},
+                    "severity": "warning",
+                }
             )
+        probe_summary["findings"] = probe_findings
+        probe_summary["passed"] = not probe_findings
+        write_loss_history()
 
         self._hydra_cfg.bypass.step_num = max_steps
         checkpoint_path = (

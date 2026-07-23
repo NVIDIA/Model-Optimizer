@@ -329,6 +329,18 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
         outputs["descriptor"] = descriptor_payload
     if not skipped:
         outputs["already_anymodel"] = already_anymodel
+
+    # Single-writer runtime candidate list for vLLM stats (not the final build_library).
+    if bool((config.get("vllm_stats") or {}).get("enabled", False)):
+        from .pipeline import emit_runtime_subblock_library
+
+        library_path = emit_runtime_subblock_library(
+            config,
+            teacher_dir=teacher_dir,
+            puzzle_dir=experiment_dir(config),
+        )
+        outputs["runtime_subblock_library"] = str(library_path)
+
     return complete_stage(
         config,
         manifest,

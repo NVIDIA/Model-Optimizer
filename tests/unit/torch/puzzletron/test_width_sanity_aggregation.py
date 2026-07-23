@@ -3,12 +3,58 @@
 
 import json
 
+import pytest
+
 from modelopt.torch.puzzletron.diagnostics.campaign_findings import MetricSpec
 from modelopt.torch.puzzletron.diagnostics.width_sanity import (
     aggregate_parent_sweep_sanity,
     aggregate_width_sanity,
 )
-from modelopt.torch.puzzletron.stages.diagnostics import _publish_parent_sweep_sanity
+from modelopt.torch.puzzletron.stages.diagnostics import (
+    _hidden_width_realization_tolerance,
+    _publish_parent_sweep_sanity,
+    _validate_parent_sweep_checkpoint_loads,
+)
+
+
+def test_parent_sweep_resume_allows_zero_or_one_checkpoint_load():
+    _validate_parent_sweep_checkpoint_loads(
+        {"checkpoint_loads": {"original": 1, "activation": 0, "realized_0000": 0}}
+    )
+
+
+def test_parent_sweep_resume_rejects_repeated_checkpoint_load():
+    with pytest.raises(RuntimeError, match="activation more than once"):
+        _validate_parent_sweep_checkpoint_loads(
+            {"checkpoint_loads": {"original": 1, "activation": 2}}
+        )
+
+
+@pytest.mark.parametrize(
+    ("config", "metric", "expected"),
+    (
+        ({}, "raw_replacement_loss", 0.0),
+        ({"comparison_tolerance": 1.0e-5}, "raw_replacement_loss", 1.0e-5),
+        (
+            {
+                "comparison_tolerance": 1.0e-5,
+                "physical_equivalence_tolerance": 1.0e-3,
+            },
+            "raw_replacement_loss",
+            1.0e-3,
+        ),
+        (
+            {
+                "physical_equivalence_tolerance": 1.0e-3,
+                "physical_equivalence_tolerances": {"raw_replacement_loss": 2.0e-3},
+            },
+            "raw_replacement_loss",
+            2.0e-3,
+        ),
+    ),
+)
+def test_hidden_width_realization_uses_physical_tolerance(config, metric, expected):
+    assert _hidden_width_realization_tolerance(config, metric) == pytest.approx(expected)
 
 
 def test_aggregation_separates_ranking_from_physical_equivalence():
@@ -168,3 +214,35 @@ def test_parent_sweep_publication_accepts_per_metric_physical_tolerances(tmp_pat
         "lm_loss": 1.0e-2,
         "raw_replacement_loss": 5.0e-3,
     }
+
+
+def test_parent_sweep_physical_miss_is_published_as_warning(tmp_path):
+    parent_summary = {
+        "rows": [
+            {
+                "axis": "moe_experts",
+                "layer_idx": 1,
+                "target_value": 4,
+                "method": method,
+                "lm_loss": loss,
+            }
+            for method, loss in (
+                ("activation", 1.0),
+                ("random", 1.1),
+                ("reverse", 1.2),
+                ("realized", 1.5),
+            )
+        ]
+    }
+
+    _, slicing_path = _publish_parent_sweep_sanity(
+        puzzle_dir=tmp_path,
+        parent_summary=parent_summary,
+        hidden_width_summary=None,
+        diag_cfg={"physical_equivalence_tolerance": 1.0e-3},
+    )
+
+    summary = json.loads(slicing_path.read_text())
+    assert summary["passed"] is False
+    assert summary["findings"]
+    assert all(finding["severity"] == "warning" for finding in summary["findings"])

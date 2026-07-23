@@ -42,6 +42,7 @@ from modelopt.torch.utils import json_dump
 
 from ..anymodel.model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ..block_config import SUBBLOCK_CLS_DICT, BlockConfig, FFNConfig, SubblockConfig
+from ..distributed_eval.storage import file_lock
 from ..replacement_library.replacement_utils import parse_layer_replacement
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
@@ -117,10 +118,19 @@ def _resolve_width_checkpoint(
     )
     if (scenario / "config.json").is_file():
         return scenario
+    runtime_checkpoint = (
+        master_puzzle_dir
+        / "runtime_cache"
+        / "width_checkpoints"
+        / f"width-{int(width):04d}"
+    )
+    if (runtime_checkpoint / "config.json").is_file():
+        return runtime_checkpoint
     if int(width) == int(teacher_hidden_size) and (teacher_dir / "config.json").is_file():
         return teacher_dir
     raise FileNotFoundError(
-        f"No physical width checkpoint for hidden size {width}. Expected {scenario}; "
+        f"No physical width checkpoint for hidden size {width}. Expected {scenario} "
+        f"or {runtime_checkpoint}; "
         "parameter accounting cannot safely reuse the native-width config."
     )
 
@@ -445,6 +455,30 @@ def _write_parameter_inventory_progress_manifest(
 
 
 def _calculate_parameter_inventory_for_width(
+    *,
+    master_puzzle_dir: Path,
+    checkpoint_dir: Path,
+    descriptor: Type[ModelDescriptor],
+    width: int,
+    subblock_configs: list[immutabledict[str, SubblockConfig]],
+    cache_root: Path,
+    progress_every: int,
+) -> dict:
+    """Build or reuse one width inventory under single-writer ownership."""
+
+    with file_lock(cache_root / f".width-{int(width):04d}.lock"):
+        return _calculate_parameter_inventory_for_width_unlocked(
+            master_puzzle_dir=master_puzzle_dir,
+            checkpoint_dir=checkpoint_dir,
+            descriptor=descriptor,
+            width=width,
+            subblock_configs=subblock_configs,
+            cache_root=cache_root,
+            progress_every=progress_every,
+        )
+
+
+def _calculate_parameter_inventory_for_width_unlocked(
     *,
     master_puzzle_dir: Path,
     checkpoint_dir: Path,

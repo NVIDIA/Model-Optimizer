@@ -132,10 +132,21 @@ mip:
   canonical_solutions_path: ${to_path:${replacement_scoring.subblock_solutions_path}}
   depth_trajectory_path: ${puzzle_dir}/depth/iterative/trajectory.json
   depth_scenario_count: 7
-  human_constraints:
-    target_latency_ratio: 0.95
-  latency_constraint_profiles:
-  - 0.95
+  workloads:
+    serving-default:
+      isl: ${vllm_stats.prefill_seq_len}
+      osl: ${vllm_stats.generation_seq_len}
+      batch_size: 1
+      concurrency: 1
+  runs:
+    latency-095:
+      constraints:
+        runtime:
+          at:
+            serving-default: 95%
+      search_space:
+        depth: all
+        embedding: all
   grid_budgeting:
     enabled: false
   enabled: true

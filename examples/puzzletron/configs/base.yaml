@@ -323,8 +323,18 @@ mip:
   output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions}
   gathered_metrics_path:
   puzzle_profile:
-  objective: metrics.cosine_embedding_loss_hidden_states
-  bigger_is_better: false
+  defaults:
+    objectives: metrics.cosine_embedding_loss_hidden_states
+    solver:
+      backend: auto
+      num_solutions: 1
+      min_hamming_distance: 1
+      max_seconds_per_solution: 60
+    homogeneous:
+      enabled: false
+      keep: all
+      rank_by: objective
+  runs: {}
   subblock_stats_args:
     weights_dtype: torch.bfloat16
     activations_dtype: torch.bfloat16
@@ -332,6 +342,9 @@ mip:
     batch_sizes: ${vllm_stats.batch_sizes}
     prefill_seq_len: ${vllm_stats.prefill_seq_len}
     generation_seq_len: ${vllm_stats.generation_seq_len}
+
+post_mip:
+  flows: {}
 
 global_distillation:
   backend: automodel

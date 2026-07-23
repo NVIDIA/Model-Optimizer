@@ -3,12 +3,14 @@ import json
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
+import sys
 
 import pytest
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.pipeline as pipeline_stages
 import modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats as runtime_stats_module
+from examples.puzzletron import run_runtime_stats_packed as packed_runtime_stats
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
 from modelopt.torch.puzzletron.anymodel.capabilities import (
     CapabilityValidationError,
@@ -76,6 +78,12 @@ def test_parameter_stats_resolve_physical_width_checkpoint(tmp_path):
     assert _resolve_width_checkpoint(tmp_path, teacher, 2688, 2688) == teacher
     with pytest.raises(FileNotFoundError, match="physical width checkpoint"):
         _resolve_width_checkpoint(tmp_path, teacher, 2432, 2688)
+
+    runtime_physical = tmp_path / "runtime_cache/width_checkpoints/width-2432"
+    runtime_physical.mkdir(parents=True)
+    (runtime_physical / "config.json").write_text("{}\n")
+
+    assert _resolve_width_checkpoint(tmp_path, teacher, 2432, 2688) == runtime_physical
 
 
 def test_parameter_inventory_cache_resumes_only_matching_identity(tmp_path):
@@ -314,6 +322,19 @@ def test_explicit_vllm_stage_is_registered_and_disables_inline_collection():
     assert not _vllm_stats_is_explicit({})
 
 
+def test_vllm_width_configuration_merges_embedding_search_widths():
+    hydra_cfg = OmegaConf.create(
+        {"calc_subblock_stats": {"model_hidden_sizes": [1024]}}
+    )
+
+    requested = pipeline_stages.configure_vllm_stats_widths(
+        {"embedding_pruning": {"widths": [768, 1024]}}, hydra_cfg
+    )
+
+    assert requested == (1024, 768)
+    assert hydra_cfg.calc_subblock_stats.model_hidden_sizes == [1024, 768]
+
+
 def test_vllm_stage_collects_from_converted_teacher_without_replacement_library(
     tmp_path, monkeypatch
 ):
@@ -352,6 +373,17 @@ def test_vllm_stage_collects_from_converted_teacher_without_replacement_library(
         lambda teacher, descriptor, *, search_space, include_noops: (
             (block_config,) if include_noops else ()
         ),
+    )
+    # Convert is the sole writer of the runtime candidate library.
+    (tmp_path / "subblock_library.json").write_text(
+        json.dumps(
+            [
+                {
+                    "attention_config": block_config.subblock_configs[0].to_dict(),
+                    "ffn_config": block_config.subblock_configs[1].to_dict(),
+                }
+            ]
+        )
     )
 
     def launch(cfg):
@@ -398,6 +430,95 @@ def test_vllm_stage_collects_from_converted_teacher_without_replacement_library(
 
     assert result.status == "success"
     assert not (tmp_path / "replacement_library.json").exists()
+    assert (tmp_path / "artifacts/vllm_stats/summary.json").is_file()
+
+
+def test_finalize_vllm_stats_report_uses_configured_aggregate(tmp_path, monkeypatch):
+    stats_path = tmp_path / "runtime/custom_stats.json"
+    stats_path.parent.mkdir(parents=True)
+    stats_path.write_text("[{}]\n")
+    config = {"experiment": {"dir": str(tmp_path)}}
+    hydra_cfg = OmegaConf.create(
+        {
+            "puzzle_dir": str(tmp_path),
+            "calc_subblock_stats": {
+                "runtime_stats": {"granularity": "subblock"},
+                "subblock_stats_filename": "runtime/custom_stats.json",
+            },
+        }
+    )
+    calls = []
+
+    def generate(puzzle_dir, **kwargs):
+        calls.append((puzzle_dir, kwargs))
+        return {"kind": "vllm_stats", "record_count": 1}
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.diagnostics.generate_vllm_stats_report",
+        generate,
+    )
+
+    summary = pipeline_stages.finalize_vllm_stats_report(config, hydra_cfg)
+
+    assert summary == {"kind": "vllm_stats", "record_count": 1}
+    assert calls == [
+        (
+            tmp_path,
+            {
+                "stats_path": stats_path,
+                "output_dir": tmp_path / "artifacts/vllm_stats",
+                "granularity": "subblock",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("shard_indices", "worker_exit_code", "expected_finalizations"),
+    (("0,1", 0, 1), ("2,3", 0, 0), ("0,1", 7, 0)),
+)
+def test_packed_runtime_stats_finalizes_only_successful_shard_zero_pack(
+    monkeypatch,
+    shard_indices,
+    worker_exit_code,
+    expected_finalizations,
+):
+    class Process:
+        def wait(self):
+            return worker_exit_code
+
+    monkeypatch.setattr(packed_runtime_stats.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(
+        packed_runtime_stats,
+        "pipeline_config_from_path",
+        lambda path, overrides: {"config_path": path, "overrides": overrides},
+        raising=False,
+    )
+    finalizations = []
+    monkeypatch.setattr(
+        packed_runtime_stats,
+        "finalize_vllm_stats_report",
+        lambda config: finalizations.append(config),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_runtime_stats_packed.py",
+            "--config",
+            "experiment.yaml",
+            "--shard-indices",
+            shard_indices,
+            "--shard-count",
+            "4",
+            "--override",
+            "vllm_stats.enabled=true",
+        ],
+    )
+
+    assert packed_runtime_stats.main() == worker_exit_code
+    assert len(finalizations) == expected_finalizations
 
 
 def test_vllm_stage_prepares_sparse_subblock_selection_from_teacher(tmp_path):
@@ -770,6 +891,7 @@ def test_vllm_stage_rejects_missing_runtime_aggregate(tmp_path, monkeypatch):
             ),
         ),
     )
+    (tmp_path / "subblock_library.json").write_text("[]\n")
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.launch_calc_subblock_stats",
         lambda _: None,

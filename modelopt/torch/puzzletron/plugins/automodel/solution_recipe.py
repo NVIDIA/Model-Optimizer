@@ -831,6 +831,44 @@ def _gdn_norm_dim_prehook(mask: torch.Tensor, scale: float):
     return hook
 
 
+@contextmanager
+def _scale_gdn_kernel_query_output(mamba_module: nn.Module, scale: float):
+    """Match a physically sliced GDN kernel's implicit query scale.
+
+    GDN kernels normalize Q/K internally and derive the query scale from the
+    tensor's last dimension. Runtime masking keeps the teacher tensor shape, so
+    a reduced child key dimension needs an explicit output correction. The
+    recurrent state is independent of the query scale and must remain unchanged.
+    """
+    originals = {}
+
+    def scaled_kernel(kernel):
+        def wrapped(*args, **kwargs):
+            output = kernel(*args, **kwargs)
+            if torch.is_tensor(output):
+                return output * scale
+            if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
+                return (output[0] * scale, *output[1:])
+            if isinstance(output, list) and output and torch.is_tensor(output[0]):
+                return [output[0] * scale, *output[1:]]
+            raise TypeError(
+                f"Unsupported GDN kernel output from {getattr(kernel, '__name__', type(kernel).__name__)}"
+            )
+
+        return wrapped
+
+    for name in ("chunk_gated_delta_rule", "recurrent_gated_delta_rule"):
+        kernel = getattr(mamba_module, name, None)
+        if callable(kernel):
+            originals[name] = kernel
+            setattr(mamba_module, name, scaled_kernel(kernel))
+    try:
+        yield
+    finally:
+        for name, kernel in originals.items():
+            setattr(mamba_module, name, kernel)
+
+
 def _mask_last_dim_forward_hook_scaled(mask: torch.Tensor, scale: float):
     """Like ``_mask_last_dim_forward_hook`` but multiplies the output by ``scale``."""
     def hook(module, args, output):
@@ -1765,6 +1803,13 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                             handles.append(
                                 mamba_module.in_proj_qkv.register_forward_hook(
                                     _mask_last_dim_forward_hook(qkv_keep)
+                                )
+                            )
+                        if target_key_dim < orig_key_dim:
+                            contexts.append(
+                                _scale_gdn_kernel_query_output(
+                                    mamba_module,
+                                    (float(orig_key_dim) / float(target_key_dim)) ** 0.5,
                                 )
                             )
                         if not bool(value_keep.all()):

@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from examples.puzzletron.embedding_pipeline import (
+    _visible_gpu_count,
     _project_vllm_stats_to_scenarios,
     finalize_replacement_scoring_diagnostics,
+    run_embedding_stage,
     scenario_preparation_commands,
     scenario_worker_commands,
 )
@@ -290,6 +292,26 @@ def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
     assert "--nproc_per_node=1" in command
 
 
+def test_embedding_pipeline_skips_composite_work_on_nonzero_rank(tmp_path, monkeypatch):
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setattr(
+        "examples.puzzletron.embedding_pipeline.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("nonzero rank launched composite work"),
+    )
+
+    outputs = run_embedding_stage(
+        config_path="experiment.yaml",
+        config={
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": [768]},
+        },
+        stage="build_library",
+        gpus_per_node=1,
+    )
+
+    assert outputs["skipped_nonzero_rank"] is True
+
+
 def test_embedding_pipeline_routes_width_local_bypass_overlay(tmp_path):
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
@@ -475,3 +497,8 @@ def test_width_scenarios_resolve_the_fingerprinted_scoring_parent(tmp_path):
 
     assert source == sorted_teacher.resolve()
     assert (tmp_path / "artifacts" / "scoring_parent.json").is_file()
+def test_embedding_pipeline_uses_task_visible_gpu_count(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,5")
+
+    assert _visible_gpu_count(8) == 2
+

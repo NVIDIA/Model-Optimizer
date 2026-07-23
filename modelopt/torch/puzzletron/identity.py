@@ -22,6 +22,7 @@ __all__ = [
     "stage_identity",
     "score_identity",
     "mip_identity",
+    "mip_execution_identity",
     "vllm_settings_identity",
     "solution_identity",
     "cache_key",
@@ -156,6 +157,30 @@ def mip_identity(library: Any, constraints: Any, objective: Any, solver_settings
             "objective": objective,
             "solver_settings": solver_settings,
         },
+    )
+
+
+def mip_execution_identity(
+    mip_config: Any,
+    *,
+    widths: Any,
+    max_depth: int,
+    depth_trajectory: Any,
+    solve_only: bool,
+    input_artifact_identity: str,
+) -> str:
+    """Identify the complete concrete MIP expansion and its materialization mode."""
+
+    return stable_hash(
+        {
+            "mip_config": mip_config,
+            "widths": widths,
+            "max_depth": int(max_depth),
+            "depth_trajectory": depth_trajectory,
+            "solve_only": bool(solve_only),
+            "input_artifact_identity": input_artifact_identity,
+        },
+        prefix="mip_execution",
     )
 
 

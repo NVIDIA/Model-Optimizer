@@ -24,6 +24,15 @@ __all__ = [
 ]
 
 
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically replace one shared orchestration JSON document."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, default=str))
+    os.replace(temporary, path)
+
+
 @dataclass
 class PersistedAttempt:
     """One durable attempt record."""
@@ -86,8 +95,9 @@ def acquire_controller_lease(
         expires = float(payload.get("expires", 0))
         if expires > now and payload.get("owner") != owner:
             return None
-    lease_path.write_text(
-        json.dumps({"owner": owner, "pid": os.getpid(), "expires": now + ttl_seconds}, indent=2)
+    _write_json(
+        lease_path,
+        {"owner": owner, "pid": os.getpid(), "expires": now + ttl_seconds},
     )
     return ControllerLease(lease_path, owner)
 
@@ -123,7 +133,7 @@ class CampaignStateStore:
         return path
 
     def write_plan(self, payload: Mapping[str, Any]) -> None:
-        self.plan_path().write_text(json.dumps(payload, indent=2, default=str))
+        _write_json(self.plan_path(), payload)
 
     def load_plan(self) -> dict[str, Any] | None:
         path = self.plan_path()
@@ -134,17 +144,11 @@ class CampaignStateStore:
     def append_event(self, event_type: str, payload: Mapping[str, Any]) -> Path:
         stamp = int(time.time() * 1000)
         path = self.events_root / f"{stamp}_{event_type}.json"
-        path.write_text(
-            json.dumps(
-                {"type": event_type, "payload": dict(payload)},
-                indent=2,
-                default=str,
-            )
-        )
+        _write_json(path, {"type": event_type, "payload": dict(payload)})
         return path
 
     def write_snapshot(self, payload: Mapping[str, Any]) -> None:
-        self.snapshot_path().write_text(json.dumps(payload, indent=2, default=str))
+        _write_json(self.snapshot_path(), payload)
 
     def load_snapshot(self) -> dict[str, Any] | None:
         path = self.snapshot_path()
@@ -183,7 +187,7 @@ class CampaignStateStore:
             "metadata": dict(attempt.metadata),
         }
         path = directory / "attempt.json"
-        path.write_text(json.dumps(payload, indent=2, default=str))
+        _write_json(path, payload)
         return path
 
     def load_attempt(self, work_id: str, attempt_id: str) -> dict[str, Any] | None:
@@ -203,7 +207,10 @@ class CampaignStateStore:
                 record_path = attempt_dir / "attempt.json"
                 if not record_path.is_file():
                     continue
-                record = json.loads(record_path.read_text())
+                try:
+                    record = json.loads(record_path.read_text())
+                except (OSError, ValueError):
+                    continue
                 if stage_id is None or record.get("stage_id") == stage_id:
                     attempts.append(record)
         return attempts
@@ -225,22 +232,19 @@ class CampaignStateStore:
         if status.handle is not None:
             record["handle"] = asdict(status.handle)
         path = self.attempt_dir(work_id, attempt_id) / "attempt.json"
-        path.write_text(json.dumps(record, indent=2, default=str))
+        _write_json(path, record)
 
     def write_stage_record(self, record: StageRunRecord) -> None:
         path = self.stage_record_path(record.stage_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "stage_id": record.stage_id,
-                    "status": record.status,
-                    "aggregated": record.aggregated,
-                    "attempts": [asdict(item) for item in record.attempts],
-                },
-                indent=2,
-                default=str,
-            )
+        _write_json(
+            path,
+            {
+                "stage_id": record.stage_id,
+                "status": record.status,
+                "aggregated": record.aggregated,
+                "attempts": [asdict(item) for item in record.attempts],
+            },
         )
 
     def load_stage_record(self, stage_id: str) -> StageRunRecord | None:
@@ -269,7 +273,7 @@ class CampaignStateStore:
         path = self._live_jobs_path()
         payload = self._read_live_jobs()
         payload[handle.handle_id] = asdict(handle)
-        path.write_text(json.dumps(payload, indent=2, default=str))
+        _write_json(path, payload)
 
     def untrack_live_job(self, handle_id: str) -> None:
         path = self._live_jobs_path()
@@ -277,7 +281,7 @@ class CampaignStateStore:
         if handle_id not in payload:
             return
         payload.pop(handle_id, None)
-        path.write_text(json.dumps(payload, indent=2, default=str))
+        _write_json(path, payload)
 
     def clear_live_jobs(self) -> None:
         path = self._live_jobs_path()

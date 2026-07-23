@@ -57,15 +57,16 @@ _STAGE_SEMANTIC_CONFIG_SECTIONS = {
     ),
     "width_importance": ("width_importance", "pruning"),
     "sort": ("sort", "pruning"),
-    "sort_sanity": ("sort_sanity", "sort", "pruning", "replacement_scoring"),
+    "sort_sanity": ("sort_sanity", "sanity", "sort", "pruning", "replacement_scoring"),
     "slicing_sanity": (
         "slicing_sanity",
+        "sanity",
         "sort",
         "pruning",
         "replacement_scoring",
     ),
-    "width_sanity": ("width_sanity", "pruning", "replacement_scoring"),
-    "bypass_sanity": ("bypass_sanity", "bypass", "pruning"),
+    "width_sanity": ("width_sanity", "sanity", "pruning", "replacement_scoring"),
+    "bypass_sanity": ("bypass_sanity", "sanity", "bypass", "pruning"),
     "bypass": ("bypass", "pruning"),
     "depth_importance": ("depth_importance", "pruning", "replacement_scoring"),
     "vllm_stats": (
@@ -97,6 +98,7 @@ _STAGE_SEMANTIC_CONFIG_SECTIONS = {
     "aiperf": ("aiperf", "zero_shot_evaluation"),
     "global_distillation_sanity": (
         "global_distillation_sanity",
+        "sanity",
         "global_distillation",
         "replacement_scoring",
         "calibration",

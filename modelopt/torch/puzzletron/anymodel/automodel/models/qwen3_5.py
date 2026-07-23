@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from ....block_config import AttentionConfig, FFNConfig, MambaConfig, MoEConfig
@@ -40,6 +41,11 @@ class Qwen3_5AutoModelDescriptor(AutoModelDescriptor):
                 overrides["linear_key_head_dim"] = mamba.state_dim
             if mamba.head_dim is not None:
                 overrides["linear_value_head_dim"] = mamba.head_dim
+        # HF Qwen MoE uses ``shared_expert_intermediate_size``; the shared
+        # AutoModel override name is Nemotron-oriented.
+        shared = overrides.pop("moe_shared_expert_intermediate_size", None)
+        if shared is not None:
+            overrides["shared_expert_intermediate_size"] = shared
         return overrides
 
     @staticmethod
@@ -99,6 +105,16 @@ class Qwen3_5AutoModelDescriptor(AutoModelDescriptor):
                     else "full_attention"
                     for candidate in block_configs
                 ]
+            if block_config is not None:
+                arguments = {
+                    "config": config,
+                    "moe_config": moe_config,
+                    "layer_idx": layer_idx,
+                    "backend": backend,
+                }
+                cls.patch_constructor_arguments(arguments, block_config, layer_idx)
+                config = arguments["config"]
+                moe_config = arguments["moe_config"]
             orig_init(self, layer_idx, config, moe_config, backend, *args, **kwargs)
             if block_config is None:
                 return
@@ -130,3 +146,48 @@ class Qwen3_5MoeAutoModelDescriptor(Qwen3_5AutoModelDescriptor):
         from nemo_automodel.components.models.qwen3_5_moe.model import Qwen3_5MoeBlock
 
         return Qwen3_5MoeBlock
+
+    @staticmethod
+    def _copy_moe_geometry(moe_config, moe, *, hidden_size=None):
+        """Copy AutoModel's global MoEConfig and apply one layer's pruned geometry.
+
+        Native Qwen MoE constructs ``MoE(moe_config, ...)`` from this separate
+        object, so per-layer ``config.num_experts`` overrides alone cannot resize
+        fused expert tensors when loading a physically materialized checkpoint.
+        """
+
+        patched = copy.copy(moe_config)
+        if hidden_size is not None:
+            patched.dim = hidden_size
+        if moe.num_experts is not None:
+            patched.n_routed_experts = moe.num_experts
+        if moe.top_k is not None:
+            patched.n_activated_experts = min(moe.top_k, patched.n_routed_experts)
+        if moe.expert_intermediate_size is not None:
+            patched.moe_inter_dim = moe.expert_intermediate_size
+        if moe.shared_expert_intermediate_size is not None:
+            patched.shared_expert_inter_dim = moe.shared_expert_intermediate_size
+        return patched
+
+    @staticmethod
+    def patch_constructor_arguments(arguments, block_config, layer_idx) -> None:
+        """Give each native MoE block its own pruned geometry.
+
+        AutoModel's Qwen3.5/3.6 MoE model creates one global ``MoEConfig`` and
+        passes that same object to every block.  Copy it before applying
+        overrides so constructing a child layer cannot mutate the teacher
+        geometry or another expert-parallel layer.
+        """
+
+        del layer_idx
+        moe = block_config.get_subblock("moe")
+        moe_config = arguments.get("moe_config")
+        if moe is None or moe.no_op or moe_config is None:
+            return
+
+        config = arguments["config"]
+        arguments["moe_config"] = Qwen3_5MoeAutoModelDescriptor._copy_moe_geometry(
+            moe_config,
+            moe,
+            hidden_size=getattr(config, "hidden_size", None),
+        )

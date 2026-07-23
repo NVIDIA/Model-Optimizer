@@ -42,6 +42,8 @@ def run_mip_with_backend(
     constraints,
     bigger_is_better,
     max_seconds_per_solution=None,
+    num_solutions=1,
+    min_hamming_distance=1,
     solver_backend: Any = None,
 ):
     backend = _backend_name(solver_backend)
@@ -62,6 +64,8 @@ def run_mip_with_backend(
             constraints=constraints,
             bigger_is_better=bigger_is_better,
             max_seconds_per_solution=max_seconds_per_solution,
+            num_solutions=num_solutions,
+            min_hamming_distance=min_hamming_distance,
         )
 
     if solver_backend is not None and _backend_name(solver_backend) == "auto":
@@ -72,4 +76,6 @@ def run_mip_with_backend(
         constraints=constraints,
         bigger_is_better=bigger_is_better,
         max_seconds_per_solution=max_seconds_per_solution,
+        num_solutions=num_solutions,
+        min_hamming_distance=min_hamming_distance,
     )

@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +23,11 @@ def _atomic_json(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
-def _one_solution(path: Path) -> dict[str, Any]:
+def _solutions(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text())
-    if not isinstance(payload, list) or len(payload) != 1:
-        raise RuntimeError(f"expected one MIP solution in {path}, found {len(payload)}")
-    return dict(payload[0])
+    if not isinstance(payload, list):
+        raise RuntimeError(f"expected a list of MIP solutions in {path}")
+    return [dict(row) for row in payload]
 
 
 def _layer_replacement(row: dict[str, Any]) -> dict[str, Any]:
@@ -61,7 +62,9 @@ def online_execution_contract(puzzle_dir: Path, width: int) -> dict[str, Any]:
     """Describe the immutable checkpoint roles used by one online worker."""
 
     scenario = puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
-    parent = scenario / "ckpts" / "sorted_teacher"
+    manifest = json.loads((scenario / "scenario_manifest.json").read_text())
+    parent = Path(str(manifest["parent_checkpoint"]))
+    bypass = manifest.get("bypass_checkpoint")
     return {
         "mode": "resident_sorted_teacher_online",
         "materialized_solution_checkpoints": False,
@@ -69,7 +72,7 @@ def online_execution_contract(puzzle_dir: Path, width: int) -> dict[str, Any]:
         "checkpoint_roles": {
             "source": str(parent),
             "target": str(parent),
-            "bypass_overlay": str(scenario / "ckpts" / "bypass_overlay"),
+            "bypass_overlay": str(bypass) if bypass is not None else None,
         },
     }
 
@@ -90,8 +93,17 @@ def build_online_evaluation_plan(
                 continue
             width = int(scenario["hidden_width"])
             depth_slug = _depth_slug(scenario)
+            mixed = _solutions(Path(scenario["solution_path"]))
+            mixed_records = list(scenario.get("solutions") or ())
+            if len(mixed) != len(mixed_records):
+                raise RuntimeError(
+                    "MIP solution/metadata cardinality mismatch for "
+                    f"{profile_id} width={width} depth={depth_slug}: "
+                    f"{len(mixed)} != {len(mixed_records)}"
+                )
             candidates: list[tuple[str, int | None, dict[str, Any], dict[str, Any]]] = [
-                ("mixed", None, _one_solution(Path(scenario["solution_path"])), scenario)
+                ("mixed", int(record.get("rank", index)), dict(solution), record)
+                for index, (solution, record) in enumerate(zip(mixed, mixed_records))
             ]
             homogeneous_path = scenario.get("homogeneous_solution_path")
             if homogeneous_path:
@@ -187,9 +199,7 @@ def write_online_evaluation_plan(puzzle_dir: Path, plan: dict[str, Any]) -> Path
 
 def shard_solution_indices(total: int, shard_index: int, shard_count: int) -> list[int]:
     if shard_count < 1 or not 0 <= shard_index < shard_count:
-        raise ValueError(
-            f"invalid shard index/count: index={shard_index} count={shard_count}"
-        )
+        raise ValueError(f"invalid shard index/count: index={shard_index} count={shard_count}")
     return list(range(int(shard_index), int(total), int(shard_count)))
 
 
@@ -228,12 +238,7 @@ def run_online_evaluation_shard(
     )
     if any(not 0 <= index < len(architectures) for index in indices):
         raise ValueError(f"solution index is outside [0, {len(architectures)}): {indices}")
-    output_dir = (
-        plan_root
-        / "raw"
-        / f"width-{int(width):04d}"
-        / f"shard-{int(shard_index):02d}"
-    )
+    output_dir = plan_root / "raw" / f"width-{int(width):04d}" / f"shard-{int(shard_index):02d}"
     if not indices:
         _atomic_json(
             output_dir / "worker.json",
@@ -248,17 +253,20 @@ def run_online_evaluation_shard(
     roles = execution["checkpoint_roles"]
     scenario = puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
     parent = Path(roles["source"])
-    bypass = Path(roles["bypass_overlay"])
+    bypass = Path(roles["bypass_overlay"]) if roles["bypass_overlay"] is not None else None
     if roles["source"] != roles["target"]:
         raise RuntimeError(f"online source and target must be the same sorted teacher: {roles}")
-    for role, checkpoint in (("parent", parent), ("bypass", bypass)):
+    checkpoints = [("parent", parent)]
+    if bypass is not None:
+        checkpoints.append(("bypass", bypass))
+    for role, checkpoint in checkpoints:
         if not (checkpoint / "config.json").is_file():
             raise FileNotFoundError(f"online evaluation {role} is missing: {checkpoint}")
     hydra_cfg.puzzle_dir = str(scenario)
     hydra_cfg.scoring.teacher_dir = str(parent)
     hydra_cfg.scoring.target_teacher_dir = str(parent)
     hydra_cfg.scoring.source_checkpoint_dir = str(parent)
-    hydra_cfg.scoring.bypass_checkpoint_dir = str(bypass)
+    hydra_cfg.scoring.bypass_checkpoint_dir = str(bypass) if bypass is not None else None
     hydra_cfg.scoring.solutions_path = str(width_root / "solutions.json")
     hydra_cfg.scoring.output_dir = str(output_dir)
     hydra_cfg.scoring.solutions_to_validate = indices
@@ -275,7 +283,9 @@ def run_online_evaluation_shard(
         launch_score_solutions_automodel(hydra_cfg)
 
     if int(__import__("os").environ.get("RANK", "0")) == 0:
-        missing = [index for index in indices if not (output_dir / f"solution_{index}.json").is_file()]
+        missing = [
+            index for index in indices if not (output_dir / f"solution_{index}.json").is_file()
+        ]
         if missing:
             raise RuntimeError(f"online evaluation shard is missing results: {missing[:20]}")
         manifest = {
@@ -457,13 +467,18 @@ def main() -> None:
     parser.add_argument("--run-shard", action="store_true")
     parser.add_argument("--merge", action="store_true")
     parser.add_argument("--width", type=int)
-    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--solution-index", type=int, action="append", default=[])
     parser.add_argument("--eval-samples", type=int, default=128)
     parser.add_argument("--block-size", type=int, default=8192)
     parser.add_argument("--micro-batch-size", type=int, default=4)
     args = parser.parse_args()
+    shard_index = (
+        int(os.environ.get("PUZZLETRON_GROUP_INDEX", os.environ.get("SLURM_PROCID", "0")))
+        if args.shard_index is None or args.shard_index < 0
+        else args.shard_index
+    )
     selected_modes = sum((args.prepare, args.run_shard, args.merge))
     if selected_modes > 1:
         parser.error("choose only one of --prepare, --run-shard, or --merge")
@@ -474,7 +489,7 @@ def main() -> None:
             args.puzzle_dir,
             config_path=args.config,
             width=args.width,
-            shard_index=args.shard_index,
+            shard_index=shard_index,
             shard_count=args.shard_count,
             solution_indices=tuple(args.solution_index),
             eval_samples=args.eval_samples,

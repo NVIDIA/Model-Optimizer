@@ -9,12 +9,33 @@ set -Eeuo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 EVALUATOR_REVISION="${EVALUATOR_REVISION:-puzzletron-distributed-replace-block-v1}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 override_args=()
 if [[ -n "${DISTRIBUTED_EVAL_OVERRIDES:-}" ]]; then
   while IFS= read -r override; do
     [[ -n "${override}" ]] && override_args+=(--override "${override}")
   done <<< "${DISTRIBUTED_EVAL_OVERRIDES}"
+fi
+
+if [[ "${PREPARE_SUBBLOCK_SOLUTIONS:-0}" == "1" && ! -f "${SOLUTIONS_PATH}" ]]; then
+  : "${PUZZLE_DIR:?set PUZZLE_DIR to backfill subblock solutions}"
+  : "${REPLACEMENT_LIBRARY_PATH:?set REPLACEMENT_LIBRARY_PATH}"
+  : "${TEACHER_DIR:?set TEACHER_DIR}"
+  prepare_args=(
+    --puzzle-dir "${PUZZLE_DIR}"
+    --replacement-library "${REPLACEMENT_LIBRARY_PATH}"
+    --teacher-dir "${TEACHER_DIR}"
+    --solutions-output "${SOLUTIONS_PATH}"
+  )
+  if [[ -n "${SUBBLOCK_MANIFEST_PATH:-}" ]]; then
+    prepare_args+=(--manifest-output "${SUBBLOCK_MANIFEST_PATH}")
+  fi
+  if [[ "${TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+    prepare_args+=(--trust-remote-code)
+  fi
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/../prepare_subblock_replacement_scoring.py" \
+    "${prepare_args[@]}"
 fi
 
 if [[ ! -f "${CAMPAIGN_DIR}/manifest.json" ]]; then
@@ -39,7 +60,7 @@ if [[ -n "${SOLUTION_IDS:-}" ]]; then
   done
 fi
 
-exec "${PYTHON_BIN}" -m modelopt.torch.puzzletron.distributed_eval.cli coordinator \
+"${PYTHON_BIN}" -m modelopt.torch.puzzletron.distributed_eval.cli coordinator \
   --campaign-dir "${CAMPAIGN_DIR}" \
   --solutions "${SOLUTIONS_PATH}" \
   --output-dir "${OUTPUT_DIR}" \
@@ -50,3 +71,9 @@ exec "${PYTHON_BIN}" -m modelopt.torch.puzzletron.distributed_eval.cli coordinat
   --retry-max-seconds "${RETRY_MAX_SECONDS:-60}" \
   "${solution_args[@]}" \
   "${compatibility_args[@]}"
+
+if [[ "${FINALIZE_REPLACEMENT_SCORING:-0}" == "1" ]]; then
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/../finalize_replacement_scoring.py" \
+    --config "${FINALIZE_CONFIG_PATH:-${CONFIG_PATH}}" \
+    --puzzle-dir "${FINALIZE_PUZZLE_DIR:-${PUZZLE_DIR}}"
+fi

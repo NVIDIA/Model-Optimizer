@@ -174,6 +174,15 @@ def _stage_artifact_present(root: Path, spec: StageSpec) -> bool:
 def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
     """Return completed, disabled, or pending from artifacts and configuration."""
 
+    post_mip_stages = {
+        "zero_shot_evaluation",
+        "aiperf",
+        "global_distillation_sanity",
+        "global_distillation",
+        "post_distillation_evaluation",
+    }
+    if (config.get("post_mip") or {}).get("flows") and spec.stage_id in post_mip_stages:
+        return "disabled"
     if _stage_artifact_present(root, spec):
         return "completed"
     section = config.get(spec.stage_id)
@@ -274,10 +283,29 @@ def _sort_table(summary: dict[str, Any]) -> str:
             f"{reverse_cell}"
             "</tr>"
         )
-    gate = "passed" if summary.get("passed") is True else "not passed"
+    gate = "passed" if summary.get("passed") is True else "warning"
+    gate_label = "passed" if summary.get("passed") is True else "warning"
+    findings = list(summary.get("findings") or ())
+    finding_notes = ""
+    gate_attributes = ""
+    if findings:
+        messages = "\n".join(
+            str(item.get("message") or "Measured result needs review.") for item in findings
+        )
+        gate_attributes = (
+            " warning-value' tabindex='0' "
+            f"data-warning='{html.escape(messages, quote=True)}"
+        )
+        finding_notes = (
+            "<p class='note'>"
+            + html.escape("; ".join(str(item.get("message") or "") for item in findings))
+            + "</p>"
+        )
     reverse_header = "<th>Reverse sorted</th>" if include_reverse else ""
     return (
-        f"<p class='gate {html.escape(gate.replace(' ', '-'))}'>Equivalence gate: {gate}</p>"
+        f"<p class='gate {html.escape(gate_label)}{gate_attributes}'>"
+        f"Equivalence gate: {gate}</p>"
+        f"{finding_notes}"
         "<div class='table-wrap'><table><thead><tr><th>Metric</th><th>Teacher</th>"
         f"<th>Sorted teacher</th>{reverse_header}</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
@@ -386,6 +414,7 @@ def _activation_diagnostic_summary(root: Path) -> dict[str, Any]:
         "axes": sorted({str(row.get("axis")) for row in rows if row.get("axis")}),
         "width_findings": list(width.get("findings") or ()),
         "slicing_findings": slicing_findings,
+        "sort_findings": list((_load_optional(root / "artifacts" / "sort_sanity" / "summary.json")).get("findings") or ()),
     }
 
 
@@ -429,7 +458,7 @@ def _cell_finding_messages(
 def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
     findings = list(summary.get("width_findings") or ()) + list(
         summary.get("slicing_findings") or ()
-    )
+    ) + list(summary.get("sort_findings") or ())
     rows = _activation_diagnostic_rows(summary)
     if not rows:
         return (
@@ -653,7 +682,10 @@ def _overfit_summary_card(mode: str, data: dict[str, Any]) -> str:
     summary = data.get("summary") or {}
     trend = summary.get("loss_trend") or {}
     sufficient = trend.get("sufficient_evidence", True) is True
-    if mode == "diverse_resampled":
+    if summary.get("passed") is not None:
+        passed = bool(summary.get("passed"))
+        gate_label = "Quality gate"
+    elif mode == "diverse_resampled":
         per_width = trend.get("per_hidden_width") or {}
         decreased = (
             all(row.get("decreased") is True for row in per_width.values())
@@ -666,8 +698,21 @@ def _overfit_summary_card(mode: str, data: dict[str, Any]) -> str:
         passed = sufficient and trend.get("hard_gate_passed") is True
         gate_label = "Trend gate"
     ratio = trend.get("last_to_first_ratio")
+    findings = list(summary.get("findings") or ())
+    warning_attributes = ""
+    if findings:
+        warning_attributes = (
+            " warning-value' tabindex='0' data-warning='"
+            + html.escape(
+                "\n".join(
+                    str(item.get("message") or "Measured result needs review.")
+                    for item in findings
+                ),
+                quote=True,
+            )
+        )
     return (
-        f"<article class='probe-summary {'passed' if passed else 'failed'}'>"
+        f"<article class='probe-summary {'passed' if passed else 'failed'}{warning_attributes}'>"
         f"<h3>{html.escape(label)}</h3>"
         f"<dl><dt>Steps</dt><dd>{len(records)}</dd>"
         f"<dt>Distinct structures</dt><dd>{html.escape(_fmt(summary.get('distinct_structure_count', 'N/A')))}</dd>"
@@ -2119,15 +2164,21 @@ def _mip_data(root: Path) -> dict[str, Any]:
                     }
                 )
                 continue
-            rows.append(
-                {
-                    "label": f"H={width}, Drop={depth}",
-                    "hidden_width": width,
-                    "removed_sublayers": depth,
-                    "outputs": _mip_outputs(scenario, runtime_profile=runtime_profile),
-                    "solution_path": scenario.get("solution_path"),
-                }
-            )
+            solution_rows = list(scenario.get("solutions") or ()) or [scenario]
+            for index, solution in enumerate(solution_rows):
+                rank = int(solution.get("rank", index)) + 1
+                rows.append(
+                    {
+                        "label": f"H={width}, Drop={depth}, Rank={rank}",
+                        "hidden_width": width,
+                        "removed_sublayers": depth,
+                        "rank": rank,
+                        "outputs": _mip_outputs(
+                            solution, runtime_profile=runtime_profile
+                        ),
+                        "solution_path": scenario.get("solution_path"),
+                    }
+                )
             for index, homogeneous in enumerate(scenario.get("homogeneous_solutions") or ()):
                 if not isinstance(homogeneous, dict):
                     continue
@@ -2741,6 +2792,20 @@ def _distillation_overfit_section(data: dict[str, Any]) -> str:
     if not profiles:
         return "<p class='empty'>Pending frozen-minibatch distillation overfit.</p>"
     profile = profiles[0]
+    findings = list(profile.get("findings") or ())
+    warning = ""
+    if findings:
+        warning = (
+            "<p class='gate warning warning-value' tabindex='0' data-warning='"
+            + html.escape(
+                "\n".join(
+                    str(item.get("message") or "Measured result needs review.")
+                    for item in findings
+                ),
+                quote=True,
+            )
+            + "'>Trend verdict: warning</p>"
+        )
     toggles = "".join(
         "<label class='layer-toggle'><input type='checkbox' checked "
         f'data-distillation-overfit-solution="{html.escape(str(row["solution_id"]))}">'
@@ -2749,6 +2814,7 @@ def _distillation_overfit_section(data: dict[str, Any]) -> str:
         for row in profile.get("solutions", ())
     )
     return (
+        f"{warning}"
         f"<p class='note'>The same frozen {html.escape(str(profile.get('sample_count', 128)))}-sample minibatch is replayed at every optimizer "
         "step. Curves show the independent run from each realized MIP checkpoint.</p>"
         f"<div class='replacement-layer-grid aiperf-solution-grid'>{toggles}</div>"
@@ -3088,10 +3154,12 @@ def _stage_dag(
     merged_config: dict[str, Any],
     statuses: dict[str, str],
     stage_targets: dict[str, str],
+    post_mip_nodes: tuple[Any, ...] = (),
 ) -> str:
     """Render the configured scheduler-neutral stage graph as a navigable SVG."""
 
     specs = {spec.stage_id: spec for spec in STAGE_SPECS}
+    dynamic = {node.stage_id: node for node in post_mip_nodes}
     parents = {
         stage_id: tuple(
             parent
@@ -3100,18 +3168,26 @@ def _stage_dag(
         )
         for stage_id in specs
     }
+    parents.update(
+        {stage_id: node.dependency_stage_ids for stage_id, node in dynamic.items()}
+    )
     levels: dict[str, int] = {}
-    pending = set(specs)
+    pending = set(specs) | set(dynamic)
     while pending:
         ready = [stage_id for stage_id in pending if all(parent in levels for parent in parents[stage_id])]
         if not ready:
             ready = list(pending)
-        for stage_id in sorted(ready, key=lambda value: specs[value].topology_order):
+        for stage_id in sorted(
+            ready,
+            key=lambda value: (
+                specs[value].topology_order if value in specs else len(specs), value
+            ),
+        ):
             levels[stage_id] = max((levels[parent] + 1 for parent in parents[stage_id]), default=0)
             pending.remove(stage_id)
 
     by_level: dict[int, list[str]] = {}
-    for stage_id in specs:
+    for stage_id in (*specs, *dynamic):
         by_level.setdefault(levels[stage_id], []).append(stage_id)
     max_rows = max((len(nodes) for nodes in by_level.values()), default=1)
     node_width, node_height = 206, 70
@@ -3142,17 +3218,22 @@ def _stage_dag(
             )
 
     nodes = []
-    for stage_id, spec in specs.items():
+    for stage_id in (*specs, *dynamic):
+        spec = specs.get(stage_id)
         x, y = positions[stage_id]
         status = statuses.get(stage_id, "")
         target = stage_targets.get(stage_id)
         granularity = _stage_granularity(root, stage_id, merged_config)
-        label = stage_display_name(stage_id, granularity=granularity)
+        label = (
+            f"{dynamic[stage_id].node_id} ({dynamic[stage_id].node_type})"
+            if stage_id in dynamic
+            else stage_display_name(stage_id, granularity=granularity)
+        )
         label_markup = "".join(
             f"<tspan x='26' dy='{'0' if index == 0 else '15'}'>{html.escape(line)}</tspan>"
             for index, line in enumerate(_dag_label_lines(label))
         )
-        node_type = "required" if spec.required else "optional"
+        node_type = "required" if spec is None or spec.required else "optional"
         status_label = status.title() if status else ""
         content = (
             f'<g class="dag-node {node_type} {html.escape(status)}" '
@@ -3494,10 +3575,25 @@ def generate_campaign_progress_report(
     output.mkdir(parents=True, exist_ok=True)
     html_path = output / "campaign_report.html"
     merged_config = _latest_merged_config(root)
+    # Defer the post-MIP registry because report generation is also used by
+    # lightweight legacy campaigns that never configure these node plugins.
+    from ..post_mip import compile_post_mip_flows, render_post_mip_node_report
+
+    post_mip_nodes = compile_post_mip_flows(merged_config)
     granularity_data = _granularity_data(root, merged_config)
     statuses = {
         spec.stage_id: _pipeline_state(root, spec, merged_config) for spec in STAGE_SPECS
     }
+    post_mip_payloads = {}
+    for node in post_mip_nodes:
+        node_root = root / "artifacts" / "post_mip" / "nodes" / node.node_id
+        payload = _load_optional(node_root / "summary.json")
+        if not payload:
+            payload = _load_optional(node_root / "manual_review.json")
+        post_mip_payloads[node.stage_id] = payload
+        statuses[node.stage_id] = (
+            "completed" if payload.get("status") == "success" else "pending"
+        )
     present = {spec.stage_id: _stage_artifact_present(root, spec) for spec in STAGE_SPECS}
     section_specs = _report_section_specs()
     forced_sections = _forced_report_sections(section_specs, rebuild_sections)
@@ -3610,7 +3706,11 @@ def generate_campaign_progress_report(
         stage_targets["global_distillation"] = "global-distillation"
     if has_post_distillation_evaluation:
         stage_targets["post_distillation_evaluation"] = "post-distillation-evaluation"
-    dag = _stage_dag(root, merged_config, statuses, stage_targets)
+    for node in post_mip_nodes:
+        stage_targets[node.stage_id] = "post-mip-pipeline"
+    dag = _stage_dag(
+        root, merged_config, statuses, stage_targets, post_mip_nodes=post_mip_nodes
+    )
     vllm_title = stage_display_name(
         "vllm_stats", granularity=_stage_granularity(root, "vllm_stats", merged_config)
     )
@@ -3738,11 +3838,20 @@ def generate_campaign_progress_report(
         )
         if enabled
     )
+    if post_mip_nodes:
+        post_mip_body = "".join(
+            render_post_mip_node_report(node, post_mip_payloads[node.stage_id])
+            for node in post_mip_nodes
+        )
+        result_sections += _report_section(
+            "post-mip-pipeline", "Post-MIP Pipeline", post_mip_body, expanded=True
+        )
     embedded = json.dumps(
         {
             "model": model_name,
             "root": str(root),
             "stage_status": statuses,
+            "post_mip": post_mip_payloads,
             "merged_config": merged_config,
             "granularity": granularity_data,
             "sort_equivalence": sort_summary,
@@ -3752,7 +3861,8 @@ def generate_campaign_progress_report(
                 "metric_order": list(_ACTIVATION_METRIC_ORDER),
                 "metric_descriptions": _METRIC_DESCRIPTIONS,
                 "findings": list(activation_summary.get("width_findings") or ())
-                + list(activation_summary.get("slicing_findings") or ()),
+                + list(activation_summary.get("slicing_findings") or ())
+                + list(activation_summary.get("sort_findings") or ()),
             },
             "bypass_overfit": bypass_overfit,
             "nested_bypass": nested_bypass,

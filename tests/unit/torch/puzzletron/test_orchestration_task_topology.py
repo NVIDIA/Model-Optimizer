@@ -5,6 +5,7 @@
 
 import pytest
 
+from puzzletron_orchestrator import task_launcher
 from puzzletron_orchestrator.schema import AttemptSpec, CommandSpec, TaskLauncher, TaskTopology
 from puzzletron_orchestrator.task_topology import resolve_task_topology
 
@@ -87,3 +88,70 @@ def test_legacy_topology_defaults_to_one_direct_task_using_allocated_gpu_slice()
     assert resolved.gpus_per_task == 4
     assert resolved.tasks_per_group == 1
     assert resolved.launcher is TaskLauncher.DIRECT
+
+
+def test_resolve_task_topology_accepts_one_cpu_task() -> None:
+    resolved = resolve_task_topology(
+        _attempt(
+            total_gpus=0,
+            gpus_per_node=0,
+            topology=TaskTopology(task_count=1, gpus_per_task=0),
+        )
+    )
+
+    assert resolved.gpus_per_node == 0
+    assert resolved.gpus_per_task == 0
+    assert resolved.task_count == 1
+    assert resolved.task_capacity == 1
+    assert resolved.unused_gpus == 0
+
+
+@pytest.mark.parametrize(
+    ("task_count", "local_task_index", "gpus_per_task", "expected"),
+    [
+        (8, 3, 1, "3"),
+        (4, 2, 2, "4,5"),
+    ],
+)
+def test_task_launcher_slices_full_node_visibility_for_packed_container_tasks(
+    monkeypatch,
+    task_count: int,
+    local_task_index: int,
+    gpus_per_task: int,
+    expected: str,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    monkeypatch.setenv("PUZZLETRON_TASK_INDEX", str(local_task_index))
+    monkeypatch.setenv("PUZZLETRON_LOCAL_TASK_INDEX", str(local_task_index))
+    monkeypatch.setenv("PUZZLETRON_TASK_HOSTS", "node-a")
+
+    def fake_execvpe(executable, command, env) -> None:
+        captured.update(executable=executable, command=command, env=env)
+
+    monkeypatch.setattr(task_launcher.os, "execvpe", fake_execvpe)
+
+    result = task_launcher.main(
+        [
+            "--attempt-id",
+            "attempt-a",
+            "--nodes",
+            "1",
+            "--gpus-per-node",
+            "8",
+            "--task-count",
+            str(task_count),
+            "--gpus-per-task",
+            str(gpus_per_task),
+            "--tasks-per-group",
+            "1",
+            "--launcher",
+            "direct",
+            "--",
+            "python",
+            "worker.py",
+        ]
+    )
+
+    assert result == 0
+    assert captured["env"]["CUDA_VISIBLE_DEVICES"] == expected

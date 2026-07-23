@@ -18,6 +18,7 @@ from safetensors import safe_open
 
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.granularity import resolve_granularity
+from modelopt.torch.puzzletron.identity import mip_execution_identity, stable_hash
 from modelopt.torch.puzzletron.mip.run_puzzle import (
     _add_block_stats_to_gathered_metrics,
     filter_subblock_stats_by_args,
@@ -30,11 +31,16 @@ from modelopt.torch.puzzletron.mip.profiles import (
     compile_profile_constraints,
     normalize_mip_profiles,
 )
+from modelopt.torch.puzzletron.orchestration.identity import (
+    artifact_snapshot_identity,
+    mip_input_artifact_paths,
+)
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.replacement_library.library import ReplacementLibrary
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
     parse_layer_replacement,
 )
+from modelopt.torch.puzzletron.stages.pipeline import _hf_checkpoint_complete
 
 
 def _atomic_json(path: Path, payload) -> None:
@@ -65,19 +71,6 @@ def _checkpoint_parameter_count(checkpoint: Path) -> int:
             for key in handle.keys():
                 total += math.prod(int(dim) for dim in handle.get_slice(key).get_shape())
     return int(total)
-
-
-def _one_solution(path: Path) -> dict:
-    raw = json.loads(path.read_text())
-    if len(raw) != 1:
-        raise RuntimeError(f"expected one MIP solution in {path}, found {len(raw)}")
-    return raw[0]
-
-
-def _requested_depths(selected: list, *, max_depth: int) -> tuple[int, ...]:
-    """Return every realizable depth from the parent through the configured cap."""
-
-    return tuple(range(min(int(max_depth), len(selected)) + 1))
 
 
 def _forced_removals_for_depth(
@@ -116,10 +109,6 @@ def _forced_removals_for_depth(
     return removals
 
 
-def _expected_scenario_count(widths: list[int], *, max_depth: int) -> int:
-    return len(widths) * (int(max_depth) + 1)
-
-
 def _replacement_score_paths(
     base_dir: Path, granularity: str
 ) -> tuple[Path, Path]:
@@ -138,19 +127,6 @@ def _replacement_score_paths(
     )
 
 
-def _profile_id(parameter_ratio: float) -> str:
-    return _constraint_profile_id("parameter_ratio", parameter_ratio)
-
-
-def _constraint_profile_id(constraint_type: str, ratio: float) -> str:
-    prefixes = {"parameter_ratio": "params", "latency_ratio": "latency"}
-    if constraint_type not in prefixes:
-        raise ValueError(f"unsupported ratio constraint type {constraint_type!r}")
-    percent = ratio * 100
-    text = f"{percent:.4f}".rstrip("0").rstrip(".").replace(".", "p")
-    return f"{prefixes[constraint_type]}-{text.zfill(3)}"
-
-
 def _load_completed_scenario(
     scenario_root: Path,
     *,
@@ -159,6 +135,7 @@ def _load_completed_scenario(
     depth_selection: DepthSelection,
     constraint_type: str,
     solve_only: bool,
+    solve_identity: str,
 ) -> dict[str, Any] | None:
     """Return an atomically completed matching scenario, otherwise rerun it."""
     path = scenario_root / "scenario_manifest.json"
@@ -177,16 +154,75 @@ def _load_completed_scenario(
         str(scenario.get("constraint_type")),
     )
     expected = (profile_id, int(width), depth_selection.as_dict(), constraint_type)
-    if identity != expected or scenario.get("status") not in {"feasible", "infeasible"}:
+    if (
+        identity != expected
+        or scenario.get("status") not in {"feasible", "infeasible"}
+        or scenario.get("solve_identity") != solve_identity
+    ):
         return None
-    if scenario["status"] == "feasible" and not solve_only:
-        checkpoint_value = scenario.get("checkpoint")
-        if not checkpoint_value:
+    solution_path = scenario.get("solution_path")
+    if not solution_path or not Path(str(solution_path)).is_file():
+        return None
+    try:
+        raw_solutions = json.loads(Path(str(solution_path)).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw_solutions, list):
+        return None
+    solutions = list(scenario.get("solutions") or ())
+    if int(scenario.get("solution_count", -1)) != len(raw_solutions):
+        return None
+    if len(solutions) != len(raw_solutions):
+        return None
+    if (scenario["status"] == "feasible") != bool(raw_solutions):
+        return None
+    homogeneous_path = scenario.get("homogeneous_solution_path")
+    homogeneous = list(scenario.get("homogeneous_solutions") or ())
+    if homogeneous_path:
+        try:
+            homogeneous_raw = json.loads(Path(str(homogeneous_path)).read_text())
+        except (OSError, ValueError):
             return None
-        checkpoint = Path(str(checkpoint_value))
-        if not (checkpoint / "config.json").is_file():
+        if not isinstance(homogeneous_raw, list) or len(homogeneous_raw) != len(homogeneous):
             return None
+    elif homogeneous:
+        return None
+    if int(scenario.get("homogeneous_solution_count", 0)) != len(homogeneous):
+        return None
+    if not solve_only:
+        for result in [*solutions, *homogeneous]:
+            checkpoint_value = result.get("checkpoint")
+            if not checkpoint_value or not _hf_checkpoint_complete(
+                Path(str(checkpoint_value))
+            ):
+                return None
     return scenario
+
+
+def _scenario_solve_identity(
+    run_profile: dict[str, Any],
+    *,
+    width: int,
+    depth_selection: DepthSelection,
+    forced_removals: list[dict[str, Any]],
+    solve_only: bool,
+    score_granularity: str,
+    input_artifact_identity: str,
+) -> str:
+    """Hash every setting that can change a concrete solve or its artifacts."""
+
+    return stable_hash(
+        {
+            "profile": run_profile,
+            "width": int(width),
+            "depth_selection": depth_selection.as_dict(),
+            "forced_removals": forced_removals,
+            "solve_only": bool(solve_only),
+            "score_granularity": score_granularity,
+            "input_artifact_identity": input_artifact_identity,
+        },
+        prefix="mip_solve",
+    )
 
 
 def _stats_profile(stats_path: Path, *, runtime_stats: bool) -> dict[str, Any]:
@@ -393,7 +429,6 @@ def main() -> None:
     max_depth = configured_max_depth if args.max_depth is None else int(args.max_depth)
     if max_depth < 0:
         raise ValueError(f"--max-depth must be non-negative, got {max_depth}")
-    objective = "metrics.raw_replacement_loss"
     mip_config = dict(cfg.get("mip") or {})
     score_granularity = str(mip_config.get("score_granularity", "block")).lower()
     depth_granularity = resolve_granularity("depth", depth_config)
@@ -422,37 +457,41 @@ def main() -> None:
         available_depth_counts=available_depth_counts,
         depth_granularity=depth_granularity,
     )
-    if named_profiles and (args.parameter_ratio or args.latency_ratio):
+    if args.parameter_ratio or args.latency_ratio:
         raise ValueError(
-            "--parameter-ratio/--latency-ratio cannot be combined with mip.profiles"
+            "--parameter-ratio/--latency-ratio were removed; configure mip.runs"
         )
-    parameter_ratios = list(
-        args.parameter_ratio
-        or ([] if named_profiles else mip_config.get("constraint_profiles", []))
-        or []
+    if not named_profiles:
+        raise ValueError("mip.runs must compile to at least one concrete solve")
+    input_artifact_identity = artifact_snapshot_identity(
+        mip_input_artifact_paths(puzzle_dir, widths, score_granularity)
     )
-    latency_ratios = list(
-        args.latency_ratio
-        or ([] if named_profiles else mip_config.get("latency_constraint_profiles", []))
-        or []
+    execution_identity = mip_execution_identity(
+        mip_config,
+        widths=widths,
+        max_depth=max_depth,
+        depth_trajectory=selected,
+        solve_only=bool(args.solve_only),
+        input_artifact_identity=input_artifact_identity,
     )
-    if not named_profiles and not parameter_ratios and not latency_ratios:
-        parameter_ratios = [0.85]
-    legacy_profiles = [
-        (constraint_type, float(ratio))
-        for constraint_type, values in (
-            ("parameter_ratio", parameter_ratios),
-            ("latency_ratio", latency_ratios),
-        )
-        for ratio in values
-    ]
-    invalid = [ratio for _, ratio in legacy_profiles if not 0 < ratio <= 1]
-    if invalid:
-        raise ValueError(f"constraint ratios must be in (0, 1], got {invalid}")
-
-    uses_runtime = any(kind == "latency_ratio" for kind, _ in legacy_profiles)
-    if uses_runtime and any(kind == "parameter_ratio" for kind, _ in legacy_profiles):
-        raise ValueError("parameter and latency profiles must be solved in separate invocations")
+    active_manifest_path = puzzle_dir / "mip" / "active_profiles.json"
+    profile_identities = {
+        profile.profile_id: stable_hash(profile, prefix="mip_profile")
+        for profile in named_profiles
+    }
+    _atomic_json(
+        active_manifest_path,
+        {
+            "version": 1,
+            "status": "running",
+            "execution_identity": execution_identity,
+            "input_artifact_identity": input_artifact_identity,
+            "profile_ids": sorted(profile_identities),
+            "profile_identities": profile_identities,
+        },
+    )
+    uses_runtime = any(profile.required_workloads for profile in named_profiles)
+    objectives = tuple(dict.fromkeys(profile.objective.metric for profile in named_profiles))
 
     teacher_width = max(widths)
     descriptor_checkpoint = (
@@ -520,9 +559,10 @@ def main() -> None:
             "workload_profiles": workload_profiles,
             "workload_teacher_costs": workload_teacher_costs,
             "report_costs": _report_costs(stats_profile),
-            "sliced_teacher_baseline": _sliced_teacher_baseline(
-                scoring_dir, objective
-            ),
+            "sliced_teacher_baselines": {
+                objective: _sliced_teacher_baseline(scoring_dir, objective)
+                for objective in objectives
+            },
         }
 
     formula_teacher_params = int(
@@ -533,12 +573,6 @@ def main() -> None:
             "full-width teacher parameter formula/checkpoint mismatch: "
             f"formula={formula_teacher_params} actual={actual_teacher_params}"
         )
-    full_teacher_runtime_ms = (
-        float(width_inputs[teacher_width]["teacher_costs"]["stats.runtime_ms"])
-        if uses_runtime
-        else None
-    )
-
     descriptor = None
     libraries: dict[int, ReplacementLibrary] = {}
     if not args.solve_only:
@@ -583,6 +617,12 @@ def main() -> None:
                 "constraint_label": profile.profile_id,
                 "constraint_fields": {
                     "base_profile_id": profile.base_profile_id,
+                    "run_id": profile.run_id,
+                    "variant_id": profile.variant_id,
+                    "objective": {
+                        "metric": profile.objective.metric,
+                        "direction": profile.objective.direction,
+                    },
                     "constraints": direct_constraints,
                 },
                 "human_constraints": None,
@@ -592,48 +632,18 @@ def main() -> None:
                 "axes_default": profile.axes_default,
                 "axis_options": profile.axis_options,
                 "num_homogeneous_solutions": profile.num_homogeneous_solutions,
+                "homogeneous_rank_by": profile.homogeneous.rank_by,
+                "homogeneous_constraint_weights": {
+                    f"stats.{constraint.stat_name}"
+                    + (f"@{constraint.workload}" if constraint.workload else ""): dict(
+                        profile.homogeneous.constraint_weights
+                    ).get(constraint.metric, 1.0)
+                    for constraint in profile.constraints
+                },
+                "solver": profile.solver,
+                "objective": profile.objective.metric,
+                "bigger_is_better": profile.objective.bigger_is_better,
                 "required_workloads": profile.required_workloads,
-            }
-        )
-    for constraint_type, ratio in legacy_profiles:
-        profile_id = _constraint_profile_id(constraint_type, ratio)
-        parameter_limit = int(math.floor(formula_teacher_params * ratio))
-        latency_limit_ms = full_teacher_runtime_ms * ratio if uses_runtime else None
-        if constraint_type == "parameter_ratio":
-            constraint_label = f"{ratio * 100:g}% params"
-            human_constraints = {"num_params": parameter_limit}
-            constraint_fields = {
-                "parameter_ratio": ratio,
-                "parameter_limit": parameter_limit,
-                "parameter_denominator": formula_teacher_params,
-                "parameter_denominator_scope": "original_full_width_teacher",
-            }
-        else:
-            constraint_label = f"{ratio * 100:g}% latency"
-            human_constraints = {"target_latency_seconds": latency_limit_ms / 1000.0}
-            constraint_fields = {
-                "latency_ratio": ratio,
-                "latency_limit_ms": latency_limit_ms,
-                "latency_denominator_ms": full_teacher_runtime_ms,
-                "latency_denominator_scope": "original_full_width_teacher",
-            }
-        run_profiles.append(
-            {
-                "profile_id": profile_id,
-                "constraint_type": constraint_type,
-                "constraint_label": constraint_label,
-                "constraint_fields": constraint_fields,
-                "human_constraints": human_constraints,
-                "mip_constraints": None,
-                "widths": tuple(widths),
-                "depth_selections": tuple(
-                    DepthSelection.total_prefix(depth)
-                    for depth in _requested_depths(selected, max_depth=max_depth)
-                ),
-                "axes_default": "all",
-                "axis_options": {},
-                "num_homogeneous_solutions": 0,
-                "required_workloads": (),
             }
         )
 
@@ -644,9 +654,14 @@ def main() -> None:
         constraint_label = run_profile["constraint_label"]
         constraint_fields = run_profile["constraint_fields"]
         human_constraints = run_profile["human_constraints"]
+        objective = run_profile["objective"]
         profile_root = puzzle_dir / "mip" / "profiles" / profile_id
         summary = {
             "version": 1,
+            "status": "success",
+            "execution_identity": execution_identity,
+            "profile_identity": profile_identities[profile_id],
+            "input_artifact_identity": input_artifact_identity,
             "profile": {
                 "id": profile_id,
                 "label": constraint_label,
@@ -658,10 +673,10 @@ def main() -> None:
                 "hidden_width": teacher_width,
                 "removed_sublayers": 0,
                 "status": "reference",
-                "score": width_inputs[teacher_width]["sliced_teacher_baseline"],
+                "score": width_inputs[teacher_width]["sliced_teacher_baselines"][objective],
                 "sliced_teacher_baseline": width_inputs[teacher_width][
-                    "sliced_teacher_baseline"
-                ],
+                    "sliced_teacher_baselines"
+                ][objective],
                 "total_costs": _teacher_summary_costs(
                     width_inputs[teacher_width]["teacher_costs"],
                     width_inputs[teacher_width]["workload_teacher_costs"],
@@ -699,6 +714,15 @@ def main() -> None:
                     / f"width-{width:04d}"
                     / depth_selection.slug
                 )
+                solve_identity = _scenario_solve_identity(
+                    run_profile,
+                    width=width,
+                    depth_selection=depth_selection,
+                    forced_removals=forced_removals,
+                    solve_only=bool(args.solve_only),
+                    score_granularity=score_granularity,
+                    input_artifact_identity=input_artifact_identity,
+                )
                 completed = _load_completed_scenario(
                     scenario_root,
                     profile_id=profile_id,
@@ -706,6 +730,7 @@ def main() -> None:
                     depth_selection=depth_selection,
                     constraint_type=constraint_type,
                     solve_only=bool(args.solve_only),
+                    solve_identity=solve_identity,
                 )
                 if completed is not None:
                     summary["scenarios"].append(completed)
@@ -719,7 +744,13 @@ def main() -> None:
                 mip_cfg.subblock_stats_path = inputs["stats_path"]
                 mip_cfg.output_path = scenario_root / "puzzle_solutions"
                 mip_cfg.objective = objective
-                mip_cfg.bigger_is_better = False
+                mip_cfg.bigger_is_better = run_profile["bigger_is_better"]
+                mip_cfg.solver_backend = run_profile["solver"].backend
+                mip_cfg.num_solutions = run_profile["solver"].num_solutions
+                mip_cfg.min_hamming_distance = run_profile["solver"].min_hamming_distance
+                mip_cfg.max_seconds_per_solution = run_profile[
+                    "solver"
+                ].max_seconds_per_solution
                 if run_profile["mip_constraints"] is None:
                     mip_cfg.human_constraints = human_constraints
                     mip_cfg.pop("mip_constraints", None)
@@ -737,6 +768,10 @@ def main() -> None:
                 mip_cfg.axis_options = dict(run_profile["axis_options"])
                 mip_cfg.num_homogeneous_solutions = run_profile[
                     "num_homogeneous_solutions"
+                ]
+                mip_cfg.homogeneous_rank_by = run_profile["homogeneous_rank_by"]
+                mip_cfg.homogeneous_constraint_weights = run_profile[
+                    "homogeneous_constraint_weights"
                 ]
                 mip_cfg.report_additional_costs = sorted(
                     {
@@ -761,32 +796,31 @@ def main() -> None:
                     "forced_removals": forced_removals,
                     "solution_path": str(solution_path),
                     "constraint_type": constraint_type,
+                    "solve_identity": solve_identity,
+                    "requested_solution_count": run_profile["solver"].num_solutions,
                     **constraint_fields,
                     "status": "infeasible" if not raw_solutions else "feasible",
+                    "solutions": [],
                 }
                 if raw_solutions:
-                    if len(raw_solutions) != 1:
-                        raise RuntimeError(
-                            f"expected one solution in {solution_path}, found {len(raw_solutions)}"
-                        )
-                    solution = raw_solutions[0]
-                    total_costs = {
-                        str(key): float(value)
-                        for key, value in (solution.get("total_costs") or {}).items()
-                        if isinstance(value, (int, float)) and not isinstance(value, bool)
-                    }
-                    parameter_count = int(round(total_costs["stats.num_params"]))
-                    chosen_count = len(solution.get("chosen_replacements") or [])
-                    solver_objective_sum = _solution_score(solution, objective)
-                    baseline = float(inputs["sliced_teacher_baseline"])
-                    score = (
-                        solver_objective_sum - (chosen_count - 1) * baseline
-                        if solver_objective_sum is not None
-                        else None
-                    )
-                    scenario.update(
-                        {
-                            "score": score,
+                    for solution_index, solution in enumerate(raw_solutions):
+                        total_costs = {
+                            str(key): float(value)
+                            for key, value in (solution.get("total_costs") or {}).items()
+                            if isinstance(value, (int, float)) and not isinstance(value, bool)
+                        }
+                        parameter_count = int(round(total_costs["stats.num_params"]))
+                        chosen_count = len(solution.get("chosen_replacements") or [])
+                        solver_objective_sum = _solution_score(solution, objective)
+                        baseline = float(inputs["sliced_teacher_baselines"][objective])
+                        record = {
+                            "rank": solution_index,
+                            "kind": "heterogeneous",
+                            "score": (
+                                solver_objective_sum - (chosen_count - 1) * baseline
+                                if solver_objective_sum is not None
+                                else None
+                            ),
                             "solver_objective_sum": solver_objective_sum,
                             "sliced_teacher_baseline": baseline,
                             "total_costs": total_costs,
@@ -794,62 +828,53 @@ def main() -> None:
                             "parameter_ratio": parameter_count / formula_teacher_params,
                             "chosen_replacement_count": chosen_count,
                             "solution_repr": solution.get("solution_repr"),
+                            "solution_path": str(solution_path),
                         }
-                    )
-                    if constraint_type == "parameter_ratio" and parameter_count > int(
-                        constraint_fields["parameter_limit"]
-                    ):
-                        raise RuntimeError(
-                            f"MIP parameter constraint violated for {profile_id} "
-                            f"width={width} depth={depth_selection.slug}: {parameter_count}>"
-                            f"{constraint_fields['parameter_limit']}"
-                        )
-                    if constraint_type == "latency_ratio" and float(
-                        total_costs["stats.runtime_ms"]
-                    ) > float(constraint_fields["latency_limit_ms"]):
-                        raise RuntimeError(
-                            f"MIP latency constraint violated for {profile_id} "
-                            f"width={width} depth={depth_selection.slug}: "
-                            f"{total_costs['stats.runtime_ms']}>"
-                            f"{constraint_fields['latency_limit_ms']}"
-                        )
-                    if constraint_type == "named_profile":
                         _verify_direct_constraints(
                             total_costs,
                             run_profile["mip_constraints"],
                             context=(
-                                f"{profile_id} width={width} depth={depth_selection.slug}"
+                                f"{profile_id} width={width} depth={depth_selection.slug} "
+                                f"solution={solution_index}"
                             ),
                         )
-                    if not args.solve_only:
-                        replacements = [
-                            parse_layer_replacement(item["layer_replacement"])
-                            for item in solution["chosen_replacements"]
-                        ]
-                        library = libraries[width]
-                        model_config = library.create_model_config(replacements)
-                        checkpoint = scenario_root / "checkpoints" / "solution_0"
-                        library.materialize_checkpoint(
-                            replacements,
-                            checkpoint,
-                            model_config=model_config,
-                            solution_identity=(
-                                f"{profile_id}-width-{width:04d}-{depth_selection.slug}"
-                            ),
-                        )
-                        actual_params = _checkpoint_parameter_count(checkpoint)
-                        if actual_params != parameter_count:
-                            raise RuntimeError(
-                                "parameter formula/materialization mismatch for "
-                                f"profile={profile_id} width={width} "
-                                f"depth={depth_selection.slug}: "
-                                f"formula={parameter_count} actual={actual_params}"
+                        if not args.solve_only:
+                            replacements = [
+                                parse_layer_replacement(item["layer_replacement"])
+                                for item in solution["chosen_replacements"]
+                            ]
+                            library = libraries[width]
+                            model_config = library.create_model_config(replacements)
+                            checkpoint = (
+                                scenario_root / "checkpoints" / f"solution_{solution_index}"
                             )
-                        scenario["checkpoint"] = str(checkpoint)
+                            library.materialize_checkpoint(
+                                replacements,
+                                checkpoint,
+                                model_config=model_config,
+                                solution_identity=(
+                                    f"{profile_id}-width-{width:04d}-{depth_selection.slug}-"
+                                    f"solution-{solution_index}"
+                                ),
+                            )
+                            actual_params = _checkpoint_parameter_count(checkpoint)
+                            if actual_params != parameter_count:
+                                raise RuntimeError(
+                                    "parameter formula/materialization mismatch for "
+                                    f"profile={profile_id} solution={solution_index}: "
+                                    f"formula={parameter_count} actual={actual_params}"
+                                )
+                            record["checkpoint"] = str(checkpoint)
+                        scenario["solutions"].append(record)
+                    scenario.update(scenario["solutions"][0])
+                scenario["solution_count"] = len(scenario["solutions"])
                 homogeneous_path = solution_path.with_name(
                     "homogeneous_solutions.json"
                 )
-                if homogeneous_path.is_file():
+                if (
+                    run_profile["num_homogeneous_solutions"] != 0
+                    and homogeneous_path.is_file()
+                ):
                     homogeneous_records = []
                     for index, homogeneous in enumerate(
                         json.loads(homogeneous_path.read_text())
@@ -869,9 +894,10 @@ def main() -> None:
                             )
                         chosen_count = len(homogeneous["chosen_replacements"])
                         objective_sum = _solution_score(homogeneous, objective)
-                        baseline = float(inputs["sliced_teacher_baseline"])
+                        baseline = float(inputs["sliced_teacher_baselines"][objective])
                         record = {
                             "rank": index,
+                            "kind": "homogeneous",
                             "score": objective_sum
                             - (chosen_count - 1) * baseline,
                             "solver_objective_sum": objective_sum,
@@ -882,6 +908,9 @@ def main() -> None:
                             "homogeneous_assignment": homogeneous[
                                 "homogeneous_assignment"
                             ],
+                            "constraint_closeness": homogeneous.get(
+                                "constraint_closeness"
+                            ),
                             "solution_repr": homogeneous.get("solution_repr"),
                         }
                         if not args.solve_only:
@@ -916,6 +945,9 @@ def main() -> None:
                         homogeneous_records.append(record)
                     scenario["homogeneous_solution_path"] = str(homogeneous_path)
                     scenario["homogeneous_solutions"] = homogeneous_records
+                scenario["homogeneous_solution_count"] = len(
+                    scenario.get("homogeneous_solutions") or ()
+                )
                 _atomic_json(scenario_root / "scenario_manifest.json", scenario)
                 summary["scenarios"].append(scenario)
 
@@ -941,12 +973,26 @@ def main() -> None:
         )
 
     index_path = puzzle_dir / "mip" / "profiles" / "index.json"
-    existing = json.loads(index_path.read_text()) if index_path.is_file() else {"profiles": []}
-    by_id = {row["id"]: row for row in existing.get("profiles", [])}
-    by_id.update({row["id"]: row for row in profile_summaries})
     _atomic_json(
         index_path,
-        {"version": 1, "profiles": sorted(by_id.values(), key=lambda x: x["id"])},
+        {
+            "version": 1,
+            "execution_identity": execution_identity,
+            "input_artifact_identity": input_artifact_identity,
+            "profiles": sorted(profile_summaries, key=lambda x: x["id"]),
+        },
+    )
+    _atomic_json(
+        active_manifest_path,
+        {
+            "version": 1,
+            "status": "success",
+            "execution_identity": execution_identity,
+            "input_artifact_identity": input_artifact_identity,
+            "profile_ids": sorted(profile_identities),
+            "profile_identities": profile_identities,
+            "profiles": sorted(profile_summaries, key=lambda x: x["id"]),
+        },
     )
     print(json.dumps(profile_summaries, indent=2))
 

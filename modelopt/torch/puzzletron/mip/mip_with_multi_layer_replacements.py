@@ -16,6 +16,7 @@
 """Solves multi-layer replacement optimization using Mixed Integer Programming."""
 
 # mypy: ignore-errors
+import json
 import math
 import warnings
 from collections import defaultdict
@@ -32,7 +33,6 @@ __all__ = ["run_mip"]
 
 ReplacementID: TypeAlias = Hashable
 Replacement: TypeAlias = dict[str, Any]
-ChosenReplacements: TypeAlias = list[Replacement]
 
 
 def run_mip(
@@ -41,7 +41,13 @@ def run_mip(
     constraints: dict[str, float],
     bigger_is_better: bool,
     max_seconds_per_solution: float | None = None,
-) -> tuple[ChosenReplacements, float, dict[str, float]]:
+    num_solutions: int = 1,
+    min_hamming_distance: int = 1,
+) -> list[dict[str, Any]]:
+    if num_solutions < 1:
+        raise ValueError("num_solutions must be positive")
+    if min_hamming_distance < 1:
+        raise ValueError("min_hamming_distance must be positive")
     orig_num_replacements = len(replacements)
     replacements = {
         replacement_id: deepcopy(replacement)
@@ -51,7 +57,8 @@ def run_mip(
     if len(replacements) < orig_num_replacements:
         print("\n\n\n")
         warnings.warn(
-            f"mip: removed {orig_num_replacements - len(replacements)} replacements with NaN/inf objective value"
+            f"mip: removed {orig_num_replacements - len(replacements)} replacements "
+            "with NaN/inf objective value"
         )
         print("\n\n\n")
 
@@ -60,11 +67,12 @@ def run_mip(
     problem = pulp.LpProblem(name="multi_layer_replacement", sense=sense)
 
     objective_vars = []
+    choice_vars = {}
     constraint_vars = {constraint_key: [] for constraint_key in constraints}
     choice_indicators_by_layer = defaultdict(list)
     for i, (replacement_id, replacement) in enumerate(replacements.items()):
         is_chosen = pulp.LpVariable(f"choice_{i}", cat=pulp.LpBinary)
-        replacement["is_chosen"] = is_chosen
+        choice_vars[replacement_id] = is_chosen
 
         for parent_layer_idx in replacement["parent_layer_indices"]:
             choice_indicators_by_layer[parent_layer_idx].append(is_chosen)
@@ -97,68 +105,81 @@ def run_mip(
 
     # Configure and run solver
     solver = pulp.PULP_CBC_CMD(msg=True, timeLimit=max_seconds_per_solution)
-    problem.solve(solver)
-
-    # Check if solution is feasible
-    if problem.status != pulp.LpStatusOptimal:
-        return []
-        # raise InfeasibleError()
-
-    # Trust But Verify: calculate total value and costs, and check that all the constraints are filled
-    total_value = 0.0
-    total_costs = dict.fromkeys(constraints.keys(), 0)
-    chosen_replacements: ChosenReplacements = []
-    chosen_layers = []
-    for replacement_id, replacement in replacements.items():
-        is_chosen = replacement["is_chosen"].varValue >= 0.99
-        if is_chosen:
-            assert replacement not in chosen_replacements
-            chosen_replacements.append(replacement)
-            total_value += get_nested_key(replacement, objective)
-            for constraint_key in constraints:
-                total_costs[constraint_key] += get_nested_key(replacement, constraint_key)
-            for parent_layer_idx in replacement["parent_layer_indices"]:
-                assert parent_layer_idx not in chosen_layers
-                chosen_layers.append(parent_layer_idx)
-
-    missing_layers = set(choice_indicators_by_layer.keys()) - set(chosen_layers)
-    assert len(missing_layers) == 0, (
-        f"The following layers were not chosen by any replacement:\n{missing_layers=}\n{chosen_replacements}"
-    )
-
-    for constraint_key, max_cost in constraints.items():
-        min_cost = None
-        if isinstance(max_cost, Iterable):
-            min_cost, max_cost = max_cost
-
-        if max_cost is not None:
-            assert total_costs[constraint_key] < max_cost or math.isclose(
-                total_costs[constraint_key], max_cost, rel_tol=1e-9
-            ), (
-                f"This max_cost was violated {constraint_key} in the solution, sol val={total_costs[constraint_key]} > {max_cost=}"
-            )
-        if min_cost is not None:
-            assert total_costs[constraint_key] > min_cost or math.isclose(
-                total_costs[constraint_key], min_cost, rel_tol=1e-9
-            ), (
-                f"This min_cost was violated {constraint_key} in the solution, sol val={total_costs[constraint_key]} < {min_cost=}"
-            )
-
-    chosen_replacements = sort_replacements(chosen_replacements)
-    for cr in chosen_replacements:
-        del cr["is_chosen"]  # not copyable, will cause errors in deep copy
-        if "block_config" in cr:
-            cr["child_block_configs"] = cr["block_config"]
-        # del cr['block_config'] for now the dump includes both keys (duplicated values) # we might wanna either delete one of them or keep both
-        # I prefer keeping block_config and deleting 'child_block_configs' from previous puzzle steps
-
-    return [
-        {
-            "chosen_replacements": chosen_replacements,
-            "total_value": total_value,
-            "total_costs": total_costs,
+    layer_signatures = {
+        replacement_id: _layer_signatures(replacement)
+        for replacement_id, replacement in replacements.items()
+    }
+    all_layers = tuple(sorted(choice_indicators_by_layer))
+    solutions = []
+    for solution_index in range(num_solutions):
+        problem.solve(solver)
+        if problem.status != pulp.LpStatusOptimal:
+            break
+        selected_ids = [
+            replacement_id
+            for replacement_id, variable in choice_vars.items()
+            if variable.varValue is not None and variable.varValue >= 0.99
+        ]
+        chosen = [replacements[replacement_id] for replacement_id in selected_ids]
+        total_value = sum(float(get_nested_key(row, objective)) for row in chosen)
+        total_costs = {
+            key: sum(float(get_nested_key(row, key)) for row in chosen)
+            for key in constraints
         }
-    ]
+        selected_by_layer = {
+            layer: signature
+            for replacement_id in selected_ids
+            for layer, signature in layer_signatures[replacement_id].items()
+        }
+        missing_layers = set(all_layers) - set(selected_by_layer)
+        assert not missing_layers, f"MIP solution is missing layers {sorted(missing_layers)}"
+        copied = sort_replacements([deepcopy(row) for row in chosen])
+        for row in copied:
+            row.pop("is_chosen", None)
+            if "block_config" in row:
+                row["child_block_configs"] = row["block_config"]
+        solutions.append(
+            {
+                "chosen_replacements": copied,
+                "total_value": total_value,
+                "total_costs": total_costs,
+                "solution_rank": solution_index,
+            }
+        )
+        if solution_index + 1 >= num_solutions:
+            break
+        required_difference = min_hamming_distance
+        if required_difference > len(all_layers):
+            break
+        matching_terms = []
+        for replacement_id, variable in choice_vars.items():
+            matches = sum(
+                selected_by_layer.get(layer) == signature
+                for layer, signature in layer_signatures[replacement_id].items()
+            )
+            if matches:
+                matching_terms.append(matches * variable)
+        problem += (
+            pulp.lpSum(matching_terms) <= len(all_layers) - required_difference,
+            f"diversity_{solution_index}",
+        )
+    return solutions
+
+
+def _signature(value: Any) -> str:
+    if hasattr(value, "to_dict"):
+        value = value.to_dict()
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _layer_signatures(replacement: Replacement) -> dict[int, str]:
+    layers = tuple(int(value) for value in replacement["parent_layer_indices"])
+    children = replacement.get("child_block_configs")
+    if children is None:
+        children = replacement.get("block_config")
+    if not isinstance(children, (list, tuple)) or len(children) != len(layers):
+        children = [children] * len(layers)
+    return {layer: _signature(child) for layer, child in zip(layers, children)}
 
 
 def usage_example():

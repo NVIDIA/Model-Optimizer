@@ -12,9 +12,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from modelopt.torch.puzzletron.benchmarks import run_aiperf_sweep
-
-
 CONCURRENCIES = (1, 4, 16, 64)
 # Two full concurrency waves are enough to measure every configured point while
 # avoiding redundant multi-hour traffic for long-context campaign workloads.
@@ -108,24 +105,22 @@ def select_registry_solutions(
 
 
 def build_work_items(registry: dict[str, Any]) -> list[dict[str, Any]]:
-    items = []
-    for solution in registry["solutions"]:
-        for topology in TOPOLOGIES:
-            items.append(
-                {
-                    "profile_id": registry["profile_id"],
-                    "solution_id": solution["solution_id"],
-                    "checkpoint": solution["checkpoint"],
-                    "topology_id": topology["topology_id"],
-                    "gpu_count": topology["gpu_count"],
-                    "topology": {
-                        key: value
-                        for key, value in topology.items()
-                        if key not in {"topology_id", "gpu_count"}
-                    },
-                }
-            )
-    return items
+    return [
+        {
+            "profile_id": registry["profile_id"],
+            "solution_id": solution["solution_id"],
+            "checkpoint": solution["checkpoint"],
+            "topology_id": topology["topology_id"],
+            "gpu_count": topology["gpu_count"],
+            "topology": {
+                key: value
+                for key, value in topology.items()
+                if key not in {"topology_id", "gpu_count"}
+            },
+        }
+        for solution in registry["solutions"]
+        for topology in TOPOLOGIES
+    ]
 
 
 def shard_work(
@@ -181,6 +176,10 @@ def run_worker(
     request_count: int | None = None,
     benchmark_timeout: float = 7200,
 ) -> Path:
+    # Worker execution needs the GPU stack; result merging intentionally remains
+    # usable by the dependency-light login-node orchestrator.
+    from modelopt.torch.puzzletron.benchmarks import run_aiperf_sweep
+
     registry = select_registry_solutions(_registry(puzzle_dir, profile_id), solution_ids)
     items = build_work_items(registry)
     if preflight:

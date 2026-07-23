@@ -98,6 +98,10 @@ def test_report_has_clean_header_and_only_artifact_backed_sections(tmp_path: Pat
     assert "<span class='optional-node'>Optional</span>" in document
     assert "dagre.min.js" in document
     assert 'data-source="convert" data-target="tokenize_data"' in document
+    assert 'data-source="sort" data-target="sort_sanity"' in document
+    assert 'data-source="sort_sanity" data-target="width_sanity"' in document
+    assert 'data-source="width_sanity" data-target="slicing_sanity"' in document
+    assert 'data-source="sort" data-target="bypass_sanity"' in document
     assert "<tspan x='26' dy='0'>Global Distillation</tspan>" in document
     assert "<tspan x='26' dy='15'>Sanity Check</tspan>" in document
     assert "Subblock Bypass" in document
@@ -166,6 +170,34 @@ def test_progress_report_renders_canonical_sort_sanity_metrics(tmp_path: Path):
     assert "<tr><th>lm_loss</th><td>1.25</td><td>1.2501</td><td>1.5</td></tr>" in document
     assert "1.2501" in document
     assert 'data-stage="width_importance" data-status="completed"' not in document
+    assert 'data-stage="sort_sanity" data-status="completed"' in document
+
+
+def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: Path):
+    message = "sorted teacher loss drift exceeded tolerance"
+    _write(
+        tmp_path / "artifacts/sort_sanity/summary.json",
+        {
+            "passed": False,
+            "teacher": {"lm_loss": 1.0},
+            "sorted_teacher": {"lm_loss": 1.2},
+            "findings": [
+                {
+                    "stage": "sort_sanity",
+                    "severity": "warning",
+                    "message": message,
+                    "evidence": {"metric": "lm_loss"},
+                }
+            ],
+        },
+    )
+
+    result = generate_campaign_progress_report(tmp_path)
+    document = Path(result["html"]).read_text(encoding="utf-8")
+
+    assert "Equivalence gate: warning" in document
+    assert "warning-value" in document
+    assert f"data-warning='{message}'" in document
     assert 'data-stage="sort_sanity" data-status="completed"' in document
 
 
@@ -1405,6 +1437,51 @@ def test_diverse_bypass_gate_uses_decreasing_per_width_trends_and_diversity():
 
     assert "probe-summary passed" in card
     assert "Trend + diversity gate</dt><dd>passed" in card
+
+
+def test_bypass_gate_findings_render_warning_tooltip():
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
+        _overfit_summary_card,
+    )
+
+    message = "local KD acceptance loss did not decrease"
+    card = _overfit_summary_card(
+        "smallest_fixed",
+        {
+            "records": [{"step": 1}],
+            "summary": {
+                "passed": False,
+                "findings": [{"message": message, "severity": "warning"}],
+                "loss_trend": {"sufficient_evidence": True, "hard_gate_passed": False},
+            },
+        },
+    )
+
+    assert "probe-summary failed warning-value" in card
+    assert f"data-warning='{message}'" in card
+
+
+def test_distillation_sanity_findings_render_warning_tooltip():
+    from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
+        _distillation_overfit_section,
+    )
+
+    message = "ending loss did not improve"
+    section = _distillation_overfit_section(
+        {
+            "profiles": [
+                {
+                    "sample_count": 8,
+                    "findings": [{"message": message, "severity": "warning"}],
+                    "solutions": [],
+                }
+            ]
+        }
+    )
+
+    assert "Trend verdict: warning" in section
+    assert "warning-value" in section
+    assert f"data-warning='{message}'" in section
 
 
 def test_report_cache_reuses_sections_and_targets_changed_inputs(tmp_path: Path, monkeypatch):

@@ -93,6 +93,39 @@ def test_build_layer_layouts_keys_and_skip_mamba():
     assert layouts[1].down_key == "model.layers.1.mlp.down_proj.weight"
 
 
+def test_build_layer_layouts_qwen_shared_expert_unfused_keys():
+    layouts = build_layer_layouts(
+        [
+            BlockConfig(
+                subblock_configs=(
+                    MoEConfig(
+                        num_experts=4,
+                        expert_intermediate_size=8,
+                        shared_expert_intermediate_size=8,
+                    ),
+                )
+            )
+        ],
+        layer_prefix_tmpl="model.language_model.layers.{i}",
+        num_attention_heads=4,
+        head_dim=4,
+        moe_shared_expert_subname="shared_expert",
+        moe_shared_gate_subname="gate_proj",
+    )
+    assert (
+        layouts[0].moe_shared_gate_key
+        == "model.language_model.layers.0.mlp.shared_expert.gate_proj.weight"
+    )
+    assert (
+        layouts[0].moe_shared_up_key
+        == "model.language_model.layers.0.mlp.shared_expert.up_proj.weight"
+    )
+    assert (
+        layouts[0].moe_shared_down_key
+        == "model.language_model.layers.0.mlp.shared_expert.down_proj.weight"
+    )
+
+
 def test_build_layer_layouts_uses_per_layer_attention_head_dimension():
     layouts = build_layer_layouts(
         [

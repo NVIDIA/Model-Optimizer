@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,15 @@ __all__ = [
 
 def _scenario_dir(puzzle_dir: Path, width: int) -> Path:
     return puzzle_dir / "scenarios" / f"width-{width:04d}" / "depth-00"
+
+
+def _visible_gpu_count(fallback: int) -> int:
+    visible = tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+    return len(visible) if visible else int(fallback)
 
 
 def _project_vllm_stats_to_scenarios(config: dict) -> dict[int, Path]:
@@ -116,6 +126,7 @@ def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
 
 def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
     teacher = scenario / "ckpts" / "sorted_teacher"
+    scenario_manifest = json.loads((scenario / "scenario_manifest.json").read_text())
     subblock = (
         str((config.get("replacement_scoring") or {}).get("granularity")) == "subblock"
     )
@@ -145,7 +156,7 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         f"scoring_diagnostic.scores_dir={scoring_output}",
         f"scoring_diagnostic.output_dir={scenario / 'artifacts/scoring_diagnostic'}",
     ]
-    if (config.get("replacement_scoring") or {}).get("bypass_checkpoint_dir") is not None:
+    if scenario_manifest.get("bypass_checkpoint") is not None:
         overrides.append(
             "replacement_scoring.bypass_checkpoint_dir="
             f"{scenario / 'ckpts' / 'bypass_overlay'}"
@@ -234,7 +245,22 @@ def run_embedding_stage(
     """Run the width-aware portion of a composite pipeline stage."""
 
     puzzle_dir = Path(config["puzzle_dir"])
+    outputs = {
+        "widths": [
+            int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
+        ],
+        "scenarios_root": str(puzzle_dir / "scenarios"),
+        "stage": stage,
+    }
+    # A distributed root stage invokes this function in every torchrun
+    # process.  Width preparation and nested workers own shared artifacts and
+    # GPUs, so only the global rank-zero process may fan them out.
+    if int(os.environ.get("RANK", "0")) != 0:
+        outputs["skipped_nonzero_rank"] = True
+        return outputs
+
     examples = Path(__file__).resolve().parent
+    worker_gpus = _visible_gpu_count(gpus_per_node)
     if stage == "build_library":
         subprocess.run(
             (
@@ -251,7 +277,7 @@ def run_embedding_stage(
                 config_path=config_path,
                 config=config,
                 stage="build_library",
-                gpus_per_node=gpus_per_node,
+                gpus_per_node=worker_gpus,
             )
         )
     elif stage in {
@@ -265,7 +291,7 @@ def run_embedding_stage(
                 config_path=config_path,
                 config=config,
                 stage=stage,
-                gpus_per_node=gpus_per_node,
+                gpus_per_node=worker_gpus,
             )
         )
         if stage == "replacement_scoring":
@@ -277,15 +303,10 @@ def run_embedding_stage(
                 str(examples / "run_width_depth_mips.py"),
                 "--config",
                 str(config_path),
+                "--solve-only",
             ),
             check=True,
         )
     else:
         raise ValueError(f"unsupported embedding composite stage: {stage}")
-    return {
-        "widths": [
-            int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
-        ],
-        "scenarios_root": str(puzzle_dir / "scenarios"),
-        "stage": stage,
-    }
+    return outputs

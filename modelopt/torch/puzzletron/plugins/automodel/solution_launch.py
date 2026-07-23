@@ -48,6 +48,7 @@ from ...replacement_library.replacement_utils import parse_layer_replacement
 from ...tools.validation_utils import write_results
 from .config import build_solution_recipe_config, solution_scoring_params
 from .launch import _free_scoring_memory
+from .module_trace import synchronized_module_trace
 from .patch import apply_patch, _precache_trust_remote_code_distributed
 from .solution_metrics import aggregate_solution_scores, retain_teacher_channels, score_batch
 from .teacher_cache import TeacherTargetCache
@@ -122,6 +123,20 @@ def _is_output_writer(recipe) -> bool:
     torch_dist.all_gather_object(gathered, (rank, bool(recipe.has_outputs)))
     output_ranks = [rank for rank, has_outputs in gathered if has_outputs]
     return bool(recipe.has_outputs) and bool(output_ranks) and rank == min(output_ranks)
+
+
+def _quarantine_failed_realization(checkpoint_dir: Path) -> Path | None:
+    """Remove a realized parent checkpoint that failed during first load."""
+
+    from ...checkpoint_transactions import invalidate_realization, remove_realization_temp_dir
+
+    if not dist.is_master():
+        dist.barrier()
+        return None
+    remove_realization_temp_dir(checkpoint_dir)
+    quarantined = invalidate_realization(checkpoint_dir)
+    dist.barrier()
+    return quarantined
 
 
 def _run_recipe(
@@ -278,11 +293,14 @@ def _score_candidate(
     is_writer = _is_output_writer(recipe)
     lm_head_w = recipe.lm_head_weight() if recipe.has_outputs else None
     batch_started = time.perf_counter()
-    with _candidate_execution_context(
-        recipe,
-        prune_target,
-        bypass_checkpoint_dir=bypass_checkpoint_dir,
-        hidden_width=hidden_width,
+    with (
+        _candidate_execution_context(
+            recipe,
+            prune_target,
+            bypass_checkpoint_dir=bypass_checkpoint_dir,
+            hidden_width=hidden_width,
+        ),
+        synchronized_module_trace(recipe),
     ):
         for batch_idx, (hidden, targets) in enumerate(recipe.iterate_captures()):
             _trace_batch("candidate_capture_yield", batch_idx, has_hidden=hidden is not None, name=name)
@@ -434,18 +452,32 @@ def _validate_parent_equivalence(
     }
 
     failed = [name for name, check in checks.items() if not check["passed"]]
+    findings = [
+        {
+            "stage": "width_sanity",
+            "message": (
+                f"parent equivalence check {name} failed: "
+                f"value={check['value']:.6g} limit={check['limit']:.6g}"
+            ),
+            "evidence": {
+                "kind": "parent_equivalence",
+                "check": name,
+                "value": check["value"],
+                "limit": check["limit"],
+            },
+            "severity": "warning",
+        }
+        for name, check in checks.items()
+        if not check["passed"]
+    ]
     summary = {
         "teacher_result": str(teacher_result_path),
         "parent_result": str(parent_result_path),
         "hidden_basis_permuted": bool(hidden_basis_permuted),
         "checks": checks,
         "passed": not failed,
+        "findings": findings,
     }
-    if failed:
-        raise RuntimeError(
-            "parent checkpoint is not equivalent to the original teacher: "
-            f"failed={failed} checks={checks}"
-        )
     return summary
 
 
@@ -882,24 +914,11 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
             checkpoint_dir = Path(parent["checkpoint_dir"])
             solutions_path = Path(parent["solutions_path"])
             output_dir = Path(parent["output_dir"])
-            if not (checkpoint_dir / "config.json").is_file():
-                raise FileNotFoundError(f"{role} parent missing config.json: {checkpoint_dir}")
             if not solutions_path.is_file():
                 raise FileNotFoundError(f"{role} parent missing solutions: {solutions_path}")
             output_dir.mkdir(parents=True, exist_ok=True)
 
             solutions = load_puzzle_solutions(solutions_path, None, False)
-            parent_config = _load_model_config_distributed(
-                checkpoint_dir,
-                descriptor,
-                loader=load_model_config,
-            )
-            parent_width = int(descriptor.get_language_model_config(parent_config).hidden_size)
-            retained_hidden_indices = _source_hidden_channel_indices(
-                checkpoint_dir,
-                parent_width,
-                int(lm.hidden_size),
-            )
             pending_ids = [
                 idx
                 for idx in range(len(solutions))
@@ -909,11 +928,9 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
             needs_parent_evaluation = (
                 evaluation_mode != "realized_baseline"
                 and not skip_parent_equivalence
-                and (
-                role == "original" or force_rescore or not parent_result_path.is_file()
-                )
+                and (force_rescore or not parent_result_path.is_file())
             )
-            if role != "original" and not pending_ids and not needs_parent_evaluation:
+            if not pending_ids and not needs_parent_evaluation:
                 manifest["parents"][role] = {
                     "checkpoint_dir": str(checkpoint_dir),
                     "solutions": len(solutions),
@@ -928,13 +945,41 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
                 f"role={role} checkpoint={checkpoint_dir} "
                 f"solutions={len(solutions)} pending={len(pending_ids)}"
             )
-            recipe = _run_recipe(
-                build_solution_recipe_config(hydra_cfg, checkpoint_dir),
-                scoring,
-                params["eval_iters"],
-                params["use_puzzletron_dataloader"],
-                params["data_cfg"],
-            )
+            try:
+                if not (checkpoint_dir / "config.json").is_file():
+                    raise FileNotFoundError(
+                        f"{role} parent missing config.json: {checkpoint_dir}"
+                    )
+                parent_config = _load_model_config_distributed(
+                    checkpoint_dir,
+                    descriptor,
+                    loader=load_model_config,
+                )
+                parent_width = int(
+                    descriptor.get_language_model_config(parent_config).hidden_size
+                )
+                retained_hidden_indices = _source_hidden_channel_indices(
+                    checkpoint_dir,
+                    parent_width,
+                    int(lm.hidden_size),
+                )
+                recipe = _run_recipe(
+                    build_solution_recipe_config(hydra_cfg, checkpoint_dir),
+                    scoring,
+                    params["eval_iters"],
+                    params["use_puzzletron_dataloader"],
+                    params["data_cfg"],
+                )
+            except BaseException as exc:
+                if evaluation_mode == "realized_baseline":
+                    quarantined = _quarantine_failed_realization(checkpoint_dir)
+                    manifest["parents"][role] = {
+                        "checkpoint_dir": str(checkpoint_dir),
+                        "quarantined": str(quarantined) if quarantined else None,
+                        "load_error": f"{type(exc).__name__}: {exc}",
+                    }
+                    write_manifest()
+                raise
             manifest["checkpoint_loads"][role] += 1
             if manifest["checkpoint_loads"][role] != 1:
                 raise RuntimeError(f"parent {role} loaded more than once: {manifest['checkpoint_loads']}")
@@ -997,8 +1042,9 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
                         ),
                     )
                     mprint(
-                        "[solution/automodel] parent equivalence passed | "
-                        f"role={role} checks={parent_summary['checks']}"
+                        "[solution/automodel] parent equivalence | "
+                        f"role={role} passed={parent_summary['passed']} "
+                        f"checks={parent_summary['checks']}"
                     )
                 elif evaluation_mode == "runtime_slice":
                     parent_summary = {

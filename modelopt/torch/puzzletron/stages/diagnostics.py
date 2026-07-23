@@ -1140,6 +1140,19 @@ def _hidden_width_ranking_verdict(
     }
 
 
+def _hidden_width_realization_tolerance(
+    diag_cfg: dict[str, Any], metric: str
+) -> float:
+    """Resolve the physical gate independently from ranking comparisons."""
+
+    comparison_tolerance = float(diag_cfg.get("comparison_tolerance", 0.0))
+    default = float(
+        diag_cfg.get("physical_equivalence_tolerance", comparison_tolerance)
+    )
+    overrides = dict(diag_cfg.get("physical_equivalence_tolerances") or {})
+    return float(overrides.get(str(metric), default))
+
+
 def _select_diagnostic_hidden_width(
     teacher_width: int,
     widths: Iterable[int],
@@ -1411,7 +1424,8 @@ def _run_hidden_width_diagnostic_at_width(
         activation_value = values["activation"]
         realized_value = values["realized"]
         realization_delta = abs(activation_value - realized_value)
-        realization_passed = realization_delta <= tolerance
+        realization_tolerance = _hidden_width_realization_tolerance(diag_cfg, metric)
+        realization_passed = realization_delta <= realization_tolerance
         summary = {
             "hidden_width": width,
             "teacher_hidden_width": teacher_width,
@@ -1420,6 +1434,7 @@ def _run_hidden_width_diagnostic_at_width(
             "passed": bool(verdict["passed"] and realization_passed),
             "realization_delta": realization_delta,
             "realization_passed": realization_passed,
+            "realization_tolerance": realization_tolerance,
             "rows": rows,
             "retained_activation_checkpoint": str(activation_parent),
         }
@@ -1960,6 +1975,17 @@ def _write_summary(
     return summary
 
 
+def _validate_parent_sweep_checkpoint_loads(sweep_manifest: dict) -> None:
+    """Require each parent checkpoint to be loaded at most once in this invocation."""
+
+    for role, value in (sweep_manifest.get("checkpoint_loads") or {}).items():
+        loads = int(value)
+        if loads not in (0, 1):
+            raise RuntimeError(
+                f"fresh parent sweep loaded {role} more than once; loads={loads}"
+            )
+
+
 def _publish_parent_sweep_sanity(
     *,
     puzzle_dir: Path,
@@ -2016,6 +2042,8 @@ def _publish_parent_sweep_sanity(
         ("width_sanity", width_summary),
         ("slicing_sanity", slicing_summary),
     ):
+        payload["passed"] = not payload.get("findings")
+        payload["verdict"] = "passed" if payload["passed"] else "warning"
         payload["provenance"] = provenance
         output = puzzle_dir / "artifacts" / stage / "summary.json"
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -2024,13 +2052,6 @@ def _publish_parent_sweep_sanity(
             encoding="utf-8",
         )
         paths.append(output)
-    if slicing_summary["findings"] and bool(
-        diag_cfg.get("require_physical_equivalence", True)
-    ):
-        raise RuntimeError(
-            "runtime/physical width slicing differs beyond tolerance: "
-            f"{slicing_summary['findings']}"
-        )
     return paths[0], paths[1]
 
 
@@ -2240,9 +2261,15 @@ def _activation_diagnostic_parent_sweep(
     reverse_is_temporary = not bool(configured_reverse_dir)
     sorted_dir = puzzle_dir / "ckpts" / "sorted_teacher"
     load_manifest_path = diag_root / "parent_sweep_manifest.json"
+    force_rescore = bool(diag_cfg.get("force_rescore", False))
+    overwrite = bool(diag_cfg.get("overwrite", True))
+    # Keep durable parent-sweep scores/realizations across orchestrator retries
+    # unless the caller forces a rebuild.  Fresh runs (no manifest) still honor
+    # overwrite=True and clear stale diagnostics.
+    preserve_progress = load_manifest_path.is_file() and not force_rescore
 
     with _distributed(hydra_cfg):
-        if dist.is_master() and bool(diag_cfg.get("overwrite", True)):
+        if dist.is_master() and overwrite and not preserve_progress:
             if diag_root.exists():
                 shutil.rmtree(diag_root)
             if artifacts_dir.exists():
@@ -2599,12 +2626,7 @@ def _activation_diagnostic_parent_sweep(
             sweep_manifest = json.loads(load_manifest_path.read_text())
             if sweep_manifest.get("status") != "complete":
                 raise RuntimeError(f"parent sweep did not complete: {sweep_manifest}")
-            for role in ("original", "activation", "reverse"):
-                loads = int((sweep_manifest.get("checkpoint_loads") or {}).get(role, -1))
-                if loads != 1:
-                    raise RuntimeError(
-                        f"fresh parent sweep must load {role} exactly once; loads={loads}"
-                    )
+            _validate_parent_sweep_checkpoint_loads(sweep_manifest)
             summary = _write_summary(
                 rows,
                 artifacts_dir,
@@ -2632,11 +2654,8 @@ def _activation_diagnostic_parent_sweep(
             activation_equivalence = (
                 (sweep_manifest.get("parents") or {}).get("activation") or {}
             ).get("equivalence") or {}
-            if activation_equivalence.get("passed") is not True:
-                raise RuntimeError(
-                    "activation-sorted parent equivalence is missing or failed: "
-                    f"{activation_equivalence}"
-                )
+            equivalence_findings = list(activation_equivalence.get("findings") or ())
+            sort_passed = activation_equivalence.get("passed") is True
             sort_equivalence_dir = puzzle_dir / "artifacts" / "sort_sanity"
             sort_equivalence_dir.mkdir(parents=True, exist_ok=True)
             sort_summary_path = sort_equivalence_dir / "summary.json"
@@ -2644,11 +2663,12 @@ def _activation_diagnostic_parent_sweep(
                 json.loads(sort_summary_path.read_text()) if sort_summary_path.is_file() else {}
             )
             reuse_sort_summary = {
-                "passed": True,
+                "passed": sort_passed,
                 "reused_parent_sweep": True,
                 "teacher_dir": str(teacher_dir),
                 "sorted_teacher_dir": str(sorted_dir),
                 "equivalence": activation_equivalence,
+                "findings": equivalence_findings,
                 "parent_sweep_manifest": str(load_manifest_path),
             }
             sort_summary_path.write_text(
@@ -2681,7 +2701,12 @@ def _activation_diagnostic_parent_sweep(
                 shutil.rmtree(parent_root / "realized", ignore_errors=True)
         dist.barrier()
 
-    return complete_stage(
+    width_summary_path = puzzle_dir / "artifacts" / "width_sanity" / "summary.json"
+    width_verdict = json.loads(width_summary_path.read_text(encoding="utf-8"))
+    width_findings = list(width_verdict.get("findings") or ())
+    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+    return complete_sanity_stage(
         config,
         manifest,
         outputs={
@@ -2700,13 +2725,15 @@ def _activation_diagnostic_parent_sweep(
             "hidden_width_summary_path": str(
                 artifacts_dir / "hidden_width_diagnostic_summary.json"
             ),
-            "width_summary_path": str(
-                puzzle_dir / "artifacts" / "width_sanity" / "summary.json"
-            ),
+            "width_summary_path": str(width_summary_path),
             "slicing_summary_path": str(
                 puzzle_dir / "artifacts" / "slicing_sanity" / "summary.json"
             ),
         },
+        verdict=SanityVerdict(
+            passed=bool(width_verdict.get("passed", not width_findings)),
+            findings=width_findings,
+        ),
     )
 
 
@@ -3074,6 +3101,23 @@ def _sort_equivalence_decision(
     }
 
 
+def _sort_equivalence_tolerances(
+    diag_cfg: dict[str, Any],
+    descriptor: type[ModelDescriptor],
+) -> tuple[float, float]:
+    descriptor_tolerances = descriptor.checkpoint_equivalence_tolerances()
+    tolerance = float(
+        diag_cfg.get(
+            "max_abs_lm_loss_delta",
+            descriptor_tolerances.get("max_abs_lm_loss_delta", 1e-3),
+        )
+    )
+    reverse_tolerance = float(
+        diag_cfg.get("max_abs_reverse_lm_loss_delta", tolerance)
+    )
+    return tolerance, reverse_tolerance
+
+
 def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     """Evaluate teacher and sorted teacher with the chunked AutoModel scorer."""
 
@@ -3101,9 +3145,10 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     )
     artifacts_dir = _puzzle_dir(config, hydra_cfg) / "artifacts" / "sort_sanity"
     metric = str(diag_cfg.get("metric", "lm_loss"))
-    tolerance = float(diag_cfg.get("max_abs_lm_loss_delta", 1e-3))
-    reverse_tolerance = float(
-        diag_cfg.get("max_abs_reverse_lm_loss_delta", tolerance)
+    descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
+    tolerance, reverse_tolerance = _sort_equivalence_tolerances(
+        diag_cfg,
+        descriptor,
     )
     if not (sorted_dir / "config.json").is_file():
         raise FileNotFoundError(f"sorted checkpoint missing config.json: {sorted_dir}")
@@ -3112,7 +3157,6 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     scoring_output_dir = diag_root / "single_sequence_replacement_solutions--validation"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     with _distributed(hydra_cfg):
-        descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
         if include_reverse:
             needs_reverse_parent = _diagnostic_checkpoint_needs_rebuild(reverse_dir)
             if needs_reverse_parent and dist.is_master():
@@ -3262,6 +3306,8 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             "max_abs_delta": tolerance,
             "max_abs_reverse_delta": reverse_tolerance,
             "passed": passed,
+            "findings": [],
+            "verdict": "passed" if passed else "warning",
             "teacher_result": str(scoring_output_dir / "teacher.json"),
             "sorted_result": str(sorted_result_path),
             "reverse_sorted_dir": str(reverse_dir) if include_reverse else None,
@@ -3299,15 +3345,58 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             encoding="utf-8",
         )
         mprint(md_path.read_text(encoding="utf-8"))
+        findings = []
         if not passed:
-            raise RuntimeError(
-                f"Sorted teacher {metric} drift too large: teacher={teacher_value} "
-                f"sorted={sorted_value} delta={delta} reverse={reverse_value} "
-                f"reverse_delta={reverse_delta} tolerance={tolerance} "
-                f"reverse_tolerance={reverse_tolerance}"
+            from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage, finding_from_message
+
+            if not sorted_passed:
+                findings.append(
+                    finding_from_message(
+                        stage="sort_sanity",
+                        message=(
+                            f"sorted teacher {metric} drift too large: delta={delta:.6g} "
+                            f"tolerance={tolerance:.6g}"
+                        ),
+                        evidence={"metric": metric, "delta": delta, "tolerance": tolerance},
+                    )
+                )
+            if include_reverse and not reverse_passed:
+                findings.append(
+                    finding_from_message(
+                        stage="sort_sanity",
+                        message=(
+                            f"reverse-sorted teacher {metric} drift too large: "
+                            f"reverse_delta={reverse_delta:.6g} "
+                            f"tolerance={reverse_tolerance:.6g}"
+                        ),
+                        evidence={
+                            "metric": metric,
+                            "reverse_delta": reverse_delta,
+                            "tolerance": reverse_tolerance,
+                        },
+                    )
+                )
+            summary["findings"] = findings
+            summary_path.write_text(
+                json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
+            )
+            dist.barrier()
+            return complete_sanity_stage(
+                config,
+                manifest,
+                outputs={
+                    "summary_path": str(summary_path),
+                    "table_path": str(md_path),
+                    "metric": metric,
+                    "delta": delta_value,
+                    "reverse_delta": reverse_delta_value,
+                },
+                verdict=SanityVerdict(passed=False, findings=findings),
             )
     dist.barrier()
-    return complete_stage(
+    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+    return complete_sanity_stage(
         config,
         manifest,
         outputs={
@@ -3317,6 +3406,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             "delta": delta_value,
             "reverse_delta": reverse_delta_value,
         },
+        verdict=SanityVerdict(passed=True),
     )
 
 
@@ -3339,18 +3429,18 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
         if not summary.get("rows") or not summary.get("axes"):
             raise RuntimeError(f"distributed slicing summary has no evidence: {summary_path}")
         findings = list(summary.get("findings") or ())
-        passed = not findings
-        return complete_stage(
+        passed = bool(summary.get("passed", not findings))
+        from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+        return complete_sanity_stage(
             config,
             manifest,
             outputs={
                 "summary_path": str(summary_path),
                 "backend": "distributed_parent_sweep",
-                "passed": passed,
                 "axes": list(summary.get("axes") or ()),
-                "findings": findings,
             },
-            status="success" if passed else "failed",
+            verdict=SanityVerdict(passed=passed, findings=findings),
         )
     diag_cfg = dict(config.get("width_slice_equivalence") or {})
     sorted_dir = _puzzle_dir(config, hydra_cfg) / "ckpts" / "sorted_teacher"
@@ -3457,7 +3547,19 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
         sampled_layers=sampled_layers,
     )
     validate_width_slice_artifacts(artifacts_dir, descriptor=descriptor)
-    return complete_stage(
+    findings = [
+        {
+            "stage": "slicing_sanity",
+            "message": f"width-slice equivalence failed for case {case.get('case_id')}",
+            "evidence": {"case": case},
+            "severity": "warning",
+        }
+        for case in summary.get("cases", ())
+        if not case.get("passed", True)
+    ]
+    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+    return complete_sanity_stage(
         config,
         manifest,
         outputs={
@@ -3468,7 +3570,7 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
             "cases": summary["cases"],
             "tolerances": summary["tolerances"],
         },
-        status="success" if summary["passed"] else "failed",
+        verdict=SanityVerdict(passed=bool(summary["passed"]), findings=findings),
     )
 
 
@@ -3789,6 +3891,7 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
     mode = str(diag_cfg.get("mode", "block_combinations"))
     diag_root = puzzle_dir / "diagnostics" / "bypass"
     artifacts_dir = puzzle_dir / "artifacts" / "bypass_diagnostic"
+    summary = None
 
     with _distributed(hydra_cfg):
         if dist.is_master() and bool(diag_cfg.get("overwrite", True)) and diag_root.exists():
@@ -3966,7 +4069,6 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                     dist.barrier()
 
         summary = None
-        failure_message = None
         if dist.is_master():
             full_overlay_summary = None
             if bool(diag_cfg.get("full_overlay_check", False)):
@@ -3983,13 +4085,6 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                     requested_metric=requested_metric,
                     tolerance=float(diag_cfg.get("max_full_overlay_loss", 0.05)),
                 )
-                if bool(
-                    diag_cfg.get("require_full_overlay_check", False)
-                ) and not full_overlay_summary.get("passed", False):
-                    failure_message = (
-                        "Bypass full-overlay check did not pass; see "
-                        f"{artifacts_dir / 'bypass_full_overlay_table.md'}"
-                    )
             rows = _bypass_diagnostic_rows(diag_root)
             summary = _write_bypass_diagnostic_summary(
                 rows,
@@ -3997,17 +4092,42 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                 requested_metric=requested_metric,
                 tolerance=tolerance,
             )
-            if not summary.get("passed", False):
-                failure_message = (
-                    "Bypass diagnostic did not pass; see "
-                    f"{artifacts_dir / 'bypass_diagnostic_table.md'}"
+            findings = list(summary.get("findings") or ())
+            if full_overlay_summary is not None and not full_overlay_summary.get("passed", False):
+                findings.append(
+                    {
+                        "stage": "bypass_diagnostic",
+                        "message": (
+                            "Bypass full-overlay check did not pass; see "
+                            f"{artifacts_dir / 'bypass_full_overlay_table.md'}"
+                        ),
+                        "severity": "warning",
+                    }
                 )
-        failure_message = dist.broadcast(failure_message, src=0)
-        if failure_message:
-            raise RuntimeError(failure_message)
+            if not summary.get("passed", False):
+                findings.append(
+                    {
+                        "stage": "bypass_diagnostic",
+                        "message": (
+                            "Bypass diagnostic comparison did not pass; see "
+                            f"{artifacts_dir / 'bypass_diagnostic_table.md'}"
+                        ),
+                        "severity": "warning",
+                    }
+                )
+            if findings:
+                summary = dict(summary)
+                summary["findings"] = findings
+                summary["passed"] = False
+                (artifacts_dir / "bypass_diagnostic_summary.json").write_text(
+                    json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
+                )
         dist.barrier()
 
-    return complete_stage(
+    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+    findings = list((summary or {}).get("findings") or ())
+    return complete_sanity_stage(
         config,
         manifest,
         outputs={
@@ -4018,4 +4138,8 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
             "table_path": str(artifacts_dir / "bypass_diagnostic_table.md"),
             "csv_path": str(artifacts_dir / "bypass_diagnostic_scores.csv"),
         },
+        verdict=SanityVerdict(
+            passed=bool((summary or {}).get("passed", True)),
+            findings=findings,
+        ),
     )

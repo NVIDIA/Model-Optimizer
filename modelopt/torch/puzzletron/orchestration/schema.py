@@ -101,6 +101,7 @@ class StageExecutionSpec:
     mesh_override: ParallelMeshOverride | None = None
     gpus_per_node: int | None = None
     partition: str | None = None
+    resource: str = "gpu"
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,7 @@ class SlurmRunnerConfig:
     partition: str = "batch"
     partition_interactive: str | None = None
     partition_batch: str | None = None
+    partition_cpu: str | None = None
     interactive_max_nodes: int = 2
     max_nodes: int | None = None
     time_limit: str = "4:00:00"
@@ -190,6 +192,7 @@ class StagePlanNode:
     parents: tuple[str, ...]
     distributed: bool
     partition: str | None = None
+    resource: str = "gpu"
 
 
 @dataclass(frozen=True)

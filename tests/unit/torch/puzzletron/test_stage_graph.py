@@ -47,10 +47,15 @@ def test_registry_uses_the_approved_fixed_dependencies():
     assert selected_parent_stage_ids("depth_importance", {}) == ("tokenize_data",)
     assert selected_parent_stage_ids("width_importance", {}) == ("tokenize_data",)
     assert selected_parent_stage_ids("sort", {}) == ("width_importance",)
-    for stage in ("sort_sanity", "width_sanity", "slicing_sanity", "bypass_sanity"):
-        assert selected_parent_stage_ids(stage, {}) == ("sort",)
+    assert selected_parent_stage_ids("sort_sanity", {}) == ("sort",)
+    assert selected_parent_stage_ids("width_sanity", {}) == ("sort_sanity",)
+    assert selected_parent_stage_ids("slicing_sanity", {}) == ("width_sanity",)
+    assert selected_parent_stage_ids("bypass_sanity", {}) == ("sort",)
     assert selected_parent_stage_ids("bypass", {}) == ("bypass_sanity",)
     assert selected_parent_stage_ids("build_library", {}) == ("bypass",)
+    assert selected_parent_stage_ids(
+        "build_library", {"vllm_stats": {"enabled": True}}
+    ) == ("bypass", "vllm_stats")
     assert selected_parent_stage_ids("replacement_scoring", {}) == ("build_library",)
     assert selected_parent_stage_ids("mip", {}) == (
         "vllm_stats",

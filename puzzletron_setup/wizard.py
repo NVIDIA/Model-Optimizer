@@ -16,7 +16,7 @@ import yaml
 
 from . import SetupError
 from .inspection import InspectedModel, infer_dataset_modality, inspect_model
-from .profiles import UnsupportedModelError
+from .profiles import CandidateCounts, UnsupportedModelError, count_candidate_options
 from .prompts import PromptSession
 from .state import AnswerState
 
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 __all__ = ["run_wizard"]
 
 _MESH_KEYS = ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
+_DEFAULT_MIP_SOLUTION_COUNT = 3
+_DEFAULT_HOMOGENEOUS_SOLUTIONS_PER_SCENARIO = 8
 
 
 def _default(state: AnswerState, section: str, key: str, fallback: Any) -> Any:
@@ -180,6 +182,62 @@ def _axis_defaults(values: tuple[int, ...], teacher: int) -> list[int]:
     return defaults
 
 
+def _vllm_granularity_choices(counts: CandidateCounts) -> list[tuple[str, str]]:
+    width_count = counts.effective_vllm_width_count
+    if width_count == 1:
+        subblock_label = f"Sublayer — {counts.vllm_subblock_total} unique configurations"
+        block_label = f"Whole block — {counts.vllm_block_total} unique configurations"
+    else:
+        subblock_label = (
+            f"Sublayer — {counts.vllm_subblock} configurations/width, "
+            f"{counts.vllm_subblock_total} total across {width_count} widths"
+        )
+        block_label = (
+            f"Whole block — {counts.vllm_block} configurations/width, "
+            f"{counts.vllm_block_total} total across {width_count} widths"
+        )
+    return [
+        (subblock_label, "subblock"),
+        (block_label, "block"),
+    ]
+
+
+def _replacement_count_label(
+    label: str,
+    per_width: int,
+    total: int,
+    width_count: int,
+) -> str:
+    if width_count == 1:
+        return f"{label} — {total} solutions"
+    return f"{label} — {per_width} solutions/width, {total} total across {width_count} widths"
+
+
+def _replacement_granularity_choices(
+    counts: CandidateCounts,
+) -> list[tuple[str, str]]:
+    return [
+        (
+            _replacement_count_label(
+                "Subblock",
+                counts.replacement_subblock_per_width,
+                counts.replacement_subblock_total,
+                counts.width_count,
+            ),
+            "subblock",
+        ),
+        (
+            _replacement_count_label(
+                "Whole block",
+                counts.replacement_block_per_width,
+                counts.replacement_block_total,
+                counts.width_count,
+            ),
+            "block",
+        ),
+    ]
+
+
 def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedModel) -> None:
     if state.section("pruning"):
         return
@@ -224,6 +282,7 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
             "values": sorted({int(value) for value in selected}, reverse=True),
             "alignment": axis.alignment,
         }
+    counts = count_candidate_options(model.config, inventory, axes)
 
     sort_sanity = prompts.confirm("Run sorting sanity checks?", default=False)
     bypass_sanity = prompts.confirm("Run bypass sanity checks?", default=False)
@@ -256,7 +315,7 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
     print(f"The model has {inventory.num_layers} blocks and {inventory.num_sublayers} subblocks.")
     replacement_granularity = prompts.select(
         "Replace and score one block or subblock at a time?",
-        [("Subblock", "subblock"), ("Block", "block")],
+        _replacement_granularity_choices(counts),
         default="subblock",
     )
     width_samples = prompts.integer("Width-importance samples:", default=32 * 1024)
@@ -277,7 +336,11 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
     )
 
 
-def _ask_runtime(prompts: PromptSession, state: AnswerState) -> None:
+def _ask_runtime(
+    prompts: PromptSession,
+    state: AnswerState,
+    model: InspectedModel,
+) -> None:
     if state.section("runtime"):
         return
     prompts.begin(state, "runtime")
@@ -294,7 +357,19 @@ def _ask_runtime(prompts: PromptSession, state: AnswerState) -> None:
     isl = sequence_length
     osl = 1024
     concurrency = 1
+    granularity = "subblock"
     if enabled:
+        axes = state.section("pruning")["axes"]
+        counts = count_candidate_options(model.config, model.inventory, axes)
+        granularity = prompts.select(
+            "vLLM measurement granularity:",
+            _vllm_granularity_choices(counts),
+            default="subblock",
+            description=(
+                "Sublayer measurements isolate attention/GDN and FFN costs; whole-block "
+                "measurements capture their runtime interaction."
+            ),
+        )
         isl = prompts.integer("Serving input sequence length (ISL):", default=sequence_length)
         osl = prompts.integer("Serving output sequence length (OSL):", default=1024)
         concurrency = prompts.integer("Serving concurrency:", default=1)
@@ -302,6 +377,7 @@ def _ask_runtime(prompts: PromptSession, state: AnswerState) -> None:
         "runtime",
         {
             "vllm_enabled": enabled,
+            "granularity": granularity,
             "workload_id": "serving-default",
             "isl": isl,
             "osl": osl,
@@ -434,20 +510,28 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
 
         search_space: dict[str, Any] = {"depth": "all", "embedding": "all"}
         if detailed:
-            for key, label in (
-                ("depth", "Depth loop (all, integer, or YAML range mapping):"),
-                ("embedding", "Embedding loop (all, integer, or YAML list):"),
-            ):
-                while True:
-                    raw = prompts.text(label, default="all")
-                    try:
-                        search_space[key] = _parse_yaml_value(raw)
-                        break
-                    except yaml.YAMLError as error:
-                        print(f"Invalid YAML value: {error}")
+            while True:
+                raw = prompts.text(
+                    "Depth loop (all, integer, or YAML range mapping):", default="all"
+                )
+                try:
+                    search_space["depth"] = _parse_yaml_value(raw)
+                    break
+                except yaml.YAMLError as error:
+                    print(f"Invalid YAML value: {error}")
+        while True:
+            raw = prompts.text(
+                "Embedding widths for this MIP run (all or YAML list):",
+                default="all",
+            )
+            try:
+                search_space["embedding"] = _parse_yaml_value(raw)
+                break
+            except yaml.YAMLError as error:
+                print(f"Invalid YAML value: {error}")
         solver = {
             "backend": "auto",
-            "num_solutions": 2000,
+            "num_solutions": _DEFAULT_MIP_SOLUTION_COUNT,
             "min_hamming_distance": 3,
             "max_seconds_per_solution": 120,
         }
@@ -459,7 +543,9 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
                         ["auto", "pulp", "cuopt"],
                         default="auto",
                     ),
-                    "num_solutions": prompts.integer("MIP solution count:", default=2000),
+                    "num_solutions": prompts.integer(
+                        "MIP solution count:", default=_DEFAULT_MIP_SOLUTION_COUNT
+                    ),
                     "min_hamming_distance": prompts.integer(
                         "Minimum Hamming distance:", default=3, minimum=1
                     ),
@@ -470,12 +556,13 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
             )
         homogeneous_config: dict[str, Any] = {
             "enabled": homogeneous,
-            "keep": 100,
+            "keep": _DEFAULT_HOMOGENEOUS_SOLUTIONS_PER_SCENARIO,
             "rank_by": "objective",
         }
         if detailed and homogeneous:
             homogeneous_config["keep"] = prompts.integer(
-                "Homogeneous candidates to keep:", default=100
+                "Homogeneous candidates to keep per width/depth scenario:",
+                default=_DEFAULT_HOMOGENEOUS_SOLUTIONS_PER_SCENARIO,
             )
             rank_by = prompts.select(
                 "Rank homogeneous candidates by:",
@@ -814,6 +901,8 @@ def _ask_mesh(
     mesh["ep"] = (
         prompts.integer(f"  {labels['ep']}:", default=int(defaults.get("ep", 1))) if moe else 1
     )
+    if not moe:
+        print("  Expert parallel (EP): 1 (not applicable to dense models).")
     print(
         "  Allocation: "
         f"{mesh['tp']} TP * {mesh['cp']} CP * {mesh['pp']} PP * "
@@ -858,9 +947,11 @@ def _resource_rows(
     workers: Mapping[str, int],
 ) -> list[dict[str, Any]]:
     rows = []
+    single_gpu = dict.fromkeys(_MESH_KEYS, 1)
     stages = [
         ("importance/scoring", common, int(workers["pool"])),
-        ("vLLM/AIPerf/evaluation", common, int(workers["sharded"])),
+        ("vLLM/AIPerf", single_gpu, int(workers["sharded"])),
+        ("evaluation", common, int(workers["sharded"])),
         ("bypass", bypass, 1),
         ("global KD", global_kd, 1),
     ]
@@ -946,10 +1037,20 @@ def _ask_infrastructure(
     }
     runner: dict[str, Any] = {"kind": runner_kind}
     if runner_kind == "slurm":
+        cpu_partition = prompts.text(
+            "CPU partition (blank to use one GPU node for CPU/IO stages):",
+            default="",
+            description=(
+                "Used for conversion, tokenization, sorting, block-library construction, "
+                "MIP, filters, and materialization. Leave blank when the cluster has no "
+                "CPU-only partition."
+            ),
+        ).strip()
         runner["slurm"] = {
             "account": prompts.text("Slurm account:", default=""),
             "partition_interactive": prompts.text("Interactive partition:", default="interactive"),
             "partition_batch": prompts.text("Batch partition:", default="batch"),
+            "partition_cpu": cpu_partition or None,
             "time_limit": prompts.text("Default time limit:", default="4:00:00"),
             "qos": prompts.text("QoS (blank for none):", default="").strip() or None,
             "max_nodes": prompts.integer("Maximum simultaneous nodes:", default=64),
@@ -1060,7 +1161,7 @@ def run_wizard(*, detailed: bool, resume: Path | None) -> Path:
     _print_inventory(model)
     _ask_data(prompts, state, model)
     _ask_pruning(prompts, state, model)
-    _ask_runtime(prompts, state)
+    _ask_runtime(prompts, state, model)
     _ask_mip(prompts, state)
     _ask_post_mip(prompts, state)
     _ask_infrastructure(prompts, state, model)

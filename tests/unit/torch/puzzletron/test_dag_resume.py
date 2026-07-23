@@ -184,6 +184,36 @@ def test_every_registry_stage_projects_its_own_section_but_not_report_settings()
 
 
 @pytest.mark.parametrize(
+    "stage",
+    (
+        "sort_sanity",
+        "width_sanity",
+        "slicing_sanity",
+        "bypass_sanity",
+        "global_distillation_sanity",
+    ),
+)
+def test_sanity_stage_identity_includes_global_warning_policy(stage: str) -> None:
+    config = {
+        stage: {"enabled": True},
+        "sanity": {"fail_on_warnings": False},
+    }
+    changed = {**config, "sanity": {"fail_on_warnings": True}}
+
+    assert semantic_stage_config(changed, stage) != semantic_stage_config(config, stage)
+
+
+def test_non_sanity_stage_identity_ignores_global_warning_policy() -> None:
+    config = {
+        "sort": {"enabled": True},
+        "sanity": {"fail_on_warnings": False},
+    }
+    changed = {**config, "sanity": {"fail_on_warnings": True}}
+
+    assert semantic_stage_config(changed, "sort") == semantic_stage_config(config, "sort")
+
+
+@pytest.mark.parametrize(
     "section",
     ("tokenize_data", "convert", "dataset_path", "model", "data", "dataset"),
 )
@@ -588,3 +618,19 @@ def test_static_pre_v3_marker_reports_implementation_source_staleness(tmp_path: 
 def test_embedding_followup_does_not_replay_completed_root_vllm_stats() -> None:
     assert _embedding_followup_stage("build_library")
     assert not _embedding_followup_stage("vllm_stats")
+
+
+def test_embedding_build_library_completion_tracks_width_scenarios() -> None:
+    from examples.puzzletron.main import _stage_output_patterns
+
+    patterns = _stage_output_patterns(
+        {
+            "embedding_pruning": {"enabled": True, "widths": [1024, 768]},
+            "vllm_stats": {"subblock_stats_filename": "runtime.json"},
+        },
+        "build_library",
+    )
+
+    assert "scenarios/width_scenarios.json" in patterns
+    assert "scenarios/width-1024/depth-00/manifests/build_library.json" in patterns
+    assert "scenarios/width-0768/depth-00/runtime.json" in patterns

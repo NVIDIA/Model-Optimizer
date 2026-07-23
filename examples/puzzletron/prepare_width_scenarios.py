@@ -13,6 +13,7 @@ import shutil
 
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
+from modelopt.torch.puzzletron.candidates import discover_bypass_checkpoints
 from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.pruning.materialize import materialize_hidden_width_checkpoint
@@ -90,17 +91,44 @@ def _resolve_source_checkpoint(
     return requested
 
 
-def _resolve_bypass_checkpoint(config: dict) -> Path | None:
+def _resolve_bypass_checkpoint(config: dict, puzzle_dir: Path) -> Path | None:
     """Resolve the optional nested-bypass checkpoint used for one-block overlays."""
     configured = (config.get("replacement_scoring") or {}).get("bypass_checkpoint_dir")
-    if configured is None:
-        return None
-    checkpoint = Path(configured).resolve()
-    if not (checkpoint / "config.json").is_file():
-        raise FileNotFoundError(
-            f"bypass overlay checkpoint is incomplete: {checkpoint}"
+    if configured is not None:
+        checkpoint = Path(configured).resolve()
+        if not (checkpoint / "config.json").is_file():
+            raise FileNotFoundError(
+                f"bypass overlay checkpoint is incomplete: {checkpoint}"
+            )
+        return checkpoint
+
+    library = (
+        config.get("build_library")
+        or config.get("build_replacement_library")
+        or {}
+    )
+    include_bypass = bool(
+        library.get(
+            "include_bypass",
+            (config.get("bypass") or {}).get("enabled", False),
         )
-    return checkpoint
+    )
+    if not include_bypass:
+        return None
+
+    checkpoints = discover_bypass_checkpoints(puzzle_dir)
+    if not checkpoints:
+        raise FileNotFoundError(
+            "build_library.include_bypass is enabled, but no realized bypass "
+            f"checkpoint was found under {puzzle_dir / 'ckpts'}"
+        )
+    if len(checkpoints) > 1:
+        choices = ", ".join(str(checkpoint) for checkpoint in checkpoints)
+        raise RuntimeError(
+            "multiple realized bypass checkpoints are available; set "
+            f"replacement_scoring.bypass_checkpoint_dir explicitly: {choices}"
+        )
+    return checkpoints[0].resolve()
 
 
 def main() -> None:
@@ -116,7 +144,7 @@ def main() -> None:
     if not (source / "config.json").is_file():
         raise FileNotFoundError(f"width-scenario parent is incomplete: {source}")
     source_identity = checkpoint_identity(source)
-    bypass_source = _resolve_bypass_checkpoint(cfg)
+    bypass_source = _resolve_bypass_checkpoint(cfg, puzzle_dir)
     bypass_identity = checkpoint_identity(bypass_source) if bypass_source is not None else None
     model_cfg = cfg.get("model") or {}
     descriptor = resolve_descriptor_from_pretrained(
@@ -131,8 +159,6 @@ def main() -> None:
     teacher_blocks = list(maybe_cast_block_configs(source_config.block_configs))
     embedding = dict(cfg.get("embedding_pruning") or {})
     widths = tuple(int(width) for width in embedding.get("widths", ()))
-    if teacher_width not in widths:
-        raise ValueError(f"embedding widths {widths} do not include parent width {teacher_width}")
 
     summary = {
         "source_checkpoint": str(source.resolve()),
@@ -216,7 +242,8 @@ def main() -> None:
         num_layers = len(teacher_blocks)
         if teacher_entries != num_layers:
             raise RuntimeError(
-                f"width {width} library has {teacher_entries} teacher entries, expected {num_layers}"
+                f"width {width} library has {teacher_entries} teacher entries, "
+                f"expected {num_layers}"
             )
         if len(solutions) != len(library["entries"]) - num_layers:
             raise RuntimeError(

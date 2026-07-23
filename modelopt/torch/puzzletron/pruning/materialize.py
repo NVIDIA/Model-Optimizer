@@ -375,28 +375,30 @@ def materialize_checkpoint_from_sorted(
         "solution_identity": solution_identity,
         "config_identity": config_identity,
     }
-    manifest_path = output_dir / "puzzletron_realization.json"
-    if manifest_path.is_file() and not overwrite:
-        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if existing.get("status") == "complete" and all(
-            existing.get(key) == value for key, value in expected_identity.items()
-        ):
-            index_path = output_dir / "model.safetensors.index.json"
-            complete = (output_dir / "config.json").is_file()
-            if index_path.is_file():
-                index = json.loads(index_path.read_text(encoding="utf-8"))
-                complete = complete and all(
-                    (output_dir / shard).is_file()
-                    for shard in set(index.get("weight_map", {}).values())
-                )
-            else:
-                complete = complete and (output_dir / "model.safetensors").is_file()
-            if complete:
+    from ..checkpoint_transactions import (
+        REALIZATION_MANIFEST,
+        REALIZATION_TMP_SUFFIX,
+        prepare_realization_retry,
+        quarantine_incomplete_realization,
+        realization_is_complete,
+        remove_realization_temp_dir,
+    )
+
+    manifest_path = output_dir / REALIZATION_MANIFEST
+    if not overwrite:
+        if realization_is_complete(output_dir):
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if all(existing.get(key) == value for key, value in expected_identity.items()):
                 return output_dir
-            raise RuntimeError(f"completed realization manifest has missing outputs: {output_dir}")
-        raise FileExistsError(
-            f"realization destination exists with a different identity: {output_dir}"
-        )
+            raise FileExistsError(
+                f"realization destination exists with a different identity: {output_dir}"
+            )
+        if not prepare_realization_retry(output_dir, expected_identity=expected_identity):
+            return output_dir
+        overwrite = True
+    elif output_dir.exists() and not realization_is_complete(output_dir):
+        quarantine_incomplete_realization(output_dir)
+        remove_realization_temp_dir(output_dir)
     if output_dir.exists() and not overwrite:
         raise FileExistsError(f"realization destination already exists: {output_dir}")
 
@@ -465,7 +467,7 @@ def materialize_checkpoint_from_sorted(
         ple_spec is not None and target_ple_width < teacher_ple_width
     )
 
-    tmp_dir = output_dir.with_name(output_dir.name + ".puzzletron-tmp")
+    tmp_dir = output_dir.with_name(output_dir.name + REALIZATION_TMP_SUFFIX)
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True)
@@ -564,7 +566,7 @@ def materialize_checkpoint_from_sorted(
             "hidden_width": target_hidden_width,
             "ple_width": target_ple_width,
         }
-        (tmp_dir / "puzzletron_realization.json").write_text(
+        (tmp_dir / REALIZATION_MANIFEST).write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         if output_dir.exists():
@@ -573,6 +575,11 @@ def materialize_checkpoint_from_sorted(
     except BaseException:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
+        if output_dir.exists() and not realization_is_complete(output_dir):
+            try:
+                quarantine_incomplete_realization(output_dir)
+            except FileExistsError:
+                pass
         raise
     return output_dir
 
@@ -875,6 +882,12 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
             ):
                 keep = torch.arange(sk)
                 orig_intermediate = int(layout.moe_shared_intermediate)
+                if layout.moe_shared_gate_key and layout.moe_shared_gate_key in sd:
+                    # Unfused shared expert (Qwen): gate/up are independent row tensors.
+                    sd[layout.moe_shared_gate_key] = sd[layout.moe_shared_gate_key][keep]
+                    gate_bias = _bias_key(layout.moe_shared_gate_key)
+                    if gate_bias in sd:
+                        sd[gate_bias] = sd[gate_bias][keep]
                 if layout.moe_shared_up_key in sd:
                     sd[layout.moe_shared_up_key] = _slice_gated_up(
                         sd[layout.moe_shared_up_key], keep, orig_intermediate

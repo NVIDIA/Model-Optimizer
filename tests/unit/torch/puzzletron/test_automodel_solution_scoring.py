@@ -44,6 +44,7 @@ from modelopt.torch.puzzletron.plugins.automodel.solution_metrics import (
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
     _candidate_execution_context,
     _load_model_config_distributed,
+    _quarantine_failed_realization,
     _source_hidden_channel_indices,
     _solution_prune_target,
     _solution_prune_targets,
@@ -348,13 +349,44 @@ def test_parent_equivalence_still_gates_hidden_metrics_without_basis_permutation
         )
     )
 
-    with pytest.raises(RuntimeError, match="cosine_embedding_loss_hidden_states"):
-        _validate_parent_equivalence(
-            teacher_result_path=teacher_path,
-            parent_result_path=parent_path,
-            tolerances={},
-            hidden_basis_permuted=False,
-        )
+    summary = _validate_parent_equivalence(
+        teacher_result_path=teacher_path,
+        parent_result_path=parent_path,
+        tolerances={},
+        hidden_basis_permuted=False,
+    )
+
+    assert summary["passed"] is False
+    assert summary["findings"]
+    assert any("cosine_embedding_loss_hidden_states" in item["message"] for item in summary["findings"])
+
+
+def test_unloadable_realization_is_quarantined_after_first_load_failure(
+    tmp_path, monkeypatch
+):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}\n")
+    (checkpoint / "model.safetensors").write_text("weights\n")
+    (checkpoint / "puzzletron_realization.json").write_text(
+        json.dumps({"status": "complete"}) + "\n"
+    )
+    barriers = []
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.solution_launch.dist.is_master",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.solution_launch.dist.barrier",
+        lambda: barriers.append(True),
+    )
+
+    quarantined = _quarantine_failed_realization(checkpoint)
+
+    assert quarantined is not None
+    assert quarantined.is_dir()
+    assert not checkpoint.exists()
+    assert barriers == [True]
 
 
 def test_native_gate_can_mask_ranked_nonprefix_expert_ids():

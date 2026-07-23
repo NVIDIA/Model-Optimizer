@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable
 
 __all__ = [
     "STAGE_REGISTRY",
@@ -23,6 +23,7 @@ __all__ = [
     "stage_ids",
     "stage_is_enabled",
     "stage_spec",
+    "topological_mapping_items",
     "topological_stage_ids",
 ]
 
@@ -55,6 +56,40 @@ class StageSpec:
     distributed: bool = False
     report_order: int = 0
     topology_order: int = 0
+
+
+def topological_mapping_items(
+    nodes: Mapping[str, Any],
+    dependency_ids: Callable[[str, Any], Iterable[str]],
+) -> tuple[tuple[str, Any], ...]:
+    """Return mapping items in dependency order, independent of key serialization order."""
+
+    known = set(nodes)
+    dependencies = {
+        str(node_id): tuple(dict.fromkeys(str(value) for value in dependency_ids(node_id, value)))
+        for node_id, value in nodes.items()
+    }
+    for node_id, node_dependencies in dependencies.items():
+        unknown = set(node_dependencies) - known
+        if unknown:
+            raise ValueError(f"node {node_id!r} references unknown dependencies {sorted(unknown)}")
+
+    pending = dict(nodes)
+    completed: set[str] = set()
+    ordered: list[tuple[str, Any]] = []
+    while pending:
+        ready = [
+            (str(node_id), value)
+            for node_id, value in pending.items()
+            if set(dependencies[str(node_id)]) <= completed
+        ]
+        if not ready:
+            raise ValueError(f"dependency cycle among nodes: {sorted(pending)}")
+        for node_id, value in ready:
+            ordered.append((node_id, value))
+            completed.add(node_id)
+            del pending[node_id]
+    return tuple(ordered)
 
 
 _SPECS: list[StageSpec] = []
@@ -149,14 +184,14 @@ _stage(
 _stage(
     "width_sanity",
     "Width Sanity Check",
-    parents=("sort",),
+    parents=("sort_sanity",),
     completion_artifacts=("artifacts/width_sanity/summary.json",),
     distributed=True,
 )
 _stage(
     "slicing_sanity",
     "Slicing Sanity Check",
-    parents=("sort",),
+    parents=("width_sanity",),
     completion_artifacts=("artifacts/slicing_sanity/summary.json",),
 )
 _stage(
@@ -182,6 +217,7 @@ _stage(
     "Build Block Library",
     required=True,
     parents=("bypass",),
+    conditional_parents=(("vllm_stats", ("vllm_stats.enabled", True)),),
     completion_artifacts=("replacement_library.json", "candidate_library.json"),
     distributed=True,
 )

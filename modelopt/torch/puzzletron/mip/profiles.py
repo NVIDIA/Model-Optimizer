@@ -14,8 +14,11 @@ from typing import Any, Iterable, Mapping
 __all__ = [
     "BoundValue",
     "DepthSelection",
+    "HomogeneousPolicy",
     "MIPProfile",
+    "ObjectiveSpec",
     "ProfileConstraint",
+    "SolverOptions",
     "compile_profile_constraints",
     "normalize_mip_profiles",
 ]
@@ -68,12 +71,51 @@ class DepthSelection:
 
 
 @dataclass(frozen=True)
+class ObjectiveSpec:
+    """One independent additive objective solve."""
+
+    metric: str
+    direction: str
+
+    @property
+    def bigger_is_better(self) -> bool:
+        return self.direction == "maximize"
+
+
+@dataclass(frozen=True)
+class SolverOptions:
+    """Backend-neutral MIP solution-pool controls."""
+
+    backend: str = "pulp"
+    num_solutions: int = 1
+    min_hamming_distance: int = 1
+    max_seconds_per_solution: float | None = 60.0
+
+
+@dataclass(frozen=True)
+class HomogeneousPolicy:
+    """Retention and ranking policy for homogeneous Cartesian candidates."""
+
+    enabled: bool = False
+    keep: int = -1
+    rank_by: str = "objective"
+    constraint_weights: tuple[tuple[str, float], ...] = ()
+
+    @property
+    def num_solutions(self) -> int:
+        return self.keep if self.enabled else 0
+
+
+@dataclass(frozen=True)
 class MIPProfile:
-    """One concrete profile after expanding every ``values`` grid."""
+    """One concrete run/variant/matrix/objective solve."""
 
     profile_id: str
-    base_profile_id: str
-    num_homogeneous_solutions: int
+    run_id: str
+    variant_id: str
+    objective: ObjectiveSpec
+    solver: SolverOptions
+    homogeneous: HomogeneousPolicy
     constraints: tuple[ProfileConstraint, ...]
     workloads: dict[str, dict[str, Any]]
     depths: tuple[int, ...]
@@ -81,6 +123,16 @@ class MIPProfile:
     embedding_widths: tuple[int, ...]
     axes_default: str
     axis_options: dict[str, Any]
+
+    @property
+    def base_profile_id(self) -> str:
+        """Compatibility label used by existing MIP artifact reports."""
+
+        return self.run_id
+
+    @property
+    def num_homogeneous_solutions(self) -> int:
+        return self.homogeneous.num_solutions
 
     @property
     def required_workloads(self) -> tuple[str, ...]:
@@ -109,6 +161,7 @@ _METRICS = {
     "prefill_runtime": _MetricSpec("prefill_runtime_ms", "max", "time", True),
     "throughput": _MetricSpec("runtime_ms", "min", "throughput", True),
     "kv_heads": _MetricSpec("num_kv_heads", "max", "count"),
+    "experts": _MetricSpec("num_experts", "max", "count"),
 }
 
 _COUNT_SUFFIXES = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
@@ -133,55 +186,10 @@ def _normalize_workloads(raw: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return workloads
 
 
-def _find_values(node: Any, path: tuple[str, ...] = ()) -> tuple[tuple[str, ...], list] | None:
-    if isinstance(node, Mapping):
-        if "values" in node:
-            if set(node) != {"values"}:
-                raise ValueError("a constraint values grid cannot also define bounds")
-            values = node["values"]
-            if not isinstance(values, (list, tuple)) or not values:
-                raise ValueError("constraint values must be a non-empty list")
-            return path, list(values)
-        for key, value in node.items():
-            found = _find_values(value, (*path, str(key)))
-            if found is not None:
-                return found
-    return None
-
-
-def _replace_at_path(node: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-    target = node
-    for key in path[:-1]:
-        target = target[key]
-    target[path[-1]] = deepcopy(value)
-
-
 def _slug(value: Any) -> str:
     text = str(value).strip().lower().replace("%", "pct")
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     return text or "value"
-
-
-def _expand_values(raw_profile: Mapping[str, Any]) -> list[tuple[dict[str, Any], tuple[str, ...]]]:
-    expanded = [(deepcopy(dict(raw_profile)), ())]
-    while True:
-        next_expanded = []
-        changed = False
-        for profile, suffixes in expanded:
-            found = _find_values(profile.get("constraints") or {})
-            if found is None:
-                next_expanded.append((profile, suffixes))
-                continue
-            changed = True
-            path, values = found
-            for value in values:
-                candidate = deepcopy(profile)
-                _replace_at_path(candidate["constraints"], path, value)
-                label = "-".join((*path, _slug(value)))
-                next_expanded.append((candidate, (*suffixes, label)))
-        expanded = next_expanded
-        if not changed:
-            return expanded
 
 
 def _absolute_value(metric: str, value: Any, unit_kind: str) -> BoundValue:
@@ -279,8 +287,6 @@ def _normalize_constraints(
             raise ValueError(f"{metric} must select a named workload with at")
         minimum, maximum = _bound_values(metric, value, spec)
         constraints.append(ProfileConstraint(metric, spec.stat_name, None, minimum, maximum))
-    if not constraints:
-        raise ValueError("a MIP profile must define at least one constraint")
     return tuple(constraints)
 
 
@@ -311,6 +317,146 @@ def _homogeneous_count(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < -1:
         raise ValueError("num_homogeneous_solutions must be -1 or a non-negative integer")
     return value
+
+
+def _objective_specs(raw: Any) -> tuple[ObjectiveSpec, ...]:
+    if isinstance(raw, (str, Mapping)):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ValueError("each MIP run must define one or more objectives")
+    objectives = []
+    for entry in raw:
+        if isinstance(entry, str):
+            metric, direction = entry, "minimize"
+        elif isinstance(entry, Mapping):
+            unknown = set(entry) - {"metric", "direction"}
+            if unknown or not entry.get("metric"):
+                raise ValueError(f"invalid MIP objective fields: {sorted(unknown)}")
+            metric = str(entry["metric"])
+            direction = str(entry.get("direction", "minimize")).lower()
+        else:
+            raise TypeError("MIP objectives must be strings or mappings")
+        if direction not in {"minimize", "maximize"}:
+            raise ValueError("objective direction must be minimize or maximize")
+        objectives.append(ObjectiveSpec(str(metric), direction))
+    if len({(item.metric, item.direction) for item in objectives}) != len(objectives):
+        raise ValueError("duplicate MIP objectives are not allowed")
+    return tuple(objectives)
+
+
+def _solver_options(raw: Mapping[str, Any] | None) -> SolverOptions:
+    raw = dict(raw or {})
+    unknown = set(raw) - {
+        "backend",
+        "num_solutions",
+        "min_hamming_distance",
+        "max_seconds_per_solution",
+    }
+    if unknown:
+        raise ValueError(f"unknown common MIP solver options: {sorted(unknown)}")
+    backend = str(raw.get("backend", "pulp")).lower()
+    if backend not in {"pulp", "cbc", "cuopt", "auto"}:
+        raise ValueError(f"unsupported MIP solver backend {backend!r}")
+    num_solutions = int(raw.get("num_solutions", 1))
+    min_hamming = int(raw.get("min_hamming_distance", 1))
+    timeout = raw.get("max_seconds_per_solution", 60.0)
+    if num_solutions < 1:
+        raise ValueError("solver.num_solutions must be positive")
+    if min_hamming < 1:
+        raise ValueError("solver.min_hamming_distance must be positive")
+    if timeout is not None and float(timeout) <= 0:
+        raise ValueError("solver.max_seconds_per_solution must be positive or null")
+    return SolverOptions(
+        backend=backend,
+        num_solutions=num_solutions,
+        min_hamming_distance=min_hamming,
+        max_seconds_per_solution=float(timeout) if timeout is not None else None,
+    )
+
+
+def _homogeneous_policy(raw: Mapping[str, Any] | None) -> HomogeneousPolicy:
+    raw = dict(raw or {})
+    unknown = set(raw) - {"enabled", "keep", "rank_by"}
+    if unknown:
+        raise ValueError(f"unknown homogeneous policy fields: {sorted(unknown)}")
+    enabled = bool(raw.get("enabled", False))
+    keep_raw = raw.get("keep", "all")
+    keep = -1 if keep_raw == "all" else _homogeneous_count(keep_raw)
+    rank_raw = raw.get("rank_by", "objective")
+    weights: dict[str, float] = {}
+    if isinstance(rank_raw, Mapping):
+        if set(rank_raw) != {"constraint_closeness"}:
+            raise ValueError("homogeneous.rank_by mapping must contain constraint_closeness")
+        closeness = rank_raw["constraint_closeness"] or {}
+        if not isinstance(closeness, Mapping):
+            raise TypeError("constraint_closeness must be a mapping")
+        unknown_closeness = set(closeness) - {"weights"}
+        if unknown_closeness:
+            raise ValueError(
+                f"unknown constraint_closeness fields: {sorted(unknown_closeness)}"
+            )
+        weights = {
+            str(key): float(value)
+            for key, value in dict(closeness.get("weights") or {}).items()
+        }
+        if any(value <= 0 for value in weights.values()):
+            raise ValueError("constraint-closeness weights must be positive")
+        rank_by = "constraint_closeness"
+    else:
+        rank_by = str(rank_raw)
+    if rank_by not in {"objective", "constraint_closeness"}:
+        raise ValueError("homogeneous.rank_by must be objective or constraint_closeness")
+    if enabled and keep == 0:
+        raise ValueError("enabled homogeneous search cannot keep zero solutions")
+    return HomogeneousPolicy(enabled, keep, rank_by, tuple(sorted(weights.items())))
+
+
+def _merge_mapping(
+    base: Mapping[str, Any] | None, update: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    merged = deepcopy(dict(base or {}))
+    for key, value in dict(update or {}).items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _merge_mapping(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _matrix_rows(raw: Mapping[str, Any] | None) -> tuple[dict[str, Any], ...]:
+    matrix = dict(raw or {})
+    if not matrix:
+        return ({},)
+    supported = {"embedding", "depth"}
+    invalid = sorted(
+        key
+        for key in matrix
+        if key not in supported
+        and not key.startswith("constraints.")
+        and not key.startswith("solver.")
+        and not key.startswith("homogeneous.")
+    )
+    if invalid:
+        raise ValueError(f"unsupported MIP matrix paths: {invalid}")
+    keys = tuple(matrix)
+    domains = []
+    for key in keys:
+        values = matrix[key]
+        if not isinstance(values, (list, tuple)) or not values:
+            raise ValueError(f"MIP matrix field {key!r} must be a non-empty list")
+        domains.append(tuple(values))
+    return tuple(dict(zip(keys, values)) for values in product(*domains))
+
+
+def _apply_matrix_path(config: dict[str, Any], path: str, value: Any) -> None:
+    target = config
+    keys = path.split(".")
+    for key in keys[:-1]:
+        child = target.setdefault(key, {})
+        if not isinstance(child, dict):
+            raise ValueError(f"MIP matrix path crosses a scalar: {path}")
+        target = child
+    target[keys[-1]] = deepcopy(value)
 
 
 def _depth_selections(
@@ -366,59 +512,153 @@ def normalize_mip_profiles(
     available_depth_counts: Mapping[str, int] | None = None,
     depth_granularity: str = "subblock",
 ) -> tuple[MIPProfile, ...]:
-    """Validate and expand the public ``mip.profiles`` configuration."""
+    """Validate and compile public ``mip.runs`` into concrete solve specs."""
 
     workloads = _normalize_workloads(mip_cfg.get("workloads") or {})
-    raw_profiles = mip_cfg.get("profiles") or {}
-    if not isinstance(raw_profiles, Mapping):
-        raise TypeError("mip.profiles must be a mapping of profile names")
+    legacy = {
+        key: mip_cfg.get(key)
+        for key in ("profiles", "constraint_profiles", "latency_constraint_profiles")
+        if mip_cfg.get(key)
+    }
+    if legacy:
+        raise ValueError(
+            "legacy MIP profile fields are no longer supported; use mip.runs: "
+            + ", ".join(sorted(legacy))
+        )
+    raw_runs = mip_cfg.get("runs") or {}
+    if not isinstance(raw_runs, Mapping):
+        raise TypeError("mip.runs must be a mapping of independent run names")
     depths_available = tuple(int(value) for value in available_depths)
     embeddings_available = tuple(int(value) for value in available_embeddings)
+    defaults = dict(mip_cfg.get("defaults") or {})
+    unknown_defaults = set(defaults) - {"objectives", "solver", "homogeneous"}
+    if unknown_defaults:
+        raise ValueError(f"unknown mip.defaults fields: {sorted(unknown_defaults)}")
     profiles = []
-    for base_profile_id, raw_profile in raw_profiles.items():
-        if not isinstance(raw_profile, Mapping):
-            raise TypeError(f"MIP profile {base_profile_id!r} must be a mapping")
-        for raw, suffixes in _expand_values(raw_profile):
-            search = raw.get("search_space") or {}
-            if not isinstance(search, Mapping):
-                raise TypeError("search_space must be a mapping")
-            axes_default = search.get("axes_default", "all")
-            if axes_default is None:
-                axes_default = "teacher"
-            if axes_default not in {"all", "teacher"}:
-                raise ValueError("axes_default must be all or teacher")
-            axes = search.get("axes") or {}
-            if not isinstance(axes, Mapping):
-                raise TypeError("search_space.axes must be a mapping")
-            profile_id = str(base_profile_id)
-            if suffixes:
-                profile_id += "--" + "--".join(suffixes)
-            depth_selections = _depth_selections(
-                search.get("depth"),
-                depths_available,
-                available_depth_counts=available_depth_counts,
-                depth_granularity=depth_granularity,
-            )
-            profiles.append(
-                MIPProfile(
-                    profile_id=profile_id,
-                    base_profile_id=str(base_profile_id),
-                    num_homogeneous_solutions=_homogeneous_count(
-                        raw.get("num_homogeneous_solutions", 0)
-                    ),
-                    constraints=_normalize_constraints(
-                        raw.get("constraints") or {}, workloads
-                    ),
-                    workloads=deepcopy(workloads),
-                    depths=tuple(selection.total for selection in depth_selections),
-                    depth_selections=depth_selections,
-                    embedding_widths=_selected_values(
-                        search.get("embedding"), embeddings_available, "embedding"
-                    ),
-                    axes_default=str(axes_default),
-                    axis_options={str(key): deepcopy(value) for key, value in axes.items()},
+    for run_id, run_value in raw_runs.items():
+        if run_value is False:
+            continue
+        if not isinstance(run_value, Mapping):
+            raise TypeError(f"MIP run {run_id!r} must be a mapping")
+        run = dict(run_value)
+        unknown_run = set(run) - {
+            "constraints",
+            "objectives",
+            "search_space",
+            "solver",
+            "homogeneous",
+            "variants",
+        }
+        if unknown_run:
+            raise ValueError(f"unknown fields in MIP run {run_id!r}: {sorted(unknown_run)}")
+        implicit_variant = "variants" not in run
+        raw_variants = run.get("variants") or {"default": {}}
+        if not isinstance(raw_variants, Mapping):
+            raise TypeError(f"MIP run {run_id!r} variants must be a mapping")
+        for variant_id, variant_value in raw_variants.items():
+            if not isinstance(variant_value, Mapping):
+                raise TypeError(f"MIP variant {run_id}.{variant_id} must be a mapping")
+            variant = dict(variant_value)
+            unknown_variant = set(variant) - {
+                "constraints",
+                "objectives",
+                "search_space",
+                "solver",
+                "homogeneous",
+                "matrix",
+            }
+            if unknown_variant:
+                raise ValueError(
+                    f"unknown fields in MIP variant {run_id}.{variant_id}: "
+                    f"{sorted(unknown_variant)}"
                 )
-            )
+            for matrix in _matrix_rows(variant.get("matrix")):
+                concrete = {
+                    "constraints": _merge_mapping(
+                        run.get("constraints"), variant.get("constraints")
+                    ),
+                    "search_space": _merge_mapping(
+                        run.get("search_space"), variant.get("search_space")
+                    ),
+                    "solver": _merge_mapping(
+                        defaults.get("solver"),
+                        _merge_mapping(run.get("solver"), variant.get("solver")),
+                    ),
+                    "homogeneous": _merge_mapping(
+                        defaults.get("homogeneous"),
+                        _merge_mapping(run.get("homogeneous"), variant.get("homogeneous")),
+                    ),
+                }
+                for path, value in matrix.items():
+                    if path in {"embedding", "depth"}:
+                        concrete["search_space"][path] = value
+                    else:
+                        _apply_matrix_path(concrete, path, value)
+                search = concrete["search_space"]
+                axes_default = search.get("axes_default", "all")
+                if axes_default is None:
+                    axes_default = "teacher"
+                if axes_default not in {"all", "teacher"}:
+                    raise ValueError("axes_default must be all or teacher")
+                axes = search.get("axes") or {}
+                if not isinstance(axes, Mapping):
+                    raise TypeError("search_space.axes must be a mapping")
+                depth_selections = _depth_selections(
+                    search.get("depth"),
+                    depths_available,
+                    available_depth_counts=available_depth_counts,
+                    depth_granularity=depth_granularity,
+                )
+                embeddings = _selected_values(
+                    search.get("embedding"), embeddings_available, "embedding"
+                )
+                objectives = _objective_specs(
+                    variant.get(
+                        "objectives",
+                        run.get("objectives", defaults.get("objectives")),
+                    )
+                )
+                matrix_suffix = tuple(
+                    f"{_slug(key)}-{_slug(value)}" for key, value in matrix.items()
+                )
+                constraints = _normalize_constraints(concrete["constraints"], workloads)
+                homogeneous = _homogeneous_policy(concrete["homogeneous"])
+                constraint_metrics = {constraint.metric for constraint in constraints}
+                unknown_weights = set(dict(homogeneous.constraint_weights)) - constraint_metrics
+                if unknown_weights:
+                    raise ValueError(
+                        "homogeneous constraint-closeness weights name unknown constraints: "
+                        f"{sorted(unknown_weights)}"
+                    )
+                for objective in objectives:
+                    profile_parts = [str(run_id)]
+                    if not implicit_variant:
+                        profile_parts.append(str(variant_id))
+                    profile_parts.extend(matrix_suffix)
+                    if len(objectives) > 1:
+                        profile_parts.append(
+                            f"objective-{_slug(objective.metric)}-{objective.direction}"
+                        )
+                    profiles.append(
+                        MIPProfile(
+                            profile_id="--".join(profile_parts),
+                            run_id=str(run_id),
+                            variant_id=str(variant_id),
+                            objective=objective,
+                            solver=_solver_options(concrete["solver"]),
+                            homogeneous=homogeneous,
+                            constraints=constraints,
+                            workloads=deepcopy(workloads),
+                            depths=tuple(selection.total for selection in depth_selections),
+                            depth_selections=depth_selections,
+                            embedding_widths=embeddings,
+                            axes_default=str(axes_default),
+                            axis_options={str(key): deepcopy(value) for key, value in axes.items()},
+                        )
+                    )
+    ids = [profile.profile_id for profile in profiles]
+    if len(ids) != len(set(ids)):
+        raise ValueError("MIP run expansion produced duplicate concrete solve IDs")
     return tuple(profiles)
 
 

@@ -418,8 +418,6 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
     if micro_batch_size in (None, "none", "None", ""):
         return recipe
     distributed = dict(recipe.get("distributed", {}))
-    if _int_or_default(distributed.get("pp_size"), 1) <= 1:
-        return recipe
     explicit_dp = distributed.get("dp_size")
     # AutoModel's StepScheduler counts the EP mesh as its data mesh when no
     # explicit FSDP/DP axis exists. EP ranks still consume the same packed
@@ -448,12 +446,17 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
     local_batch = (
         global_batch // batch_dp if global_batch % batch_dp == 0 else global_batch
     )
+    scheduler = dict(recipe.get("step_scheduler") or {})
+    if _int_or_default(distributed.get("pp_size"), 1) <= 1:
+        scheduler["local_batch_size"] = local_batch
+        scheduler["global_batch_size"] = local_batch * scheduler_dp
+        recipe["step_scheduler"] = scheduler
+        return recipe
     pipeline = dict(distributed.get("pipeline") or {})
     pipeline["pp_microbatch_size"] = local_batch
     pipeline["pp_batch_size"] = local_batch * _int_or_default(distributed.get("pp_size"), 1)
     distributed["pipeline"] = pipeline
     recipe["distributed"] = distributed
-    scheduler = dict(recipe.get("step_scheduler") or {})
     scheduler["local_batch_size"] = pipeline["pp_batch_size"]
     scheduler["global_batch_size"] = pipeline["pp_batch_size"] * scheduler_dp
     recipe["step_scheduler"] = scheduler

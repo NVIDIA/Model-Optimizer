@@ -116,6 +116,7 @@ class LayerLayout:
     moe_expert_intermediate_group_size: int = 1
     moe_expert_order_mode: str = "physical"
     moe_fused_gate_layout: str = "concatenated"
+    moe_shared_gate_key: str | None = None
     moe_shared_up_key: str | None = None
     moe_shared_down_key: str | None = None
     moe_fc1_latent_key: str | None = None
@@ -576,9 +577,18 @@ def sort_state_dict(
                 and layout.moe_shared_down_key in sd
             ):
                 perm = ffn_permutation(shared_score)
+                intermediate = int(sd[layout.moe_shared_down_key].shape[1])
+                if layout.moe_shared_gate_key and layout.moe_shared_gate_key in sd:
+                    sd[layout.moe_shared_gate_key] = sd[layout.moe_shared_gate_key][perm]
+                    gate_bias = _bias_key(layout.moe_shared_gate_key)
+                    if gate_bias in sd:
+                        sd[gate_bias] = sd[gate_bias][perm]
                 sd[layout.moe_shared_up_key] = _gated_up_perm(
-                    sd[layout.moe_shared_up_key], perm, sd[layout.moe_shared_down_key].shape[1]
+                    sd[layout.moe_shared_up_key], perm, intermediate
                 )
+                up_bias = _bias_key(layout.moe_shared_up_key)
+                if up_bias in sd:
+                    sd[up_bias] = _gated_up_perm(sd[up_bias], perm, intermediate)
                 sd[layout.moe_shared_down_key] = sd[layout.moe_shared_down_key][:, perm]
                 perms[f"moe.shared_intermediate.{layout.layer_idx}"] = perm
 
@@ -958,6 +968,10 @@ def build_layer_layouts(
     moe_expert_intermediate_group_size: int = 1,
     moe_expert_order_mode: str = "physical",
     moe_fused_gate_layout: str = "concatenated",
+    moe_shared_expert_subname: str = "shared_experts",
+    moe_shared_gate_subname: str | None = None,
+    moe_shared_up_subname: str = "up_proj",
+    moe_shared_down_subname: str = "down_proj",
     mamba_module: str = "self_attn",
     q_gate_row_group: int | None = None,
     attention_q_head_subnames: tuple[str, ...] = (),
@@ -1060,8 +1074,15 @@ def build_layer_layouts(
                 layout.moe_expert_down_keys = [
                     f"{mprefix}.experts.{e}.down_proj.weight" for e in range(moe.num_experts)
                 ]
-            layout.moe_shared_up_key = f"{mprefix}.shared_experts.up_proj.weight"
-            layout.moe_shared_down_key = f"{mprefix}.shared_experts.down_proj.weight"
+            shared_prefix = f"{mprefix}.{moe_shared_expert_subname}"
+            if moe_shared_gate_subname:
+                layout.moe_shared_gate_key = (
+                    f"{shared_prefix}.{moe_shared_gate_subname}.weight"
+                )
+            layout.moe_shared_up_key = f"{shared_prefix}.{moe_shared_up_subname}.weight"
+            layout.moe_shared_down_key = (
+                f"{shared_prefix}.{moe_shared_down_subname}.weight"
+            )
             if moe.latent_dim is not None:
                 layout.moe_fc1_latent_key = f"{mprefix}.fc1_latent_proj.weight"
                 layout.moe_fc2_latent_key = f"{mprefix}.fc2_latent_proj.weight"
@@ -1341,7 +1362,10 @@ def _checkpoint_tensor_categories(key: str) -> tuple[str, ...]:
         categories.append("mtp")
     if any(token in lowered for token in ("vision", "visual", "vit")):
         categories.append("vision")
-    if any(token in lowered for token in (".experts.", ".shared_experts.", ".gate.")):
+    if any(
+        token in lowered
+        for token in (".experts.", ".shared_experts.", ".shared_expert.", ".gate.")
+    ):
         categories.append("moe")
     if "latent" in lowered:
         categories.append("latent_moe")

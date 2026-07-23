@@ -29,6 +29,8 @@ write your own one. Currently, we support plugins for
 - :meth:`transformer_engine<modelopt.torch.quantization.plugins.transformer_engine>`
 """
 
+import os
+
 from modelopt.torch.utils import import_plugin
 
 with import_plugin("accelerate"):
@@ -67,8 +69,9 @@ with import_plugin("transformers trainer"):
 with import_plugin("transformers"):
     from .transformers import *
 
-with import_plugin("vllm"):
-    from .vllm import *
+if os.environ.get("MODELOPT_SKIP_VLLM_PLUGIN") != "1":
+    with import_plugin("vllm"):
+        from .vllm import *
 
 with import_plugin("trl"):
     from .trl import *

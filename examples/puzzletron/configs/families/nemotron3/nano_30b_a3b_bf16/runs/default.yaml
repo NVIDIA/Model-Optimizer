@@ -203,12 +203,6 @@ mip:
   enabled: true
   depth_trajectory_path: ${puzzle_dir}/depth/iterative/trajectory.json
   depth_scenario_count: 6
-  human_constraints:
-    num_params_ratio: 0.75
-  constraint_profiles:
-  - 0.75
-  latency_constraint_profiles:
-  - 0.75
   grid_budgeting:
     enabled: false
   workloads:
@@ -217,9 +211,9 @@ mip:
       osl: 1024
       batch_size: 4
       concurrency: 4
-  profiles:
+  runs:
     params-075:
-      num_homogeneous_solutions: 5
+      homogeneous: {enabled: true, keep: 5}
       constraints:
         params:
           min: 73%
@@ -234,7 +228,7 @@ mip:
         - 2560
         - 2432
     runtime-075:
-      num_homogeneous_solutions: 5
+      homogeneous: {enabled: true, keep: 5}
       constraints:
         runtime:
           at:
@@ -251,7 +245,7 @@ mip:
         - 2560
         - 2432
     memory-075:
-      num_homogeneous_solutions: 5
+      homogeneous: {enabled: true, keep: 5}
       constraints:
         memory:
           at:
@@ -268,7 +262,7 @@ mip:
         - 2560
         - 2432
     params-075-num-experts-only:
-      num_homogeneous_solutions: 5
+      homogeneous: {enabled: true, keep: 5}
       constraints:
         params:
           min: 73%
@@ -286,7 +280,7 @@ mip:
         axes:
           n_routed_experts: all
     params-075-expert-dim-only:
-      num_homogeneous_solutions: 5
+      homogeneous: {enabled: true, keep: 5}
       constraints:
         params:
           min: 73%
@@ -304,7 +298,7 @@ mip:
         axes:
           moe_intermediate_size: all
     params-075-num-experts-and-expert-dim:
-      num_homogeneous_solutions: 5
+      homogeneous: {enabled: true, keep: 5}
       constraints:
         params:
           min: 73%

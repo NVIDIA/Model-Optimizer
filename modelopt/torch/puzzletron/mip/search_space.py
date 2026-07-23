@@ -209,6 +209,8 @@ def rank_homogeneous_solutions(
     constraints: Mapping[str, Any],
     bigger_is_better: bool,
     num_solutions: int,
+    rank_by: str = "objective",
+    constraint_weights: Mapping[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Rank uniform-per-axis solutions without invoking one MIP per assignment."""
 
@@ -216,6 +218,8 @@ def rank_homogeneous_solutions(
         return []
     if num_solutions < -1:
         raise ValueError("num_solutions must be -1 or non-negative")
+    if rank_by not in {"objective", "constraint_closeness"}:
+        raise ValueError("homogeneous rank_by must be objective or constraint_closeness")
     by_layer = defaultdict(list)
     axis_domains = defaultdict(set)
     for replacement_id, replacement in replacements.items():
@@ -316,16 +320,30 @@ def rank_homogeneous_solutions(
                 "chosen_replacements": [row[1] for row in chosen],
                 "total_value": sum(row[3] for row in chosen),
                 "homogeneous_assignment": assignment,
+                "constraint_closeness": _constraint_closeness(
+                    effective_costs,
+                    effective_constraints,
+                    constraint_weights or {},
+                ),
             }
         )
 
-    solutions.sort(
-        key=lambda solution: (
-            solution["total_value"],
-            str(solution["homogeneous_assignment"]),
-        ),
-        reverse=bigger_is_better,
-    )
+    if rank_by == "constraint_closeness":
+        solutions.sort(
+            key=lambda solution: (
+                solution["constraint_closeness"],
+                -solution["total_value"] if bigger_is_better else solution["total_value"],
+                str(solution["homogeneous_assignment"]),
+            )
+        )
+    else:
+        solutions.sort(
+            key=lambda solution: (
+                solution["total_value"],
+                str(solution["homogeneous_assignment"]),
+            ),
+            reverse=bigger_is_better,
+        )
     retained = solutions if num_solutions == -1 else solutions[:num_solutions]
     for solution in retained:
         replacements_to_copy = solution["chosen_replacements"]
@@ -340,3 +358,31 @@ def rank_homogeneous_solutions(
             deepcopy(replacement) for replacement in replacements_to_copy
         ]
     return retained
+
+
+def _constraint_closeness(
+    costs: Mapping[str, float],
+    constraints: Mapping[str, Any],
+    weights: Mapping[str, float],
+) -> float:
+    """Return weighted worst normalized deviation from constraint targets."""
+
+    distances = []
+    for key, bound in constraints.items():
+        if isinstance(bound, Iterable) and not isinstance(bound, (str, bytes, Mapping)):
+            minimum, maximum = bound
+        else:
+            minimum, maximum = None, bound
+        if minimum is not None and maximum is not None:
+            target = (float(minimum) + float(maximum)) / 2.0
+        elif minimum is not None:
+            target = float(minimum)
+        elif maximum is not None:
+            target = float(maximum)
+        else:
+            continue
+        scale = max(abs(target), 1.0)
+        distances.append(
+            float(weights.get(key, 1.0)) * abs(float(costs[key]) - target) / scale
+        )
+    return max(distances, default=0.0)

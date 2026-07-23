@@ -43,6 +43,11 @@ __all__ = [
     "bypass_overfit_stage",
     "bypass_stage",
     "build_library_stage",
+    "configure_vllm_stats_widths",
+    "emit_runtime_subblock_library",
+    "finalize_vllm_stats_report",
+    "prepare_vllm_stats_workspace",
+    "prepare_vllm_width_checkpoints",
     "vllm_stats_stage",
     "scoring_stage",
     "mip_stage",
@@ -208,7 +213,162 @@ def _write_runtime_subblock_library(path: Path, block_configs: tuple[Any, ...]) 
             for subblock in block_config.subblock_configs
         }
         rows.append(row)
-    path.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    temporary.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def emit_runtime_subblock_library(
+    config: dict[str, Any],
+    *,
+    teacher_dir: Path | str,
+    puzzle_dir: Path | str | None = None,
+) -> Path:
+    """Write the pre-build_library runtime candidate list used by vLLM stats.
+
+    Convert is the sole producer. This is intentionally not the final
+    replacement/subblock library from ``build_library``.
+    """
+    from ..anymodel.model_descriptor import ModelDescriptorFactory
+    from ..anymodel.registry import resolve_descriptor_from_pretrained
+    from ..subblock_stats.calc_runtime_stats import enumerate_runtime_block_configs
+
+    teacher_dir = Path(teacher_dir)
+    puzzle_dir = Path(puzzle_dir) if puzzle_dir is not None else experiment_dir(config)
+    model_cfg = config.get("model") or {}
+    resolution = resolve_descriptor_from_pretrained(
+        str(teacher_dir),
+        trust_remote_code=bool(model_cfg.get("trust_remote_code", False)),
+        descriptor_override=model_cfg.get("descriptor_override"),
+    )
+    descriptor = ModelDescriptorFactory.get(resolution.name)
+    block_configs = enumerate_runtime_block_configs(
+        teacher_dir,
+        descriptor,
+        search_space=config.get("search_space") or {},
+        include_noops=bool((config.get("build_library") or {}).get("include_noops", True)),
+    )
+    puzzle_dir.mkdir(parents=True, exist_ok=True)
+    path = puzzle_dir / "subblock_library.json"
+    _write_runtime_subblock_library(path, block_configs)
+    return path
+
+
+def configure_vllm_stats_widths(config: dict[str, Any], hydra_cfg: Any) -> tuple[int, ...]:
+    """Merge embedding search widths into the vLLM measurement configuration."""
+    OmegaConf.set_struct(hydra_cfg, False)
+    if not hasattr(hydra_cfg, "calc_subblock_stats"):
+        raise ValueError("vLLM statistics require calc_subblock_stats runtime configuration")
+    configured_widths = tuple(
+        int(width)
+        for width in (_get(hydra_cfg.calc_subblock_stats, "model_hidden_sizes", ()) or ())
+    )
+    embedding_widths = tuple(
+        int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
+    )
+    requested_widths = tuple(dict.fromkeys((*configured_widths, *embedding_widths)))
+    if requested_widths:
+        hydra_cfg.calc_subblock_stats.model_hidden_sizes = list(requested_widths)
+    return requested_widths
+
+
+def prepare_vllm_width_checkpoints(
+    config: dict[str, Any], hydra_cfg: Any
+) -> dict[int, Path]:
+    """Materialize physical hidden-width parents used by runtime parameter accounting."""
+    requested_widths = configure_vllm_stats_widths(config, hydra_cfg)
+    if not requested_widths:
+        return {}
+
+    from ..anymodel.model_descriptor import ModelDescriptorFactory
+    from ..distributed_eval.storage import file_lock
+    from ..pruning.materialize import materialize_hidden_width_checkpoint
+    from ..tools.checkpoint_utils import load_model_config
+
+    puzzle_dir = _puzzle_dir(config, hydra_cfg)
+    teacher_dir = _teacher_dir(config, hydra_cfg)
+    descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
+    teacher_config = load_model_config(
+        teacher_dir,
+        trust_remote_code=descriptor.requires_trust_remote_code(),
+    )
+    teacher_width = int(
+        descriptor.get_language_model_config(teacher_config).hidden_size
+    )
+    alignment = int((config.get("embedding_pruning") or {}).get("alignment", 1))
+    checkpoint_root = puzzle_dir / "runtime_cache" / "width_checkpoints"
+    checkpoints: dict[int, Path] = {}
+    for width in requested_widths:
+        if int(width) == teacher_width:
+            checkpoints[int(width)] = teacher_dir
+            continue
+        output_dir = checkpoint_root / f"width-{int(width):04d}"
+        with file_lock(checkpoint_root / f".width-{int(width):04d}.lock"):
+            if not (output_dir / "config.json").is_file():
+                print(
+                    f"[vllm-stats] materializing hidden-width checkpoint {width} at "
+                    f"{output_dir}",
+                    flush=True,
+                )
+            materialize_hidden_width_checkpoint(
+                teacher_dir,
+                descriptor,
+                int(width),
+                output_dir,
+                alignment=alignment,
+            )
+        checkpoints[int(width)] = output_dir
+    return checkpoints
+
+
+def prepare_vllm_stats_workspace(config: dict[str, Any], hydra_cfg: Any) -> dict[str, Any]:
+    """Validate convert-emitted inputs and enable runtime measurement config."""
+    puzzle_dir = _puzzle_dir(config, hydra_cfg)
+    teacher_dir = _teacher_dir(config, hydra_cfg)
+    OmegaConf.set_struct(hydra_cfg, False)
+    if not hasattr(hydra_cfg, "calc_subblock_stats"):
+        raise ValueError("vLLM statistics require calc_subblock_stats runtime configuration")
+    runtime_cfg = _get(hydra_cfg.calc_subblock_stats, "runtime_stats", None)
+    if runtime_cfg is None:
+        hydra_cfg.calc_subblock_stats.runtime_stats = {}
+        runtime_cfg = hydra_cfg.calc_subblock_stats.runtime_stats
+    runtime_cfg.enabled = True
+    hydra_cfg.teacher_dir = str(teacher_dir)
+    width_checkpoints = prepare_vllm_width_checkpoints(config, hydra_cfg)
+
+    subblock_library_path = puzzle_dir / "subblock_library.json"
+    if not (subblock_library_path.is_file() and subblock_library_path.stat().st_size > 0):
+        raise FileNotFoundError(
+            f"missing runtime subblock library {subblock_library_path}; "
+            "convert must emit it when vllm_stats is enabled"
+        )
+
+    from ..anymodel.model_descriptor import ModelDescriptorFactory
+    from ..subblock_stats.calc_runtime_stats import enumerate_runtime_block_configs
+
+    descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
+    block_configs = enumerate_runtime_block_configs(
+        teacher_dir,
+        descriptor,
+        search_space=config.get("search_space") or {},
+        include_noops=bool((config.get("build_library") or {}).get("include_noops", True)),
+    )
+    sparse_selection = _prepare_sparse_runtime_selection(
+        config,
+        runtime_cfg=runtime_cfg,
+        teacher_dir=teacher_dir,
+        puzzle_dir=puzzle_dir,
+    )
+    return {
+        "puzzle_dir": puzzle_dir,
+        "teacher_dir": teacher_dir,
+        "subblock_library_path": subblock_library_path,
+        "block_configs": block_configs,
+        "width_checkpoints": width_checkpoints,
+        "runtime_cfg": runtime_cfg,
+        "sparse_selection": sparse_selection,
+    }
 
 
 def _prepare_sparse_runtime_selection(
@@ -264,58 +424,69 @@ def _prepare_sparse_runtime_selection(
     }
 
 
-def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
-    """Collect runtime statistics from converted-teacher candidates before library assembly."""
-    hydra_cfg = load_runtime_hydra_config(config)
+def finalize_vllm_stats_report(
+    config: dict[str, Any], hydra_cfg: Any | None = None
+) -> dict[str, Any]:
+    """Validate the runtime aggregate and generate canonical vLLM report artifacts."""
+
+    if hydra_cfg is None:
+        hydra_cfg = load_runtime_hydra_config(config)
     puzzle_dir = _puzzle_dir(config, hydra_cfg)
-    teacher_dir = _teacher_dir(config, hydra_cfg)
-    OmegaConf.set_struct(hydra_cfg, False)
-    if not hasattr(hydra_cfg, "calc_subblock_stats"):
-        raise ValueError("vLLM statistics require calc_subblock_stats runtime configuration")
-    runtime_cfg = _get(hydra_cfg.calc_subblock_stats, "runtime_stats", None)
-    if runtime_cfg is None:
-        hydra_cfg.calc_subblock_stats.runtime_stats = {}
-        runtime_cfg = hydra_cfg.calc_subblock_stats.runtime_stats
-    runtime_cfg.enabled = True
-    hydra_cfg.teacher_dir = str(teacher_dir)
-
-    from ..anymodel.model_descriptor import ModelDescriptorFactory
-    from ..subblock_stats.calc_runtime_stats import enumerate_runtime_block_configs
-    from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
-
-    descriptor = ModelDescriptorFactory.get(_get(hydra_cfg, "descriptor", None))
-    block_configs = enumerate_runtime_block_configs(
-        teacher_dir,
-        descriptor,
-        search_space=config.get("search_space") or {},
-        include_noops=bool((config.get("build_library") or {}).get("include_noops", True)),
-    )
-    puzzle_dir.mkdir(parents=True, exist_ok=True)
-    subblock_library_path = puzzle_dir / "subblock_library.json"
-    _write_runtime_subblock_library(subblock_library_path, block_configs)
-    sparse_selection = _prepare_sparse_runtime_selection(
-        config,
-        runtime_cfg=runtime_cfg,
-        teacher_dir=teacher_dir,
-        puzzle_dir=puzzle_dir,
-    )
-    launch_calc_subblock_stats(hydra_cfg)
+    runtime_cfg = _get(hydra_cfg.calc_subblock_stats, "runtime_stats", {})
     stats_path = puzzle_dir / _get(
         hydra_cfg.calc_subblock_stats, "subblock_stats_filename", "subblock_stats.json"
     )
     if not stats_path.is_file() or stats_path.stat().st_size == 0:
         raise RuntimeError(f"vLLM statistics aggregate is missing or empty: {stats_path}")
+    stats = json.loads(stats_path.read_text())
+    measured_widths = {
+        int(entry["args"]["n_embd"])
+        for entry in stats
+        if isinstance(entry, dict)
+        and isinstance(entry.get("args"), dict)
+        and entry["args"].get("runtime_stats") is True
+        and entry["args"].get("n_embd") is not None
+    }
+    expected_widths = {
+        int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
+    }
+    missing_widths = expected_widths - measured_widths
+    if missing_widths:
+        raise RuntimeError(
+            f"vLLM statistics aggregate {stats_path} is missing configured hidden widths "
+            f"{sorted(missing_widths)}; measured widths are {sorted(measured_widths)}"
+        )
+
+    from ..diagnostics import generate_vllm_stats_report
+
+    return generate_vllm_stats_report(
+        puzzle_dir,
+        stats_path=stats_path,
+        output_dir=puzzle_dir / "artifacts" / "vllm_stats",
+        granularity=str(_get(runtime_cfg, "granularity", "block")),
+    )
+
+
+def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
+    """Collect runtime statistics from converted-teacher candidates before library assembly."""
+    hydra_cfg = load_runtime_hydra_config(config)
+    from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
+
+    prepared = prepare_vllm_stats_workspace(config, hydra_cfg)
+    puzzle_dir = prepared["puzzle_dir"]
+    runtime_cfg = prepared["runtime_cfg"]
+    subblock_library_path = prepared["subblock_library_path"]
+    block_configs = prepared["block_configs"]
+    sparse_selection = prepared["sparse_selection"]
+    launch_calc_subblock_stats(hydra_cfg)
+    stats_path = puzzle_dir / _get(
+        hydra_cfg.calc_subblock_stats, "subblock_stats_filename", "subblock_stats.json"
+    )
     report_summary: dict[str, Any] = {}
     if int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0"))) == 0:
-        from ..diagnostics import generate_vllm_stats_report
-
-        granularity = str(_get(runtime_cfg, "granularity", "block"))
-        report_summary = generate_vllm_stats_report(
-            puzzle_dir,
-            stats_path=stats_path,
-            output_dir=puzzle_dir / "artifacts" / "vllm_stats",
-            granularity=granularity,
-        )
+        report_summary = finalize_vllm_stats_report(config, hydra_cfg)
+    elif not stats_path.is_file() or stats_path.stat().st_size == 0:
+        raise RuntimeError(f"vLLM statistics aggregate is missing or empty: {stats_path}")
     return complete_stage(
         config,
         manifest,
@@ -582,6 +753,8 @@ def _finalize_bypass_sanity_summary(
     """Publish one completion artifact after every independent probe is complete."""
 
     mode_summaries: dict[str, dict[str, Any]] = {}
+    findings: list[dict[str, Any]] = []
+    passed = True
     for mode in modes:
         history_path = (
             puzzle_dir
@@ -609,6 +782,11 @@ def _finalize_bypass_sanity_summary(
             or not valid_losses
         ):
             return None
+        history_summary = history.get("summary") or {}
+        mode_passed = bool(history_summary.get("passed", True))
+        mode_findings = list(history_summary.get("findings") or ())
+        passed = passed and mode_passed
+        findings.extend(mode_findings)
         mode_summaries[mode] = {
             "history_path": str(history_path),
             "record_count": len(records),
@@ -616,7 +794,9 @@ def _finalize_bypass_sanity_summary(
             "last_loss": float(losses[-1]),
             "finite": True,
             "max_step": steps[-1],
-            "history_summary": history.get("summary") or {},
+            "history_summary": history_summary,
+            "passed": mode_passed,
+            "findings": mode_findings,
         }
 
     summary_path = puzzle_dir / "artifacts" / "bypass_sanity" / "summary.json"
@@ -627,6 +807,9 @@ def _finalize_bypass_sanity_summary(
             {
                 "stage": "bypass_sanity",
                 "complete": True,
+                "passed": passed,
+                "findings": findings,
+                "verdict": "passed" if passed else "warning",
                 "modes": modes,
                 "repetitions": repetitions,
                 "mode_summaries": mode_summaries,
@@ -699,13 +882,18 @@ def bypass_overfit_stage(config: dict[str, Any], manifest: StageManifest):
     }
     repetitions = int(hydra_cfg.bypass.overfit.repetitions)
     summary_path = None
+    bypass_summary = None
     if os.environ.get("RANK") in (None, "", "0"):
         summary_path = _finalize_bypass_sanity_summary(
             puzzle_dir,
             modes,
             repetitions,
         )
-    return complete_stage(
+        if summary_path is not None and summary_path.is_file():
+            bypass_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+
+    return complete_sanity_stage(
         config,
         manifest,
         outputs={
@@ -718,16 +906,19 @@ def bypass_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             "nested": bool(hydra_cfg.bypass.elastic),
             "num_nodes": num_nodes,
             "node_index": node_index,
+            "passed": bool((bypass_summary or {}).get("passed", True)),
+            "findings": list((bypass_summary or {}).get("findings") or ()),
         },
+        verdict=SanityVerdict(
+            passed=bool((bypass_summary or {}).get("passed", True)),
+            findings=list((bypass_summary or {}).get("findings") or ()),
+        ),
     )
 
 
 def build_library_stage(config: dict[str, Any], manifest: StageManifest):
     hydra_cfg = load_runtime_hydra_config(config)
     puzzle_dir = _puzzle_dir(config, hydra_cfg)
-    scoring_parent = ensure_scoring_parent(config, refresh=True)
-    OmegaConf.set_struct(hydra_cfg, False)
-    hydra_cfg.build_replacement_library.source_checkpoint_dir = str(scoring_parent.path)
     candidate_library_path = puzzle_dir / "candidate_library.json"
     stats_path = puzzle_dir / _get(
         _get(hydra_cfg, "calc_subblock_stats", {}) or {},
@@ -735,6 +926,14 @@ def build_library_stage(config: dict[str, Any], manifest: StageManifest):
         "subblock_stats.json",
     )
     with _distributed(hydra_cfg):
+        # The scoring-parent artifact is shared campaign state.  Publish it
+        # once, then let every rank validate the same atomic artifact.
+        if dist.is_master():
+            ensure_scoring_parent(config, refresh=True)
+        dist.barrier()
+        scoring_parent = ensure_scoring_parent(config)
+        OmegaConf.set_struct(hydra_cfg, False)
+        hydra_cfg.build_replacement_library.source_checkpoint_dir = str(scoring_parent.path)
         if dist.is_master():
             if _vllm_stats_is_explicit(config):
                 if not stats_path.is_file():

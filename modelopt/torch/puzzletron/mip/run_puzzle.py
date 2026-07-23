@@ -444,6 +444,8 @@ def run_single_puzzle_config(
         constraints=mip_constraints,
         bigger_is_better=args.bigger_is_better,
         max_seconds_per_solution=args.get("max_seconds_per_solution", None),
+        num_solutions=int(args.get("num_solutions", 1)),
+        min_hamming_distance=int(args.get("min_hamming_distance", 1)),
         solver_backend=args.get("solver_backend", args.get("use_cuopt", None)),
     )
 
@@ -453,6 +455,8 @@ def run_single_puzzle_config(
         constraints=mip_constraints,
         bigger_is_better=args.bigger_is_better,
         num_solutions=int(args.get("num_homogeneous_solutions", 0) or 0),
+        rank_by=str(args.get("homogeneous_rank_by", "objective")),
+        constraint_weights=dict(args.get("homogeneous_constraint_weights", {}) or {}),
     )
 
     for solution in [*solutions, *homogeneous_solutions]:

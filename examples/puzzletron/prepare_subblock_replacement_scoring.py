@@ -9,42 +9,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from modelopt.torch.puzzletron.block_config import BlockConfig, maybe_cast_block_configs
+from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
 from modelopt.torch.puzzletron.replacement_library.subblock_scoring import (
-    build_subblock_replacement_solutions,
+    build_subblock_replacement_payload,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 
-
-def prepare_subblock_replacement_payload(
-    replacement_library: dict[str, Any],
-    teacher_block_configs: Sequence[BlockConfig],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Return provenance and an annotated one-subblock scoring solution list."""
-
-    entries = replacement_library.get("entries")
-    if replacement_library.get("version") != 2 or not isinstance(entries, list):
-        raise ValueError("subblock scoring requires a v2 replacement library with entries")
-    solutions = build_subblock_replacement_solutions(entries, teacher_block_configs)
-    annotation = {
-        key: replacement_library[key]
-        for key in ("hidden_width", "teacher_hidden_width", "scenario")
-        if key in replacement_library
-    }
-    for solution in solutions:
-        solution.update(annotation)
-    manifest = {
-        "version": 1,
-        "mode": "replace_one_subblock",
-        "canonical_entry_count": len(entries),
-        "subblock_solution_count": len(solutions),
-        "teacher_layer_count": len(teacher_block_configs),
-        "full_search_space_preserved": True,
-        **annotation,
-    }
-    return manifest, solutions
+# Backward-compatible import for callers of the example helper.
+prepare_subblock_replacement_payload = build_subblock_replacement_payload
 
 
 def _write_json(path: Path, value: Any) -> None:
