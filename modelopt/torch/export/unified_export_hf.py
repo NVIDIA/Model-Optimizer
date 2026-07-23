@@ -917,16 +917,17 @@ def _process_quantized_modules_offloaded(
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
 ) -> dict[str, Any]:
-    """Export quantized decoder-layer weights for an offloaded model, one layer at a time.
+    """Export quantized weights for a disk/CPU-offloaded model, one layer at a time.
+
+    Decoder layers are processed one at a time via enable_weight_access_and_writeback.
+    Non-decoder modules that are also disk-offloaded (embed_tokens, norms, lm_head) are
+    materialized individually; any quantized non-decoder module (e.g. lm_head) has its
+    export handler invoked in the same context.
 
     Returns a full-model state dict with no meta tensors.
-
-    Limitation: only decoder layers discovered by LayerActivationCollector are
-    materialized. Non-decoder quantized modules (e.g. a quantized lm_head) are
-    collected from model.state_dict() in their current form. Default FP8/NVFP4
-    configs exclude lm_head, so this is typically harmless, but custom configs
-    that quantize non-decoder modules will export those layers without quantization applied.
     """
+    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
     from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -944,10 +945,17 @@ def _process_quantized_modules_offloaded(
     for name, module in model.named_modules():
         if id(module) not in decoder_layer_ids:
             continue
-        with enable_weight_access_and_writeback(module, module, writeback=True):
+        # writeback=False: weights are captured in layer_tensors below; no need to promote
+        # the quantized values back to the offload store on context exit.
+        with enable_weight_access_and_writeback(module, module, writeback=False):
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
+
+            # Mirror the non-offloaded path: reconstruct fused MoE per-expert weights
+            # into 3D tensors BEFORE snapshotting, so captured keys match the original
+            # MoE format (e.g. moe.up_proj.weight [N, out, in]).
+            _reconstruct_fused_moe_linear(module)
 
             # Snapshot inside the context: post-exit, post_forward re-offloads params to meta.
             prefix = f"{name}." if name else ""
@@ -955,16 +963,11 @@ def _process_quantized_modules_offloaded(
                 assert not tensor.is_meta, (
                     f"Expected real tensor for '{prefix + key}' inside materialization context"
                 )
-                layer_tensors[prefix + key] = tensor.detach()
+                layer_tensors[prefix + key] = tensor.detach().cpu()
 
-    # Also collect direct parameters of non-decoder modules that are disk-offloaded.
-    # model.state_dict() returns meta for ANY disk-offloaded tensor, including
-    # embed_tokens, final norms, and lm_head.  After revert_weight_conversion renames
-    # these to hub-original names (e.g. backbone.*), transformers' save_pretrained
-    # looks them up in the model by hub name and crashes if they are still meta.
-    # Fix: materialize each such module in-place and capture the real tensor.
-    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
-
+    # Also collect non-decoder modules that are disk-offloaded (embed_tokens, norms, lm_head).
+    # model.state_dict() returns meta for these; materialize, run any export handlers
+    # (e.g. a quantized lm_head), then snapshot the real tensors.
     for name, module in model.named_modules():
         if id(module) in decoder_layer_ids:
             continue
@@ -973,20 +976,20 @@ def _process_quantized_modules_offloaded(
         if _get_offload_hook(module._hf_hook) is None:
             continue
         # Only handle modules that have DIRECT meta parameters/buffers.
-        # Child decoder layers (already quantized above) must not be re-collected.
+        # Child decoder layers (already captured above) must not be re-collected.
         if not (
             any(p is not None and p.is_meta for p in module._parameters.values())
             or any(b is not None and b.is_meta for b in module._buffers.values())
         ):
             continue
         with enable_weight_access_and_writeback(module, module, writeback=False):
+            for sub_name, sub_mod in module.named_modules():
+                full_name = f"{name}.{sub_name}" if sub_name else name
+                _dispatch_export_handler(full_name, sub_mod, ctx)
             prefix = f"{name}." if name else ""
-            for pname, param in module._parameters.items():
-                if param is not None and not param.is_meta:
-                    layer_tensors[prefix + pname] = param.data.detach().cpu()
-            for bname, buf in module._buffers.items():
-                if buf is not None and not buf.is_meta:
-                    layer_tensors[prefix + bname] = buf.detach().cpu()
+            for key, tensor in module.state_dict().items():
+                if not tensor.is_meta:
+                    layer_tensors[prefix + key] = tensor.detach().cpu()
 
     # model.state_dict() fills in non-offloaded parts (GPU-resident tensors).
     # layer_tensors overrides both decoder-layer placeholders and non-decoder
@@ -1092,9 +1095,8 @@ def _export_transformers_checkpoint(
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
     if _offloaded:
+        # MoE reconstruction happens per-layer inside _process_quantized_modules_offloaded.
         quantized_state_dict = _process_quantized_modules_offloaded(model, dtype, is_modelopt_qlora)
-        # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
-        _reconstruct_fused_moe_linear(model)
     else:
         _reconstruct_fused_moe_linear(model)
 

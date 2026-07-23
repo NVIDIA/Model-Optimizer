@@ -923,10 +923,12 @@ def get_model(
         max_memory = get_max_memory()
 
         if _disk_offload:
-            if max_gpu_memory_gb is not None:
-                for _k in max_memory:
-                    if isinstance(_k, int):
+            for _k in max_memory:
+                if isinstance(_k, int):
+                    if max_gpu_memory_gb is not None:
                         max_memory[_k] = int(max_gpu_memory_gb * 1024**3)
+                    else:
+                        max_memory[_k] = int(max_memory[_k] * gpu_mem_percentage)
             if max_cpu_memory_gb is not None:
                 max_memory["cpu"] = int(max_cpu_memory_gb * 1024**3)
             model_kwargs["max_memory"] = max_memory
