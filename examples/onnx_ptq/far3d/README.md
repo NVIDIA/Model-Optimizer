@@ -1,6 +1,6 @@
 # FAR3D ONNX PTQ and Argoverse 2 evaluation
 
-This example quantizes the FAR3D image encoder to INT8 with Model Optimizer and evaluates the complete encoder-decoder pipeline on the Argoverse 2 validation set. It follows the [NVIDIA DL4AGX FAR3D workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt).
+This example quantizes the FAR3D image encoder and decoder to INT8 with Model Optimizer and evaluates the complete pipeline on the Argoverse 2 validation set. It follows the [NVIDIA DL4AGX FAR3D workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt).
 
 FAR3D uses a legacy PyTorch/MMCV environment that is incompatible with the current Model Optimizer Python dependencies. The provided image uses `nvcr.io/nvidia/pytorch:25.06-py3` for the complete workflow and isolates the legacy FAR3D packages in a Python 3.8 virtual environment.
 
@@ -67,38 +67,14 @@ This produces `far3d.encoder.onnx` and `far3d.decoder.onnx`.
 
 ## 3. Prepare calibration batches
 
-Extract 500 batches sampled every 20 frames from the Argoverse 2 validation loader:
-
-```bash
-/opt/far3d/bin/python /opt/modelopt/examples/onnx_ptq/far3d/prepare_calibration.py \
-  dependencies/Far3D/projects/configs/far3d.py \
-  data/far3d_calibration \
-  --num-samples 500 \
-  --sample-skip-interval 20
-```
-
-The calibration directory is approximately 25 GiB at the reference model's 960x640 resolution.
-
-## 4. Quantize the encoder
-
-Use the base Python environment for Model Optimizer:
-
-```bash
-python /opt/modelopt/examples/onnx_ptq/far3d/quantize.py \
-  far3d.encoder.onnx \
-  data/far3d_calibration \
-  --output-path far3d.encoder.int8.onnx
-```
-
-The quantizer preserves the accuracy-sensitive exclusions used by the DL4AGX reference: the `OSA4_5` block and nodes downstream of `lateral_convs` remain in high precision.
-
-Build both engines in the same container. Serialized TensorRT engines are not portable across TensorRT versions or GPU architectures.
+Build temporary engines from the exported models. They run the reference pipeline while collecting
+representative encoder and decoder inputs:
 
 ```bash
 trtexec \
-  --onnx=far3d.encoder.int8.onnx \
-  --saveEngine=far3d.encoder.int8.engine \
-  --stronglyTyped \
+  --onnx=far3d.encoder.onnx \
+  --saveEngine=far3d.encoder.fp16.engine \
+  --fp16 \
   --skipInference
 trtexec \
   --onnx=far3d.decoder.onnx \
@@ -107,15 +83,69 @@ trtexec \
   --skipInference
 ```
 
+Extract 512 batches sampled every 20 frames from the Argoverse 2 validation loader:
+
+```bash
+/opt/far3d/bin/python /opt/modelopt/examples/onnx_ptq/far3d/prepare_calibration.py \
+  dependencies/Far3D/projects/configs/far3d.py \
+  data/far3d_calibration \
+  --encoder-engine far3d.encoder.fp16.engine \
+  --decoder-engine far3d.decoder.fp16.engine \
+  --num-samples 512 \
+  --sample-skip-interval 20
+```
+
+The calibration directory contains separate `encoder/` and `decoder/` batches. Decoder batches
+include the image features, camera geometry, and temporal state seen by the reference decoder.
+
+## 4. Quantize the models
+
+Use the base Python environment for Model Optimizer:
+
+```bash
+python /opt/modelopt/examples/onnx_ptq/far3d/quantize.py \
+  far3d.encoder.onnx \
+  far3d.decoder.onnx \
+  data/far3d_calibration
+```
+
+The quantizer preserves the accuracy-sensitive exclusions used by the DL4AGX reference: the `OSA4_5` block and nodes downstream of `lateral_convs` remain in high precision.
+
+This produces `far3d.encoder.int8.onnx` and `far3d.decoder.int8.onnx`. To keep the decoder in its
+original mixed FP16/FP32 precision, add `--fp16-decoder`; decoder calibration batches are not
+required in that mode.
+
+Build both engines in the same container. Serialized TensorRT engines are not portable across
+TensorRT versions or GPU architectures.
+
+```bash
+trtexec \
+  --onnx=far3d.encoder.int8.onnx \
+  --saveEngine=far3d.encoder.int8.engine \
+  --stronglyTyped \
+  --skipInference
+trtexec \
+  --onnx=far3d.decoder.int8.onnx \
+  --saveEngine=far3d.decoder.int8.engine \
+  --stronglyTyped \
+  --skipInference
+```
+
+When using `--fp16-decoder`, build `far3d.decoder.onnx` as
+`far3d.decoder.fp16.engine` instead.
+
 ## 5. Evaluate accuracy
 
 ```bash
 /opt/far3d/bin/python /opt/modelopt/examples/onnx_ptq/far3d/evaluate.py \
   dependencies/Far3D/projects/configs/far3d.py \
   far3d.encoder.int8.engine \
-  far3d.decoder.fp16.engine
+  far3d.decoder.int8.engine
 ```
 
-The evaluator runs every Argoverse 2 validation frame and reports the dataset metrics, including mAP. The DL4AGX reference reports 0.230 mAP for its INT8 encoder and FP16 decoder, compared with 0.232 mAP for FP16 encoder and decoder. Exact results can vary with TensorRT version and target GPU.
+The evaluator runs every Argoverse 2 validation frame and reports the dataset metrics, including
+mAP. The DL4AGX reference reports 0.230 mAP for its INT8 encoder and mixed FP16/FP32 decoder,
+compared with 0.232 mAP for FP16 encoder and decoder. It does not report an INT8 decoder result;
+validate the default INT8 encoder-decoder pipeline on the target TensorRT version and GPU.
 
 Use `--max-samples N` for an inference smoke test. Dataset metrics are skipped when only part of the validation set is processed.

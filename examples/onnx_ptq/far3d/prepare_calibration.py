@@ -17,6 +17,8 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import torch
+from evaluate import Far3DPipeline
 from mmcv import Config
 from mmdet.datasets import replace_ImageToTensor
 from mmdet3d.datasets import build_dataset
@@ -27,8 +29,10 @@ from torch.utils.data import Subset
 def parse_args():
     parser = argparse.ArgumentParser(description="Prepare FAR3D calibration batches")
     parser.add_argument("config", help="Path to the FAR3D configuration file")
-    parser.add_argument("output_dir", type=Path, help="Directory for calibration .npy files")
-    parser.add_argument("--num-samples", type=int, default=500)
+    parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--encoder-engine")
+    parser.add_argument("--decoder-engine")
+    parser.add_argument("--num-samples", type=int, default=512)
     parser.add_argument("--sample-skip-interval", type=int, default=20)
     return parser.parse_args()
 
@@ -68,24 +72,58 @@ def build_validation_loader(config_path, num_samples, sample_skip_interval):
     )
 
 
+class DecoderCalibrationWriter:
+    def __init__(self, output_dir):
+        self.output_dir = output_dir
+        self.saved = 0
+
+    def __call__(self, inputs):
+        batch = {name: value.detach().cpu().numpy() for name, value in inputs.items()}
+        np.savez(self.output_dir / f"batch_{self.saved:04d}.npz", **batch)
+        self.saved += 1
+
+
 def main():
     args = parse_args()
     if args.num_samples < 1:
         raise ValueError("--num-samples must be positive")
     if args.sample_skip_interval < 1:
         raise ValueError("--sample-skip-interval must be positive")
+    if bool(args.encoder_engine) != bool(args.decoder_engine):
+        raise ValueError("--encoder-engine and --decoder-engine must be specified together")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    if any(args.output_dir.glob("*.npy")):
+    encoder_dir = args.output_dir / "encoder"
+    encoder_dir.mkdir(parents=True, exist_ok=True)
+    if any(encoder_dir.glob("*.npy")):
         raise FileExistsError(
-            f"{args.output_dir} already contains calibration batches; use an empty directory"
+            f"{encoder_dir} already contains calibration batches; use an empty directory"
         )
+
+    decoder_writer = None
+    pipeline = None
+    stream = None
+    if args.encoder_engine:
+        decoder_dir = args.output_dir / "decoder"
+        decoder_dir.mkdir(parents=True, exist_ok=True)
+        if any(decoder_dir.glob("*.npz")):
+            raise FileExistsError(
+                f"{decoder_dir} already contains calibration batches; use an empty directory"
+            )
+        decoder_writer = DecoderCalibrationWriter(decoder_dir)
+        pipeline = Far3DPipeline(
+            args.encoder_engine,
+            args.decoder_engine,
+            decoder_input_callback=decoder_writer,
+        )
+        stream = torch.cuda.Stream()
 
     saved = 0
     data_loader = build_validation_loader(args.config, args.num_samples, args.sample_skip_interval)
     for data in data_loader:
         images = data["img"][0].data[0].cpu().permute(0, 1, 3, 4, 2).numpy()
-        np.save(args.output_dir / f"batch_{saved:04d}.npy", images)
+        np.save(encoder_dir / f"batch_{saved:04d}.npy", images)
+        if pipeline:
+            pipeline(stream, data)
         saved += 1
         if saved == args.num_samples:
             break
@@ -94,7 +132,13 @@ def main():
         raise RuntimeError(
             f"Only prepared {saved} of {args.num_samples} requested calibration batches"
         )
-    print(f"Saved {saved} calibration batches to {args.output_dir}")
+    if decoder_writer and decoder_writer.saved != saved:
+        raise RuntimeError(f"Prepared {saved} encoder and {decoder_writer.saved} decoder batches")
+    print(f"Saved {saved} encoder calibration batches to {encoder_dir}")
+    if decoder_writer:
+        print(
+            f"Saved {decoder_writer.saved} decoder calibration batches to {decoder_writer.output_dir}"
+        )
 
 
 if __name__ == "__main__":

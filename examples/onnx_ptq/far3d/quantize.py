@@ -24,27 +24,58 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 from modelopt.onnx.quantization import quantize
 
 
-class Far3DCalibrationReader(CalibrationDataReader):
-    def __init__(self, calibration_dir):
-        self.batch_paths = sorted(Path(calibration_dir).glob("*.npy"))
+class FileCalibrationReader(CalibrationDataReader):
+    def __init__(self, calibration_dir, pattern):
+        self.batch_paths = sorted(Path(calibration_dir).glob(pattern))
         if not self.batch_paths:
-            raise ValueError(f"No .npy calibration batches found in {calibration_dir}")
+            raise ValueError(f"No {pattern} calibration batches found in {calibration_dir}")
         self.rewind()
 
     def get_next(self):
         batch_path = next(self._iterator, None)
         if batch_path is None:
             return None
-        return {"img": np.load(batch_path)}
+        return self.load(batch_path)
 
     def get_first(self):
-        return {"img": np.load(self.batch_paths[0])}
+        return self.load(self.batch_paths[0])
 
     def rewind(self):
         self._iterator = iter(self.batch_paths)
 
+    def load(self, batch_path):
+        raise NotImplementedError
 
-def find_nodes_to_exclude(onnx_path):
+
+class EncoderCalibrationReader(FileCalibrationReader):
+    def __init__(self, calibration_dir):
+        super().__init__(calibration_dir, "*.npy")
+
+    def load(self, batch_path):
+        return {"img": np.load(batch_path)}
+
+
+class DecoderCalibrationReader(FileCalibrationReader):
+    def __init__(self, calibration_dir, onnx_path):
+        graph = onnx.load(onnx_path, load_external_data=False).graph
+        self.input_dtypes = {
+            value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
+            for value in graph.input
+        }
+        super().__init__(calibration_dir, "*.npz")
+
+    def load(self, batch_path):
+        with np.load(batch_path) as batch:
+            missing = self.input_dtypes.keys() - batch.files
+            if missing:
+                raise ValueError(f"{batch_path} is missing decoder inputs: {sorted(missing)}")
+            return {
+                name: batch[name].astype(dtype, copy=False)
+                for name, dtype in self.input_dtypes.items()
+            }
+
+
+def find_encoder_nodes_to_exclude(onnx_path):
     graph = onnx.load(onnx_path, load_external_data=False).graph
     consumers = defaultdict(list)
     nodes_by_name = {}
@@ -71,28 +102,60 @@ def find_nodes_to_exclude(onnx_path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Quantize the FAR3D ONNX encoder to INT8")
-    parser.add_argument("onnx_path", help="Path to far3d.encoder.onnx")
+    parser = argparse.ArgumentParser(description="Quantize the FAR3D ONNX models to INT8")
+    parser.add_argument("encoder_onnx", help="Path to far3d.encoder.onnx")
+    parser.add_argument("decoder_onnx", help="Path to far3d.decoder.onnx")
     parser.add_argument("calibration_dir", help="Directory created by prepare_calibration.py")
-    parser.add_argument("--output-path", default="far3d.encoder.int8.onnx")
+    parser.add_argument("--encoder-output", default="far3d.encoder.int8.onnx")
+    parser.add_argument("--decoder-output", default="far3d.decoder.int8.onnx")
+    parser.add_argument(
+        "--fp16-decoder",
+        action="store_true",
+        help="Skip decoder INT8 quantization and use the original mixed-precision decoder",
+    )
     parser.add_argument("--calibration-method", choices=("entropy", "max"), default="entropy")
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    excluded_nodes = find_nodes_to_exclude(args.onnx_path)
+def quantize_encoder(args):
+    calibration_dir = Path(args.calibration_dir)
+    encoder_dir = calibration_dir / "encoder"
+    if not encoder_dir.is_dir():
+        encoder_dir = calibration_dir
+    excluded_nodes = find_encoder_nodes_to_exclude(args.encoder_onnx)
     print(f"Excluding {len(excluded_nodes)} accuracy-sensitive nodes from quantization")
     quantize(
-        onnx_path=args.onnx_path,
+        onnx_path=args.encoder_onnx,
         quantize_mode="int8",
-        calibration_data_reader=Far3DCalibrationReader(args.calibration_dir),
+        calibration_data_reader=EncoderCalibrationReader(encoder_dir),
         calibration_method=args.calibration_method,
         calibration_eps=["cuda:0", "cpu"],
         nodes_to_exclude=excluded_nodes,
         high_precision_dtype="fp16",
-        output_path=args.output_path,
+        output_path=args.encoder_output,
     )
+
+
+def quantize_decoder(args):
+    decoder_dir = Path(args.calibration_dir) / "decoder"
+    quantize(
+        onnx_path=args.decoder_onnx,
+        quantize_mode="int8",
+        calibration_data_reader=DecoderCalibrationReader(decoder_dir, args.decoder_onnx),
+        calibration_method=args.calibration_method,
+        calibration_eps=["cuda:0", "cpu"],
+        high_precision_dtype="fp32",
+        output_path=args.decoder_output,
+    )
+
+
+def main():
+    args = parse_args()
+    quantize_encoder(args)
+    if args.fp16_decoder:
+        print("Skipping decoder quantization; use the original mixed-precision decoder ONNX")
+    else:
+        quantize_decoder(args)
 
 
 if __name__ == "__main__":

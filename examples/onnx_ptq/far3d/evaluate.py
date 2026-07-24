@@ -102,24 +102,29 @@ class TensorRTRunner:
         for tensor in self.state.values():
             tensor.zero_()
 
+    def prepare_input(self, name, inputs):
+        shape = self.input_shapes[name]
+        base_name = name.rsplit(".1", maxsplit=1)[0] if name.endswith(".1") else name
+        if base_name not in inputs:
+            raise KeyError(f"Missing TensorRT input {base_name}")
+        value = inputs[base_name].to(device="cuda", dtype=self.tensor_dtypes[name])
+        if tuple(value.shape) != shape:
+            if tuple(value.shape[1:]) == shape:
+                value = value.squeeze(0)
+            elif tuple(shape[1:]) == tuple(value.shape):
+                value = value.unsqueeze(0)
+            else:
+                raise ValueError(
+                    f"Input {base_name} has shape {tuple(value.shape)}, expected {shape}"
+                )
+        return base_name, value
+
     def __call__(self, stream, **inputs):
         input_buffers = {}
         for name, shape in self.input_shapes.items():
             if name in self.state:
                 continue
-            base_name = name.rsplit(".1", maxsplit=1)[0] if name.endswith(".1") else name
-            if base_name not in inputs:
-                raise KeyError(f"Missing TensorRT input {base_name}")
-            value = inputs[base_name].to(device="cuda", dtype=self.tensor_dtypes[name])
-            if tuple(value.shape) != shape:
-                if tuple(value.shape[1:]) == shape:
-                    value = value.squeeze(0)
-                elif tuple(shape[1:]) == tuple(value.shape):
-                    value = value.unsqueeze(0)
-                else:
-                    raise ValueError(
-                        f"Input {base_name} has shape {tuple(value.shape)}, expected {shape}"
-                    )
+            _, value = self.prepare_input(name, inputs)
             buffer = aligned_tensor(shape, value.dtype, value.device)
             buffer.copy_(value)
             input_buffers[name] = buffer
@@ -147,8 +152,9 @@ STATE_NAMES = (
 
 
 class Far3DDecoderRunner(TensorRTRunner):
-    def __init__(self, engine_path):
+    def __init__(self, engine_path, input_callback=None):
         super().__init__(engine_path, STATE_NAMES)
+        self.input_callback = input_callback
         self.scene_token = None
         self.timestamp_offset = None
 
@@ -167,9 +173,18 @@ class Far3DDecoderRunner(TensorRTRunner):
                 dtype=self.tensor_dtypes[prev_exists_name],
                 device="cuda",
             )
-        outputs = super().__call__(
-            stream, timestamp=(timestamp - self.timestamp_offset).float(), **inputs
-        )
+        inputs["timestamp"] = (timestamp - self.timestamp_offset).float()
+        if self.input_callback:
+            calibration_inputs = {}
+            for name in self.input_shapes:
+                base_name = name.rsplit(".1", maxsplit=1)[0] if name.endswith(".1") else name
+                if name in self.state:
+                    value = self.state[name]
+                else:
+                    _, value = self.prepare_input(name, inputs)
+                calibration_inputs[base_name] = value
+            self.input_callback(calibration_inputs)
+        outputs = super().__call__(stream, **inputs)
         for base_name in STATE_NAMES:
             input_name = self.resolve_name(base_name)
             output_name = f"{base_name}_out"
@@ -180,9 +195,9 @@ class Far3DDecoderRunner(TensorRTRunner):
 
 
 class Far3DPipeline:
-    def __init__(self, encoder_engine, decoder_engine):
+    def __init__(self, encoder_engine, decoder_engine, decoder_input_callback=None):
         self.encoder = TensorRTRunner(encoder_engine)
-        self.decoder = Far3DDecoderRunner(decoder_engine)
+        self.decoder = Far3DDecoderRunner(decoder_engine, decoder_input_callback)
 
     @staticmethod
     def unpack(data):
