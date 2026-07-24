@@ -35,7 +35,6 @@ from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _has_accelerate_offload,
-    _process_quantized_modules_offloaded,
     _StreamingShardWriter,
 )
 
@@ -124,78 +123,6 @@ def test_meta_guard_not_raised_for_real_weight():
 
 
 # ---------------------------------------------------------------------------
-# _process_quantized_modules_offloaded — non-decoder materialization
-# ---------------------------------------------------------------------------
-
-
-def test_non_decoder_offloaded_tensors_are_collected():
-    """Non-decoder modules with disk-offload hooks must have no meta tensors in the result.
-
-    Reproduces the NemotronH 550B crash: embed_tokens (and norm, lm_head) are
-    disk-offloaded and return meta from model.state_dict().  After
-    revert_weight_conversion_quant_aware renames them to hub-original names, transformers'
-    remove_tied_weights_from_state_dict tries to look them up in the model by that name
-    and crashes.  Fix: _process_quantized_modules_offloaded materialises non-decoder
-    offloaded modules directly so the returned state dict contains no meta tensors.
-
-    The decoder layer here is NOT disk-offloaded (all weights GPU-resident) so the
-    decoder-layer loop exercises the null-context path and we focus on the non-decoder
-    collection pass that was previously missing.
-    """
-
-    class _TinyLayer(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.proj = nn.Linear(8, 8, bias=False)
-
-        def forward(self, x):
-            return self.proj(x)
-
-    class _TinyModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.embed = nn.Embedding(16, 8)
-            self.layers = nn.ModuleList([_TinyLayer()])
-
-        def forward(self, x):
-            return self.layers[0](self.embed(x))
-
-    model = _TinyModel()
-
-    # Install a CPU-offload hook on embed ONLY (non-decoder module).
-    # The decoder layer is left GPU-resident so enable_weight_access_and_writeback
-    # returns a no-op nullcontext and the decoder-layer state_dict() returns real tensors.
-    embed_val = model.embed.weight.data.clone().cpu()
-    embed_weights_map = {"weight": embed_val}
-    embed_hook = AlignDevicesHook(
-        execution_device="cpu", offload=True, weights_map=embed_weights_map
-    )
-    add_hook_to_module(model.embed, embed_hook)
-    set_module_tensor_to_device(model.embed, "weight", "meta")
-
-    from unittest.mock import patch
-
-    with patch(
-        "modelopt.torch.quantization.utils.layerwise_calib"
-        ".LayerActivationCollector.get_decoder_layers",
-        return_value=list(model.layers),
-    ):
-        result = _process_quantized_modules_offloaded(model, torch.float32)
-
-    assert "embed.weight" in result, "embed.weight missing from state dict"
-    emb = result["embed.weight"]
-    assert not emb.is_meta, "embed.weight must not be meta in exported state dict"
-    assert emb.shape == (16, 8)
-
-    assert "layers.0.proj.weight" in result
-    assert not result["layers.0.proj.weight"].is_meta
-
-    for key, val in result.items():
-        if isinstance(val, torch.Tensor):
-            assert not val.is_meta, f"meta tensor found for key '{key}'"
-
-
-# ---------------------------------------------------------------------------
 # _StreamingShardWriter
 # ---------------------------------------------------------------------------
 
@@ -236,6 +163,32 @@ def test_streaming_shard_writer_multi_shard():
         assert index["metadata"]["total_size"] > 0
 
 
+def test_multi_shard_files_exist_after_finalize():
+    """All numbered shard files referenced in the index must exist on disk after finalize().
+
+    Regression guard: an earlier code path called model.save_pretrained(state_dict={}) after
+    finalize(), triggering transformers' stale-shard cleanup loop which matched and deleted
+    every model-NNNNN-of-NNNNN.safetensors file because filename_to_tensors was empty.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=64)
+        writer.add("x", torch.ones(4, 4))
+        writer.add("y", torch.ones(4, 4))
+        writer.finalize()
+
+        index_path = Path(tmpdir) / "model.safetensors.index.json"
+        assert index_path.exists()
+        with open(index_path) as f:
+            index = json.load(f)
+
+        for key, shard_name in index["weight_map"].items():
+            shard_path = Path(tmpdir) / shard_name
+            assert shard_path.exists(), (
+                f"Shard '{shard_name}' (for key '{key}') missing from disk after finalize()"
+            )
+            assert shard_path.stat().st_size > 0, f"Shard file {shard_name} is empty"
+
+
 def test_streaming_shard_writer_tensors_readable():
     """Tensors written by the shard writer can be read back correctly."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -257,7 +210,9 @@ def test_streaming_shard_writer_tensors_readable():
 
 def test_postprocess_passthrough_normal_key():
     """Non-quantizer weights pass through unchanged."""
-    key, val = _postprocess_single_tensor("model.layers.0.self_attn.q_proj.weight", torch.randn(4, 4), 448.0, None)
+    key, val = _postprocess_single_tensor(
+        "model.layers.0.self_attn.q_proj.weight", torch.randn(4, 4), 448.0, None
+    )
     assert key == "model.layers.0.self_attn.q_proj.weight"
     assert val is not None
     assert val.shape == (4, 4)
@@ -265,7 +220,9 @@ def test_postprocess_passthrough_normal_key():
 
 def test_postprocess_amax_dropped():
     """weight_quantizer._amax matches skip_keys but has no replacement — dropped."""
-    key, val = _postprocess_single_tensor("model.layers.0.weight_quantizer._amax", torch.tensor(1.0), 448.0, None)
+    key, val = _postprocess_single_tensor(
+        "model.layers.0.weight_quantizer._amax", torch.tensor(1.0), 448.0, None
+    )
     assert key is None
     assert val is None
 

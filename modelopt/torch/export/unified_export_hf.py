@@ -603,9 +603,8 @@ def _export_quantized_weight(
     if weight.is_meta:
         raise RuntimeError(
             f"Weight '{weight_name}' of {type(sub_module).__name__} is a meta tensor during "
-            "export. If the model was loaded with disk/CPU offload, export must run inside an "
-            "enable_weight_access_and_writeback context. Use the offload-aware export path "
-            "(_process_quantized_modules_offloaded) rather than _process_quantized_modules."
+            "export. If the model was loaded with disk/CPU offload, use export_hf_checkpoint() "
+            "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
 
     # Capture source identity BEFORE any tensor-creating operation below.
@@ -914,93 +913,6 @@ def _has_accelerate_offload(model: nn.Module) -> bool:
         if hook is not None and _get_offload_hook(hook) is not None:
             return True
     return False
-
-
-def _process_quantized_modules_offloaded(
-    model: nn.Module,
-    dtype: torch.dtype,
-    is_modelopt_qlora: bool = False,
-) -> dict[str, Any]:
-    """Export quantized weights for a disk/CPU-offloaded model, one layer at a time.
-
-    Decoder layers are processed one at a time via enable_weight_access_and_writeback.
-    Non-decoder modules that are also disk-offloaded (embed_tokens, norms, lm_head) are
-    materialized individually; any quantized non-decoder module (e.g. lm_head) has its
-    export handler invoked in the same context.
-
-    Returns a full-model state dict with no meta tensors.
-    """
-    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
-    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-    if decoder_layers is None:
-        raise RuntimeError(
-            "Disk/CPU-offloaded export requires discoverable decoder layers. "
-            "The model architecture is not supported by LayerActivationCollector."
-        )
-    decoder_layer_ids = {id(m) for m in decoder_layers}
-
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
-    layer_tensors: dict[str, torch.Tensor] = {}
-
-    for name, module in model.named_modules():
-        if id(module) not in decoder_layer_ids:
-            continue
-        # writeback=False: weights are captured in layer_tensors below; no need to promote
-        # the quantized values back to the offload store on context exit.
-        with enable_weight_access_and_writeback(module, module, writeback=False):
-            for sub_name, sub_mod in module.named_modules():
-                full_name = f"{name}.{sub_name}" if sub_name else name
-                _dispatch_export_handler(full_name, sub_mod, ctx)
-
-            # Mirror the non-offloaded path: reconstruct fused MoE per-expert weights
-            # into 3D tensors BEFORE snapshotting, so captured keys match the original
-            # MoE format (e.g. moe.up_proj.weight [N, out, in]).
-            _reconstruct_fused_moe_linear(module)
-
-            # Snapshot inside the context: post-exit, post_forward re-offloads params to meta.
-            prefix = f"{name}." if name else ""
-            for key, tensor in module.state_dict().items():
-                assert not tensor.is_meta, (
-                    f"Expected real tensor for '{prefix + key}' inside materialization context"
-                )
-                layer_tensors[prefix + key] = tensor.detach().cpu()
-
-    # Also collect non-decoder modules that are disk-offloaded (embed_tokens, norms, lm_head).
-    # model.state_dict() returns meta for these; materialize, run any export handlers
-    # (e.g. a quantized lm_head), then snapshot the real tensors.
-    for name, module in model.named_modules():
-        if id(module) in decoder_layer_ids:
-            continue
-        if not hasattr(module, "_hf_hook"):
-            continue
-        if _get_offload_hook(module._hf_hook) is None:
-            continue
-        # Only handle modules that have DIRECT meta parameters/buffers.
-        # Child decoder layers (already captured above) must not be re-collected.
-        if not (
-            any(p is not None and p.is_meta for p in module._parameters.values())
-            or any(b is not None and b.is_meta for b in module._buffers.values())
-        ):
-            continue
-        with enable_weight_access_and_writeback(module, module, writeback=False):
-            for sub_name, sub_mod in module.named_modules():
-                full_name = f"{name}.{sub_name}" if sub_name else name
-                _dispatch_export_handler(full_name, sub_mod, ctx)
-            prefix = f"{name}." if name else ""
-            for key, tensor in module.state_dict().items():
-                if not tensor.is_meta:
-                    layer_tensors[prefix + key] = tensor.detach().cpu()
-
-    # model.state_dict() fills in non-offloaded parts (GPU-resident tensors).
-    # layer_tensors overrides both decoder-layer placeholders and non-decoder
-    # offloaded placeholders so the returned dict contains no meta tensors.
-    full_sd = model.state_dict()
-    full_sd.update(layer_tensors)
-    return full_sd
 
 
 class _StreamingShardWriter:
@@ -1370,7 +1282,7 @@ def _export_transformers_checkpoint(
 
             remove_hook_from_module(model, recurse=True)
         except ImportError:
-            warnings.warn("accelerate is not installed, hooks will not be removed")
+            pass  # no accelerate installed → no offload hooks exist to remove
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
@@ -1411,8 +1323,10 @@ def _export_transformers_checkpoint(
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
     if _offloaded:
-        # MoE reconstruction happens per-layer inside _process_quantized_modules_offloaded.
-        quantized_state_dict = _process_quantized_modules_offloaded(model, dtype, is_modelopt_qlora)
+        raise NotImplementedError(
+            "_export_transformers_checkpoint does not support disk/CPU-offloaded models. "
+            "Use export_hf_checkpoint() which dispatches to _export_transformers_checkpoint_streaming."
+        )
     else:
         _reconstruct_fused_moe_linear(model)
 
@@ -1877,6 +1791,38 @@ def export_speculative_decoding(
     exporter.export(export_dir, dtype)
 
 
+def _write_hf_export_config(
+    model: nn.Module,
+    hf_quant_config: dict | None,
+    export_dir: Path,
+) -> None:
+    """Write hf_quant_config.json (if quantized) and embed quantization_config into config.json."""
+    quantization_details = (hf_quant_config or {}).get("quantization", {})
+    is_quantized_export = (
+        quantization_details.get("quant_algo") is not None
+        or quantization_details.get("kv_cache_quant_algo") is not None
+    )
+    if is_quantized_export:
+        with open(f"{export_dir}/hf_quant_config.json", "w") as file:
+            json.dump(hf_quant_config, file, indent=4)
+        hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+    else:
+        hf_quant_config = None
+
+    original_config = f"{export_dir}/config.json"
+    with open(original_config) as file:
+        config_data = json.load(file)
+    sanitize_hf_config_for_deployment(config_data, model)
+    if hf_quant_config is not None:
+        config_data["quantization_config"] = hf_quant_config
+    if export_sparse_attention_config is not None:
+        sparse_attn_config = export_sparse_attention_config(model)
+        if sparse_attn_config is not None:
+            config_data["sparse_attention_config"] = sparse_attn_config
+    with open(original_config, "w") as file:
+        json.dump(config_data, file, indent=4)
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1937,7 +1883,6 @@ def export_hf_checkpoint(
     # Streaming path writes shard files layer-by-layer without accumulating the full
     # state dict in RAM (peak = 1 layer + 1 shard buffer vs. ~764 GiB for Ultra 550B).
     _offloaded = _has_accelerate_offload(model)
-    export_state_dict = None
 
     try:
         if _offloaded:
@@ -1958,15 +1903,27 @@ def export_hf_checkpoint(
                 max_shard_size=max_shard_size,
                 **kwargs,
             )
-        else:
-            post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
+            if getattr(model, "hf_quantizer", None) is not None:
+                model.hf_quantizer = None
+            try:
+                name_mapper = build_reverse_name_mapper(model)
+                if name_mapper is not None and hf_quant_config:
+                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+            except Exception as exc:
+                warnings.warn(
+                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+                    "names may not match the original HF hub checkpoint."
+                )
+            _write_hf_export_config(model, hf_quant_config, export_dir)
+            return
+
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
-        if not _offloaded:
-            export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
+        export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
 
         # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
         # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
@@ -1981,10 +1938,7 @@ def export_hf_checkpoint(
         # weights and config so they stay mutually consistent.
         try:
             name_mapper = build_reverse_name_mapper(model)
-            if not _offloaded:
-                # Streaming path applies per-tensor renaming inline inside
-                # _export_transformers_checkpoint_streaming; skip full-dict reversal here.
-                export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+            export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
             if name_mapper is not None and hf_quant_config:
                 revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
         except Exception as exc:
@@ -1997,65 +1951,26 @@ def export_hf_checkpoint(
         if is_distributed and torch.distributed.get_rank() != 0:
             return
 
-        # Only treat the export as quantized when at least one quant_algo field is set.
-        # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
-        # so emitting hf_quant_config.json unconditionally produces a file with
-        # "quant_algo": null that downstream loaders (e.g. TensorRT-LLM) reject as a
-        # malformed pre-quantized checkpoint.
-        quantization_details = (hf_quant_config or {}).get("quantization", {})
-        is_quantized_export = (
-            quantization_details.get("quant_algo") is not None
-            or quantization_details.get("kv_cache_quant_algo") is not None
-        )
+        # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
+        # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
+        # scale tensors). Patch both the source and importing module since modeling_utils does
+        # `from core_model_loading import revert_weight_conversion`.
+        _patches = _patch_revert_weight_conversion()
 
-        if is_quantized_export:
-            # Save hf_quant_config.json for backward compatibility
-            with open(f"{export_dir}/hf_quant_config.json", "w") as file:
-                json.dump(hf_quant_config, file, indent=4)
+        _sanitize_generation_config_for_save(model)
 
-            hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
-        else:
-            hf_quant_config = None
+        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
+        try:
+            model.save_pretrained(
+                export_dir,
+                state_dict=export_state_dict,
+                save_modelopt_state=save_modelopt_state,
+                max_shard_size=max_shard_size,
+            )
+        finally:
+            _unpatch_revert_weight_conversion(_patches)
 
-        if not _offloaded:
-            # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
-            # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
-            # scale tensors). Patch both the source and importing module since modeling_utils does
-            # `from core_model_loading import revert_weight_conversion`.
-            _patches = _patch_revert_weight_conversion()
-
-            _sanitize_generation_config_for_save(model)
-
-            # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
-            try:
-                model.save_pretrained(
-                    export_dir,
-                    state_dict=export_state_dict,
-                    save_modelopt_state=save_modelopt_state,
-                    max_shard_size=max_shard_size,
-                )
-            finally:
-                _unpatch_revert_weight_conversion(_patches)
-
-        original_config = f"{export_dir}/config.json"
-        config_data = {}
-
-        with open(original_config) as file:
-            config_data = json.load(file)
-
-        sanitize_hf_config_for_deployment(config_data, model)
-
-        if hf_quant_config is not None:
-            config_data["quantization_config"] = hf_quant_config
-
-        # Add sparse attention config if available
-        if export_sparse_attention_config is not None:
-            sparse_attn_config = export_sparse_attention_config(model)
-            if sparse_attn_config is not None:
-                config_data["sparse_attention_config"] = sparse_attn_config
-
-        with open(original_config, "w") as file:
-            json.dump(config_data, file, indent=4)
+        _write_hf_export_config(model, hf_quant_config, export_dir)
 
     except Exception as e:
         warnings.warn(
