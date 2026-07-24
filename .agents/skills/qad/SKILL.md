@@ -42,6 +42,15 @@ dataset, sample count, sequence length, and seed. Choose Megatron execution
 topology separately without changing quantization semantics. If any quantization
 setting must change, treat it as a new PTQ candidate and evaluate it before QAD.
 
+In the exact runtime, confirm `AutoBridge.can_handle()` accepts the model, then
+reproduce PTQ with `quantize.py`. Sanity-check the checkpoint's master-rank
+`.quant_summary.txt`: every enabled statically calibrated quantizer it lists
+must have a finite, positive `amax`. Accept `dynamic` or format-defined `None`
+only when the preserved recipe intentionally uses dynamic or MX quantization;
+with model parallelism, do not treat this rank-local summary as exhaustive.
+Stop on unsupported conversion, failed PTQ, missing ModelOpt state, or
+unexpected `amax`.
+
 ## 3. Set up Slurm execution
 
 Read `skills/common/environment-setup.md` and detect whether the Slurm target is
@@ -129,11 +138,11 @@ data as training evidence.
 
 ## 6. Reproduce PTQ, then run staged QAD
 
-Produce the required Megatron checkpoint with the PTQ config or recipe preserved
-in step 2. Reuse a valid preceding PTQ evaluation; run a new PTQ evaluation only
-when the baseline is missing, invalid, or non-comparable, or a quantization
-setting changed. Follow the current Megatron Bridge README for PTQ, QAD, resume,
-and export commands. Apply these QAD defaults:
+Use the verified Megatron PTQ checkpoint from step 2. Reuse a valid preceding
+PTQ evaluation; run a new PTQ evaluation only when the baseline is missing,
+invalid, or non-comparable, or a quantization setting changed. Follow the
+current Megatron Bridge README for QAD, resume, and export commands. Apply these
+QAD defaults:
 
 | Setting | Default |
 | --- | --- |
