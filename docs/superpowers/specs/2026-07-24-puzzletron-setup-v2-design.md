@@ -160,6 +160,35 @@ The top-level order is:
 9. Post-MIP flows and dynamic-node resource cards.
 10. Results location, complete review, validation, and bundle generation.
 
+### Campaign and model entry
+
+After accepting the campaign directory, the wizard proceeds directly to model
+selection. It does not show a generic campaign-section
+`Use defaults / Customize / Review` menu because the directory is the only
+campaign-level input at that point.
+
+Model selection presents supported checkpoints as concise labels grouped under:
+
+- **Nemotron 3**
+  - Ultra 550B-A55B
+  - Super 120B-A12B
+  - Nano 30B-A3B
+- **Qwen 3.5/3.6 Dense**
+  - Qwen 3.5 0.8B
+  - Qwen 3.5 2B
+  - Qwen 3.5 4B
+  - Qwen 3.5 9B
+  - Qwen 3.6 27B
+- **Qwen 3.5/3.6 MoE**
+  - Qwen 3.6 35B-A3B
+  - Qwen 3.5 122B-A10B
+  - Qwen 3.5 397B-A17B
+
+Each supported choice resolves to its canonical Hugging Face URL. A final
+`Custom local path or Hugging Face model` choice preserves free-form local
+paths and supported Hugging Face URLs. Revision selection and immutable commit
+resolution remain unchanged.
+
 Infrastructure precedes stage resource cards so GPU packing, partitions, and derived scheduler
 tasks can be shown when a stage is configured. Model inspection precedes infrastructure mesh
 validation so MoE and descriptor constraints are known.
