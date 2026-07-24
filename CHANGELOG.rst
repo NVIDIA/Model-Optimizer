@@ -12,6 +12,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix AWQ (e.g. ``int4_awq``, ``w4a8_awq``, ``nvfp4_awq``) HF checkpoint export for models whose MoE experts are stored as fused 3-D parameters — Nemotron-H on ``transformers>=5.5`` (``NemotronHExperts``), and any other model wrapped by ``_QuantFusedExperts`` / ``_QuantNonGatedFusedExperts``. Calibration succeeded but export raised ``TypeError: object of type 'QuantNemotronHExperts' has no len()``, because the AWQ-only expert resmoothing step addressed experts positionally (``module.experts[i].<linear>``), which only exists for the sequential ``nn.ModuleList`` layout; fused blocks are now skipped, as a fused wrapper already shares one input quantizer (and therefore one ``pre_quant_scale``) across all of its experts. Past that, the uncalibrated-expert fallback in ``_export_fused_experts`` assigned a scalar ``amax``, which is only valid for per-tensor formats — block-wise formats then evaluated ``weight.shape[-1] // weights_scaling_factor.shape[-1]`` on a 0-d tensor and raised ``IndexError: tuple index out of range``. It now derives a per-block ``amax`` shaped ``(out_features, n_blocks)``, matching what ``MaxCalibrator`` produces for a calibrated expert. Experts left unrouted by the calibration set are common on wide MoEs (e.g. 512 experts at top-22), so both paths were easy to hit. Non-AWQ formats (FP8, NVFP4) were unaffected.
+
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
 

@@ -65,7 +65,7 @@ except ImportError:
     export_sparse_attention_config = None
 
 # Importing the built-in handlers installs their entries in the two registries.
-from . import hf_export_handlers as _hf_export_handlers  # noqa: F401
+from . import hf_export_handlers as _hf_export_handlers
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
     get_experts_list,
@@ -425,6 +425,20 @@ def _fuse_shared_input_modules(
     return fused_linears
 
 
+def _has_fused_experts(module: torch.nn.Module) -> bool:
+    """Return True when an MoE block stores its experts as fused 3-D parameters.
+
+    ``get_experts_list`` / ``_get_expert_attr`` address experts positionally
+    (``module.experts[i].<linear>``), which only exists for the sequential
+    ``nn.ModuleList`` layout. Fused wrappers (e.g. NemotronH ``NemotronHExperts`` on
+    transformers >= 5.5) pack every expert into 3-D parameters and expose per-expert
+    quantizers as ``<proj>_weight_quantizers`` instead, so they have no ``__len__`` and
+    no per-expert submodules to group.
+    """
+    experts = getattr(module, "experts", None)
+    return experts is not None and _hf_export_handlers._has_fused_experts_quantizers(experts)
+
+
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
@@ -444,9 +458,16 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     for name, module in model.named_modules():
         module_names.add(name)
 
-        # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module) and (
-            quantization_format is not QUANTIZATION_NONE
+        # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts.
+        # Fused-experts blocks are skipped: resmoothing exists to give every expert in a group
+        # one common input pre_quant_scale, but a fused wrapper already shares a single input
+        # quantizer (and hence a single pre_quant_scale) across all its experts, so there is
+        # nothing to reconcile. Without the guard, get_experts_list() below raises
+        # "object of type 'QuantNemotronHExperts' has no len()".
+        if (
+            is_moe(module)
+            and not _has_fused_experts(module)
+            and quantization_format is not QUANTIZATION_NONE
             and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)

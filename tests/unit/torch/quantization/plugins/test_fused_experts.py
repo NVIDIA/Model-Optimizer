@@ -636,6 +636,70 @@ class TestExportFusedExperts:
             if QuantModuleRegistry.get(expert_type) is not None:
                 QuantModuleRegistry.unregister(expert_type)
 
+    def test_uncalibrated_expert_block_quant_amax_is_per_block(self, monkeypatch):
+        """An uncalibrated expert under a block-wise format needs a per-block amax.
+
+        Regression for INT4 AWQ export of NemotronH (NVBug: "cannot run int4_awq PTQ").
+        With 512 routed experts at top-22 a small calibration set leaves some experts
+        unrouted, so their weight quantizers reach export with ``_amax is None``. The
+        fallback used to assign a scalar ``weight.abs().amax()``, which is only valid
+        for per-tensor formats; for ``block_sizes={-1: N}`` the exporter then evaluates
+        ``weight.shape[-1] // weights_scaling_factor.shape[-1]`` on a 0-d tensor and
+        raised ``IndexError: tuple index out of range``.
+        """
+        block_size = HIDDEN_DIM // 2
+        experts = _SyntheticNonGatedFusedExperts()
+        expert_type = type(experts)
+        if QuantModuleRegistry.get(expert_type) is None:
+            QuantModuleRegistry.register({expert_type: "test.SyntheticNonGatedFusedExperts"})(
+                _QuantNonGatedFusedExperts
+            )
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+
+            # Enable every expert weight quantizer as block-quantized, and leave them
+            # all uncalibrated so the export-time fallback is what supplies the amax.
+            block_cfg = QuantizerAttributeConfig(
+                num_bits=4, block_sizes={-1: block_size, "type": "static"}
+            )
+            for quantizers in (
+                converted.up_proj_weight_quantizers,
+                converted.down_proj_weight_quantizers,
+            ):
+                for q in quantizers:
+                    q.set_from_attribute_config(block_cfg)
+                    q._disabled = False
+
+            seen = []
+
+            def _spy_export(wrapper, dtype, **_kwargs):
+                seen.append(
+                    (tuple(wrapper.weight.shape), wrapper.weight_quantizer._amax.detach().clone())
+                )
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                _spy_export,
+            )
+
+            _export_fused_experts(converted, torch.float16)
+
+            assert seen, "no projections were exported"
+            for weight_shape, amax in seen:
+                out_features, in_features = weight_shape
+                assert amax.dim() == 2, (
+                    f"uncalibrated block-quantized expert got a {amax.dim()}-d amax "
+                    f"{tuple(amax.shape)}; block formats need one amax per block"
+                )
+                assert tuple(amax.shape) == (out_features, in_features // block_size), (
+                    f"expected per-block amax {(out_features, in_features // block_size)}, "
+                    f"got {tuple(amax.shape)}"
+                )
+                assert torch.all(amax > 0), "weight-derived amax must be positive"
+        finally:
+            if QuantModuleRegistry.get(expert_type) is not None:
+                QuantModuleRegistry.unregister(expert_type)
+
 
 # ---------------------------------------------------------------------------
 # Tests for tied-experts dedup in _export_fused_experts

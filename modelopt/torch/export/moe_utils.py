@@ -74,6 +74,33 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
             delattr(module, attr)
 
 
+def _weight_derived_amax(quantizer: nn.Module, weight: torch.Tensor) -> torch.Tensor:
+    """Amax for an uncalibrated expert weight, at the quantizer's own granularity.
+
+    A scalar (0-d) amax is only meaningful for per-tensor formats. Block-wise formats --
+    e.g. INT4 AWQ with ``block_sizes={-1: 128}`` -- need one amax per block, matching what
+    ``MaxCalibrator`` produces for a calibrated expert. Handing them a 0-d amax makes the
+    exporter compute ``weight.shape[-1] // weights_scaling_factor.shape[-1]`` on a 0-d
+    scale and raise "IndexError: tuple index out of range", which is how a MoE expert that
+    the router never picked during calibration used to break INT4 AWQ export.
+    """
+    block_sizes = getattr(quantizer, "block_sizes", None)
+    block_size = None
+    if isinstance(block_sizes, dict):
+        # Block size on the last (input) axis; recorded under -1 or the positive axis index.
+        block_size = block_sizes.get(-1, block_sizes.get(weight.dim() - 1))
+    if (
+        not isinstance(block_size, int)
+        or block_size <= 0
+        or weight.dim() < 2
+        or weight.shape[-1] % block_size != 0
+    ):
+        return weight.abs().amax().to(torch.float32)
+    # (out_features, n_blocks) -- the same layout the per-channel slicing above normalises
+    # a calibrated block amax into, and what the exporter divides the weight columns by.
+    return weight.abs().reshape(weight.shape[0], -1, block_size).amax(dim=-1).to(torch.float32)
+
+
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
@@ -258,7 +285,7 @@ def _export_fused_experts(
                     or torch.all(w_quantizer._amax == 0)
                 )
             ):
-                w_quantizer.amax = weight_slice.abs().amax().to(torch.float32)
+                w_quantizer.amax = _weight_derived_amax(w_quantizer, weight_slice)
                 warnings.warn(
                     f"Expert {idx} {proj_name} weight quantizer was not calibrated "
                     f"(amax missing or zero). Using weight-derived amax as fallback. "
