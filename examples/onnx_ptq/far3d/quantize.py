@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +21,7 @@ import onnx
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.quantization import quantize
+from modelopt.onnx.utils import topologically_sort_graph_nodes
 
 
 class FileCalibrationReader(CalibrationDataReader):
@@ -75,27 +75,17 @@ class DecoderCalibrationReader(FileCalibrationReader):
 
 def find_encoder_nodes_to_exclude(onnx_path):
     graph = onnx.load(onnx_path, load_external_data=False).graph
-    consumers = defaultdict(list)
-    nodes_by_name = {}
+    topologically_sort_graph_nodes(graph)
+
+    excluded = set()
+    downstream_tensors = set()
     for node in graph.node:
-        nodes_by_name[node.name] = node
-        for input_name in node.input:
-            consumers[input_name].append(node.name)
-
-    excluded = {name for name in nodes_by_name if "OSA4_5" in name}
-    queue = deque()
-    for name, node in nodes_by_name.items():
-        if "lateral_convs" in name:
-            for output_name in node.output:
-                queue.extend(consumers[output_name])
-
-    while queue:
-        name = queue.popleft()
-        if not name or name in excluded:
-            continue
-        excluded.add(name)
-        for output_name in nodes_by_name[name].output:
-            queue.extend(consumers[output_name])
+        is_osa = "OSA4_5" in node.name
+        is_downstream = any(name in downstream_tensors for name in node.input)
+        if is_osa or is_downstream:
+            excluded.add(node.name)
+        if "lateral_convs" in node.name or (is_downstream and not is_osa):
+            downstream_tensors.update(node.output)
     return sorted(excluded)
 
 
