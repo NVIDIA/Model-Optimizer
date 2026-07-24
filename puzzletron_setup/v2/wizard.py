@@ -28,7 +28,14 @@ from .post_mip import (
     PostMIPFlowEditor,
     recommended_flow,
 )
-from .prompts import BACK, InteractiveBackend, PromptBackend
+from .prompts import (
+    BACK,
+    InteractiveBackend,
+    PromptBackend,
+    PromptChoice,
+    PromptItem,
+    PromptSeparator,
+)
 from .resources import (
     ParallelProfile,
     ResourceProfileRegistry,
@@ -103,6 +110,55 @@ STATIC_MODEL_STAGES = (
     "bypass",
     "replacement_scoring",
 )
+
+_CUSTOM_MODEL_SOURCE = "__custom_model_source__"
+
+SUPPORTED_MODEL_GROUPS = (
+    (
+        "Nemotron 3",
+        (
+            (
+                "Ultra 550B-A55B",
+                "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+            ),
+            (
+                "Super 120B-A12B",
+                "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+            ),
+            (
+                "Nano 30B-A3B",
+                "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            ),
+        ),
+    ),
+    (
+        "Qwen 3.5/3.6 Dense",
+        (
+            ("Qwen 3.5 0.8B", "https://huggingface.co/Qwen/Qwen3.5-0.8B"),
+            ("Qwen 3.5 2B", "https://huggingface.co/Qwen/Qwen3.5-2B"),
+            ("Qwen 3.5 4B", "https://huggingface.co/Qwen/Qwen3.5-4B"),
+            ("Qwen 3.5 9B", "https://huggingface.co/Qwen/Qwen3.5-9B"),
+            ("Qwen 3.6 27B", "https://huggingface.co/Qwen/Qwen3.6-27B"),
+        ),
+    ),
+    (
+        "Qwen 3.5/3.6 MoE",
+        (
+            ("Qwen 3.6 35B-A3B", "https://huggingface.co/Qwen/Qwen3.6-35B-A3B"),
+            ("Qwen 3.5 122B-A10B", "https://huggingface.co/Qwen/Qwen3.5-122B-A10B"),
+            ("Qwen 3.5 397B-A17B", "https://huggingface.co/Qwen/Qwen3.5-397B-A17B"),
+        ),
+    ),
+)
+
+
+def _model_source_choices() -> list[PromptItem]:
+    choices: list[PromptItem] = []
+    for group, models in SUPPORTED_MODEL_GROUPS:
+        choices.append(PromptSeparator(group))
+        choices.extend(PromptChoice(short_name, url) for short_name, url in models)
+    choices.append(PromptChoice("Custom local path or Hugging Face model", _CUSTOM_MODEL_SOURCE))
+    return choices
 
 
 def _nested_records(state: WizardState) -> dict[str, Any]:
@@ -210,20 +266,6 @@ def _integer_field(
     return value
 
 
-def campaign_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    action = _section_action(
-        session,
-        "campaign",
-        f"Answers are saved atomically in {session.state.path}.",
-    )
-    if action is BACK:
-        return False
-    if action == "review":
-        print(f"  Campaign directory: {session.state.campaign_dir}")
-        return campaign_section(session, resolver, context)
-    return True
-
-
 def model_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     action = _section_action(
         session,
@@ -240,19 +282,29 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
     if action == "defaults" and not source_default.value:
         action = "customize"
     if action == "customize":
-        source = _text_field(
-            session,
-            resolver,
-            "model.source",
-            "Local model path or Hugging Face URL:",
+        source = session.select(
+            "model.source_choice",
+            "Model:",
+            _model_source_choices(),
+            default=_CUSTOM_MODEL_SOURCE,
         )
         if source is BACK:
             return False
+        if source == _CUSTOM_MODEL_SOURCE:
+            source = _text_field(
+                session,
+                resolver,
+                "model.source",
+                "Local model path or Hugging Face URL:",
+            )
+            if source is BACK:
+                return False
         try:
             source = normalize_model_source(str(source))
         except SetupError as error:
             print(f"  {error}")
             return model_section(session, resolver, context)
+        session.state.set_field("model.source", source, source="user")
         revision = None
         if not Path(source).exists():
             revision = _text_field(
@@ -1499,7 +1551,6 @@ def output_review_section(
 
 
 SECTION_BUILDERS: tuple[Callable[..., bool], ...] = (
-    campaign_section,
     model_section,
     data_section,
     infrastructure_section,

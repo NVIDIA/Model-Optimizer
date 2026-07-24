@@ -8,7 +8,14 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Any, Optional, Union
 
-from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
+from .prompts import (
+    BACK,
+    InteractiveBackend,
+    PromptBackend,
+    PromptChoice,
+    PromptItem,
+    PromptSeparator,
+)
 from .state import PromptFrame, WizardState
 
 __all__ = ["BACK", "WizardSession"]
@@ -90,10 +97,10 @@ class WizardSession:
         print(f"  Default: {value!r} ({source})")
 
     @staticmethod
-    def _choices(choices: Sequence[Any]) -> list[PromptChoice]:
+    def _choices(choices: Sequence[Any]) -> list[PromptItem]:
         rendered = []
         for item in choices:
-            if isinstance(item, PromptChoice):
+            if isinstance(item, (PromptChoice, PromptSeparator)):
                 rendered.append(item)
             elif isinstance(item, tuple):
                 rendered.append(PromptChoice(str(item[0]), item[1]))
