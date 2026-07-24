@@ -106,6 +106,7 @@ STATIC_MODEL_STAGES = (
 STATIC_MODEL_BATCH_PATHS = {
     "depth_importance": "depth_importance.micro_batch_size",
     "width_importance": "pruning.micro_batch_size",
+    "sort_sanity": "sort_sanity.micro_batch_size",
     "bypass": "bypass.training.micro_batch_size",
     "replacement_scoring": "replacement_scoring.micro_batch_size",
 }
@@ -351,24 +352,8 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
             print(f"  {error}")
             continue
         session.state.set_field("model.source", source, source=source_kind)
-        revision = None
-        if not Path(source).exists():
-            if source_kind == "defaults_file":
-                resolved_revision = resolver.resolve_default("model.revision", "main")
-                revision = resolved_revision.value
-                session.state.set_field(
-                    "model.revision",
-                    revision,
-                    source=resolved_revision.source,
-                )
-            else:
-                revision = _text_field(
-                    session, resolver, "model.revision", "Hugging Face revision:", "main"
-                )
-                if revision is BACK:
-                    continue
         break
-    model = inspect_model(str(source), str(revision) if revision else None)
+    model = inspect_model(str(source))
     session.state.set_model(model.to_dict(), model.inventory.to_dict())
     context["model"] = model
     print(
@@ -379,20 +364,10 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
 
 
 def data_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    del context
     session.begin("data")
     explicit = resolver.file_default("data.source")
     if explicit is not None and explicit.value:
-        _print_default_decisions(
-            {
-                "source": explicit.value,
-                "modality": resolver.resolve_default("data.modality", "text").value,
-                "layout": resolver.resolve_default("data.layout", "fixed").value,
-                "sequence_length": resolver.resolve_default(
-                    "data.sequence_length", 4096
-                ).value,
-            }
-        )
+        _print_default_decisions({"source": explicit.value})
     choices = _data_source_choices(resolver)
     mode = session.select(
         "data.source_mode",
@@ -416,53 +391,63 @@ def data_section(session: WizardSession, resolver: DefaultsResolver, context: di
         if source is BACK:
             return False
         source = normalize_dataset_source(str(source))
-        finding = infer_dataset_modality(source)
-        modality = session.select(
-            "data.modality",
-            f"Data modality ({finding.evidence}):",
-            [("Text", "text"), ("Multimodal", "multimodal")],
-            default=finding.modality if finding.modality != "unknown" else "text",
-        )
-        if modality is BACK:
-            return False
-        layout = session.select(
-            "data.layout",
-            "Dataset layout:",
-            [
-                ("Fixed-length", "fixed"),
-                ("Packed variable-length", "packed_varlen"),
-                ("Padded", "padded"),
-            ],
-            default="fixed",
-        )
-        if layout is BACK:
-            return False
-        sequence = _integer_field(
-            session,
-            resolver,
-            "data.sequence_length",
-            "Calibration sequence length:",
-            4096,
-        )
-        if sequence is BACK:
-            return False
-        session.state.set_field("data.source", source, source="user")
-        session.state.set_field("data.modality", modality, source="user")
-        session.state.set_field("data.layout", layout, source="user")
+        source_kind = "user"
     else:
-        if explicit is None:
+        if explicit is None or not explicit.value:
             raise SetupError("The selected dataset default is no longer available.")
-        session.state.set_field(
-            "data.source",
-            normalize_dataset_source(str(explicit.value)),
-            source=explicit.source,
-        )
-        for path, fallback in (
-            ("data.modality", "text"),
-            ("data.layout", "fixed"),
-            ("data.sequence_length", 4096),
-        ):
-            _record_default(session.state, resolver, path, fallback)
+        source = normalize_dataset_source(str(explicit.value))
+        source_kind = explicit.source
+
+    finding = infer_dataset_modality(source)
+    modality_choices = [("Text", "text")]
+    if context["model"].inventory.multimodal:
+        modality_choices.append(("Multimodal", "multimodal"))
+    suggested_modality = str(
+        resolver.resolve(
+            "data.modality",
+            finding.modality if finding.modality != "unknown" else "text",
+        ).value
+    )
+    valid_modalities = {value for _, value in modality_choices}
+    if suggested_modality not in valid_modalities:
+        suggested_modality = "text"
+    modality = session.select(
+        "data.modality",
+        f"Data modality ({finding.evidence}):",
+        modality_choices,
+        default=suggested_modality,
+    )
+    if modality is BACK:
+        return False
+    layout = session.select(
+        "data.layout",
+        "Dataset layout:",
+        [
+            ("Fixed-length", "fixed"),
+            ("Packed variable-length", "packed_varlen"),
+            ("Padded", "padded"),
+        ],
+        default=str(resolver.resolve("data.layout", "fixed").value),
+    )
+    if layout is BACK:
+        return False
+    sequence = _integer_field(
+        session,
+        resolver,
+        "data.sequence_length",
+        "Sequence length used by width, depth, bypass, evaluation, and global KD:",
+        4096,
+    )
+    if sequence is BACK:
+        return False
+    session.state.set_field("data.source", source, source=source_kind)
+    session.state.set_field("data.modality", modality, source="user")
+    session.state.set_field("data.layout", layout, source="user")
+    session.state.set_field(
+        "data.sequence_length",
+        int(sequence),
+        source="user",
+    )
     return True
 
 
@@ -867,6 +852,622 @@ def _profile_prompt(
     else:
         registry.create(profile, consumer=stage_id)
     return profile
+
+
+def _pruning_payload(state: WizardState) -> dict[str, Any]:
+    payload = deepcopy(BUILTINS["pruning"])
+    current = state.collection("pruning")
+    if not isinstance(current, Mapping):
+        return payload
+    for key, value in current.items():
+        if isinstance(value, Mapping) and isinstance(payload.get(key), Mapping):
+            merged = dict(payload[key])
+            merged.update(deepcopy(dict(value)))
+            payload[key] = merged
+        else:
+            payload[key] = deepcopy(value)
+    return payload
+
+
+def _resource_registry(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+) -> ResourceProfileRegistry:
+    registry = ResourceProfileRegistry.from_dict(
+        session.state.collection("parallel_profiles") or {}
+    )
+    if not registry.names():
+        registry = ResourceProfileRegistry.from_dict(
+            resolver.resolve_default("profiles", {}).value or {}
+        )
+    return registry
+
+
+def _stage_resource_defaults(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+    stage_id: str,
+    *,
+    strategy: str,
+    batch: int,
+) -> dict[str, Any]:
+    registry = _resource_registry(session, resolver)
+    profile = (
+        registry.get(registry.names()[0])
+        if registry.names()
+        else ParallelProfile(stage_id)
+    )
+    resolved_strategy = str(
+        resolver.resolve_default(f"stages.{stage_id}.strategy", strategy).value
+    )
+    gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
+    instances = int(
+        resolver.resolve_default(
+            f"stages.{stage_id}.instances",
+            gpus_per_node if resolved_strategy != "single" else 1,
+        ).value
+    )
+    requested_batch = int(
+        resolver.resolve_default(f"stages.{stage_id}.batch", batch).value
+    )
+    resolution = resolve_batch(requested_batch, profile)
+    return {
+        "strategy": resolved_strategy,
+        "instances": instances,
+        "parallel_profile": profile.name,
+        "parallel": {
+            "tp": profile.tp,
+            "cp": profile.cp,
+            "pp": profile.pp,
+            "dp_shard": profile.dp_shard,
+            "dp_replicate": profile.dp_replicate,
+            "ep": profile.ep,
+            "sequence_parallel": profile.sequence_parallel,
+        },
+        "requested_batch": resolution.requested,
+        "effective_batch": resolution.effective,
+    }
+
+
+def _remove_stage_resource(session: WizardSession, stage_id: str) -> None:
+    resources = _mapping_copy(session.state.collection("stage_resources"))
+    resources.pop(stage_id, None)
+    session.state.set_collection("stage_resources", resources)
+    batches = _mapping_copy(session.state.collection("stage_batches"))
+    batch_path = STATIC_MODEL_BATCH_PATHS.get(stage_id)
+    if batch_path is not None:
+        batches.pop(batch_path, None)
+    session.state.set_collection("stage_batches", batches)
+
+
+def _configure_stage_resource(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+    model: Any,
+    stage_id: str,
+    *,
+    action: str,
+    strategy_default: str,
+    batch_default: int,
+) -> Any:
+    defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        stage_id,
+        strategy=strategy_default,
+        batch=batch_default,
+    )
+    registry = _resource_registry(session, resolver)
+    if action == "customize":
+        profile = _profile_prompt(session, registry, stage_id, model)
+        if profile is BACK:
+            return BACK
+        strategy = session.select(
+            f"stages.{stage_id}.strategy",
+            "Execution strategy:",
+            ["single", "persistent_pool", "sharded"],
+            default=defaults["strategy"],
+        )
+        if strategy is BACK:
+            return BACK
+        gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
+        default_instances = (
+            int(defaults["instances"])
+            if str(strategy) == str(defaults["strategy"])
+            else (1 if strategy == "single" else gpus_per_node)
+        )
+        instances = session.integer(
+            f"stages.{stage_id}.instances",
+            "Independent model instances/workers:",
+            default=default_instances,
+            minimum=1,
+        )
+        if instances is BACK:
+            return BACK
+        requested_batch = session.integer(
+            f"stages.{stage_id}.batch",
+            "Local/micro batch size:",
+            default=int(defaults["requested_batch"]),
+            minimum=1,
+        )
+        if requested_batch is BACK:
+            return BACK
+    else:
+        profile = (
+            registry.reuse(registry.names()[0], consumer=stage_id)
+            if registry.names()
+            else registry.create(ParallelProfile(stage_id), consumer=stage_id)
+        )
+        strategy = defaults["strategy"]
+        instances = defaults["instances"]
+        requested_batch = defaults["requested_batch"]
+
+    resolution = resolve_batch(int(requested_batch), profile)
+    if resolution.adjusted:
+        print(
+            f"  {stage_id} batch {resolution.requested} rounds up to "
+            f"{resolution.effective} "
+            f"(unit PP×DP-shard×DP-replicate={resolution.unit})."
+        )
+    gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
+    resource = StageResources(
+        stage_id=stage_id,
+        strategy=str(strategy),
+        instances=int(instances),
+        profile=profile,
+        gpus_per_node=gpus_per_node,
+    )
+    summary = allocation_summary(resource, gpus_per_node=gpus_per_node)
+    print(
+        f"  {stage_id}: {summary.instances} instance(s), "
+        f"{summary.gpus_per_instance} GPU/instance, {summary.task_count} task(s), "
+        f"{summary.nodes} node(s)."
+    )
+    resources = _mapping_copy(session.state.collection("stage_resources"))
+    resources[stage_id] = {
+        "strategy": resource.strategy,
+        "instances": resource.instances,
+        "resource": resource.resource,
+        "gpus_per_node": gpus_per_node,
+        "profile_name": profile.name,
+    }
+    batches = _mapping_copy(session.state.collection("stage_batches"))
+    batches[STATIC_MODEL_BATCH_PATHS[stage_id]] = resolution.effective
+    session.state.set_collection("parallel_profiles", registry.to_dict())
+    session.state.set_collection("stage_resources", resources)
+    session.state.set_collection("stage_batches", batches)
+    session.state.set_field(
+        f"stages.{stage_id}.batch",
+        resolution.effective,
+        source="user" if action == "customize" else "builtin",
+        requested=resolution.requested,
+        effective=resolution.effective,
+        dependencies=(f"profiles.{profile.name}",),
+    )
+    return resource
+
+
+def depth_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    inventory = context["model"].inventory
+    pruning = _pruning_payload(session.state)
+    granularity = str(
+        resolver.resolve_default(
+            "pruning.depth_granularity",
+            pruning.get("depth_granularity", "subblock"),
+        ).value
+    )
+    count = inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
+    remove = min(
+        int(
+            resolver.resolve_default(
+                "pruning.depth_remove",
+                pruning.get("depth_remove", min(4, count - 1)),
+            ).value
+        ),
+        count - 1,
+    )
+    samples = int(
+        resolver.resolve_default(
+            "pruning.depth_importance_samples",
+            pruning.get("depth_importance_samples", 128),
+        ).value
+    )
+    resource_defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        "depth_importance",
+        strategy="persistent_pool",
+        batch=8,
+    )
+    action = _section_action(
+        session,
+        "depth",
+        "Configure depth pruning and its importance-evaluation resources.",
+        {
+            "granularity": granularity,
+            "maximum_removed": remove,
+            "eval_samples": samples,
+            "sequence_length": session.state.get_field("data.sequence_length", 4096),
+            "resources": resource_defaults,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        granularity = session.select(
+            "pruning.depth_granularity",
+            "Depth pruning granularity:",
+            [("Sublayer", "subblock"), ("Whole block", "block")],
+            default=granularity,
+        )
+        if granularity is BACK:
+            return False
+        count = (
+            inventory.num_sublayers
+            if granularity == "subblock"
+            else inventory.num_layers
+        )
+        remove = session.integer(
+            "pruning.depth_remove",
+            "Maximum number to remove:",
+            default=min(remove, count - 1),
+            minimum=0,
+            maximum=count - 1,
+        )
+        samples = session.integer(
+            "pruning.depth_importance_samples",
+            "Depth-importance evaluation samples:",
+            default=samples,
+            minimum=1,
+        )
+        if BACK in (remove, samples):
+            return False
+    pruning["depth_granularity"] = str(granularity)
+    pruning["depth_remove"] = int(remove)
+    pruning["depth_importance_samples"] = int(samples)
+    session.state.set_collection("pruning", pruning)
+    if int(remove) == 0:
+        _remove_stage_resource(session, "depth_importance")
+        return True
+    configured = _configure_stage_resource(
+        session,
+        resolver,
+        context["model"],
+        "depth_importance",
+        action=str(action),
+        strategy_default="persistent_pool",
+        batch_default=8,
+    )
+    return configured is not BACK
+
+
+def width_axes_section(
+    session: WizardSession, resolver: DefaultsResolver, context: dict
+) -> bool:
+    pruning = _pruning_payload(session.state)
+    inventory = context["model"].inventory
+    current_axes = _mapping_copy(pruning.get("axes"))
+    defaults = {
+        axis.axis_id: list(
+            resolver.resolve_default(
+                f"pruning.axes.{axis.axis_id}.values",
+                _mapping_copy(current_axes.get(axis.axis_id)).get(
+                    "values",
+                    list(axis.values)[: min(2, len(axis.values))],
+                ),
+            ).value
+        )
+        for axis in inventory.axes
+    }
+    action = _section_action(
+        session,
+        "width_axes",
+        "Choose the legal values searched for every model width axis.",
+        defaults,
+    )
+    if action is BACK:
+        return False
+    axes = {}
+    for axis in inventory.axes:
+        selected = defaults[axis.axis_id]
+        if action == "customize":
+            selected = session.checkbox(
+                f"pruning.axes.{axis.axis_id}",
+                f"Values for {axis.label}:",
+                [(str(value), value) for value in axis.values],
+                defaults=selected,
+                validate=lambda values: bool(values) or "Select at least one value.",
+            )
+            if selected is BACK:
+                return False
+        axes[axis.axis_id] = {
+            "enabled": True,
+            "teacher_value": axis.teacher_value,
+            "values": sorted({int(value) for value in selected}, reverse=True),
+            "alignment": axis.alignment,
+        }
+    pruning["axes"] = axes
+    session.state.set_collection("pruning", pruning)
+    return True
+
+
+def width_importance_section(
+    session: WizardSession, resolver: DefaultsResolver, context: dict
+) -> bool:
+    pruning = _pruning_payload(session.state)
+    samples = int(
+        resolver.resolve_default(
+            "pruning.width_importance_samples",
+            pruning.get("width_importance_samples", 32768),
+        ).value
+    )
+    resource_defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        "width_importance",
+        strategy="single",
+        batch=8,
+    )
+    action = _section_action(
+        session,
+        "width_importance",
+        "Configure width-importance evaluation and its resources.",
+        {
+            "eval_samples": samples,
+            "sequence_length": session.state.get_field("data.sequence_length", 4096),
+            "resources": resource_defaults,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        samples = session.integer(
+            "pruning.width_importance_samples",
+            "Width-importance evaluation samples:",
+            default=samples,
+            minimum=1,
+        )
+        if samples is BACK:
+            return False
+    pruning["width_importance_samples"] = int(samples)
+    session.state.set_collection("pruning", pruning)
+    configured = _configure_stage_resource(
+        session,
+        resolver,
+        context["model"],
+        "width_importance",
+        action=str(action),
+        strategy_default="single",
+        batch_default=8,
+    )
+    return configured is not BACK
+
+
+def sort_sanity_section(
+    session: WizardSession, resolver: DefaultsResolver, context: dict
+) -> bool:
+    pruning = _pruning_payload(session.state)
+    enabled = bool(
+        resolver.resolve_default(
+            "pruning.sort_sanity", pruning.get("sort_sanity", False)
+        ).value
+    )
+    samples = int(
+        resolver.resolve_default(
+            "pruning.sort_sanity_samples",
+            pruning.get("sort_sanity_samples", 128),
+        ).value
+    )
+    resource_defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        "sort_sanity",
+        strategy="single",
+        batch=8,
+    )
+    action = _section_action(
+        session,
+        "sort_sanity",
+        "Optionally validate that sorting preserves model quality.",
+        {
+            "enabled": enabled,
+            "eval_samples": samples,
+            "sequence_length": session.state.get_field("data.sequence_length", 4096),
+            "resources": resource_defaults,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        enabled = session.confirm(
+            "pruning.sort_sanity",
+            "Run sorting sanity evaluation?",
+            default=enabled,
+        )
+        if enabled is BACK:
+            return False
+        if enabled:
+            samples = session.integer(
+                "pruning.sort_sanity_samples",
+                "Sorting-sanity evaluation samples:",
+                default=samples,
+                minimum=1,
+            )
+            if samples is BACK:
+                return False
+    pruning["sort_sanity"] = bool(enabled)
+    pruning["sort_sanity_samples"] = int(samples)
+    session.state.set_collection("pruning", pruning)
+    if not enabled:
+        _remove_stage_resource(session, "sort_sanity")
+        return True
+    configured = _configure_stage_resource(
+        session,
+        resolver,
+        context["model"],
+        "sort_sanity",
+        action=str(action),
+        strategy_default="single",
+        batch_default=8,
+    )
+    return configured is not BACK
+
+
+def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    pruning = _pruning_payload(session.state)
+    bypass = dict(pruning.get("bypass") or {})
+    enabled = bool(
+        resolver.resolve_default("pruning.bypass.enabled", bypass.get("enabled", True)).value
+    )
+    granularity = str(
+        resolver.resolve_default(
+            "pruning.bypass.granularity",
+            bypass.get("granularity", "subblock"),
+        ).value
+    )
+    samples = int(
+        resolver.resolve_default(
+            "pruning.bypass.samples", bypass.get("samples", 4096)
+        ).value
+    )
+    resource_defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        "bypass",
+        strategy="single",
+        batch=int(bypass.get("batch_size", 8)),
+    )
+    action = _section_action(
+        session,
+        "bypass",
+        "Configure optional local bypass distillation and its resources.",
+        {
+            "enabled": enabled,
+            "granularity": granularity,
+            "samples": samples,
+            "sequence_length": session.state.get_field("data.sequence_length", 4096),
+            "resources": resource_defaults,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        enabled = session.confirm(
+            "pruning.bypass.enabled",
+            "Run local bypass distillation?",
+            default=enabled,
+        )
+        if enabled is BACK:
+            return False
+        if enabled:
+            granularity = session.select(
+                "pruning.bypass.granularity",
+                "Bypass granularity:",
+                [("Sublayer", "subblock"), ("Whole block", "block")],
+                default=granularity,
+            )
+            samples = session.integer(
+                "pruning.bypass.samples",
+                "Bypass samples:",
+                default=samples,
+                minimum=1,
+            )
+            if BACK in (granularity, samples):
+                return False
+    bypass.update(
+        {
+            "enabled": bool(enabled),
+            "granularity": str(granularity),
+            "samples": int(samples),
+            "sequence_length": int(
+                session.state.get_field("data.sequence_length", 4096)
+            ),
+        }
+    )
+    pruning["bypass"] = bypass
+    session.state.set_collection("pruning", pruning)
+    if not enabled:
+        _remove_stage_resource(session, "bypass")
+        return True
+    configured = _configure_stage_resource(
+        session,
+        resolver,
+        context["model"],
+        "bypass",
+        action=str(action),
+        strategy_default="single",
+        batch_default=int(bypass.get("batch_size", 8)),
+    )
+    return configured is not BACK
+
+
+def replacement_scoring_section(
+    session: WizardSession, resolver: DefaultsResolver, context: dict
+) -> bool:
+    pruning = _pruning_payload(session.state)
+    granularity = str(
+        resolver.resolve_default(
+            "pruning.replacement_granularity",
+            pruning.get(
+                "replacement_granularity",
+                pruning.get("depth_granularity", "subblock"),
+            ),
+        ).value
+    )
+    samples = int(
+        resolver.resolve_default(
+            "pruning.replacement_samples",
+            pruning.get("replacement_samples", 128),
+        ).value
+    )
+    resource_defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        "replacement_scoring",
+        strategy="persistent_pool",
+        batch=8,
+    )
+    action = _section_action(
+        session,
+        "replacement_scoring",
+        "Configure replace-one scoring and its evaluation resources.",
+        {
+            "granularity": granularity,
+            "eval_samples": samples,
+            "sequence_length": session.state.get_field("data.sequence_length", 4096),
+            "resources": resource_defaults,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        granularity = session.select(
+            "pruning.replacement_granularity",
+            "Replace and score:",
+            [("One sublayer at a time", "subblock"), ("One block at a time", "block")],
+            default=granularity,
+        )
+        samples = session.integer(
+            "pruning.replacement_samples",
+            "Replacement-scoring evaluation samples:",
+            default=samples,
+            minimum=1,
+        )
+        if BACK in (granularity, samples):
+            return False
+    pruning["replacement_granularity"] = str(granularity)
+    pruning["replacement_samples"] = int(samples)
+    session.state.set_collection("pruning", pruning)
+    configured = _configure_stage_resource(
+        session,
+        resolver,
+        context["model"],
+        "replacement_scoring",
+        action=str(action),
+        strategy_default="persistent_pool",
+        batch_default=8,
+    )
+    return configured is not BACK
 
 
 def pre_mip_stages_section(
@@ -1482,7 +2083,6 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
 def post_mip_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
-    del resolver
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
     sequence = int(session.state.get_field("data.sequence_length", 4096))
@@ -1507,14 +2107,40 @@ def post_mip_section(
             serving,
             node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
         )
+        node_previews = []
+        for node_id, node in flow.nodes.items():
+            node_preview = {
+                "id": node_id,
+                "type": node.node_type,
+                **({"config": dict(node.config)} if node.config else {}),
+            }
+            if node.node_type in {"evaluation", "global_kd"}:
+                node_preview["resources"] = _stage_resource_defaults(
+                    session,
+                    resolver,
+                    f"post.{run_id}.{node_id}",
+                    strategy=(
+                        "persistent_pool"
+                        if node.node_type == "evaluation" and node.input_id == "source"
+                        else "sharded"
+                    ),
+                    batch=1,
+                )
+            elif node.node_type == "aiperf":
+                node_preview["resources"] = {
+                    "strategy": "sharded",
+                    "instances": int(
+                        session.state.get_field(
+                            "infrastructure.gpus_per_node", 8
+                        )
+                    ),
+                    "topology": node.config.get("topology", {}),
+                }
+            node_previews.append(node_preview)
         preview[str(run_id)] = {
             "mode": "recommended",
-            "nodes": [
-                {"id": node_id, "type": node.node_type}
-                for node_id, node in flow.nodes.items()
-            ],
+            "nodes": node_previews,
             "serving": serving,
-            "resources": "stage defaults with batch alignment",
         }
     action = _section_action(
         session,
@@ -1567,6 +2193,15 @@ def post_mip_section(
                 node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
             )
             editor.add_flow(flow)
+            if action == "customize":
+                configured = _configure_post_mip_algorithms(
+                    session,
+                    editor,
+                    str(run_id),
+                    sequence_length=sequence,
+                )
+                if configured is BACK:
+                    return False
             configured = _configure_dynamic_resources(
                 session,
                 editor,
@@ -1637,7 +2272,18 @@ def post_mip_section(
                     "top_k": int(top_k),
                 }
             elif node_type == "evaluation":
-                config = {"eval_samples": 128, "block_size": sequence}
+                eval_samples = session.integer(
+                    f"post_mip.{run_id}.{node_id}.eval_samples",
+                    "Evaluation samples:",
+                    default=128,
+                    minimum=1,
+                )
+                if eval_samples is BACK:
+                    return False
+                config = {
+                    "eval_samples": int(eval_samples),
+                    "block_size": sequence,
+                }
             elif node_type == "aiperf":
                 configured = _serving_setting_prompt(
                     session,
@@ -1653,7 +2299,24 @@ def post_mip_section(
                     "benchmark_timeout": 900,
                 }
             elif node_type == "global_kd":
-                config = {"max_steps": 128}
+                max_steps = session.integer(
+                    f"post_mip.{run_id}.{node_id}.max_steps",
+                    "Global-KD training steps:",
+                    default=128,
+                    minimum=1,
+                )
+                global_batch = session.integer(
+                    f"post_mip.{run_id}.{node_id}.global_batch_size",
+                    "Global-KD sample/global batch size:",
+                    default=128,
+                    minimum=1,
+                )
+                if BACK in (max_steps, global_batch):
+                    return False
+                config = {
+                    "max_steps": int(max_steps),
+                    "global_batch_size": int(global_batch),
+                }
             editor.add_node(
                 str(run_id),
                 NodeDraft(
@@ -1682,6 +2345,53 @@ def post_mip_section(
             if configured is BACK:
                 return False
     session.state.set_collection("post_mip_flows", editor.to_config())
+    return True
+
+
+def _configure_post_mip_algorithms(
+    session: WizardSession,
+    editor: PostMIPFlowEditor,
+    flow_id: str,
+    *,
+    sequence_length: int,
+) -> Any:
+    for node_id, node in tuple(editor.flow(flow_id).nodes.items()):
+        config = dict(node.config)
+        if node.node_type == "evaluation":
+            samples = session.integer(
+                f"post_mip.{flow_id}.{node_id}.eval_samples",
+                f"Evaluation samples for {node_id}:",
+                default=int(config.get("eval_samples", 128)),
+                minimum=1,
+            )
+            if samples is BACK:
+                return BACK
+            config.update(
+                eval_samples=int(samples),
+                block_size=int(sequence_length),
+            )
+        elif node.node_type == "global_kd":
+            max_steps = session.integer(
+                f"post_mip.{flow_id}.{node_id}.max_steps",
+                f"Global-KD training steps for {node_id}:",
+                default=int(config.get("max_steps", 128)),
+                minimum=1,
+            )
+            global_batch = session.integer(
+                f"post_mip.{flow_id}.{node_id}.global_batch_size",
+                f"Global-KD sample/global batch size for {node_id}:",
+                default=int(config.get("global_batch_size", 128)),
+                minimum=1,
+            )
+            if BACK in (max_steps, global_batch):
+                return BACK
+            config.update(
+                max_steps=int(max_steps),
+                global_batch_size=int(global_batch),
+            )
+        else:
+            continue
+        editor.edit_node(flow_id, node_id, config=config)
     return True
 
 
@@ -1851,6 +2561,17 @@ def _configure_dynamic_resources(
                     return BACK
             resolved = resolve_batch(int(requested), profile)
             config = dict(node.config)
+            automodel = _mapping_copy(config.get("automodel"))
+            automodel["parallel"] = {
+                "tp": profile.tp,
+                "cp": profile.cp,
+                "pp": profile.pp,
+                "ep": profile.ep,
+                "dp_shard": profile.dp_shard,
+                "dp_replicate": profile.dp_replicate,
+                "sequence_parallel": profile.sequence_parallel,
+            }
+            config["automodel"] = automodel
             key = (
                 "local_batch_size"
                 if node.node_type == "global_kd"
@@ -1942,8 +2663,12 @@ SECTION_BUILDERS: tuple[Callable[..., bool], ...] = (
     model_section,
     data_section,
     infrastructure_section,
-    pruning_section,
-    pre_mip_stages_section,
+    depth_section,
+    width_axes_section,
+    width_importance_section,
+    sort_sanity_section,
+    bypass_section,
+    replacement_scoring_section,
     vllm_section,
     mip_section,
     post_mip_section,
@@ -2108,9 +2833,7 @@ def run_wizard_v2(
     context: dict[str, Any] = {}
     if state.payload.get("model", {}).get("source"):
         saved = state.payload["model"]
-        context["model"] = inspect_model(
-            str(saved["source"]), saved.get("requested_revision")
-        )
+        context["model"] = inspect_model(str(saved["source"]))
 
     index = 0
     while index < len(SECTION_BUILDERS):

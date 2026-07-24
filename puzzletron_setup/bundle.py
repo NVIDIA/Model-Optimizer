@@ -342,9 +342,13 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     axes = _axis_config(pruning)
     sequence_length = int(data["sequence_length"])
     width_samples = int(pruning["width_importance_samples"])
+    depth_samples = int(pruning.get("depth_importance_samples", 128))
+    sort_sanity_samples = int(pruning.get("sort_sanity_samples", 128))
     replacement_samples = int(pruning["replacement_samples"])
     if smoke:
         width_samples = min(width_samples, 128)
+        depth_samples = min(depth_samples, 16)
+        sort_sanity_samples = min(sort_sanity_samples, 16)
         replacement_samples = min(replacement_samples, 16)
     result_root = str(output["result_root"]).rstrip("/")
     puzzle_dir = f"{result_root}/{budget}"
@@ -446,7 +450,13 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
                 {
                     "output": validation_cache,
                     "split": "validation",
-                    "num_samples": replacement_samples,
+                    "num_samples": max(
+                        depth_samples,
+                        sort_sanity_samples
+                        if pruning.get("sort_sanity", False)
+                        else 0,
+                        replacement_samples,
+                    ),
                     "seq_length": sequence_length,
                     "shuffle_seed": 445,
                 },
@@ -475,7 +485,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         "search_space": {"axes": axes},
         "sort_sanity": {
             "enabled": bool(pruning.get("sort_sanity", False)),
-            "eval_samples": replacement_samples,
+            "eval_samples": sort_sanity_samples,
             "micro_batch_size": scoring_batch_size,
             "block_size": sequence_length,
             "packed_token_cache_path": validation_cache,
@@ -512,7 +522,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "max_removals": int(pruning.get("depth_remove", 0)),
             "max_subblocks_to_remove": int(pruning.get("depth_remove", 0)),
             "metric": "lm_loss",
-            "eval_samples": replacement_samples,
+            "eval_samples": depth_samples,
             "micro_batch_size": scoring_batch_size,
             "block_size": sequence_length,
             "packed_token_cache_path": validation_cache,

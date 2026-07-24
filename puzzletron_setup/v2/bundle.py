@@ -108,6 +108,37 @@ def render_experiment_v2(state: WizardState, budget: str) -> dict[str, Any]:
 
     for dotted, value in _mapping(state.collection("stage_batches")).items():
         _set_dotted(rendered, str(dotted), value)
+    resources = _mapping(state.collection("stage_resources"))
+    profiles = _mapping(state.collection("parallel_profiles"))
+    parallel_paths = {
+        "depth_importance": "depth_importance.automodel.parallel",
+        "width_importance": "pruning.automodel.parallel",
+        "sort_sanity": "sort_sanity.automodel.parallel",
+        "bypass": "bypass.automodel.parallel",
+        "replacement_scoring": "replacement_scoring.automodel.parallel",
+    }
+    for stage_id, dotted in parallel_paths.items():
+        profile_name = _mapping(resources.get(stage_id)).get("profile_name")
+        profile = _mapping(profiles.get(str(profile_name)))
+        if not profile:
+            continue
+        _set_dotted(
+            rendered,
+            dotted,
+            {
+                key: profile[key]
+                for key in (
+                    "tp",
+                    "cp",
+                    "pp",
+                    "ep",
+                    "dp_shard",
+                    "dp_replicate",
+                    "sequence_parallel",
+                )
+                if key in profile
+            },
+        )
     return rendered
 
 

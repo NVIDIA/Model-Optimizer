@@ -31,7 +31,6 @@ _SCHEMA = {
     },
     "model": {
         "source": None,
-        "revision": None,
         "trust_remote_code": None,
         "force_hf": None,
     },

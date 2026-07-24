@@ -346,7 +346,10 @@ def recommended_flow(
                     short_kd,
                     "global_kd",
                     input_id=fastest,
-                    config={"max_steps": 128},
+                    config={
+                        "max_steps": 128,
+                        "global_batch_size": 128,
+                    },
                 ),
             ),
             (
