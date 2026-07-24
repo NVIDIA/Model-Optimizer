@@ -103,8 +103,17 @@ STATIC_MODEL_STAGES = (
     "bypass",
     "replacement_scoring",
 )
+STATIC_MODEL_BATCH_PATHS = {
+    "depth_importance": "depth_importance.micro_batch_size",
+    "width_importance": "pruning.micro_batch_size",
+    "bypass": "bypass.training.micro_batch_size",
+    "replacement_scoring": "replacement_scoring.micro_batch_size",
+}
 
 _CUSTOM_MODEL_SOURCE = "__custom_model_source__"
+_DEFAULT_MODEL_SOURCE = "__default_model_source__"
+_CUSTOM_DATA_SOURCE = "__custom_data_source__"
+_DEFAULT_DATA_SOURCE = "__default_data_source__"
 
 SUPPORTED_MODEL_GROUPS = (
     (
@@ -145,11 +154,18 @@ SUPPORTED_MODEL_GROUPS = (
 )
 
 
-def _model_family_choices() -> list[PromptChoice]:
-    return [
-        PromptChoice("Custom", _CUSTOM_MODEL_SOURCE),
-        *[PromptChoice(group, group) for group, _ in SUPPORTED_MODEL_GROUPS],
-    ]
+def _model_family_choices(resolver: DefaultsResolver) -> list[PromptChoice]:
+    choices = []
+    explicit = resolver.file_default("model.source")
+    if explicit is not None and explicit.value:
+        choices.append(PromptChoice(f"Default — {explicit.value}", _DEFAULT_MODEL_SOURCE))
+    choices.extend(
+        [
+            PromptChoice("Custom", _CUSTOM_MODEL_SOURCE),
+            *[PromptChoice(group, group) for group, _ in SUPPORTED_MODEL_GROUPS],
+        ]
+    )
+    return choices
 
 
 def _model_choices_for_family(family: str) -> list[PromptChoice]:
@@ -157,6 +173,15 @@ def _model_choices_for_family(family: str) -> list[PromptChoice]:
         if group == family:
             return [PromptChoice(short_name, url) for short_name, url in models]
     raise SetupError(f"Unknown supported model family: {family}")
+
+
+def _data_source_choices(resolver: DefaultsResolver) -> list[PromptChoice]:
+    choices = []
+    explicit = resolver.file_default("data.source")
+    if explicit is not None and explicit.value:
+        choices.append(PromptChoice(f"Default — {explicit.value}", _DEFAULT_DATA_SOURCE))
+    choices.append(PromptChoice("Custom", _CUSTOM_DATA_SOURCE))
+    return choices
 
 
 def _nested_records(state: WizardState) -> dict[str, Any]:
@@ -198,7 +223,7 @@ def _record_default(
     *,
     dependencies: tuple[str, ...] = (),
 ) -> Any:
-    resolved = resolver.resolve(path, fallback)
+    resolved = resolver.resolve_default(path, fallback)
     state.set_field(
         path,
         resolved.value,
@@ -212,19 +237,31 @@ def _section_action(
     session: WizardSession,
     section: str,
     summary: str,
+    defaults: Mapping[str, Any],
 ) -> Any:
     session.begin(section)
     print(f"\n[{section}] {summary}")
+    _print_default_decisions(defaults)
     return session.select(
         f"{section}.action",
         f"{section.replace('_', ' ').title()}:",
         [
-            ("Use defaults", "defaults"),
+            ("Use defaults shown above", "defaults"),
             ("Customize", "customize"),
-            ("Review current values", "review"),
         ],
         default="defaults",
     )
+
+
+def _print_default_decisions(defaults: Mapping[str, Any]) -> None:
+    print("  Resolved defaults:")
+    rendered = yaml.safe_dump(
+        deepcopy(dict(defaults)),
+        sort_keys=False,
+        default_flow_style=False,
+    ).rstrip()
+    for line in rendered.splitlines():
+        print(f"    {line}")
 
 
 def _text_field(
@@ -272,11 +309,16 @@ def _select_model_source(
         family = session.select(
             "model.source_family",
             "Model:",
-            _model_family_choices(),
+            _model_family_choices(resolver),
             default=_CUSTOM_MODEL_SOURCE,
         )
         if family is BACK:
             return BACK
+        if family == _DEFAULT_MODEL_SOURCE:
+            explicit = resolver.file_default("model.source")
+            if explicit is None:
+                raise SetupError("The selected model default is no longer available.")
+            return explicit.value, "defaults_file"
         if family == _CUSTOM_MODEL_SOURCE:
             source = _text_field(
                 session,
@@ -286,35 +328,45 @@ def _select_model_source(
             )
             if source is BACK:
                 continue
-            return source
+            return source, "user"
         source = session.select(
             "model.source_model",
             f"{family} model:",
             _model_choices_for_family(str(family)),
         )
         if source is not BACK:
-            return source
+            return source, "user"
 
 
 def model_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     session.begin("model")
     while True:
-        source = _select_model_source(session, resolver)
-        if source is BACK:
+        selected = _select_model_source(session, resolver)
+        if selected is BACK:
             return False
+        source, source_kind = selected
         try:
             source = normalize_model_source(str(source))
         except SetupError as error:
             print(f"  {error}")
             continue
-        session.state.set_field("model.source", source, source="user")
+        session.state.set_field("model.source", source, source=source_kind)
         revision = None
         if not Path(source).exists():
-            revision = _text_field(
-                session, resolver, "model.revision", "Hugging Face revision:", "main"
-            )
-            if revision is BACK:
-                continue
+            if source_kind == "defaults_file":
+                resolved_revision = resolver.resolve_default("model.revision", "main")
+                revision = resolved_revision.value
+                session.state.set_field(
+                    "model.revision",
+                    revision,
+                    source=resolved_revision.source,
+                )
+            else:
+                revision = _text_field(
+                    session, resolver, "model.revision", "Hugging Face revision:", "main"
+                )
+                if revision is BACK:
+                    continue
         break
     model = inspect_model(str(source), str(revision) if revision else None)
     session.state.set_model(model.to_dict(), model.inventory.to_dict())
@@ -327,28 +379,34 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
 
 
 def data_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    action = _section_action(
-        session,
-        "data",
-        "Choose a local dataset path or a Hugging Face dataset and its sequence layout.",
-    )
-    if action is BACK:
-        return False
-    if action == "review":
-        print(
-            yaml.safe_dump(
-                {
-                    key: record.effective
-                    for key, record in session.state.records().items()
-                    if key.startswith("data.")
-                }
-            )
+    del context
+    session.begin("data")
+    explicit = resolver.file_default("data.source")
+    if explicit is not None and explicit.value:
+        _print_default_decisions(
+            {
+                "source": explicit.value,
+                "modality": resolver.resolve_default("data.modality", "text").value,
+                "layout": resolver.resolve_default("data.layout", "fixed").value,
+                "sequence_length": resolver.resolve_default(
+                    "data.sequence_length", 4096
+                ).value,
+            }
         )
-        return data_section(session, resolver, context)
-    source_default = resolver.resolve("data.source", session.state.get_field("data.source", ""))
-    if action == "defaults" and not source_default.value:
-        action = "customize"
-    if action == "customize":
+    choices = _data_source_choices(resolver)
+    mode = session.select(
+        "data.source_mode",
+        "Dataset:",
+        choices,
+        default=(
+            _DEFAULT_DATA_SOURCE
+            if explicit is not None and explicit.value
+            else _CUSTOM_DATA_SOURCE
+        ),
+    )
+    if mode is BACK:
+        return False
+    if mode == _CUSTOM_DATA_SOURCE:
         source = _text_field(
             session,
             resolver,
@@ -392,8 +450,14 @@ def data_section(session: WizardSession, resolver: DefaultsResolver, context: di
         session.state.set_field("data.modality", modality, source="user")
         session.state.set_field("data.layout", layout, source="user")
     else:
+        if explicit is None:
+            raise SetupError("The selected dataset default is no longer available.")
+        session.state.set_field(
+            "data.source",
+            normalize_dataset_source(str(explicit.value)),
+            source=explicit.source,
+        )
         for path, fallback in (
-            ("data.source", ""),
             ("data.modality", "text"),
             ("data.layout", "fixed"),
             ("data.sequence_length", 4096),
@@ -405,24 +469,7 @@ def data_section(session: WizardSession, resolver: DefaultsResolver, context: di
 def infrastructure_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
-    action = _section_action(
-        session,
-        "infrastructure",
-        "Configure the worker contract and cluster facts before stage allocations.",
-    )
-    if action is BACK:
-        return False
-    if action == "review":
-        print(
-            yaml.safe_dump(
-                {
-                    key: record.effective
-                    for key, record in session.state.records().items()
-                    if key.startswith("infrastructure.")
-                }
-            )
-        )
-        return infrastructure_section(session, resolver, context)
+    del context
     paths = (
         ("infrastructure.execution_contract.repository", str(Path.cwd())),
         ("infrastructure.execution_contract.venv", ".venv"),
@@ -438,10 +485,30 @@ def infrastructure_section(
         ("infrastructure.runner.slurm.max_nodes", 64),
         ("infrastructure.gpus_per_node", 8),
     )
+    preview = {
+        path.removeprefix("infrastructure."): resolver.resolve_default(
+            path, fallback
+        ).value
+        for path, fallback in paths
+    }
+    preview["execution_contract.prerun_commands"] = resolver.resolve_default(
+        "infrastructure.execution_contract.prerun_commands", []
+    ).value
+    preview["execution_contract.postrun_commands"] = resolver.resolve_default(
+        "infrastructure.execution_contract.postrun_commands", []
+    ).value
+    action = _section_action(
+        session,
+        "infrastructure",
+        "Configure the worker contract and cluster facts before stage allocations.",
+        preview,
+    )
+    if action is BACK:
+        return False
     if action == "defaults":
         for path, fallback in paths:
             _record_default(session.state, resolver, path, fallback)
-        commands = resolver.resolve(
+        commands = resolver.resolve_default(
             "infrastructure.execution_contract.prerun_commands", []
         )
         session.state.set_field(
@@ -449,8 +516,13 @@ def infrastructure_section(
             list(commands.value or ()),
             source=commands.source,
         )
+        postrun = resolver.resolve_default(
+            "infrastructure.execution_contract.postrun_commands", []
+        )
         session.state.set_field(
-            "infrastructure.execution_contract.postrun_commands", [], source="builtin"
+            "infrastructure.execution_contract.postrun_commands",
+            list(postrun.value or ()),
+            source=postrun.source,
         )
         return True
 
@@ -517,19 +589,99 @@ def infrastructure_section(
 
 def pruning_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     model = context["model"]
+    inventory = model.inventory
+    default_granularity = str(
+        resolver.resolve_default("pruning.depth_granularity", "subblock").value
+    )
+    default_count = (
+        inventory.num_sublayers
+        if default_granularity == "subblock"
+        else inventory.num_layers
+    )
+    default_remove = min(
+        int(
+            resolver.resolve_default(
+                "pruning.depth_remove", min(4, default_count - 1)
+            ).value
+        ),
+        default_count - 1,
+    )
+    default_axes = {
+        axis.axis_id: resolver.resolve_default(
+            f"pruning.axes.{axis.axis_id}.values",
+            list(axis.values)[: min(2, len(axis.values))],
+        ).value
+        for axis in inventory.axes
+    }
     action = _section_action(
         session,
         "pruning",
         "Choose depth and every descriptor-supported pruning-axis domain.",
+        {
+            "depth_granularity": default_granularity,
+            "maximum_depth_removed": default_remove,
+            "axes": default_axes,
+            "width_importance_samples": resolver.resolve_default(
+                "pruning.width_importance_samples", 32768
+            ).value,
+            "replacement_scoring_samples": resolver.resolve_default(
+                "pruning.replacement_samples", 128
+            ).value,
+            "sort_sanity": resolver.resolve_default(
+                "pruning.sort_sanity", False
+            ).value,
+            "replacement_granularity": resolver.resolve_default(
+                "pruning.replacement_granularity", default_granularity
+            ).value,
+            "bypass": {
+                "enabled": resolver.resolve_default(
+                    "pruning.bypass.enabled", True
+                ).value,
+                "granularity": resolver.resolve_default(
+                    "pruning.bypass.granularity", "subblock"
+                ).value,
+                "samples": resolver.resolve_default(
+                    "pruning.bypass.samples", 4096
+                ).value,
+                "sequence_length": session.state.get_field(
+                    "data.sequence_length", 4096
+                ),
+                "batch_size": resolver.resolve_default(
+                    "pruning.bypass.batch_size", 8
+                ).value,
+            },
+        },
     )
     if action is BACK:
         return False
-    if action == "review" and session.state.collection("pruning"):
-        print(yaml.safe_dump(session.state.collection("pruning")))
-        return pruning_section(session, resolver, context)
 
-    inventory = model.inventory
     defaults = deepcopy(BUILTINS["pruning"])
+    defaults["width_importance_samples"] = int(
+        resolver.resolve_default(
+            "pruning.width_importance_samples",
+            defaults["width_importance_samples"],
+        ).value
+    )
+    defaults["replacement_samples"] = int(
+        resolver.resolve_default(
+            "pruning.replacement_samples",
+            defaults["replacement_samples"],
+        ).value
+    )
+    defaults["bypass"]["enabled"] = bool(
+        resolver.resolve_default(
+            "pruning.bypass.enabled",
+            defaults["bypass"]["enabled"],
+        ).value
+    )
+    for key, fallback in (
+        ("granularity", defaults["bypass"]["granularity"]),
+        ("samples", defaults["bypass"]["samples"]),
+        ("batch_size", defaults["bypass"]["batch_size"]),
+    ):
+        defaults["bypass"][key] = resolver.resolve_default(
+            f"pruning.bypass.{key}", fallback
+        ).value
     if action == "customize":
         granularity = session.select(
             "pruning.depth_granularity",
@@ -552,18 +704,20 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         if remove is BACK:
             return False
     else:
-        granularity = str(resolver.resolve("pruning.depth_granularity", "subblock").value)
+        granularity = default_granularity
         count = (
             inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
         )
-        remove = min(
-            int(resolver.resolve("pruning.depth_remove", min(4, count - 1)).value),
-            count - 1,
-        )
+        remove = default_remove
     axes = {}
     for axis in inventory.axes:
         axis_values = list(axis.values)
-        default_values = axis_values[: min(2, len(axis_values))]
+        default_values = list(
+            resolver.resolve_default(
+                f"pruning.axes.{axis.axis_id}.values",
+                axis_values[: min(2, len(axis_values))],
+            ).value
+        )
         if action == "customize":
             selected = session.checkbox(
                 f"pruning.axes.{axis.axis_id}",
@@ -587,8 +741,14 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
             "depth_granularity": granularity,
             "depth_remove": int(remove),
             "axes": axes,
-            "sort_sanity": False,
-            "replacement_granularity": granularity,
+            "sort_sanity": bool(
+                resolver.resolve_default("pruning.sort_sanity", False).value
+            ),
+            "replacement_granularity": str(
+                resolver.resolve_default(
+                    "pruning.replacement_granularity", granularity
+                ).value
+            ),
         }
     )
     defaults["bypass"]["sequence_length"] = int(
@@ -712,30 +872,73 @@ def _profile_prompt(
 def pre_mip_stages_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
-    action = _section_action(
-        session,
-        "pre_mip_stages",
-        "Each stage has independent instances, strategy, parallelism, and batch behavior.",
-    )
-    if action is BACK:
-        return False
-    if action == "review" and session.state.collection("stage_resources"):
-        print(
-            yaml.safe_dump(
-                {
-                    "profiles": session.state.collection("parallel_profiles"),
-                    "stages": session.state.collection("stage_resources"),
-                    "batches": session.state.collection("stage_batches"),
-                }
-            )
-        )
-        return pre_mip_stages_section(session, resolver, context)
-    registry = ResourceProfileRegistry.from_dict(
+    current_registry = ResourceProfileRegistry.from_dict(
         session.state.collection("parallel_profiles") or {}
+    )
+    default_registry = ResourceProfileRegistry.from_dict(
+        resolver.resolve_default("profiles", {}).value or {}
     )
     resources = _mapping_copy(session.state.collection("stage_resources"))
     batches = _mapping_copy(session.state.collection("stage_batches"))
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
+    preview_profile = (
+        default_registry.get(default_registry.names()[0])
+        if default_registry.names()
+        else ParallelProfile(STATIC_MODEL_STAGES[0])
+    )
+    preview = {}
+    for stage_id in STATIC_MODEL_STAGES:
+        if stage_id == "bypass" and not (
+            session.state.collection("pruning") or {}
+        ).get("bypass", {}).get("enabled", False):
+            continue
+        strategy_fallback = (
+            "persistent_pool"
+            if stage_id in {"depth_importance", "replacement_scoring"}
+            else "single"
+        )
+        strategy = str(
+            resolver.resolve_default(
+                f"stages.{stage_id}.strategy", strategy_fallback
+            ).value
+        )
+        instances = int(
+            resolver.resolve_default(
+                f"stages.{stage_id}.instances",
+                gpus_per_node if strategy != "single" else 1,
+            ).value
+        )
+        requested_batch = int(
+            resolver.resolve_default(f"stages.{stage_id}.batch", 8).value
+        )
+        batch = resolve_batch(requested_batch, preview_profile)
+        preview[stage_id] = {
+            "strategy": strategy,
+            "instances": instances,
+            "parallel": {
+                "tp": preview_profile.tp,
+                "cp": preview_profile.cp,
+                "pp": preview_profile.pp,
+                "dp_shard": preview_profile.dp_shard,
+                "dp_replicate": preview_profile.dp_replicate,
+                "ep": preview_profile.ep,
+            },
+            "requested_batch": batch.requested,
+            "effective_batch": batch.effective,
+        }
+    action = _section_action(
+        session,
+        "pre_mip_stages",
+        "Each stage has independent instances, strategy, parallelism, and batch behavior.",
+        preview,
+    )
+    if action is BACK:
+        return False
+    registry = default_registry if action == "defaults" else current_registry
+    if action == "defaults":
+        for stage_id in STATIC_MODEL_STAGES:
+            resources.pop(stage_id, None)
+            batches.pop(STATIC_MODEL_BATCH_PATHS[stage_id], None)
     customize_all = action == "customize"
     for stage_id in STATIC_MODEL_STAGES:
         if stage_id == "bypass" and not (
@@ -789,13 +992,25 @@ def pre_mip_stages_section(
                 if registry.names()
                 else registry.create(ParallelProfile(stage_id), consumer=stage_id)
             )
-            strategy = (
+            strategy_fallback = (
                 "persistent_pool"
                 if stage_id in {"depth_importance", "replacement_scoring"}
                 else "single"
             )
-            instances = gpus_per_node if strategy != "single" else 1
-            requested_batch = 8
+            strategy = str(
+                resolver.resolve_default(
+                    f"stages.{stage_id}.strategy", strategy_fallback
+                ).value
+            )
+            instances = int(
+                resolver.resolve_default(
+                    f"stages.{stage_id}.instances",
+                    gpus_per_node if strategy != "single" else 1,
+                ).value
+            )
+            requested_batch = int(
+                resolver.resolve_default(f"stages.{stage_id}.batch", 8).value
+            )
         resolution = resolve_batch(int(requested_batch), profile)
         if resolution.adjusted:
             print(
@@ -822,13 +1037,7 @@ def pre_mip_stages_section(
             "gpus_per_node": gpus_per_node,
             "profile_name": profile.name,
         }
-        batch_paths = {
-            "depth_importance": "depth_importance.micro_batch_size",
-            "width_importance": "pruning.micro_batch_size",
-            "bypass": "bypass.training.micro_batch_size",
-            "replacement_scoring": "replacement_scoring.micro_batch_size",
-        }
-        batches[batch_paths[stage_id]] = resolution.effective
+        batches[STATIC_MODEL_BATCH_PATHS[stage_id]] = resolution.effective
         session.state.set_field(
             f"stages.{stage_id}.batch",
             resolution.effective,
@@ -847,20 +1056,86 @@ def _mapping_copy(value: Any) -> dict[str, Any]:
     return deepcopy(dict(value)) if isinstance(value, Mapping) else {}
 
 
+def _default_vllm_topology(resolver: DefaultsResolver) -> dict[str, Any]:
+    topology = {
+        key: int(
+            resolver.resolve_default(f"vllm.topology.{key}", 1).value
+        )
+        for key in (
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "prefill_context_parallel_size",
+            "decode_context_parallel_size",
+        )
+    }
+    topology["gpu_group_size"] = (
+        topology["tensor_parallel_size"]
+        * topology["pipeline_parallel_size"]
+        * topology["prefill_context_parallel_size"]
+    )
+    topology["distributed_executor_backend"] = "mp"
+    return topology
+
+
+def _default_vllm_measurement(
+    resolver: DefaultsResolver,
+    *,
+    sequence_length: int,
+) -> dict[str, Any]:
+    batch = int(resolver.resolve_default("vllm.batch_size", 1).value)
+    max_num_seqs = max(
+        batch,
+        int(resolver.resolve_default("vllm.max_num_seqs", 1).value),
+    )
+    granularity = str(
+        resolver.resolve_default("vllm.granularity", "subblock").value
+    )
+    topology = _default_vllm_topology(resolver)
+    return {
+        "prefill_seq_len": int(
+            resolver.resolve_default("vllm.prefill_seq_len", sequence_length).value
+        ),
+        "generation_seq_len": int(
+            resolver.resolve_default("vllm.generation_seq_len", 1024).value
+        ),
+        "batch_size": batch,
+        "max_num_seqs": max_num_seqs,
+        "granularity": granularity,
+        "runtime_stats": {
+            "granularity": granularity,
+            "max_num_seqs": max_num_seqs,
+            "topology": topology,
+        },
+    }
+
+
 def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    del context
+    enabled_default = bool(resolver.resolve_default("vllm.enabled", False).value)
+    default_measurement = _default_vllm_measurement(
+        resolver,
+        sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
+    )
+    default_topology = default_measurement["runtime_stats"]["topology"]
+    preview = {"enabled": enabled_default}
+    if enabled_default:
+        preview["measurement"] = default_measurement
     action = _section_action(
         session,
         "vllm",
         "Define zero or more exact workload/topology measurement points.",
+        preview,
     )
     if action is BACK:
         return False
-    if action == "review":
-        print(yaml.safe_dump(session.state.collection("vllm_measurements") or {}))
-        return vllm_section(session, resolver, context)
-    enabled_default = bool(resolver.resolve("vllm.enabled", False).value)
-    if action == "defaults" and not enabled_default:
-        session.state.set_collection("vllm_measurements", {})
+    if action == "defaults":
+        if not enabled_default:
+            session.state.set_collection("vllm_measurements", {})
+            return True
+        session.state.set_collection(
+            "vllm_measurements",
+            {"serving-default": default_measurement},
+        )
         return True
     measurements: OrderedDict[str, Any] = OrderedDict()
     while True:
@@ -872,7 +1147,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         if name is BACK:
             return False
         defaults = {
-            key: int(resolver.resolve(f"vllm.{key}", fallback).value)
+            key: int(resolver.resolve_default(f"vllm.{key}", fallback).value)
             for key, fallback in (
                 ("prefill_seq_len", session.state.get_field("data.sequence_length", 4096)),
                 ("generation_seq_len", 1024),
@@ -901,7 +1176,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
             f"vllm.measurements.{name}.granularity",
             "Measurement granularity:",
             ["subblock", "block"],
-            default=str(resolver.resolve("vllm.granularity", "subblock").value),
+            default=str(resolver.resolve_default("vllm.granularity", "subblock").value),
         )
         if granularity is BACK:
             return False
@@ -915,7 +1190,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
             value = session.integer(
                 f"vllm.measurements.{name}.topology.{key}",
                 label,
-                default=1,
+                default=int(default_topology[key]),
                 minimum=1,
             )
             if value is BACK:
@@ -948,16 +1223,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
 
 
 def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    action = _section_action(
-        session,
-        "mip",
-        "Create independent goals, then add internal constraints, variants, and matrices.",
-    )
-    if action is BACK:
-        return False
-    if action == "review" and session.state.collection("mip_config"):
-        print(yaml.safe_dump(session.state.collection("mip_config")))
-        return mip_section(session, resolver, context)
+    del context
     measurements = _mapping_copy(session.state.collection("vllm_measurements"))
     workloads = OrderedDict(
         (
@@ -971,6 +1237,96 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         )
         for name, raw in measurements.items()
     )
+    default_goal_metric = str(
+        resolver.resolve_default("mip.goal_metric", "params").value
+    )
+    default_goal_value = resolver.resolve_default("mip.goal_value", "75%").value
+    default_objective = str(
+        resolver.resolve_default(
+            "mip.objective", "metrics.cosine_embedding_loss_hidden_states"
+        ).value
+    )
+    default_num_solutions = int(
+        resolver.resolve_default("mip.num_solutions", 1000).value
+    )
+    action = _section_action(
+        session,
+        "mip",
+        "Create independent goals, then add internal constraints, variants, and matrices.",
+        {
+            "goal": {
+                "metric": default_goal_metric,
+                "bound": default_goal_value,
+                "workload": (
+                    next(iter(workloads))
+                    if default_goal_metric
+                    in {"memory", "runtime", "throughput"}
+                    and workloads
+                    else None
+                ),
+            },
+            "objective": default_objective,
+            "internal_constraints": [],
+            "variants": [],
+            "search_space": {"depth": "all", "embedding": "all"},
+            "solver": {
+                "backend": "auto",
+                "num_solutions": default_num_solutions,
+                "min_hamming_distance": 2,
+                "max_seconds_per_solution": 60,
+            },
+            "homogeneous": {"enabled": True, "keep": "all"},
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "defaults":
+        default_workload = None
+        if default_goal_metric in {"memory", "runtime", "throughput"}:
+            if not workloads:
+                raise SetupError(
+                    f"Default MIP goal {default_goal_metric!r} requires an enabled "
+                    "vLLM measurement."
+                )
+            default_workload = next(iter(workloads))
+        goal_bound = yaml.safe_load(str(default_goal_value))
+        goal_config = (
+            {"at": {str(default_workload): goal_bound}}
+            if default_workload is not None
+            else goal_bound
+        )
+        run_id = f"{default_goal_metric}-{str(default_goal_value).replace('%', '')}"
+        session.state.set_collection(
+            "mip_config",
+            {
+                "defaults": {},
+                "workloads": workloads,
+                "runs": {
+                    run_id: {
+                        "constraints": {default_goal_metric: goal_config},
+                        "objectives": [
+                            {
+                                "metric": default_objective,
+                                "direction": "minimize",
+                            }
+                        ],
+                        "search_space": {"depth": "all", "embedding": "all"},
+                        "solver": {
+                            "backend": "auto",
+                            "num_solutions": default_num_solutions,
+                            "min_hamming_distance": 2,
+                            "max_seconds_per_solution": 60,
+                        },
+                        "homogeneous": {
+                            "enabled": True,
+                            "keep": "all",
+                            "rank_by": "objective",
+                        },
+                    }
+                },
+            },
+        )
+        return True
     runs: OrderedDict[str, Any] = OrderedDict()
     while True:
         goal_metric = session.select(
@@ -983,7 +1339,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                 ("Runtime at a workload", "runtime"),
                 ("Throughput at a workload", "throughput"),
             ],
-            default=str(resolver.resolve("mip.goal_metric", "params").value),
+            default=default_goal_metric,
         )
         if goal_metric is BACK:
             return False
@@ -993,7 +1349,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         goal_value = session.text(
             "mip.run.goal.value",
             "Goal bound (for example 75%, 22.5B, or 5000):",
-            default=str(resolver.resolve("mip.goal_value", "75%").value),
+            default=str(default_goal_value),
         )
         if goal_value is BACK:
             return False
@@ -1098,7 +1454,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             "search_space": {"depth": "all", "embedding": "all"},
             "solver": {
                 "backend": "auto",
-                "num_solutions": int(resolver.resolve("mip.num_solutions", 1000).value),
+                "num_solutions": default_num_solutions,
                 "min_hamming_distance": 2,
                 "max_seconds_per_solution": 60,
             },
@@ -1126,19 +1482,9 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
 def post_mip_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
-    action = _section_action(
-        session,
-        "post_mip",
-        "For each MIP run, accept the recommended flow or add typed nodes one by one.",
-    )
-    if action is BACK:
-        return False
-    if action == "review" and session.state.collection("post_mip_flows"):
-        print(yaml.safe_dump(session.state.collection("post_mip_flows")))
-        return post_mip_section(session, resolver, context)
+    del resolver
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
-    editor = PostMIPFlowEditor(runs)
     sequence = int(session.state.get_field("data.sequence_length", 4096))
     measurements = _mapping_copy(session.state.collection("vllm_measurements"))
     first_measurement = next(iter(measurements.values()), {})
@@ -1147,6 +1493,38 @@ def post_mip_section(
         "output_tokens": int(first_measurement.get("generation_seq_len", 1024)),
         "concurrency": int(first_measurement.get("max_num_seqs", 1)),
     }
+    preview = {}
+    for run_id, run in runs.items():
+        objectives = [
+            str(item.get("metric"))
+            for item in run.get("objectives", ())
+            if isinstance(item, Mapping)
+        ]
+        flow = recommended_flow(
+            str(run_id),
+            objectives,
+            {"sequence_length": sequence},
+            serving,
+            node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
+        )
+        preview[str(run_id)] = {
+            "mode": "recommended",
+            "nodes": [
+                {"id": node_id, "type": node.node_type}
+                for node_id, node in flow.nodes.items()
+            ],
+            "serving": serving,
+            "resources": "stage defaults with batch alignment",
+        }
+    action = _section_action(
+        session,
+        "post_mip",
+        "For each MIP run, accept the recommended flow or add typed nodes one by one.",
+        preview,
+    )
+    if action is BACK:
+        return False
+    editor = PostMIPFlowEditor(runs)
     for run_id, run in runs.items():
         flow_mode = "recommended"
         if action == "customize":
@@ -1497,14 +1875,25 @@ def _configure_dynamic_resources(
 def output_review_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
+    del context
+    default_root = str(
+        resolver.resolve_default(
+            "output.result_root",
+            str(session.state.campaign_dir / "results"),
+        ).value
+    )
     action = _section_action(
         session,
         "output",
         "Review effective values, then validate and generate both bundles.",
+        {
+            "result_root": default_root,
+            "generate_smoke_bundle": True,
+            "generate_production_bundle": True,
+        },
     )
     if action is BACK:
         return False
-    default_root = str(session.state.campaign_dir / "results")
     if action == "customize":
         root = _text_field(
             session,

@@ -142,19 +142,44 @@ class DefaultsResolver:
         file_defaults: Optional[Mapping[str, Any]] = None,
         preserved: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        self._layers = (
+        self._default_layers = (
             ("builtin", dict(builtins or {})),
             ("model", dict(model_derived or {})),
             ("defaults_file", dict(file_defaults or {})),
+        )
+        self._file_defaults = dict(file_defaults or {})
+        self._layers = (
+            *self._default_layers,
             ("preserved", dict(preserved or {})),
         )
 
-    def resolve(self, path: str, fallback: Any = None) -> ResolvedDefault:
-        """Return the highest-precedence value for a dotted path."""
-
+    @staticmethod
+    def _resolve_layers(
+        layers: tuple[tuple[str, Mapping[str, Any]], ...],
+        path: str,
+        fallback: Any,
+    ) -> ResolvedDefault:
         resolved = ResolvedDefault(deepcopy(fallback), "fallback")
-        for source, layer in self._layers:
+        for source, layer in layers:
             found, value = _lookup(layer, path)
             if found:
                 resolved = ResolvedDefault(deepcopy(value), source)
         return resolved
+
+    def resolve(self, path: str, fallback: Any = None) -> ResolvedDefault:
+        """Return the suggested value, including preserved wizard answers."""
+
+        return self._resolve_layers(self._layers, path, fallback)
+
+    def resolve_default(self, path: str, fallback: Any = None) -> ResolvedDefault:
+        """Return built-in, model-derived, or explicit-file defaults."""
+
+        return self._resolve_layers(self._default_layers, path, fallback)
+
+    def file_default(self, path: str) -> Optional[ResolvedDefault]:
+        """Return an explicitly supplied file default, if present."""
+
+        found, value = _lookup(self._file_defaults, path)
+        if not found:
+            return None
+        return ResolvedDefault(deepcopy(value), "defaults_file")

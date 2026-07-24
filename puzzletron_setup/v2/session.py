@@ -155,9 +155,13 @@ class WizardSession:
         *,
         default: Any = None,
     ) -> Any:
+        rendered = self._choices(choices)
+        if len(rendered) == 1:
+            print(f"  {message} {rendered[0].title} (only option)")
+            return rendered[0].value
         return self._ask(
             prompt_id,
-            lambda: self.backend.select(message, self._choices(choices), default),
+            lambda: self.backend.select(message, rendered, default),
         )
 
     def confirm(
@@ -183,12 +187,22 @@ class WizardSession:
         defaults: Sequence[Any] = (),
         validate: Optional[Validator] = None,
     ) -> Any:
+        rendered_choices = self._choices(choices)
+        if len(rendered_choices) == 1:
+            selected = [rendered_choices[0].value]
+            verdict = True if validate is None else validate(selected)
+            if verdict is True:
+                print(
+                    f"  {message} {rendered_choices[0].title} "
+                    "(only option, selected automatically)"
+                )
+                return selected
         while True:
             value = self._ask(
                 prompt_id,
                 lambda: self.backend.checkbox(
                     message,
-                    self._choices(choices),
+                    rendered_choices,
                     defaults,
                 ),
             )
