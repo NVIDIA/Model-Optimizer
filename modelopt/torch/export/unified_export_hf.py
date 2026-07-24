@@ -830,23 +830,15 @@ def _process_quantized_modules(
             handler(name, sub_module, ctx)
 
 
-def _export_transformers_checkpoint(
-    model: nn.Module,
-    dtype: torch.dtype | None = None,
-    is_modelopt_qlora: bool = False,
-    **kwargs,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Exports the torch model to the packed checkpoint with original HF naming.
+def _prepare_and_pack(
+    model: nn.Module, dtype: torch.dtype | None, is_modelopt_qlora: bool
+) -> dict[str, Any]:
+    """Shared export prep + in-place weight pack; returns ``quant_config``.
 
-    The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
-
-    Args:
-        model: the full torch model to export. The actual quantized model may be a submodule.
-        dtype: the weights data type to export the unquantized layers or the default model data type if None.
-
-    Returns:
-        post_state_dict: Dict containing quantized weights
-        quant_config: config information to export hf_quant_cfg.json
+    Runs MoE-input preparation, resmooth/requantize, amax syncs, then packs every quantized module
+    (``_process_quantized_modules``) and reconstructs fused MoE linears. Both the standard whole-model
+    gather (``_export_transformers_checkpoint``) and the FSDP2 per-owned-unit parallel write
+    (``_parallel_write_hf_checkpoint``) call this, then diverge only in how they gather + write.
     """
     if dtype is None:
         dtype = model.config.torch_dtype
@@ -924,13 +916,28 @@ def _export_transformers_checkpoint(
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
     _reconstruct_fused_moe_linear(model)
+    return quant_config
 
-    # The FSDP2 parallel-write path shares this prep+pack, then streams the gather+write itself
-    # (per-owned-unit) instead of the whole-model gather below. See _parallel_write_hf_checkpoint.
-    if kwargs.get("_pack_only"):
-        # Only _parallel_write_hf_checkpoint passes this; it discards the state dict (writes per-unit
-        # itself), so return an empty dict to keep the tuple[dict, dict] contract for other callers.
-        return {}, quant_config
+
+def _export_transformers_checkpoint(
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    **kwargs,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Exports the torch model to the packed checkpoint with original HF naming.
+
+    The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
+
+    Args:
+        model: the full torch model to export. The actual quantized model may be a submodule.
+        dtype: the weights data type to export the unquantized layers or the default model data type if None.
+
+    Returns:
+        post_state_dict: Dict containing quantized weights
+        quant_config: config information to export hf_quant_cfg.json
+    """
+    quant_config = _prepare_and_pack(model, dtype, is_modelopt_qlora)
 
     if is_fsdp2_model(model):
         # FSDP2 shard-local: each rank packed its own Shard(0) slice (keep-fused for experts, so the
@@ -1590,7 +1597,7 @@ def _parallel_write_hf_checkpoint(
 ):
     """FSDP2 shard-local parallel checkpoint save (see docs/fsdp2_parallel_write.md).
 
-    Reuses the standard prep+pack (``_pack_only``) so every rank packs its own ``Shard(0)`` slice,
+    Reuses the standard prep+pack (``_prepare_and_pack``) so every rank packs its own ``Shard(0)`` slice,
     then streams the write in chunks of ``world`` decoder-layer units: each rank gathers every unit
     (collective) but materializes + writes only the one it owns (``i % world``). Host peak is bounded
     to ~one chunk; writes parallelize across ranks. Rank 0 merges the index + writes metadata.
@@ -1599,9 +1606,7 @@ def _parallel_write_hf_checkpoint(
     rank, world = _dist.rank(), _dist.size()
 
     # Phase A — prep + shard-local pack, shared with the standard path (packs in place, all ranks).
-    _, quant_config = _export_transformers_checkpoint(
-        model, dtype, is_modelopt_qlora=is_modelopt_qlora, _pack_only=True, **kwargs
-    )
+    quant_config = _prepare_and_pack(model, dtype, is_modelopt_qlora)
     if getattr(model, "hf_quantizer", None) is not None:
         model.hf_quantizer = None
 
