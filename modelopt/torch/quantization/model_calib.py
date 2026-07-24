@@ -44,8 +44,8 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import (
+    AnyQuantizer,
     GroupedQuantizer,
-    NVFP4StaticQuantizer,
     QuantModule,
     SequentialQuantizer,
     StaticBlockScaleQuantizer,
@@ -76,9 +76,6 @@ __all__ = [
     "smoothquant",
     "svdquant",
 ]
-
-# Any quantizer instance: the leaf TensorQuantizer or a quantizer container.
-_ANY_QUANTIZER = (TensorQuantizer, SequentialQuantizer, GroupedQuantizer)
 
 
 def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
@@ -386,7 +383,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, _ANY_QUANTIZER):
+                if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
@@ -405,7 +402,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, _ANY_QUANTIZER):
+                if isinstance(child, AnyQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same

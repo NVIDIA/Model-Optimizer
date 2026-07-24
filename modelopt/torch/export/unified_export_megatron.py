@@ -34,6 +34,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import __version__
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 from modelopt.torch.utils import import_plugin
 
 from .convert_hf_config import convert_hf_quant_config_format
@@ -70,7 +71,6 @@ from .quant_utils import (
     process_layer_quant_config,
     to_quantized_weight,
 )
-from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
 
 with import_plugin("transformers", verbose=False):
     import transformers
@@ -1122,6 +1122,7 @@ class GPTModelExporter:
 
                 module.weight = getattr(module, weight_key)
                 if per_expert_wq:
+                    assert isinstance(grouped_wq, GroupedQuantizer)
                     module.weight_quantizer = grouped_wq[min(local_id, len(grouped_wq) - 1)]
                     # Dynamic-NVFP4 per-expert quantizers carry no stored amax, but
                     # weight_scale_2 derivation asserts one. Max-calibration weight amax
@@ -1158,7 +1159,9 @@ class GPTModelExporter:
                     local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
 
                 if weight_scale_2_cpu is not None:
-                    local_expert_state[expert_prefix + "weight_scale_2"] = weight_scale_2_cpu.clone()
+                    local_expert_state[expert_prefix + "weight_scale_2"] = (
+                        weight_scale_2_cpu.clone()
+                    )
 
                 for key, val in name_to_value.items():
                     if key == "output_scale":
@@ -1174,6 +1177,7 @@ class GPTModelExporter:
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
         # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
         if seen_qformat is not None:
+            assert seen_block_size is not None
             num_total_experts = num_experts * ep_size
             for global_id in range(num_total_experts):
                 self._record_layer_quant_config(

@@ -214,21 +214,25 @@ def reduce_sum(input, axis=None, keepdims=True):
 def representative_weight_quantizer(module: nn.Module, weight_name: str = "weight"):
     """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
-    Handles two layouts:
+    Handles three layouts:
 
     - singular ``<name>_weight_quantizer`` — standard ``nn.Linear`` / ``_QuantLinear``.
+    - singular ``<name>_weight_quantizer`` that is a ``GroupedQuantizer`` — TEGroupedLinear
+      fused experts (one quantizer per expert); the first is representative.
     - plural ``<name>_weight_quantizers`` (``nn.ModuleList``) — fused-experts modules
       (``_QuantFusedExperts``) hold one ``TensorQuantizer`` per expert. Per-expert
       formats are identical, so the first element is representative.
 
     Returns ``None`` if no matching quantizer is found.
     """
-    from ..nn import SequentialQuantizer, TensorQuantizer
+    from ..nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
 
     singular = quantizer_attr_names(weight_name).weight_quantizer
     q = getattr(module, singular, None)
     if isinstance(q, (TensorQuantizer, SequentialQuantizer)):
         return q
+    if isinstance(q, GroupedQuantizer) and len(q) > 0:
+        return q[0]
 
     plural = getattr(module, singular + "s", None)
     if isinstance(plural, nn.ModuleList) and len(plural) > 0:

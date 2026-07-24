@@ -1905,7 +1905,3 @@ class GroupedQuantizer(nn.ModuleList):
             attributes = [attributes] * len(self)
         for attribute, quantizer in zip(attributes, self):
             quantizer.set_from_attribute_config(attribute)
-
-    def get_modelopt_state(self) -> dict[str, Any]:
-        """Get meta state to be saved in checkpoint."""
-        return {"num_quantizers": len(self), "is_grouped_quantizer": True}
