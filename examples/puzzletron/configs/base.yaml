@@ -209,6 +209,7 @@ vllm_stats:
     num_iters: 30
     num_warmup_iters: 10
     max_num_seqs: 1
+    repeat_block_n_times: 4
     ignore_negatives: false
     topology:
       tensor_parallel_size: 1

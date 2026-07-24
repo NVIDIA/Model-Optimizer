@@ -755,6 +755,75 @@ def test_block_runtime_uses_homogeneous_n_and_2n_layouts(monkeypatch):
     assert non_block == RuntimeMeasurement(total_ms=6.0, prefill_ms=2.0)
 
 
+@pytest.mark.parametrize(
+    ("calculator", "candidate"),
+    (
+        (
+            calc_runtime_for_blocks,
+            BlockConfig(
+                subblock_configs=(AttentionConfig(num_query_heads=8, num_kv_heads=2),)
+            ),
+        ),
+        (
+            calc_runtime_for_subblocks,
+            AttentionConfig(num_query_heads=8, num_kv_heads=2),
+        ),
+    ),
+    ids=("block", "subblock"),
+)
+def test_block_and_subblock_runtime_default_to_four_repeats(
+    monkeypatch, calculator, candidate
+):
+    base_block = BlockConfig(
+        subblock_configs=(AttentionConfig(num_query_heads=8, num_kv_heads=2),)
+    )
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_config_fields(_config):
+            return {}
+
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base_block
+
+        @staticmethod
+        def runtime_benchmark_sublayers_are_exclusive():
+            return True
+
+    captured_layouts = []
+
+    def run_benchmarks(specs, _gpu_ids, _cache_dir):
+        results = {}
+        for key, (_runtime, layout) in specs.items():
+            captured_layouts.append(layout)
+            results[key] = RuntimeMeasurement(
+                total_ms=6.0 + 2.0 * len(layout),
+                prefill_ms=2.0 + 0.5 * len(layout),
+            )
+        return results
+
+    monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
+    monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0"])
+
+    calculator(
+        {candidate},
+        OmegaConf.create({}),
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        descriptor=Descriptor,
+        lm_config=SimpleNamespace(),
+        tokenizer_path="tokenizer",
+        prefill_seq_len=16,
+        generation_seq_len=4,
+        batch_size=1,
+    )
+
+    assert sorted(len(layout) for layout in captured_layouts) == [4, 8]
+
+
 def test_exclusive_sublayer_runtime_candidate_does_not_keep_attention_active():
     base_block = BlockConfig(
         subblock_configs=(

@@ -181,6 +181,15 @@ def test_nemotron_super_keeps_latent_moe_activation_pass() -> None:
     assert "moe_latent" in pass_names
 
 
+def test_render_experiment_uses_global_runtime_repeat_default() -> None:
+    experiment = render_experiment(
+        _nemotron_render_state(latent_moe=False),
+        "production",
+    )
+
+    assert experiment["vllm_stats"]["runtime_stats"]["repeat_block_n_times"] == 4
+
+
 def test_normal_aiperf_config_asks_shared_cp_and_maps_moe_ep_to_dp() -> None:
     prompts = _ServingPrompts(
         {

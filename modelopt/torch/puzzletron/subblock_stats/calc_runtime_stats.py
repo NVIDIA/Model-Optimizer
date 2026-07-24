@@ -529,7 +529,7 @@ def calc_runtime_for_blocks(
     :func:`calc_runtime_for_subblocks`.
     """
     configured_repeat_count = max(
-        1, int(runtime_stats_config.get("repeat_block_n_times", 10))
+        1, int(runtime_stats_config.get("repeat_block_n_times", 4))
     )
     topology = RuntimeTopology.from_config(runtime_stats_config.get("topology", None))
     repeat_block_n_times = effective_repeat_count(
@@ -682,7 +682,7 @@ def calc_runtime_for_subblocks(
     the same differencing the sequential version used.
     """
     configured_repeat_count = max(
-        1, int(runtime_stats_config.get("repeat_block_n_times", 10))
+        1, int(runtime_stats_config.get("repeat_block_n_times", 4))
     )
     topology = RuntimeTopology.from_config(runtime_stats_config.get("topology", None))
     repeat_block_n_times = effective_repeat_count(
