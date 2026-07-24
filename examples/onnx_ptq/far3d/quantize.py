@@ -33,9 +33,7 @@ class FileCalibrationReader(CalibrationDataReader):
 
     def get_next(self):
         batch_path = next(self._iterator, None)
-        if batch_path is None:
-            return None
-        return self.load(batch_path)
+        return None if batch_path is None else self.load(batch_path)
 
     def get_first(self):
         return self.load(self.batch_paths[0])
@@ -102,33 +100,32 @@ def find_encoder_nodes_to_exclude(onnx_path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Quantize the FAR3D ONNX models to INT8")
+    parser = argparse.ArgumentParser(description="Quantize the FAR3D ONNX models")
     parser.add_argument("encoder_onnx", help="Path to far3d.encoder.onnx")
     parser.add_argument("decoder_onnx", help="Path to far3d.decoder.onnx")
     parser.add_argument("calibration_dir", help="Directory created by prepare_calibration.py")
-    parser.add_argument("--encoder-output", default="far3d.encoder.int8.onnx")
-    parser.add_argument("--decoder-output", default="far3d.decoder.int8.onnx")
+    parser.add_argument("--quantization-mode", choices=("int8", "fp8"), default="int8")
+    parser.add_argument("--encoder-output")
+    parser.add_argument("--decoder-output")
     parser.add_argument(
         "--fp16-decoder",
         action="store_true",
-        help="Skip decoder INT8 quantization and use the original mixed-precision decoder",
+        help="Skip decoder quantization and use the original mixed-precision decoder",
     )
-    parser.add_argument("--calibration-method", choices=("entropy", "max"), default="entropy")
     return parser.parse_args()
 
 
 def quantize_encoder(args):
-    calibration_dir = Path(args.calibration_dir)
-    encoder_dir = calibration_dir / "encoder"
-    if not encoder_dir.is_dir():
-        encoder_dir = calibration_dir
+    encoder_dir = Path(args.calibration_dir)
+    if (encoder_dir / "encoder").is_dir():
+        encoder_dir /= "encoder"
     excluded_nodes = find_encoder_nodes_to_exclude(args.encoder_onnx)
     print(f"Excluding {len(excluded_nodes)} accuracy-sensitive nodes from quantization")
     quantize(
         onnx_path=args.encoder_onnx,
-        quantize_mode="int8",
+        quantize_mode=args.quantization_mode,
         calibration_data_reader=EncoderCalibrationReader(encoder_dir),
-        calibration_method=args.calibration_method,
+        calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         nodes_to_exclude=excluded_nodes,
         high_precision_dtype="fp16",
@@ -140,17 +137,21 @@ def quantize_decoder(args):
     decoder_dir = Path(args.calibration_dir) / "decoder"
     quantize(
         onnx_path=args.decoder_onnx,
-        quantize_mode="int8",
+        quantize_mode=args.quantization_mode,
         calibration_data_reader=DecoderCalibrationReader(decoder_dir, args.decoder_onnx),
-        calibration_method=args.calibration_method,
+        calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
-        high_precision_dtype="fp32",
+        high_precision_dtype="fp16" if args.quantization_mode == "fp8" else "fp32",
         output_path=args.decoder_output,
     )
 
 
 def main():
     args = parse_args()
+    if args.encoder_output is None:
+        args.encoder_output = f"far3d.encoder.{args.quantization_mode}.onnx"
+    if args.decoder_output is None:
+        args.decoder_output = f"far3d.decoder.{args.quantization_mode}.onnx"
     quantize_encoder(args)
     if args.fp16_decoder:
         print("Skipping decoder quantization; use the original mixed-precision decoder ONNX")

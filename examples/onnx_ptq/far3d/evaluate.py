@@ -117,14 +117,14 @@ class TensorRTRunner:
                 raise ValueError(
                     f"Input {base_name} has shape {tuple(value.shape)}, expected {shape}"
                 )
-        return base_name, value
+        return value
 
     def __call__(self, stream, **inputs):
         input_buffers = {}
         for name, shape in self.input_shapes.items():
             if name in self.state:
                 continue
-            _, value = self.prepare_input(name, inputs)
+            value = self.prepare_input(name, inputs)
             buffer = aligned_tensor(shape, value.dtype, value.device)
             buffer.copy_(value)
             input_buffers[name] = buffer
@@ -181,7 +181,7 @@ class Far3DDecoderRunner(TensorRTRunner):
                 if name in self.state:
                     value = self.state[name]
                 else:
-                    _, value = self.prepare_input(name, inputs)
+                    value = self.prepare_input(name, inputs)
                 calibration_inputs[base_name] = value
             self.input_callback(calibration_inputs)
         outputs = super().__call__(stream, **inputs)

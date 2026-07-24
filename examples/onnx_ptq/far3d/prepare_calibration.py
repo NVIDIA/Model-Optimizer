@@ -99,9 +99,7 @@ def main():
             f"{encoder_dir} already contains calibration batches; use an empty directory"
         )
 
-    decoder_writer = None
-    pipeline = None
-    stream = None
+    decoder_writer = pipeline = None
     if args.encoder_engine:
         decoder_dir = args.output_dir / "decoder"
         decoder_dir.mkdir(parents=True, exist_ok=True)
