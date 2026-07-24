@@ -27,7 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from example_utils import build_quant_cfg, get_tokenizer
+from example_utils import build_quant_cfg, get_tokenizer, patch_match_named_modules
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -47,6 +47,11 @@ RAND_SEED = 1234
 
 # Enable HuggingFace checkpointing
 mto.enable_huggingface_checkpointing()
+
+# Speed up the compressed-tensors load (the "Compressing model..." phase): make match_named_modules
+# O(modules) instead of O(modules x ~69k targets). Must run before any compressed-tensors load, so
+# apply it at import time (mirrors hf_ptq.py).
+patch_match_named_modules()
 
 
 def parse_args():
