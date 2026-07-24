@@ -32,6 +32,10 @@ from ..identity import canonicalize, stable_hash
 from ..pipeline_config import load_runtime_hydra_config
 from ..rpc_eval import EvaluationCache, EvaluationRequest, EvaluationResult
 from ..scoring_parent import ensure_scoring_parent
+from ..subblock_stats.measurements import (
+    apply_vllm_measurement,
+    normalize_vllm_measurements,
+)
 from .common import complete_stage, experiment_dir, stage_manifest_path
 
 if TYPE_CHECKING:
@@ -45,6 +49,7 @@ __all__ = [
     "build_library_stage",
     "configure_vllm_stats_widths",
     "emit_runtime_subblock_library",
+    "finalize_vllm_measurements",
     "finalize_vllm_stats_report",
     "prepare_vllm_stats_workspace",
     "vllm_stats_stage",
@@ -416,24 +421,90 @@ def finalize_vllm_stats_report(
     )
 
 
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def finalize_vllm_measurements(config: dict[str, Any]) -> dict[str, Any]:
+    """Merge named measurement results and publish their completion index."""
+
+    measurements = normalize_vllm_measurements(config)
+    if len(measurements) == 1 and next(iter(measurements.values())).legacy:
+        return finalize_vllm_stats_report(config)
+
+    puzzle_dir = Path(config["puzzle_dir"]).resolve()
+    rows: list[dict[str, Any]] = []
+    index: dict[str, Any] = {"schema_version": 1, "measurements": {}}
+    for measurement_id, measurement in measurements.items():
+        path = puzzle_dir / measurement.relative_stats_path
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError) as error:
+            raise RuntimeError(
+                f"vLLM measurement {measurement_id!r} is missing or invalid: {path}"
+            ) from error
+        if not isinstance(payload, list) or not payload:
+            raise RuntimeError(f"vLLM measurement {measurement_id!r} is empty: {path}")
+        for raw in payload:
+            if not isinstance(raw, dict):
+                raise RuntimeError(
+                    f"vLLM measurement {measurement_id!r} contains a non-mapping row."
+                )
+            row = dict(raw)
+            row["args"] = dict(row.get("args") or {})
+            row["args"]["workload_id"] = measurement_id
+            rows.append(row)
+        index["measurements"][measurement_id] = {
+            "identity": measurement.identity,
+            "path": str(measurement.relative_stats_path),
+            "rows": len(payload),
+            "workload": {
+                "batch_size": measurement.batch_size,
+                "prefill_seq_len": measurement.prefill_seq_len,
+                "generation_seq_len": measurement.generation_seq_len,
+            },
+        }
+
+    stats_name = str(
+        (config.get("vllm_stats") or {}).get("subblock_stats_filename", "subblock_stats.json")
+    )
+    _write_json_atomic(puzzle_dir / stats_name, rows)
+    index_path = puzzle_dir / "artifacts" / "vllm_stats" / "measurements" / "index.json"
+    _write_json_atomic(index_path, index)
+    report = finalize_vllm_stats_report(config)
+    return {"index": str(index_path), "measurements": index["measurements"], "report": report}
+
+
 def vllm_stats_stage(config: dict[str, Any], manifest: StageManifest):
     """Collect runtime statistics from converted-teacher candidates before library assembly."""
-    hydra_cfg = load_runtime_hydra_config(config)
     from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
 
-    prepared = prepare_vllm_stats_workspace(config, hydra_cfg)
+    measurements = normalize_vllm_measurements(config)
+    prepared = None
+    for measurement in measurements.values():
+        selected = apply_vllm_measurement(config, measurement)
+        hydra_cfg = load_runtime_hydra_config(selected)
+        prepared = prepare_vllm_stats_workspace(selected, hydra_cfg)
+        stats_path = prepared["puzzle_dir"] / _get(
+            hydra_cfg.calc_subblock_stats, "subblock_stats_filename", "subblock_stats.json"
+        )
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        launch_calc_subblock_stats(hydra_cfg)
+    assert prepared is not None
     puzzle_dir = prepared["puzzle_dir"]
     runtime_cfg = prepared["runtime_cfg"]
     subblock_library_path = prepared["subblock_library_path"]
     block_configs = prepared["block_configs"]
     sparse_selection = prepared["sparse_selection"]
-    launch_calc_subblock_stats(hydra_cfg)
-    stats_path = puzzle_dir / _get(
-        hydra_cfg.calc_subblock_stats, "subblock_stats_filename", "subblock_stats.json"
+    stats_path = puzzle_dir / str(
+        (config.get("vllm_stats") or {}).get("subblock_stats_filename", "subblock_stats.json")
     )
     report_summary: dict[str, Any] = {}
     if int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", "0"))) == 0:
-        report_summary = finalize_vllm_stats_report(config, hydra_cfg)
+        report_summary = finalize_vllm_measurements(config)
     elif not stats_path.is_file() or stats_path.stat().st_size == 0:
         raise RuntimeError(f"vLLM statistics aggregate is missing or empty: {stats_path}")
     return complete_stage(

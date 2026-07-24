@@ -1,0 +1,310 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Atomic authoring state and dependency-aware invalidation for setup v2."""
+
+from __future__ import annotations
+
+import os
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import yaml
+
+from puzzletron_setup import SetupError
+
+__all__ = ["FieldRecord", "PromptFrame", "WizardState"]
+
+SCHEMA_VERSION = 1
+WIZARD_VERSION = 2
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+@dataclass
+class FieldRecord:
+    """One authored value with provenance and dependency metadata."""
+
+    value: Any
+    source: str = "user"
+    dependencies: tuple[str, ...] = ()
+    stale: bool = False
+    requested: Any = None
+    effective: Any = None
+    error: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.dependencies = tuple(str(item) for item in self.dependencies)
+        if self.effective is None:
+            self.effective = self.value
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "FieldRecord":
+        return cls(
+            value=payload.get("value"),
+            source=str(payload.get("source", "user")),
+            dependencies=tuple(payload.get("dependencies") or ()),
+            stale=bool(payload.get("stale", False)),
+            requested=payload.get("requested"),
+            effective=payload.get("effective"),
+            error=payload.get("error"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _plain(asdict(self))
+
+
+@dataclass(frozen=True)
+class PromptFrame:
+    """One resumable prompt location."""
+
+    section: str
+    prompt_id: str
+    collection: Optional[str] = None
+    item_id: Optional[str] = None
+    cursor: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PromptFrame":
+        return cls(
+            section=str(payload["section"]),
+            prompt_id=str(payload["prompt_id"]),
+            collection=payload.get("collection"),
+            item_id=payload.get("item_id"),
+            cursor=payload.get("cursor"),
+        )
+
+
+Validator = Callable[[Any, "WizardState"], Optional[str]]
+
+
+@dataclass
+class WizardState:
+    """Mutable v2 setup state whose mutations are persisted atomically."""
+
+    path: Path
+    payload: dict[str, Any]
+    _fields: dict[str, FieldRecord] = field(default_factory=dict)
+
+    @classmethod
+    def start(
+        cls,
+        campaign_dir: Path,
+        *,
+        defaults_path: Optional[Path],
+    ) -> "WizardState":
+        campaign_dir = Path(campaign_dir).expanduser().resolve()
+        if campaign_dir.exists() and any(campaign_dir.iterdir()):
+            raise SetupError(
+                f"Campaign directory is not empty: {campaign_dir}. "
+                "Choose a new directory or use --resume."
+            )
+        campaign_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "wizard_version": WIZARD_VERSION,
+            "defaults_path": (
+                str(Path(defaults_path).expanduser().resolve())
+                if defaults_path is not None
+                else None
+            ),
+            "fields": {},
+            "navigation": {"frames": [], "cursor": None},
+            "collections": {},
+            "model": {},
+            "inventory": {},
+            "updated_at": _timestamp(),
+        }
+        state = cls(campaign_dir / "answers_v2.yaml", payload)
+        state.save()
+        return state
+
+    @classmethod
+    def resume(cls, path: Path) -> "WizardState":
+        candidate = Path(path).expanduser().resolve()
+        state_path = candidate / "answers_v2.yaml" if candidate.is_dir() else candidate
+        if not state_path.is_file():
+            raise SetupError(f"V2 setup state does not exist: {state_path}")
+        try:
+            payload = yaml.safe_load(state_path.read_text()) or {}
+        except (OSError, yaml.YAMLError) as error:
+            raise SetupError(f"Cannot read setup state {state_path}: {error}") from error
+        if payload.get("schema_version") != SCHEMA_VERSION:
+            raise SetupError(
+                f"Unsupported v2 setup schema {payload.get('schema_version')!r}; "
+                f"expected {SCHEMA_VERSION}."
+            )
+        if payload.get("wizard_version") != WIZARD_VERSION:
+            raise SetupError(
+                f"Unsupported wizard version {payload.get('wizard_version')!r}; "
+                f"expected {WIZARD_VERSION}."
+            )
+        fields = {
+            str(name): FieldRecord.from_dict(record)
+            for name, record in dict(payload.get("fields") or {}).items()
+        }
+        return cls(state_path, dict(payload), fields)
+
+    @property
+    def campaign_dir(self) -> Path:
+        return self.path.parent
+
+    @property
+    def defaults_path(self) -> Optional[Path]:
+        value = self.payload.get("defaults_path")
+        return Path(str(value)) if value else None
+
+    def field(self, path: str) -> FieldRecord:
+        try:
+            return self._fields[path]
+        except KeyError as error:
+            raise KeyError(f"Unknown setup field: {path}") from error
+
+    def get_field(self, path: str, default: Any = None) -> Any:
+        record = self._fields.get(path)
+        return default if record is None else record.effective
+
+    def records(self) -> Mapping[str, FieldRecord]:
+        return dict(self._fields)
+
+    def set_field(
+        self,
+        path: str,
+        value: Any,
+        *,
+        source: str = "user",
+        dependencies: Sequence[str] = (),
+        requested: Any = None,
+        effective: Any = None,
+    ) -> FieldRecord:
+        previous = self._fields.get(path)
+        resolved_effective = value if effective is None else effective
+        changed = previous is None or previous.effective != resolved_effective
+        record = FieldRecord(
+            value=value,
+            source=source,
+            dependencies=tuple(dependencies),
+            stale=False,
+            requested=requested,
+            effective=resolved_effective,
+            error=None,
+        )
+        self._fields[path] = record
+        if changed:
+            self.mark_dependents_stale(path, save=False)
+        self.save()
+        return record
+
+    def mark_dependents_stale(self, changed_path: str, *, save: bool = True) -> tuple[str, ...]:
+        reverse: dict[str, set[str]] = {}
+        for field_path, record in self._fields.items():
+            for dependency in record.dependencies:
+                reverse.setdefault(dependency, set()).add(field_path)
+        marked: list[str] = []
+        queue = deque([changed_path])
+        visited = {changed_path}
+        while queue:
+            dependency = queue.popleft()
+            for field_path in sorted(reverse.get(dependency, ())):
+                if field_path in visited:
+                    continue
+                visited.add(field_path)
+                record = self._fields[field_path]
+                record.stale = True
+                record.error = "Requires revalidation after an upstream change."
+                marked.append(field_path)
+                queue.append(field_path)
+        if save:
+            self.save()
+        return tuple(marked)
+
+    def revalidate(self, validators: Mapping[str, Validator]) -> Mapping[str, str]:
+        issues: dict[str, str] = {}
+        for path, record in self._fields.items():
+            if not record.stale:
+                continue
+            validator = validators.get(path)
+            error = (
+                validator(record.effective, self)
+                if validator is not None
+                else "No validator is registered for this stale field."
+            )
+            record.error = error
+            record.stale = error is not None
+            if error is not None:
+                issues[path] = error
+        self.save()
+        return issues
+
+    def collection(self, path: str) -> Any:
+        return self.payload.setdefault("collections", {}).get(path)
+
+    def set_collection(self, path: str, value: Any) -> None:
+        self.payload.setdefault("collections", {})[path] = _plain(value)
+        self.save()
+
+    @property
+    def frames(self) -> tuple[PromptFrame, ...]:
+        return tuple(
+            PromptFrame.from_dict(item)
+            for item in self.payload.setdefault("navigation", {}).get("frames", ())
+        )
+
+    def push_frame(self, frame: PromptFrame) -> None:
+        frames = self.payload.setdefault("navigation", {}).setdefault("frames", [])
+        if not frames or frames[-1] != asdict(frame):
+            frames.append(_plain(asdict(frame)))
+        self.payload["navigation"]["cursor"] = frame.prompt_id
+        self.save()
+
+    def pop_frame(self) -> Optional[PromptFrame]:
+        navigation = self.payload.setdefault("navigation", {})
+        frames = navigation.setdefault("frames", [])
+        if frames:
+            frames.pop()
+        navigation["cursor"] = frames[-1]["prompt_id"] if frames else None
+        self.save()
+        return PromptFrame.from_dict(frames[-1]) if frames else None
+
+    def replace_frames(self, frames: Sequence[PromptFrame]) -> None:
+        rendered = [_plain(asdict(frame)) for frame in frames]
+        self.payload["navigation"] = {
+            "frames": rendered,
+            "cursor": rendered[-1]["prompt_id"] if rendered else None,
+        }
+        self.save()
+
+    def set_model(self, model: Mapping[str, Any], inventory: Mapping[str, Any]) -> None:
+        self.payload["model"] = _plain(model)
+        self.payload["inventory"] = _plain(inventory)
+        self.save()
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.payload["fields"] = {
+            path: record.to_dict() for path, record in sorted(self._fields.items())
+        }
+        self.payload["updated_at"] = _timestamp()
+        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        try:
+            with temporary.open("w") as stream:
+                yaml.safe_dump(_plain(self.payload), stream, sort_keys=False, width=100)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        except OSError as error:
+            raise SetupError(f"Cannot save v2 setup state {self.path}: {error}") from error

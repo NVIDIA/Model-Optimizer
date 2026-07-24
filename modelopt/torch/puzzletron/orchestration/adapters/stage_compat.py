@@ -23,6 +23,7 @@ from ..schema import (
     WorkPlan,
 )
 from ..stages import stage_spec
+from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 
 __all__ = [
@@ -72,7 +73,12 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
         stats_name = (config.get("vllm_stats") or {}).get(
             "subblock_stats_filename", "subblock_stats.json"
         )
-        return ("artifacts/vllm_stats/summary.json", stats_name)
+        measurements = normalize_vllm_measurements(config)
+        patterns = ["artifacts/vllm_stats/summary.json", stats_name]
+        if not (len(measurements) == 1 and next(iter(measurements.values())).legacy):
+            patterns.append("artifacts/vllm_stats/measurements/index.json")
+            patterns.extend(str(item.relative_stats_path) for item in measurements.values())
+        return tuple(patterns)
     if stage_id == "replacement_scoring":
         return ("artifacts/replacement_scoring/summary.json",)
     if stage_id == "bypass":
@@ -119,7 +125,24 @@ def _vllm_stats_are_complete(config: Mapping[str, Any], puzzle_dir: Path) -> boo
     expected_widths = {
         int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
     }
-    return expected_widths.issubset(measured_widths)
+    if not expected_widths.issubset(measured_widths):
+        return False
+    measurements = normalize_vllm_measurements(config)
+    if len(measurements) == 1 and next(iter(measurements.values())).legacy:
+        return True
+    index = _read_mapping(
+        puzzle_dir / "artifacts" / "vllm_stats" / "measurements" / "index.json"
+    )
+    if index is None:
+        return False
+    recorded = index.get("measurements")
+    if not isinstance(recorded, Mapping) or set(recorded) != set(measurements):
+        return False
+    return all(
+        (puzzle_dir / measurement.relative_stats_path).is_file()
+        and (puzzle_dir / measurement.relative_stats_path).stat().st_size > 0
+        for measurement in measurements.values()
+    )
 
 
 def _read_mapping(path: Path) -> Mapping[str, Any] | None:

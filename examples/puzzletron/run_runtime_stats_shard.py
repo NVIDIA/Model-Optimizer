@@ -18,9 +18,10 @@ from modelopt.torch.puzzletron.pipeline_config import (
 from modelopt.torch.puzzletron.stages.common import experiment_dir
 from modelopt.torch.puzzletron.stages.pipeline import (
     configure_vllm_stats_widths,
-    finalize_vllm_stats_report,
+    finalize_vllm_measurements,
 )
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
+from modelopt.torch.puzzletron.subblock_stats.measurements import apply_vllm_measurement
 
 
 def _inject_runtime_descriptor(config: dict) -> None:
@@ -66,7 +67,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--override", action="append", default=[])
+    parser.add_argument("--measurement-id")
+    parser.add_argument("--merge", action="store_true")
     args = parser.parse_args()
+    plain = pipeline_config_from_path(args.config, overrides=args.override)
+    if args.merge:
+        _inject_runtime_descriptor(plain)
+        finalize_vllm_measurements(plain)
+        return
     shard_index = os.environ.get(
         "PUZZLETRON_RUNTIME_SHARD_INDEX",
         os.environ.get("PUZZLETRON_GROUP_INDEX", os.environ.get("SLURM_PROCID", "0")),
@@ -76,14 +84,15 @@ def main() -> None:
     )
     os.environ["PUZZLETRON_RUNTIME_SHARD_INDEX"] = shard_index
     os.environ["PUZZLETRON_RUNTIME_SHARD_COUNT"] = shard_count
-    plain = pipeline_config_from_path(args.config, overrides=args.override)
+    if args.measurement_id:
+        plain = apply_vllm_measurement(plain, args.measurement_id)
     _inject_runtime_descriptor(plain)
     _require_runtime_subblock_library(plain)
     cfg = load_runtime_hydra_config(plain)
     configure_vllm_stats_widths(plain, cfg)
+    stats_path = Path(plain["puzzle_dir"]) / plain["vllm_stats"]["subblock_stats_filename"]
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
     launch_calc_subblock_stats(cfg)
-    if int(shard_index) == 0:
-        finalize_vllm_stats_report(plain)
 
 
 if __name__ == "__main__":

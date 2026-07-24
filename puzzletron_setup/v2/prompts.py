@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Prompt backends with a universal Back action."""
+
+from __future__ import annotations
+
+from collections import deque
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from puzzletron_setup import SetupError
+
+__all__ = [
+    "BACK",
+    "InteractiveBackend",
+    "PromptBackend",
+    "PromptChoice",
+    "ScriptedBackend",
+]
+
+
+class _Back:
+    def __repr__(self) -> str:
+        return "BACK"
+
+
+BACK = _Back()
+
+
+@dataclass(frozen=True)
+class PromptChoice:
+    """One backend-neutral prompt choice."""
+
+    title: str
+    value: Any
+
+
+class PromptBackend(Protocol):
+    """Minimal backend used by the navigable wizard session."""
+
+    def text(self, message: str, default: str) -> Any:
+        raise NotImplementedError
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        default: Any,
+    ) -> Any:
+        raise NotImplementedError
+
+    def checkbox(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        defaults: Sequence[Any],
+    ) -> Any:
+        raise NotImplementedError
+
+
+def _questionary():
+    try:
+        import questionary
+    except ImportError as error:
+        raise SetupError(
+            "questionary is required. Install examples/puzzletron/requirements-setup.txt."
+        ) from error
+    return questionary
+
+
+def _answer(question: Any) -> Any:
+    value = question.ask()
+    if value is None:
+        raise KeyboardInterrupt
+    return value
+
+
+class InteractiveBackend:
+    """Questionary-backed prompts with visible Back controls."""
+
+    _BACK_TITLE = "← Back"
+
+    def text(self, message: str, default: str) -> Any:
+        print("  Type :back to return to the previous question.")
+        value = str(_answer(_questionary().text(message, default=default)))
+        return BACK if value.strip().lower() == ":back" else value
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        default: Any,
+    ) -> Any:
+        questionary = _questionary()
+        rendered = [
+            questionary.Choice(title=choice.title, value=choice.value) for choice in choices
+        ]
+        rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK))
+        return _answer(questionary.select(message, choices=rendered, default=default))
+
+    def checkbox(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        defaults: Sequence[Any],
+    ) -> Any:
+        questionary = _questionary()
+        selected = set(defaults)
+        rendered = [
+            questionary.Choice(
+                title=choice.title,
+                value=choice.value,
+                checked=choice.value in selected,
+            )
+            for choice in choices
+        ]
+        rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK, checked=False))
+        values = list(_answer(questionary.checkbox(message, choices=rendered)))
+        return BACK if BACK in values else values
+
+
+class ScriptedBackend:
+    """Deterministic non-interactive backend for embedding and automation."""
+
+    def __init__(self, answers: Sequence[Any]) -> None:
+        self._answers = deque(answers)
+
+    @property
+    def remaining(self) -> int:
+        return len(self._answers)
+
+    def _next(self) -> Any:
+        if not self._answers:
+            raise SetupError("Scripted setup input was exhausted.")
+        value = self._answers.popleft()
+        return BACK if value == ":back" else value
+
+    def text(self, message: str, default: str) -> Any:
+        del message, default
+        return self._next()
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        default: Any,
+    ) -> Any:
+        del message, choices, default
+        return self._next()
+
+    def checkbox(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        defaults: Sequence[Any],
+    ) -> Any:
+        del message, choices, defaults
+        return self._next()

@@ -192,6 +192,8 @@ build_library:
 
 vllm_stats:
   enabled: false
+  # Optional named exact workload/topology points. Empty preserves the legacy fields below.
+  measurements: {}
   batch_sizes: [1]
   prefill_seq_len: 4096
   generation_seq_len: 4096

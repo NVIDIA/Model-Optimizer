@@ -1371,6 +1371,7 @@ def calculate_subblock_stats_for_puzzle_dir(
     }
 
     subblock_stats_file = master_puzzle_dir / subblock_stats_filename
+    subblock_stats_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Resume support: the runtime (vLLM) benchmark is by far the most expensive
     # part of this step, so make it skippable on re-runs just like teacher

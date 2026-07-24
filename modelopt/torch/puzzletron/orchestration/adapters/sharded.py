@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
+from ..vllm_measurements import normalize_vllm_measurements
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -59,10 +61,33 @@ class ShardedStageAdapter(WorkAdapter):
     strategy = ExecutionStrategy.SHARDED
 
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
-        if node.stage_id == "vllm_stats" and node.gpus_per_instance != 1:
-            raise ValueError(
-                "vLLM runtime-statistics workers require exactly one GPU per instance; "
-                f"got {node.gpus_per_instance}"
+        if node.stage_id == "vllm_stats":
+            items = tuple(
+                _gang_item(
+                    node,
+                    suffix=f"{measurement_id}:gang",
+                    metadata={
+                        "measurement_id": measurement_id,
+                        "measurement_identity": measurement.identity,
+                        "runtime_topology": dict(measurement.topology),
+                    },
+                )
+                for measurement_id, measurement in normalize_vllm_measurements(
+                    plan.experiment_config
+                ).items()
+            )
+            items = tuple(
+                replace(item, gpus_per_instance=measurement.gpu_group_size)
+                for item, measurement in zip(
+                    items,
+                    normalize_vllm_measurements(plan.experiment_config).values(),
+                )
+            )
+            return WorkPlan(
+                stage_id=node.stage_id,
+                strategy=self.strategy,
+                items=items,
+                aggregate_required=True,
             )
         if node.stage_id == "zero_shot_evaluation":
             widths = tuple(
@@ -117,7 +142,12 @@ class ShardedStageAdapter(WorkAdapter):
             ("examples/puzzletron/main.py", ["--worker-stage", node.stage_id]),
         )
         script_path = repo / script
-        log_path = str(log_dir / f"{node.stage_id}_shard{item.shard_index}_{attempt_id}.log")
+        measurement_id = item.metadata.get("measurement_id")
+        name_suffix = f"_{measurement_id}" if measurement_id else ""
+        log_path = str(
+            log_dir
+            / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
+        )
         if node.stage_id == "aiperf":
             aiperf = plan.experiment_config.get("aiperf") or {}
             argv = [
@@ -149,6 +179,8 @@ class ShardedStageAdapter(WorkAdapter):
             width = item.metadata.get("width")
             if width is not None:
                 argv.extend(["--width", str(width)])
+        elif node.stage_id == "vllm_stats" and measurement_id is not None:
+            argv.extend(["--measurement-id", str(measurement_id)])
         env = {}
         if node.stage_id == "vllm_stats":
             env["PUZZLETRON_RUNTIME_SHARD_COUNT"] = str(logical_count)
@@ -157,8 +189,15 @@ class ShardedStageAdapter(WorkAdapter):
         if node.stage_id != "aiperf":
             for override in overrides or []:
                 argv.extend(["--override", override])
+        allocation_node = node
+        if node.stage_id == "vllm_stats":
+            allocation_node = replace(
+                node,
+                gpus_per_instance=item.gpus_per_instance,
+                exclusive=False,
+            )
         allocation_nodes, allocation_gpus, topology = packed_allocation(
-            node, instances=logical_count
+            allocation_node, instances=logical_count
         )
         return AttemptSpec(
             attempt_id=attempt_id,
@@ -167,7 +206,7 @@ class ShardedStageAdapter(WorkAdapter):
             command=CommandSpec(argv=tuple(argv), cwd=str(repo), env=env, log_path=log_path),
             allocation_nodes=allocation_nodes,
             allocation_gpus=allocation_gpus,
-            exclusive=allocation_gpus == allocation_nodes * node.gpus_per_node,
+            exclusive=False,
             contract_hash=plan.contract_hash,
             metadata={
                 "shard_index": item.shard_index,
@@ -221,6 +260,16 @@ class ShardedStageAdapter(WorkAdapter):
                 str(plan.puzzle_dir),
                 "--profile-id",
                 str(aiperf.get("profile_id", "runtime-075")),
+                "--merge",
+            )
+        elif node.stage_id == "vllm_stats":
+            repo = Path(plan.runner.contract.repository)
+            merge_script = repo / "examples" / "puzzletron" / "run_runtime_stats_shard.py"
+            command = (
+                "python",
+                str(merge_script),
+                "--config",
+                plan.experiment_config_path,
                 "--merge",
             )
         if command is not None:

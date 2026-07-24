@@ -73,6 +73,37 @@ validated and dry-run, but neither is submitted and production is not gated on
 smoke. Slurm and SSH bare-metal runners are supported; use the bare-metal runner
 with `localhost` for a single local host.
 
+### Setup wizard v2
+
+The new schema-driven wizard keeps the existing entry point unchanged and adds
+local defaults-versus-customize decisions at every section:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py \
+  --defaults nv-internal/sepehr_defaults.yaml
+```
+
+The defaults file is loaded only when passed explicitly. Selection prompts have
+a visible **← Back** action; text and numeric prompts accept `:back`. Every
+accepted answer and the exact navigation frame are saved in
+`answers_v2.yaml`, so an interrupted session can resume with:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py --resume /path/to/campaign
+```
+
+V2 supports reusable named parallel profiles, independent strategy and instance
+counts per stage, requested and scheduling-compatible effective batches,
+multiple named vLLM workload/topology measurements, independent MIP goals with
+internal constraints/variants/matrices, and editable post-MIP flow DAGs. The
+recommended flow begins with online evaluation and uses LM loss for filtering;
+it does not include Initial Filter. PTQ and downstream evaluation are shown as
+reserved but unavailable.
+
+The final review writes `resolved_defaults.yaml`, `README.md`, and validated
+`smoke/` and `production/` bundles transactionally. The wizard never launches
+the orchestrator.
+
 ## Installation
 
 Puzzletron uses one Python environment for ModelOpt, the patched vLLM fork,
