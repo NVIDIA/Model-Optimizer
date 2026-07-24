@@ -37,6 +37,11 @@ from .dashboard import StageView, format_duration, progress_eta, progress_fracti
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
+from .reporting import (
+    FinalReportResult,
+    build_final_report_attempt,
+    final_report_paths,
+)
 from .schema import (
     CampaignPlan,
     FailureClass,
@@ -822,6 +827,66 @@ class CampaignController:
                 return
             time.sleep(min(0.2, remaining))
 
+    def _generate_final_report(self) -> FinalReportResult:
+        """Generate the canonical campaign report through the configured executor."""
+
+        attempt = build_final_report_attempt(self.plan, attempt_id=str(uuid.uuid4()))
+        fallback_logs = (
+            (attempt.command.log_path,) if attempt.command.log_path is not None else ()
+        )
+        self.logger.stage("generating final campaign report")
+        try:
+            handle = self.executor.submit(attempt)
+        except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
+            self.logger.error(f"final campaign report submission failed: {exc}")
+            return FinalReportResult(status="failed", log_paths=fallback_logs)
+        self.logger.submit(f"final_report:0 [{handle.handle_id}]")
+        last_state: JobState | None = None
+        while True:
+            try:
+                status = self.executor.poll([handle])[0]
+            except Exception as exc:  # noqa: BLE001 - reporting must remain nonfatal
+                self.logger.error(f"final campaign report polling failed: {exc}")
+                return FinalReportResult(
+                    status="failed",
+                    log_paths=self.executor.fetch_logs(handle) or fallback_logs,
+                )
+            log_paths = status.log_paths or self.executor.fetch_logs(handle) or fallback_logs
+            if status.state is not last_state:
+                if status.state is JobState.PENDING:
+                    self.logger.pending(f"final_report:0 [{handle.handle_id}]")
+                elif status.state is JobState.RUNNING:
+                    self.logger.running(f"final_report:0 [{handle.handle_id}]")
+                elif status.state is JobState.UNKNOWN:
+                    self.logger.warning(
+                        f"final_report:0 scheduler state unavailable [{handle.handle_id}]"
+                    )
+                last_state = status.state
+            if status.state in {JobState.PENDING, JobState.RUNNING, JobState.UNKNOWN}:
+                time.sleep(self.poll_interval_seconds)
+                continue
+            if status.state is not JobState.COMPLETED:
+                detail = f": {status.reason}" if status.reason else ""
+                self.logger.error(
+                    f"final campaign report {status.state.value} [{handle.handle_id}]{detail}"
+                )
+                return FinalReportResult(status="failed", log_paths=tuple(log_paths))
+            report_path, manifest_path = final_report_paths(self.plan)
+            missing = [str(path) for path in (report_path, manifest_path) if not path.is_file()]
+            if missing:
+                self.logger.error(
+                    "final campaign report completed without required artifact(s): "
+                    + ", ".join(missing)
+                )
+                return FinalReportResult(status="failed", log_paths=tuple(log_paths))
+            self.logger.success(f"final campaign report: {report_path}")
+            return FinalReportResult(
+                status="completed",
+                path=str(report_path),
+                manifest_path=str(manifest_path),
+                log_paths=tuple(log_paths),
+            )
+
     def _prompt_shutdown_action(self) -> ShutdownAction:
         """Suspend live rendering and collect one interactive exit decision."""
 
@@ -1055,6 +1120,23 @@ class CampaignController:
             self.logger.stop_dashboard()
             if lease is not None:
                 self.logger.banner("controller lease released")
+        selected_stages_complete = all(
+            stage_is_complete(self.plan.experiment_config, node.stage_id)
+            for node in self.plan.stages
+        )
+        clean_completion = (
+            selected_stages_complete
+            and not self._failed_stages
+            and not halted
+            and not cancelled
+            and not detached
+            and self._manual_waiting is None
+        )
+        report_result = (
+            self._generate_final_report()
+            if clean_completion
+            else FinalReportResult(status="skipped")
+        )
         if detached:
             self.logger.shutdown(
                 "controller detached; jobs remain active and the same command will recover them"
@@ -1083,4 +1165,5 @@ class CampaignController:
                 self._manual_waiting.node_id if self._manual_waiting is not None else None
             ),
             "iterations": iterations,
+            **report_result.as_dict(),
         }
