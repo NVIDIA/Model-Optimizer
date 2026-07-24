@@ -97,7 +97,7 @@ class MIPRunDraft:
     solver: Mapping[str, Any] = field(
         default_factory=lambda: {
             "backend": "auto",
-            "num_solutions": 1000,
+            "num_solutions": 8,
             "min_hamming_distance": 2,
             "max_seconds_per_solution": 60,
         }

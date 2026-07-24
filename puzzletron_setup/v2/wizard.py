@@ -93,7 +93,7 @@ BUILTINS = {
         "goal_metric": "params",
         "goal_value": "75%",
         "objective": "metrics.cosine_embedding_loss_hidden_states",
-        "num_solutions": 1000,
+        "num_solutions": 8,
     },
 }
 
@@ -109,6 +109,13 @@ STATIC_MODEL_BATCH_PATHS = {
     "sort_sanity": "sort_sanity.micro_batch_size",
     "bypass": "bypass.training.micro_batch_size",
     "replacement_scoring": "replacement_scoring.micro_batch_size",
+}
+CANONICAL_STAGE_STRATEGIES = {
+    "depth_importance": "persistent_pool",
+    "width_importance": "single",
+    "sort_sanity": "single",
+    "bypass": "single",
+    "replacement_scoring": "persistent_pool",
 }
 
 _CUSTOM_MODEL_SOURCE = "__custom_model_source__"
@@ -681,7 +688,11 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         )
         remove = session.integer(
             "pruning.depth_remove",
-            "Maximum number to remove:",
+            (
+                "Maximum number to remove "
+                f"(network has {count} "
+                f"{'sublayers' if granularity == 'subblock' else 'layers'}):"
+            ),
             default=min(4, count - 1),
             minimum=0,
             maximum=count - 1,
@@ -888,7 +899,7 @@ def _stage_resource_defaults(
     resolver: DefaultsResolver,
     stage_id: str,
     *,
-    strategy: str,
+    strategy: Optional[str] = None,
     batch: int,
 ) -> dict[str, Any]:
     registry = _resource_registry(session, resolver)
@@ -897,22 +908,24 @@ def _stage_resource_defaults(
         if registry.names()
         else ParallelProfile(stage_id)
     )
-    resolved_strategy = str(
-        resolver.resolve_default(f"stages.{stage_id}.strategy", strategy).value
-    )
+    strategy = strategy or CANONICAL_STAGE_STRATEGIES[stage_id]
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
-    instances = int(
-        resolver.resolve_default(
-            f"stages.{stage_id}.instances",
-            gpus_per_node if resolved_strategy != "single" else 1,
-        ).value
+    instances = (
+        1
+        if strategy == "single"
+        else int(
+            resolver.resolve_default(
+                f"stages.{stage_id}.instances",
+                gpus_per_node,
+            ).value
+        )
     )
     requested_batch = int(
         resolver.resolve_default(f"stages.{stage_id}.batch", batch).value
     )
     resolution = resolve_batch(requested_batch, profile)
     return {
-        "strategy": resolved_strategy,
+        "strategy": strategy,
         "instances": instances,
         "parallel_profile": profile.name,
         "parallel": {
@@ -947,48 +960,37 @@ def _configure_stage_resource(
     stage_id: str,
     *,
     action: str,
-    strategy_default: str,
     batch_default: int,
 ) -> Any:
     defaults = _stage_resource_defaults(
         session,
         resolver,
         stage_id,
-        strategy=strategy_default,
         batch=batch_default,
     )
     registry = _resource_registry(session, resolver)
+    strategy = CANONICAL_STAGE_STRATEGIES[stage_id]
     if action == "customize":
         profile = _profile_prompt(session, registry, stage_id, model)
         if profile is BACK:
             return BACK
-        strategy = session.select(
-            f"stages.{stage_id}.strategy",
-            "Execution strategy:",
-            ["single", "persistent_pool", "sharded"],
-            default=defaults["strategy"],
-        )
-        if strategy is BACK:
-            return BACK
-        gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
-        default_instances = (
-            int(defaults["instances"])
-            if str(strategy) == str(defaults["strategy"])
-            else (1 if strategy == "single" else gpus_per_node)
-        )
-        instances = session.integer(
-            f"stages.{stage_id}.instances",
-            "Independent model instances/workers:",
-            default=default_instances,
-            minimum=1,
-        )
-        if instances is BACK:
-            return BACK
+        if strategy == "single":
+            instances = 1
+        else:
+            instances = session.integer(
+                f"stages.{stage_id}.instances",
+                "Independent model instances/workers:",
+                default=int(defaults["instances"]),
+                minimum=1,
+            )
+            if instances is BACK:
+                return BACK
+        batch_unit = profile.batch_unit
         requested_batch = session.integer(
             f"stages.{stage_id}.batch",
-            "Local/micro batch size:",
-            default=int(defaults["requested_batch"]),
-            minimum=1,
+            f"Local/micro batch size (minimum and scheduling unit: {batch_unit}):",
+            default=int(defaults["effective_batch"]),
+            minimum=batch_unit,
         )
         if requested_batch is BACK:
             return BACK
@@ -1076,7 +1078,6 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
         session,
         resolver,
         "depth_importance",
-        strategy="persistent_pool",
         batch=8,
     )
     action = _section_action(
@@ -1109,7 +1110,11 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
         )
         remove = session.integer(
             "pruning.depth_remove",
-            "Maximum number to remove:",
+            (
+                "Maximum number to remove "
+                f"(network has {count} "
+                f"{'sublayers' if granularity == 'subblock' else 'layers'}):"
+            ),
             default=min(remove, count - 1),
             minimum=0,
             maximum=count - 1,
@@ -1135,7 +1140,6 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
         context["model"],
         "depth_importance",
         action=str(action),
-        strategy_default="persistent_pool",
         batch_default=8,
     )
     return configured is not BACK
@@ -1205,7 +1209,6 @@ def width_importance_section(
         session,
         resolver,
         "width_importance",
-        strategy="single",
         batch=8,
     )
     action = _section_action(
@@ -1237,7 +1240,6 @@ def width_importance_section(
         context["model"],
         "width_importance",
         action=str(action),
-        strategy_default="single",
         batch_default=8,
     )
     return configured is not BACK
@@ -1262,7 +1264,6 @@ def sort_sanity_section(
         session,
         resolver,
         "sort_sanity",
-        strategy="single",
         batch=8,
     )
     action = _section_action(
@@ -1307,7 +1308,6 @@ def sort_sanity_section(
         context["model"],
         "sort_sanity",
         action=str(action),
-        strategy_default="single",
         batch_default=8,
     )
     return configured is not BACK
@@ -1334,7 +1334,6 @@ def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: 
         session,
         resolver,
         "bypass",
-        strategy="single",
         batch=int(bypass.get("batch_size", 8)),
     )
     action = _section_action(
@@ -1395,7 +1394,6 @@ def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: 
         context["model"],
         "bypass",
         action=str(action),
-        strategy_default="single",
         batch_default=int(bypass.get("batch_size", 8)),
     )
     return configured is not BACK
@@ -1405,6 +1403,7 @@ def replacement_scoring_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
     pruning = _pruning_payload(session.state)
+    inventory = context["model"].inventory
     granularity = str(
         resolver.resolve_default(
             "pruning.replacement_granularity",
@@ -1424,7 +1423,6 @@ def replacement_scoring_section(
         session,
         resolver,
         "replacement_scoring",
-        strategy="persistent_pool",
         batch=8,
     )
     action = _section_action(
@@ -1444,7 +1442,16 @@ def replacement_scoring_section(
         granularity = session.select(
             "pruning.replacement_granularity",
             "Replace and score:",
-            [("One sublayer at a time", "subblock"), ("One block at a time", "block")],
+            [
+                (
+                    f"One sublayer at a time ({inventory.num_sublayers} sublayers)",
+                    "subblock",
+                ),
+                (
+                    f"One block at a time ({inventory.num_layers} layers)",
+                    "block",
+                ),
+            ],
             default=granularity,
         )
         samples = session.integer(
@@ -1464,7 +1471,6 @@ def replacement_scoring_section(
         context["model"],
         "replacement_scoring",
         action=str(action),
-        strategy_default="persistent_pool",
         batch_default=8,
     )
     return configured is not BACK
@@ -1493,21 +1499,16 @@ def pre_mip_stages_section(
             session.state.collection("pruning") or {}
         ).get("bypass", {}).get("enabled", False):
             continue
-        strategy_fallback = (
-            "persistent_pool"
-            if stage_id in {"depth_importance", "replacement_scoring"}
-            else "single"
-        )
-        strategy = str(
-            resolver.resolve_default(
-                f"stages.{stage_id}.strategy", strategy_fallback
-            ).value
-        )
-        instances = int(
-            resolver.resolve_default(
-                f"stages.{stage_id}.instances",
-                gpus_per_node if strategy != "single" else 1,
-            ).value
+        strategy = CANONICAL_STAGE_STRATEGIES[stage_id]
+        instances = (
+            1
+            if strategy == "single"
+            else int(
+                resolver.resolve_default(
+                    f"stages.{stage_id}.instances",
+                    gpus_per_node,
+                ).value
+            )
         )
         requested_batch = int(
             resolver.resolve_default(f"stages.{stage_id}.batch", 8).value
@@ -1559,31 +1560,26 @@ def pre_mip_stages_section(
             profile = _profile_prompt(session, registry, stage_id, context["model"])
             if profile is BACK:
                 return False
-            strategy = session.select(
-                f"stages.{stage_id}.strategy",
-                "Execution strategy:",
-                ["single", "persistent_pool", "sharded"],
-                default=(
-                    "persistent_pool"
-                    if stage_id in {"depth_importance", "replacement_scoring"}
-                    else "single"
-                ),
-            )
-            if strategy is BACK:
-                return False
-            instances = session.integer(
-                f"stages.{stage_id}.instances",
-                "Independent model instances/workers:",
-                default=(gpus_per_node if strategy != "single" else 1),
-                minimum=1,
-            )
-            if instances is BACK:
-                return False
+            strategy = CANONICAL_STAGE_STRATEGIES[stage_id]
+            if strategy == "single":
+                instances = 1
+            else:
+                instances = session.integer(
+                    f"stages.{stage_id}.instances",
+                    "Independent model instances/workers:",
+                    default=gpus_per_node,
+                    minimum=1,
+                )
+                if instances is BACK:
+                    return False
             requested_batch = session.integer(
                 f"stages.{stage_id}.batch",
-                "Local/micro batch size:",
-                default=8,
-                minimum=1,
+                (
+                    "Local/micro batch size "
+                    f"(minimum and scheduling unit: {profile.batch_unit}):"
+                ),
+                default=resolve_batch(8, profile).effective,
+                minimum=profile.batch_unit,
             )
             if requested_batch is BACK:
                 return False
@@ -1593,21 +1589,16 @@ def pre_mip_stages_section(
                 if registry.names()
                 else registry.create(ParallelProfile(stage_id), consumer=stage_id)
             )
-            strategy_fallback = (
-                "persistent_pool"
-                if stage_id in {"depth_importance", "replacement_scoring"}
-                else "single"
-            )
-            strategy = str(
-                resolver.resolve_default(
-                    f"stages.{stage_id}.strategy", strategy_fallback
-                ).value
-            )
-            instances = int(
-                resolver.resolve_default(
-                    f"stages.{stage_id}.instances",
-                    gpus_per_node if strategy != "single" else 1,
-                ).value
+            strategy = CANONICAL_STAGE_STRATEGIES[stage_id]
+            instances = (
+                1
+                if strategy == "single"
+                else int(
+                    resolver.resolve_default(
+                        f"stages.{stage_id}.instances",
+                        gpus_per_node,
+                    ).value
+                )
             )
             requested_batch = int(
                 resolver.resolve_default(f"stages.{stage_id}.batch", 8).value
@@ -1838,9 +1829,8 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         )
         for name, raw in measurements.items()
     )
-    default_goal_metric = str(
-        resolver.resolve_default("mip.goal_metric", "params").value
-    )
+    default_goal = resolver.resolve_default("mip.goal_metric", "params")
+    default_goal_metric = str(default_goal.value)
     default_goal_value = resolver.resolve_default("mip.goal_value", "75%").value
     default_objective = str(
         resolver.resolve_default(
@@ -1848,8 +1838,33 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         ).value
     )
     default_num_solutions = int(
-        resolver.resolve_default("mip.num_solutions", 1000).value
+        resolver.resolve_default("mip.num_solutions", 8).value
     )
+    workload_metrics = {"memory", "runtime"}
+    goal_choices = [
+        ("Parameters", "params"),
+        ("Active parameters", "active_params"),
+    ]
+    if workloads:
+        goal_choices.extend(
+            [
+                ("Memory at a workload", "memory"),
+                ("Runtime at a workload", "runtime"),
+            ]
+        )
+    available_goal_metrics = {value for _, value in goal_choices}
+    if default_goal_metric not in available_goal_metrics:
+        if default_goal_metric == "throughput":
+            raise SetupError(
+                "MIP throughput goals are not supported by setup v2; "
+                "use runtime, memory, parameters, or active parameters."
+            )
+        if default_goal_metric in workload_metrics and not workloads:
+            raise SetupError(
+                f"Default MIP goal {default_goal_metric!r} requires an enabled "
+                "vLLM measurement."
+            )
+        raise SetupError(f"Unsupported default MIP goal: {default_goal_metric!r}")
     action = _section_action(
         session,
         "mip",
@@ -1861,7 +1876,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                 "workload": (
                     next(iter(workloads))
                     if default_goal_metric
-                    in {"memory", "runtime", "throughput"}
+                    in workload_metrics
                     and workloads
                     else None
                 ),
@@ -1883,12 +1898,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         return False
     if action == "defaults":
         default_workload = None
-        if default_goal_metric in {"memory", "runtime", "throughput"}:
-            if not workloads:
-                raise SetupError(
-                    f"Default MIP goal {default_goal_metric!r} requires an enabled "
-                    "vLLM measurement."
-                )
+        if default_goal_metric in workload_metrics:
             default_workload = next(iter(workloads))
         goal_bound = yaml.safe_load(str(default_goal_value))
         goal_config = (
@@ -1933,20 +1943,11 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         goal_metric = session.select(
             "mip.run.goal.metric",
             "Main MIP goal:",
-            [
-                ("Parameters", "params"),
-                ("Active parameters", "active_params"),
-                ("Memory at a workload", "memory"),
-                ("Runtime at a workload", "runtime"),
-                ("Throughput at a workload", "throughput"),
-            ],
+            goal_choices,
             default=default_goal_metric,
         )
         if goal_metric is BACK:
             return False
-        if goal_metric in {"memory", "runtime", "throughput"} and not workloads:
-            print("  This goal requires a named vLLM measurement. Choose another goal or go Back.")
-            continue
         goal_value = session.text(
             "mip.run.goal.value",
             "Goal bound (for example 75%, 22.5B, or 5000):",
@@ -1955,7 +1956,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         if goal_value is BACK:
             return False
         workload = None
-        if goal_metric in {"memory", "runtime", "throughput"}:
+        if goal_metric in workload_metrics:
             workload = session.select(
                 "mip.run.goal.workload",
                 "Goal workload:",
@@ -2080,6 +2081,14 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
     return True
 
 
+def _post_mip_strategy(node: NodeDraft) -> str:
+    return (
+        "persistent_pool"
+        if node.node_type == "evaluation" and node.input_id == "source"
+        else "sharded"
+    )
+
+
 def post_mip_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
@@ -2119,11 +2128,7 @@ def post_mip_section(
                     session,
                     resolver,
                     f"post.{run_id}.{node_id}",
-                    strategy=(
-                        "persistent_pool"
-                        if node.node_type == "evaluation" and node.input_id == "source"
-                        else "sharded"
-                    ),
+                    strategy=_post_mip_strategy(node),
                     batch=1,
                 )
             elif node.node_type == "aiperf":
@@ -2494,26 +2499,13 @@ def _configure_dynamic_resources(
             )
             if customize is BACK:
                 return BACK
-        strategy_default = (
-            "persistent_pool"
-            if node.node_type == "evaluation" and node.input_id == "source"
-            else "sharded"
-        )
-        strategy = strategy_default
+        strategy = _post_mip_strategy(node)
         instances = gpus_per_node
         if customize:
-            strategy = session.select(
-                f"{stage_id}.strategy",
-                "Execution strategy:",
-                ["single", "persistent_pool", "sharded"],
-                default=strategy_default,
-            )
-            if strategy is BACK:
-                return BACK
             instances = session.integer(
                 f"{stage_id}.instances",
                 "Independent model instances/workers:",
-                default=1 if strategy == "single" else gpus_per_node,
+                default=gpus_per_node,
                 minimum=1,
             )
             if instances is BACK:
@@ -2553,9 +2545,12 @@ def _configure_dynamic_resources(
             if customize:
                 requested = session.integer(
                     f"{stage_id}.batch",
-                    "Local/micro batch size:",
+                    (
+                        "Local/micro batch size "
+                        f"(minimum and scheduling unit: {profile.batch_unit}):"
+                    ),
                     default=profile.batch_unit,
-                    minimum=1,
+                    minimum=profile.batch_unit,
                 )
                 if requested is BACK:
                     return BACK
