@@ -28,14 +28,7 @@ from .post_mip import (
     PostMIPFlowEditor,
     recommended_flow,
 )
-from .prompts import (
-    BACK,
-    InteractiveBackend,
-    PromptBackend,
-    PromptChoice,
-    PromptItem,
-    PromptSeparator,
-)
+from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
 from .resources import (
     ParallelProfile,
     ResourceProfileRegistry,
@@ -152,13 +145,18 @@ SUPPORTED_MODEL_GROUPS = (
 )
 
 
-def _model_source_choices() -> list[PromptItem]:
-    choices: list[PromptItem] = []
+def _model_family_choices() -> list[PromptChoice]:
+    return [
+        PromptChoice("Custom", _CUSTOM_MODEL_SOURCE),
+        *[PromptChoice(group, group) for group, _ in SUPPORTED_MODEL_GROUPS],
+    ]
+
+
+def _model_choices_for_family(family: str) -> list[PromptChoice]:
     for group, models in SUPPORTED_MODEL_GROUPS:
-        choices.append(PromptSeparator(group))
-        choices.extend(PromptChoice(short_name, url) for short_name, url in models)
-    choices.append(PromptChoice("Custom local path or Hugging Face model", _CUSTOM_MODEL_SOURCE))
-    return choices
+        if group == family:
+            return [PromptChoice(short_name, url) for short_name, url in models]
+    raise SetupError(f"Unknown supported model family: {family}")
 
 
 def _nested_records(state: WizardState) -> dict[str, Any]:
@@ -266,31 +264,20 @@ def _integer_field(
     return value
 
 
-def model_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    action = _section_action(
-        session,
-        "model",
-        "Inspect configuration and derive pruning capabilities without loading weights.",
-    )
-    if action is BACK:
-        return False
-    if action == "review" and session.state.payload.get("model"):
-        inventory = session.state.payload.get("inventory") or {}
-        print(yaml.safe_dump({"model": session.state.payload["model"], "inventory": inventory}))
-        return model_section(session, resolver, context)
-    source_default = resolver.resolve("model.source", session.state.get_field("model.source", ""))
-    if action == "defaults" and not source_default.value:
-        action = "customize"
-    if action == "customize":
-        source = session.select(
-            "model.source_choice",
+def _select_model_source(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+) -> Any:
+    while True:
+        family = session.select(
+            "model.source_family",
             "Model:",
-            _model_source_choices(),
+            _model_family_choices(),
             default=_CUSTOM_MODEL_SOURCE,
         )
-        if source is BACK:
-            return False
-        if source == _CUSTOM_MODEL_SOURCE:
+        if family is BACK:
+            return BACK
+        if family == _CUSTOM_MODEL_SOURCE:
             source = _text_field(
                 session,
                 resolver,
@@ -298,12 +285,28 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
                 "Local model path or Hugging Face URL:",
             )
             if source is BACK:
-                return False
+                continue
+            return source
+        source = session.select(
+            "model.source_model",
+            f"{family} model:",
+            _model_choices_for_family(str(family)),
+        )
+        if source is not BACK:
+            return source
+
+
+def model_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    session.begin("model")
+    while True:
+        source = _select_model_source(session, resolver)
+        if source is BACK:
+            return False
         try:
             source = normalize_model_source(str(source))
         except SetupError as error:
             print(f"  {error}")
-            return model_section(session, resolver, context)
+            continue
         session.state.set_field("model.source", source, source="user")
         revision = None
         if not Path(source).exists():
@@ -311,12 +314,8 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
                 session, resolver, "model.revision", "Hugging Face revision:", "main"
             )
             if revision is BACK:
-                return False
-    else:
-        source = normalize_model_source(str(source_default.value))
-        revision = resolver.resolve("model.revision", None).value
-        session.state.set_field("model.source", source, source=source_default.source)
-        session.state.set_field("model.revision", revision, source=source_default.source)
+                continue
+        break
     model = inspect_model(str(source), str(revision) if revision else None)
     session.state.set_model(model.to_dict(), model.inventory.to_dict())
     context["model"] = model

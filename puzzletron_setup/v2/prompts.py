@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, Union
+from typing import Any, Protocol
 
 from puzzletron_setup import SetupError
 
@@ -17,7 +17,6 @@ __all__ = [
     "InteractiveBackend",
     "PromptBackend",
     "PromptChoice",
-    "PromptSeparator",
     "ScriptedBackend",
 ]
 
@@ -38,16 +37,6 @@ class PromptChoice:
     value: Any
 
 
-@dataclass(frozen=True)
-class PromptSeparator:
-    """One non-selectable group heading in a prompt."""
-
-    title: str
-
-
-PromptItem = Union[PromptChoice, PromptSeparator]
-
-
 class PromptBackend(Protocol):
     """Minimal backend used by the navigable wizard session."""
 
@@ -57,7 +46,7 @@ class PromptBackend(Protocol):
     def select(
         self,
         message: str,
-        choices: Sequence[PromptItem],
+        choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
         raise NotImplementedError
@@ -65,7 +54,7 @@ class PromptBackend(Protocol):
     def checkbox(
         self,
         message: str,
-        choices: Sequence[PromptItem],
+        choices: Sequence[PromptChoice],
         defaults: Sequence[Any],
     ) -> Any:
         raise NotImplementedError
@@ -101,15 +90,12 @@ class InteractiveBackend:
     def select(
         self,
         message: str,
-        choices: Sequence[PromptItem],
+        choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
         questionary = _questionary()
         rendered = [
-            questionary.Separator(choice.title)
-            if isinstance(choice, PromptSeparator)
-            else questionary.Choice(title=choice.title, value=choice.value)
-            for choice in choices
+            questionary.Choice(title=choice.title, value=choice.value) for choice in choices
         ]
         rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK))
         return _answer(questionary.select(message, choices=rendered, default=default))
@@ -117,15 +103,13 @@ class InteractiveBackend:
     def checkbox(
         self,
         message: str,
-        choices: Sequence[PromptItem],
+        choices: Sequence[PromptChoice],
         defaults: Sequence[Any],
     ) -> Any:
         questionary = _questionary()
         selected = set(defaults)
         rendered = [
-            questionary.Separator(choice.title)
-            if isinstance(choice, PromptSeparator)
-            else questionary.Choice(
+            questionary.Choice(
                 title=choice.title,
                 value=choice.value,
                 checked=choice.value in selected,
@@ -160,7 +144,7 @@ class ScriptedBackend:
     def select(
         self,
         message: str,
-        choices: Sequence[PromptItem],
+        choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
         del message, choices, default
@@ -169,7 +153,7 @@ class ScriptedBackend:
     def checkbox(
         self,
         message: str,
-        choices: Sequence[PromptItem],
+        choices: Sequence[PromptChoice],
         defaults: Sequence[Any],
     ) -> Any:
         del message, choices, defaults
