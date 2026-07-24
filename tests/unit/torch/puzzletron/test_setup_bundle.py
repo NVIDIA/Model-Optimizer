@@ -3,7 +3,12 @@
 
 """Tests for scheduler-neutral configs emitted by the Puzzletron setup wizard."""
 
-from puzzletron_setup.bundle import render_execution, render_experiment, render_runner
+from puzzletron_setup.bundle import (
+    _align_model_stage_batches,
+    render_execution,
+    render_experiment,
+    render_runner,
+)
 from puzzletron_setup.state import AnswerState
 from puzzletron_setup.wizard import (
     _ask_aiperf_config,
@@ -69,6 +74,111 @@ class _ServingPrompts:
     def integer(self, message: str, *, default: int, **kwargs) -> int:
         self.messages.append(message)
         return self.values.get(message, default)
+
+
+def _nemotron_render_state(*, latent_moe: bool) -> dict:
+    axes = {
+        "hidden_width": {
+            "enabled": True,
+            "teacher_value": 2688,
+            "values": [2688, 2560],
+            "alignment": 128,
+        }
+    }
+    if latent_moe:
+        axes["moe_latent_dim"] = {
+            "enabled": True,
+            "teacher_value": 1024,
+            "values": [1024, 896],
+            "alignment": 128,
+        }
+    return {
+        "model": {
+            "source": "nvidia/NVIDIA-Nemotron-3",
+            "resolved_revision": "revision",
+            "config": {"moe_latent_size": 1024 if latent_moe else None},
+        },
+        "inventory": {
+            "family": "nemotron3",
+            "descriptor": "nemotron_h",
+            "family_config": "examples/puzzletron/configs/families/nemotron3/family.yaml",
+            "model_type": "nemotron_h",
+            "architectures": ["NemotronHForCausalLM"],
+            "num_layers": 4,
+            "num_sublayers": 4,
+            "facts": {"hidden_size": 2688},
+        },
+        "answers": {
+            "data": {
+                "source": "/dataset",
+                "modality": "text",
+                "layout": "fixed",
+                "sequence_length": 2048,
+            },
+            "pruning": {
+                "width_importance_samples": 128,
+                "replacement_samples": 16,
+                "depth_remove": 0,
+                "axes": axes,
+                "bypass": {"enabled": False},
+            },
+            "runtime": {
+                "vllm_enabled": False,
+                "isl": 2048,
+                "osl": 256,
+                "concurrency": 1,
+            },
+            "mip": {"runs": {}},
+            "post_mip": {"flows": {}},
+            "infrastructure": {
+                "meshes": {
+                    "common": {},
+                    "bypass": {},
+                    "global_kd": {},
+                }
+            },
+            "output": {"result_root": "/results"},
+        },
+    }
+
+
+def test_batch_alignment_preserves_hydra_references() -> None:
+    config = {
+        "automodel": {
+            "parallel": {
+                "pp": 2,
+                "dp_shard": 2,
+                "dp_replicate": 1,
+            }
+        },
+        "micro_batch_size": "${replacement_scoring.micro_batch_size}",
+        "nested": {"micro_batch_size": 3},
+    }
+
+    _align_model_stage_batches(config)
+
+    assert config["micro_batch_size"] == "${replacement_scoring.micro_batch_size}"
+    assert config["nested"]["micro_batch_size"] == 4
+
+
+def test_nemotron_nano_omits_latent_moe_activation_pass() -> None:
+    experiment = render_experiment(
+        _nemotron_render_state(latent_moe=False),
+        "production",
+    )
+
+    pass_names = {item["name"] for item in experiment["pruning"]["activation_passes"]}
+    assert "moe_latent" not in pass_names
+
+
+def test_nemotron_super_keeps_latent_moe_activation_pass() -> None:
+    experiment = render_experiment(
+        _nemotron_render_state(latent_moe=True),
+        "production",
+    )
+
+    pass_names = {item["name"] for item in experiment["pruning"]["activation_passes"]}
+    assert "moe_latent" in pass_names
 
 
 def test_normal_aiperf_config_asks_shared_cp_and_maps_moe_ep_to_dp() -> None:
@@ -324,6 +434,50 @@ def test_render_execution_caps_post_mip_workers_at_upstream_top_k() -> None:
 
     assert execution["post.run.short_kd"]["instances"] == 4
     assert execution["post.run.final_eval"]["instances"] == 4
+
+
+def test_render_execution_ignores_legacy_aiperf_worker_override() -> None:
+    state = {
+        "answers": {
+            "infrastructure": {
+                "gpus_per_node": 8,
+                "workers": {"pool": 4, "sharded": 4, "aiperf": 16},
+                "meshes": {
+                    "common": {},
+                    "bypass": {},
+                    "global_kd": {},
+                },
+            }
+        }
+    }
+    experiment = {
+        "post_mip": {
+            "flows": {
+                "run": {
+                    "nodes": {
+                        "serving": {
+                            "type": "aiperf",
+                            "config": {
+                                "topology": {
+                                    "tensor_parallel_size": 1,
+                                    "pipeline_parallel_size": 1,
+                                    "prefill_context_parallel_size": 1,
+                                    "decode_context_parallel_size": 1,
+                                    "data_parallel_size": 2,
+                                    "expert_parallel_size": 2,
+                                    "gpu_group_size": 2,
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    stages = render_execution(state, experiment, "production")["execution"]["stages"]
+
+    assert stages["post.run.serving"]["instances"] == 4
 
 
 def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
@@ -632,9 +786,9 @@ def test_resource_summary_separates_serving_and_evaluation_meshes(tmp_path) -> N
     serving = next(row for row in rows if row["stage"] == "AIPerf")
     assert serving == {
         "stage": "AIPerf",
-        "instances": 16,
+        "instances": 8,
         "gpus_per_instance": 4,
-        "nodes": 8,
+        "nodes": 4,
     }
     evaluation = next(row for row in rows if row["stage"] == "evaluation")
     assert evaluation == {

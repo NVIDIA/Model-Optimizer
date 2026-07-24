@@ -199,6 +199,8 @@ def _align_model_stage_batches(
     if mesh:
         for key in ("micro_batch_size", "val_micro_batch_size", "local_batch_size"):
             if key in config:
+                if isinstance(config[key], str) and "${" in config[key]:
+                    continue
                 config[key] = _aligned_batch_size(mesh, int(config[key]))
     for value in config.values():
         if isinstance(value, dict):
@@ -348,6 +350,10 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     puzzle_dir = f"{result_root}/{budget}"
 
     activation_passes = list(_mapping(config.get("pruning")).get("activation_passes") or ())
+    if "moe_latent_dim" not in axes:
+        activation_passes = [
+            entry for entry in activation_passes if entry.get("name") != "moe_latent"
+        ]
     if "hidden_width" in axes and not any(
         entry.get("name") == "hidden_width" for entry in activation_passes
     ):
@@ -664,8 +670,6 @@ def _dynamic_stage_entries(
             worker_limit = int(
                 workers.get("pool" if pooled_evaluation else "sharded", 1)
             )
-            if node_type == "aiperf":
-                worker_limit = int(workers.get("aiperf", 2 * gpus_per_node))
             candidate_limit = candidate_limits[f"post.{flow_id}.{node_id}"]
             instances = (
                 worker_limit

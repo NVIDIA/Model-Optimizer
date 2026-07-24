@@ -1152,14 +1152,13 @@ def _resource_rows(
 
     pool_workers = int(workers["pool"])
     sharded_workers = int(workers["sharded"])
-    aiperf_workers = int(workers.get("aiperf", 2 * gpus_per_node))
     stages = [
         ("importance/scoring", _mesh_product(common), int(workers["pool"])),
         ("vLLM stats", _mesh_product(single_gpu), int(workers["sharded"])),
         (
             "AIPerf",
             post_mip_gpus_per_instance("aiperf", 1),
-            post_mip_instances("aiperf", aiperf_workers, aiperf_workers),
+            post_mip_instances("aiperf", sharded_workers, sharded_workers),
         ),
         (
             "evaluation",
@@ -1256,7 +1255,6 @@ def _ask_infrastructure(
     workers = {
         "pool": prompts.integer("Workers for persistent-pool stages:", default=gpus_per_node),
         "sharded": prompts.integer("Workers for sharded stages:", default=gpus_per_node),
-        "aiperf": 2 * gpus_per_node,
     }
     runner: dict[str, Any] = {"kind": runner_kind}
     if runner_kind == "slurm":
