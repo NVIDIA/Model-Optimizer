@@ -167,7 +167,16 @@ selection. It does not show a generic campaign-section
 `Use defaults / Customize / Review` menu because the directory is the only
 campaign-level input at that point.
 
-Model selection presents supported checkpoints as concise labels grouped under:
+The Model prompt is the source chooser itself; it does not first show the
+generic per-section `Use defaults / Customize / Review` menu. Its top level is:
+
+1. `Custom`
+2. `Nemotron 3`
+3. `Qwen 3.5/3.6 Dense`
+4. `Qwen 3.5/3.6 MoE`
+
+Selecting a family opens a second prompt containing only that family's
+supported checkpoints as concise labels:
 
 - **Nemotron 3**
   - Ultra 550B-A55B
@@ -184,9 +193,10 @@ Model selection presents supported checkpoints as concise labels grouped under:
   - Qwen 3.5 122B-A10B
   - Qwen 3.5 397B-A17B
 
-Each supported choice resolves to its canonical Hugging Face URL. A final
-`Custom local path or Hugging Face model` choice preserves free-form local
-paths and supported Hugging Face URLs. Revision selection and immutable commit
+Each supported choice resolves to its canonical Hugging Face URL. `Custom`
+opens the free-form local-path or Hugging Face model prompt. Back from a family
+returns to the top-level Model prompt, and Back from the Model prompt returns
+to the preceding wizard boundary. Revision selection and immutable commit
 resolution remain unchanged.
 
 Infrastructure precedes stage resource cards so GPU packing, partitions, and derived scheduler
