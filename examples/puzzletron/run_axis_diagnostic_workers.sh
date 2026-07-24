@@ -41,9 +41,6 @@ srun_args=(
   --gpus-per-task="${AXIS_DIAGNOSTIC_GPUS_PER_WORKER}" \
   --gpu-bind=none \
 )
-if (( AXIS_DIAGNOSTIC_GPUS_PER_WORKER == 8 )); then
-  srun_args+=(--exclusive)
-fi
 
 srun "${srun_args[@]}" \
   --container-image="$image" \

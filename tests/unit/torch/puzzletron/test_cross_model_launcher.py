@@ -55,6 +55,16 @@ def test_generic_launchers_default_to_the_campaign_venv() -> None:
         assert 'source "${PUZZLETRON_VENV}/bin/activate"' in contents
 
 
+def test_generic_launchers_never_request_exclusive_slurm_steps() -> None:
+    launchers = (
+        Path("examples/puzzletron/run_multinode_stage.sh"),
+        Path("examples/puzzletron/run_axis_diagnostic_workers.sh"),
+    )
+
+    for launcher in launchers:
+        assert "--exclusive" not in launcher.read_text()
+
+
 def test_axis_diagnostic_launcher_uses_one_configured_model_instance_per_worker() -> None:
     launcher = Path("examples/puzzletron/run_axis_diagnostic_workers.sh").read_text()
     task = Path("examples/puzzletron/run_axis_diagnostic_task.sh").read_text()

@@ -133,11 +133,80 @@ def _parallel(mesh: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _serving_parallel(topology: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert a vLLM Serving topology to the scheduler's allocation mesh."""
+
+    tp = int(topology.get("tensor_parallel_size", 1))
+    pp = int(topology.get("pipeline_parallel_size", 1))
+    cp = int(topology.get("prefill_context_parallel_size", 1))
+    decode_cp = int(topology.get("decode_context_parallel_size", 1))
+    dp = int(topology.get("data_parallel_size", 1))
+    ep = int(topology.get("expert_parallel_size", 1))
+    dimensions = {
+        "TP": tp,
+        "PP": pp,
+        "prefill CP": cp,
+        "decode CP": decode_cp,
+        "DP": dp,
+        "EP": ep,
+    }
+    if any(value < 1 for value in dimensions.values()):
+        raise SetupError(f"Serving parallel dimensions must be positive: {dimensions}")
+    if decode_cp > tp or tp % decode_cp:
+        raise SetupError(f"Serving decode CP={decode_cp} must divide TP={tp}.")
+    if ep > 1:
+        if dp % ep:
+            raise SetupError(f"Serving DP={dp} must be divisible by EP={ep}.")
+        dp_shard = ep
+        dp_replicate = dp // ep
+    else:
+        dp_shard = 1
+        dp_replicate = dp
+    expected_gpu_group = tp * pp * cp * dp
+    configured_gpu_group = int(topology.get("gpu_group_size", expected_gpu_group))
+    if configured_gpu_group != expected_gpu_group:
+        raise SetupError(
+            f"Serving gpu_group_size={configured_gpu_group} does not match "
+            f"the parallel world size={expected_gpu_group}."
+        )
+    return _parallel(
+        {
+            "tp": tp,
+            "cp": cp,
+            "pp": pp,
+            "ep": ep,
+            "dp_shard": dp_shard,
+            "dp_replicate": dp_replicate,
+        }
+    )
+
+
 def _aligned_batch_size(mesh: Mapping[str, Any], requested: int = 1) -> int:
     """Round a batch up to the mesh's minimum pipeline/DP scheduling unit."""
     unit = int(mesh.get("pp", 1)) * int(mesh.get("dp_shard", 1)) * int(mesh.get("dp_replicate", 1))
     requested = max(int(requested), 1)
     return max(unit, ((requested + unit - 1) // unit) * unit)
+
+
+def _align_model_stage_batches(
+    config: dict[str, Any],
+    inherited_mesh: Mapping[str, Any] | None = None,
+) -> None:
+    """Align every model-stage batch to its inherited PP/DP scheduling unit."""
+
+    automodel = _mapping(config.get("automodel"))
+    mesh = _mapping(automodel.get("parallel")) or inherited_mesh
+    if mesh:
+        for key in ("micro_batch_size", "val_micro_batch_size", "local_batch_size"):
+            if key in config:
+                config[key] = _aligned_batch_size(mesh, int(config[key]))
+    for value in config.values():
+        if isinstance(value, dict):
+            _align_model_stage_batches(value, mesh)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _align_model_stage_batches(item, mesh)
 
 
 def _model_info(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -214,6 +283,7 @@ def _post_mip_flows(
     smoke: bool,
     common_mesh: Mapping[str, Any],
     global_kd_mesh: Mapping[str, Any],
+    default_serving_topology: Mapping[str, Any],
 ) -> dict[str, Any]:
     flows = deepcopy(_mapping(_answers(state, "post_mip").get("flows")))
     for flow in flows.values():
@@ -228,19 +298,15 @@ def _post_mip_flows(
                     )
             elif node_type == "aiperf":
                 config.setdefault("use_server_token_count", True)
-                config["topology"] = {
-                    "tensor_parallel_size": int(common_mesh.get("tp", 1)),
-                    "pipeline_parallel_size": int(common_mesh.get("pp", 1)),
-                    "prefill_context_parallel_size": int(common_mesh.get("cp", 1)),
-                    "decode_context_parallel_size": int(common_mesh.get("cp", 1)),
-                    "distributed_executor_backend": "mp",
-                    "gpu_group_size": int(common_mesh.get("tp", 1)),
-                }
+                config.setdefault("topology", deepcopy(dict(default_serving_topology)))
                 if smoke:
                     config["minimum_request_count"] = 4
                     config["requests_per_concurrency"] = 1
             elif node_type == "global_kd":
                 config.setdefault("automodel", {})["parallel"] = _parallel(global_kd_mesh)
+                config["local_batch_size"] = _aligned_batch_size(
+                    global_kd_mesh, int(config.get("local_batch_size", 1))
+                )
             if smoke and node_type == "evaluation":
                 config["eval_samples"] = min(int(config.get("eval_samples", 128)), 16)
             if smoke and node_type == "global_kd":
@@ -300,6 +366,19 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     scoring_batch_size = _aligned_batch_size(common_mesh)
     bypass_batch_size = _aligned_batch_size(bypass_mesh, int(bypass.get("batch_size", 8)))
     bypass_sequence_length = int(bypass.get("sequence_length", sequence_length))
+    vllm_topology = {
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": 1,
+    }
+    default_serving_topology = {
+        **vllm_topology,
+        "data_parallel_size": 1,
+        "expert_parallel_size": 1,
+    }
 
     train_cache = f"{puzzle_dir}/dataset_cache/train.tokens"
     validation_cache = f"{puzzle_dir}/dataset_cache/validation.tokens"
@@ -391,6 +470,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         "sort_sanity": {
             "enabled": bool(pruning.get("sort_sanity", False)),
             "eval_samples": replacement_samples,
+            "micro_batch_size": scoring_batch_size,
             "block_size": sequence_length,
             "packed_token_cache_path": validation_cache,
             "automodel": {"parallel": model_parallel},
@@ -457,13 +537,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
                 "granularity": runtime.get("granularity", "subblock"),
                 "max_num_seqs": int(runtime.get("concurrency", 1)),
                 "fixed_overhead_relative_tolerance": 0.6,
-                "topology": {
-                    "tensor_parallel_size": 1,
-                    "pipeline_parallel_size": 1,
-                    "prefill_context_parallel_size": 1,
-                    "decode_context_parallel_size": 1,
-                    "gpu_group_size": 1,
-                },
+                "topology": deepcopy(vllm_topology),
             },
         },
         "mip": {
@@ -485,6 +559,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
                 smoke=smoke,
                 common_mesh=common_mesh,
                 global_kd_mesh=global_kd_mesh,
+                default_serving_topology=default_serving_topology,
             )
         },
         "zero_shot_evaluation": {"enabled": False},
@@ -493,10 +568,13 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         "global_distillation": {
             "enabled": False,
             "automodel": {"parallel": _parallel(global_kd_mesh)},
+            "local_batch_size": _aligned_batch_size(global_kd_mesh),
         },
         "post_distillation_evaluation": {"enabled": False},
     }
-    return _deep_merge(config, overlay)
+    rendered = _deep_merge(config, overlay)
+    _align_model_stage_batches(rendered)
+    return rendered
 
 
 def render_runner(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
@@ -609,7 +687,10 @@ def _dynamic_stage_entries(
                 entry.update(resource="cpu", partition=cpu_partition)
             if node_type == "evaluation":
                 entry["parallel"] = dict(common)
-            elif node_type in {"aiperf", "materialize"}:
+            elif node_type == "aiperf":
+                config = _mapping(node.get("config"))
+                entry["parallel"] = _serving_parallel(_mapping(config.get("topology")))
+            elif node_type == "materialize":
                 entry["parallel"] = dict(single_gpu)
             entries[f"post.{flow_id}.{node_id}"] = entry
     return entries

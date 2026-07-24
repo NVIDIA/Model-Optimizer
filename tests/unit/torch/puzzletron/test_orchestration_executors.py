@@ -121,8 +121,8 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     assert "--gpu-bind" not in srun
 
 
-def test_render_sbatch_script_exclusive_and_qos_keep_shebang_first():
-    """Regression: exclusive/qos must not break shebang via textwrap.dedent."""
+def test_render_sbatch_script_never_requests_exclusive():
+    """Exclusive attempt metadata must not request exclusive Slurm nodes."""
 
     runner = RunnerEnvironment(
         kind="slurm",
@@ -157,11 +157,10 @@ def test_render_sbatch_script_exclusive_and_qos_keep_shebang_first():
         job_name="pt-vllm",
     )
     assert script.startswith("#!/bin/bash\n")
-    assert "#SBATCH --exclusive" in script
+    assert "#SBATCH --exclusive" not in script
     assert "#SBATCH --qos=normal" in script
     assert "#SBATCH --gpus-per-node=8" in script
     assert not script.startswith(" ")
-    assert "\n#SBATCH --exclusive\n" in script
     assert "\n#SBATCH --nodes=1\n" in script
     assert "tee -a" not in script
 

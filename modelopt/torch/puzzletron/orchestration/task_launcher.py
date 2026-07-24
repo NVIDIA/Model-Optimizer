@@ -41,6 +41,7 @@ TASK_IDENTITY_ENV_KEYS = frozenset(
         "PUZZLETRON_RENDEZVOUS_ID",
         "PUZZLETRON_TASK_HOSTS",
         "PUZZLETRON_TASK_INDEX",
+        "PUZZLETRON_TASK_LAUNCHER",
     }
 )
 
@@ -225,6 +226,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     env.update(
         PUZZLETRON_TASK_INDEX=str(binding.task_index),
+        PUZZLETRON_TASK_LAUNCHER=str(args.launcher),
         PUZZLETRON_LOCAL_TASK_INDEX=str(binding.local_task_index),
         PUZZLETRON_GROUP_INDEX=str(binding.group_index),
         PUZZLETRON_GROUP_RANK=str(binding.group_rank),

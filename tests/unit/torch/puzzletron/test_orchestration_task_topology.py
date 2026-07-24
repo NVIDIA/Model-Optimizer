@@ -155,3 +155,4 @@ def test_task_launcher_slices_full_node_visibility_for_packed_container_tasks(
 
     assert result == 0
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == expected
+    assert captured["env"]["PUZZLETRON_TASK_LAUNCHER"] == "direct"

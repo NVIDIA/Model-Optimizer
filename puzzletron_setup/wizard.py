@@ -627,6 +627,108 @@ def _ask_mip(prompts: PromptSession, state: AnswerState) -> None:
     state.record_many("mip", {"runs": dict(runs)})
 
 
+def _ask_aiperf_config(
+    prompts: PromptSession,
+    *,
+    detailed: bool,
+    moe: bool,
+    runtime: Mapping[str, Any],
+    defaults: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ask for one AIPerf node's independent Serving topology and workload."""
+
+    defaults = dict(defaults or {})
+    topology_defaults = dict(defaults.get("topology") or {})
+    checkpoint = prompts.checkpoint()
+    while True:
+        tp = prompts.integer(
+            "Serving tensor parallel (TP):",
+            default=int(topology_defaults.get("tensor_parallel_size", 1)),
+        )
+        pp = prompts.integer(
+            "Serving pipeline parallel (PP):",
+            default=int(topology_defaults.get("pipeline_parallel_size", 1)),
+        )
+        if detailed:
+            prefill_cp = prompts.integer(
+                "Serving prefill context parallel (CP):",
+                default=int(topology_defaults.get("prefill_context_parallel_size", 1)),
+            )
+            decode_cp = prompts.integer(
+                "Serving decode context parallel (CP):",
+                default=int(topology_defaults.get("decode_context_parallel_size", 1)),
+            )
+        else:
+            cp = prompts.integer(
+                "Serving context parallel (CP):",
+                default=int(topology_defaults.get("prefill_context_parallel_size", 1)),
+            )
+            prefill_cp = decode_cp = cp
+        ep = (
+            prompts.integer(
+                "Serving expert parallel (EP):",
+                default=int(topology_defaults.get("expert_parallel_size", 1)),
+            )
+            if moe
+            else 1
+        )
+        dimensions = {
+            "TP": tp,
+            "PP": pp,
+            "prefill CP": prefill_cp,
+            "decode CP": decode_cp,
+            "EP": ep,
+        }
+        error = None
+        if any(int(value) < 1 for value in dimensions.values()):
+            error = f"Serving parallel dimensions must be positive: {dimensions}"
+        elif decode_cp > tp or tp % decode_cp:
+            error = f"Serving decode CP={decode_cp} must divide TP={tp} and not exceed it."
+        if error is None:
+            break
+        print(error)
+        prompts.rewind(checkpoint)
+
+    data_parallel = ep if moe else 1
+    gpu_group_size = tp * pp * prefill_cp * data_parallel
+    config = {
+        **defaults,
+        "input_tokens": int(defaults.get("input_tokens", runtime["isl"])),
+        "output_tokens": int(defaults.get("output_tokens", runtime["osl"])),
+        "concurrency": list(defaults.get("concurrency") or [int(runtime["concurrency"])]),
+        "use_server_token_count": bool(defaults.get("use_server_token_count", True)),
+        "benchmark_timeout": int(defaults.get("benchmark_timeout", 900)),
+        "topology": {
+            "tensor_parallel_size": tp,
+            "pipeline_parallel_size": pp,
+            "prefill_context_parallel_size": prefill_cp,
+            "decode_context_parallel_size": decode_cp,
+            "data_parallel_size": data_parallel,
+            "expert_parallel_size": ep,
+            "distributed_executor_backend": "mp",
+            "gpu_group_size": gpu_group_size,
+        },
+    }
+    if detailed:
+        config["input_tokens"] = prompts.integer(
+            "AIPerf ISL:", default=int(config["input_tokens"])
+        )
+        config["output_tokens"] = prompts.integer(
+            "AIPerf OSL:", default=int(config["output_tokens"])
+        )
+        config["concurrency"] = [
+            prompts.integer(
+                "AIPerf concurrency:",
+                default=int(config["concurrency"][0]),
+            )
+        ]
+        config["benchmark_timeout"] = prompts.integer(
+            "Per-candidate AIPerf timeout (seconds):",
+            default=int(config["benchmark_timeout"]),
+        )
+    return config
+
+
 def _default_flow(
     run_id: str,
     run: Mapping[str, Any],
@@ -645,7 +747,7 @@ def _default_flow(
         initial_top_k = {"homogeneous": 100, "heterogeneous": 28}
     initial = node_id("initial_filter")
     online = node_id("online_eval")
-    best_kl = node_id("best_kl")
+    best_lm = node_id("best_lm")
     materialized = node_id("materialized")
     serving = node_id("serving")
     fastest = node_id("fastest")
@@ -678,17 +780,17 @@ def _default_flow(
     nodes.update(
         [
             (
-                best_kl,
+                best_lm,
                 {
                     "type": "filter",
                     "input": online,
                     "mode": "top_k",
-                    "metric": f"{online}.kl_div",
+                    "metric": f"{online}.lm_loss",
                     "direction": "minimize",
                     "top_k": 32,
                 },
             ),
-            (materialized, {"type": "materialize", "input": best_kl}),
+            (materialized, {"type": "materialize", "input": best_lm}),
             (
                 serving,
                 {
@@ -699,7 +801,7 @@ def _default_flow(
                         "output_tokens": int(runtime["osl"]),
                         "concurrency": [int(runtime["concurrency"])],
                         "use_server_token_count": True,
-                        "benchmark_timeout": 600,
+                        "benchmark_timeout": 900,
                     },
                 },
             ),
@@ -739,7 +841,7 @@ def _default_flow(
                     "type": "filter",
                     "input": final_eval,
                     "mode": "top_k",
-                    "metric": f"{final_eval}.kl_div",
+                    "metric": f"{final_eval}.lm_loss",
                     "direction": "minimize",
                     "top_k": 1,
                 },
@@ -792,6 +894,9 @@ def _custom_flow(
     runtime: Mapping[str, Any],
     data: Mapping[str, Any],
     used_ids: set[str],
+    *,
+    detailed: bool,
+    moe: bool,
 ) -> dict[str, Any]:
     nodes: OrderedDict[str, Any] = OrderedDict()
     available_metrics = ["mip.score"]
@@ -847,17 +952,12 @@ def _custom_flow(
             }
             available_metrics.append(f"{node_id}.kl_div")
         elif node_type == "aiperf":
-            node["config"] = {
-                "input_tokens": prompts.integer("AIPerf ISL:", default=int(runtime["isl"])),
-                "output_tokens": prompts.integer("AIPerf OSL:", default=int(runtime["osl"])),
-                "concurrency": [
-                    prompts.integer("AIPerf concurrency:", default=int(runtime["concurrency"]))
-                ],
-                "use_server_token_count": True,
-                "benchmark_timeout": prompts.integer(
-                    "Per-candidate AIPerf timeout (seconds):", default=600
-                ),
-            }
+            node["config"] = _ask_aiperf_config(
+                prompts,
+                detailed=detailed,
+                moe=moe,
+                runtime=runtime,
+            )
             available_metrics.append(f"{node_id}.request_throughput")
         elif node_type == "global_kd":
             node["config"] = {"max_steps": prompts.integer("Global KD steps:", default=128)}
@@ -876,7 +976,11 @@ def _custom_flow(
     return {"source": {"run": run_id, "variants": "all", "objectives": "all"}, "nodes": nodes}
 
 
-def _ask_post_mip(prompts: PromptSession, state: AnswerState) -> None:
+def _ask_post_mip(
+    prompts: PromptSession,
+    state: AnswerState,
+    model: InspectedModel,
+) -> None:
     if state.section("post_mip"):
         return
     prompts.begin(state, "post_mip")
@@ -889,7 +993,15 @@ def _ask_post_mip(prompts: PromptSession, state: AnswerState) -> None:
         if state.detailed and prompts.confirm(
             f"Build a custom post-MIP flow for {run_id}?", default=False
         ):
-            flow = _custom_flow(prompts, run_id, runtime, data, used_ids)
+            flow = _custom_flow(
+                prompts,
+                run_id,
+                runtime,
+                data,
+                used_ids,
+                detailed=state.detailed,
+                moe=model.inventory.moe,
+            )
             flows[run_id] = flow
         else:
             objectives = list(run.get("objectives") or ())
@@ -907,6 +1019,15 @@ def _ask_post_mip(prompts: PromptSession, state: AnswerState) -> None:
                     objective=objective,
                     include_initial_filter=state.detailed,
                 )
+                for node in flow["nodes"].values():
+                    if node["type"] == "aiperf":
+                        node["config"] = _ask_aiperf_config(
+                            prompts,
+                            detailed=state.detailed,
+                            moe=model.inventory.moe,
+                            runtime=runtime,
+                            defaults=node.get("config"),
+                        )
                 used_ids.update(flow["nodes"])
                 flows[flow_id] = flow
     state.record_many("post_mip", {"flows": dict(flows)})
@@ -986,7 +1107,7 @@ def _resource_rows(
     gpus_per_node: int,
     workers: Mapping[str, int],
 ) -> list[dict[str, Any]]:
-    from .bundle import _post_mip_candidate_limits
+    from .bundle import _post_mip_candidate_limits, _serving_parallel
 
     rows = []
     single_gpu = dict.fromkeys(_MESH_KEYS, 1)
@@ -1019,20 +1140,30 @@ def _resource_rows(
                 )
         return max(instances, default=default)
 
+    def post_mip_gpus_per_instance(node_type: str, default: int) -> int:
+        gpu_counts = []
+        for flow in flows.values():
+            for node in (flow.get("nodes") or {}).values():
+                if node.get("type") != node_type:
+                    continue
+                topology = (node.get("config") or {}).get("topology") or {}
+                gpu_counts.append(_mesh_product(_serving_parallel(topology)))
+        return max(gpu_counts, default=default)
+
     pool_workers = int(workers["pool"])
     sharded_workers = int(workers["sharded"])
     aiperf_workers = int(workers.get("aiperf", 2 * gpus_per_node))
     stages = [
-        ("importance/scoring", common, int(workers["pool"])),
-        ("vLLM stats", single_gpu, int(workers["sharded"])),
+        ("importance/scoring", _mesh_product(common), int(workers["pool"])),
+        ("vLLM stats", _mesh_product(single_gpu), int(workers["sharded"])),
         (
             "AIPerf",
-            single_gpu,
+            post_mip_gpus_per_instance("aiperf", 1),
             post_mip_instances("aiperf", aiperf_workers, aiperf_workers),
         ),
         (
             "evaluation",
-            common,
+            _mesh_product(common),
             post_mip_instances(
                 "evaluation",
                 sharded_workers,
@@ -1040,11 +1171,14 @@ def _resource_rows(
                 source_worker_limit=pool_workers if not state.detailed else None,
             ),
         ),
-        ("bypass", bypass, 1),
-        ("global KD", global_kd, post_mip_instances("global_kd", sharded_workers, 1)),
+        ("bypass", _mesh_product(bypass), 1),
+        (
+            "global KD",
+            _mesh_product(global_kd),
+            post_mip_instances("global_kd", sharded_workers, 1),
+        ),
     ]
-    for name, mesh, instances in stages:
-        gpus = _mesh_product(mesh)
+    for name, gpus, instances in stages:
         rows.append(
             {
                 "stage": name,
@@ -1252,7 +1386,7 @@ def run_wizard(*, detailed: bool, resume: Path | None) -> Path:
     _ask_pruning(prompts, state, model)
     _ask_runtime(prompts, state, model)
     _ask_mip(prompts, state)
-    _ask_post_mip(prompts, state)
+    _ask_post_mip(prompts, state, model)
     _ask_infrastructure(prompts, state, model)
     _ask_output(prompts, state)
     prompts.begin(state, "output")

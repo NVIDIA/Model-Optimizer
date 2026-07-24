@@ -114,9 +114,17 @@ def _canonical_topology(topology: dict[str, Any]) -> dict[str, Any]:
     }
     if any(value < 1 for value in dimensions.values()):
         raise ValueError(f"serving topology dimensions must be positive: {dimensions}")
+    if decode_cp > tp or tp % decode_cp:
+        raise ValueError(f"decode context parallel size {decode_cp} must divide TP={tp}")
+    gpu_count = tp * pp * prefill_cp * dp
+    configured_gpu_group = int(topology.get("gpu_group_size", gpu_count))
+    if configured_gpu_group != gpu_count:
+        raise ValueError(
+            f"gpu_group_size={configured_gpu_group} does not match serving GPU count={gpu_count}"
+        )
     return {
         **dimensions,
-        "gpu_count": tp * pp * dp,
+        "gpu_count": gpu_count,
         "distributed_executor_backend": str(
             topology.get("distributed_executor_backend", "mp")
         ),

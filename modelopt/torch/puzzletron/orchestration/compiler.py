@@ -13,7 +13,13 @@ import yaml
 
 from .config import load_experiment_config
 from .identity import execution_contract_hash, with_contract_hash
-from .mesh import ParallelMesh, extract_stage_mesh, gpus_per_instance, pack_gpu_allocation
+from .mesh import (
+    ParallelMesh,
+    extract_stage_mesh,
+    gpus_per_instance,
+    pack_gpu_allocation,
+    vllm_topology_to_mesh,
+)
 from .schema import (
     BareMetalHost,
     BareMetalRunnerConfig,
@@ -488,20 +494,20 @@ def compile_campaign_plan(
                         parallel[key] = global_kd[key]
             if dynamic["node_type"] == "aiperf":
                 topology = _mapping(node_config.get("topology"))
-                mesh_values = ParallelMesh(
-                    tp=int(
-                        topology.get(
-                            "gpu_group_size",
-                            topology.get("tensor_parallel_size", 1),
+                topology_mesh = vllm_topology_to_mesh(topology)
+                if override:
+                    overridden = topology_mesh.as_dict()
+                    overridden.update(override)
+                    if ParallelMesh.from_mapping(overridden) != topology_mesh:
+                        raise ValueError(
+                            f"{stage_id} execution parallel override conflicts with "
+                            "its AIPerf topology"
                         )
-                    ),
-                    pp=int(topology.get("pipeline_parallel_size", 1)),
-                    cp=int(topology.get("prefill_context_parallel_size", 1)),
-                ).as_dict()
+                mesh = topology_mesh
             else:
                 mesh_values = ParallelMesh.from_mapping(parallel).as_dict()
-            mesh_values.update(override or {})
-            mesh = ParallelMesh.from_mapping(mesh_values)
+                mesh_values.update(override or {})
+                mesh = ParallelMesh.from_mapping(mesh_values)
         instance_count = spec.instances if spec.strategy is not ExecutionStrategy.SINGLE else 1
         if spec.resource == "cpu":
             if instance_count != 1:

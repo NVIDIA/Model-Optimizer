@@ -70,12 +70,13 @@ def _atomic_json(path: Path, payload: Any) -> Path:
 def _worker_group() -> tuple[int, int]:
     """Return the rank and size of the innermost candidate process group."""
 
-    rank = int(os.environ.get("RANK", os.environ.get("PUZZLETRON_GROUP_RANK", "0")))
-    size = max(
-        int(os.environ.get("WORLD_SIZE", "1")),
+    launcher = os.environ.get("PUZZLETRON_TASK_LAUNCHER")
+    if launcher == "torchrun" or (launcher is None and "LOCAL_RANK" in os.environ):
+        return int(os.environ.get("RANK", "0")), int(os.environ.get("WORLD_SIZE", "1"))
+    return (
+        int(os.environ.get("PUZZLETRON_GROUP_RANK", "0")),
         int(os.environ.get("PUZZLETRON_GROUP_SIZE", "1")),
     )
-    return rank, size
 
 
 def _exception_diagnostics(error: Exception) -> dict[str, str]:
@@ -368,6 +369,7 @@ def _evaluate_config_group(
     settings = dict(node.config.get("config") or {})
     hydra_cfg.scoring = _merge_scoring_settings(hydra_cfg.scoring, settings)
     hydra_cfg.scoring.source_checkpoint_dir = str(first.source_checkpoint)
+    hydra_cfg.scoring.target_teacher_dir = str(hydra_cfg.scoring.teacher_dir)
     hydra_cfg.scoring.bypass_checkpoint_dir = (
         str(first.bypass_checkpoint) if first.bypass_checkpoint is not None else None
     )

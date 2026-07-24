@@ -5,7 +5,13 @@
 
 from puzzletron_setup.bundle import render_execution, render_experiment, render_runner
 from puzzletron_setup.state import AnswerState
-from puzzletron_setup.wizard import _ask_mesh, _ask_mip, _resource_rows
+from puzzletron_setup.wizard import (
+    _ask_aiperf_config,
+    _ask_mesh,
+    _ask_mip,
+    _default_flow,
+    _resource_rows,
+)
 
 
 class _NormalMipPrompts:
@@ -47,6 +53,106 @@ class _MeshPrompts:
     def integer(self, message: str, *, default: int, **kwargs) -> int:
         self.messages.append(message)
         return default
+
+
+class _ServingPrompts:
+    def __init__(self, values: dict[str, int]) -> None:
+        self.values = values
+        self.messages: list[str] = []
+
+    def checkpoint(self) -> int:
+        return len(self.messages)
+
+    def rewind(self, checkpoint: int) -> None:
+        self.messages = self.messages[:checkpoint]
+
+    def integer(self, message: str, *, default: int, **kwargs) -> int:
+        self.messages.append(message)
+        return self.values.get(message, default)
+
+
+def test_normal_aiperf_config_asks_shared_cp_and_maps_moe_ep_to_dp() -> None:
+    prompts = _ServingPrompts(
+        {
+            "Serving tensor parallel (TP):": 2,
+            "Serving pipeline parallel (PP):": 1,
+            "Serving context parallel (CP):": 2,
+            "Serving expert parallel (EP):": 4,
+        }
+    )
+
+    config = _ask_aiperf_config(
+        prompts,
+        detailed=False,
+        moe=True,
+        runtime={"isl": 4096, "osl": 1024, "concurrency": 1},
+    )
+
+    assert config["topology"] == {
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 2,
+        "data_parallel_size": 4,
+        "expert_parallel_size": 4,
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": 16,
+    }
+    assert config["input_tokens"] == 4096
+    assert config["output_tokens"] == 1024
+    assert config["concurrency"] == [1]
+    assert config["benchmark_timeout"] == 900
+    assert "AIPerf ISL:" not in prompts.messages
+
+
+def test_advanced_aiperf_config_asks_split_cp_and_workload() -> None:
+    prompts = _ServingPrompts(
+        {
+            "Serving tensor parallel (TP):": 4,
+            "Serving pipeline parallel (PP):": 2,
+            "Serving prefill context parallel (CP):": 2,
+            "Serving decode context parallel (CP):": 2,
+            "AIPerf ISL:": 8192,
+            "AIPerf OSL:": 2048,
+            "AIPerf concurrency:": 8,
+        }
+    )
+
+    config = _ask_aiperf_config(
+        prompts,
+        detailed=True,
+        moe=False,
+        runtime={"isl": 4096, "osl": 1024, "concurrency": 1},
+    )
+
+    assert config["topology"] == {
+        "tensor_parallel_size": 4,
+        "pipeline_parallel_size": 2,
+        "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 2,
+        "data_parallel_size": 1,
+        "expert_parallel_size": 1,
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": 16,
+    }
+    assert config["input_tokens"] == 8192
+    assert config["output_tokens"] == 2048
+    assert config["concurrency"] == [8]
+
+
+def test_default_post_mip_flow_uses_fifteen_minute_aiperf_timeout() -> None:
+    flow = _default_flow(
+        "memory",
+        {"objectives": [{"metric": "metrics.lm_loss", "direction": "minimize"}]},
+        {"isl": 4096, "osl": 1024, "concurrency": 1},
+        {"sequence_length": 4096},
+        prefix="",
+        include_initial_filter=False,
+    )
+
+    assert flow["nodes"]["serving"]["config"]["benchmark_timeout"] == 900
+    assert flow["nodes"]["best_lm"]["metric"] == "online_eval.lm_loss"
+    assert flow["nodes"]["best"]["metric"] == "final_eval.lm_loss"
 
 
 def test_render_execution_keeps_vllm_instances_on_one_gpu() -> None:
@@ -121,7 +227,22 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
                     "nodes": {
                         "eval": {"type": "evaluation"},
                         "materialized": {"type": "materialize", "input": "eval"},
-                        "serve": {"type": "aiperf", "input": "materialized"},
+                        "serve": {
+                            "type": "aiperf",
+                            "input": "materialized",
+                            "config": {
+                                "topology": {
+                                    "tensor_parallel_size": 2,
+                                    "pipeline_parallel_size": 2,
+                                    "prefill_context_parallel_size": 1,
+                                    "decode_context_parallel_size": 1,
+                                    "data_parallel_size": 1,
+                                    "expert_parallel_size": 1,
+                                    "distributed_executor_backend": "mp",
+                                    "gpu_group_size": 4,
+                                }
+                            },
+                        },
                     }
                 }
             }
@@ -135,9 +256,9 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
         "sequence_parallel": False,
     }
     assert execution["post.run.serve"]["parallel"] == {
-        "tp": 1,
+        "tp": 2,
         "cp": 1,
-        "pp": 1,
+        "pp": 2,
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 1,
@@ -342,12 +463,45 @@ def test_render_experiment_defaults_to_single_gpu_subblock_vllm() -> None:
                 "concurrency": 4,
             },
             "mip": {"runs": {}},
-            "post_mip": {"flows": {}},
+            "post_mip": {
+                "flows": {
+                    "memory": {
+                        "source": {"run": "memory"},
+                        "nodes": {
+                            "serving": {
+                                "type": "aiperf",
+                                "config": {
+                                    "concurrency": [1],
+                                    "topology": {
+                                        "tensor_parallel_size": 4,
+                                        "pipeline_parallel_size": 1,
+                                        "prefill_context_parallel_size": 2,
+                                        "decode_context_parallel_size": 2,
+                                        "data_parallel_size": 1,
+                                        "expert_parallel_size": 1,
+                                        "distributed_executor_backend": "mp",
+                                        "gpu_group_size": 8,
+                                    },
+                                },
+                            },
+                            "short_kd": {
+                                "type": "global_kd",
+                                "input": "serving",
+                                "config": {"local_batch_size": 1},
+                            },
+                        },
+                    }
+                }
+            },
             "infrastructure": {
                 "meshes": {
                     "common": {"tp": 2, "pp": 2, "dp_shard": 2, "ep": 1},
                     "bypass": {"pp": 1, "dp_shard": 2, "dp_replicate": 1},
-                    "global_kd": {},
+                    "global_kd": {
+                        "pp": 2,
+                        "dp_shard": 2,
+                        "dp_replicate": 2,
+                    },
                 }
             },
             "output": {"result_root": "/results"},
@@ -356,6 +510,7 @@ def test_render_experiment_defaults_to_single_gpu_subblock_vllm() -> None:
 
     experiment = render_experiment(state, "production")
     runtime = experiment["vllm_stats"]["runtime_stats"]
+    serving = experiment["post_mip"]["flows"]["memory"]["nodes"]["serving"]["config"]
 
     assert runtime["granularity"] == "subblock"
     assert experiment["embedding_pruning"]["widths"] == [1024, 768]
@@ -378,15 +533,35 @@ def test_render_experiment_defaults_to_single_gpu_subblock_vllm() -> None:
         "decode_context_parallel_size": 1,
         "gpu_group_size": 1,
     }
+    assert serving["topology"] == {
+        "tensor_parallel_size": 4,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 2,
+        "data_parallel_size": 1,
+        "expert_parallel_size": 1,
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": 8,
+    }
+    assert serving["topology"] != runtime["topology"]
     assert experiment["data"]["calibration"]["micro_batch_size"] == 4
     assert experiment["data"]["replacement_scoring"]["micro_batch_size"] == 4
     assert experiment["pruning"]["micro_batch_size"] == 4
+    assert experiment["sort_sanity"]["micro_batch_size"] == 4
     assert experiment["depth_importance"]["micro_batch_size"] == 4
     assert experiment["replacement_scoring"]["micro_batch_size"] == 4
     assert experiment["bypass"]["training"]["micro_batch_size"] == 4
+    assert experiment["bypass"]["training"]["val_micro_batch_size"] == 2
     assert experiment["bypass"]["iter_num"] == 1
     assert experiment["bypass"]["step_num"] == 1
     assert experiment["bypass"]["training"]["training_tokens"] == 4096 * 2048
+    assert experiment["global_distillation"]["local_batch_size"] == 8
+    assert (
+        experiment["post_mip"]["flows"]["memory"]["nodes"]["short_kd"]["config"][
+            "local_batch_size"
+        ]
+        == 8
+    )
 
 
 def test_normal_mip_flow_asks_for_embedding_widths(tmp_path) -> None:
@@ -412,6 +587,31 @@ def test_normal_mip_flow_asks_for_embedding_widths(tmp_path) -> None:
 
 def test_resource_summary_separates_serving_and_evaluation_meshes(tmp_path) -> None:
     state = AnswerState.start(tmp_path / "campaign", detailed=False)
+    state.record_many(
+        "post_mip",
+        {
+            "flows": {
+                "run": {
+                    "nodes": {
+                        "serving": {
+                            "type": "aiperf",
+                            "config": {
+                                "topology": {
+                                    "tensor_parallel_size": 2,
+                                    "pipeline_parallel_size": 2,
+                                    "prefill_context_parallel_size": 1,
+                                    "decode_context_parallel_size": 1,
+                                    "data_parallel_size": 1,
+                                    "expert_parallel_size": 1,
+                                    "gpu_group_size": 4,
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        },
+    )
 
     rows = _resource_rows(
         state,
@@ -429,12 +629,12 @@ def test_resource_summary_separates_serving_and_evaluation_meshes(tmp_path) -> N
         workers={"pool": 8, "sharded": 8},
     )
 
-    serving = next(row for row in rows if row["stage"] == "vLLM/AIPerf")
+    serving = next(row for row in rows if row["stage"] == "AIPerf")
     assert serving == {
-        "stage": "vLLM/AIPerf",
-        "instances": 8,
-        "gpus_per_instance": 1,
-        "nodes": 1,
+        "stage": "AIPerf",
+        "instances": 16,
+        "gpus_per_instance": 4,
+        "nodes": 8,
     }
     evaluation = next(row for row in rows if row["stage"] == "evaluation")
     assert evaluation == {

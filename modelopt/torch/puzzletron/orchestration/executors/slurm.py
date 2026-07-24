@@ -114,7 +114,6 @@ def render_sbatch_script(
     step_tasks_per_node = math.ceil(topology.task_count / step_nodes)
     step_gpus_per_node = step_tasks_per_node * topology.gpus_per_task
     kill_on_bad_exit = topology.task_count > 1 or bool(attempt.metadata.get("kill_on_bad_exit"))
-    exclusive = attempt.exclusive
     env_lines: list[str] = []
     for key, value in attempt.command.env.items():
         if key in TASK_IDENTITY_ENV_KEYS:
@@ -155,10 +154,10 @@ def render_sbatch_script(
     repository = contract.repository
     working_directory = attempt.command.cwd or repository
     # Build the header as discrete lines. Do not interpolate optional
-    # `#SBATCH --qos` / `--exclusive` fragments into a textwrap.dedent()
-    # template: a trailing newline in those fragments collapses common
-    # indent to zero and leaves leading spaces before `#!/bin/bash`, which
-    # sbatch rejects ("This does not look like a batch script").
+    # `#SBATCH --qos` fragments into a textwrap.dedent() template: a trailing
+    # newline in those fragments collapses common indent to zero and leaves
+    # leading spaces before `#!/bin/bash`, which sbatch rejects ("This does not
+    # look like a batch script").
     header_lines = [
         "#!/bin/bash",
         f"#SBATCH --job-name={job_name}",
@@ -168,8 +167,6 @@ def render_sbatch_script(
     ]
     if qos:
         header_lines.append(f"#SBATCH --qos={qos}")
-    if exclusive:
-        header_lines.append("#SBATCH --exclusive")
     header_lines.extend(
         [
             f"#SBATCH --nodes={step_nodes}",

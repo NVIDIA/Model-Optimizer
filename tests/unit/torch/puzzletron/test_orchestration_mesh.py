@@ -60,3 +60,24 @@ def test_extract_vllm_stats_mesh_from_runtime_topology():
     mesh = extract_stage_mesh(config, "vllm_stats")
     assert mesh.tp == 1
     assert gpus_per_instance(mesh) == 1
+
+
+def test_extract_aiperf_mesh_uses_topology_dimensions_without_gpu_group_double_count():
+    config = {
+        "aiperf": {
+            "topology": {
+                "tensor_parallel_size": 2,
+                "pipeline_parallel_size": 2,
+                "prefill_context_parallel_size": 2,
+                "decode_context_parallel_size": 1,
+                "data_parallel_size": 4,
+                "expert_parallel_size": 4,
+                "gpu_group_size": 32,
+            }
+        }
+    }
+
+    mesh = extract_stage_mesh(config, "aiperf")
+
+    assert mesh == ParallelMesh(tp=2, pp=2, cp=2, dp_shard=4, dp_replicate=1, ep=4)
+    assert gpus_per_instance(mesh) == 32

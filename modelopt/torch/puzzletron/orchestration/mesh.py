@@ -16,6 +16,7 @@ __all__ = [
     "gpus_per_instance",
     "pack_gpu_allocation",
     "validate_mesh",
+    "vllm_topology_to_mesh",
 ]
 
 
@@ -175,14 +176,42 @@ def _nested_get(config: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str
     return value if isinstance(value, Mapping) else None
 
 
-def _vllm_topology_to_mesh(topology: Mapping[str, Any]) -> ParallelMesh:
+def vllm_topology_to_mesh(topology: Mapping[str, Any]) -> ParallelMesh:
+    """Convert vLLM TP/PP/CP/DP/EP dimensions to one allocation mesh."""
+
     tp = int(topology.get("tensor_parallel_size", 1) or 1)
     pp = int(topology.get("pipeline_parallel_size", 1) or 1)
     cp = int(topology.get("prefill_context_parallel_size", 1) or 1)
-    gpu_group = int(topology.get("gpu_group_size", tp) or tp)
-    if gpu_group != tp:
-        tp = gpu_group
-    return ParallelMesh(tp=tp, cp=cp, pp=pp)
+    decode_cp = int(topology.get("decode_context_parallel_size", 1) or 1)
+    dp = int(topology.get("data_parallel_size", 1) or 1)
+    ep = int(topology.get("expert_parallel_size", 1) or 1)
+    if decode_cp > tp or tp % decode_cp:
+        raise ValueError(f"decode context parallel size {decode_cp} must divide TP={tp}")
+    if ep > 1:
+        if dp % ep:
+            raise ValueError(f"vLLM DP={dp} must be divisible by EP={ep}")
+        dp_shard = ep
+        dp_replicate = dp // ep
+    else:
+        dp_shard = 1
+        dp_replicate = dp
+    mesh = ParallelMesh(
+        tp=tp,
+        cp=cp,
+        pp=pp,
+        ep=ep,
+        dp_shard=dp_shard,
+        dp_replicate=dp_replicate,
+    )
+    validate_mesh(mesh)
+    expected_gpu_group = gpus_per_instance(mesh)
+    configured_gpu_group = int(topology.get("gpu_group_size", expected_gpu_group) or 1)
+    if configured_gpu_group != expected_gpu_group:
+        raise ValueError(
+            f"gpu_group_size={configured_gpu_group} does not match vLLM "
+            f"world size={expected_gpu_group}"
+        )
+    return mesh
 
 
 def extract_stage_mesh(
@@ -194,10 +223,10 @@ def extract_stage_mesh(
 
     if stage_id == "vllm_stats":
         topology = _nested_get(config, ("vllm_stats", "runtime_stats", "topology"))
-        mesh = _vllm_topology_to_mesh(topology or {})
+        mesh = vllm_topology_to_mesh(topology or {})
     elif stage_id == "aiperf":
         topology = _nested_get(config, ("aiperf", "topology"))
-        mesh = _vllm_topology_to_mesh(topology or {})
+        mesh = vllm_topology_to_mesh(topology or {})
     else:
         path = _STAGE_PARALLEL_PATHS.get(stage_id)
         parallel = _nested_get(config, path) if path else None

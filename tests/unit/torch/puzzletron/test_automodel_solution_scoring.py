@@ -668,6 +668,38 @@ def test_score_batch_identical_model_is_perfect():
     assert len(out["lm_loss"]) == b  # one value per sample
 
 
+def test_score_batch_compares_pruned_student_logits_with_full_width_teacher():
+    student_hidden = torch.tensor([[[1.0, 2.0]]])
+    student_head = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]])
+    teacher_hidden = torch.tensor([[[1.0, 2.0, 3.0]]])
+    teacher_head = torch.tensor(
+        [[1.0, 0.0, 1.0], [0.0, 1.0, -1.0], [1.0, -1.0, 0.5]]
+    )
+    hidden_metric_teacher = teacher_hidden[..., :2]
+    targets = torch.tensor([[0]])
+
+    out = score_batch(
+        student_hidden,
+        student_head,
+        teacher_hidden,
+        teacher_head,
+        targets,
+        hidden_metric_teacher=hidden_metric_teacher,
+        chunk_size=2,
+    )
+
+    student_logits = torch.nn.functional.linear(student_hidden, student_head)
+    teacher_logits = torch.nn.functional.linear(teacher_hidden, teacher_head)
+    expected = torch.nn.functional.kl_div(
+        torch.nn.functional.log_softmax(student_logits, dim=-1),
+        torch.nn.functional.log_softmax(teacher_logits, dim=-1),
+        reduction="none",
+        log_target=True,
+    ).sum(dim=-1)
+    assert out["kl_div"][0] == pytest.approx(float(expected[0, 0]))
+    assert "mse_loss_hidden_states" in out
+
+
 def test_aggregate_solution_scores_no_distributed():
     # token_group=None (single process): avg over the concatenated per-batch per-sample lists.
     per_batch = [

@@ -36,7 +36,13 @@ from puzzletron_orchestrator.compiler import (
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
 from puzzletron_orchestrator.progress import summarize_active_progress, summarize_stage_artifacts
-from puzzletron_orchestrator.schema import AttemptSpec, JobHandle, JobState, JobStatus
+from puzzletron_orchestrator.schema import (
+    AttemptSpec,
+    CommandSpec,
+    JobHandle,
+    JobState,
+    JobStatus,
+)
 from puzzletron_orchestrator.terminal import ShutdownAction
 
 
@@ -904,6 +910,37 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(tmp_path: P
         attempt["work_id"].split(":", 1)[0] for attempt in controller.store.list_attempts()
     }
     assert not ((blocked - {failed_stage}) & attempted_stages)
+
+
+def test_controller_collects_failed_attempt_log_paths(tmp_path: Path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    attempt = AttemptSpec(
+        attempt_id="failed-attempt",
+        work_id="vllm_stats:0",
+        stage_id="vllm_stats",
+        command=CommandSpec(argv=("python", "worker.py"), log_path="/logs/fallback.log"),
+    )
+    handle = JobHandle("fake", "fake-failed-attempt", attempt.attempt_id)
+    controller.store.save_attempt(attempt, handle, JobState.RUNNING.value)
+    controller.store.update_attempt_status(
+        attempt.work_id,
+        attempt.attempt_id,
+        JobStatus(
+            handle=handle,
+            state=JobState.FAILED,
+            log_paths=("/logs/worker.log",),
+        ),
+    )
+
+    assert controller._failed_log_paths({"vllm_stats"}) == {
+        "vllm_stats": ["/logs/worker.log"]
+    }
 
 
 def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(tmp_path: Path):

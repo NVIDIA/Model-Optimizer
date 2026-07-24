@@ -111,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     failed_stages = list(result.get("failed_stages") or ())
     if failed_stages:
         logger.error(f"failed stage(s): {', '.join(failed_stages)}")
+        for stage_id, paths in (result.get("failed_log_paths") or {}).items():
+            for path in paths:
+                logger.error(f"{stage_id} log: {path}")
     print(json.dumps(result, indent=2))
     return 0 if not result.get("halted") else 1
 

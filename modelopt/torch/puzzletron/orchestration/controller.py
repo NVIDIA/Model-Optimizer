@@ -578,6 +578,30 @@ class CampaignController:
             paths[work_id] = log_paths
         return paths
 
+    def _failed_log_paths(self, failed_stages: set[str]) -> dict[str, list[str]]:
+        """Return durable log paths for failed attempts, grouped by stage."""
+
+        paths_by_stage: dict[str, list[str]] = {}
+        for node in self.plan.stages:
+            if node.stage_id not in failed_stages:
+                continue
+            stage_paths: list[str] = []
+            for attempt in self.store.list_attempts(node.stage_id):
+                if attempt.get("status") != JobState.FAILED.value:
+                    continue
+                log_paths = list(attempt.get("log_paths") or ())
+                if not log_paths:
+                    command = attempt.get("command")
+                    if isinstance(command, Mapping) and command.get("log_path"):
+                        log_paths = [str(command["log_path"])]
+                for path in log_paths:
+                    value = str(path)
+                    if value not in stage_paths:
+                        stage_paths.append(value)
+            if stage_paths:
+                paths_by_stage[node.stage_id] = stage_paths
+        return paths_by_stage
+
     def _emit_progress_heartbeat(self) -> None:
         if self._shutdown_requested:
             return
@@ -1051,6 +1075,7 @@ class CampaignController:
                 or stage_is_complete(self.plan.experiment_config, node.stage_id)
             ],
             "failed_stages": sorted(self._failed_stages),
+            "failed_log_paths": self._failed_log_paths(self._failed_stages),
             "halted": halted,
             "cancelled": cancelled,
             "detached": detached,

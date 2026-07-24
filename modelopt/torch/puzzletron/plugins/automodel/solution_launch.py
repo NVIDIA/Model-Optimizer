@@ -348,7 +348,7 @@ def _score_candidate(
                 if padding:
                     candidate_hidden = torch.nn.functional.pad(candidate_hidden, (0, padding))
                     candidate_w = torch.nn.functional.pad(candidate_w, (0, padding))
-            teacher_hidden, teacher_w = retain_teacher_channels(
+            hidden_metric_teacher, _ = retain_teacher_channels(
                 candidate_hidden,
                 candidate_w,
                 teacher_hidden,
@@ -365,6 +365,7 @@ def _score_candidate(
                     tp_group=tp_group,
                     flash_kld_token_chunk_size=params["flash_kld_token_chunk_size"],
                     flash_kld_reduction_backend=params["flash_kld_reduction_backend"],
+                    hidden_metric_teacher=hidden_metric_teacher,
                     **recipe.current_metric_masks(),
                 )
             )

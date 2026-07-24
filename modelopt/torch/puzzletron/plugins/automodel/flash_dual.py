@@ -80,15 +80,25 @@ def flash_kld_ce_topk(
 
     n_tokens, hidden_size = student_hidden.shape
     vocab_size = student_lm_head_weight.shape[0]
-    if teacher_lm_head_weight.shape != student_lm_head_weight.shape:
+    if teacher_lm_head_weight.shape[0] != vocab_size:
         raise ValueError(
-            "FlashKLD requires matching teacher/student LM heads, got "
-            f"student={tuple(student_lm_head_weight.shape)} "
-            f"teacher={tuple(teacher_lm_head_weight.shape)}"
+            "FlashKLD requires matching teacher/student vocabularies, got "
+            f"student={vocab_size} teacher={teacher_lm_head_weight.shape[0]}"
         )
-    if teacher_hidden.shape != student_hidden.shape:
+    if teacher_hidden.shape[0] != n_tokens:
         raise ValueError(
-            f"FlashKLD hidden mismatch: {tuple(student_hidden.shape)} vs {tuple(teacher_hidden.shape)}"
+            "FlashKLD requires matching teacher/student token counts, got "
+            f"student={n_tokens} teacher={teacher_hidden.shape[0]}"
+        )
+    if student_lm_head_weight.shape[1] != hidden_size:
+        raise ValueError(
+            "FlashKLD student hidden/head width mismatch: "
+            f"hidden={hidden_size} head={student_lm_head_weight.shape[1]}"
+        )
+    if teacher_lm_head_weight.shape[1] != teacher_hidden.shape[1]:
+        raise ValueError(
+            "FlashKLD teacher hidden/head width mismatch: "
+            f"hidden={teacher_hidden.shape[1]} head={teacher_lm_head_weight.shape[1]}"
         )
 
     tp_size = torch_dist.get_world_size(tp_group) if tp_group is not None else 1

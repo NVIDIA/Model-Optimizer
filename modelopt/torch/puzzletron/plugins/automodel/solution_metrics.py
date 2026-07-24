@@ -116,6 +116,7 @@ def score_batch(
     ce_mask: torch.Tensor | None = None,
     kd_mask: torch.Tensor | None = None,
     hidden_mask: torch.Tensor | None = None,
+    hidden_metric_teacher: torch.Tensor | None = None,
 ) -> dict:
     """Per-sample metrics for one batch, streaming both LM heads over the vocab.
 
@@ -124,7 +125,10 @@ def score_batch(
     ``targets`` ``[b, t]``. Returns ``{metric: [per_sample, ...]}`` with the legacy keys:
     ``lm_loss``, ``kl_div``, label-based ``token_accuracy_top_{1,5,10}``, explicit
     ``token_accuracy_top_{1,5,10}_consistency``, and the ``*_hidden_states`` similarity
-    metrics. No full ``[b, t, vocab]`` logits are ever materialized.
+    metrics. ``hidden_metric_teacher`` may project the original teacher into the
+    student's retained basis for hidden-state metrics without changing the
+    full-width teacher logits used for KL. No full ``[b, t, vocab]`` logits are
+    ever materialized.
     """
     b, t, _ = candidate_hidden.shape
     sh = candidate_hidden.reshape(b * t, -1)
@@ -213,9 +217,12 @@ def score_batch(
             )
         )
 
-    if candidate_hidden.shape == teacher_hidden.shape:
+    metric_teacher = (
+        teacher_hidden if hidden_metric_teacher is None else hidden_metric_teacher
+    )
+    if candidate_hidden.shape == metric_teacher.shape:
         candidate = candidate_hidden.float()
-        teacher = teacher_hidden.to(device=candidate.device).float()
+        teacher = metric_teacher.to(device=candidate.device).float()
         feature_mask = hidden_valid.unsqueeze(-1).to(candidate.dtype)
         candidate = candidate * feature_mask
         teacher = teacher * feature_mask

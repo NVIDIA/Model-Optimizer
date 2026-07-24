@@ -30,9 +30,6 @@ export ROOT STAGE CONFIG_PATH LOG_DIR NPROC_PER_NODE MASTER_ADDR MASTER_PORT PUZ
 export PUZZLETRON_SETUP_ENV=${PUZZLETRON_SETUP_ENV:-}
 
 srun_args=(--nodes="${SLURM_NNODES}" --ntasks="${SLURM_NNODES}" --ntasks-per-node=1)
-if [[ "${PUZZLETRON_SRUN_EXCLUSIVE:-0}" == "1" ]]; then
-  srun_args+=(--exclusive)
-fi
 
 srun "${srun_args[@]}" \
   --container-image="${IMAGE}" \

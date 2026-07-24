@@ -20,8 +20,21 @@ def test_worker_group_uses_torchrun_world_size(monkeypatch):
     monkeypatch.setenv("PUZZLETRON_GROUP_SIZE", "1")
     monkeypatch.setenv("RANK", "1")
     monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("PUZZLETRON_TASK_LAUNCHER", "torchrun")
 
     assert _worker_group() == (1, 2)
+
+
+def test_worker_group_uses_puzzletron_identity_for_direct_tasks(monkeypatch):
+    monkeypatch.setenv("PUZZLETRON_GROUP_RANK", "0")
+    monkeypatch.setenv("PUZZLETRON_GROUP_SIZE", "1")
+    monkeypatch.setenv("RANK", "7")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.setenv("LOCAL_RANK", "7")
+    monkeypatch.setenv("PUZZLETRON_TASK_LAUNCHER", "direct")
+
+    assert _worker_group() == (0, 1)
 
 
 def test_exception_diagnostics_preserve_traceback():

@@ -98,8 +98,9 @@ def test_canonical_topology_covers_tp_pp_dp_ep_and_context_parallel():
             "pipeline_parallel_size": 1,
             "data_parallel_size": 1,
             "expert_parallel_size": 1,
-            "prefill_context_parallel_size": 1,
-            "decode_context_parallel_size": 1,
+            "prefill_context_parallel_size": 2,
+            "decode_context_parallel_size": 2,
+            "gpu_group_size": 4,
         }
     )
     assert topology == {
@@ -107,9 +108,9 @@ def test_canonical_topology_covers_tp_pp_dp_ep_and_context_parallel():
         "pp": 1,
         "dp": 1,
         "ep": 1,
-        "prefill_cp": 1,
-        "decode_cp": 1,
-        "gpu_count": 2,
+        "prefill_cp": 2,
+        "decode_cp": 2,
+        "gpu_count": 4,
         "distributed_executor_backend": "mp",
     }
 
