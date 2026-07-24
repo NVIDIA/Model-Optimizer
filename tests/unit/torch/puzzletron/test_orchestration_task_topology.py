@@ -156,3 +156,50 @@ def test_task_launcher_slices_full_node_visibility_for_packed_container_tasks(
     assert result == 0
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == expected
     assert captured["env"]["PUZZLETRON_TASK_LAUNCHER"] == "direct"
+
+
+def _task_binding(*, group_size: int) -> task_launcher.TaskBinding:
+    return task_launcher.TaskBinding(
+        task_index=0,
+        local_task_index=0,
+        hostname="node-a",
+        group_index=0,
+        group_rank=0,
+        group_size=group_size,
+        master_addr="node-a",
+        master_port=23456,
+        rendezvous_id="attempt-a-group-0",
+    )
+
+
+def test_single_node_torchrun_uses_localhost_for_rendezvous() -> None:
+    command = task_launcher.build_task_command(
+        payload=("python", "worker.py"),
+        launcher=TaskLauncher.TORCHRUN,
+        binding=_task_binding(group_size=1),
+        gpus_per_task=4,
+    )
+
+    assert "--rdzv-endpoint=localhost:23456" in command
+
+
+def test_multi_node_torchrun_uses_master_hostname_for_rendezvous() -> None:
+    command = task_launcher.build_task_command(
+        payload=("python", "worker.py"),
+        launcher=TaskLauncher.TORCHRUN,
+        binding=_task_binding(group_size=2),
+        gpus_per_task=4,
+    )
+
+    assert "--rdzv-endpoint=node-a:23456" in command
+
+
+def test_direct_launcher_does_not_wrap_payload() -> None:
+    command = task_launcher.build_task_command(
+        payload=("python", "worker.py"),
+        launcher=TaskLauncher.DIRECT,
+        binding=_task_binding(group_size=1),
+        gpus_per_task=4,
+    )
+
+    assert command == ("python", "worker.py")

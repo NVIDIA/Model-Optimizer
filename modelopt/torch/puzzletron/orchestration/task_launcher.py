@@ -131,6 +131,7 @@ def build_task_command(
     command = tuple(str(part) for part in payload)
     if launcher is TaskLauncher.DIRECT:
         return command
+    rendezvous_host = "localhost" if binding.group_size == 1 else binding.master_addr
     return (
         "python",
         "-m",
@@ -138,7 +139,7 @@ def build_task_command(
         f"--nnodes={binding.group_size}",
         f"--nproc-per-node={gpus_per_task}",
         "--rdzv-backend=c10d",
-        f"--rdzv-endpoint={binding.master_addr}:{binding.master_port}",
+        f"--rdzv-endpoint={rendezvous_host}:{binding.master_port}",
         f"--rdzv-id={binding.rendezvous_id}",
         "--no-python",
         *command,
