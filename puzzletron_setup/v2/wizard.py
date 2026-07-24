@@ -162,6 +162,7 @@ def _section_action(
     session.begin(section)
     print(f"\n[{section}] {summary}")
     return session.select(
+        f"{section}.action",
         f"{section.replace('_', ' ').title()}:",
         [
             ("Use defaults", "defaults"),
