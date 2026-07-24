@@ -77,7 +77,7 @@ def run_example_command(
     env: dict[str, str] | None = None,
     hf_max_retries: int = _HF_MAX_RETRIES,
     hf_retry_delay_s: int = _HF_RETRY_DELAY_S,
-):
+) -> str | None:
     """Run an example command, retrying transient HuggingFace access errors."""
     print(f"[{example_path}] Running command: {cmd_parts}")
     env = env or os.environ.copy()
@@ -88,7 +88,7 @@ def run_example_command(
             env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
         returncode, output = _run_capturing(cmd_parts, cwd, env)
         if returncode == 0:
-            return
+            return output
         transient = any(marker in output for marker in _HF_TRANSIENT_MARKERS)
         if not transient or attempt == hf_max_retries:
             raise subprocess.CalledProcessError(returncode, cmd_parts)
