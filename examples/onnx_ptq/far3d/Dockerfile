@@ -19,9 +19,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libgl1 \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 && \
+        libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
@@ -33,7 +31,6 @@ RUN python -m pip install --no-cache-dir uv && \
 RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
         torch==1.13.1+cu117 \
         torchvision==0.14.1+cu117 \
-        torchaudio==0.13.1 \
         --extra-index-url https://download.pytorch.org/whl/cu117
 
 RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
@@ -45,18 +42,15 @@ RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
 
 RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
         av2==0.2.1 \
-        colored \
-        debugpy \
         einops \
         "ipython<9" \
         kornia==0.6.12 \
         mmdet==2.28.2 \
         mmsegmentation==0.30.0 \
-        "motmetrics<1.2" \
         onnx \
+        onnx-graphsurgeon==0.6.1 \
         onnxruntime \
         onnxsim \
-        "opencv-python-headless<4.6" \
         refile \
         tensorrt-cu12-bindings==10.11.0.33 \
         --extra-index-url https://pypi.nvidia.com && \
@@ -74,27 +68,13 @@ RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
 
 COPY . /opt/modelopt
 RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
-        cppimport \
-        cupy-cuda12x \
         lief \
         ml_dtypes \
-        ninja \
-        nvidia-ml-py \
         omegaconf \
         "onnx-graphsurgeon>=0.6.1" \
         "onnx~=1.21.0" \
-        "onnxconverter-common~=1.16.0" \
         "onnxruntime-gpu~=1.24.2" \
         onnxscript \
         "onnxslim>=0.1.76" \
-        "polygraphy>=0.49.22" \
-        "pulp<4.0" \
-        "pydantic>=2.0" \
-        "PyYAML>=6.0" \
-        regex \
-        rich \
-        safetensors \
-        scipy \
-        "setuptools>=80" \
-        tqdm && \
+        "setuptools>=80" && \
     env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --no-deps -e /opt/modelopt
