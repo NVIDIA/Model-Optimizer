@@ -24,29 +24,70 @@ __all__ = [
     "ModalityFinding",
     "infer_dataset_modality",
     "inspect_model",
+    "normalize_dataset_source",
     "normalize_model_source",
 ]
 
 _MEDIA_KEYS = {"audio", "image", "images", "pixel_values", "video", "videos", "vision"}
+_HUGGING_FACE_HOSTS = {
+    "huggingface.co",
+    "www.huggingface.co",
+    "huggingface.com",
+    "www.huggingface.com",
+}
+
+
+def _normalize_source(source: str, *, kind: str, url_prefix: str | None = None) -> str:
+    """Normalize an existing local path or Hugging Face web URL."""
+
+    source = source.strip()
+    if not source:
+        raise SetupError(f"Enter a {kind} path or Hugging Face URL.")
+
+    expanded = Path(source).expanduser()
+    if expanded.exists():
+        return str(expanded.resolve())
+
+    url_source = source
+    first_component = source.split("/", 1)[0].lower()
+    if first_component in _HUGGING_FACE_HOSTS:
+        url_source = f"https://{source}"
+    parsed = urlparse(url_source)
+    if parsed.scheme not in {"http", "https"}:
+        if parsed.scheme or parsed.netloc:
+            raise SetupError(
+                f"Unsupported {kind} source {source!r}; use an existing local path "
+                "or a Hugging Face HTTP(S) URL."
+            )
+        repository_parts = [part for part in source.split("/") if part]
+        if not source.startswith((".", "/")) and len(repository_parts) == 2:
+            return "/".join(repository_parts)
+        raise SetupError(f"Local {kind} path does not exist: {expanded}")
+    if parsed.netloc.lower() not in _HUGGING_FACE_HOSTS:
+        raise SetupError(
+            f"{kind.capitalize()} URLs must point to huggingface.co or huggingface.com; "
+            "otherwise enter an existing local path."
+        )
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if url_prefix is not None and parts[:1] == [url_prefix]:
+        parts = parts[1:]
+    if len(parts) != 2:
+        raise SetupError(
+            f"Enter a Hugging Face {kind} URL containing an owner and repository name."
+        )
+    return "/".join(parts)
 
 
 def normalize_model_source(source: str) -> str:
-    """Normalize a Hugging Face repository URL to its repository ID."""
-    source = source.strip()
-    parsed = urlparse(source)
-    if parsed.scheme not in {"http", "https"}:
-        return source
-    if parsed.netloc.lower() not in {"huggingface.co", "www.huggingface.co"}:
-        raise SetupError(
-            "Model URLs must point to huggingface.co; otherwise enter a local path or "
-            "a repository ID such as Qwen/Qwen3.5-0.8B."
-        )
-    parts = [unquote(part) for part in parsed.path.split("/") if part]
-    if len(parts) != 2:
-        raise SetupError(
-            "Enter a Hugging Face repository URL such as https://huggingface.co/Qwen/Qwen3.5-0.8B."
-        )
-    return "/".join(parts)
+    """Normalize an existing model path or Hugging Face model web URL."""
+
+    return _normalize_source(source, kind="model")
+
+
+def normalize_dataset_source(source: str) -> str:
+    """Normalize an existing dataset path or Hugging Face dataset web URL."""
+
+    return _normalize_source(source, kind="dataset", url_prefix="datasets")
 
 
 @dataclass(frozen=True)
@@ -104,12 +145,11 @@ def _load_config_dict(source: str, *, revision: str | None, local: bool) -> dict
 
 
 def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
-    """Inspect a local path or Hub URI without loading model weights."""
+    """Inspect a local path or Hugging Face URL without loading model weights."""
+
     source = normalize_model_source(source)
     expanded = Path(source).expanduser()
     is_local = expanded.exists()
-    if source.startswith(("./", "../", "/")) and not is_local:
-        raise SetupError(f"Local model path does not exist: {expanded}")
     resolved_revision = None
     config_source = str(expanded.resolve()) if is_local else source
     effective_source = (
@@ -119,7 +159,7 @@ def inspect_model(source: str, revision: str | None = None) -> InspectedModel:
     )
     if not is_local:
         try:
-            resolved_revision = HfApi().model_info(source, revision=revision).sha
+            resolved_revision = HfApi().model_info(config_source, revision=revision).sha
         except Exception as error:
             raise SetupError(f"Cannot resolve Hugging Face model {source!r}: {error}") from error
     config = _load_config_dict(
@@ -176,6 +216,8 @@ def _local_dataset_metadata(path: Path) -> Any:
 
 def infer_dataset_modality(source: str) -> ModalityFinding:
     """Infer text versus multimodal data and return explicit evidence."""
+
+    source = normalize_dataset_source(source)
     path = Path(source).expanduser()
     if path.exists():
         try:

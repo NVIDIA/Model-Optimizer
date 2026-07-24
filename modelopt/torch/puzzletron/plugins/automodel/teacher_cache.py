@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Bounded teacher-target cache for AutoModel replace-1-block scoring.
+"""Bounded teacher-target cache for AutoModel solution scoring.
 
 The replace-1-block scorer runs the teacher once and reuses its outputs as the
 comparison target for every candidate solution (the user-selected "cache teacher
@@ -26,9 +26,9 @@ logits (the known OOM source):
   to reconstruct teacher logits chunk-by-chunk for KL/CE; and
 * once: the teacher LM-head weight ``[vocab, d]``.
 
-Tensors are held on CPU (``d``-sized, not ``vocab``-sized) so they survive the
-teacher's GPU teardown before the candidate loop. Sized to the (small)
-solution-validation set, not the activation pass.
+By default tensors remain on the current CUDA device and keep their source
+dtype, avoiding repeated host/device copies in the candidate loop. CPU
+``float32`` storage remains available as an explicit compatibility mode.
 """
 
 import torch
@@ -37,21 +37,30 @@ __all__ = ["TeacherTargetCache"]
 
 
 class TeacherTargetCache:
-    """Holds per-batch teacher hidden states + the teacher LM-head weight on CPU."""
+    """Holds per-batch teacher hidden states and the teacher LM-head weight."""
 
-    def __init__(self):
+    def __init__(self, device: str | torch.device = "cuda"):
+        self.device = torch.device(device)
+        if self.device.type not in {"cpu", "cuda"}:
+            raise ValueError(
+                f"teacher cache device must be 'cpu' or 'cuda', got {str(device)!r}"
+            )
         self._hidden_per_batch: list[torch.Tensor] = []
         self.lm_head_weight: torch.Tensor | None = None
         self._sealed = False
 
+    def _store(self, tensor: torch.Tensor) -> torch.Tensor:
+        dtype = torch.float32 if self.device.type == "cpu" else tensor.dtype
+        return tensor.detach().to(device=self.device, dtype=dtype)
+
     def set_lm_head_weight(self, weight: torch.Tensor) -> None:
-        """Store the teacher LM-head weight ``[vocab, d]`` once (moved to CPU)."""
-        self.lm_head_weight = weight.detach().to("cpu", dtype=torch.float32)
+        """Store the teacher LM-head weight ``[vocab, d]`` once."""
+        self.lm_head_weight = self._store(weight)
 
     def append_hidden(self, hidden_states: torch.Tensor) -> None:
-        """Append one batch of final hidden states ``[b, t, d]`` (moved to CPU)."""
+        """Append one batch of final hidden states ``[b, t, d]``."""
         assert not self._sealed, "cache already sealed; cannot append after extraction"
-        self._hidden_per_batch.append(hidden_states.detach().to("cpu", dtype=torch.float32))
+        self._hidden_per_batch.append(self._store(hidden_states))
 
     def seal(self) -> None:
         """Finalize after teacher extraction; from here the cache is read-only."""
@@ -71,6 +80,7 @@ class TeacherTargetCache:
     def lm_head(self, device=None, dtype=None) -> torch.Tensor:
         """Return the teacher LM-head weight (optionally moved)."""
         w = self.lm_head_weight
+        assert w is not None, "teacher LM-head weight was never captured"
         if device is not None or dtype is not None:
             w = w.to(device=device, dtype=dtype)
         return w

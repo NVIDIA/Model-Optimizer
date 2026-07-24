@@ -52,7 +52,11 @@ def test_replacement_score_paths_reject_unknown_granularity(tmp_path: Path) -> N
 def test_stats_profile_accepts_equivalent_static_dtype_profiles(tmp_path: Path) -> None:
     profiles = [
         {
-            "args": {"runtime_stats": False, "weights_dtype": dtype},
+            "args": {
+                "runtime_stats": False,
+                "weights_dtype": dtype,
+                "n_embd": 2048,
+            },
             "non_block": {"num_params": 11, "memory_mib": memory},
             "subblocks": [
                 {"parent_layer_index": 0, "num_params": 13, "memory_mib": memory},
@@ -64,7 +68,33 @@ def test_stats_profile_accepts_equivalent_static_dtype_profiles(tmp_path: Path) 
     path = tmp_path / "subblock_stats.json"
     path.write_text(json.dumps(profiles))
 
-    assert _stats_profile(path, runtime_stats=False) == profiles[0]
+    assert _stats_profile(path, runtime_stats=False, hidden_width=2048) == profiles[0]
+
+
+def test_stats_profile_selects_requested_width_before_comparing_inventories(
+    tmp_path: Path,
+) -> None:
+    profiles = [
+        {
+            "args": {
+                "runtime_stats": False,
+                "weights_dtype": "nvfp4",
+                "n_embd": width,
+            },
+            "non_block": {"num_params": non_block_params},
+            "subblocks": [
+                {"parent_layer_index": 0, "num_params": subblock_params},
+            ],
+        }
+        for width, non_block_params, subblock_params in (
+            (1792, 17, 19),
+            (2048, 23, 29),
+        )
+    ]
+    path = tmp_path / "subblock_stats.json"
+    path.write_text(json.dumps(profiles))
+
+    assert _stats_profile(path, runtime_stats=False, hidden_width=2048) == profiles[1]
 
 
 def test_stats_profile_rejects_conflicting_static_parameter_inventories(
@@ -72,12 +102,20 @@ def test_stats_profile_rejects_conflicting_static_parameter_inventories(
 ) -> None:
     profiles = [
         {
-            "args": {"runtime_stats": False, "weights_dtype": "nvfp4"},
+            "args": {
+                "runtime_stats": False,
+                "weights_dtype": "nvfp4",
+                "n_embd": 2048,
+            },
             "non_block": {"num_params": 11},
             "subblocks": [{"parent_layer_index": 0, "num_params": 13}],
         },
         {
-            "args": {"runtime_stats": False, "weights_dtype": "torch.int8"},
+            "args": {
+                "runtime_stats": False,
+                "weights_dtype": "torch.int8",
+                "n_embd": 2048,
+            },
             "non_block": {"num_params": 11},
             "subblocks": [{"parent_layer_index": 0, "num_params": 19}],
         },
@@ -86,7 +124,7 @@ def test_stats_profile_rejects_conflicting_static_parameter_inventories(
     path.write_text(json.dumps(profiles))
 
     with pytest.raises(RuntimeError, match="conflicting parameter inventories"):
-        _stats_profile(path, runtime_stats=False)
+        _stats_profile(path, runtime_stats=False, hidden_width=2048)
 
 
 def test_teacher_summary_costs_include_named_workload_denominators():

@@ -13,9 +13,9 @@ import subprocess
 import traceback
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from ..identity import canonicalize, stable_hash
 from .base import CompiledPostMIPNode, NodeKind, compile_post_mip_flows
@@ -269,9 +269,75 @@ def _scenario_checkpoint_roles(scenario: Path, expected_width: int) -> tuple[Pat
     return source, bypass
 
 
-def _evaluate_config(
-    config: dict[str, Any], node: CompiledPostMIPNode, source, execution_identity: str
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class _ConfigEvaluationWork:
+    input_revision_id: str
+    source: Any
+    raw_solution: dict[str, Any]
+    hidden_width: int
+    source_checkpoint: Path
+    bypass_checkpoint: Path | None
+
+    @property
+    def cache_identity(self) -> tuple[int, str, str | None]:
+        return (
+            self.hidden_width,
+            str(self.source_checkpoint),
+            str(self.bypass_checkpoint) if self.bypass_checkpoint is not None else None,
+        )
+
+
+def _config_evaluation_work(
+    config: Mapping[str, Any], input_revision_id: str, source: Any
+) -> _ConfigEvaluationWork:
+    raw = _raw_solution(source)
+    raw_width = raw.get("hidden_width", source.artifact.get("hidden_width"))
+    hidden_width = int(raw_width) if raw_width is not None else 0
+    if not hidden_width:
+        raise ValueError("online evaluation could not determine the candidate hidden width")
+    scenario = (
+        _puzzle_dir(config)
+        / "scenarios"
+        / f"width-{hidden_width:04d}"
+        / "depth-00"
+    )
+    source_checkpoint, bypass_checkpoint = _scenario_checkpoint_roles(
+        scenario, hidden_width
+    )
+    raw["hidden_width"] = hidden_width
+    return _ConfigEvaluationWork(
+        input_revision_id=input_revision_id,
+        source=source,
+        raw_solution=raw,
+        hidden_width=hidden_width,
+        source_checkpoint=source_checkpoint,
+        bypass_checkpoint=bypass_checkpoint,
+    )
+
+
+def _merge_scoring_settings(scoring, settings: Mapping[str, Any]):
+    """Merge node-local scoring overrides without dropping inherited nested fields."""
+
+    from omegaconf import OmegaConf
+
+    return OmegaConf.merge(scoring, dict(settings))
+
+
+def _evaluate_config_group(
+    config: dict[str, Any],
+    node: CompiledPostMIPNode,
+    work: list[_ConfigEvaluationWork],
+    execution_identity: str,
+) -> dict[str, dict[str, Any]]:
+    if not work:
+        return {}
+    cache_identities = {item.cache_identity for item in work}
+    if len(cache_identities) != 1:
+        raise ValueError(
+            "one online evaluation session requires one hidden-width/checkpoint identity, "
+            f"found {sorted(cache_identities, key=repr)}"
+        )
+
     from omegaconf import OmegaConf
 
     # This is a GPU-worker-only dependency; keep aggregate/filter imports lightweight.
@@ -282,42 +348,95 @@ def _evaluate_config(
     from ..stages.pipeline import _distributed
     from ..tools.hydra_utils import clone_hydra_config
 
-    raw = _raw_solution(source)
-    raw_width = raw.get("hidden_width", source.artifact.get("hidden_width"))
-    origin_width = int(raw_width) if raw_width is not None else 0
-    if not origin_width:
-        raise ValueError("online evaluation could not determine the candidate hidden width")
-    puzzle_dir = _puzzle_dir(config)
-    scenario = puzzle_dir / "scenarios" / f"width-{origin_width:04d}" / "depth-00"
-    source_checkpoint, bypass_checkpoint = _scenario_checkpoint_roles(
-        scenario, origin_width
+    first = work[0]
+    session_identity = stable_hash(
+        {
+            "cache_identity": first.cache_identity,
+            "architecture_ids": [item.source.architecture_id for item in work],
+        },
+        prefix="online_eval_session",
     )
-    output = _execution_root(config, node, execution_identity) / "raw" / source.architecture_id
-    solutions_path = output / "solutions.json"
+    raw_root = _execution_root(config, node, execution_identity) / "raw"
+    session_output = raw_root / "sessions" / session_identity
+    solutions_path = session_output / "solutions.json"
+    candidate_outputs = {
+        str(index): str(raw_root / item.source.architecture_id)
+        for index, item in enumerate(work)
+    }
     hydra_cfg = clone_hydra_config(load_runtime_hydra_config(config))
     OmegaConf.set_struct(hydra_cfg, False)
     settings = dict(node.config.get("config") or {})
-    hydra_cfg.scoring.source_checkpoint_dir = str(source_checkpoint)
+    hydra_cfg.scoring = _merge_scoring_settings(hydra_cfg.scoring, settings)
+    hydra_cfg.scoring.source_checkpoint_dir = str(first.source_checkpoint)
     hydra_cfg.scoring.bypass_checkpoint_dir = (
-        str(bypass_checkpoint) if bypass_checkpoint is not None else None
+        str(first.bypass_checkpoint) if first.bypass_checkpoint is not None else None
     )
     hydra_cfg.scoring.solutions_path = str(solutions_path)
-    hydra_cfg.scoring.output_dir = str(output)
-    hydra_cfg.scoring.solutions_to_validate = [0]
+    hydra_cfg.scoring.output_dir = str(session_output)
+    hydra_cfg.scoring.solutions_to_validate = list(range(len(work)))
     hydra_cfg.scoring.skip_existing_solutions = True
     hydra_cfg.scoring.score_source_baseline = True
-    for key, value in settings.items():
-        hydra_cfg.scoring[key] = value
+    hydra_cfg.scoring.sort_solutions_by = None
+    hydra_cfg.scoring.solution_output_dirs = candidate_outputs
     with _distributed(hydra_cfg):
         if dist.is_master():
-            _atomic_json(solutions_path, [raw])
+            _atomic_json(solutions_path, [item.raw_solution for item in work])
+            for item in work:
+                _atomic_json(
+                    raw_root / item.source.architecture_id / "solutions.json",
+                    [item.raw_solution],
+                )
         dist.barrier()
         launch_score_solutions_automodel(hydra_cfg)
-    result_path = output / "solution_0.json"
-    return {
-        "metrics": _average_metrics(json.loads(result_path.read_text())),
-        "result_path": str(result_path),
-    }
+    results = {}
+    for item in work:
+        result_path = raw_root / item.source.architecture_id / "solution_0.json"
+        results[item.input_revision_id] = {
+            "metrics": _average_metrics(json.loads(result_path.read_text())),
+            "result_path": str(result_path),
+        }
+    return results
+
+
+def _evaluate_config(
+    config: dict[str, Any], node: CompiledPostMIPNode, source, execution_identity: str
+) -> dict[str, Any]:
+    input_revision_id = str(source.revision_id)
+    return _evaluate_config_group(
+        config,
+        node,
+        [_config_evaluation_work(config, input_revision_id, source)],
+        execution_identity,
+    )[input_revision_id]
+
+
+def _evaluate_config_candidates(
+    config: dict[str, Any],
+    node: CompiledPostMIPNode,
+    ledger: CandidateLedger,
+    revision_ids: Sequence[str],
+    execution_identity: str,
+) -> dict[str, dict[str, Any]]:
+    groups: dict[tuple[int, str, str | None], list[_ConfigEvaluationWork]] = {}
+    for revision_id in revision_ids:
+        source = ledger.source_revision(revision_id, node.model_source)
+        if source.artifact_kind is ArtifactKind.CHECKPOINT:
+            continue
+        item = _config_evaluation_work(config, revision_id, source)
+        groups.setdefault(item.cache_identity, []).append(item)
+
+    rows = {}
+    for work in groups.values():
+        results = _evaluate_config_group(config, node, work, execution_identity)
+        for item in work:
+            rows[item.input_revision_id] = {
+                "input_revision_id": item.input_revision_id,
+                "source_revision_id": item.source.revision_id,
+                "architecture_id": item.source.architecture_id,
+                "status": "success",
+                **results[item.input_revision_id],
+            }
+    return rows
 
 
 def _evaluate_checkpoint(
@@ -514,14 +633,25 @@ def run_post_mip_node_shard(
     distributed = group_size > 1
     rows = []
     with _distributed_shard(config, node):
+        cached_evaluation_rows = (
+            _evaluate_config_candidates(
+                config,
+                node,
+                ledger,
+                revision_ids,
+                execution_identity,
+            )
+            if node.node_type == "evaluation"
+            else {}
+        )
         for revision_id in revision_ids:
             try:
-                row = {
-                    **_run_candidate(
+                row = cached_evaluation_rows.get(revision_id)
+                if row is None:
+                    row = _run_candidate(
                         config, node, ledger, revision_id, execution_identity
-                    ),
-                    "execution_identity": execution_identity,
-                }
+                    )
+                row = {**row, "execution_identity": execution_identity}
             except Exception as error:
                 timed_out = node.node_type == "aiperf" and isinstance(
                     error, (subprocess.TimeoutExpired, TimeoutError)

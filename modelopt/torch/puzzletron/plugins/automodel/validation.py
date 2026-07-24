@@ -61,7 +61,7 @@ def validate_realized_checkpoints_automodel(
     if not (teacher_dir / "config.json").is_file():
         raise FileNotFoundError(f"validation teacher is not an HF checkpoint: {teacher_dir}")
 
-    cache = TeacherTargetCache()
+    cache = TeacherTargetCache(device=params["teacher_cache_device"])
     teacher_recipe = _run_recipe(
         build_solution_recipe_config(cfg, teacher_dir),
         scoring,

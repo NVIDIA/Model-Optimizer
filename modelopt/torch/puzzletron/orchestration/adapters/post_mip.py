@@ -9,6 +9,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from puzzletron_orchestrator.post_mip.records import CandidateLedger
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -61,14 +62,63 @@ def _node_root(plan: CampaignPlan, stage_id: str) -> Path:
     return plan.puzzle_dir / "artifacts" / "post_mip" / "nodes" / _node_id(stage_id)
 
 
+def _available_evaluation_candidates(
+    plan: CampaignPlan, stage_id: str, config: dict
+) -> int | None:
+    input_id = str(config.get("input", "source"))
+    ledger = CandidateLedger(plan.puzzle_dir / "artifacts" / "post_mip")
+    if input_id == "source":
+        active_mip = plan.puzzle_dir / "mip" / "active_profiles.json"
+        if not active_mip.is_file():
+            return None
+        ledger.ingest_mip(plan.puzzle_dir)
+        _prefix, flow_id, _node_id_value = stage_id.split(".", 2)
+        flow = plan.experiment_config["post_mip"]["flows"][flow_id]
+        candidate_set = ledger.root_set(flow_id, flow["source"])
+    else:
+        current = (
+            plan.puzzle_dir
+            / "artifacts"
+            / "post_mip"
+            / "nodes"
+            / input_id
+            / "current.json"
+        )
+        if not current.is_file():
+            return None
+        candidate_set = ledger.load_candidate_set(input_id)
+    return len(candidate_set.revision_ids)
+
+
+def _full_node_instance_count(node: StagePlanNode, count: int) -> int:
+    if not 0 < node.gpus_per_instance < node.gpus_per_node:
+        return count
+    if node.gpus_per_node % node.gpus_per_instance:
+        return count
+    instances_per_node = node.gpus_per_node // node.gpus_per_instance
+    if count <= instances_per_node:
+        return count
+    return count - count % instances_per_node
+
+
 class PostMIPAdapter(WorkAdapter):
     """Launch independent candidate workers and publish one candidate set."""
 
     strategy = ExecutionStrategy.SHARDED
 
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
-        node_type = str(_node_config(plan, node.stage_id).get("type"))
+        config = _node_config(plan, node.stage_id)
+        node_type = str(config.get("type"))
         count = 1 if node_type in {"filter", "manual_filter"} else node.instances
+        if node_type == "evaluation":
+            available = _available_evaluation_candidates(plan, node.stage_id, config)
+            if available is not None:
+                if available < 1:
+                    raise RuntimeError(
+                        f"{node.stage_id} has no candidate architectures to evaluate"
+                    )
+                count = min(count, available)
+            count = _full_node_instance_count(node, count)
         if count == 1:
             items = (
                 WorkItem(
@@ -137,6 +187,9 @@ class PostMIPAdapter(WorkAdapter):
             instances=logical_count,
             launcher=TaskLauncher.TORCHRUN if distributed_worker else TaskLauncher.DIRECT,
         )
+        allocated_gpus_per_node = node.gpus_per_node
+        if allocation_nodes == 1 and allocation_gpus < allocated_gpus_per_node:
+            allocated_gpus_per_node = allocation_gpus
         return AttemptSpec(
             attempt_id=attempt_id,
             work_id=item.work_id,
@@ -144,12 +197,12 @@ class PostMIPAdapter(WorkAdapter):
             command=CommandSpec(argv=tuple(argv), cwd=str(repo), env={}, log_path=str(log_path)),
             allocation_nodes=allocation_nodes,
             allocation_gpus=allocation_gpus,
-            exclusive=allocation_gpus == allocation_nodes * node.gpus_per_node,
+            exclusive=allocation_gpus == allocation_nodes * allocated_gpus_per_node,
             contract_hash=plan.contract_hash,
             metadata={
                 "shard_index": item.shard_index,
                 "shard_count": logical_count,
-                "gpus_per_node": node.gpus_per_node,
+                "gpus_per_node": allocated_gpus_per_node,
                 **({"partition": node.partition} if node.partition else {}),
             },
             task_topology=topology,

@@ -68,6 +68,24 @@ def _resolve_output_dir(scoring):
     return solutions_path.with_name(f"{solutions_path.stem}--validation")
 
 
+def _solution_output_location(scoring, output_dir: Path, solution_id: int) -> tuple[Path, str]:
+    """Resolve an optional per-solution output while preserving the default layout."""
+
+    routed_outputs = scoring.get("solution_output_dirs", None)
+    if routed_outputs is not None:
+        routed_output = routed_outputs.get(str(solution_id), None)
+        if routed_output is not None:
+            return Path(str(routed_output)), "solution_0"
+    return output_dir, f"solution_{solution_id}"
+
+
+def _solution_result_path(scoring, output_dir: Path, solution_id: int) -> Path:
+    solution_output, solution_name = _solution_output_location(
+        scoring, output_dir, solution_id
+    )
+    return solution_output / f"{solution_name}.json"
+
+
 def _load_model_config_distributed(checkpoint_dir, descriptor, *, loader):
     """Pre-cache dynamic modules once before every rank imports a config."""
 
@@ -91,7 +109,11 @@ def _load_solution_work(scoring, output_dir: Path) -> tuple[list[dict], list[int
     )
     ids = scoring.get("solutions_to_validate", None) or list(range(len(solutions)))
     if bool(scoring.get("skip_existing_solutions", True)):
-        ids = [i for i in ids if not (output_dir / f"solution_{i}.json").exists()]
+        ids = [
+            i
+            for i in ids
+            if not _solution_result_path(scoring, output_dir, i).exists()
+        ]
     return solutions, ids
 
 
@@ -796,12 +818,18 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
                 num_q,
                 head_dim,
             )
-            mprint(f"[solution/automodel] Phase 2: scoring solution_{i_solution} {prune_target}")
+            solution_output, solution_name = _solution_output_location(
+                scoring, output_dir, i_solution
+            )
+            mprint(
+                f"[solution/automodel] Phase 2: scoring solution_{i_solution} "
+                f"as {solution_output / solution_name} {prune_target}"
+            )
             _score_candidate(
-                recipe, cache, params, output_dir, scoring,
-                name=f"solution_{i_solution}",
+                recipe, cache, params, solution_output, scoring,
+                name=solution_name,
                 payload={
-                    "i_solution": i_solution,
+                    "i_solution": 0 if solution_name == "solution_0" else i_solution,
                     "puzzle_solution": solution,
                     "hidden_width": solution.get("hidden_width"),
                     "sliced_teacher_baseline": sliced_teacher_baseline,
@@ -819,7 +847,7 @@ def launch_score_solutions_automodel(hydra_cfg, num_nodes: int = 1, node_index: 
     )
     try:
         mprint("[solution/automodel] Phase 1: caching teacher targets")
-        cache = TeacherTargetCache()
+        cache = TeacherTargetCache(device=params["teacher_cache_device"])
         teacher_scores = _extract_teacher_targets(recipe, cache, params)
         is_writer = bool(getattr(recipe, "_puzzletron_output_writer", False))
         if teacher_scores is not None and is_writer:
@@ -899,7 +927,7 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
         dist.barrier()
 
     write_manifest()
-    cache = TeacherTargetCache()
+    cache = TeacherTargetCache(device=params["teacher_cache_device"])
     original_result_path: Path | None = None
 
     try:

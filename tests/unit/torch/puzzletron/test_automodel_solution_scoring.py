@@ -195,14 +195,16 @@ def test_runtime_fingerprint_ignores_distributed_compute_dtype_transition():
 
 
 def test_teacher_cache_roundtrip():
-    cache = TeacherTargetCache()
+    cache = TeacherTargetCache(device="cpu")
     cache.set_lm_head_weight(torch.randn(20, 8))
     cache.append_hidden(torch.randn(2, 4, 8))
     cache.append_hidden(torch.randn(2, 4, 8))
     cache.seal()
 
+    assert cache.device == torch.device("cpu")
     assert len(cache) == 2
     assert cache.lm_head().shape == (20, 8)
+    assert cache.lm_head().dtype == torch.float32
     assert cache.hidden(1).shape == (2, 4, 8)
     # Sealed cache rejects further appends.
     with pytest.raises(AssertionError):

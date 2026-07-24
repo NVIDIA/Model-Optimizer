@@ -73,7 +73,64 @@ fi
   "${compatibility_args[@]}"
 
 if [[ "${FINALIZE_REPLACEMENT_SCORING:-0}" == "1" ]]; then
-  "${PYTHON_BIN}" "${SCRIPT_DIR}/../finalize_replacement_scoring.py" \
-    --config "${FINALIZE_CONFIG_PATH:-${CONFIG_PATH}}" \
-    --puzzle-dir "${FINALIZE_PUZZLE_DIR:-${PUZZLE_DIR}}"
+  if [[ -n "${FINALIZE_COMPLETION_DIR:-}" ]]; then
+    : "${FINALIZE_COMPLETION_MARKER:?set FINALIZE_COMPLETION_MARKER}"
+    : "${FINALIZE_EXPECTED_COMPLETIONS:?set FINALIZE_EXPECTED_COMPLETIONS}"
+    "${PYTHON_BIN}" - \
+      "${FINALIZE_COMPLETION_DIR}" \
+      "${FINALIZE_COMPLETION_MARKER}" \
+      "${FINALIZE_EXPECTED_COMPLETIONS}" \
+      "${SCRIPT_DIR}/../finalize_replacement_scoring.py" \
+      "${FINALIZE_CONFIG_PATH:-${CONFIG_PATH}}" \
+      "${FINALIZE_PUZZLE_DIR:-${PUZZLE_DIR}}" <<'PY'
+import fcntl
+from pathlib import Path
+import subprocess
+import sys
+
+(
+    completion_dir_text,
+    marker_name,
+    expected_text,
+    finalizer,
+    config_path,
+    puzzle_dir,
+) = sys.argv[1:]
+if not marker_name or Path(marker_name).name != marker_name:
+    raise ValueError(f"invalid replacement-scoring completion marker: {marker_name!r}")
+completion_dir = Path(completion_dir_text)
+completion_dir.mkdir(parents=True, exist_ok=True)
+(completion_dir / f"{marker_name}.done").touch()
+with (completion_dir / ".finalize.lock").open("a+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    finalized = completion_dir / "finalized"
+    if finalized.is_file():
+        raise SystemExit(0)
+    completed = tuple(completion_dir.glob("*.done"))
+    expected = int(expected_text)
+    if len(completed) < expected:
+        print(
+            f"[replacement-pool] completed widths: {len(completed)}/{expected}; "
+            "deferring root finalization",
+            flush=True,
+        )
+        raise SystemExit(0)
+    subprocess.run(
+        [
+            sys.executable,
+            finalizer,
+            "--config",
+            config_path,
+            "--puzzle-dir",
+            puzzle_dir,
+        ],
+        check=True,
+    )
+    finalized.touch()
+PY
+  else
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/../finalize_replacement_scoring.py" \
+      --config "${FINALIZE_CONFIG_PATH:-${CONFIG_PATH}}" \
+      --puzzle-dir "${FINALIZE_PUZZLE_DIR:-${PUZZLE_DIR}}"
+  fi
 fi

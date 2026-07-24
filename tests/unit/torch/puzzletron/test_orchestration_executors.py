@@ -504,6 +504,81 @@ def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert attempt.command.argv[-1].endswith("run_replacement_pool.sh")
 
 
+def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path):
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="replacement_scoring",
+        strategy=ExecutionStrategy.PERSISTENT_POOL,
+        instances=8,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={"tp": 1, "cp": 1, "pp": 2, "ep": 1, "dp_shard": 2, "dp_replicate": 1},
+        gpus_per_instance=4,
+        gpus_per_node=8,
+        nodes=4,
+        total_gpus=32,
+        exclusive=True,
+        parents=("build_library",),
+        distributed=True,
+        partition="batch",
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={
+            "embedding_pruning": {"enabled": True, "widths": [2048, 1792]},
+            "replacement_scoring": {"granularity": "subblock"},
+        },
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+    adapter = adapter_for_stage(node)
+    work_plan = adapter.plan(plan, node)
+
+    assert [item.work_id for item in work_plan.items] == [
+        "replacement_scoring:width-2048",
+        "replacement_scoring:width-1792",
+    ]
+    assert [item.metadata["worker_count"] for item in work_plan.items] == [4, 4]
+
+    attempts = [
+        adapter.command(
+            plan=plan,
+            node=node,
+            item=item,
+            attempt_id=f"a{index}",
+            runner=runner,
+        )
+        for index, item in enumerate(work_plan.items)
+    ]
+    assert [attempt.allocation_nodes for attempt in attempts] == [2, 2]
+    assert [attempt.allocation_gpus for attempt in attempts] == [16, 16]
+    assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
+    assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
+    assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
+    assert [
+        attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts
+    ] == ["2", "2"]
+    assert [
+        attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in attempts
+    ] == ["width-2048", "width-1792"]
+    assert (
+        attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
+        == attempts[1].command.env["FINALIZE_COMPLETION_DIR"]
+    )
+    assert attempts[0].command.env["PUZZLE_DIR"].endswith(
+        "scenarios/width-2048/depth-00"
+    )
+    assert attempts[1].command.env["PUZZLE_DIR"].endswith(
+        "scenarios/width-1792/depth-00"
+    )
+
+
 def test_stage_partition_override_forces_batch(tmp_path: Path):
     experiment = tmp_path / "experiment.yaml"
     experiment.write_text(

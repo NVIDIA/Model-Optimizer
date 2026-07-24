@@ -125,7 +125,7 @@ class AutoModelReplaceBlockExecutor:
             self.params["use_puzzletron_dataloader"],
             self.params["data_cfg"],
         )
-        self.cache = TeacherTargetCache()
+        self.cache = TeacherTargetCache(device=self.params["teacher_cache_device"])
         _extract_teacher_targets(target_recipe, self.cache, self.params)
         dist.barrier()
 

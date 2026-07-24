@@ -176,6 +176,42 @@ def test_solution_recipe_uses_inferred_runtime_descriptor(monkeypatch):
     assert recipe["model"]["anymodel_descriptor"] == "qwen3"
 
 
+def test_solution_recipe_defaults_to_native_automodel(monkeypatch):
+    cfg = OmegaConf.create(
+        {
+            "puzzle_dir": "/puzzle",
+            "descriptor": "qwen3",
+            "pruning": {"block_size": 32, "micro_batch_size": 1},
+            "scoring": {
+                "block_size": 32,
+                "micro_batch_size": 1,
+                "automodel": {
+                    "parallel": {
+                        "tp": 1,
+                        "cp": 1,
+                        "pp": 1,
+                        "ep": 1,
+                        "dp_shard": 1,
+                        "dp_replicate": 1,
+                    },
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
+        lambda *args, **kwargs: None,
+    )
+
+    recipe = build_solution_recipe_config(cfg, "/checkpoint")
+
+    assert recipe["model"]["force_hf"] is False
+
+
 @pytest.mark.parametrize(("cp_size", "expected_backend"), [(1, None), (2, {"attn": "te"})])
 def test_build_recipe_config_injects_topology_dependent_model_backend(
     monkeypatch, cp_size, expected_backend

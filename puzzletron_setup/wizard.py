@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from . import SetupError
-from .inspection import InspectedModel, infer_dataset_modality, inspect_model
+from .inspection import (
+    InspectedModel,
+    infer_dataset_modality,
+    inspect_model,
+    normalize_dataset_source,
+    normalize_model_source,
+)
 from .profiles import CandidateCounts, UnsupportedModelError, count_candidate_options
 from .prompts import PromptSession
 from .state import AnswerState
@@ -73,14 +79,20 @@ def _inspect_fresh_model(prompts: PromptSession, state: AnswerState) -> Inspecte
     prompts.begin(state, "model")
     while True:
         source = prompts.text(
-            "Model path, Hugging Face repository ID, or URL:",
+            "Local model path or Hugging Face URL:",
             description=(
-                "Examples: /checkpoints/model, Qwen/Qwen3.5-0.8B, or "
-                "https://huggingface.co/Qwen/Qwen3.5-0.8B. Only the configuration is loaded."
+                "Examples: ../models/model, /checkpoints/model, or "
+                "https://huggingface.co/Qwen/Qwen3.5-0.8B. A trailing slash is optional."
             ),
-            validate=lambda value: bool(str(value).strip()) or "Enter a model path or URI.",
+            validate=lambda value: bool(str(value).strip()) or "Enter a model path or URL.",
         ).strip()
-        is_local = Path(source).expanduser().exists()
+        try:
+            source = normalize_model_source(source)
+        except SetupError as error:
+            print(f"Could not inspect that model: {error}")
+            prompts.reset()
+            continue
+        is_local = Path(source).exists()
         revision = None
         if not is_local:
             revision = (
@@ -126,13 +138,35 @@ def _resume_model(state: AnswerState) -> InspectedModel:
 
 
 def _ask_data(prompts: PromptSession, state: AnswerState, model: InspectedModel) -> None:
-    if state.section("data"):
-        return
+    saved = state.section("data")
+    if saved:
+        try:
+            normalized = normalize_dataset_source(str(saved.get("source", "")))
+        except SetupError as error:
+            print(f"Saved dataset source is no longer valid: {error}")
+            state.invalidate_after("model")
+        else:
+            if normalized != saved.get("source"):
+                state.record("data", "source", normalized)
+            return
     prompts.begin(state, "data")
-    source = prompts.text(
-        "Dataset path or Hugging Face dataset URI:",
-        validate=lambda value: bool(str(value).strip()) or "Enter a dataset source.",
-    ).strip()
+    while True:
+        source = prompts.text(
+            "Local dataset path or Hugging Face URL:",
+            description=(
+                "Examples: ../datasets/data, /datasets/data, or "
+                "https://huggingface.co/datasets/owner/repository. "
+                "A trailing slash is optional."
+            ),
+            validate=lambda value: bool(str(value).strip()) or "Enter a dataset path or URL.",
+        ).strip()
+        try:
+            source = normalize_dataset_source(source)
+        except SetupError as error:
+            print(f"Could not inspect that dataset: {error}")
+            prompts.reset()
+            continue
+        break
     finding = infer_dataset_modality(source)
     print(f"Dataset modality finding: {finding.modality} — {finding.evidence}.")
     default_modality = (
@@ -601,6 +635,7 @@ def _default_flow(
     *,
     prefix: str,
     objective: Mapping[str, Any] | None = None,
+    include_initial_filter: bool = True,
 ) -> dict[str, Any]:
     def node_id(name: str) -> str:
         return f"{prefix}{name}"
@@ -621,29 +656,27 @@ def _default_flow(
         objective = next(iter(run.get("objectives") or ()), {})
     objective_metric = str(objective.get("metric", "metrics.lm_loss"))
     objective_direction = str(objective.get("direction", "minimize"))
-    nodes = OrderedDict(
+    nodes: OrderedDict[str, Any] = OrderedDict()
+    if include_initial_filter:
+        nodes[initial] = {
+            "type": "filter",
+            "mode": "top_k",
+            "metric": "mip.score",
+            "direction": objective_direction,
+            "top_k": initial_top_k,
+        }
+    online_node = {
+        "type": "evaluation",
+        "config": {
+            "eval_samples": 128,
+            "block_size": int(data["sequence_length"]),
+        },
+    }
+    if include_initial_filter:
+        online_node["input"] = initial
+    nodes[online] = online_node
+    nodes.update(
         [
-            (
-                initial,
-                {
-                    "type": "filter",
-                    "mode": "top_k",
-                    "metric": "mip.score",
-                    "direction": objective_direction,
-                    "top_k": initial_top_k,
-                },
-            ),
-            (
-                online,
-                {
-                    "type": "evaluation",
-                    "input": initial,
-                    "config": {
-                        "eval_samples": 128,
-                        "block_size": int(data["sequence_length"]),
-                    },
-                },
-            ),
             (
                 best_kl,
                 {
@@ -872,6 +905,7 @@ def _ask_post_mip(prompts: PromptSession, state: AnswerState) -> None:
                     data,
                     prefix=prefix,
                     objective=objective,
+                    include_initial_filter=state.detailed,
                 )
                 used_ids.update(flow["nodes"])
                 flows[flow_id] = flow
@@ -959,20 +993,33 @@ def _resource_rows(
     flows = state.section("post_mip").get("flows") or {}
     candidate_limits = _post_mip_candidate_limits({"post_mip": {"flows": flows}})
 
-    def post_mip_instances(node_type: str, worker_limit: int, default: int) -> int:
+    def post_mip_instances(
+        node_type: str,
+        worker_limit: int,
+        default: int,
+        *,
+        source_worker_limit: int | None = None,
+    ) -> int:
         instances = []
         for flow_id, flow in flows.items():
             for node_id, node in (flow.get("nodes") or {}).items():
                 if node.get("type") != node_type:
                     continue
+                node_worker_limit = (
+                    source_worker_limit
+                    if source_worker_limit is not None
+                    and str(node.get("input", "source")) == "source"
+                    else worker_limit
+                )
                 candidate_limit = candidate_limits[f"post.{flow_id}.{node_id}"]
                 instances.append(
-                    worker_limit
+                    node_worker_limit
                     if candidate_limit is None
-                    else min(worker_limit, candidate_limit)
+                    else min(node_worker_limit, candidate_limit)
                 )
         return max(instances, default=default)
 
+    pool_workers = int(workers["pool"])
     sharded_workers = int(workers["sharded"])
     aiperf_workers = int(workers.get("aiperf", 2 * gpus_per_node))
     stages = [
@@ -986,7 +1033,12 @@ def _resource_rows(
         (
             "evaluation",
             common,
-            post_mip_instances("evaluation", sharded_workers, sharded_workers),
+            post_mip_instances(
+                "evaluation",
+                sharded_workers,
+                sharded_workers,
+                source_worker_limit=pool_workers if not state.detailed else None,
+            ),
         ),
         ("bypass", bypass, 1),
         ("global KD", global_kd, post_mip_instances("global_kd", sharded_workers, 1)),

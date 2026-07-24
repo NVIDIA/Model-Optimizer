@@ -37,17 +37,20 @@ _POOL_STAGES = {
 }
 
 
-def _replacement_puzzle_dir(plan: CampaignPlan) -> Path:
+def _replacement_widths(plan: CampaignPlan) -> tuple[int | None, ...]:
     embedding = plan.experiment_config.get("embedding_pruning") or {}
     if not bool(embedding.get("enabled", False)):
-        return plan.puzzle_dir
+        return (None,)
     widths = tuple(int(width) for width in embedding.get("widths", ()))
-    if len(widths) != 1:
-        raise ValueError(
-            "persistent-pool replacement scoring requires exactly one embedding width; "
-            f"configured widths={widths}"
-        )
-    return plan.puzzle_dir / "scenarios" / f"width-{widths[0]:04d}" / "depth-00"
+    if not widths:
+        raise ValueError("embedding replacement scoring requires at least one width")
+    return widths
+
+
+def _replacement_puzzle_dir(plan: CampaignPlan, width: int | None) -> Path:
+    if width is None:
+        return plan.puzzle_dir
+    return plan.puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
 
 
 def _replacement_environment(plan: CampaignPlan, puzzle_dir: Path) -> dict[str, str]:
@@ -133,7 +136,41 @@ class PersistentPoolAdapter(WorkAdapter):
     strategy = ExecutionStrategy.PERSISTENT_POOL
 
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
-        if node.stage_id in {"depth_importance", "replacement_scoring"}:
+        if node.stage_id == "replacement_scoring":
+            widths = _replacement_widths(plan)
+            if node.instances < len(widths):
+                raise ValueError(
+                    "replacement-scoring persistent pool needs at least one worker "
+                    f"per width; instances={node.instances}, widths={widths}"
+                )
+            workers_per_width, remainder = divmod(node.instances, len(widths))
+            items = tuple(
+                WorkItem(
+                    work_id=(
+                        f"{node.stage_id}:gang"
+                        if len(widths) == 1
+                        else f"{node.stage_id}:width-{int(width):04d}"
+                    ),
+                    stage_id=node.stage_id,
+                    shard_index=index,
+                    shard_count=len(widths),
+                    gpus_per_instance=node.gpus_per_instance,
+                    metadata={
+                        "role": "gang",
+                        "worker_count": workers_per_width + (index < remainder),
+                        **({"width": int(width)} if width is not None else {}),
+                    },
+                )
+                for index, width in enumerate(widths)
+            )
+            return WorkPlan(
+                stage_id=node.stage_id,
+                strategy=self.strategy,
+                items=items,
+                aggregate_required=True,
+            )
+
+        if node.stage_id == "depth_importance":
             return WorkPlan(
                 stage_id=node.stage_id,
                 strategy=self.strategy,
@@ -191,7 +228,7 @@ class PersistentPoolAdapter(WorkAdapter):
         role = item.metadata.get("role", "worker")
         log_dir = plan.puzzle_dir / "logs"
         replacement_puzzle_dir = (
-            _replacement_puzzle_dir(plan)
+            _replacement_puzzle_dir(plan, item.metadata.get("width"))
             if node.stage_id == "replacement_scoring"
             else plan.puzzle_dir
         )
@@ -200,13 +237,14 @@ class PersistentPoolAdapter(WorkAdapter):
         if node.stage_id == "replacement_scoring":
             effective_overrides.extend(_replacement_overrides(plan, replacement_puzzle_dir))
         if role == "gang":
+            worker_count = int(item.metadata.get("worker_count", node.instances))
             env = {
                 "CAMPAIGN_DIR": str(campaign_dir),
                 "CONFIG_PATH": plan.experiment_config_path,
                 "PUZZLE_DIR": str(replacement_puzzle_dir),
                 "WORLD_SIZE": str(node.gpus_per_instance),
                 "NPROC_PER_NODE": str(node.gpus_per_instance),
-                "WORKER_COUNT": str(node.instances),
+                "WORKER_COUNT": str(worker_count),
             }
             if node.stage_id == "depth_importance":
                 depth = plan.experiment_config.get("depth_importance") or {}
@@ -216,12 +254,32 @@ class PersistentPoolAdapter(WorkAdapter):
                 script = repo / "examples/puzzletron/distributed_eval/run_depth_pool.sh"
             else:
                 env.update(_replacement_environment(plan, replacement_puzzle_dir))
+                replacement_widths = _replacement_widths(plan)
+                if len(replacement_widths) > 1:
+                    width = int(item.metadata["width"])
+                    env.update(
+                        {
+                            "FINALIZE_COMPLETION_DIR": str(
+                                plan.puzzle_dir
+                                / "artifacts"
+                                / "replacement_scoring"
+                                / ".pool_completion"
+                                / plan.contract_hash
+                            ),
+                            "FINALIZE_COMPLETION_MARKER": f"width-{width}",
+                            "FINALIZE_EXPECTED_COMPLETIONS": str(
+                                len(replacement_widths)
+                            ),
+                        }
+                    )
                 script = repo / "examples/puzzletron/distributed_eval/run_replacement_pool.sh"
             for override in effective_overrides:
                 existing = env.get("DISTRIBUTED_EVAL_OVERRIDES", "")
                 env["DISTRIBUTED_EVAL_OVERRIDES"] = f"{existing}\n{override}".strip()
             log_path = str(log_dir / f"{node.stage_id}_gang_{attempt_id}.log")
-            allocation_nodes, allocation_gpus, topology = packed_allocation(node)
+            allocation_nodes, allocation_gpus, topology = packed_allocation(
+                node, instances=worker_count
+            )
             return AttemptSpec(
                 attempt_id=attempt_id,
                 work_id=item.work_id,
@@ -239,7 +297,12 @@ class PersistentPoolAdapter(WorkAdapter):
                 contract_hash=plan.contract_hash,
                 metadata={
                     "role": role,
-                    "worker_count": node.instances,
+                    "worker_count": worker_count,
+                    **(
+                        {"width": int(item.metadata["width"])}
+                        if item.metadata.get("width") is not None
+                        else {}
+                    ),
                     "gpus_per_node": node.gpus_per_node,
                     "kill_on_bad_exit": True,
                     **({"partition": node.partition} if node.partition else {}),

@@ -219,7 +219,7 @@ def launch_iterative_depth_automodel(hydra_cfg: DictConfig) -> dict[str, Any]:
         params["use_puzzletron_dataloader"],
         params["data_cfg"],
     )
-    cache = TeacherTargetCache()
+    cache = TeacherTargetCache(device=params["teacher_cache_device"])
     try:
         teacher_scores = _extract_teacher_targets(recipe, cache, params)
         if teacher_scores is not None and bool(getattr(recipe, "_puzzletron_output_writer", False)):

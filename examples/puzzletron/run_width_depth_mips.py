@@ -21,6 +21,7 @@ from modelopt.torch.puzzletron.granularity import resolve_granularity
 from modelopt.torch.puzzletron.identity import mip_execution_identity, stable_hash
 from modelopt.torch.puzzletron.mip.run_puzzle import (
     _add_block_stats_to_gathered_metrics,
+    _normalize_subblock_stats_args,
     filter_subblock_stats_by_args,
     gather_composed_subblock_puzzle_metrics,
     gather_multi_layer_puzzle_metrics,
@@ -225,18 +226,24 @@ def _scenario_solve_identity(
     )
 
 
-def _stats_profile(stats_path: Path, *, runtime_stats: bool) -> dict[str, Any]:
+def _stats_profile(
+    stats_path: Path,
+    *,
+    runtime_stats: bool,
+    hidden_width: int,
+) -> dict[str, Any]:
     payload = json.loads(stats_path.read_text())
     profiles = [
         row
         for row in payload
         if isinstance(row, dict)
         and bool((row.get("args") or {}).get("runtime_stats", False)) is runtime_stats
+        and int((row.get("args") or {}).get("n_embd", -1)) == int(hidden_width)
     ]
     if not profiles:
         raise RuntimeError(
             f"expected a {'measured runtime' if runtime_stats else 'static'} profile "
-            f"in {stats_path}, found none"
+            f"for hidden width {hidden_width} in {stats_path}, found none"
         )
     if len(profiles) == 1:
         return profiles[0]
@@ -262,6 +269,40 @@ def _stats_profile(stats_path: Path, *, runtime_stats: bool) -> dict[str, Any]:
             f"static profiles in {stats_path} have conflicting parameter inventories"
         )
     return profiles[0]
+
+
+def _workload_stats_args(
+    mip_config: dict[str, Any],
+    vllm_stats_config: dict[str, Any],
+    workload_args: dict[str, Any],
+    *,
+    hidden_width: int,
+) -> dict[str, Any]:
+    """Build an exact static or measured-runtime workload identity."""
+
+    args = _normalize_subblock_stats_args(
+        dict(mip_config.get("subblock_stats_args") or {})
+    )
+    runtime_enabled = bool(
+        dict(vllm_stats_config.get("runtime_stats") or {}).get("enabled", False)
+    )
+    aliases = {
+        "isl": "prefill_seq_len",
+        "osl": "generation_seq_len",
+        **({"concurrency": "max_num_seqs"} if runtime_enabled else {}),
+    }
+    args.update(
+        {
+            aliases.get(str(key), str(key)): value
+            for key, value in workload_args.items()
+            if runtime_enabled or str(key) != "concurrency"
+        }
+    )
+    args["runtime_stats"] = runtime_enabled
+    args["n_embd"] = int(hidden_width)
+    if not runtime_enabled:
+        args.pop("max_num_seqs", None)
+    return args
 
 
 def _report_costs(runtime_profile: dict[str, Any]) -> list[str]:
@@ -430,6 +471,7 @@ def main() -> None:
     if max_depth < 0:
         raise ValueError(f"--max-depth must be non-negative, got {max_depth}")
     mip_config = dict(cfg.get("mip") or {})
+    vllm_stats_config = dict(cfg.get("vllm_stats") or {})
     score_granularity = str(mip_config.get("score_granularity", "block")).lower()
     depth_granularity = resolve_granularity("depth", depth_config)
     selected: list[dict[str, Any]] = []
@@ -515,6 +557,7 @@ def main() -> None:
         stats_profile = _stats_profile(
             stats_path,
             runtime_stats=uses_runtime if not named_profiles else False,
+            hidden_width=width,
         )
         teacher_costs = _teacher_costs(
             scoring_dir,
@@ -526,16 +569,12 @@ def main() -> None:
         workload_profiles = {}
         workload_teacher_costs = {}
         for workload_name, workload_args in dict(mip_config.get("workloads") or {}).items():
-            aliases = {
-                "isl": "prefill_seq_len",
-                "osl": "generation_seq_len",
-                "concurrency": "max_num_seqs",
-            }
-            normalized_args = {
-                aliases.get(str(key), str(key)): value
-                for key, value in dict(workload_args).items()
-            }
-            normalized_args["n_embd"] = width
+            normalized_args = _workload_stats_args(
+                mip_config,
+                vllm_stats_config,
+                dict(workload_args),
+                hidden_width=width,
+            )
             workload_profile = filter_subblock_stats_by_args(
                 stats_payload,
                 normalized_args,

@@ -558,7 +558,7 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     """
     automodel_cfg = hydra_cfg.scoring.get("automodel", None)
     recipe = build_stage_recipe_config(automodel_cfg)
-    force_hf = bool(_as_dict(automodel_cfg).get("force_hf", True))
+    force_hf = bool(_as_dict(automodel_cfg).get("force_hf", False))
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)
     recipe = _inject_model(recipe, model_path, descriptor, force_hf)
@@ -590,6 +590,12 @@ def solution_scoring_params(hydra_cfg) -> dict:
     """Scoring-specific knobs for replace-1-block scoring (read from ``scoring``)."""
     scoring = hydra_cfg.scoring
     automodel_cfg = _as_dict(scoring.get("automodel", None))
+    teacher_cache_device = str(automodel_cfg.get("teacher_cache_device", "cuda")).lower()
+    if teacher_cache_device not in {"cpu", "cuda"}:
+        raise ValueError(
+            "scoring.automodel.teacher_cache_device must be 'cpu' or 'cuda', "
+            f"got {teacher_cache_device!r}"
+        )
     data_cfg = _as_dict(hydra_cfg.get("data", None))
     eval_samples = scoring.get("eval_samples", None)
     micro_batch_size = scoring.get("micro_batch_size", 1) or 1
@@ -613,7 +619,8 @@ def solution_scoring_params(hydra_cfg) -> dict:
         "embedding_pruning_cfg": _as_dict(hydra_cfg.get("embedding_pruning", None)),
         "temperature": float(automodel_cfg.get("temperature", 1.0)),
         "chunk_size": int(automodel_cfg.get("chunk_size", 16384)),
-        "lm_head_backend": str(automodel_cfg.get("lm_head_backend", "streaming")),
+        "lm_head_backend": str(automodel_cfg.get("lm_head_backend", "flash_kld")),
+        "teacher_cache_device": teacher_cache_device,
         "flash_kld_token_chunk_size": automodel_cfg.get("flash_kld_token_chunk_size", None),
         "flash_kld_reduction_backend": str(
             automodel_cfg.get("flash_kld_reduction_backend", "fla")

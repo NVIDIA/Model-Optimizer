@@ -568,6 +568,8 @@ def _dynamic_stage_entries(
     common: Mapping[str, Any],
     single_gpu: Mapping[str, Any],
     cpu_partition: str | None,
+    *,
+    pool_source_evaluations: bool,
 ) -> dict[str, Any]:
     entries = {}
     candidate_limits = _post_mip_candidate_limits(experiment)
@@ -576,7 +578,14 @@ def _dynamic_stage_entries(
             node_type = str(node.get("type"))
             selector = node_type in {"filter", "manual_filter"}
             cpu_stage = selector or node_type == "materialize"
-            worker_limit = int(workers.get("sharded", 1))
+            pooled_evaluation = (
+                pool_source_evaluations
+                and node_type == "evaluation"
+                and str(node.get("input", "source")) == "source"
+            )
+            worker_limit = int(
+                workers.get("pool" if pooled_evaluation else "sharded", 1)
+            )
             if node_type == "aiperf":
                 worker_limit = int(workers.get("aiperf", 2 * gpus_per_node))
             candidate_limit = candidate_limits[f"post.{flow_id}.{node_id}"]
@@ -586,7 +595,13 @@ def _dynamic_stage_entries(
                 else min(worker_limit, candidate_limit)
             )
             entry = {
-                "strategy": "single" if selector else "sharded",
+                "strategy": (
+                    "single"
+                    if selector
+                    else "persistent_pool"
+                    if pooled_evaluation
+                    else "sharded"
+                ),
                 "instances": 1 if cpu_stage else max(1, instances),
                 "gpus_per_node": gpus_per_node,
             }
@@ -660,6 +675,7 @@ def render_execution(
             common,
             single_gpu,
             cpu_partition,
+            pool_source_evaluations=not bool(state.get("detailed", False)),
         )
     )
     cpu_stage_ids = {"convert", "tokenize_data", "sort", "build_library", "mip"}
