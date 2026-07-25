@@ -19,7 +19,15 @@ import hashlib
 import math
 from collections.abc import Mapping, Sequence
 
-__all__ = ["DoGEWeightUpdater", "normalize_data_path_weights", "sample_data_path_by_weight"]
+__all__ = [
+    "DoGEWeightUpdater",
+    "apply_source_max_blend_weights",
+    "apply_source_min_blend_weights",
+    "normalize_data_path_weights",
+    "resolve_source_max_blend_weights",
+    "resolve_source_min_blend_weights",
+    "sample_data_path_by_weight",
+]
 
 
 def normalize_data_path_weights(data_paths: Sequence[str]) -> dict[str, float]:
@@ -72,6 +80,152 @@ def sample_data_path_by_weight(weights: Mapping[str, float], iteration: int, see
     if last_path is None:
         raise ValueError("sampled data-blend weights cannot be empty.")
     return last_path
+
+
+def _resolve_source_weight_constraints(
+    constraints: Mapping[str, float] | None, source_paths: Sequence[str], constraint_name: str
+) -> dict[str, float]:
+    """Resolve source-specific weight constraints to concrete source paths.
+
+    Keys can be full source paths or unique path suffixes. This keeps command lines readable while
+    still failing early if a suffix is ambiguous.
+    """
+    if not constraints:
+        return {}
+
+    resolved: dict[str, float] = {}
+    for source_spec, weight in constraints.items():
+        if weight < 0:
+            raise ValueError(
+                f"source {constraint_name} blend weight must be non-negative: {source_spec}"
+            )
+        if weight > 1:
+            raise ValueError(
+                f"source {constraint_name} blend weight must be at most 1: {source_spec}"
+            )
+
+        if source_spec in source_paths:
+            source_path = source_spec
+        else:
+            matches = [path for path in source_paths if path.endswith(source_spec)]
+            if not matches:
+                raise ValueError(
+                    f"source {constraint_name} blend weight did not match any source: {source_spec}"
+                )
+            if len(matches) > 1:
+                raise ValueError(
+                    f"source {constraint_name} blend weight matched multiple sources: {source_spec}"
+                )
+            source_path = matches[0]
+
+        if source_path in resolved:
+            raise ValueError(
+                f"duplicate source {constraint_name} blend weight for source: {source_path}"
+            )
+        resolved[source_path] = weight
+
+    return resolved
+
+
+def resolve_source_min_blend_weights(
+    source_min_blend_weights: Mapping[str, float] | None, source_paths: Sequence[str]
+) -> dict[str, float]:
+    """Resolve source-specific minimum weights to concrete source paths."""
+    resolved = _resolve_source_weight_constraints(source_min_blend_weights, source_paths, "minimum")
+
+    if sum(resolved.values()) >= 1:
+        raise ValueError("source minimum blend weights must sum to less than 1.")
+    return resolved
+
+
+def resolve_source_max_blend_weights(
+    source_max_blend_weights: Mapping[str, float] | None, source_paths: Sequence[str]
+) -> dict[str, float]:
+    """Resolve source-specific maximum weights to concrete source paths."""
+    return _resolve_source_weight_constraints(source_max_blend_weights, source_paths, "maximum")
+
+
+def apply_source_min_blend_weights(
+    weights: Mapping[str, float], source_min_blend_weights: Mapping[str, float]
+) -> dict[str, float]:
+    """Apply source-specific minimum weights and renormalize the remaining sources."""
+    if not source_min_blend_weights:
+        return dict(weights)
+
+    missing_paths = set(source_min_blend_weights) - set(weights)
+    if missing_paths:
+        raise ValueError(f"source minimum blend weights contain unknown sources: {missing_paths}")
+
+    active_min_weights = {
+        path: min_weight
+        for path, min_weight in source_min_blend_weights.items()
+        if weights[path] < min_weight
+    }
+    if not active_min_weights:
+        return dict(weights)
+
+    min_weight_sum = sum(active_min_weights.values())
+    if min_weight_sum >= 1:
+        raise ValueError("active source minimum blend weights must sum to less than 1.")
+
+    remaining_paths = [path for path in weights if path not in active_min_weights]
+    remaining_weight = 1.0 - min_weight_sum
+    current_remaining_weight = sum(weights[path] for path in remaining_paths)
+    if current_remaining_weight <= 0:
+        raise ValueError(
+            "cannot apply source minimum blend weights when no mass remains to rescale."
+        )
+
+    scale = remaining_weight / current_remaining_weight
+    constrained_weights = {
+        path: weights[path] * scale for path in remaining_paths
+    } | active_min_weights
+    return {path: constrained_weights[path] for path in weights}
+
+
+def apply_source_max_blend_weights(
+    weights: Mapping[str, float], source_max_blend_weights: Mapping[str, float]
+) -> dict[str, float]:
+    """Apply source-specific maximum weights and renormalize the remaining sources."""
+    if not source_max_blend_weights:
+        return dict(weights)
+
+    missing_paths = set(source_max_blend_weights) - set(weights)
+    if missing_paths:
+        raise ValueError(f"source maximum blend weights contain unknown sources: {missing_paths}")
+
+    capped_weights: dict[str, float] = {}
+    free_paths = set(weights)
+    while True:
+        capped_weight_sum = sum(capped_weights.values())
+        remaining_weight = 1.0 - capped_weight_sum
+        if remaining_weight < 0:
+            raise ValueError("source maximum blend weights over-constrain the blend.")
+
+        current_free_weight = sum(weights[path] for path in free_paths)
+        if current_free_weight <= 0:
+            if remaining_weight == 0:
+                constrained_weights = capped_weights
+                break
+            raise ValueError(
+                "cannot apply source maximum blend weights when no mass remains to rescale."
+            )
+
+        scale = remaining_weight / current_free_weight
+        candidate_free_weights = {path: weights[path] * scale for path in free_paths}
+        newly_capped_weights = {
+            path: source_max_blend_weights[path]
+            for path, weight in candidate_free_weights.items()
+            if path in source_max_blend_weights and weight > source_max_blend_weights[path]
+        }
+        if not newly_capped_weights:
+            constrained_weights = capped_weights | candidate_free_weights
+            break
+
+        capped_weights.update(newly_capped_weights)
+        free_paths -= set(newly_capped_weights)
+
+    return {path: constrained_weights[path] for path in weights}
 
 
 class DoGEWeightUpdater:

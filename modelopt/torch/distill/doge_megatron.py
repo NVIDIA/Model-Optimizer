@@ -29,7 +29,11 @@ from megatron.core.models.gpt import GPTModel
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.distill.doge import (
     DoGEWeightUpdater,
+    apply_source_max_blend_weights,
+    apply_source_min_blend_weights,
     normalize_data_path_weights,
+    resolve_source_max_blend_weights,
+    resolve_source_min_blend_weights,
     sample_data_path_by_weight,
 )
 from modelopt.torch.distill.doge_megatron_data import (
@@ -75,6 +79,8 @@ class DoGEForwardStep:
         alignment_param_scope: DoGEAlignmentParamScope = "final_mlp",
         train_loss_mode: DoGETrainLossMode = "weighted",
         weight_update_strategy: DoGEWeightUpdateStrategy = "alignment",
+        source_min_blend_weights: dict[str, float] | None = None,
+        source_max_blend_weights: dict[str, float] | None = None,
         sampling_seed: int = 1234,
     ) -> None:
         """Initialize the callable state used by Megatron-Bridge ``pretrain``.
@@ -107,6 +113,11 @@ class DoGEForwardStep:
                 proportional to per-source KD loss as a naive PASER-style baseline.
                 ``target_kd_gap`` applies the KD-gap update only to sources that are also in the
                 target blend and sets non-target source weights to zero.
+            source_min_blend_weights: Optional per-source minimum normalized weights applied after
+                each adaptive blend update. Keys can be full source paths or unique path suffixes.
+            source_max_blend_weights: Optional per-source maximum normalized weights applied after
+                each adaptive blend update. A maximum of zero keeps the source available for DoGE
+                diagnostics but prevents it from contributing to the student training loss.
             sampling_seed: Seed used for deterministic source sampling in ``sampled`` mode.
         """
         if train_loss_mode not in ("weighted", "sampled"):
@@ -136,6 +147,15 @@ class DoGEForwardStep:
         self.alignment_param_scope = alignment_param_scope
         self.train_loss_mode = train_loss_mode
         self.weight_update_strategy = weight_update_strategy
+        self.source_min_blend_weights = resolve_source_min_blend_weights(
+            source_min_blend_weights, tuple(self.blend_weights)
+        )
+        self.source_max_blend_weights = resolve_source_max_blend_weights(
+            source_max_blend_weights, tuple(self.blend_weights)
+        )
+        _validate_source_blend_weight_constraints(
+            self.source_min_blend_weights, self.source_max_blend_weights
+        )
         self.sampling_seed = sampling_seed
 
     def write_trajectory_record(
@@ -161,6 +181,10 @@ class DoGEForwardStep:
             "train_loss_mode": self.train_loss_mode,
             "weight_update_strategy": self.weight_update_strategy,
         }
+        if self.source_min_blend_weights:
+            record["source_min_blend_weights"] = self.source_min_blend_weights
+        if self.source_max_blend_weights:
+            record["source_max_blend_weights"] = self.source_max_blend_weights
         if sampled_source_path is not None:
             record["sampled_source_path"] = sampled_source_path
         if candidate_blend_weights is not None:
@@ -348,19 +372,27 @@ class DoGEForwardStep:
     ) -> dict[str, float]:
         """Return candidate weights from the configured update strategy."""
         if self.weight_update_strategy == "alignment":
-            return dict(self.updater.update(self.blend_weights, weight_update_scores))
+            weights = dict(self.updater.update(self.blend_weights, weight_update_scores))
+            return self._apply_source_blend_weight_constraints(weights)
         if self.weight_update_strategy == "kd_gap":
-            return _normalize_scores_as_weights(weight_update_scores, self.min_blend_weight)
+            weights = _normalize_scores_as_weights(weight_update_scores, self.min_blend_weight)
+            return self._apply_source_blend_weight_constraints(weights)
         if self.weight_update_strategy == "target_kd_gap":
-            return _normalize_target_scores_as_weights(
+            weights = _normalize_target_scores_as_weights(
                 weight_update_scores,
                 self.blend_weights,
                 self.target_blend_weights,
                 self.min_blend_weight,
             )
+            return self._apply_source_blend_weight_constraints(weights)
         raise RuntimeError(
             f"Unsupported DoGE weight update strategy: {self.weight_update_strategy!r}"
         )
+
+    def _apply_source_blend_weight_constraints(self, weights: dict[str, float]) -> dict[str, float]:
+        """Apply source-specific min/max constraints after an adaptive update."""
+        weights = apply_source_min_blend_weights(weights, self.source_min_blend_weights)
+        return apply_source_max_blend_weights(weights, self.source_max_blend_weights)
 
     def _apply_scheduled_blend_weights(self, state: GlobalState) -> None:
         """Update ``blend_weights`` from the configured linear schedule, if any."""
@@ -415,6 +447,19 @@ def _normalize_virtual_step_candidate_weights(
             path: weight / total_weight for path, weight in zip(source_paths, weights)
         }
     return candidates
+
+
+def _validate_source_blend_weight_constraints(
+    source_min_blend_weights: dict[str, float], source_max_blend_weights: dict[str, float]
+) -> None:
+    """Reject contradictory per-source min/max constraints."""
+    for path, min_weight in source_min_blend_weights.items():
+        max_weight = source_max_blend_weights.get(path)
+        if max_weight is not None and min_weight > max_weight:
+            raise ValueError(
+                "source minimum blend weight cannot be larger than source maximum blend weight: "
+                f"{path}"
+            )
 
 
 def _normalize_scores_as_weights(

@@ -105,6 +105,13 @@ def _nonnegative_float(value: str) -> float:
     return parsed
 
 
+def _source_blend_weight_constraint(value: str) -> tuple[str, float]:
+    source_spec, separator, weight_value = value.rpartition("=")
+    if not separator or not source_spec:
+        raise argparse.ArgumentTypeError("must use SOURCE=WEIGHT format")
+    return source_spec, _nonnegative_float(weight_value)
+
+
 def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse the DoGE distillation command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -217,6 +224,30 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Minimum normalized weight for each DoGE source after every update. Use this to keep "
             "low-weight sources active while alignment scores evolve."
+        ),
+    )
+    doge.add_argument(
+        "--doge_source_min_blend_weight",
+        action="append",
+        type=_source_blend_weight_constraint,
+        default=[],
+        metavar="SOURCE=WEIGHT",
+        help=(
+            "Source-specific minimum normalized weight applied after every adaptive update. "
+            "SOURCE can be a full source path or a unique source-path suffix. Repeat for multiple "
+            "sources."
+        ),
+    )
+    doge.add_argument(
+        "--doge_source_max_blend_weight",
+        action="append",
+        type=_source_blend_weight_constraint,
+        default=[],
+        metavar="SOURCE=WEIGHT",
+        help=(
+            "Source-specific maximum normalized weight applied after every adaptive update. "
+            "Use SOURCE=0 to keep a source available for DoGE diagnostics but prevent it from "
+            "contributing to the student training loss."
         ),
     )
     doge.add_argument(
@@ -422,6 +453,8 @@ def main(args: argparse.Namespace) -> None:
         alignment_param_scope=args.doge_alignment_param_scope,
         train_loss_mode=args.doge_train_loss_mode,
         weight_update_strategy=args.doge_weight_update_strategy,
+        source_min_blend_weights=dict(args.doge_source_min_blend_weight),
+        source_max_blend_weights=dict(args.doge_source_max_blend_weight),
         sampling_seed=args.seed,
     )
 

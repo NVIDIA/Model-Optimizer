@@ -17,7 +17,11 @@ import pytest
 
 from modelopt.torch.distill.doge import (
     DoGEWeightUpdater,
+    apply_source_max_blend_weights,
+    apply_source_min_blend_weights,
     normalize_data_path_weights,
+    resolve_source_max_blend_weights,
+    resolve_source_min_blend_weights,
     sample_data_path_by_weight,
 )
 
@@ -47,6 +51,46 @@ def test_sample_data_path_by_weight_respects_zero_weight():
     assert {sample_data_path_by_weight(weights, iteration=i, seed=1234) for i in range(20)} == {
         "/data/a"
     }
+
+
+def test_resolve_source_min_blend_weights_accepts_unique_suffix():
+    source_paths = ["/data/wiki", "/data/nemotron/math", "/data/nemotron/stem"]
+
+    weights = resolve_source_min_blend_weights({"nemotron/math": 0.2}, source_paths)
+
+    assert weights == {"/data/nemotron/math": 0.2}
+
+
+def test_resolve_source_max_blend_weights_accepts_unique_suffix():
+    source_paths = ["/data/wiki", "/data/nemotron/math", "/data/nemotron/stem"]
+
+    weights = resolve_source_max_blend_weights({"nemotron/stem": 0.0}, source_paths)
+
+    assert weights == {"/data/nemotron/stem": 0.0}
+
+
+def test_apply_source_min_blend_weights_rescales_remaining_sources():
+    weights = apply_source_min_blend_weights(
+        {"wiki": 0.8, "math": 0.05, "stem": 0.15},
+        {"math": 0.1},
+    )
+
+    assert weights["math"] == 0.1
+    assert weights["wiki"] == pytest.approx(0.7578947368)
+    assert weights["stem"] == pytest.approx(0.1421052632)
+    assert sum(weights.values()) == pytest.approx(1.0)
+
+
+def test_apply_source_max_blend_weights_rescales_remaining_sources():
+    weights = apply_source_max_blend_weights(
+        {"wiki": 0.2, "math": 0.5, "stem": 0.3},
+        {"stem": 0.0},
+    )
+
+    assert weights["stem"] == 0.0
+    assert weights["wiki"] == pytest.approx(0.2857142857)
+    assert weights["math"] == pytest.approx(0.7142857143)
+    assert sum(weights.values()) == pytest.approx(1.0)
 
 
 def test_doge_weight_updater_increases_aligned_source():
