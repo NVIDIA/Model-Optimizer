@@ -851,6 +851,45 @@ def test_submit_job_slurm_creates_mlflow_run_and_injects_env(monkeypatch, tmp_pa
     assert tags["managed_by"] == "modelopt-mcp"
 
 
+def test_mark_mlflow_submission_failed_terminates_run_as_failed(monkeypatch):
+    """Failure compensation must not let the resumed MLflow run exit FINISHED."""
+    calls: list[tuple[Any, ...]] = []
+
+    class _Run:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _MLflow:
+        def set_tracking_uri(self, uri):
+            calls.append(("tracking_uri", uri))
+
+        def start_run(self, **kwargs):
+            calls.append(("start_run", kwargs))
+            return _Run()
+
+        def set_tags(self, tags):
+            calls.append(("tags", tags))
+
+        def log_param(self, key, value):
+            calls.append(("param", key, value))
+
+        def log_metric(self, key, value):
+            calls.append(("metric", key, value))
+
+        def end_run(self, status):
+            calls.append(("end_run", status))
+
+    monkeypatch.setattr(bridge, "_setup_mlflow", lambda: (_MLflow(), None))
+
+    bridge._mark_mlflow_submission_failed("run-123", "https://mlflow.example", "launch_failed")
+
+    assert ("start_run", {"run_id": "run-123"}) in calls
+    assert ("end_run", "FAILED") in calls
+
+
 def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
     """nmm-sandbox resolved cluster config maps to launcher overrides and env."""
     yaml_dir = tmp_path / "examples"
@@ -1667,8 +1706,53 @@ def test_finalize_mlflow_run_fetches_nemo_logs_before_upload(tmp_path, monkeypat
     assert (exp / "nemo_logs_task_0.log").read_text() == "log for task 0\n"
     assert (exp / "nemo_logs_task_1.log").read_text() == "log for task 1\n"
     assert [call["job_idx"] for call in fetch_calls] == [0, 1]
+    assert all(call["timeout_sec"] <= 120 for call in fetch_calls)
     uploaded = {Path(item[1]).name for item in calls if item[0] == "artifact"}
     assert {"nemo_logs_task_0.log", "nemo_logs_task_1.log"} <= uploaded
+
+
+def test_fetch_single_nemo_log_requires_child_result(monkeypatch, tmp_path):
+    """A zero-exit child with no queue result is not a successful fetch."""
+
+    class _Queue:
+        def get(self, timeout):
+            raise bridge.queue.Empty
+
+    class _Process:
+        exitcode = 0
+        daemon = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            pass
+
+        def is_alive(self):
+            return False
+
+    fake_context = type(
+        "_Context",
+        (),
+        {
+            "Queue": lambda self: _Queue(),
+            "Process": lambda self, **kwargs: _Process(),
+        },
+    )()
+    monkeypatch.setattr(bridge.multiprocessing, "get_context", lambda: fake_context)
+
+    result = bridge._fetch_single_nemo_log_to_file(
+        experiment_id="exp_done",
+        job_idx=0,
+        target=tmp_path / "nemo_logs_task_0.log",
+    )
+
+    assert result["ok"] is False
+    assert result["reason"] == "logs_fetch_failed"
+    assert "without returning a result" in result["diagnostic"]
 
 
 def test_fetch_nemo_logs_treats_zero_task_count_as_unknown(tmp_path, monkeypatch):
@@ -1694,6 +1778,67 @@ def test_fetch_nemo_logs_treats_zero_task_count_as_unknown(tmp_path, monkeypatch
 
     assert result == {"fetched_artifacts": ["nemo_logs_task_0.log"], "errors": []}
     assert calls == [0]
+
+
+def test_fetch_nemo_logs_enforces_overall_deadline(tmp_path, monkeypatch):
+    """Finalization should stop scheduling task fetches after the total budget."""
+    exp = tmp_path / "experiments" / "exp_done"
+    exp.mkdir(parents=True)
+    times = iter([0.0, 0.0, 2.0])
+    calls = []
+
+    def fake_fetch_single(*, experiment_id, job_idx, target, timeout_sec=120):
+        calls.append((job_idx, timeout_sec))
+        target.write_text("task log\n")
+        return {"ok": True}
+
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(bridge, "_infer_nemo_log_task_count", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(bridge, "_fetch_single_nemo_log_to_file", fake_fetch_single)
+
+    result = bridge._fetch_nemo_logs_to_experiment_dir(
+        experiment_id="exp_done",
+        exp_dir=exp,
+        max_total_sec=1,
+    )
+
+    assert result["fetched_artifacts"] == ["nemo_logs_task_0.log"]
+    assert calls == [(0, 1.0)]
+    assert result["errors"][0]["job_idx"] == 1
+    assert result["errors"][0]["reason"] == "logs_fetch_timeout"
+
+
+def test_mlflow_artifacts_skip_symlinks_and_snapshot_regular_files(tmp_path):
+    """MLflow upload candidates must not follow job-created symlinks."""
+    exp = tmp_path / "experiments" / "exp_done"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").write_text("")
+    (exp / "log_task_0.out").write_text("safe\n")
+    (exp / "log_task_1.out").symlink_to(tmp_path / "outside.log")
+    (tmp_path / "outside.log").write_text("secret\n")
+    snapshot_dir = tmp_path / "snapshots"
+    snapshot_dir.mkdir()
+
+    files = bridge._mlflow_artifact_files(exp)
+    snapshots = bridge._snapshot_mlflow_artifacts(exp, snapshot_dir)
+
+    assert {path.name for path in files} == {"_DONE", "log_task_0.out"}
+    assert {path.name for path in snapshots} == {"_DONE", "log_task_0.out"}
+    assert (snapshot_dir / "log_task_0.out").read_text() == "safe\n"
+    assert not (snapshot_dir / "log_task_1.out").exists()
+
+
+def test_nemo_log_writer_rejects_existing_symlink(tmp_path):
+    """Log capture must not truncate a symlink target controlled by the job."""
+    outside = tmp_path / "outside.log"
+    outside.write_text("keep me\n")
+    target = tmp_path / "nemo_logs_task_0.log"
+    target.symlink_to(outside)
+
+    with pytest.raises(OSError), bridge._open_no_follow_text_writer(target):
+        pass
+
+    assert outside.read_text() == "keep me\n"
 
 
 def test_finalize_mlflow_run_rejects_invalid_experiment_id():

@@ -43,6 +43,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
 import tempfile
 import time
@@ -748,6 +749,7 @@ def _mark_mlflow_submission_failed(mlflow_run_id: str, tracking_uri: str, reason
             mlflow.set_tags({"lifecycle": "submit_failed", "result_label": "SUBMIT_FAILED"})
             mlflow.log_param("submit_failure_reason", reason)
             mlflow.log_metric("result", 0.0)
+            mlflow.end_run(status="FAILED")
 
 
 def _mlflow_result_metric(status: str) -> float:
@@ -757,6 +759,18 @@ def _mlflow_result_metric(status: str) -> float:
     if status == "failed":
         return 0.0
     return -1.0
+
+
+def _is_safe_regular_artifact(path: Path, exp_dir: Path) -> bool:
+    """Return whether path is a non-symlink regular file contained in exp_dir."""
+    try:
+        if path.is_symlink():
+            return False
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(exp_dir.resolve(strict=True))
+        return stat.S_ISREG(path.stat(follow_symlinks=False).st_mode)
+    except (OSError, ValueError):
+        return False
 
 
 def _mlflow_artifact_files(exp_dir: Path) -> list[Path]:
@@ -772,10 +786,46 @@ def _mlflow_artifact_files(exp_dir: Path) -> list[Path]:
     files: list[Path] = []
     for pattern in patterns:
         for path in sorted(exp_dir.glob(pattern)):
-            if path.is_file() and path not in seen:
+            if _is_safe_regular_artifact(path, exp_dir) and path not in seen:
                 seen.add(path)
                 files.append(path)
     return files
+
+
+def _open_no_follow_text_writer(path: Path):
+    """Open path for truncating text output without following symlinks."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        return os.fdopen(fd, "w", encoding="utf-8", errors="replace")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _snapshot_mlflow_artifacts(exp_dir: Path, snapshot_dir: Path) -> list[Path]:
+    """Copy safe artifacts into an agent-owned directory before upload."""
+    snapshots: list[Path] = []
+    for source in _mlflow_artifact_files(exp_dir):
+        target = snapshot_dir / source.name
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(source, flags)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                continue
+            with os.fdopen(fd, "rb") as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+        except OSError:
+            continue
+        snapshots.append(target)
+    return snapshots
 
 
 def _infer_nemo_log_task_count(experiment_id: str, explicit_count: int | None = None) -> int:
@@ -805,7 +855,7 @@ def _run_nemo_logs_process(
     """Child-process entry point that streams Nemo logs into target."""
     try:
         with (
-            Path(target).open("w", encoding="utf-8", errors="replace") as out,
+            _open_no_follow_text_writer(Path(target)) as out,
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(out),
         ):
@@ -837,7 +887,7 @@ def _fetch_single_nemo_log_to_file(
     experiment_id: str,
     job_idx: int,
     target: Path,
-    timeout_sec: int = 120,
+    timeout_sec: float = 120,
 ) -> dict:
     """Fetch one Nemo task log to target without buffering it in the MCP process."""
     ctx = multiprocessing.get_context()
@@ -859,10 +909,15 @@ def _fetch_single_nemo_log_to_file(
         }
 
     try:
-        result = result_queue.get_nowait()
+        result = result_queue.get(timeout=1)
     except queue.Empty:
-        result = {}
-    if proc.exitcode == 0 and result.get("ok", True):
+        return {
+            "ok": False,
+            "reason": "logs_fetch_failed",
+            "diagnostic": "Nemo log fetch exited without returning a result.",
+            "exit_code": proc.exitcode,
+        }
+    if proc.exitcode == 0 and result.get("ok") is True:
         return {"ok": True}
 
     error_type = result.get("error_type")
@@ -888,16 +943,31 @@ def _fetch_nemo_logs_to_experiment_dir(
     experiment_id: str,
     exp_dir: Path,
     task_count: int | None = None,
+    max_total_sec: float = 120,
 ) -> dict:
     """Fetch terminal Nemo/Slurm logs into exp_dir so MLflow can archive them."""
     fetched: list[str] = []
     errors: list[dict] = []
+    deadline = time.monotonic() + max_total_sec
     for job_idx in range(_infer_nemo_log_task_count(experiment_id, task_count)):
         target = exp_dir / f"nemo_logs_task_{job_idx}.log"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append(
+                {
+                    "job_idx": job_idx,
+                    "artifact": target.name,
+                    "ok": False,
+                    "reason": "logs_fetch_timeout",
+                    "diagnostic": "Nemo log fetch deadline exhausted before this task was fetched.",
+                }
+            )
+            break
         result = _fetch_single_nemo_log_to_file(
             experiment_id=experiment_id,
             job_idx=job_idx,
             target=target,
+            timeout_sec=min(120, remaining),
         )
         if result.get("ok"):
             fetched.append(target.name)
@@ -980,9 +1050,10 @@ def finalize_mlflow_run_impl(
                         "result_label": final_status.upper(),
                     }
                 )
-                for path in _mlflow_artifact_files(exp_dir):
-                    mlflow.log_artifact(str(path), artifact_path="logs")
-                    uploaded.append(path.name)
+                with tempfile.TemporaryDirectory(prefix="modelopt-mcp-mlflow-") as snapshot:
+                    for path in _snapshot_mlflow_artifacts(exp_dir, Path(snapshot)):
+                        mlflow.log_artifact(str(path), artifact_path="logs")
+                        uploaded.append(path.name)
     except Exception as exc:
         return {
             "ok": False,
