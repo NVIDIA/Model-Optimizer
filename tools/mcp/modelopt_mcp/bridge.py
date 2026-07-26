@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
 import tempfile
@@ -966,6 +967,8 @@ def _launcher_overrides(
     account: str | None,
     partition: str | None,
     container: str | None,
+    container_mounts: list[str] | None,
+    srun_args: list[str] | None,
     gpus_per_node: int | None,
     ntasks_per_node: int | None,
 ) -> dict[str, str]:
@@ -979,6 +982,16 @@ def _launcher_overrides(
             overrides.setdefault(f"{slurm_prefix}partition", partition)
         if container:
             overrides.setdefault(f"{slurm_prefix}container", container)
+        if container_mounts is not None:
+            overrides.setdefault(
+                f"{slurm_prefix}container_mounts",
+                json.dumps(container_mounts, separators=(",", ":")),
+            )
+        if srun_args is not None:
+            overrides.setdefault(
+                f"{slurm_prefix}srun_args",
+                json.dumps(srun_args, separators=(",", ":")),
+            )
         if gpus_per_node is not None:
             overrides.setdefault(f"{slurm_prefix}gpus_per_node", str(gpus_per_node))
         if ntasks_per_node is not None:
@@ -998,7 +1011,7 @@ def _apply_launcher_env(
     reconnect_command: str | None,
 ) -> None:
     """Apply launcher env shared by live submit and dry-run."""
-    env.setdefault("NEMORUN_HOME", os.getcwd())
+    env.setdefault("NEMORUN_HOME", str(_nemorun_home()))
     if checkout is not None:
         env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
         env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
@@ -1029,6 +1042,8 @@ def submit_job_impl(
     account: str | None = None,
     partition: str | None = None,
     container: str | None = None,
+    container_mounts: list[str] | None = None,
+    srun_args: list[str] | None = None,
     gpus_per_node: int | None = None,
     ntasks_per_node: int | None = None,
     control_socket: str | None = None,
@@ -1088,6 +1103,8 @@ def submit_job_impl(
             account=account,
             partition=partition,
             container=container,
+            container_mounts=container_mounts,
+            srun_args=srun_args,
             gpus_per_node=gpus_per_node,
             ntasks_per_node=ntasks_per_node,
             control_socket=control_socket,
@@ -1202,6 +1219,8 @@ def submit_job_impl(
         account=account,
         partition=partition,
         container=container,
+        container_mounts=container_mounts,
+        srun_args=srun_args,
         gpus_per_node=gpus_per_node,
         ntasks_per_node=ntasks_per_node,
     ).items():
@@ -1399,6 +1418,8 @@ def _submit_job_dry_run(
     account: str | None,
     partition: str | None,
     container: str | None,
+    container_mounts: list[str] | None,
+    srun_args: list[str] | None,
     gpus_per_node: int | None,
     ntasks_per_node: int | None,
     control_socket: str | None,
@@ -1473,6 +1494,8 @@ def _submit_job_dry_run(
         account=account,
         partition=partition,
         container=container,
+        container_mounts=container_mounts,
+        srun_args=srun_args,
         gpus_per_node=gpus_per_node,
         ntasks_per_node=ntasks_per_node,
     ).items():
@@ -1578,12 +1601,13 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
     """Map an experiment_id to its on-disk directory.
 
     nemo_run lays experiments out under ``$NEMORUN_HOME/experiments/<id>/``
-    by default; ``NEMORUN_HOME`` falls back to cwd. We check several
+    by default. We check several
     candidate roots in order:
 
-    1. ``$NEMORUN_HOME/experiments/`` — what submit_job_impl pins via env.
+    1. NeMo Run's configured/default home.
     2. cwd's ``experiments/`` + ``local_experiments/`` — for operators
-       running the MCP server from their own checkout.
+       running the MCP server from their own checkout and for experiments
+       created by older modelopt-mcp versions.
     3. The launcher's own ``experiments/`` directory — belt-and-braces
        for the case where the operator didn't set NEMORUN_HOME at all
        AND the MCP server's cwd differs from where launch.py ran.
@@ -1600,16 +1624,21 @@ def _resolve_experiment_dir(experiment_id: str) -> Path | None:
 
 def _experiment_search_roots() -> list[Path]:
     """Return experiment roots searched by status/log tools."""
-    roots = []
-    nemorun_home = os.environ.get("NEMORUN_HOME")
-    if nemorun_home:
-        roots.append(Path(nemorun_home) / "experiments")
+    roots = [_nemorun_home() / "experiments"]
     roots.append(Path.cwd() / "experiments")
     roots.append(Path.cwd() / "local_experiments")
     launcher_dir = _find_launcher_package_dir()
     if launcher_dir is not None:
         roots.append(launcher_dir / "experiments")
     return roots
+
+
+def _nemorun_home() -> Path:
+    """Return the explicit NeMo Run home or NeMo Run's native default."""
+    configured = os.environ.get("NEMORUN_HOME")
+    if configured:
+        return Path(configured)
+    return Path.home() / ".nemo_run"
 
 
 def _experiment_not_found_diagnostic() -> str:
@@ -1923,11 +1952,15 @@ def wait_for_experiment_impl(
     experiment_id: str,
     timeout_sec: int,
     poll_interval_sec: int,
+    include_log: bool = False,
+    log_job_idx: int = 0,
 ) -> dict:
     """Block until ``experiment_id`` reaches a terminal status or the timeout elapses.
 
     Returns the same dict shape as ``job_status_impl`` plus a
-    ``waited_seconds`` field. On timeout, returns
+    ``waited_seconds`` field. When ``include_log`` is true, terminal
+    results also include ``log_tail`` or a structured ``log_error``.
+    On timeout, returns
     ``{ok: False, reason: "wait_timeout", last_status: <last poll>}``
     instead of raising — same structured-failure convention as the
     other tools.
@@ -1947,7 +1980,18 @@ def wait_for_experiment_impl(
             # dir doesn't exist.
             return {**status, "waited_seconds": time.monotonic() - started}
         if status["status"] in ("done", "failed"):
-            return {**status, "waited_seconds": time.monotonic() - started}
+            result = {**status, "waited_seconds": time.monotonic() - started}
+            if include_log:
+                log_result = read_cluster_artifact_impl(
+                    experiment_id=experiment_id,
+                    path=None,
+                    job_idx=log_job_idx,
+                )
+                if log_result.get("ok"):
+                    result["log_tail"] = log_result["content"]
+                else:
+                    result["log_error"] = log_result
+            return result
         if time.monotonic() - started > timeout_sec:
             return {
                 "ok": False,
@@ -2109,64 +2153,19 @@ def read_cluster_artifact_impl(
     The tool returns ``{ok, content, ...}`` with the file content as a
     text string (8 KB max — same as the launcher's log_excerpt cap).
     """
-    if not path:
-        # Mode 1: fetch log via `nemo experiment logs`. Subprocess
-        # because the CLI handles tunnel auth and remote-path
-        # resolution.
-        argv = [
-            "uv",
-            "run",
-            "nemo",
-            "experiment",
-            "logs",
-            experiment_id,
-            str(job_idx),
-        ]
-        try:
-            proc = subprocess.run(  # nosec B603 B607 - fixed nemo CLI argv; no shell.
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "experiment_id": experiment_id,
-                "job_idx": job_idx,
-                "reason": "logs_fetch_timeout",
-                "diagnostic": (
-                    f"`nemo experiment logs {experiment_id} {job_idx}` "
-                    f"did not return within 60s — tunnel may be slow "
-                    f"or unreachable."
-                ),
-            }
-        if proc.returncode != 0:
-            return {
-                "ok": False,
-                "experiment_id": experiment_id,
-                "job_idx": job_idx,
-                "reason": "logs_fetch_failed",
-                "exit_code": proc.returncode,
-                "diagnostic": (
-                    f"`nemo experiment logs` exited with code "
-                    f"{proc.returncode}. stderr: {proc.stderr.strip()[-400:]}"
-                ),
-            }
-        content = (proc.stdout or "")[-8192:]
+    invalid = _validate_experiment_id(experiment_id)
+    if invalid:
+        return invalid
+
+    exp_dir = _resolve_experiment_dir(experiment_id)
+    if exp_dir is None:
         return {
-            "ok": True,
+            "ok": False,
             "experiment_id": experiment_id,
-            "job_idx": job_idx,
-            "mode": "logs",
-            "content": content,
-            "bytes": len(content),
+            "reason": "experiment_dir_not_found",
+            "diagnostic": _experiment_not_found_diagnostic(),
         }
 
-    # Mode 2: arbitrary path via the experiment's tunnel. nemo_run's
-    # Experiment loads the executor + tunnel from disk; we rsync the
-    # named relative path into a local tmp dir, then read it back.
     try:
         from nemo_run.run.experiment import Experiment
     except ImportError:
@@ -2183,8 +2182,11 @@ def read_cluster_artifact_impl(
             ),
         }
     try:
-        exp = Experiment.from_id(experiment_id)
-    except (FileNotFoundError, ValueError) as e:
+        exp = Experiment._from_config(str(exp_dir))
+        job = exp.jobs[job_idx]
+        executor = job.executor
+        tunnel = getattr(executor, "tunnel", None)
+    except (AssertionError, FileNotFoundError, ValueError) as e:
         return {
             "ok": False,
             "experiment_id": experiment_id,
@@ -2196,13 +2198,6 @@ def read_cluster_artifact_impl(
             ),
         }
 
-    # The executor exposes a tunnel; tunnel.run() runs a remote shell
-    # command. Use `cat` for small files; rsync for large ones is a
-    # Phase-2.1 follow-up.
-    try:
-        task = exp.tasks[job_idx]
-        executor = task.executor
-        tunnel = getattr(executor, "tunnel", None)
     except (IndexError, AttributeError) as e:
         return {
             "ok": False,
@@ -2223,10 +2218,7 @@ def read_cluster_artifact_impl(
             "diagnostic": "Experiment executor has no tunnel attribute.",
         }
 
-    # Resolve the remote path. The experiment dir on the cluster is
-    # exposed via tunnel.job_dir or executor.job_dir; for the launcher's
-    # SlurmExecutor, this is set at submit time.
-    remote_dir = getattr(executor, "job_dir", None) or getattr(tunnel, "job_dir", None)
+    remote_dir = getattr(tunnel, "job_dir", None)
     if not remote_dir:
         return {
             "ok": False,
@@ -2238,7 +2230,44 @@ def read_cluster_artifact_impl(
                 "of a relative one."
             ),
         }
-    remote_path = path if path.startswith("/") else f"{remote_dir}/{experiment_id}/{path}"
+    if not path:
+        task_dir = f"{remote_dir}/{job.id}"
+        quoted_task_dir = shlex.quote(task_dir)
+        command = (
+            f"log_path=$(find {quoted_task_dir} -maxdepth 1 -type f "
+            "\\( -name 'log-*.out' -o -name 'sbatch_*.out' \\) "
+            "-print | sort | head -n 1); "
+            'test -n "$log_path" && tail -c 8192 "$log_path"'
+        )
+        try:
+            result = tunnel.run(command, warn=True)
+        except Exception as e:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "logs_fetch_failed",
+                "diagnostic": f"Remote log read failed: {type(e).__name__}: {e}",
+            }
+        stdout = getattr(result, "stdout", "") or ""
+        if not stdout:
+            return {
+                "ok": False,
+                "experiment_id": experiment_id,
+                "job_idx": job_idx,
+                "reason": "task_log_not_found",
+                "diagnostic": f"No task log was found under {task_dir}.",
+            }
+        return {
+            "ok": True,
+            "experiment_id": experiment_id,
+            "job_idx": job_idx,
+            "mode": "logs",
+            "content": stdout[-8192:],
+            "bytes": len(stdout),
+        }
+
+    remote_path = path if path.startswith("/") else f"{remote_dir}/{path}"
 
     try:
         result = tunnel.run(f"cat {remote_path}", warn=True)

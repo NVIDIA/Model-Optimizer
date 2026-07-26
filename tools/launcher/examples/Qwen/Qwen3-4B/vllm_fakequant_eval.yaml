@@ -1,0 +1,22 @@
+job_name: qwen3_4b_e5m2_vllm_eval
+
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Qwen3-4B scale-free E5M2 vLLM fake-quant smoke evaluation"
+
+  task_0:
+    script: common/vllm/fakequant_eval.sh
+    args:
+      - /hf-local/Qwen/Qwen3-4B
+      - E5M2_DEFAULT_CFG
+      - gsm8k
+      - "20"
+    environment:
+      - VLLM_STARTUP_TIMEOUT: "600"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: "01:00:00"
