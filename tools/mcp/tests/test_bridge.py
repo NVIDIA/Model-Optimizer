@@ -1337,6 +1337,54 @@ def test_launcher_and_status_share_native_nemorun_home(tmp_path, monkeypatch):
     assert bridge._experiment_search_roots()[0] == native_home / "experiments"
 
 
+def test_launcher_env_hydrates_credentials_from_pensieve_cache(tmp_path, monkeypatch):
+    """Carrier-backed credentials reach launcher subprocesses without entering argv."""
+    cache = tmp_path / "pensieve.env"
+    cache.write_text(
+        "export HF_TOKEN='carrier hf token'\n"
+        "SPECDEC_BENCH_S3_SECRET=carrier-s3-secret\n"
+        "UNRELATED_SECRET=do-not-forward\n"
+    )
+    monkeypatch.setenv("PENSIEVE_ENV_FILE", str(cache))
+    env = {}
+
+    bridge._apply_launcher_env(
+        env,
+        checkout=None,
+        executor="slurm",
+        cluster_host="cluster.example.com",
+        account=None,
+        partition=None,
+        control_socket=None,
+        reconnect_command=None,
+    )
+
+    assert env["HF_TOKEN"] == "carrier hf token"
+    assert env["SPECDEC_BENCH_S3_SECRET"] == "carrier-s3-secret"
+    assert "UNRELATED_SECRET" not in env
+
+
+def test_launcher_env_prefers_process_credentials(tmp_path, monkeypatch):
+    """An inherited non-empty credential takes precedence over the cache."""
+    cache = tmp_path / "pensieve.env"
+    cache.write_text("HF_TOKEN=cache-token\n")
+    monkeypatch.setenv("PENSIEVE_ENV_FILE", str(cache))
+    env = {"HF_TOKEN": "process-token"}
+
+    bridge._apply_launcher_env(
+        env,
+        checkout=None,
+        executor="slurm",
+        cluster_host="cluster.example.com",
+        account=None,
+        partition=None,
+        control_socket=None,
+        reconnect_command=None,
+    )
+
+    assert env["HF_TOKEN"] == "process-token"
+
+
 def test_job_status_rejects_unsafe_experiment_id():
     """Experiment ids are path tokens, not filesystem paths or globs."""
     result = bridge.job_status_impl("../exp_1781000008")

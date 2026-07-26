@@ -70,6 +70,14 @@ _LAUNCHER_ERROR_RE = re.compile(
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _SAFE_PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_LAUNCHER_CREDENTIAL_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "HF_TOKEN",
+        "SPECDEC_BENCH_S3_ENDPOINT",
+        "SPECDEC_BENCH_S3_KEY_ID",
+        "SPECDEC_BENCH_S3_SECRET",
+    }
+)
 _SLURM_TERMINAL_STATES: frozenset[str] = frozenset(
     {
         "COMPLETED",
@@ -1011,6 +1019,7 @@ def _apply_launcher_env(
     reconnect_command: str | None,
 ) -> None:
     """Apply launcher env shared by live submit and dry-run."""
+    _hydrate_launcher_credentials_from_cache(env)
     env.setdefault("NEMORUN_HOME", str(_nemorun_home()))
     if checkout is not None:
         env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
@@ -1026,6 +1035,40 @@ def _apply_launcher_env(
             env["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"] = os.path.expanduser(control_socket)
         if reconnect_command:
             env["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] = reconnect_command
+
+
+def _hydrate_launcher_credentials_from_cache(env: dict[str, str]) -> None:
+    """Fill missing launcher credentials from Pensieve's ephemeral env cache.
+
+    Hosted runtimes may inject credentials into the agent shell after the
+    long-lived MCP server starts. The Pensieve credential cache is hydrated
+    from the user's carrier for this case. Only credentials already supported
+    by the launcher are read, process-environment values remain authoritative,
+    and values are passed only through the child process environment.
+    """
+    configured_path = env.get("PENSIEVE_ENV_FILE") or os.environ.get("PENSIEVE_ENV_FILE")
+    cache_path = (
+        Path(configured_path).expanduser()
+        if configured_path
+        else Path.home() / ".config" / "pensieve" / "env"
+    )
+    try:
+        lines = cache_path.read_text().splitlines()
+    except OSError:
+        return
+
+    for line in lines:
+        try:
+            fields = shlex.split(line, comments=True, posix=True)
+        except ValueError:
+            continue
+        if fields[:1] == ["export"]:
+            fields = fields[1:]
+        if len(fields) != 1 or "=" not in fields[0]:
+            continue
+        key, value = fields[0].split("=", 1)
+        if key in _LAUNCHER_CREDENTIAL_ENV_KEYS and not env.get(key):
+            env[key] = value
 
 
 def submit_job_impl(
