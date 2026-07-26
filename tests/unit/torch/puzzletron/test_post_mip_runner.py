@@ -115,3 +115,55 @@ def test_online_eval_injects_resolved_hidden_width_into_solution(monkeypatch):
 
     assert work.hidden_width == 1792
     assert work.raw_solution["hidden_width"] == 1792
+
+
+def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+
+    def fake_run_aiperf_sweep(checkpoint, **settings):
+        captured["checkpoint"] = checkpoint
+        captured.update(settings)
+        return [SimpleNamespace(concurrency=8, metrics={}, raw_artifacts={})]
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.run_aiperf_sweep",
+        fake_run_aiperf_sweep,
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    node = SimpleNamespace(
+        node_id="serving",
+        flow_id="params",
+        config={
+            "config": {
+                "concurrency": [8],
+                "request_count": 23,
+                "minimum_request_count": 4,
+                "requests_per_concurrency": 2,
+                "input_tokens": 1024,
+                "output_tokens": 128,
+                "topology": {"gpu_group_size": 1},
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    result = runner._aiperf(
+        {"puzzle_dir": str(tmp_path)},
+        node,
+        source,
+        "execution",
+    )
+
+    assert captured["checkpoint"] == str(tmp_path / "checkpoint")
+    assert captured["concurrencies"] == (8,)
+    assert captured["request_counts"] == {8: 23}
+    assert "request_count" not in captured
+    assert "minimum_request_count" not in captured
+    assert "requests_per_concurrency" not in captured
+    assert result["metrics"] == {}

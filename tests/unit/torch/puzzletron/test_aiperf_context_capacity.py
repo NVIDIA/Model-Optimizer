@@ -8,6 +8,7 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _exact_length_extra_inputs,
     _parse_export,
     _prepare_vllm_checkpoint,
+    _profile_command,
     _server_max_model_len,
     _topology_vllm_args,
 )
@@ -91,37 +92,39 @@ def test_prepare_vllm_checkpoint_leaves_native_teacher_unchanged(tmp_path):
     assert _prepare_vllm_checkpoint(tmp_path) is False
 
 
-def test_canonical_topology_covers_tp_pp_dp_ep_and_context_parallel():
+def test_canonical_topology_covers_tp_pp_dp_effective_ep_and_context_parallel():
     topology = _canonical_topology(
         {
             "tensor_parallel_size": 2,
             "pipeline_parallel_size": 1,
-            "data_parallel_size": 1,
-            "expert_parallel_size": 1,
+            "data_parallel_size": 2,
+            "enable_expert_parallel": True,
             "prefill_context_parallel_size": 2,
             "decode_context_parallel_size": 2,
-            "gpu_group_size": 4,
+            "gpu_group_size": 8,
         }
     )
     assert topology == {
         "tp": 2,
         "pp": 1,
-        "dp": 1,
-        "ep": 1,
+        "dp": 2,
         "prefill_cp": 2,
         "decode_cp": 2,
-        "gpu_count": 4,
+        "enable_expert_parallel": True,
+        "effective_ep": 4,
+        "gpu_count": 8,
         "distributed_executor_backend": "mp",
     }
 
 
-def test_vllm_topology_args_enable_dp_and_ep_only_when_requested():
+def test_vllm_topology_args_enable_dp_and_expert_parallel_only_when_requested():
     dp_args = _topology_vllm_args(
         {
             "tensor_parallel_size": 1,
             "pipeline_parallel_size": 1,
             "data_parallel_size": 2,
-            "expert_parallel_size": 1,
+            "enable_expert_parallel": False,
+            "gpu_group_size": 2,
         }
     )
     assert dp_args[dp_args.index("--data-parallel-size") + 1] == "2"
@@ -130,13 +133,42 @@ def test_vllm_topology_args_enable_dp_and_ep_only_when_requested():
 
     ep_args = _topology_vllm_args(
         {
-            "tensor_parallel_size": 1,
+            "tensor_parallel_size": 2,
             "pipeline_parallel_size": 1,
-            "data_parallel_size": 2,
-            "expert_parallel_size": 2,
+            "data_parallel_size": 4,
+            "enable_expert_parallel": True,
+            "gpu_group_size": 8,
         }
     )
     assert "--enable-expert-parallel" in ep_args
+    assert "--expert-parallel-size" not in ep_args
+
+
+def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
+    command = _profile_command(
+        executable=Path("/opt/aiperf/bin/aiperf"),
+        model_name="served-model",
+        port=8000,
+        endpoint_type="chat",
+        concurrency=8,
+        request_count=23,
+        input_tokens=1024,
+        output_tokens=128,
+        tokenizer_dir=tmp_path / "tokenizer",
+        artifact_dir=tmp_path / "artifacts",
+        seed=7,
+        extra_inputs=None,
+        use_server_token_count=True,
+        gpu_telemetry=None,
+    )
+
+    assert command[command.index("--concurrency") + 1] == "8"
+    assert command[command.index("--request-count") + 1] == "23"
+    assert command[command.index("--synthetic-input-tokens-mean") + 1] == "1024"
+    assert command[command.index("--synthetic-input-tokens-stddev") + 1] == "0"
+    assert command[command.index("--output-tokens-mean") + 1] == "128"
+    assert command[command.index("--output-tokens-stddev") + 1] == "0"
+    assert "--use-server-token-count" in command
 
 
 def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):

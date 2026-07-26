@@ -36,7 +36,8 @@ def test_profile_aiperf_work_matrix_uses_six_all_eight_gpu_topologies():
     assert len(items) == 30
     assert len({(row["solution_id"], row["topology_id"]) for row in items}) == 30
     assert all(row["gpu_count"] == 8 for row in items)
-    assert any(row["topology"]["expert_parallel_size"] > 1 for row in items)
+    assert any(row["topology"]["enable_expert_parallel"] for row in items)
+    assert all("expert_parallel_size" not in row["topology"] for row in items)
 
 
 def test_profile_aiperf_work_shards_cover_every_item_once():

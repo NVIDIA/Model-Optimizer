@@ -485,7 +485,22 @@ def _aiperf(
     from ..benchmarks import run_aiperf_sweep
 
     settings = dict(node.config.get("config") or {})
-    concurrencies = tuple(int(value) for value in settings.pop("concurrency", [1]))
+    raw_concurrency = settings.pop("concurrency", [1])
+    if isinstance(raw_concurrency, (int, str)):
+        concurrencies = (int(raw_concurrency),)
+    else:
+        concurrencies = tuple(int(value) for value in raw_concurrency)
+    request_count = settings.pop("request_count", None)
+    minimum_request_count = int(settings.pop("minimum_request_count", 4))
+    requests_per_concurrency = int(settings.pop("requests_per_concurrency", 2))
+    request_counts = {
+        concurrency: (
+            int(request_count)
+            if request_count is not None
+            else max(minimum_request_count, requests_per_concurrency * concurrency)
+        )
+        for concurrency in concurrencies
+    }
     topology = dict(settings.pop("topology", {}) or {})
     gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not gpu_ids:
@@ -500,6 +515,7 @@ def _aiperf(
         output_tokens=int(settings.pop("output_tokens", 1024)),
         gpu_ids=gpu_ids,
         topology=topology,
+        request_counts=request_counts,
         solution_id=source.architecture_id,
         profile_id=node.flow_id,
         **settings,

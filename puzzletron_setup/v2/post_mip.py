@@ -316,6 +316,7 @@ def recommended_flow(
                         "input_tokens": int(serving.get("input_tokens", 4096)),
                         "output_tokens": int(serving.get("output_tokens", 1024)),
                         "concurrency": [int(serving.get("concurrency", 1))],
+                        "request_count": int(serving.get("request_count", 32)),
                         "use_server_token_count": True,
                         "benchmark_timeout": 900,
                         **(

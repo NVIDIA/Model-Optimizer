@@ -23,6 +23,7 @@ from threading import Lock
 from typing import Any, Iterable
 
 from ..identity import stable_hash
+from ..orchestration.mesh import normalize_vllm_topology
 from .schema import BenchmarkResult
 
 __all__ = ["run_aiperf_benchmark", "run_aiperf_sweep"]
@@ -94,41 +95,7 @@ def _server_max_model_len(input_tokens: int, output_tokens: int, topology: dict[
 def _canonical_topology(topology: dict[str, Any]) -> dict[str, Any]:
     """Normalize serving topology names for cache and report identities."""
 
-    tp = int(topology.get("tensor_parallel_size", topology.get("tp", 1)))
-    pp = int(topology.get("pipeline_parallel_size", topology.get("pp", 1)))
-    dp = int(topology.get("data_parallel_size", topology.get("dp", 1)))
-    ep = int(topology.get("expert_parallel_size", topology.get("ep", 1)))
-    prefill_cp = int(
-        topology.get("prefill_context_parallel_size", topology.get("prefill_cp", 1))
-    )
-    decode_cp = int(
-        topology.get("decode_context_parallel_size", topology.get("decode_cp", 1))
-    )
-    dimensions = {
-        "tp": tp,
-        "pp": pp,
-        "dp": dp,
-        "ep": ep,
-        "prefill_cp": prefill_cp,
-        "decode_cp": decode_cp,
-    }
-    if any(value < 1 for value in dimensions.values()):
-        raise ValueError(f"serving topology dimensions must be positive: {dimensions}")
-    if decode_cp > tp or tp % decode_cp:
-        raise ValueError(f"decode context parallel size {decode_cp} must divide TP={tp}")
-    gpu_count = tp * pp * prefill_cp * dp
-    configured_gpu_group = int(topology.get("gpu_group_size", gpu_count))
-    if configured_gpu_group != gpu_count:
-        raise ValueError(
-            f"gpu_group_size={configured_gpu_group} does not match serving GPU count={gpu_count}"
-        )
-    return {
-        **dimensions,
-        "gpu_count": gpu_count,
-        "distributed_executor_backend": str(
-            topology.get("distributed_executor_backend", "mp")
-        ),
-    }
+    return normalize_vllm_topology(topology)
 
 
 def _topology_vllm_args(topology: dict[str, Any]) -> list[str]:
@@ -156,7 +123,7 @@ def _topology_vllm_args(topology: dict[str, Any]) -> list[str]:
                 str(canonical["dp"]),
             )
         )
-    if canonical["ep"] > 1:
+    if canonical["enable_expert_parallel"]:
         args.append("--enable-expert-parallel")
     return args
 
