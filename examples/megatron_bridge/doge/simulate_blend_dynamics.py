@@ -28,7 +28,7 @@ import html
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 Scorer = Literal["cosine", "raw_dot", "dot", "kd_gap_dot"]
 Preset = Literal["two_domain", "twenty_four_domain"]
@@ -317,11 +317,10 @@ def simulate(
         losses = scenario.initial_losses
         weights = scenario.initial_source_weights
         for block in range(config.blocks + 1):
-            scores = (
-                tuple(1.0 / len(scenario.sources) for _ in scenario.sources)
-                if scorer is None
-                else _source_scores(scenario, scorer, losses, config)
-            )
+            if scorer is None:
+                scores = tuple(1.0 / len(scenario.sources) for _ in scenario.sources)
+            else:
+                scores = _source_scores(scenario, scorer, losses, config)
             records.append(
                 _record(
                     run=run,
@@ -656,7 +655,7 @@ def main() -> None:
         raw_dot_scale=args.raw_dot_scale,
         min_source_weight=args.min_source_weight,
     )
-    records = simulate(scenario, config, tuple(args.scorers))
+    records = simulate(scenario, config, cast("tuple[Scorer, ...]", tuple(args.scorers)))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _write_csv(args.output_dir / f"blend_sim_{args.preset}.csv", records)
     write_plots(args.output_dir, args.preset, records)
