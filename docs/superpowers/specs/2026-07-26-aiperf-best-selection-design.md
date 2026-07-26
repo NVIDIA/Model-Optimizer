@@ -44,9 +44,18 @@ fastest:
 Omitting `best_selection_mode` preserves the existing scalar `top_k` behavior. The new field
 is valid only for `mode: top_k`.
 
-The recommended flow defaults to `individual_best`. The setup wizard asks for one
-comma-separated concurrency list and one serving topology. A single-element list remains
-valid for backward compatibility.
+The recommended flow defaults to `individual_best`. While configuring an AIPerf node, setup
+v2 explicitly asks:
+
+- `Serving concurrency sweep (comma-separated; one value is allowed):`
+- `How should the best models be selected?`, with `individual_best` and
+  `best_per_concurrency` choices.
+
+It also asks for one serving topology, which is reused across the entire sweep. The wizard
+writes the concurrency list into the AIPerf node and writes `best_selection_mode` into its
+downstream `fastest` filter; the selection setting is not forwarded to the AIPerf CLI.
+For a custom flow, the mode question is asked when configuring a filter that selects metrics
+from an AIPerf node.
 
 ## Metric Resolution and Selection
 
@@ -78,7 +87,8 @@ one-based rank for `best_per_concurrency`, so reports can explain why a model wa
 
 The v2 setup wizard parses and validates positive, unique concurrency integers while
 preserving their entered order. Invalid or duplicate values are rejected and reprompted.
-The serving topology is asked once and reused for every concurrency and model.
+It validates the selection-mode answer at the same boundary. The serving topology is asked
+once and reused for every concurrency and model.
 
 The recommended post-MIP flow uses `serving.output_token_throughput`, not request throughput,
 because output TPS is comparable across a fixed ISL/OSL workload and directly represents
@@ -120,7 +130,8 @@ Tests cover:
 - global top K using each model's individual best concurrency;
 - top K per concurrency with deterministic union and deduplication;
 - minimize direction, ties, missing points, and non-finite values;
-- recommended-flow rendering and wizard concurrency-list parsing;
+- recommended-flow rendering and the setup v2 questions for concurrency-list and selection
+  mode;
 - candidate-limit estimation for the per-concurrency union;
 - both corrected execution/mesh expectations;
 - the existing Nano full orchestration dry-run.
