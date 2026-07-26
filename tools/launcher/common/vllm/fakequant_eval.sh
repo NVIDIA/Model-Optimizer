@@ -38,7 +38,7 @@ test -f "$MODEL/config.json"
 test -f "$REPO/examples/vllm_serve/vllm_serve_fakequant.py"
 
 "$PYTHON_BIN" -m pip install --editable "$REPO"
-"$PYTHON_BIN" -m pip install "lm_eval>=0.4.8"
+"$PYTHON_BIN" -m pip install "lm_eval[api]>=0.4.8"
 
 export QUANT_CFG
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
