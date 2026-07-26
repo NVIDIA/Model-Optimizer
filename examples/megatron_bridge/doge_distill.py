@@ -273,14 +273,15 @@ def get_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     doge.add_argument(
         "--doge_weight_update_strategy",
-        choices=("alignment", "kd_gap", "target_kd_gap"),
+        choices=("alignment", "scaled_dot", "kd_gap", "target_kd_gap"),
         default="alignment",
         help=(
             "Signal used to update adaptive blend weights. 'alignment' uses the DoGE "
-            "source-to-target gradient-alignment score. 'kd_gap' sets weights proportional to "
-            "per-source KD loss as a naive PASER-style baseline. 'target_kd_gap' applies the "
-            "KD-gap update only to sources that are also in the target blend and sets "
-            "non-target source weights to zero."
+            "source-to-target gradient-alignment score. 'scaled_dot' uses the globally scaled "
+            "source-target gradient dot product from the alignment diagnostics. 'kd_gap' sets "
+            "weights proportional to per-source KD loss as a naive PASER-style baseline. "
+            "'target_kd_gap' applies the KD-gap update only to sources that are also in the "
+            "target blend and sets non-target source weights to zero."
         ),
     )
     doge.add_argument(

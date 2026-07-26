@@ -55,7 +55,7 @@ from modelopt.torch.distill.doge_megatron_loss import (
 from modelopt.torch.utils import print_rank_0
 
 DoGETrainLossMode = Literal["weighted", "sampled"]
-DoGEWeightUpdateStrategy = Literal["alignment", "kd_gap", "target_kd_gap"]
+DoGEWeightUpdateStrategy = Literal["alignment", "scaled_dot", "kd_gap", "target_kd_gap"]
 
 __all__ = ["DoGEForwardStep", "DoGETrainLossMode", "DoGEWeightUpdateStrategy"]
 
@@ -112,7 +112,10 @@ class DoGEForwardStep:
                 ``alignment`` uses the DoGE gradient-alignment update. ``kd_gap`` sets weights
                 proportional to per-source KD loss as a naive PASER-style baseline.
                 ``target_kd_gap`` applies the KD-gap update only to sources that are also in the
-                target blend and sets non-target source weights to zero.
+                target blend and sets non-target source weights to zero. ``scaled_dot`` uses the
+                source-target gradient dot product after the same global scaling as the debug
+                diagnostics, avoiding raw-dot score magnitudes that are too large for the cosine
+                meta learning rate.
             source_min_blend_weights: Optional per-source minimum normalized weights applied after
                 each adaptive blend update. Keys can be full source paths or unique path suffixes.
             source_max_blend_weights: Optional per-source maximum normalized weights applied after
@@ -122,7 +125,7 @@ class DoGEForwardStep:
         """
         if train_loss_mode not in ("weighted", "sampled"):
             raise ValueError(f"Unsupported DoGE train loss mode: {train_loss_mode!r}")
-        if weight_update_strategy not in ("alignment", "kd_gap", "target_kd_gap"):
+        if weight_update_strategy not in ("alignment", "scaled_dot", "kd_gap", "target_kd_gap"):
             raise ValueError(f"Unsupported DoGE weight update strategy: {weight_update_strategy!r}")
         self.data_paths = tuple(data_paths)
         self.target_data_paths = tuple(target_data_paths)
@@ -361,6 +364,11 @@ class DoGEForwardStep:
         """Return the per-source scores used to propose the next blend."""
         if self.weight_update_strategy == "alignment":
             return alignment_result.scores
+        if self.weight_update_strategy == "scaled_dot":
+            return {
+                path: float(diagnostics["source_target_scaled_dot"])
+                for path, diagnostics in alignment_result.alignment_debug.items()
+            }
         if self.weight_update_strategy in ("kd_gap", "target_kd_gap"):
             return alignment_result.source_probe_kd_loss
         raise RuntimeError(
@@ -371,7 +379,7 @@ class DoGEForwardStep:
         self, weight_update_scores: dict[str, float]
     ) -> dict[str, float]:
         """Return candidate weights from the configured update strategy."""
-        if self.weight_update_strategy == "alignment":
+        if self.weight_update_strategy in ("alignment", "scaled_dot"):
             weights = dict(self.updater.update(self.blend_weights, weight_update_scores))
             return self._apply_source_blend_weight_constraints(weights)
         if self.weight_update_strategy == "kd_gap":
