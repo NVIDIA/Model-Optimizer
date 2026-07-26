@@ -25,16 +25,25 @@ PORT=${PORT:-8000}
 REPO=./modules/Model-Optimizer
 SERVER_LOG="$PWD/vllm_fakequant_server.log"
 
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=python3
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN=python
+else
+    echo "Neither python3 nor python is available in the workload container." >&2
+    exit 127
+fi
+
 test -f "$MODEL/config.json"
 test -f "$REPO/examples/vllm_serve/vllm_serve_fakequant.py"
 
-python -m pip install "lm_eval>=0.4.8"
+"$PYTHON_BIN" -m pip install "lm_eval>=0.4.8"
 
 export QUANT_CFG
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 export OPENAI_API_KEY=${OPENAI_API_KEY:-token-abc123}
 
-python "$REPO/examples/vllm_serve/vllm_serve_fakequant.py" \
+"$PYTHON_BIN" "$REPO/examples/vllm_serve/vllm_serve_fakequant.py" \
     "$MODEL" \
     --host 0.0.0.0 \
     --port "$PORT" \
