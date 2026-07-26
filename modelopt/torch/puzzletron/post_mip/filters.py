@@ -14,6 +14,8 @@ from .records import CandidateLedger
 
 __all__ = ["apply_filter", "filter_metric_references", "validate_filter_config"]
 
+_BEST_SELECTION_MODES = frozenset({"individual_best", "best_per_concurrency"})
+
 
 def _metric_entries(config: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
     entries = config.get("metrics") or ()
@@ -42,7 +44,7 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     mode = str(config.get("mode") or "")
     common = {"type", "input", "model_source", "failure_policy", "config", "mode"}
     allowed = {
-        "top_k": common | {"metric", "direction", "top_k"},
+        "top_k": common | {"metric", "direction", "top_k", "best_selection_mode"},
         "threshold": common | {"metric", "min", "max"},
         "pareto": common | {"metrics"},
         "aggregate_rank": common | {"metrics", "top_k"},
@@ -58,7 +60,23 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
         direction = str(config.get("direction", "minimize"))
         if direction not in {"minimize", "maximize"}:
             raise ValueError("top_k direction must be minimize or maximize")
+        best_selection_mode = config.get("best_selection_mode")
+        if best_selection_mode is not None:
+            if best_selection_mode not in _BEST_SELECTION_MODES:
+                raise ValueError(
+                    "top_k.best_selection_mode must be individual_best or "
+                    "best_per_concurrency"
+                )
+            metric = str(config["metric"])
+            owner, separator, leaf = metric.partition(".")
+            if not separator or not owner or not leaf or owner == "mip":
+                raise ValueError(
+                    "best_selection_mode requires a node-qualified metric "
+                    "such as serving.output_token_throughput"
+                )
         top_k = config.get("top_k")
+        if best_selection_mode is not None and isinstance(top_k, Mapping):
+            raise ValueError("best_selection_mode requires an integer top_k")
         if isinstance(top_k, Mapping):
             if set(top_k) - {"homogeneous", "heterogeneous"}:
                 raise ValueError("top_k quotas accept homogeneous and heterogeneous only")
@@ -100,6 +118,92 @@ def _origin_kind(ledger: CandidateLedger, revision_id: str) -> str:
     return str(revision.artifact.get("kind", "heterogeneous"))
 
 
+def _ordered_metric_rows(
+    rows: Sequence[tuple[float, str]],
+    *,
+    direction: str,
+) -> list[tuple[float, str]]:
+    return sorted(
+        rows,
+        key=lambda row: (row[0], row[1]),
+        reverse=direction == "maximize",
+    )
+
+
+def _apply_sweep_top_k(
+    ledger: CandidateLedger,
+    revision_ids: Sequence[str],
+    config: Mapping[str, Any],
+) -> tuple[tuple[str, ...], dict[str, str], dict[str, float]]:
+    metric = str(config["metric"])
+    direction = str(config.get("direction", "minimize"))
+    selection_mode = str(config["best_selection_mode"])
+    top_k = int(config["top_k"])
+    sweeps = {
+        revision_id: ledger.resolve_concurrency_metrics(revision_id, metric)
+        for revision_id in revision_ids
+    }
+    concurrencies = sorted(
+        {
+            concurrency
+            for values in sweeps.values()
+            for concurrency in values
+        }
+    )
+    excluded = {}
+    complete = {}
+    for revision_id, values in sweeps.items():
+        missing = [value for value in concurrencies if value not in values]
+        if not concurrencies:
+            excluded[revision_id] = f"missing or non-finite metric {metric}"
+        elif missing:
+            excluded[revision_id] = f"incomplete concurrency sweep; missing {missing}"
+        else:
+            complete[revision_id] = values
+
+    scores: dict[str, float] = {}
+    if selection_mode == "individual_best":
+        reducer = max if direction == "maximize" else min
+        scores = {
+            revision_id: reducer(values.values())
+            for revision_id, values in complete.items()
+        }
+        rows = _ordered_metric_rows(
+            [(value, revision_id) for revision_id, value in scores.items()],
+            direction=direction,
+        )
+        selected = tuple(revision_id for _value, revision_id in rows[:top_k])
+        for _value, revision_id in rows[top_k:]:
+            excluded[revision_id] = "outside top_k"
+        return selected, excluded, scores
+
+    selected_ids = set()
+    best_ranks = {revision_id: math.inf for revision_id in complete}
+    for concurrency in concurrencies:
+        rows = _ordered_metric_rows(
+            [
+                (values[concurrency], revision_id)
+                for revision_id, values in complete.items()
+            ],
+            direction=direction,
+        )
+        for rank, (_value, revision_id) in enumerate(rows, start=1):
+            best_ranks[revision_id] = min(best_ranks[revision_id], rank)
+            if rank <= top_k:
+                selected_ids.add(revision_id)
+    scores = {
+        revision_id: float(rank)
+        for revision_id, rank in best_ranks.items()
+    }
+    selected = tuple(
+        sorted(selected_ids, key=lambda revision_id: (scores[revision_id], revision_id))
+    )
+    for revision_id in complete:
+        if revision_id not in selected_ids:
+            excluded[revision_id] = "outside top_k at every concurrency"
+    return selected, excluded, scores
+
+
 def apply_filter(
     ledger: CandidateLedger,
     revision_ids: Sequence[str],
@@ -112,6 +216,8 @@ def apply_filter(
     excluded: dict[str, str] = {}
     scores: dict[str, float] = {}
     if mode == "top_k":
+        if config.get("best_selection_mode") is not None:
+            return _apply_sweep_top_k(ledger, revision_ids, config)
         metric = str(config["metric"])
         reverse = str(config.get("direction", "minimize")) == "maximize"
         rows = []

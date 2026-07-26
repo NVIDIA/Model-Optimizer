@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -226,6 +228,35 @@ class CandidateLedger:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
         return None
+
+    def resolve_concurrency_metrics(
+        self,
+        revision_id: str,
+        reference: str,
+    ) -> dict[int, float]:
+        """Resolve finite ``concurrency_<N>.<metric>`` values from one node observation."""
+
+        owner, separator, metric = reference.partition(".")
+        if not separator or not owner or not metric or owner == "mip":
+            raise ValueError(
+                "concurrency sweep metric must be node-qualified as <node>.<metric>: "
+                f"{reference}"
+            )
+        observation = self._observation_for_revision(owner, revision_id)
+        if observation is None:
+            return {}
+        pattern = re.compile(rf"^concurrency_([1-9][0-9]*)\.{re.escape(metric)}$")
+        values = {}
+        for name, value in observation.metrics.items():
+            match = pattern.fullmatch(name)
+            if (
+                match is not None
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                values[int(match.group(1))] = float(value)
+        return values
 
     def source_revision(self, input_revision_id: str, source: str) -> CandidateRevision:
         current = self.revisions[input_revision_id]
