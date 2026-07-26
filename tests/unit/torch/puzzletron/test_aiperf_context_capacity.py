@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _canonical_topology,
     _clean_subprocess_environment,
@@ -61,12 +63,8 @@ def test_server_context_includes_chat_template_headroom():
 
 
 def test_server_context_headroom_cannot_be_negative():
-    try:
+    with pytest.raises(ValueError, match="nonnegative"):
         _server_max_model_len(256, 32, {"server_context_overhead_tokens": -1})
-    except ValueError as error:
-        assert "nonnegative" in str(error)
-    else:
-        raise AssertionError("negative server context overhead must fail")
 
 
 def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, tmp_path):

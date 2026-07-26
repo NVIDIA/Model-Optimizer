@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from puzzletron_orchestrator import vllm_topology_to_mesh
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -135,50 +136,11 @@ def _parallel(mesh: Mapping[str, Any]) -> dict[str, Any]:
 
 def _serving_parallel(topology: Mapping[str, Any]) -> dict[str, Any]:
     """Convert a vLLM Serving topology to the scheduler's allocation mesh."""
-
-    tp = int(topology.get("tensor_parallel_size", 1))
-    pp = int(topology.get("pipeline_parallel_size", 1))
-    cp = int(topology.get("prefill_context_parallel_size", 1))
-    decode_cp = int(topology.get("decode_context_parallel_size", 1))
-    dp = int(topology.get("data_parallel_size", 1))
-    ep = int(topology.get("expert_parallel_size", 1))
-    dimensions = {
-        "TP": tp,
-        "PP": pp,
-        "prefill CP": cp,
-        "decode CP": decode_cp,
-        "DP": dp,
-        "EP": ep,
-    }
-    if any(value < 1 for value in dimensions.values()):
-        raise SetupError(f"Serving parallel dimensions must be positive: {dimensions}")
-    if decode_cp > tp or tp % decode_cp:
-        raise SetupError(f"Serving decode CP={decode_cp} must divide TP={tp}.")
-    if ep > 1:
-        if dp % ep:
-            raise SetupError(f"Serving DP={dp} must be divisible by EP={ep}.")
-        dp_shard = ep
-        dp_replicate = dp // ep
-    else:
-        dp_shard = 1
-        dp_replicate = dp
-    expected_gpu_group = tp * pp * cp * dp
-    configured_gpu_group = int(topology.get("gpu_group_size", expected_gpu_group))
-    if configured_gpu_group != expected_gpu_group:
-        raise SetupError(
-            f"Serving gpu_group_size={configured_gpu_group} does not match "
-            f"the parallel world size={expected_gpu_group}."
-        )
-    return _parallel(
-        {
-            "tp": tp,
-            "cp": cp,
-            "pp": pp,
-            "ep": ep,
-            "dp_shard": dp_shard,
-            "dp_replicate": dp_replicate,
-        }
-    )
+    try:
+        mesh = vllm_topology_to_mesh(topology)
+    except (TypeError, ValueError) as error:
+        raise SetupError(str(error)) from error
+    return {**mesh.as_dict(), "sequence_parallel": False}
 
 
 def _aligned_batch_size(mesh: Mapping[str, Any], requested: int = 1) -> int:

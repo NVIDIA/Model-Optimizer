@@ -33,7 +33,12 @@ __path__.append(str(_PUZZLETRON_SOURCE))
 
 from .compiler import compile_campaign_plan, plan_to_dict  # noqa: E402
 from .controller import CampaignController  # noqa: E402
-from .mesh import ParallelMesh, normalize_vllm_topology, pack_gpu_allocation  # noqa: E402
+from .mesh import (  # noqa: E402
+    ParallelMesh,
+    normalize_vllm_topology,
+    pack_gpu_allocation,
+    vllm_topology_to_mesh,
+)
 from .schema import (  # noqa: E402
     AttemptSpec,
     CampaignPlan,
@@ -79,4 +84,5 @@ __all__ = [
     "normalize_vllm_topology",
     "pack_gpu_allocation",
     "plan_to_dict",
+    "vllm_topology_to_mesh",
 ]

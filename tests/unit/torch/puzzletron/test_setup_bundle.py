@@ -3,8 +3,12 @@
 
 """Tests for scheduler-neutral configs emitted by the Puzzletron setup wizard."""
 
+import pytest
+
+from puzzletron_setup import SetupError
 from puzzletron_setup.bundle import (
     _align_model_stage_batches,
+    _serving_parallel,
     render_execution,
     render_experiment,
     render_runner,
@@ -74,6 +78,32 @@ class _ServingPrompts:
     def integer(self, message: str, *, default: int, **kwargs) -> int:
         self.messages.append(message)
         return self.values.get(message, default)
+
+
+def test_serving_parallel_treats_vllm_expert_parallelism_as_boolean_mode() -> None:
+    topology = {
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "data_parallel_size": 4,
+        "expert_parallel_size": 8,
+        "gpu_group_size": 8,
+    }
+
+    assert _serving_parallel(topology) == {
+        "tp": 2,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 4,
+        "sequence_parallel": False,
+    }
+
+    topology["expert_parallel_size"] = 4
+    with pytest.raises(SetupError, match=r"expected 1 or TP \* DP=8"):
+        _serving_parallel(topology)
 
 
 def _nemotron_render_state(*, latent_moe: bool) -> dict:
