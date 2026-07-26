@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from puzzletron_setup.v2.parallel_validation import (
     geometry_scope,
@@ -7,7 +19,6 @@ from puzzletron_setup.v2.parallel_validation import (
     validate_vllm_parallelism,
 )
 from puzzletron_setup.v2.resources import ParallelProfile
-
 
 MOE_INVENTORY = {
     "moe": True,
@@ -223,6 +234,60 @@ def test_candidate_gdn_and_mamba_head_counts_are_tp_constrained():
     assert "GDN value-head counts [12, 16, 18, 24]" in messages
     assert "Mamba head counts [30, 32]" in messages
     assert "head dimension" not in messages
+
+
+def test_direct_query_and_kv_head_axes_are_tp_constrained():
+    inventory = {
+        "moe": False,
+        "facts": {
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        },
+        "axes": [
+            {"axis_id": "query_heads", "teacher_value": 32, "values": [32, 30]},
+            {"axis_id": "kv_heads", "teacher_value": 8, "values": [8, 6]},
+        ],
+    }
+    pruning = {
+        "axes": {
+            "query_heads": {"enabled": True, "values": [30]},
+            "kv_heads": {"enabled": True, "values": [6]},
+        }
+    }
+
+    issues = validate_automodel_parallelism(
+        _profile(tp=8),
+        inventory,
+        pruning,
+        stage_id="width_sanity",
+        sequence_length=1024,
+    )
+
+    messages = _messages(issues)
+    assert "query-head counts [30, 32]" in messages
+    assert "KV-head counts [6, 8]" in messages
+
+
+def test_ple_widths_are_tp_constrained():
+    inventory = {
+        "moe": False,
+        "facts": {"hidden_size": 4096},
+        "axes": [
+            {"axis_id": "ple_width", "teacher_value": 4096, "values": [4096, 3072]},
+        ],
+    }
+    pruning = {"axes": {"ple_width": {"enabled": True, "values": [3072]}}}
+
+    issues = validate_automodel_parallelism(
+        _profile(tp=5),
+        inventory,
+        pruning,
+        stage_id="replacement_scoring",
+        sequence_length=1024,
+    )
+
+    assert "PLE widths [3072, 4096]" in _messages(issues)
 
 
 def test_vllm_rejects_tp_and_effective_ep_for_any_selected_candidate():

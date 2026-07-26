@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Stage-aware model geometry and parallelism compatibility checks."""
 
@@ -8,7 +20,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from puzzletron_orchestrator import normalize_vllm_topology
 
@@ -61,7 +73,6 @@ def _value(value: Any, name: str, default: Any = None) -> Any:
 
 def geometry_scope(stage_id: str, node_type: str | None = None) -> GeometryScope:
     """Return the geometry domain loaded by one static or post-MIP stage."""
-
     if node_type in _CANDIDATE_POST_MIP_TYPES:
         return "candidate"
     name = str(stage_id).rsplit(".", 1)[-1]
@@ -109,34 +120,54 @@ def _geometry(
     scope: GeometryScope,
 ) -> dict[str, tuple[int, ...] | tuple[tuple[int, int], ...]]:
     facts = _facts(inventory)
+    axes = _axes(inventory)
     query_heads = facts.get("num_attention_heads")
     kv_heads = facts.get("num_key_value_heads")
     teacher_q_per_kv = None
-    if query_heads is not None and kv_heads not in (None, 0):
+    if query_heads is not None and kv_heads is not None and int(kv_heads) != 0:
         teacher_q_per_kv = int(query_heads) // int(kv_heads)
+    kv_axis = "kv_heads" if "kv_heads" in axes else "kv_groups"
     kv_domain = _domain(
         inventory,
         pruning,
-        "kv_groups",
+        kv_axis,
         scope=scope,
         fallback=int(kv_heads) if kv_heads is not None else None,
     )
-    q_per_kv_domain = _domain(
-        inventory,
-        pruning,
-        "q_heads_per_group",
-        scope=scope,
-        fallback=teacher_q_per_kv,
-    )
-    attention_pairs = tuple(
-        sorted(
-            {
-                (kv_count * q_per_kv, kv_count)
-                for kv_count in kv_domain
-                for q_per_kv in q_per_kv_domain
-            }
+    if "query_heads" in axes:
+        query_domain = _domain(
+            inventory,
+            pruning,
+            "query_heads",
+            scope=scope,
+            fallback=int(query_heads) if query_heads is not None else None,
         )
-    )
+        attention_pairs = tuple(
+            sorted(
+                (query_count, kv_count)
+                for query_count in query_domain
+                for kv_count in kv_domain
+                if query_count % kv_count == 0
+            )
+        )
+    else:
+        q_per_kv_domain = _domain(
+            inventory,
+            pruning,
+            "q_heads_per_group",
+            scope=scope,
+            fallback=teacher_q_per_kv,
+        )
+        attention_pairs = tuple(
+            sorted(
+                {
+                    (kv_count * q_per_kv, kv_count)
+                    for kv_count in kv_domain
+                    for q_per_kv in q_per_kv_domain
+                }
+            )
+        )
+        query_domain = tuple(sorted({query for query, _ in attention_pairs}))
 
     gdn_key_heads = _domain(
         inventory,
@@ -165,13 +196,17 @@ def _geometry(
             pruning,
             "hidden_width",
             scope=scope,
-            fallback=(
-                int(facts["hidden_size"]) if facts.get("hidden_size") is not None else None
-            ),
+            fallback=(int(facts["hidden_size"]) if facts.get("hidden_size") is not None else None),
         ),
         "attention_pairs": attention_pairs,
-        "query-head counts": tuple(sorted({query for query, _ in attention_pairs})),
-        "KV-head counts": tuple(sorted({kv for _, kv in attention_pairs})),
+        "query-head counts": query_domain,
+        "KV-head counts": kv_domain,
+        "PLE widths": _domain(
+            inventory,
+            pruning,
+            "ple_width",
+            scope=scope,
+        ),
         "FFN intermediate widths": _domain(
             inventory,
             pruning,
@@ -188,9 +223,7 @@ def _geometry(
             pruning,
             "moe_experts",
             scope=scope,
-            fallback=(
-                int(facts["num_experts"]) if facts.get("num_experts") is not None else None
-            ),
+            fallback=(int(facts["num_experts"]) if facts.get("num_experts") is not None else None),
         ),
         "expert intermediate widths": _domain(
             inventory,
@@ -255,7 +288,6 @@ def validate_automodel_parallelism(
     node_type: str | None = None,
 ) -> tuple[ParallelCompatibilityIssue, ...]:
     """Return every AutoModel conflict for the stage's reachable geometries."""
-
     issues: list[ParallelCompatibilityIssue] = []
     dimensions = {
         "tp": int(_value(profile, "tp", 1)),
@@ -294,8 +326,7 @@ def validate_automodel_parallelism(
         issues.append(
             ParallelCompatibilityIssue(
                 f"{stage_id}.cp",
-                f"CP={dimensions['cp']} does not divide sequence length "
-                f"{int(sequence_length)}.",
+                f"CP={dimensions['cp']} does not divide sequence length {int(sequence_length)}.",
             )
         )
 
@@ -307,6 +338,7 @@ def validate_automodel_parallelism(
         "hidden widths",
         "query-head counts",
         "KV-head counts",
+        "PLE widths",
         "FFN intermediate widths",
         "expert intermediate widths",
         "shared-expert intermediate widths",
@@ -320,7 +352,7 @@ def validate_automodel_parallelism(
             setting="tp",
             degree=dimensions["tp"],
             label=label,
-            values=geometry[label],
+            values=cast("tuple[int, ...]", geometry[label]),
         )
         if issue is not None:
             issues.append(issue)
@@ -339,7 +371,7 @@ def validate_automodel_parallelism(
             setting="ep",
             degree=dimensions["ep"],
             label="expert counts",
-            values=geometry["expert counts"],
+            values=cast("tuple[int, ...]", geometry["expert counts"]),
         )
         if issue is not None:
             issues.append(issue)
@@ -354,7 +386,6 @@ def validate_vllm_parallelism(
     stage_id: str,
 ) -> tuple[ParallelCompatibilityIssue, ...]:
     """Return every vLLM conflict for candidate geometries served by a stage."""
-
     try:
         canonical = normalize_vllm_topology(topology)
     except (TypeError, ValueError) as error:
@@ -366,20 +397,18 @@ def validate_vllm_parallelism(
         setting="tp",
         degree=canonical["tp"],
         label="query-head counts",
-        values=geometry["query-head counts"],
+        values=cast("tuple[int, ...]", geometry["query-head counts"]),
     )
     if tp_issue is not None:
         issues.append(tp_issue)
 
     dcp = canonical["decode_cp"]
     if dcp > 1:
-        for query_heads, kv_heads in geometry["attention_pairs"]:
+        for query_heads, kv_heads in cast(
+            "tuple[tuple[int, int], ...]", geometry["attention_pairs"]
+        ):
             q_per_kv = query_heads // kv_heads
-            if (
-                canonical["tp"] <= kv_heads
-                or dcp > canonical["tp"] // kv_heads
-                or q_per_kv % dcp
-            ):
+            if canonical["tp"] <= kv_heads or dcp > canonical["tp"] // kv_heads or q_per_kv % dcp:
                 issues.append(
                     ParallelCompatibilityIssue(
                         f"{stage_id}.decode_cp",
@@ -398,7 +427,7 @@ def validate_vllm_parallelism(
             )
         )
     elif canonical["enable_expert_parallel"]:
-        experts = geometry["expert counts"]
+        experts = cast("tuple[int, ...]", geometry["expert counts"])
         if experts and any(value % canonical["effective_ep"] for value in experts):
             issues.append(
                 ParallelCompatibilityIssue(
