@@ -56,6 +56,7 @@ from ...qtensor import (
 )
 from ...tensor_quant import (
     dynamic_block_quant,
+    fake_fp8,
     fake_tensor_quant,
     fp4_cast_ste,
     int_cast_ste,
@@ -895,7 +896,7 @@ class TensorQuantizer(nn.Module):
             return entrypoint(inputs, self)
 
         amax = None
-        if not self.is_mx_format:
+        if not self.is_mx_format and self._num_bits != (5, 2):
             amax = self._get_amax(inputs)
 
         if self.block_sizes is not None and self.block_sizes.get("type", "static") == "dynamic":
@@ -921,7 +922,7 @@ class TensorQuantizer(nn.Module):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806
 
-            outputs = scaled_e4m3(
+            outputs = fake_fp8(
                 inputs,
                 amax,
                 self._get_bias(inputs),
@@ -949,6 +950,9 @@ class TensorQuantizer(nn.Module):
 
     def _check_onnx_readiness(self, inputs):
         """Check if quantizer is ready for ONNX export."""
+        if self._num_bits == (5, 2):
+            raise NotImplementedError("ONNX export does not support E5M2 fake quantization.")
+
         if not self.block_sizes or self.block_sizes.get("scale_bits", None) != (8, 0):
             assert hasattr(self, "_amax"), (
                 "Quantizer has not been calibrated. ONNX export requires the quantizer to be"

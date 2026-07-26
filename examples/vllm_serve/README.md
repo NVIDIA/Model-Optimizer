@@ -100,6 +100,15 @@ MODELOPT_STATE_PATH=<vllm_fq_modelopt_state.pth> python vllm_serve_fakequant.py 
 QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
+For scale-free E5M2 fake quantization, use the built-in `E5M2_DEFAULT_CFG`:
+
+```bash
+QUANT_CFG=E5M2_DEFAULT_CFG python vllm_serve_fakequant.py Qwen/Qwen3-4B --host 0.0.0.0 --port 8000
+```
+
+This simulates E5M2 by casting weights and activations directly to `torch.float8_e5m2`
+and back to their original dtype, without calibration or per-tensor scaling.
+
 ## Serve a model with sparse attention in vLLM
 
 Apply ModelOpt sparse attention at serve time. Right after model load, the launcher replaces each native attention implementation with its matching ModelOpt adapter: `ModelOptSparseAttentionImpl` for FlashAttention or `ModelOptSparseFlashInferImpl` for FlashInfer. Both adapters use the same Triton kernel with paged KV cache support.

@@ -428,6 +428,11 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             raise ValueError(
                 "Supported FPx quantization formats: FP8 (E4M3, E5M2), FP6(E3M2, E2M3), FP4(E2M1)."
             )
+        elif num_bits == (5, 2) and block_sizes is None:
+            if self.type != "dynamic" or self.axis is not None:
+                raise ValueError(
+                    "Unscaled E5M2 quantization requires type='dynamic' and axis=None."
+                )
         elif num_bits not in [(4, 3), (2, 1)] and (
             block_sizes is None or block_sizes.get("type", None) != "dynamic"
         ):
@@ -1659,6 +1664,7 @@ INT8_WEIGHT_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/int8_weight_only"
 )
 FP8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/fp8")
+E5M2_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/e5m2")
 MAMBA_MOE_FP8_AGGRESSIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/mamba_moe_fp8_aggressive"
 )
@@ -1755,6 +1761,7 @@ NVFP4_OMLP_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
 # DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
 # modelopt_recipes/general/ptq/ as a yaml file
 choices: set[str] = {
+    "E5M2_DEFAULT_CFG",
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",
     "FP8_DEFAULT_CFG",

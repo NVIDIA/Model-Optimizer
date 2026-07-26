@@ -64,6 +64,11 @@ def fp8_eager(x, amax):
     return _fp8_eager(x, amax)
 
 
+def e5m2_eager(x):
+    """Eager mode implementation of unscaled E5M2 quantization."""
+    return x.to(torch.float8_e5m2).to(x.dtype)
+
+
 def scaled_e4m3_impl(
     inputs: torch.Tensor,
     amax: torch.Tensor | None = None,
@@ -114,7 +119,7 @@ def fake_quant_impl(
 
 def _quantize_impl(
     inputs: torch.Tensor,
-    amax: torch.Tensor,
+    amax: torch.Tensor | None,
     num_bits: int = 8,
     exponent_bits: int = 0,
     unsigned: bool = False,
@@ -122,6 +127,10 @@ def _quantize_impl(
 ):
     if num_bits == 8 and exponent_bits == 4:
         return scaled_e4m3_impl(inputs=inputs, amax=amax)
+    elif num_bits == 8 and exponent_bits == 5:
+        if amax is not None:
+            raise ValueError("E5M2 fake quantization does not support scaling.")
+        return e5m2_eager(inputs)
     elif isinstance(num_bits, int):
         return fake_quant_impl(
             inputs=inputs,
@@ -138,7 +147,7 @@ def _quantize_impl(
 
 def _quantize_impl_abstract(
     input: torch.Tensor,
-    amax: torch.Tensor,
+    amax: torch.Tensor | None,
     num_bits: int = 8,
     exponent_bits: int = 0,
     unsigned: bool = False,
@@ -222,7 +231,7 @@ dynamic_block_quantize_op = _dynamic_block_quantize_impl
 try:
     torch.library.define(
         "tensorrt::quantize_op",
-        "(Tensor input, Tensor amax, int num_bits, int exponent_bits, "
+        "(Tensor input, Tensor? amax, int num_bits, int exponent_bits, "
         "bool unsigned, bool narrow_range) -> Tensor",
     )
     torch.library.define(
@@ -399,8 +408,8 @@ class FakeTensorQuantFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=10)
 
 
-class ScaledE4M3Function(Function):
-    """E4M3fy input with scale."""
+class FakeFP8Function(Function):
+    """Fake quantize input to a supported FP8 format."""
 
     @staticmethod
     @symbolic_helper.parse_args("v", "t", "t", "i", "i", "s", "b")
@@ -415,6 +424,8 @@ class ScaledE4M3Function(Function):
         pass_through_bwd=False,
     ):
         """ONNX symbolic function."""
+        if E != 4 or M != 3:
+            raise NotImplementedError("ONNX export only supports E4M3 FP8 quantization.")
         from .export_onnx import export_fp8
 
         return export_fp8(g, inputs, amax, trt_high_precision_dtype)
@@ -432,8 +443,8 @@ class ScaledE4M3Function(Function):
         pass_through_bwd=False,
     ):
         """Forward method."""
-        if E != 4 or M != 3:
-            raise NotImplementedError("Only support E=4 & M=3 for now.")
+        if (E, M) not in ((4, 3), (5, 2)):
+            raise NotImplementedError("Only E4M3 and E5M2 FP8 formats are supported.")
 
         if bias is not None:
             inputs = inputs - bias
@@ -444,7 +455,7 @@ class ScaledE4M3Function(Function):
             inputs,
             amax,
             num_bits=8,
-            exponent_bits=4,
+            exponent_bits=E,
             unsigned=False,
             narrow_range=False,
         )
@@ -700,7 +711,8 @@ class IntCastSTEFunction(Function):
 
 
 fake_tensor_quant = FakeTensorQuantFunction.apply
-scaled_e4m3 = ScaledE4M3Function.apply
+fake_fp8 = FakeFP8Function.apply
+scaled_e4m3 = fake_fp8
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
 static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply
 fp4_cast_ste = FP4CastSTEFunction.apply
