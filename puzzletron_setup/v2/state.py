@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -45,7 +45,7 @@ class FieldRecord:
     stale: bool = False
     requested: Any = None
     effective: Any = None
-    error: Optional[str] = None
+    error: str | None = None
 
     def __post_init__(self) -> None:
         self.dependencies = tuple(str(item) for item in self.dependencies)
@@ -53,7 +53,7 @@ class FieldRecord:
             self.effective = self.value
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "FieldRecord":
+    def from_dict(cls, payload: Mapping[str, Any]) -> FieldRecord:
         return cls(
             value=payload.get("value"),
             source=str(payload.get("source", "user")),
@@ -74,12 +74,12 @@ class PromptFrame:
 
     section: str
     prompt_id: str
-    collection: Optional[str] = None
-    item_id: Optional[str] = None
-    cursor: Optional[int] = None
+    collection: str | None = None
+    item_id: str | None = None
+    cursor: int | None = None
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "PromptFrame":
+    def from_dict(cls, payload: Mapping[str, Any]) -> PromptFrame:
         return cls(
             section=str(payload["section"]),
             prompt_id=str(payload["prompt_id"]),
@@ -87,9 +87,6 @@ class PromptFrame:
             item_id=payload.get("item_id"),
             cursor=payload.get("cursor"),
         )
-
-
-Validator = Callable[[Any, "WizardState"], Optional[str]]
 
 
 @dataclass
@@ -105,8 +102,8 @@ class WizardState:
         cls,
         campaign_dir: Path,
         *,
-        defaults_path: Optional[Path],
-    ) -> "WizardState":
+        defaults_path: Path | None,
+    ) -> WizardState:
         campaign_dir = Path(campaign_dir).expanduser().resolve()
         if campaign_dir.exists() and any(campaign_dir.iterdir()):
             raise SetupError(
@@ -134,7 +131,7 @@ class WizardState:
         return state
 
     @classmethod
-    def resume(cls, path: Path) -> "WizardState":
+    def resume(cls, path: Path) -> WizardState:
         candidate = Path(path).expanduser().resolve()
         state_path = candidate / "answers_v2.yaml" if candidate.is_dir() else candidate
         if not state_path.is_file():
@@ -164,7 +161,7 @@ class WizardState:
         return self.path.parent
 
     @property
-    def defaults_path(self) -> Optional[Path]:
+    def defaults_path(self) -> Path | None:
         value = self.payload.get("defaults_path")
         return Path(str(value)) if value else None
 
@@ -232,7 +229,10 @@ class WizardState:
             self.save()
         return tuple(marked)
 
-    def revalidate(self, validators: Mapping[str, Validator]) -> Mapping[str, str]:
+    def revalidate(
+        self,
+        validators: Mapping[str, Callable[[Any, WizardState], str | None]],
+    ) -> Mapping[str, str]:
         issues: dict[str, str] = {}
         for path, record in self._fields.items():
             if not record.stale:
@@ -264,6 +264,17 @@ class WizardState:
             for item in self.payload.setdefault("navigation", {}).get("frames", ())
         )
 
+    @property
+    def answered_frames(self) -> tuple[tuple[PromptFrame, Any, int], ...]:
+        """Return persisted prompt answers with their navigation-stack positions."""
+        return tuple(
+            (PromptFrame.from_dict(item), item["answer"], index)
+            for index, item in enumerate(
+                self.payload.setdefault("navigation", {}).get("frames", ())
+            )
+            if "answer" in item
+        )
+
     def push_frame(self, frame: PromptFrame) -> None:
         frames = self.payload.setdefault("navigation", {}).setdefault("frames", [])
         if not frames or frames[-1] != asdict(frame):
@@ -271,7 +282,15 @@ class WizardState:
         self.payload["navigation"]["cursor"] = frame.prompt_id
         self.save()
 
-    def pop_frame(self) -> Optional[PromptFrame]:
+    def answer_frame(self, frame: PromptFrame, value: Any) -> None:
+        """Persist the accepted answer for the current prompt frame."""
+        frames = self.payload.setdefault("navigation", {}).setdefault("frames", [])
+        if not frames or PromptFrame.from_dict(frames[-1]) != frame:
+            raise RuntimeError(f"Cannot answer inactive prompt frame {frame.prompt_id!r}.")
+        frames[-1]["answer"] = _plain(value)
+        self.save()
+
+    def pop_frame(self) -> PromptFrame | None:
         navigation = self.payload.setdefault("navigation", {})
         frames = navigation.setdefault("frames", [])
         if frames:
@@ -279,6 +298,14 @@ class WizardState:
         navigation["cursor"] = frames[-1]["prompt_id"] if frames else None
         self.save()
         return PromptFrame.from_dict(frames[-1]) if frames else None
+
+    def truncate_frames(self, count: int) -> None:
+        """Discard navigation frames at and after ``count`` without rewriting answers."""
+        navigation = self.payload.setdefault("navigation", {})
+        frames = navigation.setdefault("frames", [])
+        del frames[max(0, int(count)) :]
+        navigation["cursor"] = frames[-1]["prompt_id"] if frames else None
+        self.save()
 
     def replace_frames(self, frames: Sequence[PromptFrame]) -> None:
         rendered = [_plain(asdict(frame)) for frame in frames]

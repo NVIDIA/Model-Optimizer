@@ -203,9 +203,11 @@ def master_only(func):
 
 def setup(timeout: timedelta | None = None):
     """Sets up the distributed environment."""
-    torch.cuda.set_device(local_rank())
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank())
     if not is_initialized():
-        torch.distributed.init_process_group("cpu:gloo,cuda:nccl", timeout=timeout)
+        backend = "cpu:gloo,cuda:nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend, timeout=timeout)
 
 
 def cleanup():

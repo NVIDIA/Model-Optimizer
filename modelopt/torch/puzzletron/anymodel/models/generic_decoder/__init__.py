@@ -3,8 +3,8 @@
 from .generic_decoder_model_descriptor import (
     DecoderLayout,
     GatedDenseFFNContract,
-    GenericDecoderContract,
     GenericContractModelDescriptor,
+    GenericDecoderContract,
     LatentAttentionContract,
     MTPContract,
     PLEContract,

@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Tests for orchestration mesh packing and validation."""
 
@@ -38,12 +53,12 @@ def test_pack_sixteen_one_gpu_instances_onto_two_eight_gpu_nodes():
     assert allocation.exclusive is True
 
 
-def test_pack_thirty_two_gpu_single_mesh_is_exclusive_on_four_nodes():
+def test_pack_sixteen_gpu_single_mesh_spans_two_nodes_non_exclusively():
     mesh = ParallelMesh(pp=2, dp_replicate=2, dp_shard=4, ep=1)
     allocation = pack_gpu_allocation(mesh=mesh, instances=1, gpus_per_node=8)
-    assert allocation.gpus_per_instance == 32
-    assert allocation.nodes == 4
-    assert allocation.exclusive is True
+    assert allocation.gpus_per_instance == 16
+    assert allocation.nodes == 2
+    assert allocation.exclusive is False
 
 
 def test_extract_vllm_stats_mesh_from_runtime_topology():

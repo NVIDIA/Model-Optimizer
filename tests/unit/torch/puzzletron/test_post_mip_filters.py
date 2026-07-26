@@ -42,8 +42,7 @@ def _ledger(tmp_path, metrics_by_revision):
 
 def _sweep(*values):
     return {
-        f"concurrency_{concurrency}.output_token_throughput": value
-        for concurrency, value in values
+        f"concurrency_{concurrency}.output_token_throughput": value for concurrency, value in values
     }
 
 

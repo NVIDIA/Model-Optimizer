@@ -618,9 +618,9 @@ class StageCompatAdapter(WorkAdapter):
             plan.experiment_config_path,
             "--worker-stage",
             node.stage_id,
-            "--gpus-per-node",
-            str(node.gpus_per_node),
         ]
+        if node.resource != "cpu":
+            argv.extend(("--gpus-per-node", str(node.gpus_per_node)))
         for override in overrides or []:
             argv.extend(["--override", override])
         if node.distributed:

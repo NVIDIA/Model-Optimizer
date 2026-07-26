@@ -14,8 +14,8 @@ from modelopt.torch.puzzletron.dataset.multimodal import (
     INTERSYN_SINGLE_DATASET,
     INTERSYN_SINGLE_REVISION,
     batch_from_automodel,
-    load_materialized_intersyn_subset,
     load_materialized_conversation_dataset,
+    load_materialized_intersyn_subset,
     materialize_intersyn_subset,
     materialize_normalized_intersyn_samples,
     normalize_intersyn_multi,
@@ -152,6 +152,50 @@ def test_batch_from_automodel_recovers_boundaries_from_neat_packing_ids():
     assert "_packed_seq_ids" not in batch.model_kwargs
 
 
+def test_batch_from_automodel_excludes_padding_from_every_canonical_mask():
+    input_ids = torch.arange(8, dtype=torch.long).reshape(2, 4)
+    labels = input_ids.clone()
+    loss_mask = torch.ones_like(input_ids)
+
+    batch = batch_from_automodel(
+        {
+            "input_ids": input_ids,
+            "labels": labels,
+            "loss_mask": loss_mask,
+            "attention_mask": torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]]),
+        },
+        sample_ids=("row-0", "row-1"),
+        source_metadata={"dataset": "fixture", "revision": "1"},
+        layout=DataLayout.PADDED_VARLEN,
+    )
+
+    expected = torch.tensor(
+        [[True, True, True, False], [True, True, False, False]]
+    )
+    assert torch.equal(batch.hidden_mask, expected)
+    assert torch.equal(batch.ce_mask, expected)
+    assert torch.equal(batch.kd_mask, expected)
+    assert batch.labels.tolist() == [[0, 1, 2, -100], [4, 5, -100, -100]]
+
+
+def test_batch_from_automodel_honors_padding_mask_without_attention_mask():
+    input_ids = torch.arange(4, dtype=torch.long).reshape(1, 4)
+
+    batch = batch_from_automodel(
+        {
+            "input_ids": input_ids,
+            "labels": input_ids.clone(),
+            "padding_mask": torch.tensor([[False, False, True, True]]),
+        },
+        sample_ids=("row",),
+        source_metadata={"dataset": "fixture", "revision": "1"},
+        layout=DataLayout.PADDED_VARLEN,
+    )
+
+    assert batch.hidden_mask.tolist() == [[True, True, False, False]]
+    assert batch.labels.tolist() == [[0, 1, -100, -100]]
+
+
 def test_batch_from_automodel_globalizes_multiple_packed_rows_and_slices_them():
     input_ids = torch.arange(16, dtype=torch.long).reshape(2, 8)
     batch = batch_from_automodel(
@@ -195,12 +239,8 @@ def test_multi_turn_adapter_rejects_rows_without_two_images():
         "image1": "image-1",
     }
 
-    try:
+    with pytest.raises(ValueError, match="at least two images"):
         normalize_intersyn_multi(row)
-    except ValueError as exc:
-        assert "at least two images" in str(exc)
-    else:
-        raise AssertionError("single-image multi-turn row was accepted")
 
 
 def test_materialized_subset_is_offline_reusable_and_hashes_images(tmp_path):

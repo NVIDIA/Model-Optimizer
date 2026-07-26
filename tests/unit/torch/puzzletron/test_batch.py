@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from modelopt.torch.puzzletron.dataset.batch import (
@@ -147,6 +148,20 @@ def test_pp_padding_preserves_packed_boundaries_and_mrope_layout():
     assert not padded.hidden_mask[-1].any()
 
 
+def test_batch_rejects_supervision_on_padding():
+    input_ids = torch.arange(4).reshape(1, 4)
+
+    with pytest.raises(ValueError, match="ce_mask.*subset"):
+        PuzzletronBatch(
+            model_kwargs={"input_ids": input_ids},
+            labels=torch.tensor([[0, 1, -100, -100]]),
+            ce_mask=torch.ones_like(input_ids, dtype=torch.bool),
+            kd_mask=torch.tensor([[True, True, False, False]]),
+            hidden_mask=torch.tensor([[True, True, False, False]]),
+            layout=DataLayout.PADDED_VARLEN,
+        )
+
+
 def test_dp_slice_returns_new_batch_with_aligned_media_and_sample_identity():
     batch = _media_batch()
 
@@ -208,7 +223,7 @@ def test_invalid_packed_offsets_fail_before_forward():
         sample_offsets=batch.sequence.sample_offsets,
     )
 
-    try:
+    with pytest.raises(ValueError, match="sample_offsets"):
         PuzzletronBatch(
             model_kwargs=batch.model_kwargs,
             labels=batch.labels,
@@ -221,7 +236,3 @@ def test_invalid_packed_offsets_fail_before_forward():
             modality=batch.modality,
             layout=batch.layout,
         )
-    except ValueError as exc:
-        assert "sample_offsets" in str(exc)
-    else:
-        raise AssertionError("invalid packed offsets were accepted")

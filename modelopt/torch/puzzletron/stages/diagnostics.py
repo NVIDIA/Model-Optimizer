@@ -12,8 +12,8 @@ used later by the real library/scoring stages.
 
 from __future__ import annotations
 
-import csv
 import copy
+import csv
 import dataclasses
 import gc
 import hashlib
@@ -21,9 +21,8 @@ import json
 import math
 import re
 import shutil
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from omegaconf import OmegaConf
@@ -40,15 +39,14 @@ from ..block_config import (
     SubblockConfig,
     maybe_cast_block_configs,
 )
+from ..diagnostics.campaign_findings import MetricSpec
+from ..diagnostics.width_sanity import aggregate_parent_sweep_sanity
 from ..diagnostics.width_slice_equivalence import (
     evaluate_width_slice_equivalence,
     normalize_width_slice_batch,
     validate_width_slice_artifacts,
 )
-from ..diagnostics.campaign_findings import MetricSpec
-from ..diagnostics.width_sanity import aggregate_parent_sweep_sanity
 from ..identity import canonicalize, stable_hash
-from ..manifest import StageManifest
 from ..pruning.sorted_teacher import build_sorted_teacher
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
@@ -60,6 +58,11 @@ from .pipeline import (
     _puzzle_dir,
     _teacher_dir,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from ..manifest import StageManifest
 
 __all__ = [
     "activation_diagnostic_stage",
@@ -3347,7 +3350,11 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
         mprint(md_path.read_text(encoding="utf-8"))
         findings = []
         if not passed:
-            from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage, finding_from_message
+            from ..diagnostics.sanity_verdict import (
+                SanityVerdict,
+                complete_sanity_stage,
+                finding_from_message,
+            )
 
             if not sorted_passed:
                 findings.append(
@@ -3492,6 +3499,7 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
             in {
                 "max_sample_length",
                 "pack_size",
+                "packing",
                 "packing_ratio",
                 "path",
             }

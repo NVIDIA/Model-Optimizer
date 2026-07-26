@@ -37,27 +37,33 @@ In-container validation points:
     each ``model_parts`` entry) is exercised here for the first time.
 """
 
-import logging
 import inspect
 import json
+import logging
 import os
 import re
-from pathlib import Path
 import shutil
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import torch
 from nemo_automodel.recipes.llm.train_ft import TrainFinetuneRecipeForNextTokenPrediction
 
 from ...anymodel.model_descriptor import ModelDescriptorFactory
-from ...dataset import DataLayout, Modality, PuzzletronBatch, PuzzletronDataSpec, batch_from_automodel
+from ...dataset import (
+    DataLayout,
+    Modality,
+    PuzzletronBatch,
+    PuzzletronDataSpec,
+    batch_from_automodel,
+)
 from ...tools.common import resolve_torch_dtype
 from ...utils.sample_hash import log_batch_hashes, samples_hashing_enabled
+from .hooks import HiddenWidthSiteScorer
 from .output import write_scores
 from .reduction import MeshGroups
 from .target_resolver import build_magnitude_scorers, build_scorers
-from .hooks import HiddenWidthSiteScorer
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +114,9 @@ def _force_forward_only_pp_schedule(
     if schedule is None:
         return
 
-    from ...tools.logger import aprint
     from torch.distributed.pipelining.schedules import _ScheduleForwardOnly
+
+    from ...tools.logger import aprint
 
     if isinstance(schedule, _ScheduleForwardOnly):
         return
@@ -1580,7 +1587,10 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         """Use AutoModel's native VLM pre-embed, CP, and PP media path unchanged."""
         from nemo_automodel.components.datasets.vlm.pp_media import stage_vlm_media_for_pp
         from nemo_automodel.components.distributed.cp_utils import make_cp_batch_and_ctx
-        from nemo_automodel.components.utils.model_utils import VLM_INPUT_KEYS, filter_forward_kwargs
+        from nemo_automodel.components.utils.model_utils import (
+            VLM_INPUT_KEYS,
+            filter_forward_kwargs,
+        )
 
         from .batch_adapter import canonicalize_position_ids, prepare_native_cp_inputs
 

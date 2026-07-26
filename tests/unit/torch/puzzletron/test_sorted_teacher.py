@@ -23,8 +23,8 @@ from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
-    MLAConfig,
     MambaConfig,
+    MLAConfig,
     MoEConfig,
 )
 from modelopt.torch.puzzletron.pruning.sorted_teacher import build_layer_layouts, sort_state_dict

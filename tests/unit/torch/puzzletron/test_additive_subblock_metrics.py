@@ -234,9 +234,7 @@ def test_sparse_vllm_report_exposes_complete_additive_metric_bundle(tmp_path):
             {
                 "subblock_config": FFNConfig(intermediate_size=size).to_dict(),
                 **{name: value * scale for name, value in metric_values.items()},
-                "additive_metric_provenance": {
-                    name: "test_formula" for name in metric_values
-                },
+                "additive_metric_provenance": dict.fromkeys(metric_values, "test_formula"),
             }
         )
     stats_path = tmp_path / "sparse_subblock_stats.json"

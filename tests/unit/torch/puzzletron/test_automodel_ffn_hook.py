@@ -58,6 +58,10 @@ def test_ffn_independent_matches_legacy_single_forward():
     legacy_score = legacy.to_dict()["score"]
 
     scorer = FFNIndependentScorer(down_proj, MeshGroups())
+    scorer.set_batch_metadata(
+        sequence_ids=torch.zeros((1, n_tokens), dtype=torch.long),
+        num_samples=1,
+    )
     scorer(down_proj, (act,), None)
     out = scorer.finalize()
 
@@ -82,6 +86,39 @@ def test_ffn_independent_multibatch_ranking_matches_legacy():
     my_score = scorer.finalize()["score"]
     # Global-mean vs sum-of-per-batch-means differ by a positive scalar -> same ranking.
     assert torch.equal(my_score.argsort(descending=True), legacy_score.argsort(descending=True))
+
+
+def test_ffn_independent_excludes_canonical_padding():
+    down_proj = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        down_proj.weight.fill_(1)
+    activations = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [1000.0, 1000.0]]])
+
+    scorer = FFNIndependentScorer(down_proj, MeshGroups())
+    scorer.set_batch_metadata(
+        sequence_ids=torch.tensor([[0, 0, -1]]),
+        num_samples=1,
+    )
+    scorer(down_proj, (activations,), None)
+
+    expected = torch.tensor([2.0, 3.0]) * torch.sqrt(torch.tensor(1.0))
+    torch.testing.assert_close(scorer.finalize()["score"], expected)
+
+
+def test_ffn_padding_metadata_tracks_pipeline_microbatches():
+    down_proj = nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        down_proj.weight.fill_(1)
+    scorer = FFNIndependentScorer(down_proj, MeshGroups())
+    scorer.set_batch_metadata(
+        sequence_ids=torch.tensor([[0, 0, -1], [1, -1, -1]]),
+        num_samples=2,
+    )
+
+    scorer(down_proj, (torch.tensor([[[1.0], [3.0], [1000.0]]]),), None)
+    scorer(down_proj, (torch.tensor([[[5.0], [1000.0], [1000.0]]]),), None)
+
+    torch.testing.assert_close(scorer.finalize()["score"], torch.tensor([3.0]))
 
 
 def _job_ffn_node_invariance(rank, size):

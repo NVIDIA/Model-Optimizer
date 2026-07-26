@@ -20,9 +20,6 @@ from contextlib import nullcontext
 from typing import Any
 
 import torch
-from torch.distributed.tensor import DTensor, Replicate
-from torch.utils.checkpoint import checkpoint
-
 from nemo_automodel.components.distributed.config import DistributedSetup
 from nemo_automodel.components.distributed.cp_utils import make_cp_batch_and_ctx
 from nemo_automodel.components.distributed.pipelining.config import PipelineConfig
@@ -39,28 +36,28 @@ from nemo_automodel.components.training.utils import ScopedModuleOffloading
 from nemo_automodel.components.utils.model_utils import VLM_INPUT_KEYS, filter_forward_kwargs
 from nemo_automodel.recipes.llm.kd import (
     KnowledgeDistillationRecipeForNextTokenPrediction as _AutoModelLLMKD,
-    _build_teacher_model as _build_llm_teacher,
-    _verify_tokenizer_compatibility as _verify_llm_tokenizers,
 )
+from nemo_automodel.recipes.llm.kd import _build_teacher_model as _build_llm_teacher
+from nemo_automodel.recipes.llm.kd import _verify_tokenizer_compatibility as _verify_llm_tokenizers
 from nemo_automodel.recipes.llm.train_ft import (
     TrainFinetuneRecipeForNextTokenPrediction,
     _get_num_thd_chunks,
     _uses_te_dot_product_attention,
     _uses_thd_collater,
-    build_model as build_llm_model,
 )
+from nemo_automodel.recipes.llm.train_ft import build_model as build_llm_model
 from nemo_automodel.recipes.vlm.finetune import (
     FinetuneRecipeForVLM,
     _move_to_device,
-    build_model as build_vlm_model,
     stage_vlm_media_for_pp,
 )
-from nemo_automodel.recipes.vlm.kd import (
-    KnowledgeDistillationRecipeForVLM as _AutoModelVLMKD,
-    _build_teacher_model as _build_vlm_teacher,
-    _validate_cp_pre_embed_teacher_compatibility,
-    _verify_tokenizer_compatibility as _verify_vlm_tokenizers,
-)
+from nemo_automodel.recipes.vlm.finetune import build_model as build_vlm_model
+from nemo_automodel.recipes.vlm.kd import KnowledgeDistillationRecipeForVLM as _AutoModelVLMKD
+from nemo_automodel.recipes.vlm.kd import _build_teacher_model as _build_vlm_teacher
+from nemo_automodel.recipes.vlm.kd import _validate_cp_pre_embed_teacher_compatibility
+from nemo_automodel.recipes.vlm.kd import _verify_tokenizer_compatibility as _verify_vlm_tokenizers
+from torch.distributed.tensor import DTensor, Replicate
+from torch.utils.checkpoint import checkpoint
 
 from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs

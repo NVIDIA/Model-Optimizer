@@ -17,11 +17,8 @@ from safetensors import safe_open
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.replacement_library.library import ReplacementLibrary
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
-    parse_layer_replacement,
-)
+from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch.puzzletron.solution_registry import write_solution_registry
-
 
 _COLORS = ("#4f8cff", "#22d3ee", "#ff6577")
 

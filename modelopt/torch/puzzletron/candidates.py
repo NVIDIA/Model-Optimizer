@@ -14,11 +14,7 @@ except ImportError:  # pragma: no cover - exercised in minimal utility environme
     DictConfig = ListConfig = None  # type: ignore[assignment]
     OmegaConf = None  # type: ignore[assignment]
 
-from .block_config import (
-    SUBBLOCK_CLS_DICT,
-    BlockConfig,
-    SubblockConfig,
-)
+from .block_config import SUBBLOCK_CLS_DICT, BlockConfig, SubblockConfig
 from .identity import Identity, cache_key, candidate_identity, canonicalize, stable_hash
 
 __all__ = [

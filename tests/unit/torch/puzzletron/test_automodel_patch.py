@@ -26,23 +26,39 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from modelopt.torch.puzzletron.anymodel.automodel import (
+    AutoModelDescriptor,
+    AutoModelDescriptorFactory,
+    automodel_patcher,
+)
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
     MoEConfig,
 )
-from modelopt.torch.puzzletron.anymodel.automodel import (
-    AutoModelDescriptor,
-    AutoModelDescriptorFactory,
-    automodel_patcher,
-)
 from modelopt.torch.puzzletron.plugins.automodel.load import validate_force_hf_ep
 from modelopt.torch.puzzletron.plugins.automodel.patch import (
+    _cast_stage_local_model_to_dtype,
     _native_checkpoint_requires_heterogeneous_adapter,
     auto_detect_block_configs,
     load_block_configs,
 )
+
+
+def test_stage_local_dtype_cast_preserves_protected_fp32_submodules():
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.projection = torch.nn.Linear(2, 2, bias=False)
+            self._fp32_params = torch.nn.Linear(2, 2, bias=False)
+
+    model = Model()
+
+    _cast_stage_local_model_to_dtype(model, torch.bfloat16)
+
+    assert model.projection.weight.dtype is torch.bfloat16
+    assert model._fp32_params.weight.dtype is torch.float32
 
 
 def test_load_block_configs_bare_list(tmp_path):

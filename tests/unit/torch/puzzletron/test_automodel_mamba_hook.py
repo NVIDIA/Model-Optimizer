@@ -4,9 +4,7 @@
 import torch
 from torch import nn
 
-from modelopt.torch.puzzletron.plugins.automodel.hooks.mamba import (
-    MambaInProjContributionScorer,
-)
+from modelopt.torch.puzzletron.plugins.automodel.hooks.mamba import MambaInProjContributionScorer
 from modelopt.torch.puzzletron.plugins.automodel.reduction import MeshGroups
 
 

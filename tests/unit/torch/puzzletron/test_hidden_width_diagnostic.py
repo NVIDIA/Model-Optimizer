@@ -3,8 +3,8 @@ import json
 from modelopt.torch.puzzletron.stages.diagnostics import (
     _diagnostic_checkpoint_needs_rebuild,
     _hidden_only_diagnostic_ready,
-    _hidden_width_result_metrics,
     _hidden_width_ranking_verdict,
+    _hidden_width_result_metrics,
     _merge_reused_sort_equivalence,
     _near_teacher_axis_targets,
     _ratio_aligned_hidden_widths,

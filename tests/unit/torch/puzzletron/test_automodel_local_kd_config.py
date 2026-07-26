@@ -1,9 +1,9 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from omegaconf import OmegaConf
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.plugins.automodel import (
     local_kd_config,
@@ -96,7 +96,11 @@ def test_local_kd_rejects_a_disabled_data_parallel_axis_with_ep(
     monkeypatch.setattr(
         local_kd_config, "inject_descriptor_model_kwargs", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(local_kd_config, "_inject_canonical_data", lambda *_args: None)
+    monkeypatch.setattr(
+        local_kd_config,
+        "_inject_canonical_data",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         local_kd_config,
         "inject_descriptor_pipeline_config",
@@ -205,6 +209,25 @@ def test_disjoint_local_loss_backpropagates_immediately_and_returns_detached_val
     assert not second_value.requires_grad
     torch.testing.assert_close(first.grad, torch.tensor(12.0))
     torch.testing.assert_close(second.grad, torch.tensor(3.0))
+
+
+def test_local_kd_hidden_mask_excludes_padded_tokens_from_replay_loss() -> None:
+    student = torch.tensor(
+        [[[1.0, 1.0], [2.0, 2.0], [100.0, 100.0], [200.0, 200.0]]]
+    )
+    teacher = torch.zeros_like(student)
+    hidden_mask = torch.tensor([[True, True, False, False]])
+
+    masked_student, masked_teacher = local_kd_recipe._mask_local_kd_tensors(
+        student,
+        teacher,
+        hidden_mask,
+        record_index=0,
+        record_count=1,
+    )
+
+    assert masked_student.tolist() == [[1.0, 1.0], [2.0, 2.0]]
+    assert masked_teacher.tolist() == [[0.0, 0.0], [0.0, 0.0]]
 
 
 def test_elastic_local_kd_trend_is_reported_without_incomparable_hard_gate() -> None:

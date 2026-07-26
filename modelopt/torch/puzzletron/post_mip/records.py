@@ -239,8 +239,7 @@ class CandidateLedger:
         owner, separator, metric = reference.partition(".")
         if not separator or not owner or not metric or owner == "mip":
             raise ValueError(
-                "concurrency sweep metric must be node-qualified as <node>.<metric>: "
-                f"{reference}"
+                f"concurrency sweep metric must be node-qualified as <node>.<metric>: {reference}"
             )
         observation = self._observation_for_revision(owner, revision_id)
         if observation is None:
@@ -273,9 +272,7 @@ class CandidateLedger:
             )
         return self.revisions[observation.output_revision_id]
 
-    def _observation_for_revision(
-        self, node_id: str, revision_id: str
-    ) -> NodeObservation | None:
+    def _observation_for_revision(self, node_id: str, revision_id: str) -> NodeObservation | None:
         """Find a node observation on this revision's lineage.
 
         Transform nodes create a new revision, but all earlier measurements remain

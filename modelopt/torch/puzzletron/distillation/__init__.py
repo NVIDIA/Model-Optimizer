@@ -3,5 +3,5 @@
 
 """Global distillation stage interfaces."""
 
-from .global_automodel import *
 from .flash_kld import *
+from .global_automodel import *

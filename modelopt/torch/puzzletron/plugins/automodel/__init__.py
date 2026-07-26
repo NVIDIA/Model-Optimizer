@@ -71,6 +71,6 @@ __all__ = [
 ]
 from .batch_adapter import (
     VisionForwardMonitor,
-    validated_forward_kwargs,
     validate_native_feature_config,
+    validated_forward_kwargs,
 )

@@ -16,12 +16,12 @@
 
 """Runtime statistics calculation for NAS subblock benchmarking via vLLM."""
 
-import os
-import queue
-import tempfile
 import hashlib
 import json
 import math
+import os
+import queue
+import tempfile
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -37,8 +37,8 @@ from ..block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
-    MLAConfig,
     MambaConfig,
+    MLAConfig,
     MoEConfig,
     SubblockConfig,
     maybe_cast_block_configs,
@@ -46,8 +46,6 @@ from ..block_config import (
 from ..candidates import build_candidate_library
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
-from .runtime_utils import RuntimeConfig, save_model
-from .runtime_vllm import RuntimeMeasurement, run_vllm_latency_benchmark
 from .runtime_estimator import (
     candidate_slope,
     effective_repeat_count,
@@ -56,6 +54,8 @@ from .runtime_estimator import (
     median_measurement,
     scaffolded_layout,
 )
+from .runtime_utils import RuntimeConfig, save_model
+from .runtime_vllm import RuntimeMeasurement, run_vllm_latency_benchmark
 from .topology import RuntimeTopology
 
 _ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))

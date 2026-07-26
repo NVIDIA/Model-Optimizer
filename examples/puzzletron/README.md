@@ -92,8 +92,8 @@ accepted answer and the exact navigation frame are saved in
 python examples/puzzletron/puzzletron_setup_v2.py --resume /path/to/campaign
 ```
 
-V2 supports reusable named parallel profiles, independent strategy and instance
-counts per stage, requested and scheduling-compatible effective batches,
+V2 supports reusable named parallel profiles, canonical per-stage execution
+strategies, independent instance counts, scheduling-compatible effective batches,
 multiple named vLLM workload/topology measurements, independent MIP goals with
 internal constraints/variants/matrices, and editable post-MIP flow DAGs. The
 recommended flow begins with online evaluation and uses LM loss for filtering;

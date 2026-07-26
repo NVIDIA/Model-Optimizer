@@ -149,7 +149,13 @@ def _centered_subsample(valid_ids: torch.Tensor, cap: int) -> torch.Tensor:
     return valid_ids[positions]
 
 
-def _grouped_route_cache(module, args, groups) -> dict[str, Any]:
+def _grouped_route_cache(
+    module,
+    args,
+    groups,
+    *,
+    canonical_token_mask: torch.Tensor | None = None,
+) -> dict[str, Any]:
     """Build the shared, deterministic grouped-expert route sketch."""
     global _LAST_GROUPED_EXPERT_CACHE
 
@@ -160,9 +166,19 @@ def _grouped_route_cache(module, args, groups) -> dict[str, Any]:
     x = _gather_ep_inputs(source, groups)
     if x is source:
         x = source.clone()
-    token_mask = _gather_ep_inputs(
-        _local(args[1]).reshape(-1).to(torch.bool), groups
-    )
+    local_token_mask = _local(args[1]).reshape(-1).to(torch.bool)
+    if canonical_token_mask is not None:
+        canonical_token_mask = canonical_token_mask.to(
+            device=local_token_mask.device,
+            dtype=torch.bool,
+        )
+        if canonical_token_mask.shape != local_token_mask.shape:
+            raise ValueError(
+                "canonical MoE token mask does not match native routing mask: "
+                f"{tuple(canonical_token_mask.shape)} != {tuple(local_token_mask.shape)}"
+            )
+        local_token_mask = local_token_mask & canonical_token_mask
+    token_mask = _gather_ep_inputs(local_token_mask, groups)
     weights = _gather_ep_inputs(_local(args[2]).float(), groups)
     indices = _gather_ep_inputs(_local(args[3]).to(torch.long), groups)
 
@@ -420,7 +436,17 @@ class MoEExpertRemovalDiffScorer(ScoringHook):
     def __call__(self, experts, args, output):
         if self._gate_input is None:
             raise RuntimeError("expert-removal scorer did not observe the matching gate input")
-        cache = _grouped_route_cache(experts, args, self.groups)
+        canonical_token_mask = self._valid_token_mask(
+            _local(args[0]),
+            trailing_dims=1,
+            stream="experts",
+        )
+        cache = _grouped_route_cache(
+            experts,
+            args,
+            self.groups,
+            canonical_token_mask=canonical_token_mask,
+        )
         selected_tokens = torch.where(cache["token_mask"])[0]
         if selected_tokens.numel() == 0:
             return
@@ -547,7 +573,17 @@ class MoEGroupedExpertChannelScorer(ScoringHook):
         self._orders: list[list[int]] = [[] for _ in range(self.local_experts)]
 
     def __call__(self, module, args, output):
-        cache = _grouped_route_cache(module, args, self.groups)
+        canonical_token_mask = self._valid_token_mask(
+            _local(args[0]),
+            trailing_dims=1,
+            stream="experts",
+        )
+        cache = _grouped_route_cache(
+            module,
+            args,
+            self.groups,
+            canonical_token_mask=canonical_token_mask,
+        )
         weighted = cache["unweighted"] * cache["route_weights"][:, None].to(
             cache["unweighted"].dtype
         )
@@ -736,7 +772,17 @@ class MoELatentCalibrationScorer(ScoringHook):
         return self._register_handle(self.module.experts.register_forward_hook(self._dispatch))
 
     def __call__(self, experts, args, output):
-        cache = _grouped_route_cache(experts, args, self.groups)
+        canonical_token_mask = self._valid_token_mask(
+            _local(args[0]),
+            trailing_dims=1,
+            stream="experts",
+        )
+        cache = _grouped_route_cache(
+            experts,
+            args,
+            self.groups,
+            canonical_token_mask=canonical_token_mask,
+        )
         selected = _centered_subsample(torch.where(cache["token_mask"])[0], self._tokens_per_batch)
         if selected.numel() == 0:
             return

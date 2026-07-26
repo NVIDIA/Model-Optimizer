@@ -45,9 +45,7 @@ def _grid(tmp_path: Path) -> dict:
 
 
 def test_profile_solution_registry_selects_exact_pairs_and_stable_styles(tmp_path: Path):
-    from modelopt.torch.puzzletron.solution_registry import (
-        build_profile_solution_registry,
-    )
+    from modelopt.torch.puzzletron.solution_registry import build_profile_solution_registry
 
     registry = build_profile_solution_registry(
         _grid(tmp_path),
@@ -71,9 +69,7 @@ def test_profile_solution_registry_selects_exact_pairs_and_stable_styles(tmp_pat
 
 
 def test_profile_solution_registry_rejects_missing_or_unrealized_candidate(tmp_path: Path):
-    from modelopt.torch.puzzletron.solution_registry import (
-        build_profile_solution_registry,
-    )
+    from modelopt.torch.puzzletron.solution_registry import build_profile_solution_registry
 
     grid = _grid(tmp_path)
     with pytest.raises(ValueError, match="no feasible MIP scenario"):

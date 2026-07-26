@@ -68,6 +68,7 @@ from ...bypass_distillation.subblock_boundaries import (
     resolve_subblock_boundaries,
     selected_subblock_kinds,
 )
+from ...dataset import DataLayout
 from ...granularity import resolve_granularity
 from ...pruning.elastic_sampling import inverse_width_probs
 from ...pruning.runtime_hidden_width import hidden_width_layer_context, retained_hidden_prefix
@@ -103,6 +104,47 @@ _HF_WEIGHT_FILENAMES = {
     "pytorch_model.bin.index.json",
     "config.json",
 }
+
+
+def _mask_local_kd_tensors(
+    student: torch.Tensor,
+    teacher: torch.Tensor,
+    hidden_mask: torch.Tensor | None,
+    *,
+    record_index: int,
+    record_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select real tokens from one block/subblock replay tensor."""
+
+    if hidden_mask is None or bool(hidden_mask.all()):
+        return student, teacher
+    mask = hidden_mask.bool()
+    if student.ndim < 2:
+        raise RuntimeError(
+            "padded/packed local KD requires replay tensors with token dimensions"
+        )
+    if tuple(student.shape[:2]) == tuple(mask.shape):
+        return student[mask], teacher[mask]
+    if tuple(student.shape[:2]) == tuple(reversed(mask.shape)):
+        transposed = mask.transpose(0, 1)
+        return student[transposed], teacher[transposed]
+
+    if record_count > 0 and mask.shape[0] % record_count == 0:
+        rows = mask.shape[0] // record_count
+        local_mask = mask[record_index * rows : (record_index + 1) * rows]
+        if tuple(student.shape[:2]) == tuple(local_mask.shape):
+            return student[local_mask], teacher[local_mask]
+        if tuple(student.shape[:2]) == tuple(reversed(local_mask.shape)):
+            transposed = local_mask.transpose(0, 1)
+            return student[transposed], teacher[transposed]
+    if student.ndim == 2 and student.shape[0] == mask.numel():
+        flat = mask.reshape(-1)
+        return student[flat], teacher[flat]
+    raise RuntimeError(
+        "cannot align canonical hidden_mask with local KD replay tensor: "
+        f"mask={tuple(mask.shape)} tensor={tuple(student.shape)} "
+        f"record={record_index + 1}/{record_count}"
+    )
 
 
 def _cached_subblock_cost(
@@ -648,7 +690,15 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         native_dataloader = self.dataloader
         self.untrack_state("dataloader")
         self.dataloader = (
-            native_dataloader if self._use_vlm_recipe else self._build_puzzletron_train_dataloader()
+            native_dataloader
+            if (
+                self._use_vlm_recipe
+                or (
+                    self._data_spec is not None
+                    and self._data_spec.layout is not DataLayout.FIXED
+                )
+            )
+            else self._build_puzzletron_train_dataloader()
         )
         object.__setattr__(
             self,
@@ -757,6 +807,29 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             trust_remote_code=bool(self.cfg.model.get("trust_remote_code", True)),
             token=True,
         )
+        if (
+            self._data_spec is not None
+            and self._data_spec.layout is not DataLayout.FIXED
+        ):
+            from ...utils.data.dataloaders import prepare_validation_dataloader
+
+            validation_args = OmegaConf.to_container(data_cfg, resolve=True)
+            validation_args.update(
+                {
+                    "dataset_path": str(cfg.dataset_path),
+                    "eval_samples": max_eval_samples,
+                    "micro_batch_size": int(
+                        cfg.bypass.training.val_micro_batch_size
+                        or cfg.bypass.training.micro_batch_size
+                    ),
+                    "seed": int(cfg.bypass.seed),
+                }
+            )
+            return prepare_validation_dataloader(
+                validation_args,
+                tokenizer,
+                data_layout=self._data_spec.layout.value,
+            )
         load_dataset_fn = load_from_disk_fn if data_cfg.load_from_disk else load_streaming_fn
         return create_validation_dataloader(
             accelerator=_DistributedValidationCoordinator(self.dist_env.is_main),
@@ -1251,7 +1324,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                             width=ple_width,
                         )
                     )
-                for record in records:
+                for record_index, record in enumerate(records):
                     if "target" not in record:
                         raise RuntimeError(
                             f"teacher layer {layer_idx} capture has no target output"
@@ -1266,6 +1339,13 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                     if self._embedding_spec is not None and hidden_width is not None:
                         student_tensor = retained_hidden_prefix(student_tensor, hidden_width)
                         teacher_tensor = retained_hidden_prefix(teacher_tensor, hidden_width)
+                    student_tensor, teacher_tensor = _mask_local_kd_tensors(
+                        student_tensor,
+                        teacher_tensor,
+                        self._last_canonical_hidden_mask,
+                        record_index=record_index,
+                        record_count=len(records),
+                    )
                     if tuple(student_tensor.shape) != tuple(teacher_tensor.shape):
                         raise RuntimeError(
                             f"local KD shape mismatch at layer {layer_idx}: "
@@ -1342,12 +1422,19 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                             width=ple_width,
                         )
                     )
-                for record in records:
+                for record_index, record in enumerate(records):
                     student_tensor = _loss_tensor(replay_subblock(boundary, record))
                     teacher_tensor = _loss_tensor(record.target)
                     if self._embedding_spec is not None and hidden_width is not None:
                         student_tensor = retained_hidden_prefix(student_tensor, hidden_width)
                         teacher_tensor = retained_hidden_prefix(teacher_tensor, hidden_width)
+                    student_tensor, teacher_tensor = _mask_local_kd_tensors(
+                        student_tensor,
+                        teacher_tensor,
+                        self._last_canonical_hidden_mask,
+                        record_index=record_index,
+                        record_count=len(records),
+                    )
                     if tuple(student_tensor.shape) != tuple(teacher_tensor.shape):
                         raise RuntimeError(
                             f"local subblock KD shape mismatch at {key}: "

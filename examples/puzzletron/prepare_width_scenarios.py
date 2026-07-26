@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
@@ -17,10 +17,10 @@ from modelopt.torch.puzzletron.candidates import discover_bypass_checkpoints
 from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.pruning.materialize import materialize_hidden_width_checkpoint
-from modelopt.torch.puzzletron.scoring_parent import ensure_scoring_parent
 from modelopt.torch.puzzletron.replacement_library.build_replacement_library import (
     build_replacement_library_from_sorted_teacher,
 )
+from modelopt.torch.puzzletron.scoring_parent import ensure_scoring_parent
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 
 

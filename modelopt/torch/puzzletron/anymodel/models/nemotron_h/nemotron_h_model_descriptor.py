@@ -35,6 +35,7 @@ from ....block_config import (
     MoEConfig,
     maybe_cast_block_configs,
 )
+from ....pruning.embedding_pruning import EmbeddingPruningSpec, TensorAxisRule
 from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
@@ -51,7 +52,6 @@ from ....pruning.moe_mamba_pruning_mixin import (
     MoEPruningMixIn,
 )
 from ....pruning.pruning_mixin import PruningMixIn
-from ....pruning.embedding_pruning import EmbeddingPruningSpec, TensorAxisRule
 from ...capabilities import (
     AxisCapabilities,
     ExportCapabilities,

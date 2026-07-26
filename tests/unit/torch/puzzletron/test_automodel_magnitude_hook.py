@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
-from torch import nn
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 

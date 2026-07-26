@@ -33,11 +33,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .attention_ffn_surgery import (
-    attention_keep_mask,
-    ffn_keep_mask,
-    sorted_attention_keep_indices,
-)
+from .attention_ffn_surgery import attention_keep_mask, ffn_keep_mask, sorted_attention_keep_indices
 
 __all__ = [
     "FFNRemovalSpec",

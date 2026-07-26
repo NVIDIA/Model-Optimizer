@@ -33,16 +33,21 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig, MLAConfig, MambaConfig, MoEConfig
-from .attention_ffn_surgery import (
-    slice_query_rows_by_head,
-    sorted_attention_keep_indices,
+from ..block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+    MLAConfig,
+    MoEConfig,
 )
+from .attention_ffn_surgery import slice_query_rows_by_head, sorted_attention_keep_indices
 from .gated_delta_net import GDNShape, slice_gated_delta_net_state_dict
 from .mamba2_surgery import Mamba2TensorLayout, slice_mamba2_state_dict
 
@@ -306,6 +311,75 @@ def materialize_hidden_width_checkpoint(
     )
 
 
+def _materialize_one_shard(
+    relative: Path,
+    sorted_dir: Path,
+    tmp_dir: Path,
+    source_keys_by_shard: dict,
+    can_link_unchanged: bool,
+    target_layer_prefixes: tuple,
+    global_slice: bool,
+    layouts,
+    targets,
+    descriptor,
+    lm,
+    embedding_spec,
+    ple_spec,
+    target_hidden_width: int,
+    teacher_ple_width: int,
+    target_ple_width: int,
+    num_hidden_layers: int,
+) -> tuple[bool, dict[str, str], set[str], int, int, int]:
+    """Process one safetensors shard in isolation.
+
+    Returns (hardlinked, new_entries, source_keys, removed_size, added_size, added_count).
+    Hardlinked shards contribute no deltas; the caller leaves their source entries in weight_map.
+    """
+    from safetensors import safe_open
+    from safetensors.torch import load_file, save_file
+
+    source_shard = sorted_dir / relative
+    relative_name = relative.as_posix()
+    source_shard_keys = source_keys_by_shard.get(relative_name, set())
+
+    if can_link_unchanged and not _shard_requires_rewrite(
+        source_shard_keys,
+        target_layer_prefixes=target_layer_prefixes,
+        global_slice=global_slice,
+    ):
+        destination = tmp_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source_shard, destination)
+        except OSError:
+            shutil.copy2(source_shard, destination)
+        return True, {}, set(), 0, 0, 0
+
+    tensors = load_file(str(source_shard))
+    removed_size = sum(t.numel() * t.element_size() for t in tensors.values())
+    realized = materialize_solution_state_dict(tensors, layouts, targets)
+    realized = _drop_descriptor_no_op_tensors(realized, targets, descriptor, num_hidden_layers)
+    if embedding_spec is not None:
+        realized = embedding_spec.slice_state_dict(realized, target_hidden_width)
+    if ple_spec is not None and target_ple_width < teacher_ple_width:
+        realized = ple_spec.slice_state_dict(realized, target_ple_width)
+    del tensors
+    if not realized:
+        return False, {}, source_shard_keys, removed_size, 0, 0
+
+    realized = {key: tensor.contiguous() for key, tensor in realized.items()}
+    destination = tmp_dir / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with safe_open(str(source_shard), framework="pt") as handle:
+        metadata = handle.metadata()
+    save_file(realized, str(destination), metadata=metadata)
+    new_entries = {key: relative_name for key in realized}
+    added_size = sum(t.numel() * t.element_size() for t in realized.values())
+    added_count = len(realized)
+    del realized
+    return False, new_entries, source_shard_keys, removed_size, added_size, added_count
+
+
 def materialize_checkpoint_from_sorted(
     sorted_dir,
     layer_replacements,
@@ -318,11 +392,10 @@ def materialize_checkpoint_from_sorted(
 ) -> Path:
     """Stream one sorted-teacher shard at a time into a realized HF checkpoint."""
 
-    from safetensors import safe_open
-    from safetensors.torch import load_file, save_file
-
     from ..identity import stable_hash
     from ..utils.vllm_adapter import (
+        _delete,
+        _get_text_config,
         configure_anymodel_metadata,
         convert_block_configs_to_per_layer_config,
     )
@@ -338,6 +411,11 @@ def materialize_checkpoint_from_sorted(
     # instantiate heterogeneous tensors from ``block_configs``, while vLLM
     # AnyModel consumes ``per_layer_config``.  Persist both equivalent views.
     configure_anymodel_metadata(child_model_config, descriptor)
+    # child_model_config is a deep copy of the sorted-teacher config, which may
+    # carry a stale per_layer_config for the teacher architecture.  Drop it so
+    # convert_block_configs_to_per_layer_config re-derives it from the pruned
+    # block_configs without hitting the equivalence check.
+    _delete(_get_text_config(child_model_config), "per_layer_config")
     convert_block_configs_to_per_layer_config(child_model_config, keep_block_configs=True)
     child_model_config.block_configs = [
         block.to_dict() if hasattr(block, "to_dict") else block
@@ -491,59 +569,52 @@ def materialize_checkpoint_from_sorted(
     total_size = int(source_total_size) if can_link_unchanged else 0
     output_shards = 0
     hardlinked_shards = 0
+    shard_kwargs = dict(
+        sorted_dir=sorted_dir,
+        tmp_dir=tmp_dir,
+        source_keys_by_shard=source_keys_by_shard,
+        can_link_unchanged=can_link_unchanged,
+        target_layer_prefixes=target_layer_prefixes,
+        global_slice=global_slice,
+        layouts=layouts,
+        targets=targets,
+        descriptor=descriptor,
+        lm=lm,
+        embedding_spec=embedding_spec,
+        ple_spec=ple_spec,
+        target_hidden_width=target_hidden_width,
+        teacher_ple_width=teacher_ple_width,
+        target_ple_width=target_ple_width,
+        num_hidden_layers=int(lm.num_hidden_layers),
+    )
+    num_workers = min(len(weight_files), os.cpu_count() or 1)
     try:
-        for relative in weight_files:
-            source_shard = sorted_dir / relative
-            relative_name = relative.as_posix()
-            source_shard_keys = source_keys_by_shard.get(relative_name, set())
-            if can_link_unchanged and not _shard_requires_rewrite(
-                source_shard_keys,
-                target_layer_prefixes=target_layer_prefixes,
-                global_slice=global_slice,
-            ):
-                destination = tmp_dir / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.link(source_shard, destination)
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {
+                pool.submit(_materialize_one_shard, relative, **shard_kwargs): relative
+                for relative in weight_files
+            }
+            for future in as_completed(futures):
+                hardlinked, new_entries, rewritten_source_keys, removed_size, added_size, added_count = (
+                    future.result()
+                )
+                if hardlinked:
                     hardlinked_shards += 1
-                except OSError:
-                    shutil.copy2(source_shard, destination)
-                output_shards += 1
-                continue
-
-            tensors = load_file(str(source_shard))
-            if can_link_unchanged:
-                for key, tensor in tensors.items():
+                    output_shards += 1
+                    continue
+                for key in rewritten_source_keys:
                     if weight_map.pop(key, None) is not None:
                         tensor_count -= 1
-                        total_size -= tensor.numel() * tensor.element_size()
-            realized = materialize_solution_state_dict(tensors, layouts, targets)
-            realized = _drop_descriptor_no_op_tensors(
-                realized,
-                targets,
-                descriptor,
-                int(lm.num_hidden_layers),
-            )
-            if embedding_spec is not None:
-                realized = embedding_spec.slice_state_dict(realized, target_hidden_width)
-            if ple_spec is not None and target_ple_width < teacher_ple_width:
-                realized = ple_spec.slice_state_dict(realized, target_ple_width)
-            if not realized:
-                continue
-            realized = {key: tensor.contiguous() for key, tensor in realized.items()}
-            destination = tmp_dir / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with safe_open(str(source_shard), framework="pt") as handle:
-                metadata = handle.metadata()
-            save_file(realized, str(destination), metadata=metadata)
-            output_shards += 1
-            for key, tensor in realized.items():
-                if key in weight_map:
-                    raise RuntimeError(f"tensor {key} was written by multiple output shards")
-                weight_map[key] = relative_name
-                tensor_count += 1
-                total_size += tensor.numel() * tensor.element_size()
-            del tensors, realized
+                total_size -= removed_size
+                if not new_entries:
+                    continue
+                for key, shard_file in new_entries.items():
+                    if key in weight_map:
+                        raise RuntimeError(f"tensor {key} was written by multiple output shards")
+                    weight_map[key] = shard_file
+                tensor_count += added_count
+                total_size += added_size
+                output_shards += 1
 
         if source_is_indexed:
             index_metadata = dict(source_index.get("metadata") or {})
@@ -593,11 +664,11 @@ def materialize_model_from_sorted(sorted_dir, layer_replacements, descriptor, ch
     checkpoint. For large models this materializes densely — the sharded path writes the result via
     the normal save and reloads with ``load_and_shard_model`` (an in-container follow-up).
     """
-    from .sorted_teacher import build_layer_layouts
-    from ..block_config import maybe_cast_block_configs
     from ..anymodel.puzzformer import deci_x_patcher
+    from ..block_config import maybe_cast_block_configs
     from ..tools.checkpoint_utils import load_model_config
     from ..tools.checkpoint_utils_hf import init_model_from_config
+    from .sorted_teacher import build_layer_layouts
 
     teacher_config = load_model_config(
         sorted_dir, trust_remote_code=descriptor.requires_trust_remote_code()

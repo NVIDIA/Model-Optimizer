@@ -15,7 +15,7 @@
 
 """MIP-based pruning: model optimization via mixed-integer programming."""
 
-from .mip_and_realize_models import *
 from .grid_budgeting import *
+from .mip_and_realize_models import *
 from .solver_backend import *
 from .sweep import *

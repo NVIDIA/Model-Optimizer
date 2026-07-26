@@ -29,15 +29,15 @@ fused via ``te_parallel_ce`` and never calls ``lm_head``). The LM-head weight is
 the ``lm_head`` parameter (or the tied embedding) and gathered across TP once.
 """
 
-import logging
 import json
+import logging
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import MethodType
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 from ...pruning.mamba2_surgery import Mamba2TensorLayout, mamba2_projected_prefix_mask
 from .scoring_recipe import ActivationScoringRecipe

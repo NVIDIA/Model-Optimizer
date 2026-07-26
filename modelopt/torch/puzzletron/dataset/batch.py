@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from enum import Enum
 import hashlib
 import json
 import math
+from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
 import torch
@@ -237,6 +237,13 @@ class PuzzletronBatch:
         ):
             if tensor is not None and tuple(tensor.shape) != (batch_size, seq_len):
                 raise ValueError(f"{name} must have shape {(batch_size, seq_len)}, got {tuple(tensor.shape)}")
+        if self.hidden_mask is not None:
+            valid = self.hidden_mask.bool()
+            for name, mask in (("ce_mask", self.ce_mask), ("kd_mask", self.kd_mask)):
+                if mask is not None and bool((mask.bool() & ~valid).any()):
+                    raise ValueError(f"{name} must be a subset of hidden_mask")
+            if self.labels is not None and bool(self.labels[~valid].ne(-100).any()):
+                raise ValueError("labels outside hidden_mask must be -100")
         for key in _SEQUENCE_MODEL_KEYS - {"position_ids"}:
             value = self.model_kwargs.get(key)
             if isinstance(value, torch.Tensor) and value.shape[-1] != seq_len:

@@ -26,6 +26,7 @@ per-layer block config), exactly mirroring ``register_activation_hooks``.
 import logging
 import os
 import re
+
 from modelopt.torch.puzzletron.anymodel.capabilities import MagnitudeFallbackSpec
 from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
 from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock, DummyModule

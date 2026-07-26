@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """AIPerf subprocess adapter with owned vLLM server lifecycle."""
 
@@ -143,7 +158,9 @@ def _wait_for_health(url: str, process: subprocess.Popen, timeout: float) -> Non
     last_error: BaseException | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"vLLM server exited before readiness with code {process.returncode}")
+            raise RuntimeError(
+                f"vLLM server exited before readiness with code {process.returncode}"
+            )
         try:
             with urllib.request.urlopen(url, timeout=5) as response:  # nosec B310
                 if response.status == 200:
@@ -231,9 +248,7 @@ def _resolve_executable(executable: str | Path) -> Path:
         sibling = engineering_root / "aiperf" / ".venv" / "bin" / "aiperf"
         if sibling.is_file():
             return sibling.resolve()
-    raise FileNotFoundError(
-        f"Cannot find AIPerf executable {executable!s}; set AIPERF_EXECUTABLE"
-    )
+    raise FileNotFoundError(f"Cannot find AIPerf executable {executable!s}; set AIPERF_EXECUTABLE")
 
 
 def _profile_command(
@@ -321,9 +336,7 @@ def _clean_subprocess_environment(
     # determine compiled serving code, while retaining reuse across reruns and
     # concurrencies of the same sweep.
     cache_root = Path(env.get("VLLM_CACHE_ROOT", Path.home() / ".cache" / "vllm"))
-    env["VLLM_CACHE_ROOT"] = str(
-        cache_root / "puzzletron-aiperf" / architecture_id / topology_id
-    )
+    env["VLLM_CACHE_ROOT"] = str(cache_root / "puzzletron-aiperf" / architecture_id / topology_id)
 
     # Editable vLLM installs rely on an import hook in the parent process.  An
     # explicit path for that active package keeps spawned engine workers on the
@@ -415,6 +428,8 @@ def run_aiperf_sweep(
         architecture_id=architecture_id,
         topology_id=topology_id,
     )
+    for key, value in (topology.get("env") or {}).items():
+        env[str(key)] = str(value)
     cached: dict[int, BenchmarkResult] = {}
     missing: list[tuple[int, Path, list[str], str]] = []
     for concurrency in concurrency_values:

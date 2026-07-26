@@ -48,8 +48,8 @@ from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from ..utils.misc import block_config_to_str, solution_to_str
 from ..utils.parsing import get_nested_key, parse_json, parse_path
-from .solver_backend import run_mip_with_backend
 from .search_space import filter_replacements_by_axes, rank_homogeneous_solutions
+from .solver_backend import run_mip_with_backend
 
 __all__ = [
     "PuzzleMetrics",

@@ -181,6 +181,22 @@ def _sibling_paths(info: Any) -> tuple[str, ...]:
     )
 
 
+def _repository_subset_bytes(info: Any, subset: str) -> int | None:
+    sizes = []
+    prefix = f"{subset}/"
+    for item in getattr(info, "siblings", None) or ():
+        path = str(getattr(item, "rfilename", getattr(item, "path", "")))
+        size = getattr(item, "size", None)
+        if (
+            path.startswith(prefix)
+            and isinstance(size, int)
+            and not isinstance(size, bool)
+            and size >= 0
+        ):
+            sizes.append(size)
+    return sum(sizes) if sizes else None
+
+
 def discover_hf_subset_catalog(
     source: str,
     revision: str | None = None,
@@ -238,6 +254,10 @@ def discover_hf_subset_catalog(
         num_bytes = (
             record.get("num_bytes_original_files") if record is not None else None
         )
+        if num_bytes is None:
+            num_bytes = _repository_subset_bytes(info, name)
+        if num_bytes is None and record is not None:
+            num_bytes = record.get("num_bytes_parquet_files")
         disabled_reason = None
         if num_rows is None:
             disabled_reason = "row count unavailable"

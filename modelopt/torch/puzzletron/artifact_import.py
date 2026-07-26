@@ -12,8 +12,8 @@ import json
 import os
 import shutil
 import stat
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 

@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
 from collections import defaultdict
+from dataclasses import dataclass
 from itertools import product
 
 import torch

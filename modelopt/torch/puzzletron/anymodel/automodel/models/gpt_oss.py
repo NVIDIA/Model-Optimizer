@@ -7,10 +7,7 @@ from typing import Any
 
 from ...models.gpt_oss.gpt_oss_model_descriptor import GptOssModelDescriptor
 from ...puzzformer.no_op import MatchingZeros, Same
-from ..auto_model_descriptor import (
-    AutoModelDescriptorFactory,
-    ContractAutoModelDescriptor,
-)
+from ..auto_model_descriptor import AutoModelDescriptorFactory, ContractAutoModelDescriptor
 
 __all__ = ["GptOssAutoModelDescriptor"]
 

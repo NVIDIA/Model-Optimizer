@@ -17,7 +17,6 @@ from .activation_passes import compile_activation_passes
 from .preflight import CampaignPreflight, ModelPreflight
 from .schema import CampaignModel, CrossModelCampaign
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _BASE_CONFIG = _REPO_ROOT / "examples/puzzletron/configs/base.yaml"
 _TEXT_DATASET = Path(os.environ.get("PUZZLETRON_TEXT_DATASET", "data/puzzle_kd_text"))

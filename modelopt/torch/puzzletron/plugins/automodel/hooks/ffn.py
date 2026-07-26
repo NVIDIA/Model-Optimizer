@@ -34,8 +34,8 @@ exactly.
 import os
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as _tdist
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Shard
 
 from modelopt.torch.prune.importance_hooks.base_hooks import clear_gpu_memory, get_pruning_schedule
@@ -98,7 +98,9 @@ class FFNIndependentScorer(ScoringHook):
         local, feature_group = to_local_with_feature_group(activation, feature_dim=-1)
         self._feature_group = feature_group
         # Flatten all leading (token) dims; accumulate per-channel sum of |activation|.
-        flat = local.reshape(-1, local.shape[-1]).abs().to(torch.float64)
+        flat = self._flatten_valid_tokens(local, trailing_dims=1).abs().to(torch.float64)
+        if flat.shape[0] == 0:
+            return
         partial = flat.sum(dim=0)
         self._sum_abs = partial if self._sum_abs is None else self._sum_abs + partial
         self._count += flat.shape[0]
@@ -237,7 +239,9 @@ class FFNIterativeScorer(ScoringHook):
         # which is why it matched. Recompute the reference (unpruned) output via F.linear in float32
         # (instead of the captured bf16 forward output) so it stays consistent with output_curr.
         activations = _full(args[0]).float()  # [...tokens, I] full (TP-gathered), float32
-        activations = activations.reshape(-1, activations.shape[-1])
+        activations = self._flatten_valid_tokens(activations, trailing_dims=1)
+        if activations.shape[0] == 0:
+            return
         if self.token_sample_cap is not None and activations.shape[0] > self.token_sample_cap:
             positions = torch.floor(
                 (torch.arange(self.token_sample_cap, device=activations.device, dtype=torch.float64) + 0.5)

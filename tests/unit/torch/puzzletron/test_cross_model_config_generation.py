@@ -8,13 +8,9 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.campaigns import config_generation
+from modelopt.torch.puzzletron.anymodel.capabilities import AxisCapabilities
 from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor import (
     GptOssModelDescriptor,
-)
-from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
-    Qwen3P5MoeVLModelDescriptor,
-    Qwen3P5TextModelDescriptor,
 )
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
     LlamaModelDescriptor,
@@ -22,20 +18,22 @@ from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor impo
 from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
     NemotronHModelDescriptor,
 )
+from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+    Qwen3P5MoeVLModelDescriptor,
+    Qwen3P5TextModelDescriptor,
+)
+from modelopt.torch.puzzletron.campaigns import config_generation
 from modelopt.torch.puzzletron.campaigns.activation_passes import compile_activation_passes
 from modelopt.torch.puzzletron.campaigns.config_generation import (
     _axis_inventory,
     _deferred_sort_axes,
     _embedding_alignment,
     _stage_parallel,
-    generate_campaign_configs,
 )
-from modelopt.torch.puzzletron.anymodel.capabilities import AxisCapabilities
 from modelopt.torch.puzzletron.campaigns.preflight import CampaignPreflight, ModelPreflight
 from modelopt.torch.puzzletron.campaigns.schema import default_cross_model_campaign
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.stages import pipeline
-
 
 BASE_CONFIG = Path("examples/puzzletron/configs/base.yaml")
 NEMOTRON3_FAMILY_CONFIG = Path(
@@ -64,15 +62,7 @@ _NANO_ONE_NODE_MESH = {
     [
         (
             NANO_PRODUCTION_CONFIG,
-            {
-                stage: _NANO_ONE_NODE_MESH
-                for stage in (
-                    "pruning",
-                    "bypass",
-                    "replacement_scoring",
-                    "realize_model",
-                )
-            },
+            dict.fromkeys(("pruning", "bypass", "replacement_scoring", "realize_model"), _NANO_ONE_NODE_MESH),
         ),
         (
             QWEN_FULL_PIPELINE_CONFIG,

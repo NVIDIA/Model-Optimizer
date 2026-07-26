@@ -6,34 +6,32 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from modelopt.torch.puzzletron.block_config import (
-    BlockConfig,
-    FFNConfig,
-    MambaConfig,
-    MoEConfig,
-)
-from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
-    NemotronHModelDescriptor,
-)
-from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
-    LlamaModelDescriptor,
-)
-from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor import (
-    GptOssModelDescriptor,
-)
-from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter import (
-    GptOssConverter,
-)
-from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
-    Qwen3P5TextModelDescriptor,
-)
-from modelopt.torch.puzzletron.block_config import AttentionConfig
-from modelopt.torch.puzzletron.anymodel.registry import infer_descriptor_name, resolve_descriptor
 from modelopt.torch.puzzletron.anymodel.capabilities import (
     AxisCapabilities,
     CapabilityValidationError,
     default_capabilities,
     validate_capabilities,
+)
+from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter import GptOssConverter
+from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor import (
+    GptOssModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
+    LlamaModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor import (
+    NemotronHModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+    Qwen3P5TextModelDescriptor,
+)
+from modelopt.torch.puzzletron.anymodel.registry import infer_descriptor_name, resolve_descriptor
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+    MoEConfig,
 )
 from modelopt.torch.puzzletron.stage_runner import (
     StageResult,

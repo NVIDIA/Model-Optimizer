@@ -32,10 +32,7 @@ from ..identity import canonicalize, stable_hash
 from ..pipeline_config import load_runtime_hydra_config
 from ..rpc_eval import EvaluationCache, EvaluationRequest, EvaluationResult
 from ..scoring_parent import ensure_scoring_parent
-from ..subblock_stats.measurements import (
-    apply_vllm_measurement,
-    normalize_vllm_measurements,
-)
+from ..subblock_stats.measurements import apply_vllm_measurement, normalize_vllm_measurements
 from .common import complete_stage, experiment_dir, stage_manifest_path
 
 if TYPE_CHECKING:

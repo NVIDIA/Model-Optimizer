@@ -16,6 +16,5 @@ sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from puzzletron_setup.v2.cli import main  # noqa: E402
 
-
 if __name__ == "__main__":
     raise SystemExit(main())

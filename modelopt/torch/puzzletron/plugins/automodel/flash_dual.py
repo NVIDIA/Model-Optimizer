@@ -71,12 +71,10 @@ def flash_kld_ce_topk(
     and retains only per-token losses.  Tokens are chunked while the complete LM
     head remains supported; no vocabulary approximation is used.
     """
+    import torch.distributed as torch_dist
     import triton
-
     from fla.modules.fused_cross_entropy import fused_cross_entropy_forward
     from fla.modules.fused_kl_div import MAX_FUSED_SIZE, STATIC_WARPS, kl_div_kernel
-
-    import torch.distributed as torch_dist
 
     n_tokens, hidden_size = student_hidden.shape
     vocab_size = student_lm_head_weight.shape[0]

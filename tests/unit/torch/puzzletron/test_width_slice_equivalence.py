@@ -32,7 +32,7 @@ from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence import (
     validate_width_slice_artifacts,
 )
 from modelopt.torch.puzzletron.identity import canonicalize, stable_hash
-from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
+from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.stages import DEFAULT_HANDLERS
 from modelopt.torch.puzzletron.stages import diagnostics as diagnostics_stage_module
 from modelopt.torch.puzzletron.stages.diagnostics import width_slice_equivalence_stage
@@ -381,7 +381,10 @@ def test_real_batch_adapter_semantics_feed_generic_descriptor_cases(
     assert cases
 
 
-@pytest.mark.parametrize("layout", [DataLayout.FIXED, DataLayout.PACKED_VARLEN])
+@pytest.mark.parametrize(
+    "layout",
+    [DataLayout.FIXED, DataLayout.PADDED_VARLEN, DataLayout.PACKED_VARLEN],
+)
 def test_tiny_generic_vlm_executes_real_automodel_collator_batch_end_to_end(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -415,17 +418,29 @@ def test_tiny_generic_vlm_executes_real_automodel_collator_batch_end_to_end(
         collated = neat_packed_vlm_collater(
             [example],
             padding_idx=0,
+            max_length=6,
             attn_implementation="flash_attention_2",
         )
     else:
         processor = SimpleNamespace(tokenizer=SimpleNamespace(pad_token_id=0))
-        collated = pad_collate_fn([example], processor)
+        examples = [example]
+        if layout is DataLayout.PADDED_VARLEN:
+            examples.append(
+                {
+                    **example,
+                    "input_ids": torch.tensor([1, 2]),
+                    "labels": torch.tensor([1, 2]),
+                    "attention_mask": torch.tensor([1, 1]),
+                    "position_ids": torch.arange(2),
+                }
+            )
+        collated = pad_collate_fn(examples, processor)
     batch = normalize_width_slice_batch(
         collated,
         descriptor=_FFNOnlyLlamaDescriptor,
         checkpoint_config=load_model_config(checkpoint),
         layout=layout,
-        sample_ids=("vlm-0",),
+        sample_ids=tuple(f"vlm-{index}" for index in range(collated["input_ids"].shape[0])),
         source_metadata={"dataset": "processor-collator-fixture", "revision": "v1"},
     )
 
@@ -439,6 +454,8 @@ def test_tiny_generic_vlm_executes_real_automodel_collator_batch_end_to_end(
     assert summary["passed"] is True
     assert summary["batch_modality"] == "multimodal"
     assert summary["batch_layout"] == layout.value
+    if layout is not DataLayout.FIXED:
+        assert not batch.hidden_mask.all()
 
 
 def test_loss_uses_explicit_absolute_and_relative_tolerances():

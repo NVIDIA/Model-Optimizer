@@ -372,3 +372,38 @@ def test_build_recipe_config_selects_native_vlm_and_neat_packing(monkeypatch):
     assert recipe["packed_sequence"]["pack_size"] == 2048
     assert recipe["packed_sequence"]["packing_ratio"] == 0.9
     assert recipe["packed_sequence"]["attn_implementation"] == "flash_attention_2"
+    assert recipe["packed_sequence"]["max_packs"] == 200
+
+
+def test_build_recipe_config_selects_native_text_dataset_and_llm_packing(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    cfg = _cfg()
+    cfg.pruning.automodel.force_hf = False
+    cfg.pruning.automodel.use_puzzletron_dataloader = False
+    cfg.data = {
+        "path": "/puzzle/data/puzzle-kd",
+        "modality": "text",
+        "layout": "packed_varlen",
+        "max_sample_length": 192,
+        "packing": {
+            "pack_size": 256,
+            "packing_ratio": 0.8,
+            "drop_long_samples": True,
+        },
+    }
+
+    recipe = build_recipe_config(cfg)
+
+    assert recipe["dataset"]["_target_"].endswith(
+        "make_puzzletron_chat_dataset"
+    )
+    assert recipe["dataset"]["dataset_path"] == "/puzzle/data/puzzle-kd"
+    assert recipe["packed_sequence"] == {
+        "packed_sequence_size": 256,
+        "packing_strategy": "neat",
+        "drop_long_samples": True,
+        "max_packs": 200,
+    }

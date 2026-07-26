@@ -23,8 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 from transformers import PretrainedConfig
 
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig, SubblockConfig
 from ..anymodel.model_descriptor import ModelDescriptor
+from ..block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig, SubblockConfig
 from .pruning_mixin import PruningMixIn
 
 __all__ = [

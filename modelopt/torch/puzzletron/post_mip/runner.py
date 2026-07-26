@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Execute and aggregate one compiled post-MIP node."""
 
@@ -85,9 +100,7 @@ def _exception_diagnostics(error: Exception) -> dict[str, str]:
     message = str(error)
     return {
         "error": f"{type(error).__name__}: {message}" if message else type(error).__name__,
-        "traceback": "".join(
-            traceback.format_exception(type(error), error, error.__traceback__)
-        ),
+        "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__)),
     }
 
 
@@ -123,16 +136,9 @@ def _execution_contract(
     dependency_executions = {}
     for owner in sorted(dependency_owners):
         current_path = (
-            _puzzle_dir(config)
-            / "artifacts"
-            / "post_mip"
-            / "nodes"
-            / owner
-            / "current.json"
+            _puzzle_dir(config) / "artifacts" / "post_mip" / "nodes" / owner / "current.json"
         )
-        dependency_executions[owner] = json.loads(current_path.read_text())[
-            "execution_identity"
-        ]
+        dependency_executions[owner] = json.loads(current_path.read_text())["execution_identity"]
     source_revisions = {
         revision_id: ledger.source_revision(revision_id, node.model_source).revision_id
         for revision_id in candidate_set.revision_ids
@@ -157,17 +163,14 @@ def _execution_identity(
     )
 
 
-def expected_post_mip_execution_identity(
-    config: Mapping[str, Any], stage_id: str
-) -> str:
+def expected_post_mip_execution_identity(config: Mapping[str, Any], stage_id: str) -> str:
     """Return the identity a completed post-MIP stage must have right now."""
 
     node = _compiled_node(config, stage_id)
     ledger = _ledger(config)
     active = json.loads((_puzzle_dir(config) / "mip" / "active_profiles.json").read_text())
-    if (
-        active.get("status") != "success"
-        or ledger.active_mip_execution_identity != active.get("execution_identity")
+    if active.get("status") != "success" or ledger.active_mip_execution_identity != active.get(
+        "execution_identity"
     ):
         raise RuntimeError("post-MIP ledger does not reflect the active MIP execution")
     return _execution_identity(config, node, _input_set(ledger, config, node), ledger)
@@ -208,13 +211,10 @@ def _materialize(
     library = ReplacementLibrary(scenario / "replacement_library.json", descriptor)
     raw = _raw_solution(source)
     replacements = [
-        parse_layer_replacement(item["layer_replacement"])
-        for item in raw["chosen_replacements"]
+        parse_layer_replacement(item["layer_replacement"]) for item in raw["chosen_replacements"]
     ]
     output = (
-        _execution_root(config, node, execution_identity)
-        / "checkpoints"
-        / source.architecture_id
+        _execution_root(config, node, execution_identity) / "checkpoints" / source.architecture_id
     )
     model_config = library.create_model_config(replacements)
     library.materialize_checkpoint(
@@ -247,9 +247,7 @@ def _scenario_checkpoint_roles(scenario: Path, expected_width: int) -> tuple[Pat
             f"online evaluation scenario manifest is missing: {manifest_path}"
         ) from error
     if manifest.get("status") != "complete":
-        raise RuntimeError(
-            f"online evaluation scenario is not complete: {manifest_path}"
-        )
+        raise RuntimeError(f"online evaluation scenario is not complete: {manifest_path}")
     if int(manifest.get("hidden_width", 0)) != expected_width:
         raise RuntimeError(
             "online evaluation scenario width does not match the candidate: "
@@ -258,15 +256,11 @@ def _scenario_checkpoint_roles(scenario: Path, expected_width: int) -> tuple[Pat
 
     source = Path(str(manifest["parent_checkpoint"]))
     if not (source / "config.json").is_file():
-        raise FileNotFoundError(
-            f"online evaluation source checkpoint is incomplete: {source}"
-        )
+        raise FileNotFoundError(f"online evaluation source checkpoint is incomplete: {source}")
     bypass_value = manifest.get("bypass_checkpoint")
     bypass = Path(str(bypass_value)) if bypass_value is not None else None
     if bypass is not None and not (bypass / "config.json").is_file():
-        raise FileNotFoundError(
-            f"online evaluation bypass checkpoint is incomplete: {bypass}"
-        )
+        raise FileNotFoundError(f"online evaluation bypass checkpoint is incomplete: {bypass}")
     return source, bypass
 
 
@@ -296,15 +290,8 @@ def _config_evaluation_work(
     hidden_width = int(raw_width) if raw_width is not None else 0
     if not hidden_width:
         raise ValueError("online evaluation could not determine the candidate hidden width")
-    scenario = (
-        _puzzle_dir(config)
-        / "scenarios"
-        / f"width-{hidden_width:04d}"
-        / "depth-00"
-    )
-    source_checkpoint, bypass_checkpoint = _scenario_checkpoint_roles(
-        scenario, hidden_width
-    )
+    scenario = _puzzle_dir(config) / "scenarios" / f"width-{hidden_width:04d}" / "depth-00"
+    source_checkpoint, bypass_checkpoint = _scenario_checkpoint_roles(scenario, hidden_width)
     raw["hidden_width"] = hidden_width
     return _ConfigEvaluationWork(
         input_revision_id=input_revision_id,
@@ -361,8 +348,7 @@ def _evaluate_config_group(
     session_output = raw_root / "sessions" / session_identity
     solutions_path = session_output / "solutions.json"
     candidate_outputs = {
-        str(index): str(raw_root / item.source.architecture_id)
-        for index, item in enumerate(work)
+        str(index): str(raw_root / item.source.architecture_id) for index, item in enumerate(work)
     }
     hydra_cfg = clone_hydra_config(load_runtime_hydra_config(config))
     OmegaConf.set_struct(hydra_cfg, False)
@@ -485,6 +471,7 @@ def _aiperf(
     from ..benchmarks import run_aiperf_sweep
 
     settings = dict(node.config.get("config") or {})
+    settings.pop("best_selection_mode", None)
     raw_concurrency = settings.pop("concurrency", [1])
     if isinstance(raw_concurrency, (int, str)):
         concurrencies = (int(raw_concurrency),)
@@ -562,9 +549,7 @@ def _global_kd(
     candidate = copy.deepcopy(config)
     settings = _post_mip_kd_settings(config, node.config.get("config") or {})
     output = (
-        _execution_root(config, node, execution_identity)
-        / "checkpoints"
-        / source.architecture_id
+        _execution_root(config, node, execution_identity) / "checkpoints" / source.architecture_id
     )
     settings.update(student_dir=source.artifact["checkpoint"], output_dir=str(output))
     candidate["distillation"] = settings
@@ -592,9 +577,7 @@ def _run_candidate(
 ) -> dict[str, Any]:
     source = ledger.source_revision(input_revision_id, node.model_source)
     if node.node_type == "materialize":
-        result = _materialize(
-            config, node, ledger, input_revision_id, source, execution_identity
-        )
+        result = _materialize(config, node, ledger, input_revision_id, source, execution_identity)
     elif node.node_type == "evaluation":
         result = _evaluate(config, node, source, execution_identity)
     elif node.node_type == "aiperf":
@@ -613,14 +596,11 @@ def _run_candidate(
 
 
 @contextmanager
-def _distributed_shard(
-    config: dict[str, Any], node: CompiledPostMIPNode
-) -> Iterator[None]:
+def _distributed_shard(config: dict[str, Any], node: CompiledPostMIPNode) -> Iterator[None]:
     """Keep one process group alive across every candidate in a distributed shard."""
 
-    if (
-        int(os.environ.get("WORLD_SIZE", "1")) <= 1
-        or not _needs_puzzletron_process_group(node.node_type)
+    if int(os.environ.get("WORLD_SIZE", "1")) <= 1 or not _needs_puzzletron_process_group(
+        node.node_type
     ):
         yield
         return
@@ -666,9 +646,7 @@ def run_post_mip_node_shard(
             try:
                 row = cached_evaluation_rows.get(revision_id)
                 if row is None:
-                    row = _run_candidate(
-                        config, node, ledger, revision_id, execution_identity
-                    )
+                    row = _run_candidate(config, node, ledger, revision_id, execution_identity)
                 row = {**row, "execution_identity": execution_identity}
             except Exception as error:
                 timed_out = node.node_type == "aiperf" and isinstance(
@@ -691,9 +669,7 @@ def run_post_mip_node_shard(
                     default_timeout = 600 if timeout_field == "benchmark_timeout" else 1200
                     row["timeout_seconds"] = float(
                         getattr(error, "timeout", None)
-                        or (node.config.get("config") or {}).get(
-                            timeout_field, default_timeout
-                        )
+                        or (node.config.get("config") or {}).get(timeout_field, default_timeout)
                     )
                 rows.append(row)
                 if group_rank == 0:
@@ -721,9 +697,7 @@ def _aggregate_filter(
             source_revision_id=revision_id,
             output_revision_id=revision_id if revision_id in selected else None,
             status="selected" if revision_id in selected else "excluded",
-            metrics=(
-                {"aggregate_rank": scores[revision_id]} if revision_id in scores else {}
-            ),
+            metrics=({"aggregate_rank": scores[revision_id]} if revision_id in scores else {}),
             warnings=[excluded[revision_id]] if revision_id in excluded else [],
         )
         for revision_id in input_set.revision_ids
@@ -744,9 +718,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     execution_identity = _execution_identity(config, node, input_set, ledger)
     timed_out_candidates = []
     if node.node_type == "filter":
-        observations, output_set = _aggregate_filter(
-            ledger, node, input_set, execution_identity
-        )
+        observations, output_set = _aggregate_filter(ledger, node, input_set, execution_identity)
     elif node.node_type == "manual_filter":
         decision_path = _node_root(config, node) / "manual_decision.json"
         decision = json.loads(decision_path.read_text()) if decision_path.is_file() else {}
@@ -757,8 +729,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
                 "revision_ids": list(input_set.revision_ids),
                 "execution_identity": execution_identity,
                 "candidates": [
-                    ledger.candidate_metadata(revision_id)
-                    for revision_id in input_set.revision_ids
+                    ledger.candidate_metadata(revision_id) for revision_id in input_set.revision_ids
                 ],
             }
             _atomic_json(_node_root(config, node) / "manual_review.json", review)
@@ -786,9 +757,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     else:
         rows = []
         for path in sorted(
-            (_execution_root(config, node, execution_identity) / "shards").glob(
-                "shard_*.json"
-            )
+            (_execution_root(config, node, execution_identity) / "shards").glob("shard_*.json")
         ):
             rows.extend(
                 row
@@ -799,8 +768,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
         missing = set(input_set.revision_ids) - set(by_input)
         if missing:
             raise RuntimeError(
-                f"post-MIP node {node.node_id} is missing shard results: "
-                f"{sorted(missing)}"
+                f"post-MIP node {node.node_id} is missing shard results: {sorted(missing)}"
             )
         observations = []
         output_ids = []
@@ -837,9 +805,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
                     node_id=node.node_id,
                     input_revision_id=input_revision_id,
                     source_revision_id=row["source_revision_id"],
-                    output_revision_id=(
-                        output_revision_id if row["status"] == "success" else None
-                    ),
+                    output_revision_id=(output_revision_id if row["status"] == "success" else None),
                     status=row["status"],
                     metrics=dict(row.get("metrics") or {}),
                     artifacts={
@@ -891,9 +857,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     execution_summary = _execution_root(config, node, execution_identity) / "summary.json"
     if execution_summary.is_file():
         if json.loads(execution_summary.read_text()) != canonicalize(summary):
-            raise RuntimeError(
-                f"immutable post-MIP execution summary changed: {execution_summary}"
-            )
+            raise RuntimeError(f"immutable post-MIP execution summary changed: {execution_summary}")
     else:
         _atomic_json(execution_summary, summary)
     _atomic_json(_node_root(config, node) / "summary.json", summary)

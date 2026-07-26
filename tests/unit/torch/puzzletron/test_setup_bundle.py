@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Tests for scheduler-neutral configs emitted by the Puzzletron setup wizard."""
 
@@ -211,6 +226,100 @@ def test_nemotron_super_keeps_latent_moe_activation_pass() -> None:
     assert "moe_latent" in pass_names
 
 
+def test_first_class_text_acquisition_renders_local_path_and_keeps_tokenization() -> None:
+    state = _nemotron_render_state(latent_moe=False)
+    state["answers"]["data"].update(
+        {
+            "source": "/datasets/puzzle-kd",
+            "adapter": "puzzle_kd_v2",
+            "acquisition": {
+                "adapter": "puzzle_kd_v2",
+                "source": "nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2",
+                "output": "/datasets/puzzle-kd",
+                "seed": 408,
+                "train_samples": 8192,
+                "validation_samples": 1024,
+            },
+        }
+    )
+
+    experiment = render_experiment(state, "production")
+
+    assert experiment["dataset_path"] == "/datasets/puzzle-kd"
+    assert experiment["data"]["path"] == "/datasets/puzzle-kd"
+    assert experiment["data"]["acquisition"]["adapter"] == "puzzle_kd_v2"
+    assert experiment["tokenize_data"]["enabled"] is True
+
+
+def test_custom_dataset_rendering_does_not_add_acquisition_fields() -> None:
+    experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
+
+    assert "acquisition" not in experiment["data"]
+
+
+def test_packed_text_uses_native_automodel_data_instead_of_fixed_token_memmaps() -> None:
+    state = _nemotron_render_state(latent_moe=False)
+    state["answers"]["data"]["layout"] = "packed_varlen"
+
+    experiment = render_experiment(state, "production")
+
+    assert experiment["tokenize_data"]["enabled"] is False
+    assert experiment["tokenize_data"]["caches"] == []
+    assert "packed_token_cache_path" not in experiment["depth_importance"]
+    assert "packed_token_cache_path" not in experiment["replacement_scoring"]
+    assert "packed_token_cache_path" not in experiment["bypass"]["data"]
+
+
+def test_first_class_vlm_acquisition_disables_text_token_memmaps() -> None:
+    state = _nemotron_render_state(latent_moe=False)
+    state["answers"]["data"].update(
+        {
+            "source": "/datasets/nemotron-vlm",
+            "adapter": "nemotron_vlm_v2",
+            "modality": "multimodal",
+            "layout": "packed_varlen",
+            "acquisition": {
+                "adapter": "nemotron_vlm_v2",
+                "source": "nvidia/Nemotron-VLM-Dataset-v2",
+                "output": "/datasets/nemotron-vlm",
+                "seed": 42,
+                "subsets": ["sparsetables"],
+                "num_samples": 512,
+                "max_shards_per_subset": 1,
+            },
+        }
+    )
+
+    experiment = render_experiment(state, "production")
+
+    assert experiment["data"]["acquisition"]["subsets"] == ["sparsetables"]
+    assert experiment["tokenize_data"]["enabled"] is False
+    assert experiment["tokenize_data"]["caches"] == []
+    assert "packed_token_cache_path" not in experiment["depth_importance"]
+    assert "packed_token_cache_path" not in experiment["replacement_scoring"]
+    assert "packed_token_cache_path" not in experiment["bypass"]["data"]
+
+
+def test_hugging_face_subset_selection_is_emitted_in_catalog_order() -> None:
+    state = _nemotron_render_state(latent_moe=False)
+    state["answers"]["data"].update(
+        {
+            "subsets": ["small", "large"],
+            "subset_revision": "sha",
+            "subset_weights": {"small": 0.25, "large": 0.75},
+        }
+    )
+
+    experiment = render_experiment(state, "production")
+
+    assert experiment["data"]["subsets"] == ["small", "large"]
+    assert experiment["data"]["subset_revision"] == "sha"
+    assert experiment["data"]["subset_weights"] == {
+        "small": 0.25,
+        "large": 0.75,
+    }
+
+
 def test_render_experiment_uses_global_runtime_repeat_default() -> None:
     experiment = render_experiment(
         _nemotron_render_state(latent_moe=False),
@@ -304,7 +413,7 @@ def test_default_post_mip_flow_uses_fifteen_minute_aiperf_timeout() -> None:
     assert flow["nodes"]["best"]["metric"] == "final_eval.lm_loss"
 
 
-def test_render_execution_keeps_vllm_instances_on_one_gpu() -> None:
+def test_render_execution_uses_vllm_runtime_topology() -> None:
     state = {
         "answers": {
             "infrastructure": {
@@ -326,15 +435,30 @@ def test_render_execution_keeps_vllm_instances_on_one_gpu() -> None:
         }
     }
 
-    execution = render_execution(state, {}, "production")
+    experiment = {
+        "vllm_stats": {
+            "runtime_stats": {
+                "topology": {
+                    "tensor_parallel_size": 2,
+                    "pipeline_parallel_size": 1,
+                    "data_parallel_size": 2,
+                    "prefill_context_parallel_size": 1,
+                    "decode_context_parallel_size": 1,
+                    "gpu_group_size": 4,
+                }
+            }
+        }
+    }
+
+    execution = render_execution(state, experiment, "production")
 
     assert execution["execution"]["stages"]["vllm_stats"]["parallel"] == {
-        "tp": 1,
+        "tp": 2,
         "cp": 1,
         "pp": 1,
         "ep": 1,
         "dp_shard": 1,
-        "dp_replicate": 1,
+        "dp_replicate": 2,
         "sequence_parallel": False,
     }
     assert execution["execution"]["stages"]["bypass"]["strategy"] == "single"
@@ -475,6 +599,64 @@ def test_render_execution_caps_post_mip_workers_at_upstream_top_k() -> None:
     assert execution["post.run.final_eval"]["instances"] == 4
 
 
+@pytest.mark.parametrize(
+    ("best_selection_mode", "expected_instances"),
+    [("individual_best", 2), ("best_per_concurrency", 6)],
+)
+def test_render_execution_accounts_for_per_concurrency_top_k_union(
+    best_selection_mode: str,
+    expected_instances: int,
+) -> None:
+    common = {
+        "tp": 1,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 2,
+        "dp_replicate": 1,
+    }
+    state = {
+        "answers": {
+            "infrastructure": {
+                "gpus_per_node": 8,
+                "workers": {"pool": 8, "sharded": 8, "aiperf": 16},
+                "meshes": {"common": common, "bypass": common, "global_kd": common},
+            }
+        }
+    }
+    experiment = {
+        "post_mip": {
+            "flows": {
+                "run": {
+                    "nodes": {
+                        "serving": {
+                            "type": "aiperf",
+                            "config": {"concurrency": [1, 2, 4]},
+                        },
+                        "fastest": {
+                            "type": "filter",
+                            "input": "serving",
+                            "mode": "top_k",
+                            "metric": "serving.output_token_throughput",
+                            "direction": "maximize",
+                            "top_k": 2,
+                            "best_selection_mode": best_selection_mode,
+                        },
+                        "short_kd": {
+                            "type": "global_kd",
+                            "input": "fastest",
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    execution = render_execution(state, experiment, "production")["execution"]["stages"]
+
+    assert execution["post.run.short_kd"]["instances"] == expected_instances
+
+
 def test_render_execution_ignores_legacy_aiperf_worker_override() -> None:
     state = {
         "answers": {
@@ -561,7 +743,6 @@ def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
     for stage_id in (
         "convert",
         "tokenize_data",
-        "sort",
         "build_library",
         "mip",
         "post.run.filter",
@@ -570,6 +751,18 @@ def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
         assert stages[stage_id]["resource"] == "cpu"
         assert stages[stage_id]["partition"] == "cpu"
         assert stages[stage_id]["instances"] == 1
+    assert "resource" not in stages["sort"]
+    assert "partition" not in stages["sort"]
+    assert stages["sort"]["strategy"] == "single"
+    assert stages["sort"]["parallel"] == {
+        "tp": 1,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 1,
+        "sequence_parallel": False,
+    }
     assert stages["post.run.eval"]["instances"] == 8
     assert stages["post.run.serving"]["instances"] == 8
     assert stages["post.run.short_kd"]["instances"] == 8
@@ -750,9 +943,7 @@ def test_render_experiment_defaults_to_single_gpu_subblock_vllm() -> None:
     assert experiment["bypass"]["training"]["training_tokens"] == 4096 * 2048
     assert experiment["global_distillation"]["local_batch_size"] == 8
     assert (
-        experiment["post_mip"]["flows"]["memory"]["nodes"]["short_kd"]["config"][
-            "local_batch_size"
-        ]
+        experiment["post_mip"]["flows"]["memory"]["nodes"]["short_kd"]["config"]["local_batch_size"]
         == 8
     )
 

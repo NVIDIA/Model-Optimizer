@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
-import time
 
 from ..anymodel.model_descriptor import ModelDescriptorFactory
 from ..anymodel.registry import resolve_descriptor_from_pretrained
@@ -172,8 +172,8 @@ class AutoModelReplaceBlockExecutor:
             raise NotImplementedError(f"Unsupported evaluation handler {request.handler!r}")
         if not self._setup_complete:
             raise RuntimeError("AutoModelReplaceBlockExecutor.setup() was not called")
-        from ..replacement_library.replacement_utils import parse_layer_replacement
         from ..plugins.automodel.solution_launch import _solution_prune_target
+        from ..replacement_library.replacement_utils import parse_layer_replacement
 
         request_width = request.payload.get("hidden_width")
         if request_width is not None and int(request_width) != self.source_hidden_width:
@@ -252,6 +252,7 @@ class AutoModelReplaceBlockExecutor:
 
     def _score(self, prune_target: dict | list[dict] | None) -> dict | None:
         import torch.distributed as torch_dist
+
         import modelopt.torch.utils.distributed as dist
 
         from ..plugins.automodel.solution_metrics import (

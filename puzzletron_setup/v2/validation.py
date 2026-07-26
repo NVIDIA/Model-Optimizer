@@ -1,10 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Path-addressed cross-section validation for setup v2."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +69,122 @@ def _post_mip_nodes(state: WizardState) -> dict[str, Mapping[str, Any]]:
     return nodes
 
 
+def _dataset_subset_issues(state: WizardState) -> list[ValidationIssue]:
+    selection = _mapping(state.collection("data_subset_selection"))
+    if not selection:
+        return []
+    issues = []
+    source = str(selection.get("source", ""))
+    revision = str(selection.get("revision", ""))
+    selected_source = str(
+        state.get_field("data.selected_source", state.get_field("data.source", ""))
+    )
+    if not source or source != selected_source:
+        issues.append(
+            ValidationIssue(
+                "data.subsets.source",
+                "The selected subset source no longer matches the dataset source.",
+            )
+        )
+    cache = _mapping(state.collection("hf_dataset_catalogs"))
+    catalog = _mapping(cache.get(f"{source}@{revision}"))
+    if not revision or not catalog:
+        issues.append(
+            ValidationIssue(
+                "data.subsets.revision",
+                "The revision-locked Hugging Face subset catalog is missing.",
+            )
+        )
+    catalog_entries = {
+        str(item.get("name", "")): item
+        for item in catalog.get("subsets") or ()
+        if isinstance(item, Mapping)
+    }
+    records = [
+        item for item in selection.get("subsets") or () if isinstance(item, Mapping)
+    ]
+    names = [str(item.get("name", "")) for item in records]
+    if not records or any(not name for name in names) or len(names) != len(set(names)):
+        issues.append(
+            ValidationIssue(
+                "data.subsets",
+                "Choose at least one unique Hugging Face dataset subset.",
+            )
+        )
+    weights = []
+    for record, name in zip(records, names):
+        rows = record.get("num_rows")
+        size = record.get("num_bytes_original_files")
+        weight = record.get("weight")
+        if (
+            not isinstance(rows, int)
+            or isinstance(rows, bool)
+            or rows <= 0
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            issues.append(
+                ValidationIssue(
+                    f"data.subsets.{name or 'unknown'}",
+                    "Selected subset metadata requires positive rows and a known size.",
+                )
+            )
+        if (
+            not isinstance(weight, (int, float))
+            or isinstance(weight, bool)
+            or not math.isfinite(float(weight))
+            or float(weight) < 0
+        ):
+            issues.append(
+                ValidationIssue(
+                    f"data.subsets.{name or 'unknown'}.weight",
+                    "Selected subset weight must be finite and non-negative.",
+                )
+            )
+        else:
+            weights.append(float(weight))
+        cached = _mapping(catalog_entries.get(name))
+        if not cached:
+            issues.append(
+                ValidationIssue(
+                    f"data.subsets.{name or 'unknown'}",
+                    "Selected subset is absent from the revision-locked catalog.",
+                )
+            )
+        elif not bool(cached.get("selectable", True)):
+            reason = str(cached.get("disabled_reason") or "unavailable")
+            issues.append(
+                ValidationIssue(
+                    f"data.subsets.{name}",
+                    f"Selected subset is unavailable: {reason}.",
+                )
+            )
+        elif any(
+            record.get(key) != cached.get(key)
+            for key in ("num_rows", "num_bytes_original_files")
+        ):
+            issues.append(
+                ValidationIssue(
+                    f"data.subsets.{name}",
+                    "Selected subset metadata no longer matches the cached catalog.",
+                )
+            )
+    if len(weights) != len(records) or not math.isclose(
+        math.fsum(weights),
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        issues.append(
+            ValidationIssue(
+                "data.subsets.weights",
+                "Selected subset weights must sum to 1.0.",
+            )
+        )
+    return issues
+
+
 def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
     """Return actionable authoring issues before canonical compilation."""
     issues: list[ValidationIssue] = []
@@ -69,8 +201,52 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
     )
     for path, record in state.records().items():
         if record.stale:
+            issues.append(ValidationIssue(path, record.error or "This answer must be revalidated."))
+    issues.extend(_dataset_subset_issues(state))
+
+    acquisition = _mapping(state.collection("data_acquisition"))
+    adapter = str(acquisition.get("adapter", ""))
+    if adapter:
+        if not acquisition.get("output"):
             issues.append(
-                ValidationIssue(path, record.error or "This answer must be revalidated.")
+                ValidationIssue("data.acquisition.output", "A materialization path is required.")
+            )
+        if int(acquisition.get("seed", -1)) < 0:
+            issues.append(
+                ValidationIssue("data.acquisition.seed", "The selection seed cannot be negative.")
+            )
+        if adapter == "puzzle_kd_v2":
+            issues.extend(
+                ValidationIssue(
+                    f"data.acquisition.{key}",
+                    "The requested row count must be positive.",
+                )
+                for key in ("train_samples", "validation_samples")
+                if int(acquisition.get(key, 0)) <= 0
+            )
+        elif adapter == "nemotron_vlm_v2":
+            subsets = [str(item) for item in acquisition.get("subsets") or ()]
+            if not subsets or len(subsets) != len(set(subsets)):
+                issues.append(
+                    ValidationIssue(
+                        "data.acquisition.subsets",
+                        "Choose at least one unique Nemotron-VLM subset.",
+                    )
+                )
+            issues.extend(
+                ValidationIssue(
+                    f"data.acquisition.{key}",
+                    "The bounded acquisition value must be positive.",
+                )
+                for key in ("num_samples", "max_shards_per_subset")
+                if int(acquisition.get(key, 0)) <= 0
+            )
+        else:
+            issues.append(
+                ValidationIssue(
+                    "data.acquisition.adapter",
+                    f"Unknown first-class dataset adapter {adapter!r}.",
+                )
             )
 
     profiles = _mapping(state.collection("parallel_profiles"))
@@ -176,9 +352,7 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
                         "Enter a positive integer.",
                     )
                 )
-        if int(setting.get("max_num_seqs", 0) or 0) < int(
-            setting.get("batch_size", 1) or 1
-        ):
+        if int(setting.get("max_num_seqs", 0) or 0) < int(setting.get("batch_size", 1) or 1):
             issues.append(
                 ValidationIssue(
                     f"vllm.measurements.{name}.max_num_seqs",

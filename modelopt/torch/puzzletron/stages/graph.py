@@ -63,6 +63,7 @@ class StageSpec:
     required: bool = False
     default_enabled: bool = False
     enabled_when: tuple[str, bool] | None = None
+    enabled_requires: tuple[str, ...] = ()
     parents: tuple[str, ...] = ()
     conditional_parents: tuple[tuple[str, tuple[str, bool]], ...] = ()
     artifact_choices: tuple[ArtifactChoice, ...] = ()
@@ -115,6 +116,7 @@ def _stage(
     required: bool = False,
     default_enabled: bool = False,
     enabled_when: tuple[str, bool] | None = None,
+    enabled_requires: tuple[str, ...] = (),
     parents: tuple[str, ...] = (),
     conditional_parents: tuple[tuple[str, tuple[str, bool]], ...] = (),
     artifact_choices: tuple[ArtifactChoice, ...] = (),
@@ -132,6 +134,7 @@ def _stage(
             required=required,
             default_enabled=default_enabled,
             enabled_when=enabled_when,
+            enabled_requires=enabled_requires,
             parents=parents,
             conditional_parents=conditional_parents,
             artifact_choices=artifact_choices,
@@ -174,9 +177,7 @@ _stage(
     "Width Importance Estimation",
     required=True,
     parents=("tokenize_data",),
-    completion_artifacts=(
-        "pruning/pruning_scores/automodel/*/activation_passes_manifest.json",
-    ),
+    completion_artifacts=("pruning/pruning_scores/automodel/*/activation_passes_manifest.json",),
     distributed=True,
 )
 _stage(
@@ -197,6 +198,7 @@ _stage(
 _stage(
     "width_sanity",
     "Width Sanity Check",
+    enabled_requires=("sort_sanity",),
     parents=("sort_sanity",),
     completion_artifacts=("artifacts/width_sanity/summary.json",),
     distributed=True,
@@ -204,6 +206,7 @@ _stage(
 _stage(
     "slicing_sanity",
     "Slicing Sanity Check",
+    enabled_requires=("width_sanity",),
     parents=("width_sanity",),
     completion_artifacts=("artifacts/slicing_sanity/summary.json",),
 )
@@ -298,6 +301,12 @@ def _registry_for(specs: Iterable[StageSpec]) -> dict[str, StageSpec]:
             raise ValueError(f"Duplicate Puzzletron stage ID {spec.stage_id!r}")
         registry[spec.stage_id] = spec
     for spec in registry.values():
+        unknown_requirements = set(spec.enabled_requires) - set(registry)
+        if unknown_requirements:
+            raise ValueError(
+                f"unknown enabled requirements {sorted(unknown_requirements)} "
+                f"for stage {spec.stage_id!r}"
+            )
         for parent in (
             *spec.parents,
             *(parent for parent, _ in spec.conditional_parents),
@@ -359,20 +368,28 @@ def stage_is_enabled(stage_id: str, config: Mapping[str, Any]) -> bool:
 
     spec = stage_spec(stage_id)
     if spec.required:
-        return True
-    if spec.enabled_when is not None:
+        enabled = True
+    elif spec.enabled_when is not None:
         path, expected = spec.enabled_when
-        return _config_value(config, path) is expected
-    section = config.get(stage_id)
-    if not isinstance(section, Mapping):
-        return spec.default_enabled
-    return bool(section.get("enabled", spec.default_enabled))
+        enabled = _config_value(config, path) is expected
+    else:
+        section = config.get(stage_id)
+        enabled = (
+            spec.default_enabled
+            if not isinstance(section, Mapping)
+            else bool(section.get("enabled", spec.default_enabled))
+        )
+    return enabled and all(
+        stage_is_enabled(required_stage_id, config) for required_stage_id in spec.enabled_requires
+    )
 
 
 def enabled_stage_ids(config: Mapping[str, Any]) -> tuple[str, ...]:
     """Return configured stages in deterministic topological order."""
 
-    return tuple(stage_id for stage_id in topological_stage_ids() if stage_is_enabled(stage_id, config))
+    return tuple(
+        stage_id for stage_id in topological_stage_ids() if stage_is_enabled(stage_id, config)
+    )
 
 
 def configured_stage_ids(
@@ -450,6 +467,7 @@ def topological_stage_ids(specs: Iterable[StageSpec] = STAGE_SPECS) -> tuple[str
     parents = {
         stage_id: (
             set(spec.parents)
+            | set(spec.enabled_requires)
             | {parent for parent, _ in spec.conditional_parents}
             | {choice.parent for choice in spec.artifact_choices}
         )
@@ -458,7 +476,9 @@ def topological_stage_ids(specs: Iterable[StageSpec] = STAGE_SPECS) -> tuple[str
     order = {stage_id: spec.topology_order for stage_id, spec in registry.items()}
     result: list[str] = []
     while parents:
-        ready = sorted((stage_id for stage_id, values in parents.items() if not values), key=order.__getitem__)
+        ready = sorted(
+            (stage_id for stage_id, values in parents.items() if not values), key=order.__getitem__
+        )
         if not ready:
             cycle = ", ".join(sorted(parents, key=order.__getitem__))
             raise ValueError(f"Stage graph contains a cycle: {cycle}")

@@ -41,8 +41,8 @@ import json
 import logging
 import os
 import threading
-from copy import deepcopy
 from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -265,7 +265,6 @@ def _patch_nemotron_h_backbone_alias() -> None:
     child module to ``nn.Module._modules``.
     """
     import torch.nn as nn
-
     from nemo_automodel.components.distributed import parallelizer
 
     strategy_cls = getattr(parallelizer, "NemotronHParallelizationStrategy", None)
@@ -340,8 +339,6 @@ def _patch_native_nemotron_stage_local_initialization() -> None:
     """
     import torch
     import torch.nn as nn
-
-    from nemo_automodel.components.models.common.utils import cast_model_to_dtype
     from nemo_automodel.components.models.nemotron_v3 import model as nemotron_v3_model
 
     model_cls = getattr(nemotron_v3_model, "NemotronV3Model", None)
@@ -389,7 +386,7 @@ def _patch_native_nemotron_stage_local_initialization() -> None:
         if lm_head is not None:
             with device_ctx:
                 nn.init.normal_(lm_head.weight, mean=0.0, std=self.config.initializer_range)
-        cast_model_to_dtype(self, dtype)
+        _cast_stage_local_model_to_dtype(self, dtype)
 
     model_cls._puzzletron_orig_initialize_weights = orig_model_init
     lm_cls._puzzletron_orig_initialize_weights = orig_lm_init
@@ -397,6 +394,13 @@ def _patch_native_nemotron_stage_local_initialization() -> None:
     lm_cls.initialize_weights = _stage_local_lm_initialize_weights
     model_cls._puzzletron_stage_local_init_patch = True
     lm_cls._puzzletron_stage_local_init_patch = True
+
+
+def _cast_stage_local_model_to_dtype(model, dtype) -> None:
+    """Cast a stage-local Nemotron model while preserving its intrinsic FP32 parameters."""
+    from nemo_automodel.components.models.common.utils import cast_model_to_dtype
+
+    cast_model_to_dtype(model, dtype, skip_modules=("_fp32_params",))
 
 
 def _patch_hf_storage_reader(auto_model) -> None:
@@ -450,8 +454,8 @@ def _patch_stage_local_hf_load(auto_model) -> None:
     every PP rank.  For stage-local models, keep the bf16 meta skeleton and let
     DCP/HF storage read only the tensor ranges requested by that stage.
     """
-    import torch.nn as nn
     import nemo_automodel.components.checkpoint.checkpointing as checkpointing
+    import torch.nn as nn
 
     if getattr(checkpointing.Checkpointer, "_puzzletron_stage_local_load_patch", False):
         return

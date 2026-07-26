@@ -15,18 +15,30 @@
 
 """Dataset preparation utilities for Puzzletron."""
 
-from .prepare_dataset import *
+from .acquisition import (
+    NEMOTRON_VLM_DATASET,
+    PUZZLE_KD_DATASET,
+    VLM_HEADER_SUBSETS,
+    TextAcquisitionSpec,
+    VlmAcquisitionSpec,
+    materialize_nemotron_vlm_dataset,
+    materialize_puzzle_kd_dataset,
+)
 from .batch import DataLayout, Modality, PackedSequenceMetadata, PuzzletronBatch
 from .config import PackingSpec, PuzzletronDataSpec
 from .multimodal import (
     batch_from_automodel,
     load_materialized_conversation_dataset,
+    load_materialized_conversation_subset,
     load_materialized_intersyn_subset,
     materialize_intersyn_subset,
+    materialize_normalized_conversation_samples,
     materialize_normalized_intersyn_samples,
     normalize_intersyn_multi,
     normalize_intersyn_single,
+    normalize_nemotron_vlm_sample,
 )
+from .prepare_dataset import *
 
 __all__ = [
     "DataLayout",
@@ -35,11 +47,21 @@ __all__ = [
     "PuzzletronBatch",
     "PackingSpec",
     "PuzzletronDataSpec",
+    "NEMOTRON_VLM_DATASET",
+    "PUZZLE_KD_DATASET",
+    "VLM_HEADER_SUBSETS",
+    "TextAcquisitionSpec",
+    "VlmAcquisitionSpec",
     "batch_from_automodel",
     "load_materialized_conversation_dataset",
+    "load_materialized_conversation_subset",
     "load_materialized_intersyn_subset",
     "materialize_intersyn_subset",
+    "materialize_nemotron_vlm_dataset",
+    "materialize_normalized_conversation_samples",
     "materialize_normalized_intersyn_samples",
+    "materialize_puzzle_kd_dataset",
     "normalize_intersyn_multi",
     "normalize_intersyn_single",
+    "normalize_nemotron_vlm_sample",
 ]

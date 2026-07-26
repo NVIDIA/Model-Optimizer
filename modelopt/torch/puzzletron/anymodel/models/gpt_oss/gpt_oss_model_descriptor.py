@@ -30,6 +30,7 @@ from transformers.models.gpt_oss.modeling_gpt_oss import (
 )
 
 from ....block_config import AttentionConfig, BlockConfig, MoEConfig
+from ....pruning.embedding_pruning import TensorAxisRule
 from ....pruning.expert_removal_pruning_mixin import (
     ExpertRemovalLayerDescriptor,
     ExpertRemovalPruningMixIn,
@@ -40,7 +41,6 @@ from ....pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor, KVHeadsPr
 # Production models use MXFP4 quantized MoE with combined tensors
 # (gate_up_proj_blocks, down_proj_blocks), which is not yet supported.
 from ....pruning.pruning_mixin import PruningMixIn
-from ....pruning.embedding_pruning import TensorAxisRule
 from ....utils.dummy_modules import DummyBlock
 from ...model_descriptor import ModelDescriptor, ModelDescriptorFactory
 from ...puzzformer import deci_x_patcher

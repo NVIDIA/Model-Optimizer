@@ -17,17 +17,16 @@
 
 import json
 import sys
+import types
 from contextlib import contextmanager
 from types import SimpleNamespace
-import types
 
 import pytest
-from safetensors.torch import save_file
 import torch
+from safetensors.torch import save_file
 from torch import nn
 from torch.distributed.fsdp import FSDPModule
 
-from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -35,30 +34,31 @@ from modelopt.torch.puzzletron.block_config import (
     MLAConfig,
     MoEConfig,
 )
-from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
+from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
+from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
+    _candidate_execution_context,
+    _load_model_config_distributed,
+    _quarantine_failed_realization,
+    _solution_hidden_width,
+    _solution_prune_target,
+    _solution_prune_targets,
+    _source_hidden_channel_indices,
+    _validate_parent_equivalence,
+)
 from modelopt.torch.puzzletron.plugins.automodel.solution_metrics import (
     aggregate_solution_scores,
     retain_teacher_channels,
     score_batch,
 )
-from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
-    _candidate_execution_context,
-    _load_model_config_distributed,
-    _quarantine_failed_realization,
-    _source_hidden_channel_indices,
-    _solution_prune_target,
-    _solution_prune_targets,
-    _solution_hidden_width,
-    _validate_parent_equivalence,
-)
-from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_selections
 from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import (
+    ReplaceBlockScoringRecipe,
     _layer_runtime_fingerprint,
     _masked_native_gate_forward,
     _temporary_parameter_mask,
 )
-from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import ReplaceBlockScoringRecipe
 from modelopt.torch.puzzletron.plugins.automodel.teacher_cache import TeacherTargetCache
+from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
+from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_selections
 
 
 def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
@@ -1001,9 +1001,7 @@ class _NativeFusedMamba(_GroupedRMSNormMamba):
         self.dt_bias = nn.Parameter(torch.randn(self.num_heads, dtype=torch.float64))
 
     def forward(self, x):
-        from mamba_ssm.ops.triton.ssd_combined import (
-            mamba_split_conv1d_scan_combined,
-        )
+        from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 
         return mamba_split_conv1d_scan_combined(
             self.in_proj(x),

@@ -9,7 +9,6 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
-from ..vllm_measurements import normalize_vllm_measurements
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -21,6 +20,7 @@ from ..schema import (
     WorkItem,
     WorkPlan,
 )
+from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import stage_is_complete, stage_output_patterns

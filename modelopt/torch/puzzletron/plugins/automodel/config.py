@@ -88,21 +88,29 @@ def _teacher_path(hydra_cfg) -> str:
     return f"{hydra_cfg.puzzle_dir}/{_DEFAULT_TEACHER_SUBDIR}"
 
 
-def _inject_canonical_data(recipe: dict, hydra_cfg) -> dict:
+def _inject_canonical_data(
+    recipe: dict,
+    hydra_cfg,
+    *,
+    split: str = "validation",
+    num_samples: int | None = None,
+) -> dict:
     raw_data = _as_dict(hydra_cfg.get("data", None))
     if not raw_data or "layout" not in raw_data:
         return recipe
     spec = PuzzletronDataSpec.from_mapping(raw_data)
     model = dict(recipe.get("model") or {})
+    if spec.modality is Modality.TEXT and spec.layout is DataLayout.FIXED:
+        return recipe
+    source_path = raw_data.get("path")
+    if not source_path:
+        raise ValueError("canonical data requires data.path")
     if spec.modality is Modality.MULTIMODAL:
         if bool(model.get("force_hf", True)):
             raise ValueError(
-                "packed multimodal Puzzletron stages require native AutoModel; "
+                "multimodal Puzzletron stages require native AutoModel; "
                 "set model.force_hf=False"
             )
-        source_path = raw_data.get("path")
-        if not source_path:
-            raise ValueError("multimodal data requires data.path pointing at the cached subset")
         model["_target_"] = _FROM_PRETRAINED_VLM_TARGET
         recipe["model"] = model
         dataset = dict(recipe.get("dataset") or {})
@@ -119,22 +127,62 @@ def _inject_canonical_data(recipe: dict, hydra_cfg) -> dict:
                 "max_length": int(spec.max_sample_length),
             }
         )
+        if num_samples is not None and spec.layout is not DataLayout.PACKED_VARLEN:
+            dataset["num_samples"] = int(num_samples)
         recipe["dataset"] = dataset
         processor = dict(recipe.get("processor") or {})
         processor.setdefault("trust_remote_code", True)
         recipe["processor"] = processor
+    elif spec.layout is not DataLayout.FIXED:
+        if (
+            spec.layout is DataLayout.PACKED_VARLEN
+            and bool(model.get("force_hf", True))
+        ):
+            raise ValueError(
+                "packed variable-length text data require native AutoModel; "
+                "set model.force_hf=False"
+            )
+        dataset = {
+            "_target_": (
+                "modelopt.torch.puzzletron.distillation.dataset."
+                "make_puzzletron_chat_dataset"
+            ),
+            "dataset_path": str(source_path),
+            "split": str(split),
+            "seq_length": int(spec.max_sample_length),
+            "seed": int(raw_data.get("seed", 42)),
+        }
+        if num_samples is not None and spec.layout is not DataLayout.PACKED_VARLEN:
+            dataset["num_samples"] = int(num_samples)
+        recipe["dataset"] = dataset
+        recipe["dataloader"] = {
+            "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
+            "shuffle": False,
+            "collate_fn": "nemo_automodel.components.datasets.utils.default_collater",
+        }
     if spec.layout is DataLayout.PACKED_VARLEN:
         packing = spec.packing
-        recipe["packed_sequence"] = {
-            "pack_size": int(packing.pack_size),
-            "max_length": int(spec.max_sample_length),
-            "packing_ratio": float(packing.packing_ratio),
-            "drop_long_samples": bool(packing.drop_long_samples),
-            "pretokenize": True,
-            # AutoModel retains indexed document IDs and reconstructs kernel boundaries.
-            "attn_implementation": "flash_attention_2",
-            "collate_max_length": int(packing.pack_size),
-        }
+        if spec.modality is Modality.MULTIMODAL:
+            recipe["packed_sequence"] = {
+                "pack_size": int(packing.pack_size),
+                "max_length": int(spec.max_sample_length),
+                "packing_ratio": float(packing.packing_ratio),
+                "drop_long_samples": bool(packing.drop_long_samples),
+                "pretokenize": True,
+                # AutoModel retains indexed document IDs and reconstructs kernel boundaries.
+                "attn_implementation": "flash_attention_2",
+                "collate_max_length": int(packing.pack_size),
+            }
+            if num_samples is not None:
+                recipe["packed_sequence"]["max_packs"] = int(num_samples)
+        else:
+            recipe["packed_sequence"] = {
+                "packed_sequence_size": int(packing.pack_size),
+                "packing_strategy": "neat",
+                "drop_long_samples": bool(packing.drop_long_samples),
+            }
+            if num_samples is not None:
+                recipe["packed_sequence"]["max_packs"] = int(num_samples)
     return recipe
 
 
@@ -229,6 +277,7 @@ def build_stage_recipe_config(automodel_cfg) -> dict:
 def _load_model_config_for_descriptor(model_path, *, trust_remote_code: bool):
     """Load only checkpoint metadata for descriptor-owned recipe adaptations."""
     from transformers import AutoConfig
+
     from ...anymodel.registry import register_native_config_aliases
 
     register_native_config_aliases()
@@ -486,7 +535,12 @@ def build_recipe_config(hydra_cfg) -> dict:
             "pruning.automodel.recipe.model.anymodel_descriptor or the top-level 'descriptor'."
         )
 
-    _inject_canonical_data(recipe, hydra_cfg)
+    _inject_canonical_data(
+        recipe,
+        hydra_cfg,
+        split=str(hydra_cfg.pruning.get("val_dataset_name", "validation")),
+        num_samples=hydra_cfg.pruning.get("eval_samples", None),
+    )
     _align_dummy_dataset(
         recipe,
         num_samples=hydra_cfg.pruning.get("eval_samples", None),
@@ -562,7 +616,12 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)
     recipe = _inject_model(recipe, model_path, descriptor, force_hf)
-    _inject_canonical_data(recipe, hydra_cfg)
+    _inject_canonical_data(
+        recipe,
+        hydra_cfg,
+        split=str(hydra_cfg.scoring.get("val_dataset_name", "validation")),
+        num_samples=hydra_cfg.scoring.get("eval_samples", None),
+    )
     _align_dummy_dataset(
         recipe,
         num_samples=hydra_cfg.scoring.get("eval_samples", None),

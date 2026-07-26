@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import random
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from datasets import DatasetDict, load_from_disk
@@ -14,8 +16,12 @@ from torch.utils.data import IterableDataset
 from ..utils.data.dataset import ConstantLengthDataset
 from ..utils.data.packed_memmap import PackedTokenMemmapDataset
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 __all__ = [
     "collate_puzzletron_llm_batch",
+    "make_puzzletron_chat_dataset",
     "make_puzzletron_llm_dataset",
     "make_puzzletron_llm_overfit_dataset",
 ]
@@ -50,6 +56,71 @@ def collate_puzzletron_llm_batch(
     if "attention_mask" in result:
         result["padding_mask"] = ~result["attention_mask"].bool()
     return result
+
+
+def make_puzzletron_chat_dataset(
+    tokenizer,
+    dataset_path: str,
+    split: str = "train",
+    num_samples: int | None = None,
+    seq_length: int = 4096,
+    seed: int = 444,
+    **_: object,
+):
+    """Load saved, Hub, JSON, or Parquet messages through AutoModel chat formatting."""
+    from nemo_automodel.components.datasets.llm.chat_dataset import ChatDataset
+    from nemo_automodel.components.datasets.llm.formatting_utils import _add_pad_token
+
+    path = Path(dataset_path)
+    saved_to_disk = path.is_dir() and any(
+        (path / marker).is_file()
+        for marker in ("dataset_dict.json", "dataset_info.json", "state.json")
+    )
+    if not saved_to_disk:
+        dataset = ChatDataset(
+            dataset_path,
+            tokenizer,
+            split=None if split == "__auto__" else split,
+            seq_length=int(seq_length),
+            padding="do_not_pad",
+            truncation=True,
+            shuffle_seed=int(seed),
+        )
+        if isinstance(dataset.dataset, list):
+            random.Random(int(seed)).shuffle(dataset.dataset)
+        if num_samples is not None:
+            count = min(int(num_samples), len(dataset.dataset))
+            if hasattr(dataset.dataset, "select"):
+                dataset.dataset = dataset.dataset.select(range(count))
+            else:
+                dataset.dataset = dataset.dataset[:count]
+        return dataset
+
+    loaded = load_from_disk(path)
+    if isinstance(loaded, DatasetDict):
+        if split == "__auto__":
+            split = "validation" if "validation" in loaded else next(iter(loaded))
+        if split not in loaded:
+            raise KeyError(f"dataset {dataset_path} has no split {split!r}: {list(loaded)}")
+        loaded = loaded[split]
+    loaded = loaded.shuffle(seed=int(seed))
+    if num_samples is not None:
+        loaded = loaded.select(range(min(int(num_samples), len(loaded))))
+
+    dataset = ChatDataset.__new__(ChatDataset)
+    dataset.tokenizer = tokenizer
+    dataset.seq_length = int(seq_length)
+    dataset.padding = "do_not_pad"
+    dataset.truncation = True
+    dataset.start_of_turn_token = None
+    dataset.mask_reasoning_content = False
+    dataset.mask_history = False
+    dataset.unshifted = False
+    dataset.skip_invalid_samples = False
+    dataset.dataset = loaded
+    eos_token_id = getattr(tokenizer, "eos_token_id", 0)
+    dataset.pad_token_id = _add_pad_token(tokenizer) or eos_token_id
+    return dataset
 
 
 class _LimitedAutoModelDataset(IterableDataset):

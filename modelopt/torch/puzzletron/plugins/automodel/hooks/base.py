@@ -33,6 +33,8 @@ Lifecycle::
 
 from contextlib import contextmanager
 
+import torch
+
 from ..reduction import MeshGroups
 
 __all__ = ["ScoringHook"]
@@ -74,6 +76,108 @@ class ScoringHook:
         # one-time shape-inference forward (run on all-zero tensors), which would otherwise
         # pollute the accumulated statistics.
         self.enabled = True
+        self._canonical_sequence_ids: torch.Tensor | None = None
+        self._canonical_num_samples = 0
+        self._canonical_sequence_cursors: dict[str, int] = {}
+
+    def set_batch_metadata(self, *, sequence_ids: torch.Tensor, num_samples: int) -> None:
+        """Set canonical token validity for one forward batch.
+
+        ``sequence_ids`` is always ``[batch, sequence]`` and uses ``-1`` for
+        padding. Scorers that flatten token dimensions call
+        :meth:`_flatten_valid_tokens` or :meth:`_valid_token_mask`; both also
+        account for pipeline microbatching with an independent cursor per
+        observation stream.
+        """
+        if sequence_ids.ndim != 2:
+            raise ValueError("scorer sequence_ids must be [batch, sequence]")
+        if int(num_samples) < 0:
+            raise ValueError("scorer num_samples must be non-negative")
+        self._canonical_sequence_ids = sequence_ids
+        self._canonical_num_samples = int(num_samples)
+        self._canonical_sequence_cursors.clear()
+
+    def _aligned_token_ids(
+        self,
+        tensor: torch.Tensor,
+        *,
+        trailing_dims: int,
+        stream: str,
+    ) -> torch.Tensor | None:
+        """Align canonical IDs with padded ``[B,T,...]`` or packed ``[BT,...]``."""
+        sequence_ids = self._canonical_sequence_ids
+        if sequence_ids is None:
+            return None
+        if trailing_dims < 0 or tensor.ndim <= trailing_dims:
+            raise ValueError(
+                f"cannot align scorer tensor shape {tuple(tensor.shape)} "
+                f"with trailing_dims={trailing_dims}"
+            )
+        cursor = self._canonical_sequence_cursors.get(stream, 0)
+        available_rows = int(sequence_ids.shape[0]) - cursor
+        sequence = int(sequence_ids.shape[1])
+        leading_dims = tensor.ndim - trailing_dims
+        if (
+            leading_dims >= 2
+            and int(tensor.shape[0]) <= available_rows
+            and int(tensor.shape[1]) == sequence
+        ):
+            rows = int(tensor.shape[0])
+        else:
+            tokens = int(tensor.shape[0])
+            if sequence < 1 or tokens % sequence:
+                raise ValueError(
+                    f"scorer tensor shape {tuple(tensor.shape)} does not align with "
+                    f"sequence_ids shape {tuple(sequence_ids.shape)}"
+                )
+            rows = tokens // sequence
+        if rows < 1 or rows > available_rows:
+            raise ValueError(
+                "scorer activation consumed more rows than the canonical batch: "
+                f"stream={stream!r} cursor={cursor} rows={rows} available={available_rows}"
+            )
+        stop = cursor + rows
+        self._canonical_sequence_cursors[stream] = stop
+        return sequence_ids[cursor:stop].reshape(-1).to(device=tensor.device)
+
+    def _flatten_valid_tokens(
+        self,
+        tensor: torch.Tensor,
+        *,
+        trailing_dims: int = 1,
+        stream: str = "default",
+    ) -> torch.Tensor:
+        """Flatten token dimensions and remove canonical padding positions."""
+        trailing_shape = tuple(tensor.shape[-trailing_dims:]) if trailing_dims else ()
+        flat = tensor.reshape(-1, *trailing_shape)
+        ids = self._aligned_token_ids(
+            tensor,
+            trailing_dims=trailing_dims,
+            stream=stream,
+        )
+        if ids is None:
+            return flat
+        if int(ids.numel()) != int(flat.shape[0]):
+            raise ValueError(
+                f"canonical token count {ids.numel()} does not match scorer tensor "
+                f"token count {flat.shape[0]}"
+            )
+        return flat[ids >= 0]
+
+    def _valid_token_mask(
+        self,
+        tensor: torch.Tensor,
+        *,
+        trailing_dims: int = 1,
+        stream: str = "default",
+    ) -> torch.Tensor | None:
+        """Return the flattened canonical valid-token mask for ``tensor``."""
+        ids = self._aligned_token_ids(
+            tensor,
+            trailing_dims=trailing_dims,
+            stream=stream,
+        )
+        return None if ids is None else ids >= 0
 
     def __call__(self, module, args, output):
         """Forward-hook entry point — capture and accumulate. Implemented by subclasses."""

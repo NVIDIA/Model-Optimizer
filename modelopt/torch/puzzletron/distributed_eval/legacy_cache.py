@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any
-import uuid
 
 from .campaign import Campaign
 from .schema import EvaluationRequest, EvaluationResult

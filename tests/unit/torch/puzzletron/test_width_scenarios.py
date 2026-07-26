@@ -2,15 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from examples.puzzletron.embedding_pipeline import (
-    _visible_gpu_count,
     _project_vllm_stats_to_scenarios,
+    _visible_gpu_count,
     finalize_replacement_scoring_diagnostics,
     run_embedding_stage,
     scenario_preparation_commands,
@@ -20,12 +20,8 @@ from examples.puzzletron.prepare_width_scenarios import (
     _prepare_scenario_destination,
     _resolve_source_checkpoint,
 )
-
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
-from modelopt.torch.puzzletron.candidates import (
-    build_candidate_library,
-    load_stats_identity_cache,
-)
+from modelopt.torch.puzzletron.candidates import build_candidate_library, load_stats_identity_cache
 from modelopt.torch.puzzletron.depth.schema import DepthScenario
 from modelopt.torch.puzzletron.replacement_library.build_replacement_library import (
     build_replacement_library_from_sorted_teacher,
@@ -259,9 +255,9 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
     )
 
     assert command[1:4] == ("-m", "torch.distributed.run", "--standalone")
-    assert ("--worker-stage", "replacement_scoring") == tuple(
+    assert tuple(
         command[command.index("--worker-stage") : command.index("--worker-stage") + 2]
-    )
+    ) == ("--worker-stage", "replacement_scoring")
     overrides = [
         command[index + 1] for index, value in enumerate(command) if value == "--override"
     ]

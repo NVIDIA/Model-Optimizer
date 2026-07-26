@@ -16,10 +16,7 @@
 from pathlib import Path
 
 from examples.puzzletron.acceptance_resume import build_payload, check_marker, write_marker
-from modelopt.torch.puzzletron.manifest import (
-    StageManifest,
-    write_stage_manifest,
-)
+from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 
 
 def test_resume_marker_detects_missing_or_mutated_outputs_and_upstreams(tmp_path: Path) -> None:

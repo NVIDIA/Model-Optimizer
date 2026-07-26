@@ -37,7 +37,11 @@ _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 
 @functools.lru_cache(maxsize=8)
-def list_repo_files_cached(repo_id: str, repo_type: str = "dataset") -> list[str]:
+def list_repo_files_cached(
+    repo_id: str,
+    repo_type: str = "dataset",
+    revision: str | None = None,
+) -> list[str]:
     """List files in a HuggingFace repo (cached).
 
     Args:
@@ -46,7 +50,10 @@ def list_repo_files_cached(repo_id: str, repo_type: str = "dataset") -> list[str
     """
     from huggingface_hub import list_repo_files
 
-    return list_repo_files(repo_id=repo_id, repo_type=repo_type)
+    kwargs = {"repo_id": repo_id, "repo_type": repo_type}
+    if revision is not None:
+        kwargs["revision"] = revision
+    return list_repo_files(**kwargs)
 
 
 def extract_first_image_from_messages(messages: Any) -> Any:
@@ -79,6 +86,7 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
         seed: int,
         shuffle_buffer_size: int,
         max_shards: int | None,
+        revision: str | None = None,
     ):
         """Create an iterable dataset for Nemotron-VLM-Dataset-v2.
 
@@ -99,6 +107,7 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
         self.seed = seed
         self.shuffle_buffer_size = shuffle_buffer_size
         self.max_shards = max_shards
+        self.revision = revision
 
     def __iter__(self):
         from huggingface_hub import hf_hub_download
@@ -131,9 +140,11 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
             if not shard_list:
                 continue
             rng.shuffle(shard_list)
+            download_kwargs = {"repo_id": self.repo_id, "repo_type": "dataset"}
+            if self.revision is not None:
+                download_kwargs["revision"] = self.revision
             local_tar_paths = {
-                shard: hf_hub_download(repo_id=self.repo_id, filename=shard, repo_type="dataset")
-                for shard in shard_list
+                shard: hf_hub_download(filename=shard, **download_kwargs) for shard in shard_list
             }
 
             # 1) Collect candidate image filenames from tar headers (no payload reads).
@@ -164,7 +175,8 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
 
             # 2) Scan JSONL to map image filename -> messages.
             jsonl_path = hf_hub_download(
-                repo_id=self.repo_id, filename=f"{subset}/{subset}.jsonl", repo_type="dataset"
+                filename=f"{subset}/{subset}.jsonl",
+                **download_kwargs,
             )
             meta_by_image: dict[str, dict[str, Any]] = {}
             with open(jsonl_path, encoding="utf-8") as f:

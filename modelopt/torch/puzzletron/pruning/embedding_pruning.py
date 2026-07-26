@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
-import re
 from typing import Any, Mapping, Sequence
 
 import torch

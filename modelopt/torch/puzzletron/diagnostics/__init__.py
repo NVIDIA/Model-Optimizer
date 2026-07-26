@@ -15,7 +15,7 @@
 
 """Offline diagnostic reports for Puzzletron artifacts."""
 
-from .html_report import generate_replace_block_report, generate_vllm_stats_report
 from .campaign_report import generate_campaign_report
+from .html_report import generate_replace_block_report, generate_vllm_stats_report
 
 __all__ = ["generate_campaign_report", "generate_replace_block_report", "generate_vllm_stats_report"]

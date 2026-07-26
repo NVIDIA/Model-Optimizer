@@ -8,10 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
-from ..orchestration.vllm_measurements import (
-    VllmMeasurement,
-    normalize_vllm_measurements,
-)
+from ..orchestration.vllm_measurements import VllmMeasurement, normalize_vllm_measurements
 
 __all__ = [
     "VllmMeasurement",

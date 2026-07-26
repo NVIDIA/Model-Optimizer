@@ -20,13 +20,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from modelopt.torch.puzzletron.bypass_distillation import elastic_supernet
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
     MambaConfig,
 )
+from modelopt.torch.puzzletron.bypass_distillation import elastic_supernet
 from modelopt.torch.puzzletron.bypass_distillation.elastic_supernet import (
     CanonicalBlockElastic,
     CanonicalCandidateMasker,

@@ -313,7 +313,9 @@ class GroupedAttentionScorer(ScoringHook):
     def __call__(self, module, args, output):
         attn_out = args[0]
         heads = self._gather_structured_heads(attn_out)
-        flat = heads.reshape(-1, self.num_q_heads, self.head_dim)
+        flat = self._flatten_valid_tokens(heads, trailing_dims=2)
+        if flat.shape[0] == 0:
+            return
         self._ensure_weight_stats(self._feature_group)
 
         if _DBG_ITERS > 0 and self._debug_call_count < _DBG_ITERS:

@@ -17,11 +17,11 @@
 
 from .attention import GroupedAttentionScorer
 from .base import ScoringHook
+from .embedding import HiddenWidthSiteScorer
 from .ffn import FFNIndependentScorer, FFNIterativeScorer
 from .gated_delta_net import GatedDeltaNetActivationScorer
-from .embedding import HiddenWidthSiteScorer
-from .mamba import MambaInProjContributionScorer
 from .magnitude import ActivationMagnitudeScorer
+from .mamba import MambaInProjContributionScorer
 from .moe import (
     MoEExpertRemovalDiffScorer,
     MoEGroupedExpertChannelScorer,

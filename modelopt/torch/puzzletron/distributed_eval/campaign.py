@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 from collections.abc import Iterator
 from contextlib import contextmanager
-import fcntl
 from pathlib import Path
 
 from .registry import WorkerRegistry

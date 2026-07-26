@@ -326,6 +326,53 @@ def test_global_kd_auto_domain_uses_canonical_text_dataset(tmp_path, monkeypatch
     )
 
 
+def test_global_kd_packed_text_uses_native_chat_data_and_canonical_pack_size(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.global_automodel._model_recipe",
+        lambda *args, **kwargs: {},
+    )
+    config = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=tmp_path / "output",
+        descriptor="qwen3_5",
+        domain="llm",
+        student_force_hf=False,
+        teacher_force_hf=False,
+        validation_enabled=False,
+        data={
+            "path": str(tmp_path / "dataset"),
+            "modality": "text",
+            "layout": "packed_varlen",
+            "max_sample_length": 192,
+            "packing": {
+                "pack_size": 256,
+                "packing_ratio": 0.8,
+                "drop_long_samples": True,
+            },
+        },
+    )
+
+    recipe = build_automodel_global_kd_recipe(config)
+
+    assert recipe["dataset"]["_target_"].endswith(
+        "make_puzzletron_chat_dataset"
+    )
+    assert recipe["dataloader"]["collate_fn"].endswith("default_collater")
+    assert recipe["packed_sequence"] == {
+        "packed_sequence_size": 256,
+        "packing_strategy": "neat",
+        "drop_long_samples": True,
+        "max_packs": 128,
+    }
+
+
 def test_global_kd_recipe_publishes_explicit_resume_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
@@ -990,7 +1037,51 @@ def test_global_kd_uses_canonical_multimodal_packing_and_train_all(tmp_path, mon
     )
     assert recipe["dataset"]["path_or_dataset"] == str(tmp_path / "intersyn")
     assert recipe["packed_sequence"]["pack_size"] == 2048
+    assert recipe["packed_sequence"]["max_packs"] == 128
     assert recipe["freeze_config"] == {
         "freeze_vision_tower": False,
         "freeze_language_model": False,
+    }
+
+
+def test_global_kd_bounds_canonical_padded_multimodal_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"force_hf": False},
+        "_runtime": {"descriptor": "qwen3_5"},
+        "data": {
+            "path": str(tmp_path / "vlm"),
+            "modality": "multimodal",
+            "layout": "padded_varlen",
+            "max_sample_length": 1024,
+            "calibration": {"num_samples": 24},
+        },
+        "distillation": {
+            "domain": "vlm",
+            "validation_enabled": False,
+            "student_dir": str(tmp_path / "student"),
+            "teacher_dir": str(tmp_path / "teacher"),
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    recipe = build_automodel_global_kd_recipe(build_global_kd_config(config))
+
+    assert recipe["dataset"]["num_samples"] == 24
+    assert recipe["packed_sequence"] == {
+        "packed_sequence_size": 0,
+        "split_across_pack": False,
     }

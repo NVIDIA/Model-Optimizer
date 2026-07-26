@@ -5,6 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from modelopt.torch.puzzletron.campaigns.preflight import (
+    ModelMetadata,
+    _find_mtp_fields,
+    run_preflight,
+)
 from modelopt.torch.puzzletron.campaigns.schema import (
     CampaignStageIdentity,
     DatasetKind,
@@ -13,12 +18,6 @@ from modelopt.torch.puzzletron.campaigns.schema import (
     default_cross_model_campaign,
     load_campaign,
 )
-from modelopt.torch.puzzletron.campaigns.preflight import (
-    ModelMetadata,
-    _find_mtp_fields,
-    run_preflight,
-)
-
 
 EXPECTED_MODEL_IDS = {
     "qwen35_dense",

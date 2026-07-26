@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 import errno
 import fcntl
 import json
 import math
 import os
-from pathlib import Path
 import secrets
 import tempfile
-from typing import Any
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 from .identity import canonicalize
 from .schema import (

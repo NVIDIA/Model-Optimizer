@@ -1,31 +1,37 @@
-from immutabledict import immutabledict
 import json
+import sys
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
-import sys
 
 import pytest
+from immutabledict import immutabledict
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.pipeline as pipeline_stages
 import modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats as runtime_stats_module
 from examples.puzzletron import run_runtime_stats_packed as packed_runtime_stats
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig, MoEConfig
 from modelopt.torch.puzzletron.anymodel.capabilities import (
     CapabilityValidationError,
     default_capabilities,
 )
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MoEConfig,
+)
 from modelopt.torch.puzzletron.manifest import StageManifest
+from modelopt.torch.puzzletron.pipeline_config import (
+    adapt_runtime_hydra_config,
+    normalize_pipeline_config,
+)
 from modelopt.torch.puzzletron.stage_runner import _preflight
-from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
-    _load_parameter_inventory_cache,
-    _parameter_inventory_progress,
-    _reuse_runtime_stats,
-    _runtime_measurement_fields,
-    _select_runtime_subblock_configs,
-    _unique_hidden_sizes,
-    _validate_sparse_runtime_settings,
+from modelopt.torch.puzzletron.stages import DEFAULT_HANDLERS
+from modelopt.torch.puzzletron.stages.pipeline import (
+    _vllm_stats_is_explicit,
+    build_library_stage,
+    vllm_stats_stage,
 )
 from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
     _merge_runtime_shard_results,
@@ -35,17 +41,16 @@ from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
     calc_runtime_for_subblocks,
     enumerate_runtime_block_configs,
 )
+from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
+    _load_parameter_inventory_cache,
+    _parameter_inventory_progress,
+    _reuse_runtime_stats,
+    _runtime_measurement_fields,
+    _select_runtime_subblock_configs,
+    _unique_hidden_sizes,
+    _validate_sparse_runtime_settings,
+)
 from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
-from modelopt.torch.puzzletron.pipeline_config import (
-    adapt_runtime_hydra_config,
-    normalize_pipeline_config,
-)
-from modelopt.torch.puzzletron.stages import DEFAULT_HANDLERS
-from modelopt.torch.puzzletron.stages.pipeline import (
-    _vllm_stats_is_explicit,
-    build_library_stage,
-    vllm_stats_stage,
-)
 
 
 def _indexed(config, layer):
@@ -1247,7 +1252,39 @@ def test_runtime_config_restores_frozen_mapping_values():
 def test_runtime_cache_schema_separates_candidate_slope_from_legacy_cache():
     from modelopt.torch.puzzletron.subblock_stats import runtime_vllm
 
-    assert runtime_vllm._RUNTIME_CACHE_SCHEMA_VERSION == 4
+    assert runtime_vllm._RUNTIME_CACHE_SCHEMA_VERSION == 5
+
+
+def test_vllm_topology_args_include_data_and_expert_parallelism():
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _topology_vllm_args
+    from modelopt.torch.puzzletron.subblock_stats.topology import RuntimeTopology
+
+    topology = RuntimeTopology.from_config(
+        {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 2,
+            "enable_expert_parallel": True,
+            "gpu_group_size": 4,
+        }
+    )
+
+    assert _topology_vllm_args(topology) == [
+        "--tensor-parallel-size",
+        "2",
+        "--pipeline-parallel-size",
+        "1",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "2",
+        "--prefill-context-parallel-size",
+        "1",
+        "--decode-context-parallel-size",
+        "1",
+        "--distributed-executor-backend",
+        "mp",
+        "--enable-expert-parallel",
+    ]
 
 
 def test_runtime_config_records_candidate_slope_estimator_metadata():
@@ -1277,9 +1314,7 @@ def test_runtime_config_records_candidate_slope_estimator_metadata():
 
 def test_vllm_subprocess_env_applies_explicit_runtime_overrides(monkeypatch):
     from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
-    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
-        _build_subprocess_env,
-    )
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _build_subprocess_env
 
     monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1")
     runtime = RuntimeConfig(
@@ -1337,9 +1372,7 @@ def test_vllm_subprocess_env_assigns_fresh_rendezvous_port_for_mp(monkeypatch):
 
 
 def test_vllm_environment_config_is_frozen_in_stable_string_order():
-    from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
-        _vllm_env,
-    )
+    from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import _vllm_env
 
     runtime_stats = OmegaConf.create(
         {
@@ -1358,9 +1391,7 @@ def test_vllm_environment_config_is_frozen_in_stable_string_order():
 
 def test_runtime_cache_metadata_records_vllm_environment_overrides():
     from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
-    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
-        _runtime_environment_metadata,
-    )
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _runtime_environment_metadata
 
     runtime = RuntimeConfig(
         vocab_size=32,
@@ -1385,11 +1416,11 @@ def test_runtime_cache_metadata_records_vllm_environment_overrides():
 
 
 def test_vllm_environment_override_changes_runtime_cache_identity():
+    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
     from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
         _benchmark_cache_key,
         _runtime_environment_metadata,
     )
-    from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
 
     common = dict(
         vocab_size=32,
@@ -1430,9 +1461,7 @@ def test_vllm_environment_override_changes_runtime_cache_identity():
 
 def test_runtime_cache_identity_records_estimator_metadata():
     from modelopt.torch.puzzletron.subblock_stats.runtime_utils import RuntimeConfig
-    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
-        _runtime_estimator_metadata,
-    )
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _runtime_estimator_metadata
 
     runtime = RuntimeConfig(
         vocab_size=32,
@@ -1462,9 +1491,7 @@ def test_runtime_cache_identity_records_estimator_metadata():
 def test_vllm_failure_output_preserves_stdout_root_cause_and_stderr_warnings():
     from types import SimpleNamespace
 
-    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
-        _called_process_failure_output,
-    )
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _called_process_failure_output
 
     output = _called_process_failure_output(
         SimpleNamespace(stdout="ROOT CAUSE ON STDOUT", stderr="CUDA WARNING ON STDERR")
@@ -1488,9 +1515,7 @@ def test_vllm_editable_install_import_race_is_retryable_startup_failure():
 
 
 def test_short_mamba_smoke_uses_safe_aligned_cache_token_budget():
-    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import (
-        _mamba_max_num_batched_tokens,
-    )
+    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _mamba_max_num_batched_tokens
 
     assert _mamba_max_num_batched_tokens(32) == 2048
     assert _mamba_max_num_batched_tokens(4096) == 8192

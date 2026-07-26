@@ -64,6 +64,30 @@ def test_grouped_attention_axis_selection_is_explicit():
     }
 
 
+def test_grouped_attention_excludes_canonical_padding():
+    projection = nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        projection.weight.fill_(1)
+    activations = torch.tensor([[[1.0, 2.0], [1000.0, 1000.0]]])
+    scorer = GroupedAttentionScorer(
+        projection,
+        MeshGroups(),
+        num_q_heads=2,
+        num_kv_heads=2,
+        head_dim=1,
+        validation_full_iters=1,
+    )
+    scorer.set_batch_metadata(
+        sequence_ids=torch.tensor([[0, -1]]),
+        num_samples=1,
+    )
+
+    scorer(projection, (activations,), None)
+    assert scorer._pending_count == 1
+    scorer.step_iteration()
+    assert scorer.finalize()["kv_groups_importance_ascending"].tolist() == [0, 1]
+
+
 def test_grouped_attention_exact_checkpoint_finalizes_without_replay():
     projection = nn.Linear(4, 2, bias=False)
     scorer = GroupedAttentionScorer(

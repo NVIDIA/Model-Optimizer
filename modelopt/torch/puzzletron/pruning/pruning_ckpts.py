@@ -27,8 +27,8 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
-from ..block_config import BlockConfig, FFNConfig
 from ..anymodel.model_descriptor import ModelDescriptorFactory
+from ..block_config import BlockConfig, FFNConfig
 from ..tools.bypassed_training import init_child_from_parent
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint

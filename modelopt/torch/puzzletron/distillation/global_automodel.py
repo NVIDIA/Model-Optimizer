@@ -137,7 +137,8 @@ class GlobalKDConfig:
                 self.resolved_student_force_hf or self.resolved_teacher_force_hf
             ):
                 raise ValueError(
-                    "packed multimodal global KD requires force_hf=False for student and teacher"
+                    "multimodal or packed global KD requires force_hf=False "
+                    "for student and teacher"
                 )
 
     @property
@@ -553,6 +554,18 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     # requested number of optimizer updates by adding the internal sentinel.
     scheduler_max_steps = kd_config.max_steps + 1
     checkpoint_every_steps = kd_config.checkpoint_every_steps or scheduler_max_steps
+    data_spec = (
+        PuzzletronDataSpec.from_mapping(kd_config.data) if kd_config.data else None
+    )
+    packed_sequence_size = int(kd_config.packed_sequence_size)
+    if data_spec is not None and data_spec.layout is DataLayout.PACKED_VARLEN:
+        canonical_pack_size = int(data_spec.packing.pack_size)
+        if packed_sequence_size not in (0, canonical_pack_size):
+            raise ValueError(
+                "distillation.packed_sequence_size conflicts with "
+                f"data.packing.pack_size: {packed_sequence_size} != {canonical_pack_size}"
+            )
+        packed_sequence_size = canonical_pack_size
 
     recipe: dict[str, Any] = {
         "recipe": (
@@ -603,7 +616,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
             },
         },
         "packed_sequence": {
-            "packed_sequence_size": kd_config.packed_sequence_size,
+            "packed_sequence_size": packed_sequence_size,
             "split_across_pack": False,
         },
         "loss_fn": {
@@ -636,6 +649,25 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
 
             def _dataset(split: str, samples_key: str, cache_key: str) -> dict[str, Any]:
                 sample_config = dict(kd_config.data.get(samples_key) or {})
+                if data_spec.layout is not DataLayout.FIXED:
+                    dataset = {
+                        "_target_": (
+                            "modelopt.torch.puzzletron.distillation.dataset."
+                            "make_puzzletron_chat_dataset"
+                        ),
+                        "dataset_path": str(kd_config.data.get("path") or ""),
+                        "split": split,
+                        "seq_length": int(data_spec.max_sample_length),
+                        "seed": kd_config.seed,
+                    }
+                    if data_spec.layout is DataLayout.PADDED_VARLEN:
+                        dataset["num_samples"] = int(
+                            sample_config.get(
+                                "num_samples",
+                                kd_config.max_steps * kd_config.global_batch_size,
+                            )
+                        )
+                    return dataset
                 dataset = {
                     "_target_": (
                         "modelopt.torch.puzzletron.distillation.dataset."
@@ -661,8 +693,12 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
             dataloader = {
                 "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
                 "collate_fn": (
-                    "modelopt.torch.puzzletron.distillation.dataset."
-                    "collate_puzzletron_llm_batch"
+                    "nemo_automodel.components.datasets.utils.default_collater"
+                    if data_spec.layout is not DataLayout.FIXED
+                    else (
+                        "modelopt.torch.puzzletron.distillation.dataset."
+                        "collate_puzzletron_llm_batch"
+                    )
                 ),
                 "shuffle": False,
                 "num_workers": 0,
@@ -676,6 +712,19 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                 ),
                 dataloader=dict(dataloader),
             )
+            if data_spec.layout is DataLayout.PACKED_VARLEN:
+                calibration = dict(kd_config.data.get("calibration") or {})
+                recipe["packed_sequence"] = {
+                    "packed_sequence_size": int(data_spec.packing.pack_size),
+                    "packing_strategy": "neat",
+                    "drop_long_samples": bool(data_spec.packing.drop_long_samples),
+                    "max_packs": int(
+                        calibration.get(
+                            "num_samples",
+                            kd_config.max_steps * kd_config.global_batch_size,
+                        )
+                    ),
+                }
             if kd_config.validation_enabled:
                 recipe.update(
                     validation_dataset=_dataset(
@@ -744,6 +793,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
         missing = [key for key in ("dataset", "dataloader") if key not in recipe]
         if kd_config.data:
             data_spec = PuzzletronDataSpec.from_mapping(kd_config.data)
+            calibration = dict(kd_config.data.get("calibration") or {})
             recipe["dataset"] = {
                 "_target_": (
                     "modelopt.torch.puzzletron.dataset."
@@ -755,6 +805,13 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                 "inject_fake_images": False,
                 "max_length": int(data_spec.max_sample_length),
             }
+            if data_spec.layout is DataLayout.PADDED_VARLEN:
+                recipe["dataset"]["num_samples"] = int(
+                    calibration.get(
+                        "num_samples",
+                        kd_config.max_steps * kd_config.global_batch_size,
+                    )
+                )
             recipe["dataloader"] = {
                 "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
                 "shuffle": False,
@@ -770,6 +827,12 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                     "drop_long_samples": bool(data_spec.packing.drop_long_samples),
                     "attn_implementation": "flash_attention_2",
                     "collate_max_length": int(data_spec.packing.pack_size),
+                    "max_packs": int(
+                        calibration.get(
+                            "num_samples",
+                            kd_config.max_steps * kd_config.global_batch_size,
+                        )
+                    ),
                 }
             missing = []
         if missing:
@@ -855,8 +918,8 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     if kd_config.pp > 1 and domain == "llm":
         pipeline = recipe["distributed"]["pipeline"]
         if pipeline.get("pp_seq_len") is None:
-            if kd_config.packed_sequence_size > 0:
-                pp_seq_len = kd_config.packed_sequence_size
+            if packed_sequence_size > 0:
+                pp_seq_len = packed_sequence_size
             else:
                 dataset = recipe.get("dataset") or {}
                 global_seq_len = dataset.get("seq_len", dataset.get("seq_length"))

@@ -190,7 +190,7 @@ def _ask_data(prompts: PromptSession, state: AnswerState, model: InspectedModel)
         [
             ("Fixed-length", "fixed"),
             ("Packed variable-length", "packed_varlen"),
-            ("Padded", "padded"),
+            ("Padded variable-length", "padded_varlen"),
         ],
         default="packed_varlen",
     )
@@ -636,7 +636,6 @@ def _ask_aiperf_config(
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Ask for one AIPerf node's independent Serving topology and workload."""
-
     defaults = dict(defaults or {})
     topology_defaults = dict(defaults.get("topology") or {})
     checkpoint = prompts.checkpoint()

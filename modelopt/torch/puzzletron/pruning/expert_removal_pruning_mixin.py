@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 from transformers import PretrainedConfig
 
-from ..block_config import BlockConfig, MoEConfig
 from modelopt.torch.prune.importance_hooks.base_hooks import ForwardHook
 from modelopt.torch.prune.importance_hooks.expert_removal_hooks import (
     NemotronHRemoveExpertsIndependentHook,
@@ -28,6 +27,7 @@ from modelopt.torch.prune.importance_hooks.expert_removal_hooks import (
     RankedChoiceVotingHookNemotronH,
 )
 
+from ..block_config import BlockConfig, MoEConfig
 from .pruning_mixin import LayerDescriptor, PruningMixIn
 from .pruning_utils import MlpInitMode, _init_moe_module
 

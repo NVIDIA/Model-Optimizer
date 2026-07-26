@@ -8,9 +8,10 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .records import CandidateLedger
+if TYPE_CHECKING:
+    from .records import CandidateLedger
 
 __all__ = ["apply_filter", "filter_metric_references", "validate_filter_config"]
 
@@ -64,8 +65,7 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
         if best_selection_mode is not None:
             if best_selection_mode not in _BEST_SELECTION_MODES:
                 raise ValueError(
-                    "top_k.best_selection_mode must be individual_best or "
-                    "best_per_concurrency"
+                    "top_k.best_selection_mode must be individual_best or best_per_concurrency"
                 )
             metric = str(config["metric"])
             owner, separator, leaf = metric.partition(".")
@@ -104,9 +104,7 @@ def filter_metric_references(config: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(entry["metric"] for entry in _metric_entries(config))
 
 
-def _finite_metric(
-    ledger: CandidateLedger, revision_id: str, reference: str
-) -> float | None:
+def _finite_metric(ledger: CandidateLedger, revision_id: str, reference: str) -> float | None:
     value = ledger.resolve_metric(revision_id, reference)
     return value if value is not None and math.isfinite(value) else None
 
@@ -143,13 +141,7 @@ def _apply_sweep_top_k(
         revision_id: ledger.resolve_concurrency_metrics(revision_id, metric)
         for revision_id in revision_ids
     }
-    concurrencies = sorted(
-        {
-            concurrency
-            for values in sweeps.values()
-            for concurrency in values
-        }
-    )
+    concurrencies = sorted({concurrency for values in sweeps.values() for concurrency in values})
     excluded = {}
     complete = {}
     for revision_id, values in sweeps.items():
@@ -164,10 +156,7 @@ def _apply_sweep_top_k(
     scores: dict[str, float] = {}
     if selection_mode == "individual_best":
         reducer = max if direction == "maximize" else min
-        scores = {
-            revision_id: reducer(values.values())
-            for revision_id, values in complete.items()
-        }
+        scores = {revision_id: reducer(values.values()) for revision_id, values in complete.items()}
         rows = _ordered_metric_rows(
             [(value, revision_id) for revision_id, value in scores.items()],
             direction=direction,
@@ -181,20 +170,14 @@ def _apply_sweep_top_k(
     best_ranks = {revision_id: math.inf for revision_id in complete}
     for concurrency in concurrencies:
         rows = _ordered_metric_rows(
-            [
-                (values[concurrency], revision_id)
-                for revision_id, values in complete.items()
-            ],
+            [(values[concurrency], revision_id) for revision_id, values in complete.items()],
             direction=direction,
         )
         for rank, (_value, revision_id) in enumerate(rows, start=1):
             best_ranks[revision_id] = min(best_ranks[revision_id], rank)
             if rank <= top_k:
                 selected_ids.add(revision_id)
-    scores = {
-        revision_id: float(rank)
-        for revision_id, rank in best_ranks.items()
-    }
+    scores = {revision_id: float(rank) for revision_id, rank in best_ranks.items()}
     selected = tuple(
         sorted(selected_ids, key=lambda revision_id: (scores[revision_id], revision_id))
     )

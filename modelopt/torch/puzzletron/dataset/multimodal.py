@@ -1,15 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Native AutoModel multimodal dataset adapters for Puzzletron."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from copy import deepcopy
 import hashlib
 import io
 import json
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +51,13 @@ __all__ = [
     "INTERSYN_SINGLE_REVISION",
     "INTERSYN_SINGLE_SPLIT",
     "batch_from_automodel",
+    "load_materialized_conversation_subset",
     "load_materialized_intersyn_subset",
     "load_materialized_conversation_dataset",
     "materialize_intersyn_subset",
+    "materialize_normalized_conversation_samples",
     "materialize_normalized_intersyn_samples",
+    "normalize_nemotron_vlm_sample",
     "normalize_intersyn_multi",
     "normalize_intersyn_single",
 ]
@@ -71,16 +86,24 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
     temporary.replace(path)
 
 
-def materialize_normalized_intersyn_samples(
+def materialize_normalized_conversation_samples(
     samples: Sequence[Mapping[str, Any]],
     output_dir: str | Path,
+    *,
+    acquisition: Mapping[str, Any] | None = None,
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write normalized conversations and image bytes for offline reuse."""
     output_dir = Path(output_dir)
     manifest_path = output_dir / "manifest.json"
     samples_path = output_dir / "samples.json"
     if manifest_path.is_file() and samples_path.is_file():
-        return json.loads(manifest_path.read_text())
+        manifest = json.loads(manifest_path.read_text())
+        if acquisition is not None and manifest.get("acquisition") != dict(acquisition):
+            raise ValueError(
+                f"existing materialization at {output_dir} does not match requested acquisition"
+            )
+        return manifest
     output_dir.mkdir(parents=True, exist_ok=True)
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -124,8 +147,10 @@ def materialize_normalized_intersyn_samples(
 
     revisions = sorted(
         {
-            (str((sample.get("source") or {}).get("dataset", "")),
-             str((sample.get("source") or {}).get("revision", "")))
+            (
+                str((sample.get("source") or {}).get("dataset", "")),
+                str((sample.get("source") or {}).get("revision", "")),
+            )
             for sample in serialized_samples
         }
     )
@@ -133,18 +158,29 @@ def materialize_normalized_intersyn_samples(
         "version": 1,
         "sample_count": len(serialized_samples),
         "image_count": len(image_manifest),
-        "sources": [
-            {"dataset": dataset, "revision": revision} for dataset, revision in revisions
-        ],
+        "sources": [{"dataset": dataset, "revision": revision} for dataset, revision in revisions],
         "images": image_manifest,
     }
+    if acquisition is not None:
+        manifest["acquisition"] = dict(acquisition)
+    if diagnostics:
+        manifest["diagnostics"] = dict(diagnostics)
     _write_json_atomic(samples_path, serialized_samples)
     _write_json_atomic(manifest_path, manifest)
     return manifest
 
 
-def load_materialized_intersyn_subset(output_dir: str | Path) -> list[dict[str, Any]]:
-    """Load a materialized subset without contacting Hugging Face."""
+def materialize_normalized_intersyn_samples(
+    samples: Sequence[Mapping[str, Any]],
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Compatibility wrapper for the original InterSyn materializer."""
+
+    return materialize_normalized_conversation_samples(samples, output_dir)
+
+
+def load_materialized_conversation_subset(output_dir: str | Path) -> list[dict[str, Any]]:
+    """Load a materialized conversation subset without contacting Hugging Face."""
     output_dir = Path(output_dir)
     manifest = json.loads((output_dir / "manifest.json").read_text())
     samples = json.loads((output_dir / "samples.json").read_text())
@@ -159,6 +195,12 @@ def load_materialized_intersyn_subset(output_dir: str | Path) -> list[dict[str, 
                         raise FileNotFoundError(image_path)
                     item["image"] = str(image_path.resolve())
     return samples
+
+
+def load_materialized_intersyn_subset(output_dir: str | Path) -> list[dict[str, Any]]:
+    """Compatibility wrapper for the original InterSyn loader."""
+
+    return load_materialized_conversation_subset(output_dir)
 
 
 class _ConversationDataset(torch.utils.data.Dataset):
@@ -209,12 +251,9 @@ def load_materialized_conversation_dataset(
     transparent, but reject misspelled or otherwise unknown fields.
     """
     if unknown:
-        raise TypeError(
-            "Unsupported materialized-conversation dataset options: "
-            f"{sorted(unknown)}"
-        )
+        raise TypeError(f"Unsupported materialized-conversation dataset options: {sorted(unknown)}")
     del seq_length, pretokenize, truncate, inject_fake_images, max_length
-    samples = _source_balanced_order(load_materialized_intersyn_subset(path_or_dataset))
+    samples = _source_balanced_order(load_materialized_conversation_subset(path_or_dataset))
     if num_samples is not None:
         num_samples = int(num_samples)
         if num_samples <= 0:
@@ -379,6 +418,70 @@ def normalize_intersyn_multi(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_nemotron_vlm_sample(
+    row: Mapping[str, Any],
+    *,
+    subset: str,
+    revision: str,
+) -> dict[str, Any]:
+    """Preserve a complete Nemotron conversation while attaching its matched image."""
+
+    messages = row.get("messages")
+    if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes)):
+        raise ValueError("Nemotron-VLM row has no message sequence")
+    image = row.get("image")
+    if image is None:
+        raise ValueError("Nemotron-VLM row has no matched image")
+    conversation = []
+    image_items = []
+    for raw_message in deepcopy(list(messages)):
+        if not isinstance(raw_message, Mapping):
+            raise TypeError("Nemotron-VLM messages must be mappings")
+        message = dict(raw_message)
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = [{"type": "text", "text": content}]
+            conversation.append(message)
+            continue
+        if not isinstance(content, Sequence):
+            raise TypeError("Nemotron-VLM message content must be text or a sequence")
+        normalized_content = []
+        for item in content:
+            if isinstance(item, str):
+                normalized_content.append({"type": "text", "text": item})
+                continue
+            if not isinstance(item, Mapping):
+                raise TypeError("Nemotron-VLM content items must be strings or mappings")
+            item = dict(item)
+            if item.get("type") == "video":
+                raise ValueError("Nemotron-VLM video rows are not supported")
+            if item.get("type") == "image":
+                image_items.append(item)
+            normalized_content.append(item)
+        message["content"] = normalized_content
+        conversation.append(message)
+    if len(image_items) != 1:
+        raise ValueError(
+            f"Nemotron-VLM rows must reference exactly one image, found {len(image_items)}"
+        )
+    image_item = image_items[0]
+    for key in ("images", "path", "image_url", "url", "value", "data"):
+        image_item.pop(key, None)
+    image_item["image"] = image
+    if not any(message.get("role") == "assistant" for message in conversation):
+        raise ValueError("Nemotron-VLM row has no assistant response")
+    return {
+        "conversation": conversation,
+        "image_count": 1,
+        "source": {
+            "dataset": "nvidia/Nemotron-VLM-Dataset-v2",
+            "revision": revision,
+            "subset": str(subset),
+            "row_id": str(row.get("id", "")),
+        },
+    }
+
+
 def _media_counts(collated: Mapping[str, Any], batch_size: int) -> torch.Tensor | None:
     for key in ("n_images_per_sample", "num_images_per_sample", "media_counts"):
         value = collated.get(key)
@@ -421,28 +524,39 @@ def batch_from_automodel(
     labels = collated.get("labels", collated.get("targets"))
     if labels is not None and labels.ndim == 1:
         labels = labels.unsqueeze(0)
-    attention_mask = collated.get("attention_mask")
+    raw_attention_mask = collated.get("attention_mask")
+    attention_mask = raw_attention_mask
     if attention_mask is None:
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
     elif attention_mask.ndim == 1:
         attention_mask = attention_mask.unsqueeze(0)
     loss_mask = collated.get("loss_mask")
-    ce_mask = (
-        loss_mask.bool()
-        if isinstance(loss_mask, torch.Tensor)
-        else (labels != -100 if isinstance(labels, torch.Tensor) else attention_mask.bool())
-    )
-    if ce_mask.ndim == 1:
-        ce_mask = ce_mask.unsqueeze(0)
     packed_seq_ids = collated.get("_packed_seq_ids")
+    padding_mask = collated.get("padding_mask")
     if isinstance(packed_seq_ids, torch.Tensor):
         if tuple(packed_seq_ids.shape) != (batch_size, seq_len):
             raise ValueError("_packed_seq_ids must match input_ids [batch, sequence]")
-        hidden_mask = packed_seq_ids.ne(0)
-    elif attention_mask.ndim == 2:
-        hidden_mask = attention_mask.bool()
+        valid_tokens = packed_seq_ids.ne(0)
+    elif isinstance(raw_attention_mask, torch.Tensor) and attention_mask.ndim == 2:
+        valid_tokens = attention_mask.bool()
+    elif (
+        isinstance(padding_mask, torch.Tensor)
+        and tuple(padding_mask.shape) == (batch_size, seq_len)
+    ):
+        valid_tokens = ~padding_mask.bool()
     else:
-        hidden_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        valid_tokens = torch.ones_like(input_ids, dtype=torch.bool)
+    ce_mask = (
+        loss_mask.bool()
+        if isinstance(loss_mask, torch.Tensor)
+        else (labels != -100 if isinstance(labels, torch.Tensor) else valid_tokens)
+    )
+    if ce_mask.ndim == 1:
+        ce_mask = ce_mask.unsqueeze(0)
+    ce_mask = ce_mask & valid_tokens
+    if isinstance(labels, torch.Tensor):
+        labels = labels.clone().masked_fill(~valid_tokens, -100)
+    hidden_mask = valid_tokens
 
     reserved = {
         "labels",
@@ -476,12 +590,8 @@ def batch_from_automodel(
                     "cu_seqlens without seq_idx is only unambiguous for one packed row"
                 )
             if int(cu[0]) != 0 or int(cu[-1]) != seq_len:
-                raise ValueError(
-                    "one-row packed cu_seqlens must span the full input sequence"
-                )
-            sequence_ids = torch.empty(
-                (1, seq_len), dtype=torch.long, device=input_ids.device
-            )
+                raise ValueError("one-row packed cu_seqlens must span the full input sequence")
+            sequence_ids = torch.empty((1, seq_len), dtype=torch.long, device=input_ids.device)
             for sequence_id, (start, stop) in enumerate(offsets):
                 sequence_ids[0, start:stop] = sequence_id
     else:
@@ -507,7 +617,9 @@ def batch_from_automodel(
         media_counts=counts,
         media_offsets=media_offsets,
     )
-    modality = Modality.MULTIMODAL if counts is not None and int(counts.sum()) > 0 else Modality.TEXT
+    modality = (
+        Modality.MULTIMODAL if counts is not None and int(counts.sum()) > 0 else Modality.TEXT
+    )
     return PuzzletronBatch(
         model_kwargs=model_kwargs,
         labels=labels,

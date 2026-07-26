@@ -79,7 +79,7 @@ def test_generic_converter_rewrites_legacy_checkpoint_keys_without_mutating_sour
         json.dumps(
             {
                 "metadata": {"total_size": 10},
-                "weight_map": {key: "model.safetensors" for key in tensors},
+                "weight_map": dict.fromkeys(tensors, "model.safetensors"),
             }
         )
     )

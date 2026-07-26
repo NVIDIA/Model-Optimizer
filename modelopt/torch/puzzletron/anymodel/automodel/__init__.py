@@ -3,15 +3,14 @@
 
 """Native NeMo AutoModel bridge for Puzzletron AnyModel checkpoints."""
 
+# Import built-ins for registration. Descriptor modules keep NeMo imports lazy.
+from . import models  # noqa: F401
 from .auto_model_descriptor import (
     AutoModelDescriptor,
     AutoModelDescriptorFactory,
     ContractAutoModelDescriptor,
 )
 from .patcher import automodel_patcher
-
-# Import built-ins for registration. Descriptor modules keep NeMo imports lazy.
-from . import models  # noqa: F401
 
 __all__ = [
     "AutoModelDescriptor",

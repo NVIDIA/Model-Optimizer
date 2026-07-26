@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Render and validate portable Puzzletron setup bundles."""
 
@@ -155,7 +170,6 @@ def _align_model_stage_batches(
     inherited_mesh: Mapping[str, Any] | None = None,
 ) -> None:
     """Align every model-stage batch to its inherited PP/DP scheduling unit."""
-
     automodel = _mapping(config.get("automodel"))
     mesh = _mapping(automodel.get("parallel")) or inherited_mesh
     if mesh:
@@ -205,12 +219,78 @@ def _axis_config(pruning: Mapping[str, Any]) -> dict[str, Any]:
         axis = _mapping(raw)
         teacher = int(axis["teacher_value"])
         values = list(dict.fromkeys(int(value) for value in axis.get("values") or ()))
+        if not values:
+            raise SetupError(f"Pruning axis {axis_id!r} must select at least one size.")
         axes[axis_id] = {
-            "enabled": bool(axis.get("enabled", True)),
+            "enabled": bool(axis.get("enabled", True)) and any(value < teacher for value in values),
             "teacher_value": teacher,
             "values": values,
         }
+    if not axes or not any(bool(axis["enabled"]) for axis in axes.values()):
+        raise SetupError(
+            "Width-axis selections do not prune any dimension. "
+            "Select at least one size smaller than its teacher size."
+        )
     return axes
+
+
+_ACTIVATION_PASS_AXES = {
+    "hidden_width": ("hidden_width",),
+    "ffn_iterative": ("ffn_intermediate",),
+    "ffn_intermediate": ("ffn_intermediate",),
+    "attention_grouped": (
+        "kv_groups",
+        "q_heads_per_group",
+        "query_heads",
+        "kv_heads",
+        "qk_head_dim",
+    ),
+    "mla_heads": ("mla_heads",),
+    "gdn_activation": (
+        "gdn_key_groups",
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+    ),
+    "moe_expert_removal": ("moe_experts",),
+    "moe_experts": ("moe_experts",),
+    "moe_expert_intermediate": ("moe_expert_intermediate",),
+    "moe_shared_expert_intermediate": ("moe_shared_expert_intermediate",),
+    "moe_latent": ("moe_latent_dim",),
+    "moe_latent_dim": ("moe_latent_dim",),
+    "mamba_head_and_dim": ("mamba_heads", "mamba_head_dim"),
+    "ple_width": ("ple_width",),
+}
+
+
+def _enabled_activation_passes(
+    passes: list[dict[str, Any]],
+    axes: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    enabled_axes = {
+        str(axis_id) for axis_id, raw in axes.items() if bool(_mapping(raw).get("enabled", False))
+    }
+    result = []
+    for raw in passes:
+        entry = deepcopy(raw)
+        configured_axis_ids = entry.get("axis_ids")
+        axis_ids = tuple(
+            str(axis_id)
+            for axis_id in (
+                configured_axis_ids
+                if configured_axis_ids is not None
+                else _ACTIVATION_PASS_AXES.get(str(entry.get("name")), ())
+            )
+        )
+        if axis_ids:
+            active_axis_ids = [axis_id for axis_id in axis_ids if axis_id in enabled_axes]
+            if not active_axis_ids:
+                continue
+            entry["axis_ids"] = active_axis_ids
+            if str(entry.get("name")) == "attention_grouped":
+                entry.setdefault("activation_hooks_kwargs", {})["scored_axes"] = active_axis_ids
+        result.append(entry)
+    return result
 
 
 def _attention_heads(axes: Mapping[str, Any]) -> list[list[int]]:
@@ -293,6 +373,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
 
     model = _mapping(state.get("model"))
     data = _answers(state, "data")
+    data_acquisition = _mapping(data.get("acquisition"))
     pruning = _answers(state, "pruning")
     runtime = _answers(state, "runtime")
     infrastructure = _answers(state, "infrastructure")
@@ -302,34 +383,43 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     bypass_mesh = _mapping(meshes.get("bypass"))
     global_kd_mesh = _mapping(meshes.get("global_kd"))
     axes = _axis_config(pruning)
+    enabled_axis_ids = [
+        axis_id for axis_id, axis in axes.items() if bool(axis.get("enabled", False))
+    ]
     sequence_length = int(data["sequence_length"])
     width_samples = int(pruning["width_importance_samples"])
     depth_samples = int(pruning.get("depth_importance_samples", 128))
     sort_sanity_samples = int(pruning.get("sort_sanity_samples", 128))
+    width_sanity_samples = int(pruning.get("width_sanity_samples", 128))
     replacement_samples = int(pruning["replacement_samples"])
     if smoke:
         width_samples = min(width_samples, 128)
         depth_samples = min(depth_samples, 16)
         sort_sanity_samples = min(sort_sanity_samples, 16)
+        width_sanity_samples = min(width_sanity_samples, 16)
         replacement_samples = min(replacement_samples, 16)
     result_root = str(output["result_root"]).rstrip("/")
     puzzle_dir = f"{result_root}/{budget}"
 
-    activation_passes = list(_mapping(config.get("pruning")).get("activation_passes") or ())
-    if "moe_latent_dim" not in axes:
-        activation_passes = [
-            entry for entry in activation_passes if entry.get("name") != "moe_latent"
-        ]
-    if "hidden_width" in axes and not any(
+    activation_passes = _enabled_activation_passes(
+        list(_mapping(config.get("pruning")).get("activation_passes") or ()),
+        axes,
+    )
+    hidden_axis = _mapping(axes.get("hidden_width"))
+    if bool(hidden_axis.get("enabled", False)) and not any(
         entry.get("name") == "hidden_width" for entry in activation_passes
     ):
         activation_passes.insert(
             0,
             {
                 "name": "hidden_width",
+                "axis_ids": ["hidden_width"],
                 "activation_hooks_kwargs": {"method": "minitron_hidden_width"},
             },
         )
+    embedding_widths = (
+        list(hidden_axis.get("values") or ()) if bool(hidden_axis.get("enabled", False)) else []
+    )
     model_parallel = _parallel(common_mesh)
     bypass = _mapping(pruning.get("bypass"))
     bypass_samples = int(bypass.get("samples", 4096))
@@ -349,7 +439,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
     default_serving_topology = {
         **vllm_topology,
         "data_parallel_size": 1,
-        "expert_parallel_size": 1,
+        "enable_expert_parallel": False,
     }
 
     train_cache = f"{puzzle_dir}/dataset_cache/train.tokens"
@@ -374,6 +464,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "layout": data["layout"],
             "max_sample_length": sequence_length,
             "path": data["source"],
+            "acquisition": deepcopy(data_acquisition) if data_acquisition else None,
             "packing": (
                 {
                     "pack_size": sequence_length,
@@ -397,7 +488,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         "train_token_cache_path": train_cache,
         "validation_token_cache_path": validation_cache,
         "tokenize_data": {
-            "enabled": True,
+            "enabled": data["modality"] == "text" and data["layout"] == "fixed",
             "workers": 16 if smoke else 64,
             "tokenize_batch_size": 64,
             "content_field": "messages",
@@ -414,9 +505,8 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
                     "split": "validation",
                     "num_samples": max(
                         depth_samples,
-                        sort_sanity_samples
-                        if pruning.get("sort_sanity", False)
-                        else 0,
+                        sort_sanity_samples if pruning.get("sort_sanity", False) else 0,
+                        width_sanity_samples if pruning.get("width_sanity", False) else 0,
                         replacement_samples,
                     ),
                     "seq_length": sequence_length,
@@ -425,8 +515,8 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             ],
         },
         "embedding_pruning": {
-            "enabled": bool(_mapping(axes.get("hidden_width")).get("values")),
-            "widths": list(_mapping(axes.get("hidden_width")).get("values") or ()),
+            "enabled": bool(embedding_widths),
+            "widths": embedding_widths,
             "alignment": int(
                 _mapping(_mapping(pruning.get("axes")).get("hidden_width")).get("alignment", 1)
             ),
@@ -453,8 +543,46 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "packed_token_cache_path": validation_cache,
             "automodel": {"parallel": model_parallel},
         },
-        "width_sanity": {"enabled": False},
-        "slicing_sanity": {"enabled": False},
+        "width_sanity": {
+            "enabled": bool(
+                pruning.get("sort_sanity", False) and pruning.get("width_sanity", False)
+            ),
+            "axes": enabled_axis_ids,
+            "single_load_parent_sweep": True,
+            "one_case_per_axis": False,
+            "target_count_per_axis": int(pruning.get("width_sanity_targets_per_axis", 2)),
+            "layer_count": int(pruning.get("width_sanity_layer_count", 3)),
+            "layer_selection": "spread",
+            "methods": ["activation", "random", "reverse"],
+            "physical_realization": bool(
+                pruning.get("sort_sanity", False)
+                and pruning.get("width_sanity", False)
+                and pruning.get("slicing_sanity", False)
+            ),
+            "cleanup_physical_checkpoints": True,
+            "reuse_sort_equivalence": True,
+            "require_beats_random": False,
+            "require_beats_reverse": False,
+            "require_physical_equivalence": bool(
+                pruning.get("sort_sanity", False)
+                and pruning.get("width_sanity", False)
+                and pruning.get("slicing_sanity", False)
+            ),
+            "physical_equivalence_tolerance": 0.001,
+            "eval_samples": width_sanity_samples,
+            "micro_batch_size": scoring_batch_size,
+            "block_size": sequence_length,
+            "packed_token_cache_path": validation_cache,
+            "automodel": {"parallel": model_parallel},
+        },
+        "slicing_sanity": {
+            "enabled": bool(
+                pruning.get("sort_sanity", False)
+                and pruning.get("width_sanity", False)
+                and pruning.get("slicing_sanity", False)
+            ),
+            "backend": "distributed_parent_sweep",
+        },
         "bypass_sanity": {
             "enabled": bool(bypass.get("sanity", False)),
             "steps": min(128, bypass_samples),
@@ -473,6 +601,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "training": {
                 "training_tokens": bypass_samples * bypass_sequence_length,
                 "micro_batch_size": bypass_batch_size,
+                "grad_accumulation_steps": int(bypass.get("grad_accumulation_steps", 1)),
             },
         },
         "depth_importance": {
@@ -550,7 +679,28 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         },
         "post_distillation_evaluation": {"enabled": False},
     }
+    if data.get("subsets"):
+        overlay["data"].update(
+            {
+                "subsets": list(data["subsets"]),
+                "subset_revision": data.get("subset_revision"),
+                "subset_weights": deepcopy(_mapping(data.get("subset_weights"))),
+            }
+        )
+    if not data_acquisition:
+        overlay["data"].pop("acquisition", None)
+    if data["modality"] == "multimodal" or data["layout"] != "fixed":
+        overlay["tokenize_data"]["caches"] = []
     rendered = _deep_merge(config, overlay)
+    if data["modality"] == "multimodal" or data["layout"] != "fixed":
+        for section in (
+            "sort_sanity",
+            "width_sanity",
+            "depth_importance",
+            "replacement_scoring",
+        ):
+            rendered[section].pop("packed_token_cache_path", None)
+        rendered["bypass"]["data"].pop("packed_token_cache_path", None)
     _align_model_stage_batches(rendered)
     return rendered
 
@@ -580,7 +730,8 @@ def _post_mip_candidate_limits(experiment: Mapping[str, Any]) -> dict[str, int |
     limits: dict[str, int | None] = {}
     flows = _mapping(_mapping(experiment.get("post_mip")).get("flows"))
     for flow_id, flow in flows.items():
-        pending = _mapping(flow.get("nodes"))
+        nodes = _mapping(flow.get("nodes"))
+        pending = dict(nodes)
         output_limits: dict[str, int | None] = {"source": None}
         while pending:
             progressed = False
@@ -600,10 +751,20 @@ def _post_mip_candidate_limits(experiment: Mapping[str, Any]) -> dict[str, int |
                         if isinstance(top_k, Mapping)
                         else int(top_k)
                     )
+                    if node.get("best_selection_mode") == "best_per_concurrency":
+                        input_node = _mapping(nodes.get(input_id))
+                        if input_node.get("type") == "aiperf":
+                            raw_concurrency = _mapping(input_node.get("config")).get(
+                                "concurrency", [1]
+                            )
+                            concurrency_count = (
+                                1
+                                if isinstance(raw_concurrency, (int, str))
+                                else len({int(value) for value in raw_concurrency})
+                            )
+                            filter_limit *= concurrency_count
                     output_limit = (
-                        filter_limit
-                        if output_limit is None
-                        else min(output_limit, filter_limit)
+                        filter_limit if output_limit is None else min(output_limit, filter_limit)
                     )
                 output_limits[str(node_id)] = output_limit
                 limits[f"post.{flow_id}.{node_id}"] = output_limit
@@ -639,22 +800,14 @@ def _dynamic_stage_entries(
                 and node_type == "evaluation"
                 and str(node.get("input", "source")) == "source"
             )
-            worker_limit = int(
-                workers.get("pool" if pooled_evaluation else "sharded", 1)
-            )
+            worker_limit = int(workers.get("pool" if pooled_evaluation else "sharded", 1))
             candidate_limit = candidate_limits[f"post.{flow_id}.{node_id}"]
             instances = (
-                worker_limit
-                if candidate_limit is None
-                else min(worker_limit, candidate_limit)
+                worker_limit if candidate_limit is None else min(worker_limit, candidate_limit)
             )
             entry = {
                 "strategy": (
-                    "single"
-                    if selector
-                    else "persistent_pool"
-                    if pooled_evaluation
-                    else "sharded"
+                    "single" if selector else "persistent_pool" if pooled_evaluation else "sharded"
                 ),
                 "instances": 1 if cpu_stage else max(1, instances),
                 "gpus_per_node": gpus_per_node,
@@ -684,6 +837,10 @@ def render_execution(
     bypass = _parallel(_mapping(meshes.get("bypass")))
     global_kd = _parallel(_mapping(meshes.get("global_kd")))
     single_gpu = _parallel({})
+    vllm_topology = _mapping(
+        _mapping(_mapping(experiment.get("vllm_stats")).get("runtime_stats")).get("topology")
+    )
+    vllm_parallel = _serving_parallel(vllm_topology)
     gpus_per_node = int(infrastructure.get("gpus_per_node", 8))
     runner = _mapping(infrastructure.get("runner"))
     cpu_partition = str(_mapping(runner.get("slurm")).get("partition_cpu") or "").strip() or None
@@ -696,7 +853,7 @@ def render_execution(
         "vllm_stats": {
             "strategy": "sharded",
             "instances": sharded_workers,
-            "parallel": single_gpu,
+            "parallel": vllm_parallel,
         },
         "depth_importance": {
             "strategy": "persistent_pool",
@@ -706,6 +863,8 @@ def render_execution(
         "width_importance": {"strategy": "single", "instances": 1, "parallel": common},
         "sort": {"strategy": "single", "instances": 1, "parallel": single_gpu},
         "sort_sanity": {"strategy": "single", "instances": 1, "parallel": common},
+        "width_sanity": {"strategy": "single", "instances": 1, "parallel": common},
+        "slicing_sanity": {"strategy": "single", "instances": 1},
         "bypass_sanity": {"strategy": "single", "instances": 1, "parallel": bypass},
         "bypass": {
             "strategy": "single",
@@ -735,7 +894,7 @@ def render_execution(
             pool_source_evaluations=not bool(state.get("detailed", False)),
         )
     )
-    cpu_stage_ids = {"convert", "tokenize_data", "sort", "build_library", "mip"}
+    cpu_stage_ids = {"convert", "tokenize_data", "build_library", "mip"}
     if cpu_partition:
         for stage_id in cpu_stage_ids:
             stages[stage_id].update(resource="cpu", partition=cpu_partition)

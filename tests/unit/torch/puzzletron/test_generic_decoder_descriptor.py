@@ -14,8 +14,8 @@ from modelopt.torch.puzzletron.anymodel.models.generic_decoder import (
     StandardGQAAttentionContract,
     VisionLanguageContract,
 )
-from modelopt.torch.puzzletron.pruning.embedding_pruning import TensorAxisRule
 from modelopt.torch.puzzletron.anymodel.registry import infer_descriptor_name
+from modelopt.torch.puzzletron.pruning.embedding_pruning import TensorAxisRule
 
 
 def _dense_contract(*, vlm: bool = False) -> GenericDecoderContract:

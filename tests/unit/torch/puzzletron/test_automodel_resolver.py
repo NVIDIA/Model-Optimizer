@@ -26,12 +26,12 @@ from types import SimpleNamespace
 import pytest
 from torch import nn
 
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, MLAConfig
 from modelopt.torch.puzzletron.plugins.automodel.hooks import (
     FFNIndependentScorer,
     FFNIterativeScorer,
     GroupedAttentionScorer,
 )
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, MLAConfig
 from modelopt.torch.puzzletron.plugins.automodel.reduction import MeshGroups
 from modelopt.torch.puzzletron.plugins.automodel.target_resolver import build_scorers
 

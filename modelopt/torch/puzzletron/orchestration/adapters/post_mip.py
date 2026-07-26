@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from puzzletron_orchestrator.post_mip.records import CandidateLedger
+
 from ..schema import (
     AttemptSpec,
     CampaignPlan,

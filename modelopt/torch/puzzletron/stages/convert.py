@@ -11,10 +11,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-import modelopt.torch.utils.distributed as dist
 from safetensors import safe_open
 from safetensors.torch import save_file as safe_save_file
 from transformers import AutoConfig
+
+import modelopt.torch.utils.distributed as dist
 
 from ..anymodel.converter import ConverterFactory
 from ..anymodel.registry import register_native_config_aliases, resolve_descriptor_from_pretrained

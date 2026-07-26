@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,9 +49,7 @@ def test_aiperf_server_environment_uses_the_active_vllm_package_source(monkeypat
     monkeypatch.setenv("PYTHONPATH", "/existing")
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf.importlib.util.find_spec",
-        lambda name: SimpleNamespace(
-            submodule_search_locations=[str(active_source / "vllm")]
-        ),
+        lambda name: SimpleNamespace(submodule_search_locations=[str(active_source / "vllm")]),
     )
 
     env = _clean_subprocess_environment(

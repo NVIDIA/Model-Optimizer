@@ -9,10 +9,10 @@ import os
 import re
 from pathlib import Path
 
+from modelopt.torch.puzzletron.diagnostics.campaign_findings import MetricSpec
 from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     generate_campaign_progress_report,
 )
-from modelopt.torch.puzzletron.diagnostics.campaign_findings import MetricSpec
 from modelopt.torch.puzzletron.diagnostics.width_sanity import aggregate_width_sanity
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 from modelopt.torch.puzzletron.pipeline_config import (

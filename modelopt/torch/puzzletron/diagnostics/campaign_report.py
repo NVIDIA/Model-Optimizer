@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 _SCENARIO_RE = re.compile(r"(width-\d+)/(depth-\d+)")
 _GRADIENT_GROUPS = ("vision", "projector", "language", "mtp")
 

@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.validation import validate_state
@@ -168,3 +183,106 @@ def test_persisted_vllm_measurement_topology_is_candidate_checked(tmp_path):
     messages = _messages(state)
 
     assert "query-head counts [18, 24, 32]" in messages
+
+
+def test_hugging_face_subset_selection_rejects_invalid_weights_and_disabled_entries(
+    tmp_path,
+):
+    state = _state(tmp_path)
+    state.set_field("data.selected_source", "owner/dataset")
+    state.set_collection(
+        "hf_dataset_catalogs",
+        {
+            "owner/dataset@sha": {
+                "source": "owner/dataset",
+                "revision": "sha",
+                "default_subset": "small",
+                "subsets": [
+                    {
+                        "name": "small",
+                        "num_rows": 10,
+                        "num_bytes_original_files": 100,
+                        "selectable": True,
+                        "disabled_reason": None,
+                    },
+                    {
+                        "name": "external",
+                        "num_rows": 30,
+                        "num_bytes_original_files": 300,
+                        "selectable": False,
+                        "disabled_reason": "external media required",
+                    },
+                ],
+            }
+        },
+    )
+    state.set_collection(
+        "data_subset_selection",
+        {
+            "source": "owner/dataset",
+            "revision": "sha",
+            "subsets": [
+                {
+                    "name": "small",
+                    "num_rows": 10,
+                    "num_bytes_original_files": 100,
+                    "weight": 0.25,
+                },
+                {
+                    "name": "external",
+                    "num_rows": 30,
+                    "num_bytes_original_files": 300,
+                    "weight": 0.5,
+                },
+            ],
+        },
+    )
+
+    messages = _messages(state)
+
+    assert "weights must sum to 1.0" in messages
+    assert "external media required" in messages
+
+
+def test_hugging_face_subset_selection_accepts_revision_locked_metadata(tmp_path):
+    state = _state(tmp_path)
+    state.set_field("data.selected_source", "owner/dataset")
+    subset = {
+        "name": "default",
+        "num_rows": 10,
+        "num_bytes_original_files": 100,
+        "weight": 1.0,
+    }
+    state.set_collection(
+        "hf_dataset_catalogs",
+        {
+            "owner/dataset@sha": {
+                "source": "owner/dataset",
+                "revision": "sha",
+                "default_subset": "default",
+                "subsets": [
+                    {
+                        **subset,
+                        "selectable": True,
+                        "disabled_reason": None,
+                    }
+                ],
+            }
+        },
+    )
+    state.set_collection(
+        "data_subset_selection",
+        {
+            "source": "owner/dataset",
+            "revision": "sha",
+            "subsets": [subset],
+        },
+    )
+
+    issues = [
+        issue
+        for issue in validate_state(state)
+        if issue.path.startswith("data.subsets")
+    ]
+
+    assert issues == []

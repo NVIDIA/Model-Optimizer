@@ -17,7 +17,6 @@ from modelopt.torch.puzzletron.artifact_inventory import (
 from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import StageManifest
 
-
 _SOURCE_CONFIG = {
     "model": {"source": "/campaign/sorted-teacher", "family": "qwen"},
     "data": {"identity": "data-v1"},

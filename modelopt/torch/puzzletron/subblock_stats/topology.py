@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import asdict, dataclass
 from functools import lru_cache
-import subprocess
 from typing import Any
+
+from ..orchestration.mesh import normalize_vllm_topology
 
 __all__ = ["RuntimeTopology"]
 
@@ -17,8 +19,10 @@ __all__ = ["RuntimeTopology"]
 class RuntimeTopology:
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
+    data_parallel_size: int = 1
     prefill_context_parallel_size: int = 1
     decode_context_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     distributed_executor_backend: str = "mp"
     gpu_group_size: int = 1
 
@@ -26,6 +30,7 @@ class RuntimeTopology:
         for field_name in (
             "tensor_parallel_size",
             "pipeline_parallel_size",
+            "data_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
             "gpu_group_size",
@@ -55,6 +60,7 @@ class RuntimeTopology:
         return (
             self.tensor_parallel_size
             * self.pipeline_parallel_size
+            * self.data_parallel_size
             * self.prefill_context_parallel_size
         )
 
@@ -78,30 +84,41 @@ class RuntimeTopology:
         _validate_vllm_cli_support(
             self.prefill_context_parallel_size,
             self.decode_context_parallel_size,
+            self.data_parallel_size,
+            self.enable_expert_parallel,
         )
 
     @classmethod
     def from_config(cls, config: Any) -> "RuntimeTopology":
         if config is None:
             return cls()
-        get = config.get if hasattr(config, "get") else lambda key, default=None: default
-        tp = int(get("tensor_parallel_size", 1))
-        pp = int(get("pipeline_parallel_size", 1))
-        pcp = int(get("prefill_context_parallel_size", 1))
+        canonical = normalize_vllm_topology(config)
         return cls(
-            tensor_parallel_size=tp,
-            pipeline_parallel_size=pp,
-            prefill_context_parallel_size=pcp,
-            decode_context_parallel_size=int(get("decode_context_parallel_size", 1)),
-            distributed_executor_backend=str(get("distributed_executor_backend", "mp")),
-            gpu_group_size=int(get("gpu_group_size", tp * pp * pcp)),
+            tensor_parallel_size=canonical["tp"],
+            pipeline_parallel_size=canonical["pp"],
+            data_parallel_size=canonical["dp"],
+            prefill_context_parallel_size=canonical["prefill_cp"],
+            decode_context_parallel_size=canonical["decode_cp"],
+            enable_expert_parallel=canonical["enable_expert_parallel"],
+            distributed_executor_backend=canonical["distributed_executor_backend"],
+            gpu_group_size=canonical["gpu_count"],
         )
 
 
 @lru_cache(maxsize=4)
-def _validate_vllm_cli_support(prefill_cp: int, decode_cp: int) -> None:
-    """Fail before model creation when the installed vLLM lacks requested CP flags."""
-    if prefill_cp == 1 and decode_cp == 1:
+def _validate_vllm_cli_support(
+    prefill_cp: int,
+    decode_cp: int,
+    data_parallel_size: int,
+    enable_expert_parallel: bool,
+) -> None:
+    """Fail before model creation when installed vLLM lacks topology flags."""
+    if (
+        prefill_cp == 1
+        and decode_cp == 1
+        and data_parallel_size == 1
+        and not enable_expert_parallel
+    ):
         return
     completed = subprocess.run(
         # Recent vLLM releases intentionally omit advanced ParallelConfig
@@ -118,6 +135,10 @@ def _validate_vllm_cli_support(prefill_cp: int, decode_cp: int) -> None:
         required.append("--prefill-context-parallel-size")
     if decode_cp > 1:
         required.append("--decode-context-parallel-size")
+    if data_parallel_size > 1:
+        required.extend(("--data-parallel-size", "--data-parallel-size-local"))
+    if enable_expert_parallel:
+        required.append("--enable-expert-parallel")
     missing = [flag for flag in required if flag not in help_text]
     if missing:
         raise RuntimeError(

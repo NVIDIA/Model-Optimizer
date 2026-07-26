@@ -29,19 +29,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .adapters.registry import adapter_for_stage
 from .adapters.post_mip import ManualInputRequired
+from .adapters.registry import adapter_for_stage
 from .adapters.stage_compat import stage_is_complete
 from .compiler import plan_to_dict
 from .dashboard import StageView, format_duration, progress_eta, progress_fraction
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
-from .reporting import (
-    FinalReportResult,
-    build_final_report_attempt,
-    final_report_paths,
-)
+from .reporting import FinalReportResult, build_final_report_attempt, final_report_paths
 from .schema import (
     CampaignPlan,
     FailureClass,
@@ -60,8 +56,8 @@ from .state import (
     acquire_controller_lease,
     release_controller_lease,
 )
-from .terminal import InteractiveControlRequest, ShutdownAction, TerminalControls
 from .task_topology import resolve_task_topology
+from .terminal import InteractiveControlRequest, ShutdownAction, TerminalControls
 
 __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
 

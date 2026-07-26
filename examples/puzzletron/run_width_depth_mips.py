@@ -19,6 +19,11 @@ from safetensors import safe_open
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.granularity import resolve_granularity
 from modelopt.torch.puzzletron.identity import mip_execution_identity, stable_hash
+from modelopt.torch.puzzletron.mip.profiles import (
+    DepthSelection,
+    compile_profile_constraints,
+    normalize_mip_profiles,
+)
 from modelopt.torch.puzzletron.mip.run_puzzle import (
     _add_block_stats_to_gathered_metrics,
     _normalize_subblock_stats_args,
@@ -27,20 +32,13 @@ from modelopt.torch.puzzletron.mip.run_puzzle import (
     gather_multi_layer_puzzle_metrics,
     run_puzzle,
 )
-from modelopt.torch.puzzletron.mip.profiles import (
-    DepthSelection,
-    compile_profile_constraints,
-    normalize_mip_profiles,
-)
 from modelopt.torch.puzzletron.orchestration.identity import (
     artifact_snapshot_identity,
     mip_input_artifact_paths,
 )
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from modelopt.torch.puzzletron.replacement_library.library import ReplacementLibrary
-from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
-    parse_layer_replacement,
-)
+from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch.puzzletron.stages.pipeline import _hf_checkpoint_complete
 
 

@@ -35,6 +35,7 @@ class PromptChoice:
 
     title: str
     value: Any
+    disabled: str | None = None
 
 
 class PromptBackend(Protocol):
@@ -95,7 +96,12 @@ class InteractiveBackend:
     ) -> Any:
         questionary = _questionary()
         rendered = [
-            questionary.Choice(title=choice.title, value=choice.value) for choice in choices
+            questionary.Choice(
+                title=choice.title,
+                value=choice.value,
+                disabled=choice.disabled,
+            )
+            for choice in choices
         ]
         rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK))
         return _answer(questionary.select(message, choices=rendered, default=default))
@@ -113,6 +119,7 @@ class InteractiveBackend:
                 title=choice.title,
                 value=choice.value,
                 checked=choice.value in selected,
+                disabled=choice.disabled,
             )
             for choice in choices
         ]

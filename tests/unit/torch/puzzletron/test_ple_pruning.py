@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 from types import SimpleNamespace
 
-from modelopt.torch.puzzletron.pruning.ple_pruning import PLEPruningSpec
-from modelopt.torch.puzzletron.pruning.runtime_ple import ple_layer_context
+import torch
+
 from modelopt.torch.puzzletron.plugins.automodel.local_kd_recipe import (
     AutoModelLocalDistillationRecipe,
 )
+from modelopt.torch.puzzletron.pruning.ple_pruning import PLEPruningSpec
+from modelopt.torch.puzzletron.pruning.runtime_ple import ple_layer_context
 
 
 def _spec() -> PLEPruningSpec:

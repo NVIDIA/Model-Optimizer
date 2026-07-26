@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
 import os
-from pathlib import Path
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 

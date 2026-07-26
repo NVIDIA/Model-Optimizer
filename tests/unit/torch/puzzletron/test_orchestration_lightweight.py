@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import yaml
+
 from puzzletron_orchestrator.config import load_experiment_config
 from puzzletron_orchestrator.logging import OrchestratorLogger
 
@@ -24,7 +25,9 @@ def test_lightweight_package_does_not_import_torch() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; import puzzletron_orchestrator; "
+            "import sys; "
+            "from puzzletron_orchestrator import normalize_vllm_topology; "
+            "assert normalize_vllm_topology({})['gpu_count'] == 1; "
             "assert 'torch' not in sys.modules",
         ],
         cwd=REPOSITORY_ROOT,
@@ -35,10 +38,96 @@ def test_lightweight_package_does_not_import_torch() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_named_vllm_measurement_gpu_group_includes_data_parallelism() -> None:
+    from puzzletron_orchestrator.vllm_measurements import normalize_vllm_measurements
+
+    measurements = normalize_vllm_measurements(
+        {
+            "vllm_stats": {
+                "enabled": True,
+                "measurements": {
+                    "multigpu": {
+                        "prefill_seq_len": 128,
+                        "generation_seq_len": 32,
+                        "batch_size": 1,
+                        "max_num_seqs": 1,
+                        "granularity": "subblock",
+                        "runtime_stats": {
+                            "topology": {
+                                "tensor_parallel_size": 2,
+                                "data_parallel_size": 2,
+                                "prefill_context_parallel_size": 2,
+                                "enable_expert_parallel": True,
+                                "gpu_group_size": 8,
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    )
+
+    assert measurements["multigpu"].gpu_group_size == 8
+
+
+def test_cpu_stage_command_omits_main_gpu_count(tmp_path: Path) -> None:
+    from puzzletron_orchestrator.adapters.stage_compat import StageCompatAdapter
+    from puzzletron_orchestrator.schema import (
+        CampaignPlan,
+        ExecutionContract,
+        ExecutionStrategy,
+        FailurePolicy,
+        RunnerEnvironment,
+        StagePlanNode,
+    )
+
+    runner = RunnerEnvironment(
+        kind="local",
+        contract=ExecutionContract(repository=str(tmp_path), venv=".venv"),
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={},
+        runner=runner,
+        execution_defaults={},
+        stages=(),
+        contract_hash="contract",
+    )
+    node = StagePlanNode(
+        stage_id="convert",
+        strategy=ExecutionStrategy.SINGLE,
+        instances=1,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={},
+        gpus_per_instance=0,
+        gpus_per_node=0,
+        nodes=1,
+        total_gpus=0,
+        exclusive=False,
+        parents=(),
+        distributed=False,
+        resource="cpu",
+    )
+    adapter = StageCompatAdapter()
+    item = adapter.plan(plan, node).items[0]
+
+    attempt = adapter.command(
+        plan=plan,
+        node=node,
+        item=item,
+        attempt_id="attempt",
+        runner=runner,
+    )
+
+    assert "--gpus-per-node" not in attempt.command.argv
+    assert attempt.metadata["gpus_per_node"] == 0
+
+
 def test_orchestrator_logger_color_modes() -> None:
     colored = io.StringIO()
     OrchestratorLogger(color="always", stream=colored).success("stage complete")
-    assert "\033[92m" in colored.getvalue()
+    assert "\033[32m" in colored.getvalue()
     assert "stage complete" in colored.getvalue()
 
     plain = io.StringIO()
@@ -279,7 +368,7 @@ def test_vllm_completeness_requires_nonempty_canonical_stats(tmp_path: Path) -> 
     assert stage_is_complete(config, "vllm_stats")
 
 
-def test_mip_and_evaluation_require_every_configured_profile(tmp_path: Path) -> None:
+def test_legacy_mip_and_evaluation_completeness(tmp_path: Path) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {
@@ -290,10 +379,6 @@ def test_mip_and_evaluation_require_every_configured_profile(tmp_path: Path) -> 
     params_grid = tmp_path / "mip" / "profiles" / "params" / "mip_grid.json"
     params_grid.parent.mkdir(parents=True)
     params_grid.write_text("{}")
-    assert not stage_is_complete(config, "mip")
-    runtime_grid = tmp_path / "mip" / "profiles" / "runtime" / "mip_grid.json"
-    runtime_grid.parent.mkdir(parents=True)
-    runtime_grid.write_text("{}")
     assert stage_is_complete(config, "mip")
 
     params_eval = (

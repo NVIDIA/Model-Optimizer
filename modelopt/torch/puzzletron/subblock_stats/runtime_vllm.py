@@ -40,6 +40,7 @@ from types import SimpleNamespace
 from ..tools.logger import mprint
 from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
 from .runtime_utils import RuntimeConfig
+from .topology import RuntimeTopology
 
 # torchrun / torch.elastic environment variables that a child ``vllm`` process
 # must NOT inherit: with ``--distributed-executor-backend external_launcher``
@@ -64,7 +65,7 @@ _ELASTIC_ENV_VARS = {
 }
 _INHERITED_VLLM_RENDEZVOUS_ENV_VARS = {"VLLM_PORT", "VLLM_DP_MASTER_PORT"}
 
-_RUNTIME_CACHE_SCHEMA_VERSION = 4
+_RUNTIME_CACHE_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -307,6 +308,38 @@ def _called_process_failure_output(exc) -> str:
     return "\n".join(pieces) or "vLLM latency benchmark failed"
 
 
+def _topology_vllm_args(topology: RuntimeTopology) -> list[str]:
+    """Translate one runtime-statistics topology to vLLM latency flags."""
+    args = [
+        "--tensor-parallel-size",
+        str(topology.tensor_parallel_size),
+        "--pipeline-parallel-size",
+        str(topology.pipeline_parallel_size),
+    ]
+    if topology.data_parallel_size > 1:
+        args.extend(
+            (
+                "--data-parallel-size",
+                str(topology.data_parallel_size),
+                "--data-parallel-size-local",
+                str(topology.data_parallel_size),
+            )
+        )
+    args.extend(
+        (
+            "--prefill-context-parallel-size",
+            str(topology.prefill_context_parallel_size),
+            "--decode-context-parallel-size",
+            str(topology.decode_context_parallel_size),
+            "--distributed-executor-backend",
+            topology.distributed_executor_backend,
+        )
+    )
+    if topology.enable_expert_parallel:
+        args.append("--enable-expert-parallel")
+    return args
+
+
 def _run_vllm_latency_phase(
     model_path: Path,
     runtime_config: RuntimeConfig,
@@ -367,20 +400,11 @@ def _run_vllm_latency_phase(
         str(runtime_config.num_iters),
         "--max-num-seqs",
         str(max_num_seqs),
-        "--tensor-parallel-size",
-        str(runtime_config.topology.tensor_parallel_size),
-        "--pipeline-parallel-size",
-        str(runtime_config.topology.pipeline_parallel_size),
-        "--prefill-context-parallel-size",
-        str(runtime_config.topology.prefill_context_parallel_size),
-        "--decode-context-parallel-size",
-        str(runtime_config.topology.decode_context_parallel_size),
-        "--distributed-executor-backend",
-        runtime_config.topology.distributed_executor_backend,
         # Required for accurate per-block runtime stats.
         "--optimization-level",
         "0",
     ]
+    cmd.extend(_topology_vllm_args(runtime_config.topology))
     cmd.extend(runtime_config.extra_vllm_args)
     descriptor_args = list(runtime_config.descriptor.runtime_vllm_benchmark_args(config))
     cmd.extend(descriptor_args)

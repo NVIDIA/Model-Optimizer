@@ -29,11 +29,11 @@ from _test_utils.torch.transformers_models import (
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.puzzletron as mtpz
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 from modelopt.torch.puzzletron.stages.convert import (
     _descriptor_checkpoint_layout_complete,
     _is_complete_checkpoint,
 )
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 
 
 def _weight_map(checkpoint_dir):
@@ -42,7 +42,7 @@ def _weight_map(checkpoint_dir):
         return json.loads(index_path.read_text())["weight_map"]
     weights_path = checkpoint_dir / "model.safetensors"
     with safe_open(weights_path, framework="pt") as handle:
-        return {key: weights_path.name for key in handle.keys()}
+        return dict.fromkeys(handle.keys(), weights_path.name)
 
 
 def test_convert_anymodel(tmp_path):

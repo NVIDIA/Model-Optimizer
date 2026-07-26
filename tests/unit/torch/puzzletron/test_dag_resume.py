@@ -40,7 +40,6 @@ from modelopt.torch.puzzletron.manifest import (
 )
 from modelopt.torch.puzzletron.stages.graph import STAGE_REGISTRY
 
-
 _PRE_V3_COMPLETION_MARKER = """{
   "config": "/historical/campaign/config.yaml",
   "depth": null,

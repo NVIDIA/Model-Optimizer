@@ -10,8 +10,8 @@ from modelopt.torch.puzzletron.plugins.automodel.batch_adapter import (
     VisionForwardMonitor,
     canonicalize_position_ids,
     prepare_native_cp_inputs,
-    validated_forward_kwargs,
     validate_native_feature_config,
+    validated_forward_kwargs,
 )
 
 

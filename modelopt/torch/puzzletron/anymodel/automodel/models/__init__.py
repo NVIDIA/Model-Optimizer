@@ -3,7 +3,7 @@
 
 """Native AutoModel descriptors. Imports register descriptors lazily."""
 
-from .llama import *
 from .gpt_oss import *
+from .llama import *
 from .nemotron_v3 import *
 from .qwen3_5 import *

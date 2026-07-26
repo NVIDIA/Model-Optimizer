@@ -182,7 +182,7 @@ def refresh_campaign_report(config: dict, running_stage: str | None = None) -> N
         from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
             generate_campaign_progress_report,
         )
-    except Exception as exc:  # noqa: BLE001 - report is best-effort
+    except Exception as exc:
         print(
             f"warning: skipping campaign progress report ({type(exc).__name__}: {exc})",
             flush=True,
@@ -194,7 +194,7 @@ def refresh_campaign_report(config: dict, running_stage: str | None = None) -> N
             model_name=_report_model_name(config),
             running_stage=running_stage,
         )
-    except Exception as exc:  # noqa: BLE001 - report is best-effort
+    except Exception as exc:
         print(
             f"warning: campaign progress report failed ({type(exc).__name__}: {exc})",
             flush=True,

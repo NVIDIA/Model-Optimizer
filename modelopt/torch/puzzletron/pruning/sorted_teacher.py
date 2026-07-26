@@ -40,7 +40,14 @@ from typing import Callable, Sequence
 
 import torch
 
-from ..block_config import AttentionConfig, BlockConfig, FFNConfig, MLAConfig, MambaConfig, MoEConfig
+from ..block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+    MLAConfig,
+    MoEConfig,
+)
 from .attention_ffn_surgery import (
     ffn_permutation,
     grouped_attention_permutations,

@@ -22,12 +22,8 @@ from pathlib import Path
 
 # Keep one implementation while exposing it outside ``modelopt.torch``. Importing
 # through this package bypasses ModelOpt's eager PyTorch initialization.
-_PUZZLETRON_SOURCE = (
-    Path(__file__).resolve().parents[1] / "modelopt" / "torch" / "puzzletron"
-)
-_SOURCE = (
-    _PUZZLETRON_SOURCE / "orchestration"
-)
+_PUZZLETRON_SOURCE = Path(__file__).resolve().parents[1] / "modelopt" / "torch" / "puzzletron"
+_SOURCE = _PUZZLETRON_SOURCE / "orchestration"
 __path__.append(str(_SOURCE))
 __path__.append(str(_PUZZLETRON_SOURCE))
 

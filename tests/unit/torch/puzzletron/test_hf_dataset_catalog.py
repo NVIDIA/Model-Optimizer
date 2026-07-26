@@ -84,6 +84,37 @@ def test_catalog_merges_dynamic_names_sizes_and_hosted_media():
     assert api.calls == [("nvidia/example", None, True)]
 
 
+def test_catalog_falls_back_to_hosted_or_parquet_bytes_when_original_size_is_absent():
+    api = _FakeApi(paths=("hosted/media/part-000.tar",))
+    catalog = discover_hf_subset_catalog(
+        "owner/example",
+        config_names_loader=lambda source, revision=None: ["hosted", "external"],
+        size_payload_loader=lambda source: {
+            "size": {
+                "configs": [
+                    {
+                        "config": "hosted",
+                        "num_rows": 10,
+                        "num_bytes_original_files": None,
+                        "num_bytes_parquet_files": 1024,
+                    },
+                    {
+                        "config": "external",
+                        "num_rows": 30,
+                        "num_bytes_original_files": None,
+                        "num_bytes_parquet_files": 2048,
+                    },
+                ]
+            }
+        },
+        api=api,
+    )
+
+    assert catalog.subsets[0].num_bytes_original_files == 1
+    assert catalog.subsets[1].num_bytes_original_files == 2048
+    assert all(item.selectable for item in catalog.subsets)
+
+
 def test_catalog_preserves_all_46_dynamic_configurations():
     names = [f"subset_{index:02d}" for index in range(46)]
 

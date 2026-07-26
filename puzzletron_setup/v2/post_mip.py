@@ -6,19 +6,20 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any
 
 from .resources import StageResources
 
 __all__ = [
+    "IMPLEMENTED_NODE_TYPES",
+    "RESERVED_NODE_TYPES",
     "FlowDraft",
     "FlowReview",
-    "IMPLEMENTED_NODE_TYPES",
     "NodeDraft",
     "PostMIPFlowEditor",
-    "RESERVED_NODE_TYPES",
     "recommended_flow",
 ]
 
@@ -44,8 +45,8 @@ class NodeDraft:
     failure_policy: str = "record_and_continue"
     config: Mapping[str, Any] = field(default_factory=dict)
     selector: Mapping[str, Any] = field(default_factory=dict)
-    prompt: Optional[str] = None
-    resources: Optional[StageResources] = None
+    prompt: str | None = None
+    resources: StageResources | None = None
 
     def __post_init__(self) -> None:
         if self.node_type in RESERVED_NODE_TYPES:
@@ -106,7 +107,7 @@ class FlowReview:
 class PostMIPFlowEditor:
     """CRUD, branching, and canonical DAG validation for post-MIP flows."""
 
-    def __init__(self, mip_runs: Optional[Mapping[str, Any]] = None) -> None:
+    def __init__(self, mip_runs: Mapping[str, Any] | None = None) -> None:
         self._flows: OrderedDict[str, FlowDraft] = OrderedDict()
         self._mip_runs = deepcopy(dict(mip_runs or {}))
 
@@ -157,7 +158,7 @@ class PostMIPFlowEditor:
     def delete_flow(self, flow_id: str) -> None:
         del self._flows[flow_id]
 
-    def add_node(self, flow_id: str, node: NodeDraft, *, position: Optional[int] = None) -> None:
+    def add_node(self, flow_id: str, node: NodeDraft, *, position: int | None = None) -> None:
         if any(node.node_id in flow.nodes for flow in self._flows.values()):
             raise ValueError(f"duplicate post-MIP node {node.node_id!r}")
         flow = self._flows[flow_id]
@@ -222,7 +223,7 @@ class PostMIPFlowEditor:
             (flow_id, flow.to_config()) for flow_id, flow in self._flows.items()
         )
 
-    def compile(self, mip_runs: Optional[Mapping[str, Any]] = None):
+    def compile(self, mip_runs: Mapping[str, Any] | None = None):
         # Keep the setup package usable without PyTorch until canonical validation.
         from modelopt.torch.puzzletron.post_mip.base import compile_post_mip_flows
 
@@ -234,7 +235,7 @@ class PostMIPFlowEditor:
     def review(
         self,
         flow_id: str,
-        mip_runs: Optional[Mapping[str, Any]] = None,
+        mip_runs: Mapping[str, Any] | None = None,
     ) -> FlowReview:
         compiled = [node for node in self.compile(mip_runs) if node.flow_id == flow_id]
         flow = self._flows[flow_id]
@@ -268,8 +269,12 @@ def recommended_flow(
     node_prefix: str = "",
 ) -> FlowDraft:
     """Build the eight-node default flow, intentionally without Initial Filter."""
-
     sequence_length = int(data.get("sequence_length", 4096))
+    raw_concurrency = serving.get("concurrency", [1])
+    if isinstance(raw_concurrency, (int, str)):
+        concurrency = [int(raw_concurrency)]
+    else:
+        concurrency = [int(item) for item in raw_concurrency]
     online_eval = f"{node_prefix}online_eval"
     best_lm = f"{node_prefix}best_lm"
     materialized = f"{node_prefix}materialized"
@@ -315,7 +320,7 @@ def recommended_flow(
                     config={
                         "input_tokens": int(serving.get("input_tokens", 4096)),
                         "output_tokens": int(serving.get("output_tokens", 1024)),
-                        "concurrency": [int(serving.get("concurrency", 1))],
+                        "concurrency": concurrency,
                         "request_count": int(serving.get("request_count", 32)),
                         "use_server_token_count": True,
                         "benchmark_timeout": 900,
@@ -335,9 +340,12 @@ def recommended_flow(
                     input_id=serving_id,
                     selector={
                         "mode": "top_k",
-                        "metric": f"{serving_id}.request_throughput",
+                        "metric": f"{serving_id}.output_token_throughput",
                         "direction": "maximize",
                         "top_k": 4,
+                        "best_selection_mode": str(
+                            serving.get("best_selection_mode", "individual_best")
+                        ),
                     },
                 ),
             ),

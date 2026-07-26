@@ -38,18 +38,19 @@ import time
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 
-import modelopt.torch.utils.distributed as dist
-import torch.distributed as torch_dist
 import torch
+import torch.distributed as torch_dist
 
+import modelopt.torch.utils.distributed as dist
+
+from ...replacement_library.replacement_utils import parse_layer_replacement
 from ...tools.logger import mprint
 from ...tools.validate_puzzle_with_multi_replacements import load_puzzle_solutions
-from ...replacement_library.replacement_utils import parse_layer_replacement
 from ...tools.validation_utils import write_results
 from .config import build_solution_recipe_config, solution_scoring_params
 from .launch import _free_scoring_memory
 from .module_trace import synchronized_module_trace
-from .patch import apply_patch, _precache_trust_remote_code_distributed
+from .patch import _precache_trust_remote_code_distributed, apply_patch
 from .solution_metrics import aggregate_solution_scores, retain_teacher_channels, score_batch
 from .teacher_cache import TeacherTargetCache
 

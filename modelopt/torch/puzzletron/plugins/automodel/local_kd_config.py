@@ -141,7 +141,11 @@ def build_local_kd_recipe_config(hydra_cfg) -> dict[str, Any]:
             trust_remote_code=bool(recipe[model_key]["trust_remote_code"]),
             model_key=model_key,
         )
-    _inject_canonical_data(recipe, hydra_cfg)
+    _inject_canonical_data(
+        recipe,
+        hydra_cfg,
+        split=str(hydra_cfg.bypass.data.get("train_dataset_name", "train")),
+    )
     distributed = recipe.setdefault("distributed", {})
     explicit_dp_size = distributed.get("dp_size")
     dp_size = _logical_dp_size(hydra_cfg, distributed)

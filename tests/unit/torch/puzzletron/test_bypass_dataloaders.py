@@ -163,6 +163,135 @@ def test_create_train_dataloader_streaming_shuffle_omits_keep_in_memory(
     assert isinstance(patched_train_dataloader["dataset"], _FakeTrainConstantLengthDataset)
 
 
+@pytest.mark.parametrize("layout", ["padded_varlen", "packed_varlen"])
+def test_prepare_validation_routes_non_fixed_text_to_automodel(
+    monkeypatch, layout
+):
+    sentinel = object()
+    calls = []
+    tokenizer = object()
+    monkeypatch.setattr(
+        dl,
+        "prepare_automodel_text_validation_dataloader",
+        lambda args, *, tokenizer, data_layout: (
+            calls.append((args, tokenizer, data_layout)),
+            sentinel,
+        )[1],
+    )
+
+    result = dl.prepare_validation_dataloader(
+        {"dataset_path": "/data", "block_size": 128},
+        tokenizer,
+        data_layout=layout,
+    )
+
+    assert result is sentinel
+    assert calls == [
+        (
+            {"dataset_path": "/data", "block_size": 128},
+            tokenizer,
+            layout,
+        )
+    ]
+
+
+def test_prepare_validation_keeps_fixed_text_on_legacy_loader(monkeypatch):
+    calls = []
+    sentinel = object()
+    monkeypatch.setattr(
+        dl,
+        "create_validation_dataloader",
+        lambda **kwargs: (calls.append(kwargs), sentinel)[1],
+    )
+
+    result = dl.prepare_validation_dataloader(
+        {"dataset_path": "/data", "block_size": 128},
+        object(),
+        data_layout="fixed",
+    )
+
+    assert result is sentinel
+    assert calls[0]["varlen"] is False
+
+
+def test_real_automodel_chat_collaters_preserve_padded_and_packed_masks(tmp_path):
+    from datasets import Dataset, DatasetDict
+    from transformers import AutoTokenizer
+
+    from modelopt.torch.puzzletron.dataset import DataLayout, batch_from_automodel
+
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "short question"},
+                {"role": "assistant", "content": "short answer"},
+            ]
+        },
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "a considerably longer question with several words",
+                },
+                {
+                    "role": "assistant",
+                    "content": "a considerably longer answer with several words",
+                },
+            ]
+        },
+    ]
+    dataset_path = tmp_path / "messages"
+    DatasetDict({"validation": Dataset.from_list(rows)}).save_to_disk(dataset_path)
+    tokenizer = AutoTokenizer.from_pretrained("tests/_test_utils/torch/tokenizer")
+    common = {
+        "dataset_path": str(dataset_path),
+        "val_dataset_name": "validation",
+        "eval_samples": 2,
+        "micro_batch_size": 2,
+        "block_size": 512,
+        "seed": 7,
+    }
+
+    padded_native = next(
+        iter(
+            dl.prepare_automodel_text_validation_dataloader(
+                common,
+                tokenizer=tokenizer,
+                data_layout="padded_varlen",
+            )
+        )
+    )
+    padded = batch_from_automodel(
+        padded_native,
+        sample_ids=("padded-0", "padded-1"),
+        source_metadata={"dataset": "fixture", "revision": "1"},
+        layout=DataLayout.PADDED_VARLEN,
+    )
+    assert not padded.hidden_mask.all()
+    assert not padded.ce_mask[~padded.hidden_mask].any()
+    assert padded.labels[~padded.hidden_mask].eq(-100).all()
+
+    packed_native = next(
+        iter(
+            dl.prepare_automodel_text_validation_dataloader(
+                {**common, "micro_batch_size": 1, "eval_samples": 1},
+                tokenizer=tokenizer,
+                data_layout="packed_varlen",
+            )
+        )
+    )
+    packed = batch_from_automodel(
+        packed_native,
+        sample_ids=("pack-0",),
+        source_metadata={"dataset": "fixture", "revision": "1"},
+        layout=DataLayout.PACKED_VARLEN,
+    )
+    assert packed.sequence.global_cu_seqlens is not None
+    assert packed.sequence.seq_ids is not None
+    assert not packed.hidden_mask.all()
+    assert packed.labels[~packed.hidden_mask].eq(-100).all()
+
+
 class _NoChatTemplateTokenizer:
     eos_token_id = 1
     bos_token_id = None

@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import hmac
 import logging
-from queue import Empty, Queue
 import socket
 import threading
 import time
 import traceback
-from typing import Protocol
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from queue import Empty, Queue
+from typing import Protocol
 
 from .campaign import Campaign
 from .schema import (

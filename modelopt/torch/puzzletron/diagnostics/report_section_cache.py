@@ -15,15 +15,15 @@
 
 """Disposable section snapshots for incremental Puzzletron campaign reports."""
 
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import tempfile
 import time
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 

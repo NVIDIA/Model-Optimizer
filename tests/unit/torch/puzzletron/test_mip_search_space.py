@@ -5,15 +5,8 @@ import json
 
 from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.block_config import (
-    AttentionConfig,
-    BlockConfig,
-    MoEConfig,
-)
-from modelopt.torch.puzzletron.mip.run_puzzle import (
-    PuzzleConstraints,
-    run_single_puzzle_config,
-)
+from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, MoEConfig
+from modelopt.torch.puzzletron.mip.run_puzzle import PuzzleConstraints, run_single_puzzle_config
 from modelopt.torch.puzzletron.mip.search_space import (
     filter_replacements_by_axes,
     rank_homogeneous_solutions,

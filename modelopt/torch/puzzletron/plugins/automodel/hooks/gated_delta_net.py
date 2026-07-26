@@ -16,7 +16,12 @@ import torch
 import torch.distributed as c10d
 
 from ....pruning.gated_delta_net import GDNShape
-from ..reduction import full_weight, gather_scored_axis, reduce_token_sum, to_local_with_feature_group
+from ..reduction import (
+    full_weight,
+    gather_scored_axis,
+    reduce_token_sum,
+    to_local_with_feature_group,
+)
 from .base import ScoringHook
 
 __all__ = ["GatedDeltaNetActivationScorer"]
@@ -142,6 +147,13 @@ class GatedDeltaNetActivationScorer(ScoringHook):
         # simultaneously for cross-TP off-diagonal terms — that gather stays.)
         local, feature_group = to_local_with_feature_group(value, feature_dim=-1)
         local = local.detach().float()
+        local = self._flatten_valid_tokens(
+            local,
+            trailing_dims=1,
+            stream="qkv",
+        )
+        if local.shape[0] == 0:
+            return None
         self._qkv_feature_sharded = feature_group is not None
 
         tp_size = c10d.get_world_size(feature_group) if feature_group is not None else 1
@@ -193,6 +205,13 @@ class GatedDeltaNetActivationScorer(ScoringHook):
         value = args[0]
         local, feature_group = to_local_with_feature_group(value, feature_dim=-1)
         value = gather_scored_axis(local, feature_group, dim=-1).detach().float()
+        value = self._flatten_valid_tokens(
+            value,
+            trailing_dims=1,
+            stream="out",
+        )
+        if value.shape[0] == 0:
+            return None
         expected = self.shape.num_value_heads * self.shape.value_head_dim
         if value.shape[-1] != expected:
             raise RuntimeError(

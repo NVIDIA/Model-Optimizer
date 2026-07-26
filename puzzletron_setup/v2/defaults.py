@@ -1,14 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Explicit defaults-file loading and value provenance for setup v2."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any
 
 import yaml
 
@@ -39,6 +55,16 @@ _SCHEMA = {
         "modality": None,
         "layout": None,
         "sequence_length": None,
+        "subsets": None,
+        "acquisition": {
+            "output": None,
+            "seed": None,
+            "train_samples": None,
+            "validation_samples": None,
+            "subsets": None,
+            "num_samples": None,
+            "max_shards_per_subset": None,
+        },
     },
     "infrastructure": {
         "gpus_per_node": None,
@@ -99,9 +125,8 @@ def _validate_mapping(value: Any, schema: Any, path: str) -> None:
         _validate_mapping(item, schema[key], child_path)
 
 
-def load_defaults(path: Optional[Path]) -> dict[str, Any]:
+def load_defaults(path: Path | None) -> dict[str, Any]:
     """Load an explicitly selected versioned defaults file."""
-
     if path is None:
         return {}
     resolved = Path(path).expanduser().resolve()
@@ -121,7 +146,7 @@ def load_defaults(path: Optional[Path]) -> dict[str, Any]:
     return deepcopy(dict(payload))
 
 
-def _lookup(mapping: Mapping[str, Any], dotted_path: str) -> Tuple[bool, Any]:
+def _lookup(mapping: Mapping[str, Any], dotted_path: str) -> tuple[bool, Any]:
     value: Any = mapping
     for key in dotted_path.split("."):
         if not isinstance(value, Mapping) or key not in value:
@@ -136,11 +161,12 @@ class DefaultsResolver:
     def __init__(
         self,
         *,
-        builtins: Optional[Mapping[str, Any]] = None,
-        model_derived: Optional[Mapping[str, Any]] = None,
-        file_defaults: Optional[Mapping[str, Any]] = None,
-        preserved: Optional[Mapping[str, Any]] = None,
+        builtins: Mapping[str, Any] | None = None,
+        model_derived: Mapping[str, Any] | None = None,
+        file_defaults: Mapping[str, Any] | None = None,
+        preserved: Mapping[str, Any] | None = None,
     ) -> None:
+        """Build the ordered builtin, model, file, and preserved default layers."""
         self._default_layers = (
             ("builtin", dict(builtins or {})),
             ("model", dict(model_derived or {})),
@@ -167,17 +193,14 @@ class DefaultsResolver:
 
     def resolve(self, path: str, fallback: Any = None) -> ResolvedDefault:
         """Return the suggested value, including preserved wizard answers."""
-
         return self._resolve_layers(self._layers, path, fallback)
 
     def resolve_default(self, path: str, fallback: Any = None) -> ResolvedDefault:
         """Return built-in, model-derived, or explicit-file defaults."""
-
         return self._resolve_layers(self._default_layers, path, fallback)
 
-    def file_default(self, path: str) -> Optional[ResolvedDefault]:
+    def file_default(self, path: str) -> ResolvedDefault | None:
         """Return an explicitly supplied file default, if present."""
-
         found, value = _lookup(self._file_defaults, path)
         if not found:
             return None

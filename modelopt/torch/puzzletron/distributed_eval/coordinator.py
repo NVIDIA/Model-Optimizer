@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import logging
 import random
-from typing import Any
 import uuid
+from datetime import datetime, timezone
+from typing import Any
 
 from .campaign import Campaign
 from .http_transport import AsyncHttpClient, HttpStatusError

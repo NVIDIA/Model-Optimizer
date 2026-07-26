@@ -9,13 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .schema import (
-    AttemptSpec,
-    CampaignPlan,
-    CommandSpec,
-    TaskLauncher,
-    TaskTopology,
-)
+from .schema import AttemptSpec, CampaignPlan, CommandSpec, TaskLauncher, TaskTopology
 
 __all__ = [
     "FinalReportResult",

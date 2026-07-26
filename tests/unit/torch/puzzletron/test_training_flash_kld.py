@@ -8,10 +8,10 @@ import torch.nn.functional as F
 
 from modelopt.torch.puzzletron.distillation.flash_kld import TrainingFlashKLD
 from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
-    _WeightedObjectiveMixin,
     _distillation_lm_head,
     _install_distillation_head_passthrough,
     _refresh_pp_hidden_output_meta,
+    _WeightedObjectiveMixin,
 )
 from modelopt.torch.puzzletron.distillation.loss import ChunkedCrossEntropy, KDLoss
 

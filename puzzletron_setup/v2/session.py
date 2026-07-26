@@ -6,15 +6,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
 from .state import PromptFrame, WizardState
 
 __all__ = ["BACK", "WizardSession"]
-
-Validator = Callable[[Any], Union[bool, str]]
-
 
 class WizardSession:
     """Bind prompt interactions to atomic answer and navigation state."""
@@ -22,17 +19,20 @@ class WizardSession:
     def __init__(
         self,
         state: WizardState,
-        backend: Optional[PromptBackend] = None,
+        backend: PromptBackend | None = None,
     ) -> None:
         self.state = state
         self.backend = backend or InteractiveBackend()
         self._section = "campaign"
-        self._collection: Optional[str] = None
-        self._item_id: Optional[str] = None
-        self._cursor: Optional[int] = None
+        self._collection: str | None = None
+        self._item_id: str | None = None
+        self._cursor: int | None = None
+        self._replay: list[tuple[PromptFrame, Any, int]] = []
+        self._replay_cursor = 0
+        self._back_target: PromptFrame | None = None
 
     @property
-    def current_frame(self) -> Optional[PromptFrame]:
+    def current_frame(self) -> PromptFrame | None:
         frames = self.state.frames
         return frames[-1] if frames else None
 
@@ -41,13 +41,17 @@ class WizardSession:
         self._collection = None
         self._item_id = None
         self._cursor = None
+        self._replay = [
+            record for record in self.state.answered_frames if record[0].section == section
+        ]
+        self._replay_cursor = 0
 
     def enter_collection(
         self,
         collection: str,
         *,
-        item_id: Optional[str],
-        cursor: Optional[int],
+        item_id: str | None,
+        cursor: int | None,
     ) -> None:
         self._collection = collection
         self._item_id = item_id
@@ -58,14 +62,20 @@ class WizardSession:
         self._item_id = None
         self._cursor = None
 
-    def collection_cursor(self, collection: str) -> Optional[int]:
+    def collection_cursor(self, collection: str) -> int | None:
         frame = self.current_frame
         if frame is not None and frame.collection == collection:
             return frame.cursor
         return None
 
-    def back(self) -> Optional[PromptFrame]:
+    def back(self) -> PromptFrame | None:
         return self.state.pop_frame()
+
+    def consume_back_target(self) -> PromptFrame | None:
+        """Return and clear the prompt that should be asked again after Back."""
+        target = self._back_target
+        self._back_target = None
+        return target
 
     def _frame(self, prompt_id: str) -> PromptFrame:
         return PromptFrame(
@@ -78,11 +88,23 @@ class WizardSession:
 
     def _ask(self, prompt_id: str, invoke: Callable[[], Any]) -> Any:
         frame = self._frame(prompt_id)
+        if self._replay_cursor < len(self._replay):
+            replay_frame, replay_value, frame_index = self._replay[self._replay_cursor]
+            if replay_frame == frame:
+                self._replay_cursor += 1
+                return replay_value
+            self.state.truncate_frames(frame_index)
+            self._replay = self._replay[: self._replay_cursor]
         self.state.push_frame(frame)
         value = invoke()
         if value is BACK:
             self.state.pop_frame()
+            target = self.current_frame
+            if target is not None:
+                self.state.pop_frame()
+            self._back_target = target
             return BACK
+        self.state.answer_frame(frame, value)
         return value
 
     @staticmethod
@@ -107,7 +129,7 @@ class WizardSession:
         message: str,
         *,
         default: str = "",
-        validate: Optional[Validator] = None,
+        validate: Callable[[Any], bool | str] | None = None,
     ) -> Any:
         while True:
             value = self._ask(prompt_id, lambda: self.backend.text(message, default))
@@ -117,6 +139,7 @@ class WizardSession:
             verdict = True if validate is None else validate(rendered)
             if verdict is True:
                 return rendered
+            self.state.pop_frame()
             print(f"  {verdict}")
 
     def integer(
@@ -126,9 +149,9 @@ class WizardSession:
         *,
         default: int,
         minimum: int = 0,
-        maximum: Optional[int] = None,
+        maximum: int | None = None,
     ) -> Any:
-        def validate(value: str) -> Union[bool, str]:
+        def validate(value: str) -> bool | str:
             try:
                 parsed = int(value)
             except ValueError:
@@ -185,12 +208,25 @@ class WizardSession:
         choices: Sequence[Any],
         *,
         defaults: Sequence[Any] = (),
-        validate: Optional[Validator] = None,
+        validate: Callable[[Any], bool | str] | None = None,
     ) -> Any:
         rendered_choices = self._choices(choices)
+
+        def disabled_verdict(values: Sequence[Any]) -> bool | str:
+            for value in values:
+                choice = next(
+                    (item for item in rendered_choices if item.value == value),
+                    None,
+                )
+                if choice is not None and choice.disabled:
+                    return f"{choice.title} is unavailable: {choice.disabled}."
+            return True
+
         if len(rendered_choices) == 1:
             selected = [rendered_choices[0].value]
-            verdict = True if validate is None else validate(selected)
+            verdict = disabled_verdict(selected)
+            if verdict is True and validate is not None:
+                verdict = validate(selected)
             if verdict is True:
                 print(
                     f"  {message} {rendered_choices[0].title} "
@@ -209,7 +245,10 @@ class WizardSession:
             if value is BACK:
                 return BACK
             rendered = list(value)
-            verdict = True if validate is None else validate(rendered)
+            verdict = disabled_verdict(rendered)
+            if verdict is True and validate is not None:
+                verdict = validate(rendered)
             if verdict is True:
                 return rendered
+            self.state.pop_frame()
             print(f"  {verdict}")

@@ -1,17 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Ordered, locally customizable Puzzletron setup-v2 wizard."""
 
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any
 
 import yaml
 
+from puzzletron_orchestrator.mesh import vllm_topology_to_mesh
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import (
     infer_dataset_modality,
@@ -19,15 +36,18 @@ from puzzletron_setup.inspection import (
     normalize_dataset_source,
     normalize_model_source,
 )
+from puzzletron_setup.profiles import CandidateCounts, count_candidate_options
 
 from .bundle import build_bundles_v2
 from .defaults import DefaultsResolver, load_defaults
-from .post_mip import (
-    FlowDraft,
-    NodeDraft,
-    PostMIPFlowEditor,
-    recommended_flow,
+from .hf_datasets import (
+    HfSubsetCatalog,
+    discover_hf_subset_catalog,
+    format_subset_choice,
+    proportional_subset_weights,
 )
+from .parallel_validation import validate_automodel_parallelism, validate_vllm_parallelism
+from .post_mip import FlowDraft, NodeDraft, PostMIPFlowEditor, recommended_flow
 from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
 from .resources import (
     ParallelProfile,
@@ -35,7 +55,6 @@ from .resources import (
     StageResources,
     allocation_summary,
     resolve_batch,
-    validate_parallel_profile,
 )
 from .session import WizardSession
 from .state import WizardState
@@ -72,6 +91,13 @@ BUILTINS = {
         "depth_remove": 4,
         "replacement_granularity": "subblock",
         "width_importance_samples": 32768,
+        "sort_sanity": False,
+        "sort_sanity_samples": 128,
+        "width_sanity": False,
+        "width_sanity_samples": 128,
+        "width_sanity_layer_count": 3,
+        "width_sanity_targets_per_axis": 2,
+        "slicing_sanity": False,
         "replacement_samples": 128,
         "bypass": {
             "enabled": True,
@@ -79,6 +105,7 @@ BUILTINS = {
             "samples": 4096,
             "sequence_length": 4096,
             "batch_size": 8,
+            "grad_accumulation_steps": 1,
         },
     },
     "vllm": {
@@ -88,6 +115,15 @@ BUILTINS = {
         "generation_seq_len": 1024,
         "batch_size": 1,
         "max_num_seqs": 1,
+        "topology": {
+            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": 1,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "enable_expert_parallel": False,
+            "distributed_executor_backend": "mp",
+        },
     },
     "mip": {
         "goal_metric": "params",
@@ -107,6 +143,7 @@ STATIC_MODEL_BATCH_PATHS = {
     "depth_importance": "depth_importance.micro_batch_size",
     "width_importance": "pruning.micro_batch_size",
     "sort_sanity": "sort_sanity.micro_batch_size",
+    "width_sanity": "width_sanity.micro_batch_size",
     "bypass": "bypass.training.micro_batch_size",
     "replacement_scoring": "replacement_scoring.micro_batch_size",
 }
@@ -114,6 +151,7 @@ CANONICAL_STAGE_STRATEGIES = {
     "depth_importance": "persistent_pool",
     "width_importance": "single",
     "sort_sanity": "single",
+    "width_sanity": "single",
     "bypass": "single",
     "replacement_scoring": "persistent_pool",
 }
@@ -122,6 +160,11 @@ _CUSTOM_MODEL_SOURCE = "__custom_model_source__"
 _DEFAULT_MODEL_SOURCE = "__default_model_source__"
 _CUSTOM_DATA_SOURCE = "__custom_data_source__"
 _DEFAULT_DATA_SOURCE = "__default_data_source__"
+_PUZZLE_KD_DATA_SOURCE = "nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2"
+_NEMOTRON_VLM_DATA_SOURCE = "nvidia/Nemotron-VLM-Dataset-v2"
+_PUZZLE_KD_ADAPTER = "puzzle_kd_v2"
+_NEMOTRON_VLM_ADAPTER = "nemotron_vlm_v2"
+_NEMOTRON_VLM_DEFAULT_SUBSETS = ("sparsetables", "plotqa_cot", "wiki_en")
 
 SUPPORTED_MODEL_GROUPS = (
     (
@@ -186,10 +229,126 @@ def _model_choices_for_family(family: str) -> list[PromptChoice]:
 def _data_source_choices(resolver: DefaultsResolver) -> list[PromptChoice]:
     choices = []
     explicit = resolver.file_default("data.source")
+    explicit_source = None
     if explicit is not None and explicit.value:
+        explicit_source = normalize_dataset_source(str(explicit.value))
         choices.append(PromptChoice(f"Default — {explicit.value}", _DEFAULT_DATA_SOURCE))
-    choices.append(PromptChoice("Custom", _CUSTOM_DATA_SOURCE))
+    first_class = (
+        ("NVIDIA Puzzle-KD v2 (text)", _PUZZLE_KD_DATA_SOURCE),
+        ("NVIDIA Nemotron-VLM v2 (image-text)", _NEMOTRON_VLM_DATA_SOURCE),
+    )
+    choices.extend(
+        PromptChoice(title, source) for title, source in first_class if source != explicit_source
+    )
+    choices.append(PromptChoice("Custom local path or Hugging Face dataset", _CUSTOM_DATA_SOURCE))
     return choices
+
+
+def _first_class_data_adapter(source: str) -> str | None:
+    normalized = normalize_dataset_source(source)
+    if normalized == _PUZZLE_KD_DATA_SOURCE:
+        return _PUZZLE_KD_ADAPTER
+    if normalized == _NEMOTRON_VLM_DATA_SOURCE:
+        return _NEMOTRON_VLM_ADAPTER
+    return None
+
+
+def _cached_hf_subset_catalog(
+    state: WizardState,
+    source: str,
+) -> HfSubsetCatalog | None:
+    cache = state.collection("hf_dataset_catalogs")
+    if not isinstance(cache, Mapping):
+        return None
+    selection = state.collection("data_subset_selection")
+    revision = (
+        str(selection.get("revision", ""))
+        if isinstance(selection, Mapping) and selection.get("source") == source
+        else ""
+    )
+    if revision:
+        payload = cache.get(f"{source}@{revision}")
+        if isinstance(payload, Mapping):
+            return HfSubsetCatalog.from_dict(payload)
+    for payload in reversed(tuple(cache.values())):
+        if isinstance(payload, Mapping) and payload.get("source") == source:
+            return HfSubsetCatalog.from_dict(payload)
+    return None
+
+
+def _select_hf_subsets(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+    source: str,
+    *,
+    require_hosted_media: bool,
+    catalog_loader: Callable[..., HfSubsetCatalog],
+) -> Any:
+    catalog = _cached_hf_subset_catalog(session.state, source)
+    if catalog is None:
+        print(f"  Discovering Hugging Face subsets for {source}...")
+        catalog = catalog_loader(
+            source,
+            require_hosted_media=require_hosted_media,
+        )
+        cache = session.state.collection("hf_dataset_catalogs")
+        updated_cache = dict(cache) if isinstance(cache, Mapping) else {}
+        updated_cache[f"{catalog.source}@{catalog.revision}"] = catalog.to_dict()
+        session.state.set_collection("hf_dataset_catalogs", updated_cache)
+
+    selectable = [item for item in catalog.subsets if item.selectable]
+    if not selectable:
+        raise SetupError(
+            f"Hugging Face dataset {source} has no selectable subsets with "
+            "known positive row counts and sizes."
+        )
+    configured_defaults = resolver.resolve(
+        "data.subsets",
+        resolver.resolve("data.acquisition.subsets", None).value,
+    ).value
+    if isinstance(configured_defaults, str):
+        configured_defaults = [
+            item.strip() for item in configured_defaults.split(",") if item.strip()
+        ]
+    if configured_defaults:
+        preferred = [str(item) for item in configured_defaults]
+    elif source == _NEMOTRON_VLM_DATA_SOURCE:
+        preferred = list(_NEMOTRON_VLM_DEFAULT_SUBSETS)
+    elif catalog.default_subset:
+        preferred = [catalog.default_subset]
+    else:
+        preferred = [selectable[0].name]
+    selectable_names = {item.name for item in selectable}
+    defaults = [name for name in preferred if name in selectable_names]
+    if not defaults:
+        defaults = [selectable[0].name]
+
+    def validate(selected_names: list[str]) -> bool | str:
+        try:
+            proportional_subset_weights(catalog, selected_names)
+        except SetupError as error:
+            return str(error)
+        return True
+
+    selected = session.checkbox(
+        "data.subsets",
+        "Dataset subsets:",
+        [
+            PromptChoice(
+                format_subset_choice(item),
+                item.name,
+                disabled=item.disabled_reason,
+            )
+            for item in catalog.subsets
+        ],
+        defaults=defaults,
+        validate=validate,
+    )
+    if selected is BACK:
+        return BACK
+    selected_names = [str(name) for name in selected]
+    weights = proportional_subset_weights(catalog, selected_names)
+    return catalog, selected_names, weights
 
 
 def _nested_records(state: WizardState) -> dict[str, Any]:
@@ -203,7 +362,7 @@ def _nested_records(state: WizardState) -> dict[str, Any]:
     return nested
 
 
-def _resolver(state: WizardState, defaults_path: Optional[Path]) -> DefaultsResolver:
+def _resolver(state: WizardState, defaults_path: Path | None) -> DefaultsResolver:
     return DefaultsResolver(
         builtins=BUILTINS,
         model_derived={},
@@ -272,6 +431,33 @@ def _print_default_decisions(defaults: Mapping[str, Any]) -> None:
         print(f"    {line}")
 
 
+def _vllm_granularity_choices(counts: CandidateCounts) -> list[tuple[str, str]]:
+    width_count = counts.effective_vllm_width_count
+    if width_count == 1:
+        return [
+            (
+                f"Sublayer — {counts.vllm_subblock_total} unique configurations",
+                "subblock",
+            ),
+            (
+                f"Whole block — {counts.vllm_block_total} unique configurations",
+                "block",
+            ),
+        ]
+    return [
+        (
+            f"Sublayer — {counts.vllm_subblock} configurations/width, "
+            f"{counts.vllm_subblock_total} total across {width_count} widths",
+            "subblock",
+        ),
+        (
+            f"Whole block — {counts.vllm_block} configurations/width, "
+            f"{counts.vllm_block_total} total across {width_count} widths",
+            "block",
+        ),
+    ]
+
+
 def _text_field(
     session: WizardSession,
     resolver: DefaultsResolver,
@@ -294,7 +480,7 @@ def _integer_field(
     fallback: int,
     *,
     minimum: int = 1,
-    maximum: Optional[int] = None,
+    maximum: int | None = None,
 ) -> Any:
     resolved = _resolved(session.state, resolver, path, fallback)
     value = session.integer(
@@ -370,7 +556,13 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
     return True
 
 
-def data_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+def data_section(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+    context: dict,
+    *,
+    catalog_loader: Callable[..., HfSubsetCatalog] = discover_hf_subset_catalog,
+) -> bool:
     session.begin("data")
     explicit = resolver.file_default("data.source")
     if explicit is not None and explicit.value:
@@ -381,9 +573,7 @@ def data_section(session: WizardSession, resolver: DefaultsResolver, context: di
         "Dataset:",
         choices,
         default=(
-            _DEFAULT_DATA_SOURCE
-            if explicit is not None and explicit.value
-            else _CUSTOM_DATA_SOURCE
+            _DEFAULT_DATA_SOURCE if explicit is not None and explicit.value else _CUSTOM_DATA_SOURCE
         ),
     )
     if mode is BACK:
@@ -399,42 +589,195 @@ def data_section(session: WizardSession, resolver: DefaultsResolver, context: di
             return False
         source = normalize_dataset_source(str(source))
         source_kind = "user"
-    else:
+    elif mode == _DEFAULT_DATA_SOURCE:
         if explicit is None or not explicit.value:
             raise SetupError("The selected dataset default is no longer available.")
         source = normalize_dataset_source(str(explicit.value))
         source_kind = explicit.source
+    else:
+        source = normalize_dataset_source(str(mode))
+        source_kind = "builtin"
 
-    finding = infer_dataset_modality(source)
+    adapter = _first_class_data_adapter(source)
+    fixed_modality = (
+        "text"
+        if adapter == _PUZZLE_KD_ADAPTER
+        else "multimodal"
+        if adapter == _NEMOTRON_VLM_ADAPTER
+        else None
+    )
+    finding = infer_dataset_modality(source) if fixed_modality is None else None
+    finding_modality = finding.modality if finding is not None else fixed_modality
+    finding_evidence = finding.evidence if finding is not None else f"{adapter} first-class source"
     modality_choices = [("Text", "text")]
     if context["model"].inventory.multimodal:
         modality_choices.append(("Multimodal", "multimodal"))
     suggested_modality = str(
         resolver.resolve(
             "data.modality",
-            finding.modality if finding.modality != "unknown" else "text",
+            finding_modality if finding_modality != "unknown" else "text",
         ).value
     )
     valid_modalities = {value for _, value in modality_choices}
     if suggested_modality not in valid_modalities:
         suggested_modality = "text"
-    modality = session.select(
-        "data.modality",
-        f"Data modality ({finding.evidence}):",
-        modality_choices,
-        default=suggested_modality,
-    )
-    if modality is BACK:
-        return False
+    if fixed_modality == "multimodal" and not context["model"].inventory.multimodal:
+        raise SetupError(
+            "NVIDIA Nemotron-VLM v2 requires a multimodal model. "
+            "Choose a multimodal checkpoint or a text dataset."
+        )
+    if fixed_modality is None:
+        modality = session.select(
+            "data.modality",
+            f"Data modality ({finding_evidence}):",
+            modality_choices,
+            default=suggested_modality,
+        )
+        if modality is BACK:
+            return False
+    else:
+        modality = fixed_modality
+        print(f"  Data modality: {modality} ({finding_evidence})")
+
+    acquisition: dict[str, Any] | None = None
+    subset_selection: dict[str, Any] | None = None
+    selected_subsets: list[str] | None = None
+    runtime_source = source
+    if adapter is not None:
+        default_root = (
+            session.state.campaign_dir.parent
+            / f"{session.state.campaign_dir.name}_datasets"
+            / adapter
+        )
+        output = _text_field(
+            session,
+            resolver,
+            "data.acquisition.output",
+            "Local materialization directory:",
+            str(default_root),
+        )
+        if output is BACK:
+            return False
+        runtime_source = str(Path(str(output)).expanduser().resolve())
+        seed_default = 408 if adapter == _PUZZLE_KD_ADAPTER else 42
+        seed = _integer_field(
+            session,
+            resolver,
+            "data.acquisition.seed",
+            "Deterministic dataset selection seed:",
+            seed_default,
+            minimum=0,
+        )
+        if seed is BACK:
+            return False
+        acquisition = {
+            "adapter": adapter,
+            "source": source,
+            "output": runtime_source,
+            "seed": int(seed),
+        }
+
+    if not Path(source).expanduser().exists():
+        selection = _select_hf_subsets(
+            session,
+            resolver,
+            source,
+            require_hosted_media=adapter == _NEMOTRON_VLM_ADAPTER,
+            catalog_loader=catalog_loader,
+        )
+        if selection is BACK:
+            return False
+        catalog, selected_subsets, weights = selection
+        by_name = {item.name: item for item in catalog.subsets}
+        subset_selection = {
+            "source": catalog.source,
+            "revision": catalog.revision,
+            "subsets": [
+                {
+                    "name": name,
+                    "num_rows": by_name[name].num_rows,
+                    "num_bytes_original_files": by_name[
+                        name
+                    ].num_bytes_original_files,
+                    "weight": weights[name],
+                }
+                for name in selected_subsets
+            ],
+        }
+
+    if adapter is not None:
+        if adapter == _PUZZLE_KD_ADAPTER:
+            train_samples = _integer_field(
+                session,
+                resolver,
+                "data.acquisition.train_samples",
+                "Puzzle-KD training rows to materialize:",
+                8192,
+            )
+            if train_samples is BACK:
+                return False
+            validation_samples = _integer_field(
+                session,
+                resolver,
+                "data.acquisition.validation_samples",
+                "Puzzle-KD validation rows to materialize:",
+                1024,
+            )
+            if validation_samples is BACK:
+                return False
+            acquisition.update(
+                train_samples=int(train_samples),
+                validation_samples=int(validation_samples),
+            )
+        else:
+            if not selected_subsets:
+                raise SetupError(
+                    "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
+                )
+            num_samples = _integer_field(
+                session,
+                resolver,
+                "data.acquisition.num_samples",
+                "Total valid image-text rows to materialize:",
+                512,
+            )
+            if num_samples is BACK:
+                return False
+            max_shards = _integer_field(
+                session,
+                resolver,
+                "data.acquisition.max_shards_per_subset",
+                "Maximum media tar shards to download per subset:",
+                1,
+            )
+            if max_shards is BACK:
+                return False
+            acquisition.update(
+                subsets=selected_subsets,
+                subset_rows={
+                    record["name"]: record["num_rows"]
+                    for record in subset_selection["subsets"]
+                },
+                subset_weights={
+                    record["name"]: record["weight"]
+                    for record in subset_selection["subsets"]
+                },
+                revision=subset_selection["revision"],
+                num_samples=int(num_samples),
+                max_shards_per_subset=int(max_shards),
+            )
+    default_layout = str(resolver.resolve("data.layout", "fixed").value)
+    if default_layout == "padded":
+        default_layout = "padded_varlen"
     layout = session.select(
         "data.layout",
         "Dataset layout:",
         [
             ("Fixed-length", "fixed"),
             ("Packed variable-length", "packed_varlen"),
-            ("Padded", "padded"),
+            ("Padded variable-length", "padded_varlen"),
         ],
-        default=str(resolver.resolve("data.layout", "fixed").value),
+        default=default_layout,
     )
     if layout is BACK:
         return False
@@ -447,7 +790,11 @@ def data_section(session: WizardSession, resolver: DefaultsResolver, context: di
     )
     if sequence is BACK:
         return False
-    session.state.set_field("data.source", source, source=source_kind)
+    session.state.set_field("data.source", runtime_source, source=source_kind)
+    session.state.set_field("data.selected_source", source, source=source_kind)
+    session.state.set_field("data.adapter", adapter or "custom", source=source_kind)
+    session.state.set_collection("data_acquisition", acquisition or {})
+    session.state.set_collection("data_subset_selection", subset_selection or {})
     session.state.set_field("data.modality", modality, source="user")
     session.state.set_field("data.layout", layout, source="user")
     session.state.set_field(
@@ -478,9 +825,7 @@ def infrastructure_section(
         ("infrastructure.gpus_per_node", 8),
     )
     preview = {
-        path.removeprefix("infrastructure."): resolver.resolve_default(
-            path, fallback
-        ).value
+        path.removeprefix("infrastructure."): resolver.resolve_default(path, fallback).value
         for path, fallback in paths
     }
     preview["execution_contract.prerun_commands"] = resolver.resolve_default(
@@ -500,17 +845,13 @@ def infrastructure_section(
     if action == "defaults":
         for path, fallback in paths:
             _record_default(session.state, resolver, path, fallback)
-        commands = resolver.resolve_default(
-            "infrastructure.execution_contract.prerun_commands", []
-        )
+        commands = resolver.resolve_default("infrastructure.execution_contract.prerun_commands", [])
         session.state.set_field(
             "infrastructure.execution_contract.prerun_commands",
             list(commands.value or ()),
             source=commands.source,
         )
-        postrun = resolver.resolve_default(
-            "infrastructure.execution_contract.postrun_commands", []
-        )
+        postrun = resolver.resolve_default("infrastructure.execution_contract.postrun_commands", [])
         session.state.set_field(
             "infrastructure.execution_contract.postrun_commands",
             list(postrun.value or ()),
@@ -555,9 +896,7 @@ def infrastructure_section(
     )
     if gpus is BACK:
         return False
-    prerun_default = resolver.resolve(
-        "infrastructure.execution_contract.prerun_commands", []
-    ).value
+    prerun_default = resolver.resolve("infrastructure.execution_contract.prerun_commands", []).value
     prerun = session.text(
         "infrastructure.execution_contract.prerun_commands",
         "Pre-run commands separated by ';;':",
@@ -586,16 +925,10 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         resolver.resolve_default("pruning.depth_granularity", "subblock").value
     )
     default_count = (
-        inventory.num_sublayers
-        if default_granularity == "subblock"
-        else inventory.num_layers
+        inventory.num_sublayers if default_granularity == "subblock" else inventory.num_layers
     )
     default_remove = min(
-        int(
-            resolver.resolve_default(
-                "pruning.depth_remove", min(4, default_count - 1)
-            ).value
-        ),
+        int(resolver.resolve_default("pruning.depth_remove", min(4, default_count - 1)).value),
         default_count - 1,
     )
     default_axes = {
@@ -619,27 +952,22 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
             "replacement_scoring_samples": resolver.resolve_default(
                 "pruning.replacement_samples", 128
             ).value,
-            "sort_sanity": resolver.resolve_default(
-                "pruning.sort_sanity", False
-            ).value,
+            "sort_sanity": resolver.resolve_default("pruning.sort_sanity", False).value,
+            "width_sanity": resolver.resolve_default("pruning.width_sanity", False).value,
+            "slicing_sanity": resolver.resolve_default("pruning.slicing_sanity", False).value,
             "replacement_granularity": resolver.resolve_default(
                 "pruning.replacement_granularity", default_granularity
             ).value,
             "bypass": {
-                "enabled": resolver.resolve_default(
-                    "pruning.bypass.enabled", True
-                ).value,
+                "enabled": resolver.resolve_default("pruning.bypass.enabled", True).value,
                 "granularity": resolver.resolve_default(
                     "pruning.bypass.granularity", "subblock"
                 ).value,
-                "samples": resolver.resolve_default(
-                    "pruning.bypass.samples", 4096
-                ).value,
-                "sequence_length": session.state.get_field(
-                    "data.sequence_length", 4096
-                ),
-                "batch_size": resolver.resolve_default(
-                    "pruning.bypass.batch_size", 8
+                "samples": resolver.resolve_default("pruning.bypass.samples", 4096).value,
+                "sequence_length": session.state.get_field("data.sequence_length", 4096),
+                "batch_size": resolver.resolve_default("pruning.bypass.batch_size", 8).value,
+                "gradient_accumulation_steps": resolver.resolve_default(
+                    "pruning.bypass.grad_accumulation_steps", 1
                 ).value,
             },
         },
@@ -670,10 +998,12 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         ("granularity", defaults["bypass"]["granularity"]),
         ("samples", defaults["bypass"]["samples"]),
         ("batch_size", defaults["bypass"]["batch_size"]),
+        (
+            "grad_accumulation_steps",
+            defaults["bypass"]["grad_accumulation_steps"],
+        ),
     ):
-        defaults["bypass"][key] = resolver.resolve_default(
-            f"pruning.bypass.{key}", fallback
-        ).value
+        defaults["bypass"][key] = resolver.resolve_default(f"pruning.bypass.{key}", fallback).value
     if action == "customize":
         granularity = session.select(
             "pruning.depth_granularity",
@@ -683,9 +1013,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         )
         if granularity is BACK:
             return False
-        count = (
-            inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
-        )
+        count = inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
         remove = session.integer(
             "pruning.depth_remove",
             (
@@ -701,9 +1029,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
             return False
     else:
         granularity = default_granularity
-        count = (
-            inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
-        )
+        count = inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
         remove = default_remove
     axes = {}
     for axis in inventory.axes:
@@ -737,13 +1063,11 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
             "depth_granularity": granularity,
             "depth_remove": int(remove),
             "axes": axes,
-            "sort_sanity": bool(
-                resolver.resolve_default("pruning.sort_sanity", False).value
-            ),
+            "sort_sanity": bool(resolver.resolve_default("pruning.sort_sanity", False).value),
+            "width_sanity": bool(resolver.resolve_default("pruning.width_sanity", False).value),
+            "slicing_sanity": bool(resolver.resolve_default("pruning.slicing_sanity", False).value),
             "replacement_granularity": str(
-                resolver.resolve_default(
-                    "pruning.replacement_granularity", granularity
-                ).value
+                resolver.resolve_default("pruning.replacement_granularity", granularity).value
             ),
         }
     )
@@ -782,81 +1106,138 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
     return True
 
 
+def _profile_summary(profile: ParallelProfile) -> str:
+    return (
+        f"TP={profile.tp} CP={profile.cp} PP={profile.pp} "
+        f"DP-shard={profile.dp_shard} DP-replicate={profile.dp_replicate} "
+        f"EP={profile.ep} — {profile.gpu_count} GPUs per task"
+    )
+
+
+def _profile_compatibility_issues(
+    session: WizardSession,
+    profile: ParallelProfile,
+    stage_id: str,
+    model: Any,
+    *,
+    node_type: str | None = None,
+):
+    return validate_automodel_parallelism(
+        profile,
+        model.inventory,
+        _mapping_copy(session.state.collection("pruning")),
+        stage_id=stage_id,
+        node_type=node_type,
+        sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
+    )
+
+
+def _print_parallel_issues(issues) -> None:
+    for issue in issues:
+        print(f"  {issue.path}: {issue.message}")
+    print("  Choose a different parallel setting.")
+
+
 def _profile_prompt(
     session: WizardSession,
     registry: ResourceProfileRegistry,
     stage_id: str,
     model: Any,
+    *,
+    node_type: str | None = None,
 ) -> Any:
-    names = registry.names()
-    if names:
-        choices = [
-            (
-                f"Reuse {name} — TP={registry.get(name).tp} CP={registry.get(name).cp} "
-                f"PP={registry.get(name).pp} DP-shard={registry.get(name).dp_shard} "
-                f"DP-replicate={registry.get(name).dp_replicate} EP={registry.get(name).ep}",
-                f"reuse:{name}",
-            )
-            for name in names
-        ]
-        choices.extend(
-            [
-                ("Copy and modify an existing configuration", "copy"),
-                ("Create a new configuration", "new"),
+    while True:
+        names = registry.names()
+        if names:
+            choices = [
+                (
+                    f"Reuse {name} — {_profile_summary(registry.get(name))}",
+                    f"reuse:{name}",
+                )
+                for name in names
             ]
-        )
-        action = session.select(
-            f"stages.{stage_id}.profile_action",
-            f"Parallel setting for {stage_id}:",
-            choices,
-            default=f"reuse:{names[0]}",
-        )
-        if action is BACK:
-            return BACK
-        if str(action).startswith("reuse:"):
-            return registry.reuse(str(action).split(":", 1)[1], consumer=stage_id)
-        base = registry.get(names[0]) if action == "copy" else ParallelProfile(stage_id)
-    else:
+            choices.append(("Create a new configuration", "new"))
+            action = session.select(
+                f"stages.{stage_id}.profile_action",
+                f"Parallel setting for {stage_id}:",
+                choices,
+                default=f"reuse:{names[0]}",
+            )
+            if action is BACK:
+                return BACK
+            if str(action).startswith("reuse:"):
+                name = str(action).split(":", 1)[1]
+                profile = registry.get(name)
+                issues = _profile_compatibility_issues(
+                    session,
+                    profile,
+                    stage_id,
+                    model,
+                    node_type=node_type,
+                )
+                if issues:
+                    _print_parallel_issues(issues)
+                    continue
+                return registry.reuse(name, consumer=stage_id)
+
         base = ParallelProfile(stage_id)
-    name = session.text(
-        f"stages.{stage_id}.profile_name",
-        "Parallel configuration name:",
-        default=stage_id,
-    )
-    if name is BACK:
-        return BACK
-    values = {}
-    for field_name, label, default in (
-        ("tp", "Tensor parallel (TP):", base.tp),
-        ("cp", "Context parallel (CP):", base.cp),
-        ("pp", "Pipeline parallel (PP):", base.pp),
-        ("dp_shard", "FSDP shard degree:", base.dp_shard),
-        ("dp_replicate", "Data-parallel replicas:", base.dp_replicate),
-        ("ep", "Expert parallel (EP):", base.ep if model.inventory.moe else 1),
-    ):
-        if field_name == "ep" and not model.inventory.moe:
-            values[field_name] = 1
-            continue
-        value = session.integer(
-            f"stages.{stage_id}.parallel.{field_name}",
-            label,
-            default=int(default),
-            minimum=1,
+        name = session.text(
+            f"stages.{stage_id}.profile_name",
+            "Parallel configuration name:",
+            default=stage_id,
         )
-        if value is BACK:
+        if name is BACK:
             return BACK
-        values[field_name] = int(value)
-    sequence_parallel = session.confirm(
-        f"stages.{stage_id}.parallel.sequence_parallel",
-        "Enable sequence parallelism?",
-        default=base.sequence_parallel,
-    )
-    if sequence_parallel is BACK:
-        return BACK
-    profile = ParallelProfile(
-        name=str(name), sequence_parallel=bool(sequence_parallel), **values
-    )
-    validate_parallel_profile(profile, model.inventory)
+        values = {}
+        for field_name, label, default in (
+            ("tp", "Tensor parallel (TP):", base.tp),
+            ("cp", "Context parallel (CP):", base.cp),
+            ("pp", "Pipeline parallel (PP):", base.pp),
+            ("dp_shard", "FSDP shard degree:", base.dp_shard),
+            ("dp_replicate", "Data-parallel replicas:", base.dp_replicate),
+            ("ep", "Expert parallel (EP):", base.ep if model.inventory.moe else 1),
+        ):
+            if field_name == "ep" and not model.inventory.moe:
+                values[field_name] = 1
+                continue
+            value = session.integer(
+                f"stages.{stage_id}.parallel.{field_name}",
+                label,
+                default=int(default),
+                minimum=1,
+            )
+            if value is BACK:
+                return BACK
+            values[field_name] = int(value)
+        sequence_parallel = session.confirm(
+            f"stages.{stage_id}.parallel.sequence_parallel",
+            "Enable sequence parallelism?",
+            default=base.sequence_parallel,
+        )
+        if sequence_parallel is BACK:
+            return BACK
+        profile = ParallelProfile(
+            name=str(name), sequence_parallel=bool(sequence_parallel), **values
+        )
+        issues = _profile_compatibility_issues(
+            session,
+            profile,
+            stage_id,
+            model,
+            node_type=node_type,
+        )
+        if issues:
+            _print_parallel_issues(issues)
+            continue
+        confirmed = session.confirm(
+            f"stages.{stage_id}.parallel.confirm",
+            (f"Are you sure you want to use {profile.name} — {_profile_summary(profile)}?"),
+            default=True,
+        )
+        if confirmed is BACK:
+            return BACK
+        if confirmed:
+            break
     if str(name) in registry.names():
         registry.update(profile)
         registry.reuse(str(name), consumer=stage_id)
@@ -899,15 +1280,11 @@ def _stage_resource_defaults(
     resolver: DefaultsResolver,
     stage_id: str,
     *,
-    strategy: Optional[str] = None,
+    strategy: str | None = None,
     batch: int,
 ) -> dict[str, Any]:
     registry = _resource_registry(session, resolver)
-    profile = (
-        registry.get(registry.names()[0])
-        if registry.names()
-        else ParallelProfile(stage_id)
-    )
+    profile = registry.get(registry.names()[0]) if registry.names() else ParallelProfile(stage_id)
     strategy = strategy or CANONICAL_STAGE_STRATEGIES[stage_id]
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
     instances = (
@@ -920,12 +1297,9 @@ def _stage_resource_defaults(
             ).value
         )
     )
-    requested_batch = int(
-        resolver.resolve_default(f"stages.{stage_id}.batch", batch).value
-    )
+    requested_batch = int(resolver.resolve_default(f"stages.{stage_id}.batch", batch).value)
     resolution = resolve_batch(requested_batch, profile)
     return {
-        "strategy": strategy,
         "instances": instances,
         "parallel_profile": profile.name,
         "parallel": {
@@ -1000,7 +1374,12 @@ def _configure_stage_resource(
             if registry.names()
             else registry.create(ParallelProfile(stage_id), consumer=stage_id)
         )
-        strategy = defaults["strategy"]
+        issues = _profile_compatibility_issues(session, profile, stage_id, model)
+        if issues:
+            _print_parallel_issues(issues)
+            profile = _profile_prompt(session, registry, stage_id, model)
+            if profile is BACK:
+                return BACK
         instances = defaults["instances"]
         requested_batch = defaults["requested_batch"]
 
@@ -1009,7 +1388,7 @@ def _configure_stage_resource(
         print(
             f"  {stage_id} batch {resolution.requested} rounds up to "
             f"{resolution.effective} "
-            f"(unit PP×DP-shard×DP-replicate={resolution.unit})."
+            f"(unit PP x DP-shard x DP-replicate={resolution.unit})."
         )
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
     resource = StageResources(
@@ -1103,11 +1482,7 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
         )
         if granularity is BACK:
             return False
-        count = (
-            inventory.num_sublayers
-            if granularity == "subblock"
-            else inventory.num_layers
-        )
+        count = inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
         remove = session.integer(
             "pruning.depth_remove",
             (
@@ -1119,14 +1494,17 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
             minimum=0,
             maximum=count - 1,
         )
-        samples = session.integer(
-            "pruning.depth_importance_samples",
-            "Depth-importance evaluation samples:",
-            default=samples,
-            minimum=1,
-        )
-        if BACK in (remove, samples):
+        if remove is BACK:
             return False
+        if int(remove) > 0:
+            samples = session.integer(
+                "pruning.depth_importance_samples",
+                "Depth-importance evaluation samples:",
+                default=samples,
+                minimum=1,
+            )
+            if samples is BACK:
+                return False
     pruning["depth_granularity"] = str(granularity)
     pruning["depth_remove"] = int(remove)
     pruning["depth_importance_samples"] = int(samples)
@@ -1145,9 +1523,36 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
     return configured is not BACK
 
 
-def width_axes_section(
-    session: WizardSession, resolver: DefaultsResolver, context: dict
-) -> bool:
+def _normalized_axis_values(axis: Any, raw_values: Any) -> list[int]:
+    values = sorted({int(value) for value in (raw_values or ())}, reverse=True)
+    legal_values = {int(value) for value in axis.values}
+    invalid = sorted(set(values) - legal_values, reverse=True)
+    if invalid:
+        raise SetupError(
+            f"{axis.label} contains unsupported sizes {invalid}; "
+            f"choose from {sorted(legal_values, reverse=True)}."
+        )
+    return values
+
+
+def _axis_selection_validation(
+    axis: Any,
+    raw_values: Any,
+    *,
+    require_reduced: bool,
+) -> bool | str:
+    values = _normalized_axis_values(axis, raw_values)
+    if not values:
+        return "Select at least one size."
+    if require_reduced and not any(value < int(axis.teacher_value) for value in values):
+        return (
+            "Select at least one size smaller than the teacher size. "
+            "At least one pruning axis must actually reduce a dimension."
+        )
+    return True
+
+
+def width_axes_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     pruning = _pruning_payload(session.state)
     inventory = context["model"].inventory
     current_axes = _mapping_copy(pruning.get("axes"))
@@ -1171,25 +1576,63 @@ def width_axes_section(
     )
     if action is BACK:
         return False
+    defaults_are_nonempty = all(
+        bool(_normalized_axis_values(axis, defaults[axis.axis_id])) for axis in inventory.axes
+    )
+    defaults_reduce_a_dimension = any(
+        any(
+            value < int(axis.teacher_value)
+            for value in _normalized_axis_values(axis, defaults[axis.axis_id])
+        )
+        for axis in inventory.axes
+    )
+    if action == "defaults" and (not defaults_are_nonempty or not defaults_reduce_a_dimension):
+        print(
+            "  Resolved width-axis defaults are not a pruning search: every axis "
+            "needs a selected size and at least one axis needs a reduced size. "
+            "Customize the selections."
+        )
+        action = "customize"
     axes = {}
-    for axis in inventory.axes:
+    has_reduced_axis = False
+    for index, axis in enumerate(inventory.axes):
         selected = defaults[axis.axis_id]
         if action == "customize":
+            require_reduced = index == len(inventory.axes) - 1 and not has_reduced_axis
             selected = session.checkbox(
                 f"pruning.axes.{axis.axis_id}",
                 f"Values for {axis.label}:",
                 [(str(value), value) for value in axis.values],
                 defaults=selected,
-                validate=lambda values: bool(values) or "Select at least one value.",
+                validate=lambda values, axis=axis, require_reduced=require_reduced: (
+                    _axis_selection_validation(
+                        axis,
+                        values,
+                        require_reduced=require_reduced,
+                    )
+                ),
             )
             if selected is BACK:
                 return False
+        selected_values = _normalized_axis_values(axis, selected)
+        enabled = any(value < int(axis.teacher_value) for value in selected_values)
+        has_reduced_axis = has_reduced_axis or enabled
         axes[axis.axis_id] = {
-            "enabled": True,
+            "enabled": enabled,
             "teacher_value": axis.teacher_value,
-            "values": sorted({int(value) for value in selected}, reverse=True),
+            "values": selected_values,
             "alignment": axis.alignment,
         }
+        if not enabled:
+            print(
+                f"  {axis.label}: teacher size only; activation hook and "
+                "width/slicing sanity checks disabled."
+            )
+    if not has_reduced_axis:
+        raise SetupError(
+            "Width-axis selections do not prune any dimension. "
+            "Select at least one size smaller than its teacher size."
+        )
     pruning["axes"] = axes
     session.state.set_collection("pruning", pruning)
     return True
@@ -1245,14 +1688,10 @@ def width_importance_section(
     return configured is not BACK
 
 
-def sort_sanity_section(
-    session: WizardSession, resolver: DefaultsResolver, context: dict
-) -> bool:
+def sort_sanity_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     pruning = _pruning_payload(session.state)
     enabled = bool(
-        resolver.resolve_default(
-            "pruning.sort_sanity", pruning.get("sort_sanity", False)
-        ).value
+        resolver.resolve_default("pruning.sort_sanity", pruning.get("sort_sanity", False)).value
     )
     samples = int(
         resolver.resolve_default(
@@ -1313,6 +1752,146 @@ def sort_sanity_section(
     return configured is not BACK
 
 
+def width_sanity_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    pruning = _pruning_payload(session.state)
+    if not bool(pruning.get("sort_sanity", False)):
+        pruning["width_sanity"] = False
+        pruning["slicing_sanity"] = False
+        session.state.set_collection("pruning", pruning)
+        _remove_stage_resource(session, "width_sanity")
+        return True
+
+    enabled = bool(
+        resolver.resolve_default("pruning.width_sanity", pruning.get("width_sanity", False)).value
+    )
+    samples = int(
+        resolver.resolve_default(
+            "pruning.width_sanity_samples",
+            pruning.get("width_sanity_samples", 128),
+        ).value
+    )
+    layer_count = int(
+        resolver.resolve_default(
+            "pruning.width_sanity_layer_count",
+            pruning.get("width_sanity_layer_count", 3),
+        ).value
+    )
+    targets_per_axis = int(
+        resolver.resolve_default(
+            "pruning.width_sanity_targets_per_axis",
+            pruning.get("width_sanity_targets_per_axis", 2),
+        ).value
+    )
+    resource_defaults = _stage_resource_defaults(
+        session,
+        resolver,
+        "width_sanity",
+        batch=8,
+    )
+    action = _section_action(
+        session,
+        "width_sanity",
+        "Optionally compare sorted, random, and reverse reduced-width models.",
+        {
+            "enabled": enabled,
+            "eval_samples": samples,
+            "representative_layers": layer_count,
+            "targets_per_axis": targets_per_axis,
+            "physical_realization": False,
+            "resources": resource_defaults,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        enabled = session.confirm(
+            "pruning.width_sanity",
+            "Run width sanity evaluation?",
+            default=enabled,
+        )
+        if enabled is BACK:
+            return False
+        if enabled:
+            samples = session.integer(
+                "pruning.width_sanity_samples",
+                "Width-sanity evaluation samples:",
+                default=samples,
+                minimum=1,
+            )
+            layer_count = session.integer(
+                "pruning.width_sanity_layer_count",
+                "Representative layers to check:",
+                default=layer_count,
+                minimum=1,
+            )
+            targets_per_axis = session.integer(
+                "pruning.width_sanity_targets_per_axis",
+                "Reduced-width targets per pruning axis:",
+                default=targets_per_axis,
+                minimum=1,
+            )
+            if BACK in (samples, layer_count, targets_per_axis):
+                return False
+    pruning["width_sanity"] = bool(enabled)
+    pruning["width_sanity_samples"] = int(samples)
+    pruning["width_sanity_layer_count"] = int(layer_count)
+    pruning["width_sanity_targets_per_axis"] = int(targets_per_axis)
+    if not enabled:
+        pruning["slicing_sanity"] = False
+    session.state.set_collection("pruning", pruning)
+    if not enabled:
+        _remove_stage_resource(session, "width_sanity")
+        return True
+    configured = _configure_stage_resource(
+        session,
+        resolver,
+        context["model"],
+        "width_sanity",
+        action=str(action),
+        batch_default=8,
+    )
+    return configured is not BACK
+
+
+def slicing_sanity_section(
+    session: WizardSession, resolver: DefaultsResolver, context: dict
+) -> bool:
+    del context
+    pruning = _pruning_payload(session.state)
+    if not bool(pruning.get("sort_sanity", False)) or not bool(pruning.get("width_sanity", False)):
+        pruning["slicing_sanity"] = False
+        session.state.set_collection("pruning", pruning)
+        return True
+
+    enabled = bool(
+        resolver.resolve_default(
+            "pruning.slicing_sanity", pruning.get("slicing_sanity", False)
+        ).value
+    )
+    action = _section_action(
+        session,
+        "slicing_sanity",
+        "Optionally verify dynamic slicing against physical materialization.",
+        {
+            "enabled": enabled,
+            "physical_realization_for_width_sanity": enabled,
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "customize":
+        enabled = session.confirm(
+            "pruning.slicing_sanity",
+            "Run slicing sanity evaluation?",
+            default=enabled,
+        )
+        if enabled is BACK:
+            return False
+    pruning["slicing_sanity"] = bool(enabled)
+    session.state.set_collection("pruning", pruning)
+    return True
+
+
 def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     pruning = _pruning_payload(session.state)
     bypass = dict(pruning.get("bypass") or {})
@@ -1326,8 +1905,12 @@ def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: 
         ).value
     )
     samples = int(
+        resolver.resolve_default("pruning.bypass.samples", bypass.get("samples", 4096)).value
+    )
+    grad_accumulation_steps = int(
         resolver.resolve_default(
-            "pruning.bypass.samples", bypass.get("samples", 4096)
+            "pruning.bypass.grad_accumulation_steps",
+            bypass.get("grad_accumulation_steps", 1),
         ).value
     )
     resource_defaults = _stage_resource_defaults(
@@ -1344,6 +1927,7 @@ def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: 
             "enabled": enabled,
             "granularity": granularity,
             "samples": samples,
+            "gradient_accumulation_steps": grad_accumulation_steps,
             "sequence_length": session.state.get_field("data.sequence_length", 4096),
             "resources": resource_defaults,
         },
@@ -1371,16 +1955,21 @@ def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: 
                 default=samples,
                 minimum=1,
             )
-            if BACK in (granularity, samples):
+            grad_accumulation_steps = session.integer(
+                "pruning.bypass.grad_accumulation_steps",
+                "Gradient accumulation steps:",
+                default=grad_accumulation_steps,
+                minimum=1,
+            )
+            if BACK in (granularity, samples, grad_accumulation_steps):
                 return False
     bypass.update(
         {
             "enabled": bool(enabled),
             "granularity": str(granularity),
             "samples": int(samples),
-            "sequence_length": int(
-                session.state.get_field("data.sequence_length", 4096)
-            ),
+            "grad_accumulation_steps": int(grad_accumulation_steps),
+            "sequence_length": int(session.state.get_field("data.sequence_length", 4096)),
         }
     )
     pruning["bypass"] = bypass
@@ -1495,9 +2084,9 @@ def pre_mip_stages_section(
     )
     preview = {}
     for stage_id in STATIC_MODEL_STAGES:
-        if stage_id == "bypass" and not (
-            session.state.collection("pruning") or {}
-        ).get("bypass", {}).get("enabled", False):
+        if stage_id == "bypass" and not (session.state.collection("pruning") or {}).get(
+            "bypass", {}
+        ).get("enabled", False):
             continue
         strategy = CANONICAL_STAGE_STRATEGIES[stage_id]
         instances = (
@@ -1510,12 +2099,9 @@ def pre_mip_stages_section(
                 ).value
             )
         )
-        requested_batch = int(
-            resolver.resolve_default(f"stages.{stage_id}.batch", 8).value
-        )
+        requested_batch = int(resolver.resolve_default(f"stages.{stage_id}.batch", 8).value)
         batch = resolve_batch(requested_batch, preview_profile)
         preview[stage_id] = {
-            "strategy": strategy,
             "instances": instances,
             "parallel": {
                 "tp": preview_profile.tp,
@@ -1531,7 +2117,7 @@ def pre_mip_stages_section(
     action = _section_action(
         session,
         "pre_mip_stages",
-        "Each stage has independent instances, strategy, parallelism, and batch behavior.",
+        "Each stage has canonical execution behavior and independent parallelism and batch settings.",
         preview,
     )
     if action is BACK:
@@ -1543,9 +2129,9 @@ def pre_mip_stages_section(
             batches.pop(STATIC_MODEL_BATCH_PATHS[stage_id], None)
     customize_all = action == "customize"
     for stage_id in STATIC_MODEL_STAGES:
-        if stage_id == "bypass" and not (
-            session.state.collection("pruning") or {}
-        ).get("bypass", {}).get("enabled", False):
+        if stage_id == "bypass" and not (session.state.collection("pruning") or {}).get(
+            "bypass", {}
+        ).get("enabled", False):
             continue
         customize = customize_all
         if customize_all:
@@ -1574,10 +2160,7 @@ def pre_mip_stages_section(
                     return False
             requested_batch = session.integer(
                 f"stages.{stage_id}.batch",
-                (
-                    "Local/micro batch size "
-                    f"(minimum and scheduling unit: {profile.batch_unit}):"
-                ),
+                (f"Local/micro batch size (minimum and scheduling unit: {profile.batch_unit}):"),
                 default=resolve_batch(8, profile).effective,
                 minimum=profile.batch_unit,
             )
@@ -1600,14 +2183,13 @@ def pre_mip_stages_section(
                     ).value
                 )
             )
-            requested_batch = int(
-                resolver.resolve_default(f"stages.{stage_id}.batch", 8).value
-            )
+            requested_batch = int(resolver.resolve_default(f"stages.{stage_id}.batch", 8).value)
         resolution = resolve_batch(int(requested_batch), profile)
         if resolution.adjusted:
             print(
                 f"  {stage_id} batch {resolution.requested} rounds up to "
-                f"{resolution.effective} (unit PP×DP-shard×DP-replicate={resolution.unit})."
+                f"{resolution.effective} "
+                f"(unit PP x DP-shard x DP-replicate={resolution.unit})."
             )
         resource = StageResources(
             stage_id=stage_id,
@@ -1650,22 +2232,27 @@ def _mapping_copy(value: Any) -> dict[str, Any]:
 
 def _default_vllm_topology(resolver: DefaultsResolver) -> dict[str, Any]:
     topology = {
-        key: int(
-            resolver.resolve_default(f"vllm.topology.{key}", 1).value
-        )
-        for key in (
+        name: int(resolver.resolve_default(f"vllm.topology.{name}", 1).value)
+        for name in (
             "tensor_parallel_size",
             "pipeline_parallel_size",
+            "data_parallel_size",
             "prefill_context_parallel_size",
             "decode_context_parallel_size",
         )
     }
+    topology["enable_expert_parallel"] = bool(
+        resolver.resolve_default("vllm.topology.enable_expert_parallel", False).value
+    )
     topology["gpu_group_size"] = (
         topology["tensor_parallel_size"]
         * topology["pipeline_parallel_size"]
+        * topology["data_parallel_size"]
         * topology["prefill_context_parallel_size"]
     )
-    topology["distributed_executor_backend"] = "mp"
+    topology["distributed_executor_backend"] = str(
+        resolver.resolve_default("vllm.topology.distributed_executor_backend", "mp").value
+    )
     return topology
 
 
@@ -1674,44 +2261,57 @@ def _default_vllm_measurement(
     *,
     sequence_length: int,
 ) -> dict[str, Any]:
-    batch = int(resolver.resolve_default("vllm.batch_size", 1).value)
-    max_num_seqs = max(
-        batch,
-        int(resolver.resolve_default("vllm.max_num_seqs", 1).value),
+    concurrency = int(
+        resolver.resolve_default(
+            "vllm.max_num_seqs",
+            resolver.resolve_default("vllm.batch_size", 1).value,
+        ).value
     )
-    granularity = str(
-        resolver.resolve_default("vllm.granularity", "subblock").value
-    )
+    granularity = str(resolver.resolve_default("vllm.granularity", "subblock").value)
     topology = _default_vllm_topology(resolver)
     return {
         "prefill_seq_len": int(
             resolver.resolve_default("vllm.prefill_seq_len", sequence_length).value
         ),
-        "generation_seq_len": int(
-            resolver.resolve_default("vllm.generation_seq_len", 1024).value
-        ),
-        "batch_size": batch,
-        "max_num_seqs": max_num_seqs,
+        "generation_seq_len": int(resolver.resolve_default("vllm.generation_seq_len", 1024).value),
+        "batch_size": concurrency,
+        "max_num_seqs": concurrency,
         "granularity": granularity,
         "runtime_stats": {
             "granularity": granularity,
-            "max_num_seqs": max_num_seqs,
+            "max_num_seqs": concurrency,
             "topology": topology,
         },
     }
 
 
 def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    del context
     enabled_default = bool(resolver.resolve_default("vllm.enabled", False).value)
     default_measurement = _default_vllm_measurement(
         resolver,
         sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
     )
     default_topology = default_measurement["runtime_stats"]["topology"]
+    pruning = _pruning_payload(session.state)
+    counts = count_candidate_options(
+        context["model"].config,
+        context["model"].inventory,
+        _mapping_copy(pruning.get("axes")),
+    )
+    granularity_choices = _vllm_granularity_choices(counts)
+    granularity_labels = {value: label for label, value in granularity_choices}
     preview = {"enabled": enabled_default}
     if enabled_default:
-        preview["measurement"] = default_measurement
+        preview["measurement"] = {
+            "input_sequence_length": default_measurement["prefill_seq_len"],
+            "output_sequence_length": default_measurement["generation_seq_len"],
+            "concurrency": default_measurement["max_num_seqs"],
+            "granularity": granularity_labels.get(
+                default_measurement["granularity"],
+                default_measurement["granularity"],
+            ),
+            "gpus_per_task": default_topology["gpu_group_size"],
+        }
     action = _section_action(
         session,
         "vllm",
@@ -1724,6 +2324,25 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         if not enabled_default:
             session.state.set_collection("vllm_measurements", {})
             return True
+        issues = validate_vllm_parallelism(
+            default_topology,
+            context["model"].inventory,
+            pruning,
+            stage_id="vllm_stats.serving-default",
+        )
+        if issues:
+            _print_parallel_issues(issues)
+            default_topology = _vllm_topology_prompt(
+                session,
+                "vllm.measurements.serving-default.topology",
+                default_topology,
+                inventory=context["model"].inventory,
+                pruning=pruning,
+                stage_id="vllm_stats.serving-default",
+            )
+            if default_topology is BACK:
+                return False
+            default_measurement["runtime_stats"]["topology"] = default_topology
         session.state.set_collection(
             "vllm_measurements",
             {"serving-default": default_measurement},
@@ -1743,7 +2362,6 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
             for key, fallback in (
                 ("prefill_seq_len", session.state.get_field("data.sequence_length", 4096)),
                 ("generation_seq_len", 1024),
-                ("batch_size", 1),
                 ("max_num_seqs", 1),
             )
         }
@@ -1751,8 +2369,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         for key, label in (
             ("prefill_seq_len", "Input sequence length (ISL):"),
             ("generation_seq_len", "Output sequence length (OSL):"),
-            ("batch_size", "Measurement batch size:"),
-            ("max_num_seqs", "Maximum concurrent sequences:"),
+            ("max_num_seqs", "Concurrency:"),
         ):
             value = session.integer(
                 f"vllm.measurements.{name}.{key}",
@@ -1763,37 +2380,25 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
             if value is BACK:
                 return False
             values[key] = int(value)
-        values["max_num_seqs"] = max(values["max_num_seqs"], values["batch_size"])
+        values["batch_size"] = values["max_num_seqs"]
         granularity = session.select(
             f"vllm.measurements.{name}.granularity",
             "Measurement granularity:",
-            ["subblock", "block"],
+            granularity_choices,
             default=str(resolver.resolve_default("vllm.granularity", "subblock").value),
         )
         if granularity is BACK:
             return False
-        topology = {}
-        for key, label in (
-            ("tensor_parallel_size", "vLLM tensor parallel (TP):"),
-            ("pipeline_parallel_size", "vLLM pipeline parallel (PP):"),
-            ("prefill_context_parallel_size", "vLLM prefill context parallel:"),
-            ("decode_context_parallel_size", "vLLM decode context parallel:"),
-        ):
-            value = session.integer(
-                f"vllm.measurements.{name}.topology.{key}",
-                label,
-                default=int(default_topology[key]),
-                minimum=1,
-            )
-            if value is BACK:
-                return False
-            topology[key] = int(value)
-        topology["gpu_group_size"] = (
-            topology["tensor_parallel_size"]
-            * topology["pipeline_parallel_size"]
-            * topology["prefill_context_parallel_size"]
+        topology = _vllm_topology_prompt(
+            session,
+            f"vllm.measurements.{name}.topology",
+            default_topology,
+            inventory=context["model"].inventory,
+            pruning=pruning,
+            stage_id=f"vllm_stats.{name}",
         )
-        topology["distributed_executor_backend"] = "mp"
+        if topology is BACK:
+            return False
         measurements[str(name)] = {
             **values,
             "granularity": granularity,
@@ -1837,9 +2442,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             "mip.objective", "metrics.cosine_embedding_loss_hidden_states"
         ).value
     )
-    default_num_solutions = int(
-        resolver.resolve_default("mip.num_solutions", 8).value
-    )
+    default_num_solutions = int(resolver.resolve_default("mip.num_solutions", 8).value)
     workload_metrics = {"memory", "runtime"}
     goal_choices = [
         ("Parameters", "params"),
@@ -1861,8 +2464,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             )
         if default_goal_metric in workload_metrics and not workloads:
             raise SetupError(
-                f"Default MIP goal {default_goal_metric!r} requires an enabled "
-                "vLLM measurement."
+                f"Default MIP goal {default_goal_metric!r} requires an enabled vLLM measurement."
             )
         raise SetupError(f"Unsupported default MIP goal: {default_goal_metric!r}")
     action = _section_action(
@@ -1875,9 +2477,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                 "bound": default_goal_value,
                 "workload": (
                     next(iter(workloads))
-                    if default_goal_metric
-                    in workload_metrics
-                    and workloads
+                    if default_goal_metric in workload_metrics and workloads
                     else None
                 ),
             },
@@ -1988,9 +2588,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         if objective is BACK:
             return False
         goal_bound: Any = yaml.safe_load(str(goal_value))
-        goal_config = (
-            {"at": {str(workload): goal_bound}} if workload is not None else goal_bound
-        )
+        goal_config = {"at": {str(workload): goal_bound}} if workload is not None else goal_bound
         constraints = {str(goal_metric): goal_config}
         variants: OrderedDict[str, Any] = OrderedDict()
         if action == "customize":
@@ -2027,9 +2625,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             if add_variant is BACK:
                 return False
             while add_variant:
-                variant_id = session.text(
-                    "mip.run.variant.id", "Variant ID:", default="sweep"
-                )
+                variant_id = session.text("mip.run.variant.id", "Variant ID:", default="sweep")
                 matrix_path = session.text(
                     "mip.run.variant.matrix.path",
                     "Matrix path (embedding, depth, constraints.*, solver.*, homogeneous.*):",
@@ -2089,9 +2685,7 @@ def _post_mip_strategy(node: NodeDraft) -> str:
     )
 
 
-def post_mip_section(
-    session: WizardSession, resolver: DefaultsResolver, context: dict
-) -> bool:
+def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
     sequence = int(session.state.get_field("data.sequence_length", 4096))
@@ -2100,7 +2694,12 @@ def post_mip_section(
     serving = {
         "input_tokens": int(first_measurement.get("prefill_seq_len", sequence)),
         "output_tokens": int(first_measurement.get("generation_seq_len", 1024)),
-        "concurrency": int(first_measurement.get("max_num_seqs", 1)),
+        "concurrency": [int(first_measurement.get("max_num_seqs", 1))],
+        "request_count": max(
+            32,
+            4 * int(first_measurement.get("max_num_seqs", 1)),
+        ),
+        "best_selection_mode": "individual_best",
     }
     preview = {}
     for run_id, run in runs.items():
@@ -2133,12 +2732,7 @@ def post_mip_section(
                 )
             elif node.node_type == "aiperf":
                 node_preview["resources"] = {
-                    "strategy": "sharded",
-                    "instances": int(
-                        session.state.get_field(
-                            "infrastructure.gpus_per_node", 8
-                        )
-                    ),
+                    "instances": int(session.state.get_field("infrastructure.gpus_per_node", 8)),
                     "topology": node.config.get("topology", {}),
                 }
             node_previews.append(node_preview)
@@ -2185,7 +2779,9 @@ def post_mip_section(
                     session,
                     f"post_mip.{run_id}.serving",
                     run_serving,
-                    moe=context["model"].inventory.moe,
+                    inventory=context["model"].inventory,
+                    pruning=_mapping_copy(_pruning_payload(session.state)),
+                    stage_id=f"post.{run_id}.serving",
                 )
                 if configured is BACK:
                     return False
@@ -2294,13 +2890,15 @@ def post_mip_section(
                     session,
                     f"post_mip.{run_id}.{node_id}",
                     serving,
-                    moe=context["model"].inventory.moe,
+                    inventory=context["model"].inventory,
+                    pruning=_mapping_copy(_pruning_payload(session.state)),
+                    stage_id=f"post.{run_id}.{node_id}",
                 )
                 if configured is BACK:
                     return False
                 config = {
                     **configured,
-                    "concurrency": [configured["concurrency"]],
+                    "concurrency": list(configured["concurrency"]),
                     "benchmark_timeout": 900,
                 }
             elif node_type == "global_kd":
@@ -2332,9 +2930,7 @@ def post_mip_section(
                     config=config,
                 ),
             )
-            more = session.confirm(
-                f"post_mip.{run_id}.node.add", "Add another node?", default=True
-            )
+            more = session.confirm(f"post_mip.{run_id}.node.add", "Add another node?", default=True)
             if more is BACK:
                 return False
             if not more:
@@ -2400,63 +2996,174 @@ def _configure_post_mip_algorithms(
     return True
 
 
+def _parse_positive_int_list(value: str) -> list[int]:
+    tokens = [token.strip() for token in value.split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise ValueError("Enter one or more comma-separated positive integers.")
+    try:
+        values = [int(token) for token in tokens]
+    except ValueError as exc:
+        raise ValueError("Enter one or more comma-separated positive integers.") from exc
+    if any(item <= 0 for item in values):
+        raise ValueError("Enter one or more comma-separated positive integers.")
+    if len(set(values)) != len(values):
+        raise ValueError("Concurrency values must be unique.")
+    return values
+
+
+def _vllm_topology_prompt(
+    session: WizardSession,
+    prefix: str,
+    defaults: Mapping[str, Any],
+    *,
+    inventory: Any,
+    pruning: Mapping[str, Any],
+    stage_id: str,
+    label_prefix: str = "vLLM runtime",
+) -> Any:
+    """Ask for and validate one complete vLLM parallel topology."""
+    topology_defaults = _mapping_copy(defaults)
+    while True:
+        topology = {}
+        for name, label in (
+            ("tensor_parallel_size", f"{label_prefix} tensor parallel (TP):"),
+            ("pipeline_parallel_size", f"{label_prefix} pipeline parallel (PP):"),
+            ("data_parallel_size", f"{label_prefix} data parallel (DP):"),
+            (
+                "prefill_context_parallel_size",
+                f"{label_prefix} prefill context parallel (CP):",
+            ),
+            (
+                "decode_context_parallel_size",
+                f"{label_prefix} decode context parallel (CP):",
+            ),
+        ):
+            value = session.integer(
+                f"{prefix}.{name}",
+                label,
+                default=int(topology_defaults.get(name, 1)),
+                minimum=1,
+            )
+            if value is BACK:
+                return BACK
+            topology[name] = int(value)
+        enable_expert_parallel = False
+        inventory_moe = (
+            bool(inventory.get("moe", False))
+            if isinstance(inventory, Mapping)
+            else bool(getattr(inventory, "moe", False))
+        )
+        if inventory_moe:
+            enable_expert_parallel = session.confirm(
+                f"{prefix}.enable_expert_parallel",
+                (
+                    "Enable vLLM expert parallelism? vLLM has no separate EP size; "
+                    "for this MoE model, effective EP is TP * DP."
+                ),
+                default=bool(topology_defaults.get("enable_expert_parallel", False)),
+            )
+            if enable_expert_parallel is BACK:
+                return BACK
+        topology.update(
+            {
+                "enable_expert_parallel": bool(enable_expert_parallel),
+                "gpu_group_size": (
+                    topology["tensor_parallel_size"]
+                    * topology["pipeline_parallel_size"]
+                    * topology["data_parallel_size"]
+                    * topology["prefill_context_parallel_size"]
+                ),
+                "distributed_executor_backend": str(
+                    topology_defaults.get("distributed_executor_backend", "mp")
+                ),
+            }
+        )
+        issues = validate_vllm_parallelism(
+            topology,
+            inventory,
+            pruning,
+            stage_id=stage_id,
+        )
+        if issues:
+            _print_parallel_issues(issues)
+            topology_defaults = topology
+            continue
+        return topology
+
+
 def _serving_setting_prompt(
     session: WizardSession,
     prefix: str,
     defaults: Mapping[str, Any],
     *,
-    moe: bool,
+    inventory: Any,
+    pruning: Mapping[str, Any],
+    stage_id: str,
 ) -> Any:
     """Ask the complete AIPerf workload and serving-only parallel setting."""
-
     values = {}
     for name, label, default in (
         ("input_tokens", "Serving input sequence length (ISL):", defaults["input_tokens"]),
         ("output_tokens", "Serving output sequence length (OSL):", defaults["output_tokens"]),
-        ("concurrency", "Serving concurrency:", defaults["concurrency"]),
     ):
-        value = session.integer(
-            f"{prefix}.{name}", label, default=int(default), minimum=1
-        )
+        value = session.integer(f"{prefix}.{name}", label, default=int(default), minimum=1)
         if value is BACK:
             return BACK
         values[name] = int(value)
-    topology = {}
-    for name, label in (
-        ("tensor_parallel_size", "Serving tensor parallel (TP):"),
-        ("pipeline_parallel_size", "Serving pipeline parallel (PP):"),
-        ("prefill_context_parallel_size", "Serving prefill context parallel (CP):"),
-        ("decode_context_parallel_size", "Serving decode context parallel (CP):"),
-    ):
-        value = session.integer(
-            f"{prefix}.topology.{name}", label, default=1, minimum=1
-        )
-        if value is BACK:
-            return BACK
-        topology[name] = int(value)
-    ep = 1
-    if moe:
-        ep = session.integer(
-            f"{prefix}.topology.expert_parallel_size",
-            "Serving expert parallel (EP):",
-            default=1,
-            minimum=1,
-        )
-        if ep is BACK:
-            return BACK
-    topology.update(
-        {
-            "data_parallel_size": int(ep),
-            "expert_parallel_size": int(ep),
-            "gpu_group_size": (
-                topology["tensor_parallel_size"]
-                * topology["pipeline_parallel_size"]
-                * topology["prefill_context_parallel_size"]
-                * int(ep)
-            ),
-            "distributed_executor_backend": "mp",
-        }
+    raw_concurrency_default = defaults.get("concurrency", [1])
+    if isinstance(raw_concurrency_default, (int, str)):
+        concurrency_default = [int(raw_concurrency_default)]
+    else:
+        concurrency_default = [int(item) for item in raw_concurrency_default]
+
+    def validate_concurrency(value: str) -> bool | str:
+        try:
+            _parse_positive_int_list(value)
+        except ValueError as exc:
+            return str(exc)
+        return True
+
+    concurrency_text = session.text(
+        f"{prefix}.concurrency",
+        "Serving concurrency sweep (comma-separated; one value is allowed):",
+        default=", ".join(str(item) for item in concurrency_default),
+        validate=validate_concurrency,
     )
+    if concurrency_text is BACK:
+        return BACK
+    values["concurrency"] = _parse_positive_int_list(concurrency_text)
+    request_count = session.integer(
+        f"{prefix}.request_count",
+        "AIPerf request count:",
+        default=int(defaults.get("request_count", 32)),
+        minimum=1,
+    )
+    if request_count is BACK:
+        return BACK
+    values["request_count"] = int(request_count)
+    best_selection_mode = session.select(
+        f"{prefix}.best_selection_mode",
+        "How should the best models be selected?",
+        [
+            ("Best models at their individual best concurrency", "individual_best"),
+            ("Top K models per concurrency, unioned", "best_per_concurrency"),
+        ],
+        default=str(defaults.get("best_selection_mode", "individual_best")),
+    )
+    if best_selection_mode is BACK:
+        return BACK
+    values["best_selection_mode"] = str(best_selection_mode)
+    topology = _vllm_topology_prompt(
+        session,
+        f"{prefix}.topology",
+        _mapping_copy(defaults.get("topology")),
+        inventory=inventory,
+        pruning=pruning,
+        stage_id=stage_id,
+        label_prefix="Serving",
+    )
+    if topology is BACK:
+        return BACK
     values["topology"] = topology
     return values
 
@@ -2470,15 +3177,12 @@ def _configure_dynamic_resources(
     ask: bool,
 ) -> Any:
     """Attach an independent resource/batch card to every node in one flow."""
-
     registry = ResourceProfileRegistry.from_dict(
         session.state.collection("parallel_profiles") or {}
     )
     resources = _mapping_copy(session.state.collection("stage_resources"))
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
-    cpu_partition = session.state.get_field(
-        "infrastructure.runner.slurm.partition_cpu", None
-    )
+    cpu_partition = session.state.get_field("infrastructure.runner.slurm.partition_cpu", None)
     for node_id, node in tuple(editor.flow(flow_id).nodes.items()):
         stage_id = f"post.{flow_id}.{node_id}"
         if node.node_type in {"filter", "manual_filter", "materialize"}:
@@ -2518,28 +3222,43 @@ def _configure_dynamic_resources(
         }
         if node.node_type == "aiperf":
             topology = _mapping_copy(node.config.get("topology"))
-            tp = int(topology.get("tensor_parallel_size", 1))
-            pp = int(topology.get("pipeline_parallel_size", 1))
-            cp = int(topology.get("prefill_context_parallel_size", 1))
-            ep = int(topology.get("expert_parallel_size", 1))
-            dp = int(topology.get("data_parallel_size", ep))
+            allocation_mesh = vllm_topology_to_mesh(topology)
             entry["parallel"] = {
-                "tp": tp,
-                "cp": cp,
-                "pp": pp,
-                "ep": ep,
-                "dp_shard": ep if ep > 1 else 1,
-                "dp_replicate": max(1, dp // ep),
+                **allocation_mesh.as_dict(),
                 "sequence_parallel": False,
             }
         else:
             profile = (
-                _profile_prompt(session, registry, stage_id, model)
+                _profile_prompt(
+                    session,
+                    registry,
+                    stage_id,
+                    model,
+                    node_type=node.node_type,
+                )
                 if customize
                 else registry.reuse(registry.names()[0], consumer=stage_id)
             )
             if profile is BACK:
                 return BACK
+            issues = _profile_compatibility_issues(
+                session,
+                profile,
+                stage_id,
+                model,
+                node_type=node.node_type,
+            )
+            if issues:
+                _print_parallel_issues(issues)
+                profile = _profile_prompt(
+                    session,
+                    registry,
+                    stage_id,
+                    model,
+                    node_type=node.node_type,
+                )
+                if profile is BACK:
+                    return BACK
             entry["profile_name"] = profile.name
             requested = 1
             if customize:
@@ -2567,11 +3286,7 @@ def _configure_dynamic_resources(
                 "sequence_parallel": profile.sequence_parallel,
             }
             config["automodel"] = automodel
-            key = (
-                "local_batch_size"
-                if node.node_type == "global_kd"
-                else "micro_batch_size"
-            )
+            key = "local_batch_size" if node.node_type == "global_kd" else "micro_batch_size"
             config[key] = resolved.effective
             editor.edit_node(flow_id, node_id, config=config)
             session.state.set_field(
@@ -2662,6 +3377,8 @@ SECTION_BUILDERS: tuple[Callable[..., bool], ...] = (
     width_axes_section,
     width_importance_section,
     sort_sanity_section,
+    width_sanity_section,
+    slicing_sanity_section,
     bypass_section,
     replacement_scoring_section,
     vllm_section,
@@ -2669,11 +3386,28 @@ SECTION_BUILDERS: tuple[Callable[..., bool], ...] = (
     post_mip_section,
     output_review_section,
 )
+SECTION_NAMES = (
+    "model",
+    "data",
+    "infrastructure",
+    "depth",
+    "width_axes",
+    "width_importance",
+    "sort_sanity",
+    "width_sanity",
+    "slicing_sanity",
+    "bypass",
+    "replacement_scoring",
+    "vllm",
+    "mip",
+    "post_mip",
+    "output",
+)
 
 
 def _fresh_state(
     backend: PromptBackend,
-    defaults_path: Optional[Path],
+    defaults_path: Path | None,
 ) -> WizardState:
     while True:
         value = backend.text("Campaign directory:", "")
@@ -2686,6 +3420,11 @@ def _fresh_state(
 
 def _refresh_legacy_state(state: WizardState) -> None:
     pruning = deepcopy(state.collection("pruning") or {})
+    subset_selection = _mapping_copy(state.collection("data_subset_selection"))
+    subset_records = [
+        _mapping_copy(item)
+        for item in subset_selection.get("subsets") or ()
+    ]
     first_measurement = next(
         iter(_mapping_copy(state.collection("vllm_measurements")).items()),
         ("serving-default", {}),
@@ -2695,7 +3434,9 @@ def _refresh_legacy_state(state: WizardState) -> None:
         "vllm_enabled": bool(state.collection("vllm_measurements")),
         "granularity": measurement.get("granularity", "subblock"),
         "workload_id": measurement_id,
-        "isl": int(measurement.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))),
+        "isl": int(
+            measurement.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))
+        ),
         "osl": int(measurement.get("generation_seq_len", 1024)),
         "concurrency": int(measurement.get("max_num_seqs", 1)),
     }
@@ -2710,16 +3451,10 @@ def _refresh_legacy_state(state: WizardState) -> None:
                 "partition_batch": state.get_field(
                     "infrastructure.runner.slurm.partition_batch", "batch"
                 ),
-                "partition_cpu": state.get_field(
-                    "infrastructure.runner.slurm.partition_cpu", None
-                ),
-                "time_limit": state.get_field(
-                    "infrastructure.runner.slurm.time_limit", "4:00:00"
-                ),
+                "partition_cpu": state.get_field("infrastructure.runner.slurm.partition_cpu", None),
+                "time_limit": state.get_field("infrastructure.runner.slurm.time_limit", "4:00:00"),
                 "qos": state.get_field("infrastructure.runner.slurm.qos", None),
-                "max_nodes": state.get_field(
-                    "infrastructure.runner.slurm.max_nodes", 64
-                ),
+                "max_nodes": state.get_field("infrastructure.runner.slurm.max_nodes", 64),
             },
         },
         "execution_contract": {
@@ -2727,9 +3462,7 @@ def _refresh_legacy_state(state: WizardState) -> None:
                 "infrastructure.execution_contract.repository", str(Path.cwd())
             ),
             "venv": state.get_field("infrastructure.execution_contract.venv", ".venv"),
-            "container": state.get_field(
-                "infrastructure.execution_contract.container", None
-            ),
+            "container": state.get_field("infrastructure.execution_contract.container", None),
             "container_mounts": state.get_field(
                 "infrastructure.execution_contract.container_mounts", None
             ),
@@ -2776,8 +3509,7 @@ def _refresh_legacy_state(state: WizardState) -> None:
     if profiles:
         first = next(iter(profiles.values()))
         mesh = {
-            key: first.get(key, 1)
-            for key in ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
+            key: first.get(key, 1) for key in ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
         }
         infrastructure["meshes"] = {
             "common": deepcopy(mesh),
@@ -2793,9 +3525,19 @@ def _refresh_legacy_state(state: WizardState) -> None:
         "answers": {
             "data": {
                 "source": state.get_field("data.source"),
+                "selected_source": state.get_field(
+                    "data.selected_source", state.get_field("data.source")
+                ),
+                "adapter": state.get_field("data.adapter", "custom"),
                 "modality": state.get_field("data.modality", "text"),
                 "layout": state.get_field("data.layout", "fixed"),
                 "sequence_length": state.get_field("data.sequence_length", 4096),
+                "subsets": [record["name"] for record in subset_records],
+                "subset_revision": subset_selection.get("revision"),
+                "subset_weights": {
+                    record["name"]: record["weight"] for record in subset_records
+                },
+                "acquisition": deepcopy(state.collection("data_acquisition") or {}),
             },
             "pruning": pruning,
             "runtime": runtime,
@@ -2810,12 +3552,11 @@ def _refresh_legacy_state(state: WizardState) -> None:
 
 def run_wizard_v2(
     *,
-    resume: Optional[Path],
-    defaults_path: Optional[Path],
-    backend: Optional[PromptBackend] = None,
+    resume: Path | None,
+    defaults_path: Path | None,
+    backend: PromptBackend | None = None,
 ) -> Path:
     """Run setup v2, save every answer, validate bundles, and never launch jobs."""
-
     backend = backend or InteractiveBackend()
     print("Welcome to Puzzletron setup v2 — defaults are local, control is per stage.")
     if resume is None:
@@ -2837,7 +3578,8 @@ def run_wizard_v2(
         if completed:
             index += 1
         else:
-            index = max(0, index - 1)
+            target = session.consume_back_target()
+            index = SECTION_NAMES.index(target.section) if target is not None else index
     _refresh_legacy_state(state)
     build_bundles_v2(state.campaign_dir, state)
     return state.campaign_dir

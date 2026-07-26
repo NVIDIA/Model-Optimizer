@@ -39,7 +39,7 @@ def test_sampler_distribution_matches_inverse_params():
     params = [s * 48 for s in sizes]  # counts from the canonical fn in practice; proportional here
     sampler = ElasticSizeSampler(sizes, params)
     gen = torch.Generator().manual_seed(0)
-    counts = {s: 0 for s in sizes}
+    counts = dict.fromkeys(sizes, 0)
     for _ in range(20000):
         counts[sampler.sample(gen)] += 1
     total = sum(counts.values())

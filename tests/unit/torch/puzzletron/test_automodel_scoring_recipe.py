@@ -8,8 +8,8 @@ import torch
 from modelopt.torch.puzzletron.plugins.automodel.dummy_data import make_dummy_dataset
 from modelopt.torch.puzzletron.plugins.automodel.scoring_recipe import (
     ActivationScoringRecipe,
-    _HiddenStatePassthrough,
     _ensure_packed_qkv_format,
+    _HiddenStatePassthrough,
 )
 
 

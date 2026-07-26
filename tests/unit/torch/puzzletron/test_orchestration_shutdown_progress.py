@@ -36,13 +36,7 @@ from puzzletron_orchestrator.compiler import (
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
 from puzzletron_orchestrator.progress import summarize_active_progress, summarize_stage_artifacts
-from puzzletron_orchestrator.schema import (
-    AttemptSpec,
-    CommandSpec,
-    JobHandle,
-    JobState,
-    JobStatus,
-)
+from puzzletron_orchestrator.schema import AttemptSpec, CommandSpec, JobHandle, JobState, JobStatus
 from puzzletron_orchestrator.terminal import ShutdownAction
 
 

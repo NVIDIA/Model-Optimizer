@@ -25,8 +25,8 @@ from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
     FFNConfig,
-    MLAConfig,
     MambaConfig,
+    MLAConfig,
     MoEConfig,
 )
 from modelopt.torch.puzzletron.checkpoint_transactions import (

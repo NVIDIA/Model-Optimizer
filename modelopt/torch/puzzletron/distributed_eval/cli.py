@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import timedelta
 import faulthandler
 import json
 import os
-from pathlib import Path
 import signal
 import socket
 import sys
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from .campaign import Campaign
@@ -234,10 +234,11 @@ def command_worker(args) -> int:
             f"force_hf={campaign.manifest.force_hf}"
         )
 
+    import modelopt.torch.utils.distributed as dist
+
     from .automodel_executor import AutoModelReplaceBlockExecutor
     from .config import load_runtime_config
     from .worker import DistributedEvaluationWorker
-    import modelopt.torch.utils.distributed as dist
 
     runtime_cfg = load_runtime_config(args.config, overrides=_parse_overrides(args))
     if evaluation_stage == "depth":

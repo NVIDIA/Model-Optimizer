@@ -8,7 +8,6 @@ import os
 import sys
 import types
 
-
 try:
     import torch
 except ImportError:

@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
-from ..candidates import Candidate, _AXIS_TO_TARGET
+from ..candidates import _AXIS_TO_TARGET, Candidate
 from ..identity import canonicalize, stable_hash
 
 

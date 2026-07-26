@@ -43,6 +43,7 @@ __all__ = [
     "create_validation_dataloader",
     "create_padded_tensor",
     "prepare_validation_dataloader",
+    "prepare_automodel_text_validation_dataloader",
     "prepare_multimodal_validation_dataloader",
 ]
 
@@ -116,6 +117,13 @@ def prepare_validation_dataloader(
             f"({type(tokenizer).__name__}, {time.monotonic() - started:.1f}s)"
         )
 
+    if data_layout in {"padded_varlen", "packed_varlen"}:
+        return prepare_automodel_text_validation_dataloader(
+            args,
+            tokenizer=tokenizer,
+            data_layout=data_layout,
+        )
+
     packed_path = _cfg_get(args, "packed_token_cache_path", None)
     if packed_path:
         dataset = PackedTokenMemmapDataset(
@@ -159,6 +167,62 @@ def prepare_validation_dataloader(
     return loader
 
 
+def prepare_automodel_text_validation_dataloader(
+    args,
+    *,
+    tokenizer: PreTrainedTokenizerBase,
+    data_layout: str,
+):
+    """Build AutoModel-native padded or neat-packed text validation data."""
+
+    from ...distillation.dataset import make_puzzletron_chat_dataset
+
+    dataset_path = _cfg_get(args, "dataset_path", _cfg_get(args, "dataset", None))
+    if not dataset_path:
+        raise ValueError("variable-length text data requires dataset_path or dataset")
+    split = str(_cfg_get(args, "val_dataset_name", "validation"))
+    eval_samples = _cfg_get(args, "eval_samples", None)
+    max_length = int(_cfg_get(args, "block_size", 4096))
+    dataset = make_puzzletron_chat_dataset(
+        tokenizer=tokenizer,
+        dataset_path=str(dataset_path),
+        split=split,
+        num_samples=eval_samples if data_layout == "padded_varlen" else None,
+        seq_length=max_length,
+        seed=int(_cfg_get(args, "seed", 42)),
+    )
+    if data_layout == "packed_varlen":
+        from nemo_automodel.components.datasets.llm.neat_packing import neat_pack_dataset
+        from nemo_automodel.components.datasets.utils import neat_packed_collater
+        from nemo_automodel.components.models.common.packing import configure_packing
+
+        dataset = neat_pack_dataset(
+            dataset,
+            split=split,
+            pack_size=max_length,
+            max_packs=eval_samples,
+            padding_idx=getattr(tokenizer, "pad_token_id", 0) or 0,
+            drop_long_samples=True,
+        )
+        configure_packing(attn_implementation="flash_attention_2")
+        collate_fn = partial(
+            neat_packed_collater,
+            attn_implementation="flash_attention_2",
+        )
+    else:
+        from nemo_automodel.components.datasets.utils import default_collater
+
+        collate_fn = default_collater
+    return DataLoader(
+        dataset,
+        batch_size=int(_cfg_get(args, "micro_batch_size", 1)),
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
+
+
 def prepare_multimodal_validation_dataloader(
     args: Mapping[str, Any],
     *,
@@ -199,7 +263,10 @@ def prepare_multimodal_validation_dataloader(
     if data_layout == "packed_varlen":
         from nemo_automodel.components.datasets.vlm.neat_packing_vlm import neat_pack_dataset_vlm
 
-        pack_size = int(_cfg_get(args, "pack_size", max_length))
+        packing = _cfg_get(args, "packing", {}) or {}
+        pack_size = int(
+            packing.get("pack_size", _cfg_get(args, "pack_size", max_length))
+        )
         tokenized = neat_pack_dataset_vlm(
             tokenized,
             pack_size=pack_size,
@@ -207,7 +274,12 @@ def prepare_multimodal_validation_dataloader(
             drop_long_samples=True,
             max_packs=_cfg_get(args, "eval_samples", None),
             ds_raw=dataset,
-            packing_ratio=float(_cfg_get(args, "packing_ratio", 1.0)),
+            packing_ratio=float(
+                packing.get(
+                    "packing_ratio",
+                    _cfg_get(args, "packing_ratio", 1.0),
+                )
+            ),
             processor=processor,
         )
         collate_fn = partial(

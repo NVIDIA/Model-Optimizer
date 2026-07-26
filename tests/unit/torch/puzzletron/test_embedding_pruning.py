@@ -13,6 +13,8 @@ from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
     Qwen3P5VLModelDescriptor,
 )
+from modelopt.torch.puzzletron.plugins.automodel.hooks.embedding import HiddenWidthSiteScorer
+from modelopt.torch.puzzletron.plugins.automodel.reduction import MeshGroups
 from modelopt.torch.puzzletron.pruning.embedding_pruning import (
     EmbeddingPruningSpec,
     PackedMinitronImportance,
@@ -23,8 +25,6 @@ from modelopt.torch.puzzletron.pruning.runtime_hidden_width import (
     hidden_width_layer_context,
     hidden_width_module_context,
 )
-from modelopt.torch.puzzletron.plugins.automodel.hooks.embedding import HiddenWidthSiteScorer
-from modelopt.torch.puzzletron.plugins.automodel.reduction import MeshGroups
 
 
 def _spec() -> EmbeddingPruningSpec:

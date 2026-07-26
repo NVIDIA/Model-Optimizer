@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .mesh import normalize_vllm_topology
+
 __all__ = ["VllmMeasurement", "normalize_vllm_measurements"]
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -57,18 +59,7 @@ class VllmMeasurement:
             raise ValueError("vLLM max_num_seqs must be at least batch_size")
         if self.granularity not in {"block", "subblock"}:
             raise ValueError("vLLM granularity must be block or subblock")
-        topology = self.topology
-        tp = int(topology.get("tensor_parallel_size", 1))
-        pp = int(topology.get("pipeline_parallel_size", 1))
-        prefill_cp = int(topology.get("prefill_context_parallel_size", 1))
-        decode_cp = int(topology.get("decode_context_parallel_size", 1))
-        group = int(topology.get("gpu_group_size", tp * pp * prefill_cp))
-        if min(tp, pp, prefill_cp, decode_cp, group) < 1:
-            raise ValueError("vLLM topology values must be positive")
-        if group != tp * pp * prefill_cp:
-            raise ValueError("vLLM gpu_group_size must match TP * PP * prefill CP")
-        if decode_cp > tp or tp % decode_cp:
-            raise ValueError("vLLM decode CP must divide TP")
+        normalize_vllm_topology(self.topology)
 
     @property
     def topology(self) -> Mapping[str, Any]:
@@ -76,15 +67,7 @@ class VllmMeasurement:
 
     @property
     def gpu_group_size(self) -> int:
-        topology = self.topology
-        return int(
-            topology.get(
-                "gpu_group_size",
-                int(topology.get("tensor_parallel_size", 1))
-                * int(topology.get("pipeline_parallel_size", 1))
-                * int(topology.get("prefill_context_parallel_size", 1)),
-            )
-        )
+        return int(normalize_vllm_topology(self.topology)["gpu_count"])
 
     @property
     def identity(self) -> str:

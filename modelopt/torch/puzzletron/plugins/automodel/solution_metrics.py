@@ -27,11 +27,7 @@ import torch
 import torch.distributed as torch_dist
 
 from ...utils.validation import _organize_outputs
-from .flash_dual import (
-    flash_dual_ce_kd,
-    flash_kld_ce_topk,
-    topk_accuracy_and_agreement_from_hidden,
-)
+from .flash_dual import flash_dual_ce_kd, flash_kld_ce_topk, topk_accuracy_and_agreement_from_hidden
 
 __all__ = ["score_batch", "aggregate_solution_scores", "retain_teacher_channels"]
 

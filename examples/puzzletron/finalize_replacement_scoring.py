@@ -9,10 +9,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from embedding_pipeline import finalize_replacement_scoring_diagnostics
+
 from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
-
-from embedding_pipeline import finalize_replacement_scoring_diagnostics
 
 
 def main() -> None:

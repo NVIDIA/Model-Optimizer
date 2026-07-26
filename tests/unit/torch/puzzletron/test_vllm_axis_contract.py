@@ -8,9 +8,7 @@ from modelopt.torch.puzzletron.block_config import (
     MoEConfig,
 )
 from modelopt.torch.puzzletron.candidates import build_candidate_library
-from modelopt.torch.puzzletron.utils.vllm_adapter import (
-    convert_block_configs_to_per_layer_config,
-)
+from modelopt.torch.puzzletron.utils.vllm_adapter import convert_block_configs_to_per_layer_config
 
 
 def test_mla_search_axes_create_cartesian_typed_candidates() -> None:

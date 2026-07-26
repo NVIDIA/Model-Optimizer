@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Run sharded persistent-server AIPerf sweeps for a solution registry."""
 
@@ -127,9 +142,7 @@ def shard_work(
     items: list[dict[str, Any]], *, worker_index: int, worker_count: int
 ) -> list[dict[str, Any]]:
     if worker_count < 1 or not 0 <= worker_index < worker_count:
-        raise ValueError(
-            f"invalid worker index/count: index={worker_index}, count={worker_count}"
-        )
+        raise ValueError(f"invalid worker index/count: index={worker_index}, count={worker_count}")
     return list(items[worker_index::worker_count])
 
 
@@ -183,9 +196,7 @@ def run_worker(
     registry = select_registry_solutions(_registry(puzzle_dir, profile_id), solution_ids)
     items = build_work_items(registry)
     if preflight:
-        items = [
-            item for item in items if item["solution_id"] in {"teacher", "h0512-d0"}
-        ]
+        items = [item for item in items if item["solution_id"] in {"teacher", "h0512-d0"}]
     work = shard_work(
         items,
         worker_index=worker_index,
@@ -286,9 +297,7 @@ def merge_results(
     expected = expected_result_count(registry, concurrencies=concurrencies)
     if len(rows) != expected:
         raise RuntimeError(f"expected {expected} AIPerf results, found {len(rows)} under {root}")
-    identities = {
-        (row["solution_id"], row["topology_id"], int(row["concurrency"])) for row in rows
-    }
+    identities = {(row["solution_id"], row["topology_id"], int(row["concurrency"])) for row in rows}
     if len(identities) != expected:
         raise RuntimeError("AIPerf result matrix has duplicate identities")
     for row in rows:
