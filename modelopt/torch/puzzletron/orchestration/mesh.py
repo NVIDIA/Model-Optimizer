@@ -14,6 +14,7 @@ __all__ = [
     "ParallelMesh",
     "extract_stage_mesh",
     "gpus_per_instance",
+    "normalize_vllm_topology",
     "pack_gpu_allocation",
     "validate_mesh",
     "vllm_topology_to_mesh",
@@ -176,41 +177,85 @@ def _nested_get(config: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str
     return value if isinstance(value, Mapping) else None
 
 
-def vllm_topology_to_mesh(topology: Mapping[str, Any]) -> ParallelMesh:
-    """Convert vLLM TP/PP/CP/DP/EP dimensions to one allocation mesh."""
+def normalize_vllm_topology(topology: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize vLLM topology, including its boolean expert-parallel mode."""
 
-    tp = int(topology.get("tensor_parallel_size", 1) or 1)
-    pp = int(topology.get("pipeline_parallel_size", 1) or 1)
-    cp = int(topology.get("prefill_context_parallel_size", 1) or 1)
-    decode_cp = int(topology.get("decode_context_parallel_size", 1) or 1)
-    dp = int(topology.get("data_parallel_size", 1) or 1)
-    ep = int(topology.get("expert_parallel_size", 1) or 1)
+    tp = int(topology.get("tensor_parallel_size", topology.get("tp", 1)) or 1)
+    pp = int(topology.get("pipeline_parallel_size", topology.get("pp", 1)) or 1)
+    dp = int(topology.get("data_parallel_size", topology.get("dp", 1)) or 1)
+    prefill_cp = int(
+        topology.get("prefill_context_parallel_size", topology.get("prefill_cp", 1)) or 1
+    )
+    decode_cp = int(
+        topology.get("decode_context_parallel_size", topology.get("decode_cp", 1)) or 1
+    )
+    dimensions = {
+        "tp": tp,
+        "pp": pp,
+        "dp": dp,
+        "prefill_cp": prefill_cp,
+        "decode_cp": decode_cp,
+    }
+    invalid = {name: value for name, value in dimensions.items() if value < 1}
+    if invalid:
+        raise ValueError(f"vLLM topology dimensions must be positive: {invalid}")
     if decode_cp > tp or tp % decode_cp:
         raise ValueError(f"decode context parallel size {decode_cp} must divide TP={tp}")
-    if ep > 1:
-        if dp % ep:
-            raise ValueError(f"vLLM DP={dp} must be divisible by EP={ep}")
-        dp_shard = ep
-        dp_replicate = dp // ep
+
+    explicit = topology.get("enable_expert_parallel")
+    legacy = topology.get("expert_parallel_size", topology.get("ep"))
+    full_ep = tp * dp
+    if explicit is None:
+        if legacy is None or int(legacy) == 1:
+            enable_expert_parallel = False
+        elif int(legacy) == full_ep:
+            enable_expert_parallel = True
+        else:
+            raise ValueError(
+                f"expert_parallel_size={legacy} is not an independent vLLM degree; "
+                f"expected 1 or TP * DP={full_ep}"
+            )
     else:
-        dp_shard = 1
-        dp_replicate = dp
-    mesh = ParallelMesh(
-        tp=tp,
-        cp=cp,
-        pp=pp,
-        ep=ep,
-        dp_shard=dp_shard,
-        dp_replicate=dp_replicate,
-    )
-    validate_mesh(mesh)
-    expected_gpu_group = gpus_per_instance(mesh)
-    configured_gpu_group = int(topology.get("gpu_group_size", expected_gpu_group) or 1)
-    if configured_gpu_group != expected_gpu_group:
+        enable_expert_parallel = bool(explicit)
+        expected_legacy = full_ep if enable_expert_parallel else 1
+        if legacy is not None and int(legacy) != expected_legacy:
+            raise ValueError(
+                f"expert_parallel_size={legacy} conflicts with "
+                f"enable_expert_parallel={enable_expert_parallel}; "
+                f"expected {expected_legacy}"
+            )
+
+    gpu_count = tp * pp * prefill_cp * dp
+    configured_gpu_group = int(topology.get("gpu_group_size", gpu_count) or 1)
+    if configured_gpu_group != gpu_count:
         raise ValueError(
             f"gpu_group_size={configured_gpu_group} does not match vLLM "
-            f"world size={expected_gpu_group}"
+            f"world size={gpu_count}"
         )
+    return {
+        **dimensions,
+        "enable_expert_parallel": enable_expert_parallel,
+        "effective_ep": full_ep if enable_expert_parallel else 1,
+        "gpu_count": gpu_count,
+        "distributed_executor_backend": str(
+            topology.get("distributed_executor_backend", "mp")
+        ),
+    }
+
+
+def vllm_topology_to_mesh(topology: Mapping[str, Any]) -> ParallelMesh:
+    """Convert vLLM topology to an allocation-only scheduler mesh."""
+
+    canonical = normalize_vllm_topology(topology)
+    mesh = ParallelMesh(
+        tp=canonical["tp"],
+        cp=canonical["prefill_cp"],
+        pp=canonical["pp"],
+        ep=1,
+        dp_shard=1,
+        dp_replicate=canonical["dp"],
+    )
+    validate_mesh(mesh)
     return mesh
 
 

@@ -20,7 +20,7 @@
 
 from .compiler import compile_campaign_plan, plan_to_dict
 from .controller import CampaignController
-from .mesh import ParallelMesh, pack_gpu_allocation
+from .mesh import ParallelMesh, normalize_vllm_topology, pack_gpu_allocation
 from .schema import (
     AttemptSpec,
     CampaignPlan,
@@ -63,6 +63,7 @@ __all__ = [
     "WorkItem",
     "WorkPlan",
     "compile_campaign_plan",
+    "normalize_vllm_topology",
     "pack_gpu_allocation",
     "plan_to_dict",
 ]

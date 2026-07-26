@@ -9,7 +9,9 @@ from modelopt.torch.puzzletron.orchestration.mesh import (
     ParallelMesh,
     extract_stage_mesh,
     gpus_per_instance,
+    normalize_vllm_topology,
     pack_gpu_allocation,
+    vllm_topology_to_mesh,
 )
 
 
@@ -71,7 +73,7 @@ def test_extract_aiperf_mesh_uses_topology_dimensions_without_gpu_group_double_c
                 "prefill_context_parallel_size": 2,
                 "decode_context_parallel_size": 1,
                 "data_parallel_size": 4,
-                "expert_parallel_size": 4,
+                "enable_expert_parallel": True,
                 "gpu_group_size": 32,
             }
         }
@@ -79,5 +81,72 @@ def test_extract_aiperf_mesh_uses_topology_dimensions_without_gpu_group_double_c
 
     mesh = extract_stage_mesh(config, "aiperf")
 
-    assert mesh == ParallelMesh(tp=2, pp=2, cp=2, dp_shard=4, dp_replicate=1, ep=4)
+    assert mesh == ParallelMesh(tp=2, pp=2, cp=2, dp_shard=1, dp_replicate=4, ep=1)
     assert gpus_per_instance(mesh) == 32
+
+
+def test_vllm_expert_parallel_is_tp_times_dp_without_extra_allocation_axis():
+    topology = normalize_vllm_topology(
+        {
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 2,
+            "data_parallel_size": 4,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "enable_expert_parallel": True,
+            "gpu_group_size": 16,
+        }
+    )
+
+    assert topology["effective_ep"] == 8
+    assert topology["gpu_count"] == 16
+    assert vllm_topology_to_mesh(topology) == ParallelMesh(
+        tp=2,
+        pp=2,
+        cp=1,
+        dp_replicate=4,
+        dp_shard=1,
+        ep=1,
+    )
+
+
+def test_vllm_legacy_expert_parallel_rejects_an_independent_size():
+    with pytest.raises(
+        ValueError,
+        match=r"expert_parallel_size=4.*expected 1 or TP \* DP=8",
+    ):
+        normalize_vllm_topology(
+            {
+                "tensor_parallel_size": 2,
+                "data_parallel_size": 4,
+                "expert_parallel_size": 4,
+            }
+        )
+
+
+def test_vllm_legacy_effective_expert_parallel_enables_boolean_mode():
+    topology = normalize_vllm_topology(
+        {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 4,
+            "expert_parallel_size": 8,
+            "gpu_group_size": 8,
+        }
+    )
+
+    assert topology["enable_expert_parallel"] is True
+    assert topology["effective_ep"] == 8
+
+
+def test_vllm_disabled_expert_parallel_keeps_effective_ep_one():
+    topology = normalize_vllm_topology(
+        {
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 4,
+            "enable_expert_parallel": False,
+            "gpu_group_size": 8,
+        }
+    )
+
+    assert topology["enable_expert_parallel"] is False
+    assert topology["effective_ep"] == 1
