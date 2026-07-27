@@ -26,6 +26,7 @@ import warnings
 import tensorrt as trt
 import torch
 from mmcv import Config, DictAction
+from mmcv.utils import import_modules_from_strings
 from mmdet.apis import set_random_seed
 from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
 from mmdet3d.datasets import build_dataset
@@ -255,8 +256,6 @@ def main():
     if args.cfg_options:
         cfg.merge_from_dict(args.cfg_options)
     if cfg.get("custom_imports"):
-        from mmcv.utils import import_modules_from_strings
-
         import_modules_from_strings(**cfg.custom_imports)
     import_plugin(cfg)
 
