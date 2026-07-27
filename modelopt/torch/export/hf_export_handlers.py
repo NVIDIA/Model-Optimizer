@@ -17,10 +17,11 @@
 
 import collections.abc
 import warnings
+from contextlib import nullcontext
 
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, fsdp2_shard_local_pack
+from modelopt.torch.quantization.utils import fsdp2_shard_local_pack
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
@@ -146,13 +147,12 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
         with fsdp2_shard_local_pack(ctx.model, module):
             _export_fused_experts_keep_fused(module, ctx.dtype)
     else:
-        with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-            _export_fused_experts(
-                module,
-                ctx.dtype,
-                _moe_tied_cache=ctx.moe_tied_cache,
-                _tied_cache=ctx.tied_cache,
-            )
+        _export_fused_experts(
+            module,
+            ctx.dtype,
+            _moe_tied_cache=ctx.moe_tied_cache,
+            _tied_cache=ctx.tied_cache,
+        )
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
@@ -164,11 +164,7 @@ def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> No
     """
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
-    cm = (
-        fsdp2_shard_local_pack(ctx.model, module)
-        if _use_shard_local(ctx.model)
-        else fsdp2_aware_weight_update(ctx.model, module, reshard=False)
-    )
+    cm = fsdp2_shard_local_pack(ctx.model, module) if _use_shard_local(ctx.model) else nullcontext()
     try:
         with cm:
             _export_weight(module, ctx)
@@ -200,8 +196,12 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
             "The embedding will be exported as its fake-quantized float weight."
         )
         return
+    # The embedding lives in the root FSDP unit (reshard_after_forward=False -> its params may be
+    # unsharded at export); fsdp2_shard_local_pack reshards them to Shard(0) first so this rank packs
+    # only its vocab slice in place, no full unshard. Non-FSDP is unchanged.
+    cm = fsdp2_shard_local_pack(ctx.model, module) if _use_shard_local(ctx.model) else nullcontext()
     try:
-        with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
+        with cm:
             _export_weight(module, ctx)
     except AssertionError as e:
         raise AssertionError(
@@ -211,7 +211,16 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
 
 @ExportModuleRegistry.register("Llama4TextExperts", "GptOssExperts")
 def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> None:
-    """Export fused BMM-style expert weights and quantization metadata."""
+    """Export fused BMM-style expert weights and quantization metadata.
+
+    The fused ``gate_up_proj``/``down_proj`` are ``[E, ...]`` (``Shard(0)`` on E under FSDP2) and each
+    is packed WHOLE by ``_export_quantized_weight`` with its singular weight quantizer -- whose amax is
+    calibrated over all experts (a replicated buffer, i.e. global), so packing a single rank's
+    ``[E/world, ...]`` slice yields the same bytes. So under FSDP2 this uses ``fsdp2_shard_local_pack``
+    (pack this rank's slice in place, no unshard); non-FSDP is unchanged. The weight stays fused
+    ``[E, ...]`` -- no per-expert split at write time (that is gated on plural ``_weight_quantizers``,
+    which BMM does not have).
+    """
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
     # TODO: consolidate uncalibrated experts handling logic
@@ -223,6 +232,7 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
         modules=module,
         quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
     )
-    with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
+    cm = fsdp2_shard_local_pack(ctx.model, module) if _use_shard_local(ctx.model) else nullcontext()
+    with cm:
         for weight_name in ["gate_up_proj", "down_proj"]:
             _export_weight(module, ctx, weight_name)

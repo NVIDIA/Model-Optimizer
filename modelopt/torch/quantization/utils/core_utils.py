@@ -1081,6 +1081,13 @@ def fsdp2_shard_local_pack(root_model, module):
 
     root_module = _get_enclosing_fsdp_module(module, root_model)
     group = fully_shard.state(root_module)._fsdp_param_group
+    # The root FSDP module keeps reshard_after_forward=False, so a prior forward (e.g. the export
+    # resmooth) can leave its own params (embed/lm_head/norm) UNSHARDED (full, non-DTensor). Reshard so
+    # every shardable param is Shard(0) and gets captured + FSDPParam-rebuilt below -- otherwise an
+    # in-place pack of an unsharded param is silently discarded when state_dict re-materializes from the
+    # (stale) FSDPParam. Idempotent: a no-op for already-sharded decoder layers.
+    if group is not None and not group.is_sharded:
+        root_module.reshard()
     mapping = create_fsdp_param_mapping(group.fsdp_params, root_model)
 
     captured = {}
@@ -1089,9 +1096,9 @@ def fsdp2_shard_local_pack(root_model, module):
         name = f"{_get_module_name(module, root_model)}.{pname}"
         if name not in mapping:
             continue
-        # A non-DTensor param is replicated / not row-sharded (e.g. shard_root=False root params):
-        # shard-local packing does not apply -> leave it for the handler to pack in place (it stays
-        # full and passes through the gather unchanged). Only Shard(0) DTensors get the shard-local path.
+        # A non-DTensor param that survives the reshard above is genuinely replicated (not row-sharded,
+        # e.g. shard_root=False root params): shard-local packing does not apply -> leave it for the
+        # handler to pack in place. Only Shard(0) DTensors get the shard-local path.
         if not isinstance(param, DTensor):
             continue
         # Fail fast + clear on uneven sharding rather than deadlocking the gather later. Symmetric
