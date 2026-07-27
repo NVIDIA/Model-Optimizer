@@ -316,15 +316,6 @@ def _topology_vllm_args(topology: RuntimeTopology) -> list[str]:
         "--pipeline-parallel-size",
         str(topology.pipeline_parallel_size),
     ]
-    if topology.data_parallel_size > 1:
-        args.extend(
-            (
-                "--data-parallel-size",
-                str(topology.data_parallel_size),
-                "--data-parallel-size-local",
-                str(topology.data_parallel_size),
-            )
-        )
     args.extend(
         (
             "--prefill-context-parallel-size",

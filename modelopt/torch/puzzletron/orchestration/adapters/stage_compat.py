@@ -552,6 +552,9 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
     puzzle_dir = Path(
         config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir", ".")
     )
+    manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
+    if manifest is not None and manifest.get("status") == "skipped":
+        return True
     if stage_id.startswith("post."):
         node_id = stage_id.split(".", 2)[-1]
         summary = _read_mapping(

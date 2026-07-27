@@ -1052,6 +1052,12 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                             return part.get_submodule(name)
                         except AttributeError:
                             continue
+                # A descriptor path is authoritative. Under PP, a stage that
+                # does not own the language final norm may still own unrelated
+                # modules with the same leaf name (for example a VLM vision
+                # merger ``norm``). Falling back by leaf would silently select
+                # that module and apply language hidden-width slicing to it.
+                return None
         final_norm_leafs = {"norm"}
         if descriptor is not None:
             final_norm_name = descriptor.final_norm_name()

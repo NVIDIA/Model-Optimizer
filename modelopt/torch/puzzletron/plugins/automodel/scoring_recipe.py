@@ -1216,6 +1216,42 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             run_check=False,
         )
 
+    @staticmethod
+    def _has_tp_replicated_placement(value, tp_mesh) -> bool:
+        """Return whether ``value`` is replicated specifically over the TP mesh."""
+
+        from torch.distributed.tensor import Replicate
+
+        placements = tuple(getattr(value, "placements", ()) or ())
+        value_mesh = getattr(value, "device_mesh", None)
+        mesh_dim_names = tuple(getattr(value_mesh, "mesh_dim_names", ()) or ())
+        if "tp" in mesh_dim_names and len(mesh_dim_names) == len(placements):
+            return isinstance(placements[mesh_dim_names.index("tp")], Replicate)
+        return (
+            value_mesh is tp_mesh
+            and len(placements) == 1
+            and isinstance(placements[0], Replicate)
+        )
+
+    @classmethod
+    def _module_expects_sequence_parallel_input(cls, module, tp_mesh) -> bool:
+        """Return whether this decoder layer's own norm is TP sequence-parallel.
+
+        A pre-forward FSDP parameter is also a DTensor, but it is sharded over
+        the FSDP mesh. Treating that as evidence of TP sequence parallelism
+        converts the plain PP activation too early; FSDP then materializes the
+        norm weight as a local tensor and the norm receives mixed tensor types.
+        """
+
+        from torch.distributed.tensor import DTensor
+
+        norm = getattr(module, "input_layernorm", None)
+        weight = getattr(norm, "weight", None)
+        return isinstance(weight, DTensor) and cls._has_tp_replicated_placement(
+            weight,
+            tp_mesh,
+        )
+
     def _install_pp_sequence_parallel_input_restorer(self) -> int:
         """Mark non-first PP activations replicated before TP sequence parallelism."""
         from ...tools.logger import aprint
@@ -1239,7 +1275,12 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             pruning_cfg.get("automodel", {}).get("trace_layer_forwards", False)
             if pruning_cfg is not None
             else False
-        )
+        ) or os.environ.get("PUZZLETRON_TRACE_BATCHES", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if trace_enabled:
             _rank_trace(
                 "PP SP restorer decision: "
@@ -1261,6 +1302,33 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         tp_mesh = self.device_mesh["tp"]
 
         def _restore(_module, args, kwargs):
+            expects_dtensor = self._module_expects_sequence_parallel_input(
+                _module,
+                tp_mesh,
+            )
+            if trace_enabled:
+                norm = getattr(_module, "input_layernorm", None)
+                weight = getattr(norm, "weight", None)
+                source_value = args[0] if args else None
+                if source_value is None:
+                    source_value = next(
+                        (
+                            kwargs.get(key)
+                            for key in ("x", "hidden_states", "inputs_embeds", "input_ids")
+                            if kwargs.get(key) is not None
+                        ),
+                        None,
+                    )
+                _rank_trace(
+                    f"PP SP inspect module={type(_module).__name__} "
+                    f"input={type(source_value).__name__} "
+                    f"input_placements={getattr(source_value, 'placements', None)} "
+                    f"direct_norm_weight={type(weight).__name__} "
+                    f"weight_placements={getattr(weight, 'placements', None)} "
+                    f"expects_dtensor={expects_dtensor}"
+                )
+            if not expects_dtensor:
+                return args, kwargs
             source = None
             if args and torch.is_tensor(args[0]):
                 source = "args[0]"
@@ -1287,19 +1355,18 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                 )
             return args, kwargs
 
-        modules = [
+        roots = [
             stage.submod
             for stage in local_stages
             if getattr(stage, "submod", None) is not None
         ]
-        modules.extend(self.model_parts or [])
-        roots = list(modules)
+        roots.extend(self.model_parts or [])
+        modules = []
         for root in roots:
             modules.extend(
                 module
                 for module in root.modules()
-                if module is not root
-                and hasattr(module, "input_layernorm")
+                if hasattr(module, "input_layernorm")
                 and (
                     hasattr(module, "self_attn")
                     or hasattr(module, "linear_attn")
@@ -1314,9 +1381,9 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             seen.add(id(part))
             part.register_forward_pre_hook(_restore, with_kwargs=True, prepend=True)
             count += 1
-        aprint(f"[activation/automodel] PP SP restorer registered on {count} stage module(s)")
+        aprint(f"[activation/automodel] PP SP restorer registered on {count} decoder layer(s)")
         if trace_enabled:
-            _rank_trace(f"PP SP restorer registered on {count} stage module(s)")
+            _rank_trace(f"PP SP restorer registered on {count} decoder layer(s)")
         return count
 
     def _install_layer_forward_traces(self) -> int:

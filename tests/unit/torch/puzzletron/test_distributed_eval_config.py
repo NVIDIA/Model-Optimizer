@@ -1,4 +1,7 @@
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 from modelopt.torch.puzzletron.distributed_eval.config import (
     build_campaign_manifest,
@@ -178,3 +181,21 @@ def test_rpc_manifest_infers_descriptor_from_scoring_parent(monkeypatch, tmp_pat
     assert manifest.data["scoring"]["packed_token_cache_path"] == str(
         tmp_path / "validation.tokens"
     )
+
+
+def test_worker_failure_is_reported_before_distributed_cleanup(capsys):
+    from modelopt.torch.puzzletron.distributed_eval.cli import _run_worker_with_cleanup
+
+    class BrokenWorker:
+        def run(self):
+            raise RuntimeError("worker failed before cleanup")
+
+    def cleanup():
+        print("cleanup called", file=sys.stderr)
+
+    with pytest.raises(RuntimeError, match="worker failed before cleanup"):
+        _run_worker_with_cleanup(BrokenWorker().run, cleanup)
+
+    stderr = capsys.readouterr().err
+    assert "RuntimeError: worker failed before cleanup" in stderr
+    assert stderr.index("RuntimeError: worker failed before cleanup") < stderr.index("cleanup called")

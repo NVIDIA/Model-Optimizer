@@ -226,6 +226,12 @@ def build_stage_recipe_config(automodel_cfg) -> dict:
             "automodel.parallel.dp_shard must be divisible by ep because AutoModel "
             f"overlays EP on the FSDP shard axis; got dp_shard={dp_shard}, ep={ep}"
         )
+    if dp_replicate > 1 and dp_shard == 1:
+        raise ValueError(
+            "automodel.parallel.dp_replicate greater than one requires dp_shard "
+            "greater than one because AutoModel FSDP2 does not support a pure DDP mesh; "
+            f"got dp_shard={dp_shard}, dp_replicate={dp_replicate}"
+        )
 
     distributed = {
         "dp_size": dp_shard * dp_replicate,

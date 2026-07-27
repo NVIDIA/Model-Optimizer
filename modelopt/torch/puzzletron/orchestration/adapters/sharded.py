@@ -6,16 +6,21 @@
 from __future__ import annotations
 
 import subprocess
+import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
+from ..executors.slurm import SlurmExecutor
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
     CommandSpec,
     ExecutionStrategy,
+    JobState,
     PublishedOutput,
     StagePlanNode,
+    TaskTopology,
     ValidatedResult,
     WorkItem,
     WorkPlan,
@@ -35,6 +40,73 @@ _SHARDED_ENTRYPOINTS = {
     ),
     "aiperf": ("examples/puzzletron/run_profile_aiperf_worker.py", []),
 }
+
+
+def _read_log_tail(path: str | None, *, max_chars: int = 8000) -> str:
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(errors="replace")[-max_chars:].strip()
+    except OSError:
+        return ""
+
+
+def _run_slurm_aggregate(
+    *,
+    plan: CampaignPlan,
+    node: StagePlanNode,
+    command: tuple[str, ...],
+) -> str:
+    """Run a controller-side merge in the workers' Slurm execution contract."""
+
+    slurm = plan.runner.slurm
+    if slurm is None:
+        raise ValueError("Slurm aggregation requires runner.slurm")
+    attempt_id = str(uuid.uuid4())
+    log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_merge_{attempt_id}.log"
+    attempt = AttemptSpec(
+        attempt_id=attempt_id,
+        work_id=f"{node.stage_id}:aggregate",
+        stage_id=f"{node.stage_id}_merge",
+        command=CommandSpec(
+            argv=command,
+            cwd=plan.runner.contract.repository,
+            log_path=str(log_path),
+        ),
+        allocation_nodes=1,
+        allocation_gpus=0,
+        contract_hash=plan.contract_hash,
+        metadata={
+            "gpus_per_node": 0,
+            "partition": slurm.partition_cpu or slurm.partition_for_nodes(1),
+        },
+        task_topology=TaskTopology(task_count=1, gpus_per_task=0),
+    )
+    executor = SlurmExecutor(
+        plan.runner,
+        scripts_dir=plan.puzzle_dir / "orchestration" / "sbatch",
+    )
+    handle = executor.submit(attempt)
+    unknown_polls = 0
+    while True:
+        status = executor.poll([handle])[0]
+        if status.state is JobState.COMPLETED:
+            return handle.handle_id
+        if status.state is JobState.UNKNOWN:
+            unknown_polls += 1
+            if unknown_polls >= 30:
+                detail = _read_log_tail(str(log_path))
+                raise RuntimeError(
+                    f"{node.stage_id} aggregation state remained unknown "
+                    f"[{handle.handle_id}]: {detail or status.reason or 'no log output'}"
+                )
+        elif status.state not in {JobState.PENDING, JobState.RUNNING}:
+            detail = _read_log_tail(str(log_path))
+            raise RuntimeError(
+                f"{node.stage_id} aggregation {status.state.value} "
+                f"[{handle.handle_id}]: {detail or status.reason or 'no log output'}"
+            )
+        time.sleep(2)
 
 
 def _gang_item(
@@ -272,21 +344,33 @@ class ShardedStageAdapter(WorkAdapter):
                 plan.experiment_config_path,
                 "--merge",
             )
+        merge_handle = None
         if command is not None:
-            result = subprocess.run(
-                command,
-                cwd=plan.runner.contract.repository,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode:
-                raise RuntimeError(
-                    f"{node.stage_id} aggregation failed: "
-                    f"{result.stderr.strip() or result.stdout.strip()}"
+            if plan.runner.kind == "slurm":
+                merge_handle = _run_slurm_aggregate(
+                    plan=plan,
+                    node=node,
+                    command=command,
                 )
+            else:
+                result = subprocess.run(
+                    command,
+                    cwd=plan.runner.contract.repository,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode:
+                    raise RuntimeError(
+                        f"{node.stage_id} aggregation failed: "
+                        f"{result.stderr.strip() or result.stdout.strip()}"
+                    )
         return PublishedOutput(
             stage_id=node.stage_id,
             artifacts=stage_output_patterns(plan.experiment_config, node.stage_id),
-            summary={"merge_command": command} if command is not None else {},
+            summary=(
+                {"merge_command": command, "merge_handle": merge_handle}
+                if command is not None
+                else {}
+            ),
         )

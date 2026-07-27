@@ -36,9 +36,11 @@ from modelopt.torch.puzzletron.block_config import (
 )
 from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
+    _can_skip_parent_model_load,
     _candidate_execution_context,
     _load_model_config_distributed,
     _quarantine_failed_realization,
+    _report_exception_before_collective,
     _solution_hidden_width,
     _solution_prune_target,
     _solution_prune_targets,
@@ -71,6 +73,34 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
 
     assert solutions == []
     assert pending_ids == []
+
+
+def test_parent_sweep_reports_rank_local_exception_before_collective(capsys):
+    try:
+        raise RuntimeError("rank-local physical slice failure")
+    except RuntimeError:
+        _report_exception_before_collective()
+
+    assert "RuntimeError: rank-local physical slice failure" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("role", "pending_ids", "needs_parent_evaluation", "expected"),
+    [
+        ("original", [], False, False),
+        ("sorted", [], False, True),
+        ("realized_0001", [], False, True),
+        ("sorted", [0], False, False),
+        ("sorted", [], True, False),
+    ],
+)
+def test_parent_sweep_resume_recaches_original_teacher(
+    role, pending_ids, needs_parent_evaluation, expected
+):
+    assert (
+        _can_skip_parent_model_load(role, pending_ids, needs_parent_evaluation)
+        is expected
+    )
 
 
 def test_distributed_config_load_precaches_remote_code_before_import(monkeypatch, tmp_path):
@@ -275,6 +305,25 @@ def test_solution_capture_concatenates_pipeline_microbatches_in_schedule_order()
     recipe._capture_hook(nn.Identity(), (), second)
 
     torch.testing.assert_close(recipe._captured_hidden, torch.cat((first, second), dim=0))
+
+
+def test_descriptor_final_norm_lookup_does_not_fall_back_to_vlm_vision_norm():
+    stage = nn.Module()
+    stage.model = nn.Module()
+    stage.model.language_model = nn.Module()
+    stage.model.visual = nn.Module()
+    stage.model.visual.merger = nn.Module()
+    stage.model.visual.merger.norm = nn.LayerNorm(8)
+
+    descriptor = SimpleNamespace(
+        final_norm_name=lambda: "model.language_model.norm",
+        adapt_module_name_for_model=lambda name, _part: name,
+    )
+    recipe = ReplaceBlockScoringRecipe.__new__(ReplaceBlockScoringRecipe)
+    recipe.model_parts = [stage]
+    recipe._descriptor_cls = lambda: descriptor
+
+    assert recipe._find_final_norm() is None
 
 
 def test_solution_metrics_trim_pp_padding_rows():

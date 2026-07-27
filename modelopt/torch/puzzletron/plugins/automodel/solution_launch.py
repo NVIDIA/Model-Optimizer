@@ -35,6 +35,7 @@ import logging
 import math
 import os
 import time
+import traceback
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 
@@ -67,6 +68,24 @@ def _resolve_output_dir(scoring):
         return Path(scoring.output_dir)
     solutions_path = Path(scoring.solutions_path)
     return solutions_path.with_name(f"{solutions_path.stem}--validation")
+
+
+def _report_exception_before_collective() -> None:
+    """Emit the active rank-local failure before any distributed cleanup can deadlock."""
+    traceback.print_exc()
+
+
+def _can_skip_parent_model_load(
+    role: str,
+    pending_ids: list[int],
+    needs_parent_evaluation: bool,
+) -> bool:
+    """Skip completed candidates, but always rebuild the run-local teacher cache."""
+    return (
+        role != "original"
+        and not pending_ids
+        and not needs_parent_evaluation
+    )
 
 
 def _solution_output_location(scoring, output_dir: Path, solution_id: int) -> tuple[Path, str]:
@@ -960,7 +979,11 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
                 and not skip_parent_equivalence
                 and (force_rescore or not parent_result_path.is_file())
             )
-            if not pending_ids and not needs_parent_evaluation:
+            if _can_skip_parent_model_load(
+                role,
+                pending_ids,
+                needs_parent_evaluation,
+            ):
                 manifest["parents"][role] = {
                     "checkpoint_dir": str(checkpoint_dir),
                     "solutions": len(solutions),
@@ -1145,6 +1168,7 @@ def launch_score_solution_parents_automodel(hydra_cfg) -> None:
         manifest["status"] = "complete"
         write_manifest()
     except BaseException as exc:
+        _report_exception_before_collective()
         manifest["status"] = "failed"
         manifest["error"] = f"{type(exc).__name__}: {exc}"
         write_manifest()

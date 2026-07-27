@@ -153,6 +153,18 @@ def test_context_parallel_rejects_nondivisible_sequence_length():
     assert "CP=3 does not divide sequence length 1024" in _messages(issues)
 
 
+def test_automodel_rejects_replicated_dp_without_fsdp_sharding():
+    issues = validate_automodel_parallelism(
+        _profile(dp_shard=1, dp_replicate=2),
+        MOE_INVENTORY,
+        SELECTED,
+        stage_id="width_sanity",
+        sequence_length=1024,
+    )
+
+    assert "DP-replicate=2 requires DP-shard greater than one" in _messages(issues)
+
+
 def test_dense_model_rejects_expert_parallelism():
     dense_inventory = {**MOE_INVENTORY, "moe": False}
     issues = validate_automodel_parallelism(
@@ -330,3 +342,23 @@ def test_vllm_decode_context_parallel_checks_each_grouped_attention_geometry():
 
     assert "DCP=3" in _messages(issues)
     assert "KV-head count 6" in _messages(issues)
+
+
+def test_vllm_stats_rejects_data_parallel_latency_measurement():
+    issues = validate_vllm_parallelism(
+        {
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": 2,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "enable_expert_parallel": False,
+            "gpu_group_size": 4,
+        },
+        MOE_INVENTORY,
+        SELECTED,
+        stage_id="vllm_stats",
+    )
+
+    assert "DP=1" in _messages(issues)
+    assert "vLLM latency benchmark" in _messages(issues)

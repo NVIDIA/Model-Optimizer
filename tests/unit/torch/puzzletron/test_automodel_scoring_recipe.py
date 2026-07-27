@@ -158,7 +158,8 @@ def test_nonfirst_pp_stage_restores_replicated_tp_layout_before_sequence_paralle
             self.layer = DecoderLayer()
 
         def forward(self, hidden_states=None, inputs_embeds=None):
-            return hidden_states if hidden_states is not None else inputs_embeds
+            value = hidden_states if hidden_states is not None else inputs_embeds
+            return self.layer(value)
 
     module = StageModule()
     model_part = StageModule()
@@ -181,9 +182,14 @@ def test_nonfirst_pp_stage_restores_replicated_tp_layout_before_sequence_paralle
         seen.append((hidden_states.clone(), tp_mesh))
         return hidden_states + 1
 
+    monkeypatch.setattr(
+        recipe,
+        "_module_expects_sequence_parallel_input",
+        lambda _module, _tp_mesh: True,
+    )
     monkeypatch.setattr(recipe, "_replicate_plain_pp_input", fake_replicate)
 
-    assert recipe._install_pp_sequence_parallel_input_restorer() == 4
+    assert recipe._install_pp_sequence_parallel_input_restorer() == 2
     positional_result = module(torch.tensor([3.0]))
     keyword_result = model_part(inputs_embeds=torch.tensor([5.0]))
     native_layer_result = module.layer(x=torch.tensor([7.0]))
@@ -193,3 +199,73 @@ def test_nonfirst_pp_stage_restores_replicated_tp_layout_before_sequence_paralle
     assert torch.equal(positional_result, torch.tensor([4.0]))
     assert torch.equal(keyword_result, torch.tensor([6.0]))
     assert torch.equal(native_layer_result, torch.tensor([8.0]))
+
+
+def test_nonfirst_pp_stage_keeps_plain_input_when_norm_is_not_sequence_parallel(
+    monkeypatch,
+):
+    class DecoderLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_layernorm = torch.nn.LayerNorm(1)
+            self.mlp = torch.nn.Identity()
+
+        def forward(self, x=None):
+            return self.input_layernorm(x)
+
+    class StageModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer = DecoderLayer()
+
+        def forward(self, hidden_states=None):
+            return self.layer(hidden_states)
+
+    module = StageModule()
+    recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
+    recipe.pp = SimpleNamespace(
+        info=SimpleNamespace(
+            has_first_stage=False,
+            stages=[SimpleNamespace(submod=module, is_first=False)],
+        )
+    )
+    recipe.model_parts = [module]
+    recipe.device_mesh = {"tp": "tp-mesh"}
+    recipe._groups = SimpleNamespace(tp_size=2)
+    recipe.cfg = SimpleNamespace(distributed=SimpleNamespace(sequence_parallel=True))
+    seen = []
+
+    def fake_replicate(hidden_states, tp_mesh):
+        seen.append((hidden_states.clone(), tp_mesh))
+        return hidden_states + 1
+
+    monkeypatch.setattr(recipe, "_replicate_plain_pp_input", fake_replicate)
+
+    assert recipe._install_pp_sequence_parallel_input_restorer() == 1
+    result = module(hidden_states=torch.tensor([[3.0]]))
+
+    assert seen == []
+    assert torch.equal(result, torch.tensor([[0.0]]))
+
+
+def test_tp_replicated_placement_is_distinct_from_fsdp_sharding():
+    from torch.distributed.tensor import Replicate, Shard
+
+    tp_mesh = SimpleNamespace(mesh_dim_names=("tp",))
+    fsdp_weight = SimpleNamespace(
+        device_mesh=SimpleNamespace(mesh_dim_names=("dp_shard",)),
+        placements=(Shard(0),),
+    )
+    composable_tp_weight = SimpleNamespace(
+        device_mesh=SimpleNamespace(mesh_dim_names=("dp_shard", "tp")),
+        placements=(Shard(0), Replicate()),
+    )
+
+    assert not ActivationScoringRecipe._has_tp_replicated_placement(
+        fsdp_weight,
+        tp_mesh,
+    )
+    assert ActivationScoringRecipe._has_tp_replicated_placement(
+        composable_tp_weight,
+        tp_mesh,
+    )

@@ -10,9 +10,10 @@ import os
 import signal
 import socket
 import sys
+import traceback
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .campaign import Campaign
 from .config import (
@@ -32,6 +33,26 @@ def _json_print(value: Any) -> None:
 
 def _parse_overrides(args) -> list[str]:
     return list(getattr(args, "override", None) or [])
+
+
+def _run_worker_with_cleanup(
+    run_worker: Callable[[], None],
+    cleanup: Callable[[], None],
+) -> None:
+    """Run a worker while preserving its original failure before process-group cleanup."""
+
+    try:
+        run_worker()
+    except BaseException:
+        print(
+            "[distributed-eval/worker] fatal error before distributed cleanup:",
+            file=sys.stderr,
+            flush=True,
+        )
+        traceback.print_exc()
+        raise
+    finally:
+        cleanup()
 
 
 def command_init(args) -> int:
@@ -247,7 +268,7 @@ def command_worker(args) -> int:
         runtime_cfg = _depth_scoring_config(runtime_cfg)
     timeout_minutes = int(runtime_cfg.get("nccl_timeout_minutes", 120))
     dist.setup(timeout=timedelta(minutes=timeout_minutes))
-    try:
+    def run_worker() -> None:
         executor = AutoModelReplaceBlockExecutor(runtime_cfg)
         worker = DistributedEvaluationWorker(
             campaign,
@@ -258,8 +279,10 @@ def command_worker(args) -> int:
             heartbeat_seconds=args.heartbeat_seconds,
         )
         worker.run()
+
+    try:
+        _run_worker_with_cleanup(run_worker, dist.cleanup)
     finally:
-        dist.cleanup()
         if stack_log is not None:
             faulthandler.unregister(signal.SIGUSR1)
             stack_log.close()

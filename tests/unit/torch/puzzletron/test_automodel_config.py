@@ -98,6 +98,15 @@ def test_build_recipe_config_generates_recipe_from_stage_parallelism(monkeypatch
     assert recipe["optimizer"]["lr"] == 0.0
 
 
+def test_build_recipe_config_rejects_pure_ddp_replication():
+    cfg = _cfg()
+    cfg.pruning.automodel.parallel.dp_shard = 1
+    cfg.pruning.automodel.parallel.dp_replicate = 2
+
+    with pytest.raises(ValueError, match="dp_shard greater than one"):
+        build_recipe_config(cfg)
+
+
 @pytest.mark.parametrize("legacy_key", ["recipe", "recipe_path"])
 def test_build_recipe_config_rejects_removed_recipe_inputs(legacy_key):
     cfg = _cfg()

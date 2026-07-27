@@ -42,6 +42,11 @@ class RuntimeTopology:
                 f"gpu_group_size={self.gpu_group_size} does not match vLLM "
                 f"world_size={self.world_size}"
             )
+        if self.data_parallel_size != 1:
+            raise ValueError(
+                "vLLM runtime statistics use the single-process latency benchmark, "
+                "which requires data_parallel_size=1"
+            )
         if self.decode_context_parallel_size > self.tensor_parallel_size:
             raise ValueError(
                 "decode_context_parallel_size cannot exceed tensor_parallel_size"
@@ -84,7 +89,6 @@ class RuntimeTopology:
         _validate_vllm_cli_support(
             self.prefill_context_parallel_size,
             self.decode_context_parallel_size,
-            self.data_parallel_size,
             self.enable_expert_parallel,
         )
 
@@ -109,14 +113,12 @@ class RuntimeTopology:
 def _validate_vllm_cli_support(
     prefill_cp: int,
     decode_cp: int,
-    data_parallel_size: int,
     enable_expert_parallel: bool,
 ) -> None:
     """Fail before model creation when installed vLLM lacks topology flags."""
     if (
         prefill_cp == 1
         and decode_cp == 1
-        and data_parallel_size == 1
         and not enable_expert_parallel
     ):
         return
@@ -135,8 +137,6 @@ def _validate_vllm_cli_support(
         required.append("--prefill-context-parallel-size")
     if decode_cp > 1:
         required.append("--decode-context-parallel-size")
-    if data_parallel_size > 1:
-        required.extend(("--data-parallel-size", "--data-parallel-size-local"))
     if enable_expert_parallel:
         required.append("--enable-expert-parallel")
     missing = [flag for flag in required if flag not in help_text]

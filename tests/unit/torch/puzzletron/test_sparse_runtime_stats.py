@@ -24,7 +24,9 @@ from modelopt.torch.puzzletron.block_config import (
 from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.pipeline_config import (
     adapt_runtime_hydra_config,
+    load_runtime_hydra_config,
     normalize_pipeline_config,
+    pipeline_config_from_path,
 )
 from modelopt.torch.puzzletron.stage_runner import _preflight
 from modelopt.torch.puzzletron.stages import DEFAULT_HANDLERS
@@ -50,6 +52,7 @@ from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
     _unique_hidden_sizes,
     _validate_sparse_runtime_settings,
 )
+from modelopt.torch.puzzletron.subblock_stats.measurements import apply_vllm_measurement
 from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import RuntimeMeasurement
 
 
@@ -57,6 +60,49 @@ def _indexed(config, layer):
     return immutabledict(
         {"subblock_config": config, "parent_layer_indices": (layer,)}
     )
+
+
+def test_runtime_hydra_config_preserves_named_vllm_measurement_overlay(tmp_path):
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "puzzle_dir": str(tmp_path / "run"),
+                "vllm_stats": {
+                    "enabled": True,
+                    "subblock_stats_filename": "subblock_stats.json",
+                    "measurements": {
+                        "isl_heavy": {
+                            "prefill_seq_len": 32,
+                            "generation_seq_len": 8,
+                            "max_num_seqs": 2,
+                            "batch_size": 2,
+                            "runtime_stats": {
+                                "topology": {
+                                    "tensor_parallel_size": 1,
+                                    "pipeline_parallel_size": 1,
+                                    "data_parallel_size": 1,
+                                    "prefill_context_parallel_size": 1,
+                                    "decode_context_parallel_size": 1,
+                                    "gpu_group_size": 1,
+                                }
+                            },
+                        }
+                    },
+                },
+            }
+        )
+    )
+    selected = apply_vllm_measurement(
+        pipeline_config_from_path(config_path),
+        "isl_heavy",
+    )
+
+    hydra_cfg = load_runtime_hydra_config(selected)
+
+    expected = "artifacts/vllm_stats/measurements/isl_heavy/subblock_stats.json"
+    assert selected["vllm_stats"]["subblock_stats_filename"] == expected
+    assert hydra_cfg.calc_subblock_stats.subblock_stats_filename == expected
 
 
 def test_parameter_stats_hidden_widths_are_stably_deduplicated():
@@ -1255,36 +1301,17 @@ def test_runtime_cache_schema_separates_candidate_slope_from_legacy_cache():
     assert runtime_vllm._RUNTIME_CACHE_SCHEMA_VERSION == 5
 
 
-def test_vllm_topology_args_include_data_and_expert_parallelism():
-    from modelopt.torch.puzzletron.subblock_stats.runtime_vllm import _topology_vllm_args
+def test_vllm_runtime_topology_rejects_data_parallel_latency_measurement():
     from modelopt.torch.puzzletron.subblock_stats.topology import RuntimeTopology
 
-    topology = RuntimeTopology.from_config(
-        {
-            "tensor_parallel_size": 2,
-            "data_parallel_size": 2,
-            "enable_expert_parallel": True,
-            "gpu_group_size": 4,
-        }
-    )
-
-    assert _topology_vllm_args(topology) == [
-        "--tensor-parallel-size",
-        "2",
-        "--pipeline-parallel-size",
-        "1",
-        "--data-parallel-size",
-        "2",
-        "--data-parallel-size-local",
-        "2",
-        "--prefill-context-parallel-size",
-        "1",
-        "--decode-context-parallel-size",
-        "1",
-        "--distributed-executor-backend",
-        "mp",
-        "--enable-expert-parallel",
-    ]
+    with pytest.raises(ValueError, match="data_parallel_size=1"):
+        RuntimeTopology.from_config(
+            {
+                "tensor_parallel_size": 2,
+                "data_parallel_size": 2,
+                "gpu_group_size": 4,
+            }
+        )
 
 
 def test_runtime_config_records_candidate_slope_estimator_metadata():

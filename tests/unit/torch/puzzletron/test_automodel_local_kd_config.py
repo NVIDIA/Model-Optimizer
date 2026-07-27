@@ -230,6 +230,24 @@ def test_local_kd_hidden_mask_excludes_padded_tokens_from_replay_loss() -> None:
     assert masked_teacher.tolist() == [[0.0, 0.0], [0.0, 0.0]]
 
 
+def test_local_kd_empty_mask_shard_backpropagates_finite_zero_without_metric() -> None:
+    source = torch.ones((1, 2, 3), requires_grad=True)
+    student = source[torch.zeros((1, 2), dtype=torch.bool)]
+    teacher = torch.zeros_like(student)
+
+    loss, contributes_metric = local_kd_recipe._local_kd_loss_or_zero(
+        lambda actual, expected: ((actual - expected) ** 2).mean(),
+        student,
+        teacher,
+    )
+
+    assert not contributes_metric
+    assert torch.isfinite(loss)
+    assert loss.item() == 0.0
+    loss.backward()
+    torch.testing.assert_close(source.grad, torch.zeros_like(source))
+
+
 def test_elastic_local_kd_trend_is_reported_without_incomparable_hard_gate() -> None:
     records = [
         {"loss": loss, "hidden_width": width}

@@ -147,6 +147,17 @@ def _mask_local_kd_tensors(
     )
 
 
+def _local_kd_loss_or_zero(loss_fn, student, teacher) -> tuple[torch.Tensor, bool]:
+    """Keep empty DP/CP shards in autograd without treating them as observations."""
+
+    if student.numel() == 0:
+        # Every rank must participate in FSDP gradient synchronization.  A
+        # differentiable zero preserves that collective schedule, while
+        # excluding the empty shard from metrics avoids NaN (and zero bias).
+        return student.sum() * 0.0, False
+    return loss_fn(student, teacher), True
+
+
 def _cached_subblock_cost(
     cache: dict[tuple[int, str], int],
     *,
@@ -1351,7 +1362,11 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                             f"local KD shape mismatch at layer {layer_idx}: "
                             f"student={tuple(student_tensor.shape)} teacher={tuple(teacher_tensor.shape)}"
                         )
-                    loss = loss_fn(student_tensor, teacher_tensor)
+                    loss, contributes_metric = _local_kd_loss_or_zero(
+                        loss_fn,
+                        student_tensor,
+                        teacher_tensor,
+                    )
                     if backward and loss.requires_grad:
                         loss = _backward_disjoint_loss(
                             loss,
@@ -1360,7 +1375,8 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                         )
                         did_backward = True
                     partials.append(loss)
-                    values[layer_idx].append(loss.detach())
+                    if contributes_metric:
+                        values[layer_idx].append(loss.detach())
 
         if not partials:
             return None, {}, False
@@ -1441,7 +1457,11 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                             f"student={tuple(student_tensor.shape)} "
                             f"teacher={tuple(teacher_tensor.shape)}"
                         )
-                    loss = loss_fn(student_tensor, teacher_tensor)
+                    loss, contributes_metric = _local_kd_loss_or_zero(
+                        loss_fn,
+                        student_tensor,
+                        teacher_tensor,
+                    )
                     if backward and loss.requires_grad:
                         loss = _backward_disjoint_loss(
                             loss,
@@ -1450,9 +1470,10 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                         )
                         did_backward = True
                     partials.append(loss)
-                    detached = loss.detach()
-                    layer_values[layer_idx].append(detached)
-                    subblock_values[f"{layer_idx}:{kind}:{name}"].append(detached)
+                    if contributes_metric:
+                        detached = loss.detach()
+                        layer_values[layer_idx].append(detached)
+                        subblock_values[f"{layer_idx}:{kind}:{name}"].append(detached)
 
         if not partials:
             self._current_subblock_metrics = {}
@@ -1924,6 +1945,10 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 str(layer_idx): sum(values) / len(values)
                 for layer_idx, values in sorted(merged.items())
             }
+            if not per_layer:
+                raise RuntimeError(
+                    "local KD batch contains no valid tokens after applying the hidden mask"
+                )
             merged_subblocks: dict[str, list[float]] = defaultdict(list)
             for rank_metrics in gathered_subblocks:
                 for key, value in (rank_metrics or {}).items():

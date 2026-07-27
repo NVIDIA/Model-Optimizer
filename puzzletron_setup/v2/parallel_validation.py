@@ -315,6 +315,15 @@ def validate_automodel_parallelism(
                 f"EP={dimensions['ep']}.",
             )
         )
+    if dimensions["dp_replicate"] > 1 and dimensions["dp_shard"] == 1:
+        issues.append(
+            ParallelCompatibilityIssue(
+                f"{stage_id}.dp_replicate",
+                f"DP-replicate={dimensions['dp_replicate']} requires DP-shard greater "
+                "than one because AutoModel FSDP2 does not support a pure DDP mesh. "
+                "Choose DP-replicate=1 or increase DP-shard.",
+            )
+        )
     if bool(_value(profile, "sequence_parallel", False)) and dimensions["tp"] == 1:
         issues.append(
             ParallelCompatibilityIssue(
@@ -392,6 +401,14 @@ def validate_vllm_parallelism(
         return (ParallelCompatibilityIssue(f"{stage_id}.topology", str(error)),)
     geometry = _geometry(inventory, _mapping(pruning), "candidate")
     issues: list[ParallelCompatibilityIssue] = []
+    if stage_id.startswith("vllm_stats") and canonical["dp"] != 1:
+        issues.append(
+            ParallelCompatibilityIssue(
+                f"{stage_id}.dp",
+                "The vLLM latency benchmark used for runtime statistics requires "
+                f"DP=1; got DP={canonical['dp']}.",
+            )
+        )
     tp_issue = _divisibility_issue(
         stage_id=stage_id,
         setting="tp",

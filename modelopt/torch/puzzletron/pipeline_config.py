@@ -316,6 +316,7 @@ def load_runtime_hydra_config(config: dict[str, Any]) -> DictConfig:
     )
     OmegaConf.set_struct(hydra_cfg, False)
     _install_runtime_section_aliases(hydra_cfg)
+    _overlay_runtime_section_aliases(hydra_cfg, config)
     return adapt_runtime_hydra_config(hydra.utils.instantiate(hydra_cfg), config)
 
 
@@ -327,6 +328,23 @@ def _install_runtime_section_aliases(hydra_cfg: DictConfig) -> None:
             hydra_cfg[runtime_name] = OmegaConf.create(
                 OmegaConf.to_container(hydra_cfg[canonical], resolve=False)
             )
+
+
+def _overlay_runtime_section_aliases(
+    hydra_cfg: DictConfig,
+    config: dict[str, Any],
+) -> None:
+    """Apply derived canonical stage sections over recomposed Hydra defaults."""
+
+    for canonical, runtime_name in _RUNTIME_SECTION_ALIASES.items():
+        payload = config.get(canonical)
+        if not isinstance(payload, dict):
+            continue
+        overlay = OmegaConf.create(deepcopy(payload))
+        canonical_base = hydra_cfg.get(canonical) or OmegaConf.create({})
+        runtime_base = hydra_cfg.get(runtime_name) or OmegaConf.create({})
+        hydra_cfg[canonical] = OmegaConf.merge(canonical_base, overlay)
+        hydra_cfg[runtime_name] = OmegaConf.merge(runtime_base, overlay)
 
 
 def _ensure_dictconfig_child(cfg: DictConfig, key: str) -> DictConfig:

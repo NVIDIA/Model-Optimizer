@@ -130,6 +130,39 @@ def test_nemotron_materializer_is_bounded_balanced_and_manifested(tmp_path):
     ]
 
 
+def test_nemotron_materializer_serializes_before_requesting_the_next_row(tmp_path):
+    output = tmp_path / "streamed"
+
+    def sample_loader(**kwargs):
+        del kwargs
+        yield {
+            "id": "row-0",
+            "messages": _messages("row-0.png"),
+            "image": Image.new("RGB", (2, 2)),
+        }
+        transactions = list(tmp_path.glob(".streamed-*"))
+        assert len(transactions) == 1
+        assert (transactions[0] / "images" / "0000_00.png").is_file()
+        yield {
+            "id": "row-1",
+            "messages": _messages("row-1.png"),
+            "image": Image.new("RGB", (2, 2)),
+        }
+
+    manifest = materialize_nemotron_vlm_dataset(
+        VlmAcquisitionSpec(
+            output_dir=output,
+            subsets=("wiki_en",),
+            num_samples=2,
+            revision="sha",
+        ),
+        sample_loader=sample_loader,
+    )
+
+    assert manifest["sample_count"] == 2
+    assert not list(tmp_path.glob(".streamed-*"))
+
+
 def test_nemotron_materializer_redistributes_exhausted_subset_quota(tmp_path):
     def sample_loader(*, subset, **kwargs):
         del kwargs

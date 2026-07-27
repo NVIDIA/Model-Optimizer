@@ -373,74 +373,78 @@ def materialize_nemotron_vlm_dataset(
     requested_quotas = largest_remainder_quotas(row_counts, spec.num_samples)
     target_quotas = dict(requested_quotas)
     materialized_rows = dict.fromkeys(spec.subsets, 0)
-    samples: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
-    active = list(range(len(iterators)))
-    redistributed_rows = 0
-    while active and len(samples) < spec.num_samples:
-        made_progress = False
-        for index in tuple(active):
-            if len(samples) == spec.num_samples:
-                break
-            subset = spec.subsets[index]
-            if materialized_rows[subset] >= target_quotas[subset]:
-                continue
-            try:
-                row = next(iterators[index])
-            except StopIteration:
-                active.remove(index)
-                deficit = target_quotas[subset] - materialized_rows[subset]
-                target_quotas[subset] = materialized_rows[subset]
-                remaining = {
-                    spec.subsets[other]: max(
-                        row_counts[spec.subsets[other]]
-                        - materialized_rows[spec.subsets[other]],
-                        1,
-                    )
-                    for other in active
-                }
-                if deficit > 0 and remaining:
-                    additions = largest_remainder_quotas(remaining, deficit)
-                    for name, amount in additions.items():
-                        target_quotas[name] += amount
-                    redistributed_rows += deficit
-                continue
-            made_progress = True
-            try:
-                samples.append(
-                    normalize_nemotron_vlm_sample(
+    diagnostics = {
+        "rejected_rows": failures,
+        "requested_quotas": requested_quotas,
+        "materialized_rows": materialized_rows,
+        "redistributed_rows": 0,
+    }
+
+    def normalized_samples():
+        active = list(range(len(iterators)))
+        produced = 0
+        while active and produced < spec.num_samples:
+            made_progress = False
+            for index in tuple(active):
+                if produced == spec.num_samples:
+                    break
+                subset = spec.subsets[index]
+                if materialized_rows[subset] >= target_quotas[subset]:
+                    continue
+                try:
+                    row = next(iterators[index])
+                except StopIteration:
+                    active.remove(index)
+                    deficit = target_quotas[subset] - materialized_rows[subset]
+                    target_quotas[subset] = materialized_rows[subset]
+                    remaining = {
+                        spec.subsets[other]: max(
+                            row_counts[spec.subsets[other]]
+                            - materialized_rows[spec.subsets[other]],
+                            1,
+                        )
+                        for other in active
+                    }
+                    if deficit > 0 and remaining:
+                        additions = largest_remainder_quotas(remaining, deficit)
+                        for name, amount in additions.items():
+                            target_quotas[name] += amount
+                        diagnostics["redistributed_rows"] += deficit
+                    continue
+                made_progress = True
+                try:
+                    sample = normalize_nemotron_vlm_sample(
                         row,
                         subset=subset,
                         revision=revision,
                     )
+                    materialized_rows[subset] += 1
+                    produced += 1
+                    yield sample
+                except (TypeError, ValueError) as error:
+                    failures.append(
+                        {
+                            "subset": subset,
+                            "row_id": str(row.get("id", "")),
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    )
+            if not made_progress and active:
+                raise RuntimeError(
+                    "proportional Nemotron-VLM sampling made no progress; "
+                    f"targets={target_quotas}, materialized={materialized_rows}"
                 )
-                materialized_rows[subset] += 1
-            except (TypeError, ValueError) as error:
-                failures.append(
-                    {
-                        "subset": subset,
-                        "row_id": str(row.get("id", "")),
-                        "error": f"{type(error).__name__}: {error}",
-                    }
-                )
-        if not made_progress and active:
+        if produced != spec.num_samples:
             raise RuntimeError(
-                "proportional Nemotron-VLM sampling made no progress; "
-                f"targets={target_quotas}, materialized={materialized_rows}"
+                f"only found {produced}/{spec.num_samples} valid Nemotron-VLM rows; "
+                f"first failures={failures[:3]}"
             )
-    if len(samples) != spec.num_samples:
-        raise RuntimeError(
-            f"only found {len(samples)}/{spec.num_samples} valid Nemotron-VLM rows; "
-            f"first failures={failures[:3]}"
-        )
+
     return materialize_normalized_conversation_samples(
-        samples,
+        normalized_samples(),
         spec.output_dir,
         acquisition=identity,
-        diagnostics={
-            "rejected_rows": failures,
-            "requested_quotas": requested_quotas,
-            "materialized_rows": materialized_rows,
-            "redistributed_rows": redistributed_rows,
-        },
+        diagnostics=diagnostics,
+        expected_count=spec.num_samples,
     )

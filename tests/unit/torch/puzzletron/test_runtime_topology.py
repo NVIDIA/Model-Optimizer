@@ -23,19 +23,19 @@ def test_runtime_split_preserves_explicit_larger_campaign(monkeypatch):
     assert _observed_num_nodes(4) == 4
 
 
-def test_runtime_topology_includes_data_and_expert_parallelism():
+def test_runtime_topology_includes_context_and_expert_parallelism():
     topology = RuntimeTopology.from_config(
         {
             "tensor_parallel_size": 2,
             "pipeline_parallel_size": 1,
-            "data_parallel_size": 2,
+            "data_parallel_size": 1,
             "prefill_context_parallel_size": 2,
             "decode_context_parallel_size": 1,
             "enable_expert_parallel": True,
-            "gpu_group_size": 8,
+            "gpu_group_size": 4,
         }
     )
 
-    assert topology.world_size == 8
-    assert topology.to_dict()["data_parallel_size"] == 2
+    assert topology.world_size == 4
+    assert topology.to_dict()["data_parallel_size"] == 1
     assert topology.to_dict()["enable_expert_parallel"] is True

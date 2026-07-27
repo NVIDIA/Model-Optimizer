@@ -3,10 +3,12 @@
 
 """Tests for orchestration executors."""
 
+import time
 from pathlib import Path
 
 import yaml
 
+import puzzletron_orchestrator.adapters.sharded as sharded_module
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
@@ -22,10 +24,14 @@ from puzzletron_orchestrator.schema import (
     ExecutionContract,
     ExecutionStrategy,
     FailurePolicy,
+    JobHandle,
+    JobState,
+    JobStatus,
     RunnerEnvironment,
     SlurmRunnerConfig,
     StagePlanNode,
     TaskTopology,
+    WorkPlan,
 )
 
 
@@ -42,9 +48,12 @@ def test_local_executor_runs_successful_command(tmp_path: Path):
         ),
     )
     handle = executor.submit(attempt)
-    statuses = executor.poll([handle])
-    assert statuses[0].state.value == "completed"
-    assert log_path.read_text().strip() == "ok"
+    deadline = time.monotonic() + 5
+    while (status := executor.poll([handle])[0]).state is JobState.RUNNING:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert status.state is JobState.COMPLETED
+    assert log_path.read_text().splitlines()[-1] == "ok"
 
 
 def test_render_sbatch_script_requests_gpus_per_node():
@@ -70,6 +79,7 @@ def test_render_sbatch_script_requests_gpus_per_node():
         allocation_nodes=2,
         allocation_gpus=16,
         metadata={"gpus_per_node": 8},
+        task_topology=TaskTopology(task_count=2, gpus_per_task=8),
     )
     script = render_sbatch_script(
         attempt=attempt,
@@ -119,6 +129,98 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     srun = next(line for line in script.splitlines() if line.startswith("srun "))
     assert "--gpus-per-task" not in srun
     assert "--gpu-bind" not in srun
+
+
+def test_vllm_aggregation_uses_slurm_execution_contract(tmp_path: Path, monkeypatch):
+    """Controller-side merges must run in the same container/venv as workers."""
+
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(
+            repository=str(tmp_path),
+            venv=".venv-worker",
+            container="/images/pytorch.sqsh",
+        ),
+        slurm=SlurmRunnerConfig(
+            account="acct",
+            partition_cpu="cpu",
+        ),
+    )
+    node = StagePlanNode(
+        stage_id="vllm_stats",
+        strategy=ExecutionStrategy.SHARDED,
+        instances=1,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={},
+        gpus_per_instance=1,
+        gpus_per_node=8,
+        nodes=1,
+        total_gpus=1,
+        exclusive=False,
+        parents=("convert",),
+        distributed=False,
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={"puzzle_dir": str(tmp_path / "run")},
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+    submitted = []
+
+    class FakeSlurmExecutor:
+        def __init__(self, configured_runner, *, scripts_dir=None):
+            assert configured_runner is runner
+            assert scripts_dir == plan.puzzle_dir / "orchestration" / "sbatch"
+
+        def submit(self, attempt):
+            submitted.append(attempt)
+            return JobHandle(
+                backend="slurm",
+                handle_id="slurm-123",
+                attempt_id=attempt.attempt_id,
+                metadata={"job_id": "123", "log_paths": (attempt.command.log_path,)},
+            )
+
+        def poll(self, handles):
+            return [
+                JobStatus(
+                    handle=handles[0],
+                    state=JobState.COMPLETED,
+                    exit_code=0,
+                    log_paths=tuple(handles[0].metadata["log_paths"]),
+                )
+            ]
+
+    monkeypatch.setattr(sharded_module, "SlurmExecutor", FakeSlurmExecutor, raising=False)
+
+    def fail_local_subprocess(*_args, **_kwargs):
+        raise AssertionError("aggregation escaped the Slurm execution contract")
+
+    monkeypatch.setattr(sharded_module.subprocess, "run", fail_local_subprocess)
+    adapter = adapter_for_stage(node)
+    result = adapter.aggregate(
+        plan=plan,
+        node=node,
+        work_plan=WorkPlan(
+            stage_id="vllm_stats",
+            strategy=ExecutionStrategy.SHARDED,
+            items=(),
+            aggregate_required=True,
+        ),
+    )
+
+    assert result is not None
+    assert len(submitted) == 1
+    attempt = submitted[0]
+    assert attempt.allocation_gpus == 0
+    assert attempt.metadata["gpus_per_node"] == 0
+    assert attempt.metadata["partition"] == "cpu"
+    assert attempt.command.argv[-1] == "--merge"
+    assert result.summary["merge_handle"] == "slurm-123"
 
 
 def test_render_sbatch_script_never_requests_exclusive():

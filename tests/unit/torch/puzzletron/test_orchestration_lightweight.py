@@ -353,6 +353,19 @@ def test_stage_completeness_requires_every_declared_output(tmp_path: Path) -> No
     assert stage_is_complete(config, "tokenize_data")
 
 
+def test_stage_completeness_accepts_successful_noop_manifest(tmp_path: Path) -> None:
+    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
+
+    config = {"puzzle_dir": str(tmp_path)}
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "tokenize_data.json").write_text(
+        json.dumps({"status": "skipped", "outputs": {"enabled": False}})
+    )
+
+    assert stage_is_complete(config, "tokenize_data")
+
+
 def test_vllm_completeness_requires_nonempty_canonical_stats(tmp_path: Path) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 

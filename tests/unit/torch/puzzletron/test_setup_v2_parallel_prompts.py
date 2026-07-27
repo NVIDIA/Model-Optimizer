@@ -300,7 +300,7 @@ def test_vllm_topology_prompt_rejects_incompatible_setting_and_reprompts(
             True,
             2,
             1,
-            4,
+            1,
             1,
             1,
             True,
@@ -319,14 +319,15 @@ def test_vllm_topology_prompt_rejects_incompatible_setting_and_reprompts(
     assert topology == {
         "tensor_parallel_size": 2,
         "pipeline_parallel_size": 1,
-        "data_parallel_size": 4,
+        "data_parallel_size": 1,
         "prefill_context_parallel_size": 1,
         "decode_context_parallel_size": 1,
         "enable_expert_parallel": True,
-        "gpu_group_size": 8,
+        "gpu_group_size": 2,
         "distributed_executor_backend": "mp",
     }
     assert backend.remaining == 0
     output = capsys.readouterr().out
     assert "effective EP=32" in output
+    assert "requires DP=1" in output
     assert "Choose a different parallel setting." in output

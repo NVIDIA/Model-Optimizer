@@ -20,7 +20,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from collections.abc import Mapping, Sequence
+import os
+import shutil
+import tempfile
+from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -87,13 +90,14 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def materialize_normalized_conversation_samples(
-    samples: Sequence[Mapping[str, Any]],
+    samples: Iterable[Mapping[str, Any]],
     output_dir: str | Path,
     *,
     acquisition: Mapping[str, Any] | None = None,
     diagnostics: Mapping[str, Any] | None = None,
+    expected_count: int | None = None,
 ) -> dict[str, Any]:
-    """Write normalized conversations and image bytes for offline reuse."""
+    """Stream normalized conversations into an atomically published offline subset."""
     output_dir = Path(output_dir)
     manifest_path = output_dir / "manifest.json"
     samples_path = output_dir / "samples.json"
@@ -104,70 +108,103 @@ def materialize_normalized_conversation_samples(
                 f"existing materialization at {output_dir} does not match requested acquisition"
             )
         return manifest
-    output_dir.mkdir(parents=True, exist_ok=True)
-    images_dir = output_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    serialized_samples: list[dict[str, Any]] = []
-    image_manifest: list[dict[str, Any]] = []
-    for sample_index, raw_sample in enumerate(samples):
-        sample = deepcopy(dict(raw_sample))
-        source = dict(sample.get("source") or {})
-        row_id = str(source.get("row_id", sample_index))
-        image_index = 0
-        for message in sample.get("conversation", []):
-            for item in message.get("content", []):
-                if item.get("type") != "image":
-                    continue
-                image = _pil_image(item.get("image")).convert("RGB")
-                relative = Path("images") / f"{sample_index:04d}_{image_index:02d}.png"
-                absolute = output_dir / relative
-                temporary = absolute.with_suffix(".png.tmp")
-                image.save(temporary, format="PNG")
-                temporary.replace(absolute)
-                digest = hashlib.sha256(absolute.read_bytes()).hexdigest()
-                item["image"] = relative.as_posix()
-                image_manifest.append(
-                    {
-                        "sample_index": sample_index,
-                        "row_id": row_id,
-                        "image_index": image_index,
-                        "path": relative.as_posix(),
-                        "sha256": digest,
-                        "width": image.width,
-                        "height": image.height,
-                    }
-                )
-                image_index += 1
-        if image_index != int(sample.get("image_count", image_index)):
+    if output_dir.exists():
+        if any(output_dir.iterdir()):
             raise ValueError(
-                f"sample {row_id!r} declared {sample.get('image_count')} images but serialized {image_index}"
+                f"dataset destination exists without a complete manifest: {output_dir}"
             )
-        serialized_samples.append(sample)
-
-    revisions = sorted(
-        {
-            (
-                str((sample.get("source") or {}).get("dataset", "")),
-                str((sample.get("source") or {}).get("revision", "")),
-            )
-            for sample in serialized_samples
-        }
+        output_dir.rmdir()
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    transaction = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}-",
+            dir=str(output_dir.parent),
+        )
     )
-    manifest = {
-        "version": 1,
-        "sample_count": len(serialized_samples),
-        "image_count": len(image_manifest),
-        "sources": [{"dataset": dataset, "revision": revision} for dataset, revision in revisions],
-        "images": image_manifest,
-    }
-    if acquisition is not None:
-        manifest["acquisition"] = dict(acquisition)
-    if diagnostics:
-        manifest["diagnostics"] = dict(diagnostics)
-    _write_json_atomic(samples_path, serialized_samples)
-    _write_json_atomic(manifest_path, manifest)
-    return manifest
+    images_dir = transaction / "images"
+    images_dir.mkdir()
+    image_manifest: list[dict[str, Any]] = []
+    revisions: set[tuple[str, str]] = set()
+    sample_count = 0
+    try:
+        with (transaction / "samples.json").open("w", encoding="utf-8") as stream:
+            stream.write("[\n")
+            for sample_index, raw_sample in enumerate(samples):
+                sample = deepcopy(dict(raw_sample))
+                source = dict(sample.get("source") or {})
+                revisions.add(
+                    (
+                        str(source.get("dataset", "")),
+                        str(source.get("revision", "")),
+                    )
+                )
+                row_id = str(source.get("row_id", sample_index))
+                image_index = 0
+                for message in sample.get("conversation", []):
+                    for item in message.get("content", []):
+                        if item.get("type") != "image":
+                            continue
+                        image = _pil_image(item.get("image")).convert("RGB")
+                        try:
+                            width, height = image.size
+                            relative = (
+                                Path("images")
+                                / f"{sample_index:04d}_{image_index:02d}.png"
+                            )
+                            absolute = transaction / relative
+                            temporary = absolute.with_suffix(".png.tmp")
+                            image.save(temporary, format="PNG")
+                            temporary.replace(absolute)
+                        finally:
+                            image.close()
+                        digest = hashlib.sha256(absolute.read_bytes()).hexdigest()
+                        item["image"] = relative.as_posix()
+                        image_manifest.append(
+                            {
+                                "sample_index": sample_index,
+                                "row_id": row_id,
+                                "image_index": image_index,
+                                "path": relative.as_posix(),
+                                "sha256": digest,
+                                "width": width,
+                                "height": height,
+                            }
+                        )
+                        image_index += 1
+                if image_index != int(sample.get("image_count", image_index)):
+                    raise ValueError(
+                        f"sample {row_id!r} declared {sample.get('image_count')} "
+                        f"images but serialized {image_index}"
+                    )
+                if sample_index:
+                    stream.write(",\n")
+                json.dump(sample, stream, sort_keys=True)
+                sample_count += 1
+            stream.write("\n]\n")
+        if expected_count is not None and sample_count != int(expected_count):
+            raise RuntimeError(
+                f"materialized {sample_count}/{int(expected_count)} expected rows"
+            )
+        manifest = {
+            "version": 1,
+            "sample_count": sample_count,
+            "image_count": len(image_manifest),
+            "sources": [
+                {"dataset": dataset, "revision": revision}
+                for dataset, revision in sorted(revisions)
+            ],
+            "images": image_manifest,
+        }
+        if acquisition is not None:
+            manifest["acquisition"] = dict(acquisition)
+        if diagnostics:
+            manifest["diagnostics"] = dict(diagnostics)
+        _write_json_atomic(transaction / "manifest.json", manifest)
+        os.replace(transaction, output_dir)
+        return manifest
+    except Exception:
+        shutil.rmtree(transaction, ignore_errors=True)
+        raise
 
 
 def materialize_normalized_intersyn_samples(
