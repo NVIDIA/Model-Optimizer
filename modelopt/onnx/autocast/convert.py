@@ -46,6 +46,17 @@ DEFAULT_INIT_MAX = np.finfo(np.float16).max
 LATEST_IR_VERSION_SUPPORTED_BY_ORT = 10
 
 
+def _capture_network_io_metadata(
+    model: onnx.ModelProto, keep_io_types: bool
+) -> dict[str, list[onnx.ValueInfoProto]] | None:
+    if not keep_io_types:
+        return None
+    return {
+        "input": [deepcopy(io) for io in model.graph.input],
+        "output": [deepcopy(io) for io in model.graph.output],
+    }
+
+
 def convert_to_mixed_precision(
     onnx_path: str,
     low_precision_type: str = "fp16",
@@ -99,14 +110,7 @@ def convert_to_mixed_precision(
     # Load and process model
     model = onnx.load(onnx_path, load_external_data=True)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
-    original_network_io_metadata = (
-        {
-            "input": [deepcopy(io) for io in model.graph.input],
-            "output": [deepcopy(io) for io in model.graph.output],
-        }
-        if keep_io_types
-        else None
-    )
+    original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
     # Get original model's opset version
     original_opset = onnx_utils.get_opset_version(model)
@@ -238,14 +242,7 @@ def convert_to_f16(
                INT4 requires 21, NVFP4 requires 23).
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
-    original_network_io_metadata = (
-        {
-            "input": [deepcopy(io) for io in model.graph.input],
-            "output": [deepcopy(io) for io in model.graph.output],
-        }
-        if keep_io_types
-        else None
-    )
+    original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
     # Check Q/DQ precision types in the model and determine required opset
     qdq_precisions = get_qdq_precisions(model)
