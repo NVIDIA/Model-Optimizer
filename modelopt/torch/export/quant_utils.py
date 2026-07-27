@@ -984,7 +984,12 @@ _QLORA_SKIP_KEYS: tuple[str, ...] = (*_BASE_SKIP_KEYS, "base_layer")
 
 def _maybe_squeeze_scale(key: str, value: Any) -> Any:
     """Squeeze a leading dim=1 from 3-D scale tensors of shape (1, n, m)."""
-    if "scale" in key and isinstance(value, torch.Tensor) and value.dim() == 3 and value.shape[0] == 1:
+    if (
+        "scale" in key
+        and isinstance(value, torch.Tensor)
+        and value.dim() == 3
+        and value.shape[0] == 1
+    ):
         return value.squeeze(0)
     return value
 

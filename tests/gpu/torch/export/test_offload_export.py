@@ -106,7 +106,7 @@ def test_export_hf_checkpoint_cpu_offloaded(tmp_path, quant_cfg):
 
     for st_file in safetensor_files:
         with safe_open(str(st_file), framework="pt") as st:
-            for key in st.keys():
+            for key in list(st.keys()):
                 tensor = st.get_tensor(key)
                 assert tensor.numel() > 0, f"Zero-numel tensor for key '{key}' in {st_file.name}"
                 assert not tensor.is_meta, f"Meta tensor for key '{key}' in {st_file.name}"

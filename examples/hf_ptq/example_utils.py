@@ -128,7 +128,9 @@ class _FP8BF16Fallback:
     """
 
     @staticmethod
-    def matmul(input, weight, weight_scale_inv, block_size, output_dtype=None, activation_scale=None):
+    def matmul(
+        input, weight, weight_scale_inv, block_size, output_dtype=None, activation_scale=None
+    ):
         out_f, in_f = weight.shape[-2], weight.shape[-1]
         nb_out, nb_in = weight_scale_inv.shape[-2], weight_scale_inv.shape[-1]
         scale = (
@@ -149,7 +151,7 @@ def _install_transformers_compat_shims() -> None:
 
     # transformers >=5 removed is_torch_fx_available; older bundled model files still import it.
     if not hasattr(_tui, "is_torch_fx_available"):
-        _tui.is_torch_fx_available = lambda: False  # type: ignore[attr-defined]
+        _tui.is_torch_fx_available = lambda: False
 
     # Broken flash_attn installs (.so undefined-symbol) crash at import time, not find_spec time.
     # Force transformers' availability checks to False so bundled models skip the flash-attn path.
@@ -157,13 +159,17 @@ def _install_transformers_compat_shims() -> None:
         import flash_attn  # noqa: F401
     except Exception:
         for _mod in (_tu, _tui):
-            for _fn in ("is_flash_attn_2_available", "is_flash_attn_available",
-                        "is_flash_attn_greater_or_equal_2_10"):
+            for _fn in (
+                "is_flash_attn_2_available",
+                "is_flash_attn_available",
+                "is_flash_attn_greater_or_equal_2_10",
+            ):
                 setattr(_mod, _fn, lambda: False)
 
     # No `kernels` package → block-scaled FP8 matmul fails; swap in lossy BF16 fallback.
     with contextlib.suppress(Exception):
         import transformers.integrations.finegrained_fp8 as _ff8
+
         try:
             _ff8._load_finegrained_fp8_kernel()
         except ImportError:
@@ -173,7 +179,7 @@ def _install_transformers_compat_shims() -> None:
                 UserWarning,
                 stacklevel=2,
             )
-            _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback  # type: ignore[attr-defined]
+            _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback
 
 
 def run_nemotron_vl_preview(
@@ -742,7 +748,7 @@ def _fmt_max_memory(max_memory: dict) -> str:
     parts = []
     for key in sorted(max_memory.keys(), key=lambda k: (isinstance(k, str), k)):
         val = max_memory[key]
-        label = f"{val / 1024 ** 3:.1f} GiB" if isinstance(val, int) else str(val)
+        label = f"{val / 1024**3:.1f} GiB" if isinstance(val, int) else str(val)
         key_str = f"GPU {key}" if isinstance(key, int) else str(key)
         parts.append(f"  {key_str}: {label}")
     return "\n".join(parts)

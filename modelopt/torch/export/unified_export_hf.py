@@ -1090,10 +1090,11 @@ def _export_transformers_checkpoint_streaming(
     # Only apply when tie_word_embeddings=True: _tied_weights_keys can list keys whose
     # weights are not actually shared (e.g. if the model was saved with tie_word_embeddings=False
     # but the attribute was never cleared), which would incorrectly drop lm_head.weight.
-    if getattr(model.config, "tie_word_embeddings", False):
-        raw_tied_keys: set[str] = set(getattr(model, "_tied_weights_keys", None) or [])
-    else:
-        raw_tied_keys: set[str] = set()
+    raw_tied_keys: set[str] = (
+        set(getattr(model, "_tied_weights_keys", None) or [])
+        if getattr(model.config, "tie_word_embeddings", False)
+        else set()
+    )
 
     # --- Name mapper for per-tensor key reversal ---
     # Tensor names are applied inline; quant config names are handled by the caller.
@@ -1137,7 +1138,7 @@ def _export_transformers_checkpoint_streaming(
         new_key, new_value = _postprocess_single_tensor(
             full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
         )
-        if new_key is None:
+        if new_key is None or new_value is None:
             return
         if name_mapper is not None:
             new_key = name_mapper(new_key)
@@ -1802,19 +1803,18 @@ def _write_hf_export_config(
         quantization_details.get("quant_algo") is not None
         or quantization_details.get("kv_cache_quant_algo") is not None
     )
-    if is_quantized_export:
+    quantization_config = None
+    if hf_quant_config is not None and is_quantized_export:
         with open(f"{export_dir}/hf_quant_config.json", "w") as file:
             json.dump(hf_quant_config, file, indent=4)
-        hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
-    else:
-        hf_quant_config = None
+        quantization_config = convert_hf_quant_config_format(hf_quant_config)
 
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
         config_data = json.load(file)
     sanitize_hf_config_for_deployment(config_data, model)
-    if hf_quant_config is not None:
-        config_data["quantization_config"] = hf_quant_config
+    if quantization_config is not None:
+        config_data["quantization_config"] = quantization_config
     if export_sparse_attention_config is not None:
         sparse_attn_config = export_sparse_attention_config(model)
         if sparse_attn_config is not None:
