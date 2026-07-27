@@ -584,6 +584,7 @@ def load_model(args: argparse.Namespace):
             offload_folder=args.offload_folder,
             max_cpu_memory_gb=args.max_cpu_memory_gb,
             max_gpu_memory_gb=args.max_gpu_memory_gb,
+            allow_compat_shims=args.allow_compat_shims,
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -1657,6 +1658,17 @@ def parse_args() -> argparse.Namespace:
             "Maximum GPU memory budget per device in GiB for disk-offload model loading. "
             "Only effective when --offload_folder is set. "
             "Defaults to 80%% of available GPU memory when not specified."
+        ),
+    )
+    parser.add_argument(
+        "--allow_compat_shims",
+        action="store_true",
+        help=(
+            "Patch transformers so block-scaled FP8 checkpoints (e.g. DeepSeek-R1) load on "
+            "partial installs: disables flash-attention availability checks when flash_attn "
+            "is broken, and substitutes a lossy BF16 dequant for the finegrained-FP8 matmul "
+            "when the kernels package is missing. The FP8 fallback degrades numerics and is "
+            "only suitable for calibration amax collection, so this is opt-in."
         ),
     )
 

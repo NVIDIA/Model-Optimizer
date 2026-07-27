@@ -203,6 +203,42 @@ def test_streaming_shard_writer_tensors_readable():
         assert torch.allclose(recovered, t), "recovered tensor does not match original"
 
 
+def test_streaming_shard_writer_drops_tied_alias():
+    """Two keys sharing storage must not both reach save_file, which rejects aliases.
+
+    The name-based _tied_weights_keys filter misses ties that transformers does not
+    declare (e.g. tie_word_embeddings=False but shared storage), so the writer needs
+    its own guard.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        shared = torch.ones(4, 4)
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("embed_tokens.weight", shared)
+        writer.add("lm_head.weight", shared)
+        weight_map = writer.finalize()
+
+        assert set(weight_map) == {"embed_tokens.weight"}, (
+            "tied alias should be dropped, keeping only the first key"
+        )
+
+
+def test_streaming_shard_writer_copies_aliased_view():
+    """A distinct view onto shared storage must be copied, not dropped."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        view = base.view(16)  # same data_ptr, different shape
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("base", base)
+        writer.add("view", view)
+        weight_map = writer.finalize()
+
+        assert set(weight_map) == {"base", "view"}, "aliased view must be kept, not dropped"
+        shard_file = Path(tmpdir) / weight_map["view"]
+        with safe_open(str(shard_file), framework="pt") as f:
+            assert torch.equal(f.get_tensor("view"), view)
+            assert torch.equal(f.get_tensor("base"), base)
+
+
 # ---------------------------------------------------------------------------
 # _postprocess_single_tensor
 # ---------------------------------------------------------------------------

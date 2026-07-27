@@ -934,6 +934,8 @@ class _StreamingShardWriter:
         self._total_bytes: int = 0
         # Maps tensor key → part-file index (recorded at flush time)
         self._key_to_part: dict[str, int] = {}
+        # Storage identity of every buffered tensor, so aliases never reach save_file.
+        self._buffer_storage: dict[tuple[int, tuple[int, ...], torch.dtype], str] = {}
 
     def _flush(self) -> None:
         if not self._buffer:
@@ -946,10 +948,28 @@ class _StreamingShardWriter:
         self._part_files.append(part_path)
         self._total_bytes += self._buffer_bytes
         self._buffer = {}
+        self._buffer_storage = {}
         self._buffer_bytes = 0
 
     def add(self, key: str, tensor: torch.Tensor) -> None:
-        """Buffer a tensor, flushing the current shard to disk when it is full."""
+        """Buffer a tensor, flushing the current shard to disk when it is full.
+
+        ``safetensors.save_file`` rejects a dict containing two tensors that share
+        storage, so aliases are resolved here. ``data_ptr()`` is unreliable across the
+        whole export (offloaded weights are materialized and freed per layer), but it is
+        reliable *within* one buffer because every buffered tensor is kept alive until
+        :meth:`_flush`. An exact match on (pointer, shape, dtype) is a genuine tied
+        weight and is dropped, matching the batch path's dedup; a partial match is a
+        distinct view onto shared storage and is copied so no tensor is silently lost.
+        """
+        storage_id = (tensor.data_ptr(), tuple(tensor.shape), tensor.dtype)
+        if storage_id in self._buffer_storage:
+            return
+        if any(ptr == tensor.data_ptr() for ptr, _, _ in self._buffer_storage):
+            tensor = tensor.clone()
+            storage_id = (tensor.data_ptr(), tuple(tensor.shape), tensor.dtype)
+
+        self._buffer_storage[storage_id] = key
         self._buffer[key] = tensor
         self._buffer_bytes += tensor.nbytes
         if self._buffer_bytes >= self._max_shard_size:
@@ -1272,18 +1292,21 @@ def _export_transformers_checkpoint(
     # TODO: Handle mixed precision
     requantize_resmooth_fused_llm_layers(model)
 
-    # Detect accelerate offload before removing hooks; offloaded models need weights
-    # materialized layer-by-layer during export (hooks must stay alive for that pass).
-    _offloaded = _has_accelerate_offload(model)
+    # Offloaded models need their weights materialized layer-by-layer, which this
+    # whole-state-dict path cannot do; export_hf_checkpoint() streams them instead.
+    if _has_accelerate_offload(model):
+        raise NotImplementedError(
+            "_export_transformers_checkpoint does not support disk/CPU-offloaded models. "
+            "Use export_hf_checkpoint() which dispatches to _export_transformers_checkpoint_streaming."
+        )
 
-    # Remove all hooks from the model (deferred for offloaded models)
-    if not _offloaded:
-        try:
-            from accelerate.hooks import remove_hook_from_module
+    # Remove all hooks from the model
+    try:
+        from accelerate.hooks import remove_hook_from_module
 
-            remove_hook_from_module(model, recurse=True)
-        except ImportError:
-            pass  # no accelerate installed → no offload hooks exist to remove
+        remove_hook_from_module(model, recurse=True)
+    except ImportError:
+        pass  # no accelerate installed → no offload hooks exist to remove
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
@@ -1323,23 +1346,18 @@ def _export_transformers_checkpoint(
     # Process all quantized modules and export weights
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    if _offloaded:
-        raise NotImplementedError(
-            "_export_transformers_checkpoint does not support disk/CPU-offloaded models. "
-            "Use export_hf_checkpoint() which dispatches to _export_transformers_checkpoint_streaming."
+    _process_quantized_modules(model, dtype, is_modelopt_qlora)
+    _reconstruct_fused_moe_linear(model)
+
+    if is_fsdp2_model(model):
+        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
+        quantized_state_dict = get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
         )
     else:
-        _reconstruct_fused_moe_linear(model)
-
-        if is_fsdp2_model(model):
-            # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
-            quantized_state_dict = get_model_state_dict(
-                model,
-                options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-            )
-        else:
-            # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
-            quantized_state_dict = model.state_dict()
+        # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
+        quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448

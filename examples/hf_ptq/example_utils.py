@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-import contextlib
 import copy
 import glob
 import hashlib
@@ -131,21 +130,29 @@ class _FP8BF16Fallback:
     def matmul(
         input, weight, weight_scale_inv, block_size, output_dtype=None, activation_scale=None
     ):
-        out_f, in_f = weight.shape[-2], weight.shape[-1]
-        nb_out, nb_in = weight_scale_inv.shape[-2], weight_scale_inv.shape[-1]
-        scale = (
-            weight_scale_inv.float()
-            .repeat_interleave(out_f // nb_out, -2)
-            .repeat_interleave(in_f // nb_in, -1)
+        # Expand by block_size, not by out_f // nb_out: the scale grid is ceil-divided, so
+        # deriving the factor from the ratio mis-groups (or truncates) the last block
+        # whenever a dimension is not an exact multiple of block_size.
+        block_out, block_in = (
+            (block_size, block_size) if isinstance(block_size, int) else block_size
         )
-        w_bf16 = (weight.float() * scale).to(torch.bfloat16)
+        out_f, in_f = weight.shape[-2], weight.shape[-1]
+        scale = (
+            weight_scale_inv.to(torch.bfloat16)
+            .repeat_interleave(block_out, -2)
+            .repeat_interleave(block_in, -1)[..., :out_f, :in_f]
+        )
+        w_bf16 = weight.to(torch.bfloat16) * scale
         out = torch.nn.functional.linear(input.to(torch.bfloat16), w_bf16)
         return out if output_dtype is None else out.to(output_dtype)
 
 
 def _install_transformers_compat_shims() -> None:
-    """Patch transformers so older remote-code models (e.g. DeepSeek-R1) load on
-    newer/partial installs.  Call once before loading a trust_remote_code checkpoint."""
+    """Patch transformers so large FP8 checkpoints (e.g. DeepSeek-R1) load on partial installs.
+
+    Opt-in only (``--allow_compat_shims``): these are process-wide monkeypatches, and the
+    FP8 one degrades numerics, so they must never be applied on a user's behalf.
+    """
     import transformers.utils as _tu
     import transformers.utils.import_utils as _tui
 
@@ -157,7 +164,13 @@ def _install_transformers_compat_shims() -> None:
     # Force transformers' availability checks to False so bundled models skip the flash-attn path.
     try:
         import flash_attn  # noqa: F401
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"flash_attn is unavailable ({exc}); forcing transformers' flash-attention "
+            "availability checks to False for this process.",
+            UserWarning,
+            stacklevel=2,
+        )
         for _mod in (_tu, _tui):
             for _fn in (
                 "is_flash_attn_2_available",
@@ -167,19 +180,33 @@ def _install_transformers_compat_shims() -> None:
                 setattr(_mod, _fn, lambda: False)
 
     # No `kernels` package → block-scaled FP8 matmul fails; swap in lossy BF16 fallback.
-    with contextlib.suppress(Exception):
+    # Only ImportError is suppressed: a missing _load_finegrained_fp8_kernel means the
+    # transformers internals moved, which must surface rather than silently no-op.
+    try:
         import transformers.integrations.finegrained_fp8 as _ff8
+    except ImportError:
+        return
 
-        try:
-            _ff8._load_finegrained_fp8_kernel()
-        except ImportError:
-            warnings.warn(
-                "finegrained-fp8 kernel unavailable; using a lossy BF16 dequant fallback "
-                "for FP8 matmul. Suitable for calibration amax collection only.",
-                UserWarning,
-                stacklevel=2,
-            )
-            _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback
+    if not hasattr(_ff8, "_load_finegrained_fp8_kernel"):
+        warnings.warn(
+            "transformers.integrations.finegrained_fp8._load_finegrained_fp8_kernel is "
+            f"missing on transformers {transformers.__version__}; the FP8 BF16 fallback "
+            "was NOT installed. Block-scaled FP8 models may fail to run calibration.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+
+    try:
+        _ff8._load_finegrained_fp8_kernel()
+    except ImportError:
+        warnings.warn(
+            "finegrained-fp8 kernel unavailable; using a lossy BF16 dequant fallback "
+            "for FP8 matmul. Suitable for calibration amax collection only.",
+            UserWarning,
+            stacklevel=2,
+        )
+        _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback
 
 
 def run_nemotron_vl_preview(
@@ -764,8 +791,10 @@ def get_model(
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
+    allow_compat_shims=False,
 ):
-    _install_transformers_compat_shims()
+    if allow_compat_shims:
+        _install_transformers_compat_shims()
     print(f"Initializing model from {ckpt_path}")
 
     _disk_offload = offload_folder is not None
