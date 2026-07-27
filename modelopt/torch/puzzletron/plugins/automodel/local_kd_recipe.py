@@ -278,6 +278,7 @@ def _select_hidden_width(
 def _elastic_selection_record(
     *,
     step: int,
+    micro_step: int | None = None,
     hidden_width: int,
     targets: dict[int, object],
     ple_width: int | None = None,
@@ -285,7 +286,7 @@ def _elastic_selection_record(
 ) -> dict[str, object]:
     """Stable per-step candidate provenance written with local-KD metrics."""
 
-    return {
+    record = {
         "step": int(step),
         "hidden_width": int(hidden_width),
         "ple_width": int(ple_width) if ple_width is not None else None,
@@ -303,6 +304,9 @@ def _elastic_selection_record(
             for layer_idx, candidate in sorted(targets.items())
         ],
     }
+    if micro_step is not None:
+        record["micro_step"] = int(micro_step)
+    return record
 
 
 def _recipe_parallel_size(recipe_cfg, key: str) -> int:
@@ -772,8 +776,15 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             f"{lane}/{lane_count} model_parallel_peers={local_peer_sets}"
         )
 
-    def _architecture_sample_index(self, step: int) -> int:
-        return (int(step) - 1) * self._logical_dp_size + self._logical_dp_lane
+    def _architecture_sample_index(self, step: int, micro_step: int = 0) -> int:
+        hydra_cfg = getattr(self, "_hydra_cfg", None)
+        grad_accum = (
+            int(hydra_cfg.bypass.training.grad_accumulation_steps)
+            if hydra_cfg is not None
+            else 1
+        )
+        iteration = (int(step) - 1) * grad_accum + int(micro_step)
+        return iteration * self._logical_dp_size + self._logical_dp_lane
 
     def _build_puzzletron_train_dataloader(self):
         cfg = self._hydra_cfg
@@ -1115,15 +1126,16 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         # identity itself is stateless from optimizer step and logical DP lane.
         self._elastic_masker.sample_step = max(
             0,
-            int(cfg.bypass.get("step_num", 1) or 1) - 1,
+            (int(cfg.bypass.get("step_num", 1) or 1) - 1)
+            * int(cfg.bypass.training.grad_accumulation_steps),
         )
 
-    def _child_blocks_for_step(self, step: int):
+    def _child_blocks_for_step(self, step: int, micro_step: int = 0):
         if self._elastic_masker is None:
             self._last_elastic_targets = {}
             return self._fixed_child_blocks
         targets = self._elastic_masker.sample_targets(
-            sample_index=self._architecture_sample_index(step),
+            sample_index=self._architecture_sample_index(step, micro_step),
             cycle_all=bool(self._hydra_cfg.bypass.get("elastic_cycle_all_targets", False)),
             coverage_mode=self._hydra_cfg.bypass.get("elastic_coverage_mode", None),
             selection=self._hydra_cfg.bypass.get("elastic_fixed_selection", None),
@@ -1134,12 +1146,12 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             children[layer_idx] = candidate.block_config
         return children
 
-    def _hidden_width_for_step(self, step: int) -> int:
+    def _hidden_width_for_step(self, step: int, micro_step: int = 0) -> int:
         if self._embedding_spec is None:
             if self._teacher_hidden_width is None:
                 raise RuntimeError("teacher hidden width was not initialized")
             return self._teacher_hidden_width
-        sample_index = self._architecture_sample_index(step)
+        sample_index = self._architecture_sample_index(step, micro_step)
         generator = torch.Generator().manual_seed(
             int(self._hydra_cfg.bypass.get("elastic_seed", 42))
             + 7_919
@@ -1156,13 +1168,13 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         self._hidden_width_counts[width] += 1
         return width
 
-    def _ple_width_for_step(self, step: int) -> int | None:
+    def _ple_width_for_step(self, step: int, micro_step: int = 0) -> int | None:
         if self._ple_spec is None:
             return None
         # Hidden width cycles fastest; PLE advances after one complete hidden
         # cycle so the combined global axes cover their Cartesian product.
         hidden_period = max(1, len(self._hidden_widths))
-        sample_index = self._architecture_sample_index(step)
+        sample_index = self._architecture_sample_index(step, micro_step)
         width = int(
             self._ple_widths[
                 (sample_index // hidden_period) % len(self._ple_widths)
@@ -1759,45 +1771,46 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         for step in range(start_step, max_steps + 1):
             self._hydra_cfg.bypass.step_num = step
             lr = self._set_learning_rate(step)
-            if overfit_structure is None or resample_overfit_structure:
-                hidden_width = self._hidden_width_for_step(step)
-                child_blocks = self._child_blocks_for_step(step)
-                ple_width = self._ple_width_for_step(step)
-                if single_batch_overfit and not resample_overfit_structure:
-                    overfit_structure = (
-                        hidden_width,
-                        child_blocks,
-                        ple_width,
-                        dict(self._last_elastic_targets),
-                    )
-            else:
-                hidden_width, child_blocks, ple_width, fixed_targets = overfit_structure
-                self._last_elastic_targets = dict(fixed_targets)
-            if self._elastic_masker is not None:
+            accumulated: dict[int, list[float]] = defaultdict(list)
+            accumulated_subblocks: dict[str, list[float]] = defaultdict(list)
+            selection_records: list[dict[str, object]] = []
+            micro_observation_payloads: list[dict[str, object]] = []
+            did_backward = False
+            prepare_for_grad_accumulation(self.model_parts, pp_enabled=False)
+            for micro_step in range(grad_accum):
+                if overfit_structure is None or resample_overfit_structure:
+                    hidden_width = self._hidden_width_for_step(step, micro_step)
+                    child_blocks = self._child_blocks_for_step(step, micro_step)
+                    ple_width = self._ple_width_for_step(step, micro_step)
+                    if single_batch_overfit and not resample_overfit_structure:
+                        overfit_structure = (
+                            hidden_width,
+                            child_blocks,
+                            ple_width,
+                            dict(self._last_elastic_targets),
+                        )
+                else:
+                    hidden_width, child_blocks, ple_width, fixed_targets = overfit_structure
+                    self._last_elastic_targets = dict(fixed_targets)
                 selection_record = _elastic_selection_record(
                     step=step,
+                    micro_step=micro_step,
                     hidden_width=hidden_width,
                     ple_width=ple_width,
-                    targets=self._last_elastic_targets,
+                    targets=(
+                        self._last_elastic_targets
+                        if self._elastic_masker is not None
+                        else {}
+                    ),
                     parameter_counts=self._elastic_parameter_counts_by_width.get(
                         int(hidden_width), {}
                     ),
                 )
-                self._elastic_selection_history.append(selection_record)
-            else:
-                selection_record = _elastic_selection_record(
-                    step=step,
-                    hidden_width=hidden_width,
-                    ple_width=ple_width,
-                    targets={},
-                )
-            self._validate_lane_assignment(selection_record)
-            self._last_child_blocks = child_blocks
-            accumulated: dict[int, list[float]] = defaultdict(list)
-            accumulated_subblocks: dict[str, list[float]] = defaultdict(list)
-            did_backward = False
-            prepare_for_grad_accumulation(self.model_parts, pp_enabled=False)
-            for micro_step in range(grad_accum):
+                selection_records.append(selection_record)
+                if self._elastic_masker is not None:
+                    self._elastic_selection_history.append(selection_record)
+                self._validate_lane_assignment(selection_record)
+                self._last_child_blocks = child_blocks
                 if single_batch_overfit:
                     batch = overfit_batch
                     pending_first_batch = None
@@ -1861,6 +1874,17 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                         accumulated[layer_idx].append(value)
                     for subblock_key, value in self._current_subblock_metrics.items():
                         accumulated_subblocks[subblock_key].append(value)
+                    if self._elastic_masker is not None:
+                        micro_observation_payloads.append(
+                            {
+                                "dp_lane": self._logical_dp_lane,
+                                "selection": selection_record,
+                                "per_layer_loss": dict(layer_metrics),
+                                "per_subblock_loss": dict(
+                                    self._current_subblock_metrics
+                                ),
+                            }
+                        )
                 self._teacher_records.clear()
                 if micro_step == 0:
                     prepare_after_first_microbatch()
@@ -1925,12 +1949,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 gathered_observation_payloads = [None] * torch.distributed.get_world_size()
                 torch.distributed.all_gather_object(
                     gathered_observation_payloads,
-                    {
-                        "dp_lane": self._logical_dp_lane,
-                        "selection": selection_record,
-                        "per_layer_loss": local_layer_metrics,
-                        "per_subblock_loss": local_subblock_metrics,
-                    },
+                    micro_observation_payloads,
                 )
             print(
                 f"[bypass/automodel] rank={torch.distributed.get_rank()} "
@@ -1963,15 +1982,23 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 grad_norm = grad_norm.detach().float().cpu().item()
             dp_observations = []
             if gathered_observation_payloads is not None:
-                dp_observations, step_catalog = merge_rank_observations(
-                    gathered_observation_payloads,
-                    step=step,
-                    granularity=self._local_kd_granularity,
-                    learning_rate=lr,
-                    grad_norm=float(grad_norm) if grad_norm is not None else None,
-                    elapsed_seconds=time.monotonic() - start,
-                    candidate_metadata=self._elastic_candidate_metadata_by_width,
-                )
+                step_catalog = CandidateCatalog()
+                for micro_step in range(grad_accum):
+                    micro_observations, micro_catalog = merge_rank_observations(
+                        [
+                            rank_payloads[micro_step]
+                            for rank_payloads in gathered_observation_payloads
+                        ],
+                        step=step,
+                        micro_step=micro_step,
+                        granularity=self._local_kd_granularity,
+                        learning_rate=lr,
+                        grad_norm=float(grad_norm) if grad_norm is not None else None,
+                        elapsed_seconds=time.monotonic() - start,
+                        candidate_metadata=self._elastic_candidate_metadata_by_width,
+                    )
+                    dp_observations.extend(micro_observations)
+                    step_catalog.merge(micro_catalog)
                 if self.dist_env.is_main:
                     candidate_catalog.merge(step_catalog)
                     candidate_catalog.write(candidate_catalog_path)
@@ -1988,6 +2015,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 "hidden_width": hidden_width,
                 "ple_width": ple_width,
                 "elastic_selection": selection_record,
+                "elastic_selections": selection_records,
                 "dp_observations": [point.to_dict() for point in dp_observations],
             }
             history_record = {
@@ -2002,6 +2030,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 "hidden_width": hidden_width,
                 "ple_width": ple_width,
                 "elastic_selection": selection_record,
+                "elastic_selections": selection_records,
                 "dp_observation_count": len(dp_observations),
                 "dp_observation_path": str(observation_path),
             }
@@ -2198,11 +2227,16 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             fixed_targets = overfit_structure[3] if overfit_structure is not None else {}
             structure_identities = set()
             for record in loss_history:
-                selection = dict(record.get("elastic_selection") or {})
-                selection.pop("step", None)
-                structure_identities.add(
-                    json.dumps(selection, sort_keys=True, separators=(",", ":"))
+                selections = record.get("elastic_selections") or (
+                    record.get("elastic_selection"),
                 )
+                for raw_selection in selections:
+                    selection = dict(raw_selection or {})
+                    selection.pop("step", None)
+                    selection.pop("micro_step", None)
+                    structure_identities.add(
+                        json.dumps(selection, sort_keys=True, separators=(",", ":"))
+                    )
             distinct_structure_count = len(structure_identities)
             multiple_legal_structures = (
                 len(self._hidden_widths) > 1

@@ -226,17 +226,23 @@ def _model_choices_for_family(family: str) -> list[PromptChoice]:
     raise SetupError(f"Unknown supported model family: {family}")
 
 
-def _data_source_choices(resolver: DefaultsResolver) -> list[PromptChoice]:
+def _data_source_choices(
+    resolver: DefaultsResolver,
+    *,
+    multimodal_model: bool = True,
+) -> list[PromptChoice]:
     choices = []
     explicit = resolver.file_default("data.source")
     explicit_source = None
     if explicit is not None and explicit.value:
         explicit_source = normalize_dataset_source(str(explicit.value))
-        choices.append(PromptChoice(f"Default — {explicit.value}", _DEFAULT_DATA_SOURCE))
-    first_class = (
-        ("NVIDIA Puzzle-KD v2 (text)", _PUZZLE_KD_DATA_SOURCE),
-        ("NVIDIA Nemotron-VLM v2 (image-text)", _NEMOTRON_VLM_DATA_SOURCE),
-    )
+        if multimodal_model or explicit_source != _NEMOTRON_VLM_DATA_SOURCE:
+            choices.append(PromptChoice(f"Default — {explicit.value}", _DEFAULT_DATA_SOURCE))
+    first_class = [("NVIDIA Puzzle-KD v2 (text)", _PUZZLE_KD_DATA_SOURCE)]
+    if multimodal_model:
+        first_class.append(
+            ("NVIDIA Nemotron-VLM v2 (image-text)", _NEMOTRON_VLM_DATA_SOURCE)
+        )
     choices.extend(
         PromptChoice(title, source) for title, source in first_class if source != explicit_source
     )
@@ -458,6 +464,56 @@ def _vllm_granularity_choices(counts: CandidateCounts) -> list[tuple[str, str]]:
     ]
 
 
+def _replacement_granularity_choices(
+    counts: CandidateCounts,
+) -> list[tuple[str, str]]:
+    width_count = counts.width_count
+
+    def label(name: str, per_width: int, total: int) -> str:
+        if width_count == 1:
+            return f"{name} — {total} options"
+        return (
+            f"{name} — {per_width} options/width, "
+            f"{total} total across {width_count} widths"
+        )
+
+    return [
+        (
+            label(
+                "One sublayer at a time",
+                counts.replacement_subblock_per_width,
+                counts.replacement_subblock_total,
+            ),
+            "subblock",
+        ),
+        (
+            label(
+                "One layer at a time",
+                counts.replacement_block_per_width,
+                counts.replacement_block_total,
+            ),
+            "block",
+        ),
+    ]
+
+
+def _depth_granularity_choices(inventory: Any) -> list[tuple[str, str]]:
+    return [
+        (f"Sublayer — {inventory.num_sublayers} available", "subblock"),
+        (f"Whole layer — {inventory.num_layers} available", "block"),
+    ]
+
+
+def _default_axis_values(axis: Any) -> list[int]:
+    legal_values = tuple(int(value) for value in axis.values)
+    teacher = int(axis.teacher_value)
+    half = min(
+        legal_values,
+        key=lambda value: (abs(value - teacher // 2), -value),
+    )
+    return list(dict.fromkeys((teacher, half)))
+
+
 def _text_field(
     session: WizardSession,
     resolver: DefaultsResolver,
@@ -567,13 +623,19 @@ def data_section(
     explicit = resolver.file_default("data.source")
     if explicit is not None and explicit.value:
         _print_default_decisions({"source": explicit.value})
-    choices = _data_source_choices(resolver)
+    choices = _data_source_choices(
+        resolver,
+        multimodal_model=bool(context["model"].inventory.multimodal),
+    )
+    default_choice_available = any(
+        choice.value == _DEFAULT_DATA_SOURCE for choice in choices
+    )
     mode = session.select(
         "data.source_mode",
         "Dataset:",
         choices,
         default=(
-            _DEFAULT_DATA_SOURCE if explicit is not None and explicit.value else _CUSTOM_DATA_SOURCE
+            _DEFAULT_DATA_SOURCE if default_choice_available else _CUSTOM_DATA_SOURCE
         ),
     )
     if mode is BACK:
@@ -707,27 +769,9 @@ def data_section(
 
     if adapter is not None:
         if adapter == _PUZZLE_KD_ADAPTER:
-            train_samples = _integer_field(
-                session,
-                resolver,
-                "data.acquisition.train_samples",
-                "Puzzle-KD training rows to materialize:",
-                8192,
-            )
-            if train_samples is BACK:
-                return False
-            validation_samples = _integer_field(
-                session,
-                resolver,
-                "data.acquisition.validation_samples",
-                "Puzzle-KD validation rows to materialize:",
-                1024,
-            )
-            if validation_samples is BACK:
-                return False
-            acquisition.update(
-                train_samples=int(train_samples),
-                validation_samples=int(validation_samples),
+            print(
+                "  Puzzle-KD train and validation row counts will be inferred "
+                "from the completed stage configuration."
             )
         else:
             if not selected_subsets:
@@ -934,7 +978,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
     default_axes = {
         axis.axis_id: resolver.resolve_default(
             f"pruning.axes.{axis.axis_id}.values",
-            list(axis.values)[: min(2, len(axis.values))],
+            _default_axis_values(axis),
         ).value
         for axis in inventory.axes
     }
@@ -1008,7 +1052,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         granularity = session.select(
             "pruning.depth_granularity",
             "Depth pruning granularity:",
-            [("Sublayer", "subblock"), ("Whole block", "block")],
+            _depth_granularity_choices(inventory),
             default="subblock",
         )
         if granularity is BACK:
@@ -1037,7 +1081,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
         default_values = list(
             resolver.resolve_default(
                 f"pruning.axes.{axis.axis_id}.values",
-                axis_values[: min(2, len(axis_values))],
+                _default_axis_values(axis),
             ).value
         )
         if action == "customize":
@@ -1477,7 +1521,7 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
         granularity = session.select(
             "pruning.depth_granularity",
             "Depth pruning granularity:",
-            [("Sublayer", "subblock"), ("Whole block", "block")],
+            _depth_granularity_choices(inventory),
             default=granularity,
         )
         if granularity is BACK:
@@ -1562,7 +1606,7 @@ def width_axes_section(session: WizardSession, resolver: DefaultsResolver, conte
                 f"pruning.axes.{axis.axis_id}.values",
                 _mapping_copy(current_axes.get(axis.axis_id)).get(
                     "values",
-                    list(axis.values)[: min(2, len(axis.values))],
+                    _default_axis_values(axis),
                 ),
             ).value
         )
@@ -1782,6 +1826,17 @@ def width_sanity_section(session: WizardSession, resolver: DefaultsResolver, con
             pruning.get("width_sanity_targets_per_axis", 2),
         ).value
     )
+    reduced_target_counts = {}
+    for axis_id, raw_axis in _mapping_copy(pruning.get("axes")).items():
+        axis = _mapping_copy(raw_axis)
+        if not bool(axis.get("enabled", False)):
+            continue
+        teacher = int(axis.get("teacher_value", 0))
+        reduced_target_counts[axis_id] = len(
+            {int(value) for value in axis.get("values", ()) if int(value) < teacher}
+        )
+    max_targets_per_axis = max(reduced_target_counts.values(), default=1)
+    targets_per_axis = min(targets_per_axis, max_targets_per_axis)
     resource_defaults = _stage_resource_defaults(
         session,
         resolver,
@@ -1797,6 +1852,7 @@ def width_sanity_section(session: WizardSession, resolver: DefaultsResolver, con
             "eval_samples": samples,
             "representative_layers": layer_count,
             "targets_per_axis": targets_per_axis,
+            "selected_reduced_targets": reduced_target_counts,
             "physical_realization": False,
             "resources": resource_defaults,
         },
@@ -1826,9 +1882,13 @@ def width_sanity_section(session: WizardSession, resolver: DefaultsResolver, con
             )
             targets_per_axis = session.integer(
                 "pruning.width_sanity_targets_per_axis",
-                "Reduced-width targets per pruning axis:",
+                (
+                    "Reduced-width targets per pruned axis "
+                    "(teacher excluded; each axis uses at most its selected values):"
+                ),
                 default=targets_per_axis,
                 minimum=1,
+                maximum=max_targets_per_axis,
             )
             if BACK in (samples, layer_count, targets_per_axis):
                 return False
@@ -1993,6 +2053,11 @@ def replacement_scoring_section(
 ) -> bool:
     pruning = _pruning_payload(session.state)
     inventory = context["model"].inventory
+    counts = count_candidate_options(
+        context["model"].config,
+        inventory,
+        _mapping_copy(pruning.get("axes")),
+    )
     granularity = str(
         resolver.resolve_default(
             "pruning.replacement_granularity",
@@ -2031,16 +2096,7 @@ def replacement_scoring_section(
         granularity = session.select(
             "pruning.replacement_granularity",
             "Replace and score:",
-            [
-                (
-                    f"One sublayer at a time ({inventory.num_sublayers} sublayers)",
-                    "subblock",
-                ),
-                (
-                    f"One block at a time ({inventory.num_layers} layers)",
-                    "block",
-                ),
-            ],
+            _replacement_granularity_choices(counts),
             default=granularity,
         )
         samples = session.integer(
@@ -3303,10 +3359,68 @@ def _configure_dynamic_resources(
     return True
 
 
+def _infer_puzzle_kd_acquisition_samples(state: WizardState) -> None:
+    acquisition = _mapping_copy(state.collection("data_acquisition"))
+    if acquisition.get("adapter") != _PUZZLE_KD_ADAPTER:
+        return
+
+    pruning = _mapping_copy(state.collection("pruning"))
+    train_requirements = [int(pruning.get("width_importance_samples", 1))]
+    bypass = _mapping_copy(pruning.get("bypass"))
+    if bool(bypass.get("enabled", False)):
+        train_requirements.append(int(bypass.get("samples", 1)))
+
+    validation_requirements = [int(pruning.get("replacement_samples", 1))]
+    if int(pruning.get("depth_remove", 0)) > 0:
+        validation_requirements.append(int(pruning.get("depth_importance_samples", 1)))
+    if bool(pruning.get("sort_sanity", False)):
+        validation_requirements.append(int(pruning.get("sort_sanity_samples", 1)))
+    if bool(pruning.get("sort_sanity", False)) and bool(
+        pruning.get("width_sanity", False)
+    ):
+        validation_requirements.append(int(pruning.get("width_sanity_samples", 1)))
+
+    for raw_flow in _mapping_copy(state.collection("post_mip_flows")).values():
+        for raw_node in _mapping_copy(_mapping_copy(raw_flow).get("nodes")).values():
+            node = _mapping_copy(raw_node)
+            config = _mapping_copy(node.get("config"))
+            if node.get("type") == "global_kd":
+                train_requirements.append(
+                    int(config.get("max_steps", 1))
+                    * int(
+                        config.get(
+                            "global_batch_size",
+                            config.get("local_batch_size", 1),
+                        )
+                    )
+                )
+            elif node.get("type") == "evaluation":
+                validation_requirements.append(int(config.get("eval_samples", 1)))
+
+    train_samples = max(1, *train_requirements)
+    validation_samples = max(1, *validation_requirements)
+    acquisition.update(
+        train_samples=train_samples,
+        validation_samples=validation_samples,
+    )
+    state.set_collection("data_acquisition", acquisition)
+    state.set_field(
+        "data.acquisition.train_samples",
+        train_samples,
+        source="inferred",
+    )
+    state.set_field(
+        "data.acquisition.validation_samples",
+        validation_samples,
+        source="inferred",
+    )
+
+
 def output_review_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
     del context
+    _infer_puzzle_kd_acquisition_samples(session.state)
     default_root = str(
         resolver.resolve_default(
             "output.result_root",

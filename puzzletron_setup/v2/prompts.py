@@ -78,6 +78,15 @@ def _answer(question: Any) -> Any:
     return value
 
 
+def _choice_style(questionary: Any) -> Any:
+    return questionary.Style(
+        [
+            ("highlighted", "noreverse bg:default"),
+            ("selected", "noreverse bg:default"),
+        ]
+    )
+
+
 class InteractiveBackend:
     """Questionary-backed prompts with visible Back controls."""
 
@@ -104,7 +113,14 @@ class InteractiveBackend:
             for choice in choices
         ]
         rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK))
-        return _answer(questionary.select(message, choices=rendered, default=default))
+        return _answer(
+            questionary.select(
+                message,
+                choices=rendered,
+                default=default,
+                style=_choice_style(questionary),
+            )
+        )
 
     def checkbox(
         self,
@@ -124,7 +140,15 @@ class InteractiveBackend:
             for choice in choices
         ]
         rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK, checked=False))
-        values = list(_answer(questionary.checkbox(message, choices=rendered)))
+        values = list(
+            _answer(
+                questionary.checkbox(
+                    message,
+                    choices=rendered,
+                    style=_choice_style(questionary),
+                )
+            )
+        )
         return BACK if BACK in values else values
 
 

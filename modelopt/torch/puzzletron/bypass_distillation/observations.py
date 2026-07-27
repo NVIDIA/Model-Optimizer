@@ -40,6 +40,7 @@ class BypassObservation:
     """One loss point for one logical DP lane and trained unit."""
 
     step: int
+    micro_step: int
     dp_lane: int
     granularity: str
     layer_idx: int
@@ -113,6 +114,7 @@ def merge_rank_observations(
     rank_payloads,
     *,
     step: int,
+    micro_step: int = 0,
     granularity: str,
     learning_rate: float | None,
     grad_norm: float | None,
@@ -158,6 +160,7 @@ def merge_rank_observations(
             points.append(
                 BypassObservation(
                     step=int(step),
+                    micro_step=int(micro_step),
                     dp_lane=lane,
                     granularity=granularity,
                     layer_idx=layer_idx,
@@ -189,6 +192,7 @@ def merge_rank_observations(
             points.append(
                 BypassObservation(
                     step=int(step),
+                    micro_step=int(micro_step),
                     dp_lane=lane,
                     granularity=granularity,
                     layer_idx=layer_idx,
