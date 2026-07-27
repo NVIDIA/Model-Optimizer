@@ -148,7 +148,10 @@ class _FP8BF16Fallback:
 
 
 def _install_transformers_compat_shims() -> None:
-    """Patch transformers so large FP8 checkpoints (e.g. DeepSeek-R1) load on partial installs.
+    """Patch transformers so DeepSeek-R1-style checkpoints load on newer/partial installs.
+
+    Mostly aimed at bundled (``--trust_remote_code``) modeling files, which import symbols
+    newer transformers dropped; the FP8 shim also covers the built-in loading path.
 
     Opt-in only (``--allow_compat_shims``): these are process-wide monkeypatches, and the
     FP8 one degrades numerics, so they must never be applied on a user's behalf.
@@ -922,11 +925,16 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        if not hasattr(transformers, architecture):
-            warnings.warn(
-                f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
-            )
+        # DeepSeek ships bundled modeling code, but the built-in class is what the
+        # disk-offload and streaming-export paths are validated against.
+        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+
+        if not hasattr(transformers, architecture) or use_bundled_code:
+            if not hasattr(transformers, architecture):
+                warnings.warn(
+                    f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
+                    "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
+                )
             assert trust_remote_code, (
                 "Please set trust_remote_code to True if you want to use this architecture"
             )

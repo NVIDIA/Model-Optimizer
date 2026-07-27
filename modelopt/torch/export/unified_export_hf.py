@@ -954,13 +954,10 @@ class _StreamingShardWriter:
     def add(self, key: str, tensor: torch.Tensor) -> None:
         """Buffer a tensor, flushing the current shard to disk when it is full.
 
-        ``safetensors.save_file`` rejects a dict containing two tensors that share
-        storage, so aliases are resolved here. ``data_ptr()`` is unreliable across the
-        whole export (offloaded weights are materialized and freed per layer), but it is
-        reliable *within* one buffer because every buffered tensor is kept alive until
-        :meth:`_flush`. An exact match on (pointer, shape, dtype) is a genuine tied
-        weight and is dropped, matching the batch path's dedup; a partial match is a
-        distinct view onto shared storage and is copied so no tensor is silently lost.
+        ``save_file`` rejects tensors sharing storage. ``data_ptr()`` is only meaningful
+        within one buffer (entries stay alive until :meth:`_flush`), so dedup here: an
+        exact (pointer, shape, dtype) match is a real tie and is dropped; a partial match
+        is a distinct view and is copied rather than lost.
         """
         storage_id = (tensor.data_ptr(), tuple(tensor.shape), tensor.dtype)
         if storage_id in self._buffer_storage:
