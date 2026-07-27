@@ -119,99 +119,6 @@ def validate_fsdp2_supported(args, config):
             + "\n  - ".join(issues)
             + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
         )
-
-class _FP8BF16Fallback:
-    """BF16 dequant fallback for block-scaled FP8 matmul when the kernels package is absent.
-
-    Calibration amax collection only — not accurate for production inference.
-    """
-
-    @staticmethod
-    def matmul(
-        input, weight, weight_scale_inv, block_size, output_dtype=None, activation_scale=None
-    ):
-        # Expand by block_size, not by out_f // nb_out: the scale grid is ceil-divided, so
-        # deriving the factor from the ratio mis-groups (or truncates) the last block
-        # whenever a dimension is not an exact multiple of block_size.
-        block_out, block_in = (
-            (block_size, block_size) if isinstance(block_size, int) else block_size
-        )
-        out_f, in_f = weight.shape[-2], weight.shape[-1]
-        scale = (
-            weight_scale_inv.to(torch.bfloat16)
-            .repeat_interleave(block_out, -2)
-            .repeat_interleave(block_in, -1)[..., :out_f, :in_f]
-        )
-        w_bf16 = weight.to(torch.bfloat16) * scale
-        out = torch.nn.functional.linear(input.to(torch.bfloat16), w_bf16)
-        return out if output_dtype is None else out.to(output_dtype)
-
-
-def _install_transformers_compat_shims() -> None:
-    """Patch transformers so DeepSeek-R1-style checkpoints load on newer/partial installs.
-
-    Mostly aimed at bundled (``--trust_remote_code``) modeling files, which import symbols
-    newer transformers dropped; the FP8 shim also covers the built-in loading path.
-
-    Opt-in only (``--allow_compat_shims``): these are process-wide monkeypatches, and the
-    FP8 one degrades numerics, so they must never be applied on a user's behalf.
-    """
-    import transformers.utils as _tu
-    import transformers.utils.import_utils as _tui
-
-    # transformers >=5 removed is_torch_fx_available; older bundled model files still import it.
-    if not hasattr(_tui, "is_torch_fx_available"):
-        _tui.is_torch_fx_available = lambda: False
-
-    # Broken flash_attn installs (.so undefined-symbol) crash at import time, not find_spec time.
-    # Force transformers' availability checks to False so bundled models skip the flash-attn path.
-    try:
-        import flash_attn  # noqa: F401
-    except Exception as exc:
-        warnings.warn(
-            f"flash_attn is unavailable ({exc}); forcing transformers' flash-attention "
-            "availability checks to False for this process.",
-            UserWarning,
-            stacklevel=2,
-        )
-        for _mod in (_tu, _tui):
-            for _fn in (
-                "is_flash_attn_2_available",
-                "is_flash_attn_available",
-                "is_flash_attn_greater_or_equal_2_10",
-            ):
-                setattr(_mod, _fn, lambda: False)
-
-    # No `kernels` package → block-scaled FP8 matmul fails; swap in lossy BF16 fallback.
-    # Only ImportError is suppressed: a missing _load_finegrained_fp8_kernel means the
-    # transformers internals moved, which must surface rather than silently no-op.
-    try:
-        import transformers.integrations.finegrained_fp8 as _ff8
-    except ImportError:
-        return
-
-    if not hasattr(_ff8, "_load_finegrained_fp8_kernel"):
-        warnings.warn(
-            "transformers.integrations.finegrained_fp8._load_finegrained_fp8_kernel is "
-            f"missing on transformers {transformers.__version__}; the FP8 BF16 fallback "
-            "was NOT installed. Block-scaled FP8 models may fail to run calibration.",
-            UserWarning,
-            stacklevel=2,
-        )
-        return
-
-    try:
-        _ff8._load_finegrained_fp8_kernel()
-    except ImportError:
-        warnings.warn(
-            "finegrained-fp8 kernel unavailable; using a lossy BF16 dequant fallback "
-            "for FP8 matmul. Suitable for calibration amax collection only.",
-            UserWarning,
-            stacklevel=2,
-        )
-        _ff8._load_finegrained_fp8_kernel = lambda: _FP8BF16Fallback
-
-
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
@@ -794,10 +701,7 @@ def get_model(
     offload_folder=None,
     max_cpu_memory_gb=None,
     max_gpu_memory_gb=None,
-    allow_compat_shims=False,
 ):
-    if allow_compat_shims:
-        _install_transformers_compat_shims()
     print(f"Initializing model from {ckpt_path}")
 
     _disk_offload = offload_folder is not None
