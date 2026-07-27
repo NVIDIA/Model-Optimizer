@@ -430,12 +430,22 @@ def _section_action(
 def _print_default_decisions(defaults: Mapping[str, Any]) -> None:
     print("  Resolved defaults:")
     rendered = yaml.safe_dump(
-        deepcopy(dict(defaults)),
+        _plain_review_value(defaults),
         sort_keys=False,
         default_flow_style=False,
     ).rstrip()
     for line in rendered.splitlines():
         print(f"    {line}")
+
+
+def _plain_review_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain_review_value(item) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_plain_review_value(item) for item in value]
+    return value
 
 
 def _vllm_granularity_choices(counts: CandidateCounts) -> list[tuple[str, str]]:
@@ -621,6 +631,9 @@ def data_section(
     catalog_loader: Callable[..., HfSubsetCatalog] = discover_hf_subset_catalog,
 ) -> bool:
     session.begin("data")
+    previous_acquisition = _mapping_copy(
+        session.state.collection("data_acquisition")
+    )
     explicit = resolver.file_default("data.source")
     if explicit is not None and explicit.value:
         _print_default_decisions({"source": explicit.value})
@@ -762,6 +775,7 @@ def data_section(
                     "num_bytes_original_files": by_name[
                         name
                     ].num_bytes_original_files,
+                    "num_media_shards": by_name[name].num_media_shards,
                     "weight": weights[name],
                 }
                 for name in selected_subsets
@@ -779,24 +793,11 @@ def data_section(
                 raise SetupError(
                     "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
                 )
-            num_samples = _integer_field(
-                session,
-                resolver,
-                "data.acquisition.num_samples",
-                "Total valid image-text rows to materialize:",
-                512,
-            )
-            if num_samples is BACK:
-                return False
-            max_shards = _integer_field(
-                session,
-                resolver,
-                "data.acquisition.max_shards_per_subset",
-                "Maximum media tar shards to download per subset:",
-                1,
-            )
-            if max_shards is BACK:
-                return False
+            subset_media_shards = {
+                record["name"]: record["num_media_shards"]
+                for record in subset_selection["subsets"]
+                if record["num_media_shards"] is not None
+            }
             acquisition.update(
                 subsets=selected_subsets,
                 subset_rows={
@@ -807,9 +808,18 @@ def data_section(
                     record["name"]: record["weight"]
                     for record in subset_selection["subsets"]
                 },
+                subset_media_shards=subset_media_shards,
                 revision=subset_selection["revision"],
-                num_samples=int(num_samples),
-                max_shards_per_subset=int(max_shards),
+            )
+            if len(subset_media_shards) != len(selected_subsets):
+                previous_shard_cap = int(
+                    previous_acquisition.get("max_shards_per_subset", 0)
+                )
+                if previous_shard_cap > 0:
+                    acquisition["max_shards_per_subset"] = previous_shard_cap
+            print(
+                "  Nemotron-VLM row and media-shard counts will be inferred "
+                "from the completed stage configuration and selected subsets."
             )
     default_layout = str(resolver.resolve("data.layout", "fixed").value)
     if default_layout == "padded":
@@ -2476,8 +2486,46 @@ def serving_workloads_section(
     return True
 
 
+def _set_vllm_stage_resource(
+    session: WizardSession,
+    *,
+    instances: int,
+    topology: Mapping[str, Any],
+    source: str,
+) -> None:
+    allocation_mesh = vllm_topology_to_mesh(topology)
+    gpus_per_node = int(
+        session.state.get_field("infrastructure.gpus_per_node", 8)
+    )
+    resources = _mapping_copy(session.state.collection("stage_resources"))
+    resources["vllm_stats"] = {
+        "strategy": "sharded",
+        "instances": int(instances),
+        "resource": "gpu",
+        "gpus_per_node": gpus_per_node,
+        "parallel": {
+            **allocation_mesh.as_dict(),
+            "sequence_parallel": False,
+        },
+    }
+    session.state.set_collection("stage_resources", resources)
+    session.state.set_field(
+        "stages.vllm_stats.instances",
+        int(instances),
+        source=source,
+    )
+
+
 def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     enabled_default = bool(resolver.resolve_default("vllm.enabled", False).value)
+    gpus_per_node = int(
+        session.state.get_field("infrastructure.gpus_per_node", 8)
+    )
+    resolved_instances = resolver.resolve_default(
+        "stages.vllm_stats.instances",
+        gpus_per_node,
+    )
+    default_instances = int(resolved_instances.value)
     default_measurement_settings = _default_vllm_measurement(
         resolver,
         sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
@@ -2518,6 +2566,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
                 default_measurement_settings["granularity"],
             ),
             "gpus_per_task": default_topology["gpu_group_size"],
+            "instances": default_instances,
         }
     action = _section_action(
         session,
@@ -2530,6 +2579,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
     if action == "defaults":
         if not enabled_default:
             session.state.set_collection("vllm_measurements", {})
+            _remove_stage_resource(session, "vllm_stats")
             return True
         default_name, default_workload = next(iter(workloads.items()))
         issues = validate_vllm_parallelism(
@@ -2565,6 +2615,12 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
                 }
             },
         )
+        _set_vllm_stage_resource(
+            session,
+            instances=default_instances,
+            topology=default_topology,
+            source=resolved_instances.source,
+        )
         return True
 
     enabled = session.confirm(
@@ -2576,9 +2632,11 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         return False
     if not enabled:
         session.state.set_collection("vllm_measurements", {})
+        _remove_stage_resource(session, "vllm_stats")
         return True
 
     measurements: OrderedDict[str, Any] = OrderedDict()
+    instances: int | None = None
     while True:
         unused_workloads = OrderedDict(
             (name, setting)
@@ -2644,6 +2702,15 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         )
         if topology is BACK:
             return False
+        if instances is None:
+            instances = session.integer(
+                "stages.vllm_stats.instances",
+                "Independent vLLM statistics tasks/instances:",
+                default=default_instances,
+                minimum=1,
+            )
+            if instances is BACK:
+                return False
         measurements[str(name)] = {
             **values,
             "granularity": granularity,
@@ -2662,6 +2729,16 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
             break
     session.state.set_collection("vllm_measurements", measurements)
     session.state.set_collection("serving_workloads", workloads)
+    first_measurement = _mapping_copy(next(iter(measurements.values())))
+    first_topology = _mapping_copy(
+        _mapping_copy(first_measurement.get("runtime_stats")).get("topology")
+    )
+    _set_vllm_stage_resource(
+        session,
+        instances=int(instances),
+        topology=first_topology,
+        source="user",
+    )
     return True
 
 
@@ -3102,7 +3179,10 @@ def _print_mip_search_review(
     estimate: Mapping[str, Any],
 ) -> None:
     print(f"\n  Search {search_id!r} review:")
-    print(f"    Main budgets: {yaml.safe_dump(dict(constraints), sort_keys=False).strip()}")
+    print(
+        "    Main budgets: "
+        f"{yaml.safe_dump(_plain_review_value(constraints), sort_keys=False).strip()}"
+    )
     print(f"    Depth selections: {depths}")
     print(f"    Embedding widths: {embeddings}")
     print(f"    Ranking metrics: {objectives}")
@@ -4134,11 +4214,7 @@ def _configure_dynamic_resources(
     return True
 
 
-def _infer_puzzle_kd_acquisition_samples(state: WizardState) -> None:
-    acquisition = _mapping_copy(state.collection("data_acquisition"))
-    if acquisition.get("adapter") != _PUZZLE_KD_ADAPTER:
-        return
-
+def _acquisition_sample_requirements(state: WizardState) -> tuple[int, int]:
     pruning = _mapping_copy(state.collection("pruning"))
     train_requirements = [int(pruning.get("width_importance_samples", 1))]
     bypass = _mapping_copy(pruning.get("bypass"))
@@ -4172,30 +4248,111 @@ def _infer_puzzle_kd_acquisition_samples(state: WizardState) -> None:
             elif node.get("type") == "evaluation":
                 validation_requirements.append(int(config.get("eval_samples", 1)))
 
-    train_samples = max(1, *train_requirements)
-    validation_samples = max(1, *validation_requirements)
-    acquisition.update(
-        train_samples=train_samples,
-        validation_samples=validation_samples,
+    return max(1, *train_requirements), max(1, *validation_requirements)
+
+
+def _apportion_vlm_samples(
+    subset_rows: Mapping[str, Any],
+    total: int,
+) -> dict[str, int]:
+    rows = {
+        str(name): int(value)
+        for name, value in subset_rows.items()
+    }
+    if not rows or any(value <= 0 for value in rows.values()):
+        raise SetupError(
+            "Cannot infer Nemotron-VLM acquisition without positive selected-subset "
+            "row counts."
+        )
+    source_total = sum(rows.values())
+    quotas = {
+        name: total * value // source_total
+        for name, value in rows.items()
+    }
+    remaining = total - sum(quotas.values())
+    ranked = sorted(
+        enumerate(rows.items()),
+        key=lambda item: (
+            -(total * item[1][1] % source_total),
+            item[0],
+        ),
     )
+    for _, (name, _) in ranked[:remaining]:
+        quotas[name] += 1
+    return quotas
+
+
+def _infer_vlm_shard_cap(
+    acquisition: Mapping[str, Any],
+    num_samples: int,
+) -> int:
+    subset_rows = _mapping_copy(acquisition.get("subset_rows"))
+    subset_media_shards = _mapping_copy(
+        acquisition.get("subset_media_shards")
+    )
+    missing = [
+        name
+        for name in subset_rows
+        if int(subset_media_shards.get(name, 0)) <= 0
+    ]
+    if missing:
+        previous_shard_cap = int(acquisition.get("max_shards_per_subset", 0))
+        if previous_shard_cap > 0:
+            return previous_shard_cap
+        raise SetupError(
+            "Cannot infer Nemotron-VLM media-shard count because the revision-locked "
+            f"catalog lacks tar metadata for: {', '.join(missing)}. "
+            "Return to the data section to refresh the dataset catalog."
+        )
+
+    quotas = _apportion_vlm_samples(subset_rows, num_samples)
+    estimates = []
+    for name, source_rows in subset_rows.items():
+        available_shards = int(subset_media_shards[name])
+        quota = quotas[name]
+        estimated = (
+            quota * available_shards + int(source_rows) - 1
+        ) // int(source_rows)
+        estimates.append(min(available_shards, max(1, estimated)))
+    return max(estimates)
+
+
+def _infer_acquisition_samples(state: WizardState) -> None:
+    acquisition = _mapping_copy(state.collection("data_acquisition"))
+    adapter = acquisition.get("adapter")
+    if adapter not in {_PUZZLE_KD_ADAPTER, _NEMOTRON_VLM_ADAPTER}:
+        return
+
+    train_samples, validation_samples = _acquisition_sample_requirements(state)
+    if adapter == _PUZZLE_KD_ADAPTER:
+        inferred = {
+            "train_samples": train_samples,
+            "validation_samples": validation_samples,
+        }
+    else:
+        num_samples = max(train_samples, validation_samples)
+        inferred = {
+            "num_samples": num_samples,
+            "max_shards_per_subset": _infer_vlm_shard_cap(
+                acquisition,
+                num_samples,
+            ),
+        }
+    acquisition.update(inferred)
     state.set_collection("data_acquisition", acquisition)
-    state.set_field(
-        "data.acquisition.train_samples",
-        train_samples,
-        source="inferred",
-    )
-    state.set_field(
-        "data.acquisition.validation_samples",
-        validation_samples,
-        source="inferred",
-    )
+    for key, value in inferred.items():
+        state.set_field(
+            f"data.acquisition.{key}",
+            value,
+            source="inferred",
+        )
 
 
 def output_review_section(
     session: WizardSession, resolver: DefaultsResolver, context: dict
 ) -> bool:
     del context
-    _infer_puzzle_kd_acquisition_samples(session.state)
+    _infer_acquisition_samples(session.state)
     default_root = str(
         resolver.resolve_default(
             "output.result_root",
@@ -4229,21 +4386,23 @@ def output_review_section(
     print("\nEffective setup:")
     print(
         yaml.safe_dump(
-            {
-                "fields": {
-                    path: {
-                        "effective": record.effective,
-                        "requested": record.requested,
-                        "source": record.source,
-                    }
-                    for path, record in session.state.records().items()
-                },
-                "profiles": session.state.collection("parallel_profiles"),
-                "serving_workloads": session.state.collection("serving_workloads"),
-                "vllm_measurements": session.state.collection("vllm_measurements"),
-                "mip": session.state.collection("mip_config"),
-                "post_mip": session.state.collection("post_mip_flows"),
-            },
+            _plain_review_value(
+                {
+                    "fields": {
+                        path: {
+                            "effective": record.effective,
+                            "requested": record.requested,
+                            "source": record.source,
+                        }
+                        for path, record in session.state.records().items()
+                    },
+                    "profiles": session.state.collection("parallel_profiles"),
+                    "serving_workloads": session.state.collection("serving_workloads"),
+                    "vllm_measurements": session.state.collection("vllm_measurements"),
+                    "mip": session.state.collection("mip_config"),
+                    "post_mip": session.state.collection("post_mip_flows"),
+                }
+            ),
             sort_keys=False,
         )
     )

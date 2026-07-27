@@ -39,6 +39,7 @@ class HfSubsetInfo:
     num_bytes_original_files: int | None
     selectable: bool = True
     disabled_reason: str | None = None
+    num_media_shards: int | None = None
 
     def __post_init__(self) -> None:
         name = str(self.name).strip()
@@ -49,6 +50,11 @@ class HfSubsetInfo:
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, int(value))
+        if self.num_media_shards is not None:
+            num_media_shards = int(self.num_media_shards)
+            if num_media_shards < 0:
+                raise ValueError("Hugging Face media-shard count cannot be negative")
+            object.__setattr__(self, "num_media_shards", num_media_shards)
         if self.selectable and self.disabled_reason:
             raise ValueError("a selectable subset cannot have a disabled reason")
         if not self.selectable and not self.disabled_reason:
@@ -61,6 +67,7 @@ class HfSubsetInfo:
             name=str(payload["name"]),
             num_rows=payload.get("num_rows"),
             num_bytes_original_files=payload.get("num_bytes_original_files"),
+            num_media_shards=payload.get("num_media_shards"),
             selectable=bool(payload.get("selectable", True)),
             disabled_reason=payload.get("disabled_reason"),
         )
@@ -250,6 +257,11 @@ def discover_hf_subset_catalog(
     subsets = []
     for name in names:
         record = records.get(name)
+        num_media_shards = sum(
+            1
+            for path in sibling_paths
+            if path.startswith(f"{name}/media/") and path.lower().endswith(".tar")
+        )
         num_rows = record.get("num_rows") if record is not None else None
         num_bytes = (
             record.get("num_bytes_original_files") if record is not None else None
@@ -265,16 +277,14 @@ def discover_hf_subset_catalog(
             disabled_reason = "subset has no rows"
         elif num_bytes is None:
             disabled_reason = "size unavailable"
-        elif require_hosted_media and not any(
-            path.startswith(f"{name}/media/") and path.lower().endswith(".tar")
-            for path in sibling_paths
-        ):
+        elif require_hosted_media and num_media_shards == 0:
             disabled_reason = "external media required"
         subsets.append(
             HfSubsetInfo(
                 name=name,
                 num_rows=num_rows,
                 num_bytes_original_files=num_bytes,
+                num_media_shards=num_media_shards,
                 selectable=disabled_reason is None,
                 disabled_reason=disabled_reason,
             )
