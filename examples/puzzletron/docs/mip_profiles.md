@@ -13,7 +13,7 @@ mip:
     objectives: metrics.cosine_embedding_loss_hidden_states
     solver:
       backend: auto
-      num_solutions: 1000
+      num_solutions: 16
       min_hamming_distance: 2
       max_seconds_per_solution: 60
     homogeneous:
@@ -25,7 +25,6 @@ mip:
     serving-8k:
       isl: 8192
       osl: 1024
-      batch_size: 4
       concurrency: 4
 
   runs:

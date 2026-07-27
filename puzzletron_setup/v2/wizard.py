@@ -163,6 +163,7 @@ _DEFAULT_DATA_SOURCE = "__default_data_source__"
 _PUZZLE_KD_DATA_SOURCE = "nvidia/Puzzle-KD-Nemotron-Post-Training-Dataset-v2"
 _NEMOTRON_VLM_DATA_SOURCE = "nvidia/Nemotron-VLM-Dataset-v2"
 _PUZZLE_KD_ADAPTER = "puzzle_kd_v2"
+_CREATE_SERVING_WORKLOAD = "/create-new-serving-workload"
 _NEMOTRON_VLM_ADAPTER = "nemotron_vlm_v2"
 _NEMOTRON_VLM_DEFAULT_SUBSETS = ("sparsetables", "plotqa_cot", "wiki_en")
 
@@ -2286,6 +2287,13 @@ def _mapping_copy(value: Any) -> dict[str, Any]:
     return deepcopy(dict(value)) if isinstance(value, Mapping) else {}
 
 
+def _identifier_validation(value: str) -> bool | str:
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    if not value or any(character not in allowed for character in value):
+        return "Use only letters, digits, '_' and '-'."
+    return True
+
+
 def _default_vllm_topology(resolver: DefaultsResolver) -> dict[str, Any]:
     topology = {
         name: int(resolver.resolve_default(f"vllm.topology.{name}", 1).value)
@@ -2341,13 +2349,148 @@ def _default_vllm_measurement(
     }
 
 
-def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    enabled_default = bool(resolver.resolve_default("vllm.enabled", False).value)
-    default_measurement = _default_vllm_measurement(
+def _default_serving_workload(
+    resolver: DefaultsResolver,
+    *,
+    sequence_length: int,
+) -> dict[str, int]:
+    measurement = _default_vllm_measurement(
+        resolver,
+        sequence_length=sequence_length,
+    )
+    return {
+        "prefill_seq_len": int(measurement["prefill_seq_len"]),
+        "generation_seq_len": int(measurement["generation_seq_len"]),
+        "batch_size": int(measurement["batch_size"]),
+        "max_num_seqs": int(measurement["max_num_seqs"]),
+    }
+
+
+def _serving_workload_label(name: str, setting: Mapping[str, Any]) -> str:
+    return (
+        f"{name} — ISL {setting['prefill_seq_len']}, "
+        f"OSL {setting['generation_seq_len']}, "
+        f"concurrency {setting['max_num_seqs']}"
+    )
+
+
+def _serving_workload_prompt(
+    session: WizardSession,
+    prompt_id: str,
+    *,
+    default_name: str,
+    default_workload: Mapping[str, Any],
+    existing_names: set[str],
+) -> Any:
+    while True:
+        name = session.text(
+            f"{prompt_id}.id",
+            "Serving workload ID:",
+            default=default_name,
+            validate=_identifier_validation,
+        )
+        if name is BACK:
+            return BACK
+        name = str(name)
+        if name in existing_names:
+            print(f"  Serving workload {name!r} already exists.")
+            continue
+        break
+    values: dict[str, int] = {}
+    for key, label in (
+        ("prefill_seq_len", "Input sequence length (ISL):"),
+        ("generation_seq_len", "Output sequence length (OSL):"),
+        ("max_num_seqs", "Concurrency:"),
+    ):
+        value = session.integer(
+            f"{prompt_id}.{name}.{key}",
+            label,
+            default=int(default_workload[key]),
+            minimum=1,
+        )
+        if value is BACK:
+            return BACK
+        values[key] = int(value)
+    values["batch_size"] = values["max_num_seqs"]
+    return name, values
+
+
+def serving_workloads_section(
+    session: WizardSession,
+    resolver: DefaultsResolver,
+    context: dict,
+) -> bool:
+    default_workload = _default_serving_workload(
         resolver,
         sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
     )
-    default_topology = default_measurement["runtime_stats"]["topology"]
+    action = _section_action(
+        session,
+        "serving_workloads",
+        (
+            "Define the serving workloads used for analytical memory budgets. "
+            "vLLM statistics can measure any subset of these workloads later."
+        ),
+        {
+            "serving-default": {
+                "input_sequence_length": default_workload["prefill_seq_len"],
+                "output_sequence_length": default_workload["generation_seq_len"],
+                "concurrency": default_workload["max_num_seqs"],
+            }
+        },
+    )
+    if action is BACK:
+        return False
+    if action == "defaults":
+        session.state.set_collection(
+            "serving_workloads",
+            {"serving-default": default_workload},
+        )
+        return True
+
+    workloads: OrderedDict[str, Any] = OrderedDict()
+    while True:
+        result = _serving_workload_prompt(
+            session,
+            "serving_workloads",
+            default_name=(
+                "serving-default" if not workloads else f"serving-{len(workloads) + 1}"
+            ),
+            default_workload=default_workload,
+            existing_names=set(workloads),
+        )
+        if result is BACK:
+            return False
+        name, workload = result
+        workloads[name] = workload
+        add_more = session.confirm(
+            "serving_workloads.add",
+            "Add another serving workload?",
+            default=False,
+        )
+        if add_more is BACK:
+            return False
+        if not add_more:
+            break
+    session.state.set_collection("serving_workloads", workloads)
+    return True
+
+
+def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    enabled_default = bool(resolver.resolve_default("vllm.enabled", False).value)
+    default_measurement_settings = _default_vllm_measurement(
+        resolver,
+        sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
+    )
+    default_topology = default_measurement_settings["runtime_stats"]["topology"]
+    workloads = OrderedDict(
+        _mapping_copy(session.state.collection("serving_workloads")).items()
+    )
+    if not workloads:
+        workloads["serving-default"] = _default_serving_workload(
+            resolver,
+            sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
+        )
     pruning = _pruning_payload(session.state)
     counts = count_candidate_options(
         context["model"].config,
@@ -2356,15 +2499,23 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
     )
     granularity_choices = _vllm_granularity_choices(counts)
     granularity_labels = {value: label for label, value in granularity_choices}
-    preview = {"enabled": enabled_default}
+    preview = {
+        "enabled": enabled_default,
+        "available_serving_workloads": [
+            _serving_workload_label(name, setting)
+            for name, setting in workloads.items()
+        ],
+    }
     if enabled_default:
+        default_name, default_workload = next(iter(workloads.items()))
         preview["measurement"] = {
-            "input_sequence_length": default_measurement["prefill_seq_len"],
-            "output_sequence_length": default_measurement["generation_seq_len"],
-            "concurrency": default_measurement["max_num_seqs"],
+            "workload": default_name,
+            "input_sequence_length": default_workload["prefill_seq_len"],
+            "output_sequence_length": default_workload["generation_seq_len"],
+            "concurrency": default_workload["max_num_seqs"],
             "granularity": granularity_labels.get(
-                default_measurement["granularity"],
-                default_measurement["granularity"],
+                default_measurement_settings["granularity"],
+                default_measurement_settings["granularity"],
             ),
             "gpus_per_task": default_topology["gpu_group_size"],
         }
@@ -2380,63 +2531,101 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         if not enabled_default:
             session.state.set_collection("vllm_measurements", {})
             return True
+        default_name, default_workload = next(iter(workloads.items()))
         issues = validate_vllm_parallelism(
             default_topology,
             context["model"].inventory,
             pruning,
-            stage_id="vllm_stats.serving-default",
+            stage_id=f"vllm_stats.{default_name}",
         )
         if issues:
             _print_parallel_issues(issues)
             default_topology = _vllm_topology_prompt(
                 session,
-                "vllm.measurements.serving-default.topology",
+                f"vllm.measurements.{default_name}.topology",
                 default_topology,
                 inventory=context["model"].inventory,
                 pruning=pruning,
-                stage_id="vllm_stats.serving-default",
+                stage_id=f"vllm_stats.{default_name}",
             )
             if default_topology is BACK:
                 return False
-            default_measurement["runtime_stats"]["topology"] = default_topology
+        granularity = default_measurement_settings["granularity"]
         session.state.set_collection(
             "vllm_measurements",
-            {"serving-default": default_measurement},
+            {
+                default_name: {
+                    **default_workload,
+                    "granularity": granularity,
+                    "runtime_stats": {
+                        "granularity": granularity,
+                        "max_num_seqs": default_workload["max_num_seqs"],
+                        "topology": default_topology,
+                    },
+                }
+            },
         )
         return True
+
+    enabled = session.confirm(
+        "vllm.enabled",
+        "Collect vLLM runtime statistics?",
+        default=enabled_default,
+    )
+    if enabled is BACK:
+        return False
+    if not enabled:
+        session.state.set_collection("vllm_measurements", {})
+        return True
+
     measurements: OrderedDict[str, Any] = OrderedDict()
     while True:
-        name = session.text(
-            "vllm.measurement.id",
-            "Measurement ID:",
-            default="serving-default" if not measurements else f"serving-{len(measurements) + 1}",
+        unused_workloads = OrderedDict(
+            (name, setting)
+            for name, setting in workloads.items()
+            if name not in measurements
         )
-        if name is BACK:
+        if unused_workloads:
+            workload_choice = session.select(
+                "vllm.measurement.workload",
+                "Serving workload for this vLLM measurement:",
+                [
+                    *(
+                        PromptChoice(
+                            _serving_workload_label(name, setting),
+                            name,
+                            (
+                                "Already selected for vLLM statistics"
+                                if name in measurements
+                                else None
+                            ),
+                        )
+                        for name, setting in workloads.items()
+                    ),
+                    ("Create a new serving workload", _CREATE_SERVING_WORKLOAD),
+                ],
+                default=next(iter(unused_workloads)),
+            )
+        else:
+            workload_choice = _CREATE_SERVING_WORKLOAD
+        if workload_choice is BACK:
             return False
-        defaults = {
-            key: int(resolver.resolve_default(f"vllm.{key}", fallback).value)
-            for key, fallback in (
-                ("prefill_seq_len", session.state.get_field("data.sequence_length", 4096)),
-                ("generation_seq_len", 1024),
-                ("max_num_seqs", 1),
+        if workload_choice == _CREATE_SERVING_WORKLOAD:
+            previous_workload = workloads[next(reversed(workloads))]
+            result = _serving_workload_prompt(
+                session,
+                "vllm.measurement.new_workload",
+                default_name=f"serving-{len(workloads) + 1}",
+                default_workload=previous_workload,
+                existing_names=set(workloads),
             )
-        }
-        values = {}
-        for key, label in (
-            ("prefill_seq_len", "Input sequence length (ISL):"),
-            ("generation_seq_len", "Output sequence length (OSL):"),
-            ("max_num_seqs", "Concurrency:"),
-        ):
-            value = session.integer(
-                f"vllm.measurements.{name}.{key}",
-                label,
-                default=defaults[key],
-                minimum=1,
-            )
-            if value is BACK:
+            if result is BACK:
                 return False
-            values[key] = int(value)
-        values["batch_size"] = values["max_num_seqs"]
+            name, values = result
+            workloads[name] = values
+        else:
+            name = str(workload_choice)
+            values = _mapping_copy(workloads[name])
         granularity = session.select(
             f"vllm.measurements.{name}.granularity",
             "Measurement granularity:",
@@ -2472,15 +2661,476 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         if not add_more:
             break
     session.state.set_collection("vllm_measurements", measurements)
+    session.state.set_collection("serving_workloads", workloads)
     return True
 
 
+_MIP_RANKING_CHOICES = (
+    ("Cosine embedding distance", "metrics.cosine_embedding_loss_hidden_states"),
+    ("Language-model loss", "metrics.lm_loss"),
+)
+
+_MIP_AXIS_ALIASES = {
+    "ffn_intermediate": "ffn.intermediate_size",
+    "kv_heads": "num_key_value_heads",
+    "q_heads_per_group": "q_per_group",
+    "moe_experts": "n_routed_experts",
+    "moe_expert_intermediate": "moe_intermediate_size",
+    "moe_shared_expert_intermediate": "moe_shared_expert_intermediate_size",
+    "moe_latent_dim": "moe.latent_dim",
+    "moe_top_k": "num_experts_per_tok",
+    "mamba_heads": "mamba_num_heads",
+    "mamba_head_dim": "mamba_head_dim",
+}
+
+
+_mip_identifier_validation = _identifier_validation
+
+
+def _mip_default_search_id(metric: str, value: Any) -> str:
+    suffix = str(value).replace("%", "")
+    slug = "".join(
+        character if character.isalnum() or character in "_-" else "-"
+        for character in suffix
+    ).strip("-")
+    return f"{metric}-{slug or 'target'}"
+
+
+def _mip_scalar_validation(value: str) -> bool | str:
+    try:
+        parsed = yaml.safe_load(value)
+    except yaml.YAMLError:
+        return "Enter a number, percentage, or value with a supported unit."
+    if parsed is None or isinstance(parsed, (bool, list, tuple, Mapping)):
+        return "Enter one scalar value, such as 70%, 22.5B, or 120GiB."
+    return True
+
+
+def _mip_parse_scalar(value: str) -> Any:
+    return yaml.safe_load(str(value))
+
+
+def _mip_range_lower_default(value: Any) -> str:
+    text = str(value)
+    if text.endswith("%"):
+        try:
+            return f"{max(1.0, float(text[:-1]) - 2.0):g}%"
+        except ValueError:
+            pass
+    return text
+
+
+def _mip_bound_prompt(
+    session: WizardSession,
+    prompt_id: str,
+    label: str,
+    *,
+    default: Any,
+) -> Any:
+    mode = session.select(
+        f"{prompt_id}.mode",
+        f"{label} bound:",
+        [
+            ("Maximum", "max"),
+            ("Range", "range"),
+            ("Exact", "eq"),
+        ],
+        default="max",
+    )
+    if mode is BACK:
+        return BACK
+    if mode == "range":
+        lower = session.text(
+            f"{prompt_id}.minimum",
+            f"{label} minimum:",
+            default=_mip_range_lower_default(default),
+            validate=_mip_scalar_validation,
+        )
+        upper = session.text(
+            f"{prompt_id}.maximum",
+            f"{label} maximum:",
+            default=str(default),
+            validate=_mip_scalar_validation,
+        )
+        if BACK in (lower, upper):
+            return BACK
+        return {"range": [_mip_parse_scalar(lower), _mip_parse_scalar(upper)]}
+    value = session.text(
+        f"{prompt_id}.value",
+        f"{label} value:",
+        default=str(default),
+        validate=_mip_scalar_validation,
+    )
+    if value is BACK:
+        return BACK
+    return {str(mode): _mip_parse_scalar(value)}
+
+
+def _mip_maximum_prompt(
+    session: WizardSession,
+    prompt_id: str,
+    label: str,
+    *,
+    default: Any,
+) -> Any:
+    value = session.text(
+        f"{prompt_id}.maximum",
+        f"{label} maximum:",
+        default=str(default),
+        validate=_mip_scalar_validation,
+    )
+    if value is BACK:
+        return BACK
+    return {"max": _mip_parse_scalar(value)}
+
+
+def _mip_workload_choices(
+    workloads: Mapping[str, Mapping[str, Any]],
+) -> list[tuple[str, str]]:
+    return [
+        (
+            (
+                f"{name} — ISL {setting['isl']}, OSL {setting['osl']}, "
+                f"concurrency {setting['concurrency']}"
+            ),
+            str(name),
+        )
+        for name, setting in workloads.items()
+    ]
+
+
+def _mip_constraint_choices(
+    *,
+    moe: bool,
+    workloads: Mapping[str, Any],
+    runtime_workloads: Mapping[str, Any],
+    include_axis_aggregates: bool,
+    axis_ids: set[str],
+) -> list[tuple[str, str]]:
+    choices = [("Total parameters", "params")]
+    if moe:
+        choices.append(("Active parameters", "active_params"))
+    if workloads:
+        choices.append(("Memory at selected workloads", "memory"))
+    if runtime_workloads:
+        choices.append(("Runtime at selected measured workloads", "runtime"))
+    if include_axis_aggregates:
+        if "moe_experts" in axis_ids:
+            choices.append(("Total expert slots across all layers", "experts"))
+        if "kv_heads" in axis_ids:
+            choices.append(("Total KV heads across all layers", "kv_heads"))
+    return choices
+
+
+def _mip_constraint_default(metric: str, configured_goal: Any) -> Any:
+    return {
+        "params": configured_goal,
+        "active_params": "80%",
+        "memory": "70%",
+        "runtime": "75%",
+        "experts": "75%",
+        "kv_heads": "75%",
+    }[metric]
+
+
+def _mip_constraints_prompt(
+    session: WizardSession,
+    prompt_id: str,
+    *,
+    choices: list[tuple[str, str]],
+    workloads: Mapping[str, Mapping[str, Any]],
+    runtime_workloads: Mapping[str, Mapping[str, Any]],
+    configured_goal: Any,
+    defaults: list[str],
+    require_one: bool,
+) -> Any:
+    selected = session.checkbox(
+        f"{prompt_id}.metrics",
+        "Constraints:",
+        choices,
+        defaults=defaults,
+        validate=(
+            (lambda values: bool(values) or "Select at least one constraint.")
+            if require_one
+            else None
+        ),
+    )
+    if selected is BACK:
+        return BACK
+    labels = {value: title for title, value in choices}
+    constraints: OrderedDict[str, Any] = OrderedDict()
+    for metric in selected:
+        metric = str(metric)
+        default = _mip_constraint_default(metric, configured_goal)
+        if metric not in {"memory", "runtime"}:
+            prompt = (
+                _mip_maximum_prompt
+                if metric in {"params", "active_params"}
+                else _mip_bound_prompt
+            )
+            bound = prompt(
+                session,
+                f"{prompt_id}.{metric}",
+                labels[metric],
+                default=default,
+            )
+            if bound is BACK:
+                return BACK
+            constraints[metric] = bound
+            continue
+        available_workloads = runtime_workloads if metric == "runtime" else workloads
+        selected_workloads = session.checkbox(
+            f"{prompt_id}.{metric}.workloads",
+            f"{labels[metric]}:",
+            _mip_workload_choices(available_workloads),
+            defaults=list(available_workloads),
+            validate=lambda values: bool(values) or "Select at least one workload.",
+        )
+        if selected_workloads is BACK:
+            return BACK
+        workload_bounds: OrderedDict[str, Any] = OrderedDict()
+        for workload in selected_workloads:
+            bound = _mip_maximum_prompt(
+                session,
+                f"{prompt_id}.{metric}.{workload}",
+                f"{labels[metric]} at {workload}",
+                default=default,
+            )
+            if bound is BACK:
+                return BACK
+            workload_bounds[str(workload)] = bound
+        constraints[metric] = {"at": workload_bounds}
+    return constraints
+
+
+def _mip_axis_specs(inventory: Any, pruning: Mapping[str, Any]) -> list[dict[str, Any]]:
+    configured = _mapping_copy(pruning.get("axes"))
+    specs = []
+    for axis in inventory.axes:
+        if axis.axis_id == "hidden_width" or axis.axis_id not in _MIP_AXIS_ALIASES:
+            continue
+        setting = _mapping_copy(configured.get(axis.axis_id))
+        values = list(
+            dict.fromkeys(int(value) for value in setting.get("values") or axis.values)
+        )
+        if not values or not bool(setting.get("enabled", False)):
+            continue
+        specs.append(
+            {
+                "axis_id": str(axis.axis_id),
+                "mip_axis": _MIP_AXIS_ALIASES[axis.axis_id],
+                "label": str(axis.label),
+                "values": values,
+                "teacher_value": int(axis.teacher_value),
+            }
+        )
+    return specs
+
+
+def _mip_scenario_domains(
+    inventory: Any,
+    pruning: Mapping[str, Any],
+) -> tuple[list[int], list[int]]:
+    maximum_depth = int(pruning.get("depth_remove", 0))
+    depths = list(range(maximum_depth + 1))
+    hidden = _mapping_copy(_mapping_copy(pruning.get("axes")).get("hidden_width"))
+    embeddings = list(dict.fromkeys(int(value) for value in hidden.get("values") or ()))
+    if not embeddings:
+        teacher_width = next(
+            (
+                int(axis.teacher_value)
+                for axis in inventory.axes
+                if axis.axis_id == "hidden_width"
+            ),
+            None,
+        )
+        if teacher_width is None:
+            raise SetupError("The model inventory has no embedding-width domain for MIP.")
+        embeddings = [teacher_width]
+    return depths, embeddings
+
+
+def _mip_variant_prompt(
+    session: WizardSession,
+    search_id: str,
+    *,
+    existing_ids: set[str],
+    constraint_choices: list[tuple[str, str]],
+    workloads: Mapping[str, Mapping[str, Any]],
+    runtime_workloads: Mapping[str, Mapping[str, Any]],
+    configured_goal: Any,
+    axis_specs: list[dict[str, Any]],
+) -> Any:
+    while True:
+        variant_id = session.text(
+            f"mip.search.{search_id}.variant.id",
+            "Variant ID:",
+            default="restricted",
+            validate=_mip_identifier_validation,
+        )
+        if variant_id is BACK:
+            return BACK
+        variant_id = str(variant_id)
+        if variant_id == "baseline":
+            print("  'baseline' is reserved for the main search without extra restrictions.")
+            continue
+        if variant_id in existing_ids:
+            print(f"  Variant {variant_id!r} already exists.")
+            continue
+        break
+    restriction_choices = [("Additional model constraints", "constraints")]
+    if axis_specs:
+        restriction_choices.append(("Pruning-axis restrictions", "axes"))
+    restrictions = session.checkbox(
+        f"mip.search.{search_id}.variant.{variant_id}.restrictions",
+        "Variant restrictions:",
+        restriction_choices,
+        defaults=[restriction_choices[0][1]],
+        validate=lambda values: bool(values) or "Select at least one restriction.",
+    )
+    if restrictions is BACK:
+        return BACK
+    variant: dict[str, Any] = {}
+    if "constraints" in restrictions:
+        constraints = _mip_constraints_prompt(
+            session,
+            f"mip.search.{search_id}.variant.{variant_id}.constraints",
+            choices=constraint_choices,
+            workloads=workloads,
+            runtime_workloads=runtime_workloads,
+            configured_goal=configured_goal,
+            defaults=[constraint_choices[0][1]],
+            require_one=True,
+        )
+        if constraints is BACK:
+            return BACK
+        variant["constraints"] = constraints
+    if "axes" in restrictions:
+        mode = session.select(
+            f"mip.search.{search_id}.variant.{variant_id}.axes.mode",
+            "Pruning-axis policy:",
+            [
+                ("Restrict values for selected axes; inherit all other axes", "restrict"),
+                (
+                    "Only selected width axes may change; keep other width axes at teacher",
+                    "only",
+                ),
+            ],
+            default="restrict",
+        )
+        if mode is BACK:
+            return BACK
+        axes = session.checkbox(
+            f"mip.search.{search_id}.variant.{variant_id}.axes.selected",
+            "Pruning axes:",
+            [(spec["label"], spec["axis_id"]) for spec in axis_specs],
+            defaults=[axis_specs[0]["axis_id"]],
+            validate=lambda values: bool(values) or "Select at least one pruning axis.",
+        )
+        if axes is BACK:
+            return BACK
+        selected_axes = set(str(axis_id) for axis_id in axes)
+        axis_options: OrderedDict[str, Any] = OrderedDict()
+        for spec in axis_specs:
+            if spec["axis_id"] not in selected_axes:
+                continue
+            values = session.checkbox(
+                (
+                    f"mip.search.{search_id}.variant.{variant_id}."
+                    f"axes.{spec['axis_id']}.values"
+                ),
+                f"Allowed values for {spec['label']}:",
+                [
+                    (
+                        f"{value}"
+                        + (" (teacher)" if value == spec["teacher_value"] else ""),
+                        value,
+                    )
+                    for value in spec["values"]
+                ],
+                defaults=spec["values"],
+                validate=lambda selected: bool(selected) or "Select at least one value.",
+            )
+            if values is BACK:
+                return BACK
+            axis_options[spec["mip_axis"]] = [int(value) for value in values]
+        variant["search_space"] = {
+            "axes_default": "teacher" if mode == "only" else "all",
+            "axes": axis_options,
+        }
+    return variant_id, variant
+
+
+def _mip_solution_estimate(
+    *,
+    variant_count: int,
+    metric_count: int,
+    embedding_count: int,
+    depth_count: int,
+    heterogeneous_per_solve: int,
+    homogeneous_keep: int | str,
+    axis_specs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    solve_count = variant_count * metric_count * embedding_count * depth_count
+    if homogeneous_keep == "all":
+        homogeneous_per_solve = 1
+        for spec in axis_specs:
+            homogeneous_per_solve *= len(spec["values"])
+        homogeneous_label = f"at most about {homogeneous_per_solve} per solve"
+    else:
+        homogeneous_per_solve = int(homogeneous_keep)
+        homogeneous_label = str(homogeneous_per_solve)
+    candidate_upper_bound = solve_count * (
+        heterogeneous_per_solve + homogeneous_per_solve
+    )
+    return {
+        "concrete_solves": solve_count,
+        "heterogeneous_per_solve": heterogeneous_per_solve,
+        "homogeneous_per_solve": homogeneous_label,
+        "candidate_origin_upper_bound": candidate_upper_bound,
+    }
+
+
+def _print_mip_search_review(
+    search_id: str,
+    *,
+    constraints: Mapping[str, Any],
+    depths: list[int],
+    embeddings: list[int],
+    objectives: list[str],
+    variants: Mapping[str, Any],
+    estimate: Mapping[str, Any],
+) -> None:
+    print(f"\n  Search {search_id!r} review:")
+    print(f"    Main budgets: {yaml.safe_dump(dict(constraints), sort_keys=False).strip()}")
+    print(f"    Depth selections: {depths}")
+    print(f"    Embedding widths: {embeddings}")
+    print(f"    Ranking metrics: {objectives}")
+    print(f"    Variants: {list(variants) if variants else ['baseline']}")
+    print(f"    Concrete solves: {estimate['concrete_solves']}")
+    print(
+        "    Requested candidates per solve: "
+        f"{estimate['heterogeneous_per_solve']} heterogeneous + "
+        f"{estimate['homogeneous_per_solve']} homogeneous"
+    )
+    print(
+        "    Candidate upper bound before deduplication: "
+        f"{estimate['candidate_origin_upper_bound']}"
+    )
+    print(
+        "    MIP scores are comparable only within the same ranking metric, "
+        "embedding width, and depth selection."
+    )
+
+
 def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    del context
+    inventory = context["model"].inventory
+    pruning = _mapping_copy(session.state.collection("pruning"))
+    serving_workloads = _mapping_copy(session.state.collection("serving_workloads"))
     measurements = _mapping_copy(session.state.collection("vllm_measurements"))
     workloads = OrderedDict(
         (
-            name,
+            str(name),
             {
                 "isl": int(raw["prefill_seq_len"]),
                 "osl": int(raw["generation_seq_len"]),
@@ -2488,96 +3138,124 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                 "concurrency": int(raw["max_num_seqs"]),
             },
         )
-        for name, raw in measurements.items()
+        for name, raw in serving_workloads.items()
     )
-    default_goal = resolver.resolve_default("mip.goal_metric", "params")
-    default_goal_metric = str(default_goal.value)
+    runtime_workloads = OrderedDict(
+        (name, workloads[name])
+        for name in measurements
+        if name in workloads
+    )
+    default_goal_metric = str(
+        resolver.resolve_default("mip.goal_metric", "params").value
+    )
     default_goal_value = resolver.resolve_default("mip.goal_value", "75%").value
     default_objective = str(
         resolver.resolve_default(
             "mip.objective", "metrics.cosine_embedding_loss_hidden_states"
         ).value
     )
-    default_num_solutions = int(resolver.resolve_default("mip.num_solutions", 8).value)
-    workload_metrics = {"memory", "runtime"}
-    goal_choices = [
-        ("Parameters", "params"),
-        ("Active parameters", "active_params"),
-    ]
-    if workloads:
-        goal_choices.extend(
-            [
-                ("Memory at a workload", "memory"),
-                ("Runtime at a workload", "runtime"),
-            ]
-        )
-    available_goal_metrics = {value for _, value in goal_choices}
-    if default_goal_metric not in available_goal_metrics:
-        if default_goal_metric == "throughput":
-            raise SetupError(
-                "MIP throughput goals are not supported by setup v2; "
-                "use runtime, memory, parameters, or active parameters."
-            )
-        if default_goal_metric in workload_metrics and not workloads:
-            raise SetupError(
-                f"Default MIP goal {default_goal_metric!r} requires an enabled vLLM measurement."
-            )
-        raise SetupError(f"Unsupported default MIP goal: {default_goal_metric!r}")
+    default_num_solutions = int(
+        resolver.resolve_default("mip.num_solutions", 8).value
+    )
+    available_depths, available_embeddings = _mip_scenario_domains(
+        inventory, pruning
+    )
+    teacher_embedding = next(
+        (
+            int(axis.teacher_value)
+            for axis in inventory.axes
+            if axis.axis_id == "hidden_width"
+        ),
+        max(available_embeddings),
+    )
+    axis_specs = _mip_axis_specs(inventory, pruning)
+    axis_ids = {str(axis.axis_id) for axis in inventory.axes}
+    main_constraint_choices = _mip_constraint_choices(
+        moe=bool(inventory.moe),
+        workloads=workloads,
+        runtime_workloads=runtime_workloads,
+        include_axis_aggregates=False,
+        axis_ids=axis_ids,
+    )
+    variant_constraint_choices = _mip_constraint_choices(
+        moe=bool(inventory.moe),
+        workloads=workloads,
+        runtime_workloads=runtime_workloads,
+        include_axis_aggregates=True,
+        axis_ids=axis_ids,
+    )
+    available_main_metrics = {value for _, value in main_constraint_choices}
+    if default_goal_metric not in available_main_metrics:
+        default_goal_metric = "params"
+    if default_objective not in {value for _, value in _MIP_RANKING_CHOICES}:
+        default_objective = _MIP_RANKING_CHOICES[0][1]
+    default_search_id = _mip_default_search_id(
+        default_goal_metric, default_goal_value
+    )
+    default_estimate = _mip_solution_estimate(
+        variant_count=1,
+        metric_count=1,
+        embedding_count=len(available_embeddings),
+        depth_count=len(available_depths),
+        heterogeneous_per_solve=default_num_solutions,
+        homogeneous_keep=5,
+        axis_specs=axis_specs,
+    )
     action = _section_action(
         session,
         "mip",
-        "Create independent goals, then add internal constraints, variants, and matrices.",
+        (
+            "Create one or more searches. Each search shares main budgets, "
+            "width/depth scenarios, ranking metrics, solution policy, and named variants."
+        ),
         {
-            "goal": {
-                "metric": default_goal_metric,
-                "bound": default_goal_value,
-                "workload": (
-                    next(iter(workloads))
-                    if default_goal_metric in workload_metrics and workloads
-                    else None
-                ),
-            },
-            "objective": default_objective,
-            "internal_constraints": [],
-            "variants": [],
-            "search_space": {"depth": "all", "embedding": "all"},
-            "solver": {
-                "backend": "auto",
-                "num_solutions": default_num_solutions,
-                "min_hamming_distance": 2,
-                "max_seconds_per_solution": 60,
-            },
-            "homogeneous": {"enabled": True, "keep": "all"},
+            "search": default_search_id,
+            "main_budgets": {default_goal_metric: {"max": default_goal_value}},
+            "depths": available_depths,
+            "embedding_widths": available_embeddings,
+            "ranking_metrics": [default_objective],
+            "variants": ["baseline"],
+            "heterogeneous_per_solve": default_num_solutions,
+            "homogeneous_per_solve": 5,
+            "candidate_origin_upper_bound": default_estimate[
+                "candidate_origin_upper_bound"
+            ],
         },
     )
     if action is BACK:
         return False
+
     if action == "defaults":
-        default_workload = None
-        if default_goal_metric in workload_metrics:
-            default_workload = next(iter(workloads))
-        goal_bound = yaml.safe_load(str(default_goal_value))
-        goal_config = (
-            {"at": {str(default_workload): goal_bound}}
-            if default_workload is not None
-            else goal_bound
-        )
-        run_id = f"{default_goal_metric}-{str(default_goal_value).replace('%', '')}"
+        constraint: Any = {"max": _mip_parse_scalar(str(default_goal_value))}
+        if default_goal_metric in {"memory", "runtime"}:
+            target_workloads = (
+                runtime_workloads if default_goal_metric == "runtime" else workloads
+            )
+            if not target_workloads:
+                raise SetupError(
+                    f"Default MIP constraint {default_goal_metric!r} requires "
+                    + (
+                        "an enabled vLLM measurement."
+                        if default_goal_metric == "runtime"
+                        else "a serving workload."
+                    )
+                )
+            constraint = {"at": {name: constraint for name in target_workloads}}
         session.state.set_collection(
             "mip_config",
             {
                 "defaults": {},
                 "workloads": workloads,
                 "runs": {
-                    run_id: {
-                        "constraints": {default_goal_metric: goal_config},
+                    default_search_id: {
+                        "constraints": {default_goal_metric: constraint},
                         "objectives": [
-                            {
-                                "metric": default_objective,
-                                "direction": "minimize",
-                            }
+                            {"metric": default_objective, "direction": "minimize"}
                         ],
-                        "search_space": {"depth": "all", "embedding": "all"},
+                        "search_space": {
+                            "depth": available_depths,
+                            "embedding": available_embeddings,
+                        },
                         "solver": {
                             "backend": "auto",
                             "num_solutions": default_num_solutions,
@@ -2586,142 +3264,238 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                         },
                         "homogeneous": {
                             "enabled": True,
-                            "keep": "all",
+                            "keep": 5,
                             "rank_by": "objective",
                         },
                     }
                 },
             },
         )
+        session.state.set_collection(
+            "mip_search_estimates", {default_search_id: default_estimate}
+        )
         return True
+
     runs: OrderedDict[str, Any] = OrderedDict()
+    estimates: OrderedDict[str, Any] = OrderedDict()
     while True:
-        goal_metric = session.select(
-            "mip.run.goal.metric",
-            "Main MIP goal:",
-            goal_choices,
-            default=default_goal_metric,
-        )
-        if goal_metric is BACK:
-            return False
-        goal_value = session.text(
-            "mip.run.goal.value",
-            "Goal bound (for example 75%, 22.5B, or 5000):",
-            default=str(default_goal_value),
-        )
-        if goal_value is BACK:
-            return False
-        workload = None
-        if goal_metric in workload_metrics:
-            workload = session.select(
-                "mip.run.goal.workload",
-                "Goal workload:",
-                list(workloads),
-                default=next(iter(workloads)),
+        print("\n  MIP search step 1/8 — Search identity")
+        while True:
+            search_id = session.text(
+                "mip.search.id",
+                "Search ID:",
+                default=default_search_id if not runs else f"search-{len(runs) + 1}",
+                validate=_mip_identifier_validation,
             )
-            if workload is BACK:
+            if search_id is BACK:
                 return False
-        run_id = session.text(
-            "mip.run.id",
-            "MIP run ID:",
-            default=f"{goal_metric}-{str(goal_value).replace('%', '')}",
+            search_id = str(search_id)
+            if search_id in runs:
+                print(f"  Search {search_id!r} already exists.")
+                continue
+            break
+
+        print("\n  MIP search step 2/8 — Main budgets")
+        constraints = _mip_constraints_prompt(
+            session,
+            f"mip.search.{search_id}.budgets",
+            choices=main_constraint_choices,
+            workloads=workloads,
+            runtime_workloads=runtime_workloads,
+            configured_goal=default_goal_value,
+            defaults=[default_goal_metric],
+            require_one=True,
         )
-        if run_id is BACK:
+        if constraints is BACK:
             return False
-        objective = session.select(
-            "mip.run.objective",
-            "Objective:",
+
+        print("\n  MIP search step 3/8 — Width and depth scenarios")
+        depths = session.checkbox(
+            f"mip.search.{search_id}.depths",
+            "Depth removals:",
+            [(str(depth), depth) for depth in available_depths],
+            defaults=available_depths,
+            validate=lambda values: bool(values) or "Select at least one depth.",
+        )
+        embeddings = session.checkbox(
+            f"mip.search.{search_id}.embeddings",
+            "Embedding widths:",
             [
-                ("Cosine embedding distance", "metrics.cosine_embedding_loss_hidden_states"),
-                ("Language-model loss", "metrics.lm_loss"),
+                (
+                    f"{width}" + (" (teacher)" if width == teacher_embedding else ""),
+                    width,
+                )
+                for width in available_embeddings
             ],
-            default=str(
-                resolver.resolve(
-                    "mip.objective", "metrics.cosine_embedding_loss_hidden_states"
-                ).value
-            ),
+            defaults=available_embeddings,
+            validate=lambda values: bool(values) or "Select at least one embedding width.",
         )
-        if objective is BACK:
+        if BACK in (depths, embeddings):
             return False
-        goal_bound: Any = yaml.safe_load(str(goal_value))
-        goal_config = {"at": {str(workload): goal_bound}} if workload is not None else goal_bound
-        constraints = {str(goal_metric): goal_config}
+        depths = [int(value) for value in depths]
+        embeddings = [int(value) for value in embeddings]
+
+        print("\n  MIP search step 4/8 — Ranking metrics")
+        objectives = session.checkbox(
+            f"mip.search.{search_id}.objectives",
+            "Ranking metrics (each creates an independent solution pool):",
+            list(_MIP_RANKING_CHOICES),
+            defaults=[default_objective],
+            validate=lambda values: bool(values) or "Select at least one ranking metric.",
+        )
+        if objectives is BACK:
+            return False
+        objectives = [str(value) for value in objectives]
+
+        print("\n  MIP search step 5/8 — Solution types")
+        solution_types = session.select(
+            f"mip.search.{search_id}.solution_types",
+            "Solution types:",
+            [
+                ("Heterogeneous only", "heterogeneous"),
+                ("Heterogeneous and homogeneous", "both"),
+            ],
+            default="both",
+        )
+        if solution_types is BACK:
+            return False
+
+        print("\n  MIP search step 6/8 — Named variants")
         variants: OrderedDict[str, Any] = OrderedDict()
-        if action == "customize":
-            while True:
-                extra = session.confirm(
-                    "mip.run.constraint.add", "Add an internal AND constraint?", default=False
-                )
-                if extra is BACK:
-                    return False
-                if not extra:
-                    break
-                metric = session.text(
-                    "mip.run.constraint.metric",
-                    "Constraint metric (friendly name or stats.*):",
-                    default="experts",
-                )
-                mode = session.select(
-                    "mip.run.constraint.mode",
-                    "Bound type:",
-                    ["min", "max", "eq", "range"],
-                    default="max",
-                )
-                raw = session.text(
-                    "mip.run.constraint.value",
-                    "Bound value (YAML scalar/list):",
-                    default="[64, 96]" if mode == "range" else "75%",
-                )
-                if BACK in (metric, mode, raw):
-                    return False
-                constraints[str(metric)] = {str(mode): yaml.safe_load(str(raw))}
+        add_variant = session.confirm(
+            f"mip.search.{search_id}.variant.add",
+            "Add a named variant in addition to baseline?",
+            default=False,
+        )
+        if add_variant is BACK:
+            return False
+        while add_variant:
+            variant_result = _mip_variant_prompt(
+                session,
+                search_id,
+                existing_ids=set(variants),
+                constraint_choices=variant_constraint_choices,
+                workloads=workloads,
+                runtime_workloads=runtime_workloads,
+                configured_goal=default_goal_value,
+                axis_specs=axis_specs,
+            )
+            if variant_result is BACK:
+                return False
+            variant_id, variant = variant_result
+            variants[str(variant_id)] = variant
             add_variant = session.confirm(
-                "mip.run.variant.add", "Add a variant or matrix sweep?", default=False
+                f"mip.search.{search_id}.variant.add_more",
+                "Add another named variant?",
+                default=False,
             )
             if add_variant is BACK:
                 return False
-            while add_variant:
-                variant_id = session.text("mip.run.variant.id", "Variant ID:", default="sweep")
-                matrix_path = session.text(
-                    "mip.run.variant.matrix.path",
-                    "Matrix path (embedding, depth, constraints.*, solver.*, homogeneous.*):",
-                    default="depth",
+
+        print("\n  MIP search step 7/8 — Candidate pool sizes")
+        heterogeneous_per_solve = session.integer(
+            f"mip.search.{search_id}.heterogeneous_per_solve",
+            "Heterogeneous solutions requested per solve:",
+            default=default_num_solutions,
+            minimum=1,
+        )
+        if heterogeneous_per_solve is BACK:
+            return False
+        homogeneous_keep: int | str = 0
+        if solution_types == "both":
+            homogeneous_mode = session.select(
+                f"mip.search.{search_id}.homogeneous.mode",
+                "Homogeneous solutions retained per solve:",
+                [
+                    ("Top N", "top_n"),
+                    ("All feasible homogeneous solutions", "all"),
+                ],
+                default="top_n",
+            )
+            if homogeneous_mode is BACK:
+                return False
+            if homogeneous_mode == "all":
+                homogeneous_keep = "all"
+            else:
+                homogeneous_keep = session.integer(
+                    f"mip.search.{search_id}.homogeneous.keep",
+                    "Homogeneous solutions retained per solve:",
+                    default=5,
+                    minimum=1,
                 )
-                matrix_values = session.text(
-                    "mip.run.variant.matrix.values",
-                    "Matrix values as a YAML list:",
-                    default="[0, 2, 4]",
-                )
-                if BACK in (variant_id, matrix_path, matrix_values):
+                if homogeneous_keep is BACK:
                     return False
-                variants[str(variant_id)] = {
-                    "matrix": {str(matrix_path): yaml.safe_load(str(matrix_values))}
-                }
-                add_variant = session.confirm(
-                    "mip.run.variant.add_more", "Add another variant?", default=False
-                )
-                if add_variant is BACK:
-                    return False
+
+        explicit_variants: OrderedDict[str, Any] = OrderedDict()
+        if variants:
+            explicit_variants["baseline"] = {}
+            explicit_variants.update(variants)
+        estimate = _mip_solution_estimate(
+            variant_count=max(1, len(explicit_variants)),
+            metric_count=len(objectives),
+            embedding_count=len(embeddings),
+            depth_count=len(depths),
+            heterogeneous_per_solve=int(heterogeneous_per_solve),
+            homogeneous_keep=homogeneous_keep,
+            axis_specs=axis_specs,
+        )
+
+        print("\n  MIP search step 8/8 — Review")
+        _print_mip_search_review(
+            search_id,
+            constraints=constraints,
+            depths=depths,
+            embeddings=embeddings,
+            objectives=objectives,
+            variants=explicit_variants,
+            estimate=estimate,
+        )
+        accept = session.confirm(
+            f"mip.search.{search_id}.accept",
+            "Add this search?",
+            default=True,
+        )
+        if accept is BACK:
+            return False
+        if not accept:
+            print("  Search discarded; starting it again.")
+            continue
+
         run = {
             "constraints": constraints,
-            "objectives": [{"metric": str(objective), "direction": "minimize"}],
-            "search_space": {"depth": "all", "embedding": "all"},
+            "objectives": [
+                {"metric": metric, "direction": "minimize"} for metric in objectives
+            ],
+            "search_space": {
+                "depth": depths,
+                "embedding": embeddings,
+            },
             "solver": {
                 "backend": "auto",
-                "num_solutions": default_num_solutions,
+                "num_solutions": int(heterogeneous_per_solve),
                 "min_hamming_distance": 2,
                 "max_seconds_per_solution": 60,
             },
-            "homogeneous": {"enabled": True, "keep": "all", "rank_by": "objective"},
+            "homogeneous": {
+                "enabled": solution_types == "both",
+                "keep": homogeneous_keep if solution_types == "both" else "all",
+                "rank_by": "objective",
+            },
         }
-        if variants:
-            run["variants"] = variants
-        runs[str(run_id)] = run
-        more = session.confirm("mip.run.add", "Add another independent MIP run?", default=False)
+        if explicit_variants:
+            run["variants"] = explicit_variants
+        runs[search_id] = run
+        estimates[search_id] = estimate
+        more = session.confirm(
+            "mip.search.add",
+            "Define another MIP search?",
+            default=False,
+        )
         if more is BACK:
             return False
         if not more:
             break
+
     session.state.set_collection(
         "mip_config",
         {
@@ -2730,6 +3504,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             "runs": runs,
         },
     )
+    session.state.set_collection("mip_search_estimates", estimates)
     return True
 
 
@@ -2745,15 +3520,15 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
     sequence = int(session.state.get_field("data.sequence_length", 4096))
-    measurements = _mapping_copy(session.state.collection("vllm_measurements"))
-    first_measurement = next(iter(measurements.values()), {})
+    workloads = _mapping_copy(session.state.collection("serving_workloads"))
+    first_workload = next(iter(workloads.values()), {})
     serving = {
-        "input_tokens": int(first_measurement.get("prefill_seq_len", sequence)),
-        "output_tokens": int(first_measurement.get("generation_seq_len", 1024)),
-        "concurrency": [int(first_measurement.get("max_num_seqs", 1))],
+        "input_tokens": int(first_workload.get("prefill_seq_len", sequence)),
+        "output_tokens": int(first_workload.get("generation_seq_len", 1024)),
+        "concurrency": [int(first_workload.get("max_num_seqs", 1))],
         "request_count": max(
             32,
-            4 * int(first_measurement.get("max_num_seqs", 1)),
+            4 * int(first_workload.get("max_num_seqs", 1)),
         ),
         "best_selection_mode": "individual_best",
     }
@@ -3464,6 +4239,7 @@ def output_review_section(
                     for path, record in session.state.records().items()
                 },
                 "profiles": session.state.collection("parallel_profiles"),
+                "serving_workloads": session.state.collection("serving_workloads"),
                 "vllm_measurements": session.state.collection("vllm_measurements"),
                 "mip": session.state.collection("mip_config"),
                 "post_mip": session.state.collection("post_mip_flows"),
@@ -3495,6 +4271,7 @@ SECTION_BUILDERS: tuple[Callable[..., bool], ...] = (
     slicing_sanity_section,
     bypass_section,
     replacement_scoring_section,
+    serving_workloads_section,
     vllm_section,
     mip_section,
     post_mip_section,
@@ -3512,6 +4289,7 @@ SECTION_NAMES = (
     "slicing_sanity",
     "bypass",
     "replacement_scoring",
+    "serving_workloads",
     "vllm",
     "mip",
     "post_mip",
@@ -3539,20 +4317,25 @@ def _refresh_legacy_state(state: WizardState) -> None:
         _mapping_copy(item)
         for item in subset_selection.get("subsets") or ()
     ]
-    first_measurement = next(
-        iter(_mapping_copy(state.collection("vllm_measurements")).items()),
+    serving_workloads = _mapping_copy(state.collection("serving_workloads"))
+    measurements = _mapping_copy(state.collection("vllm_measurements"))
+    first_workload = next(
+        iter(serving_workloads.items()),
         ("serving-default", {}),
     )
-    measurement_id, measurement = first_measurement
+    workload_id, workload = first_workload
+    measurement = _mapping_copy(measurements.get(workload_id))
+    if not measurement and measurements:
+        measurement = _mapping_copy(next(iter(measurements.values())))
     runtime = {
-        "vllm_enabled": bool(state.collection("vllm_measurements")),
+        "vllm_enabled": bool(measurements),
         "granularity": measurement.get("granularity", "subblock"),
-        "workload_id": measurement_id,
+        "workload_id": workload_id,
         "isl": int(
-            measurement.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))
+            workload.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))
         ),
-        "osl": int(measurement.get("generation_seq_len", 1024)),
-        "concurrency": int(measurement.get("max_num_seqs", 1)),
+        "osl": int(workload.get("generation_seq_len", 1024)),
+        "concurrency": int(workload.get("max_num_seqs", 1)),
     }
     infrastructure = {
         "runner": {

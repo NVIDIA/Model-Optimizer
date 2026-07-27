@@ -139,17 +139,25 @@ class InteractiveBackend:
             )
             for choice in choices
         ]
-        rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK, checked=False))
-        values = list(
-            _answer(
-                questionary.checkbox(
-                    message,
-                    choices=rendered,
-                    style=_choice_style(questionary),
-                )
-            )
+        rendered.append(questionary.Separator(f"  {self._BACK_TITLE} (press Esc)"))
+        question = questionary.checkbox(
+            message,
+            choices=rendered,
+            instruction=(
+                "(Use arrow keys to move, <space> to select, <a> to toggle, "
+                "<i> to invert, <esc> to go back)"
+            ),
+            style=_choice_style(questionary),
         )
-        return BACK if BACK in values else values
+
+        @question.application.key_bindings.add("escape", eager=True)
+        def go_back(event):
+            event.app.exit(result=BACK)
+
+        values = _answer(question)
+        if values is BACK:
+            return BACK
+        return list(values)
 
 
 class ScriptedBackend:

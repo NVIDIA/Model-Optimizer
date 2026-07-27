@@ -318,23 +318,56 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
                     )
                 )
 
+    serving_workloads = _mapping(state.collection("serving_workloads"))
     measurements = _mapping(state.collection("vllm_measurements"))
     mip = _mapping(state.collection("mip_config"))
     workloads = _mapping(mip.get("workloads"))
-    if measurements:
-        issues.extend(
-            (
-                ValidationIssue(
-                    f"mip.workloads.{name}",
-                    "The referenced named vLLM measurement does not exist.",
-                )
+    if not serving_workloads:
+        issues.append(
+            ValidationIssue(
+                "serving_workloads",
+                "Define at least one serving workload.",
             )
-            for name in workloads
-            if name not in measurements
         )
+    for name, raw in serving_workloads.items():
+        setting = _mapping(raw)
+        for field_name in (
+            "prefill_seq_len",
+            "generation_seq_len",
+            "batch_size",
+            "max_num_seqs",
+        ):
+            try:
+                valid = int(setting.get(field_name, 0)) > 0
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                issues.append(
+                    ValidationIssue(
+                        f"serving_workloads.{name}.{field_name}",
+                        "Enter a positive integer.",
+                    )
+                )
+
+    issues.extend(
+        ValidationIssue(
+            f"mip.workloads.{name}",
+            "The referenced serving workload does not exist.",
+        )
+        for name in workloads
+        if name not in serving_workloads
+    )
 
     for name, raw in measurements.items():
         setting = _mapping(raw)
+        serving = _mapping(serving_workloads.get(name))
+        if not serving:
+            issues.append(
+                ValidationIssue(
+                    f"vllm.measurements.{name}",
+                    "The referenced serving workload does not exist.",
+                )
+            )
         for field_name in (
             "prefill_seq_len",
             "generation_seq_len",
@@ -350,6 +383,13 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
                     ValidationIssue(
                         f"vllm.measurements.{name}.{field_name}",
                         "Enter a positive integer.",
+                    )
+                )
+            if serving and setting.get(field_name) != serving.get(field_name):
+                issues.append(
+                    ValidationIssue(
+                        f"vllm.measurements.{name}.{field_name}",
+                        "The measurement must match its serving workload.",
                     )
                 )
         if int(setting.get("max_num_seqs", 0) or 0) < int(setting.get("batch_size", 1) or 1):
@@ -380,10 +420,11 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
         "infrastructure": 3,
         "pruning": 4,
         "stage_resources": 5,
-        "vllm": 6,
-        "mip": 7,
-        "post_mip": 8,
-        "output": 9,
+        "serving_workloads": 6,
+        "vllm": 7,
+        "mip": 8,
+        "post_mip": 9,
+        "output": 10,
     }
     return tuple(
         sorted(issues, key=lambda item: (order.get(item.path.split(".", 1)[0], 99), item.path))

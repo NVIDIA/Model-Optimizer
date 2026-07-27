@@ -272,6 +272,7 @@ def _stats_profile(
 def _workload_stats_args(
     mip_config: dict[str, Any],
     vllm_stats_config: dict[str, Any],
+    workload_name: str,
     workload_args: dict[str, Any],
     *,
     hidden_width: int,
@@ -281,8 +282,12 @@ def _workload_stats_args(
     args = _normalize_subblock_stats_args(
         dict(mip_config.get("subblock_stats_args") or {})
     )
-    runtime_enabled = bool(
+    runtime_globally_enabled = bool(
         dict(vllm_stats_config.get("runtime_stats") or {}).get("enabled", False)
+    )
+    named_measurements = dict(vllm_stats_config.get("measurements") or {})
+    runtime_enabled = runtime_globally_enabled and (
+        not named_measurements or workload_name in named_measurements
     )
     aliases = {
         "isl": "prefill_seq_len",
@@ -298,8 +303,12 @@ def _workload_stats_args(
     )
     args["runtime_stats"] = runtime_enabled
     args["n_embd"] = int(hidden_width)
-    if not runtime_enabled:
+    if runtime_enabled:
+        if named_measurements:
+            args["workload_id"] = workload_name
+    else:
         args.pop("max_num_seqs", None)
+        args.pop("workload_id", None)
     return args
 
 
@@ -570,6 +579,7 @@ def main() -> None:
             normalized_args = _workload_stats_args(
                 mip_config,
                 vllm_stats_config,
+                str(workload_name),
                 dict(workload_args),
                 hidden_width=width,
             )

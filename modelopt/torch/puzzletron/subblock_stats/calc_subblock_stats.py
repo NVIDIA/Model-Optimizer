@@ -1146,14 +1146,20 @@ def _arg_signature(args: dict) -> tuple:
     """Identity of a computed stats entry.
 
     Captures the knobs that distinguish one configuration from another while
-    ignoring ``gpu`` (host-dependent) and the derived sequence lengths.
+    ignoring ``gpu`` (host-dependent).
     """
+    runtime_stats = bool(args.get("runtime_stats", False))
     return (
         args["batch_size"],
+        args.get("prefill_seq_len"),
+        args.get("generation_seq_len"),
         str(args["weights_dtype"]),
         str(args["activations_dtype"]),
         str(args["kv_cache_dtype"]),
         args["n_embd"],
+        runtime_stats,
+        args.get("runtime_granularity") if runtime_stats else None,
+        args.get("max_num_seqs") if runtime_stats else None,
         args.get("runtime_selection_identity"),
         args.get("parameter_inventory_identity"),
     )
@@ -1167,8 +1173,11 @@ def _subblock_stats_already_complete(
     model_hidden_sizes: Iterable[int],
     runtime_stats_enabled: bool,
     runtime_granularity: str = "subblock",
+    runtime_max_num_seqs: int | None = None,
     runtime_selection_identity: str | None = None,
     parameter_inventory_identities: Mapping[int, str] | None = None,
+    prefill_seq_len: int = 2048,
+    generation_seq_len: int = 2048,
 ) -> bool:
     """Whether ``existing_stats`` already covers every configuration this run would compute.
 
@@ -1200,15 +1209,21 @@ def _subblock_stats_already_complete(
         activations_dtype,
         kv_cache_dtype,
     ), model_hidden_size in product(batch_sizes, data_types, model_hidden_sizes):
+        runtime_expected = runtime_stats_enabled and weights_dtype == torch.bfloat16
         signature = (
             batch_size,
+            prefill_seq_len,
+            generation_seq_len,
             str(weights_dtype),
             str(activations_dtype),
             str(kv_cache_dtype),
             model_hidden_size,
+            runtime_expected,
+            runtime_granularity if runtime_expected else None,
+            runtime_max_num_seqs if runtime_expected else None,
             (
                 runtime_selection_identity
-                if runtime_stats_enabled and weights_dtype == torch.bfloat16
+                if runtime_expected
                 else None
             ),
             (
@@ -1224,7 +1239,6 @@ def _subblock_stats_already_complete(
             return False
         # Runtime is only measured for the bf16 configuration (see the
         # ``curr_runtime_stats_enabled`` guard below); require it to be present.
-        runtime_expected = runtime_stats_enabled and weights_dtype == torch.bfloat16
         if runtime_expected:
             if not entry["args"].get("runtime_stats", False):
                 return False
@@ -1393,8 +1407,13 @@ def calculate_subblock_stats_for_puzzle_dir(
             runtime_granularity=calc_subblock_stats_config.get("runtime_stats", {}).get(
                 "granularity", "subblock"
             ),
+            runtime_max_num_seqs=calc_subblock_stats_config.get("runtime_stats", {}).get(
+                "max_num_seqs"
+            ),
             runtime_selection_identity=runtime_selection_identity,
             parameter_inventory_identities=parameter_inventory_identities,
+            prefill_seq_len=prefill_seq_len,
+            generation_seq_len=generation_seq_len,
         ):
             mprint(
                 f"Subblock stats file {subblock_stats_file} already covers all requested "

@@ -205,6 +205,42 @@ def _vllm_stats_is_explicit(config: dict[str, Any]) -> bool:
     return bool((config.get("vllm_stats") or {}).get("enabled", False))
 
 
+def _calculate_static_workload_stats(config: dict[str, Any], hydra_cfg: Any) -> None:
+    """Append one analytical memory profile for every configured MIP workload."""
+    from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
+
+    workloads = dict((config.get("mip") or {}).get("workloads") or {})
+    if not workloads:
+        workloads = {
+            "default": {
+                "isl": int(hydra_cfg.calc_subblock_stats.prefill_seq_len),
+                "osl": int(hydra_cfg.calc_subblock_stats.generation_seq_len),
+                "batch_size": int(hydra_cfg.calc_subblock_stats.batch_sizes[0]),
+            }
+        }
+    for raw_workload in workloads.values():
+        workload = dict(raw_workload or {})
+        selected = OmegaConf.create(OmegaConf.to_container(hydra_cfg, resolve=True))
+        OmegaConf.set_struct(selected, False)
+        stats_cfg = selected.calc_subblock_stats
+        concurrency = int(workload.get("concurrency", workload.get("batch_size", 1)))
+        stats_cfg.batch_sizes = [int(workload.get("batch_size", concurrency))]
+        stats_cfg.prefill_seq_len = int(
+            workload.get("isl", workload.get("prefill_seq_len", stats_cfg.prefill_seq_len))
+        )
+        stats_cfg.generation_seq_len = int(
+            workload.get(
+                "osl",
+                workload.get("generation_seq_len", stats_cfg.generation_seq_len),
+            )
+        )
+        if stats_cfg.get("runtime_stats") is None:
+            stats_cfg.runtime_stats = {}
+        stats_cfg.runtime_stats.enabled = False
+        stats_cfg.merge_with_existing_stats = True
+        launch_calc_subblock_stats(selected)
+
+
 def _write_runtime_subblock_library(path: Path, block_configs: tuple[Any, ...]) -> None:
     """Write the legacy subblock-library input without assembling a replacement library."""
     rows = []
@@ -958,21 +994,12 @@ def build_library_stage(config: dict[str, Any], manifest: StageManifest):
                         "build-library requires the standalone vLLM aggregate at "
                         f"{stats_path}; run or import vllm_stats first"
                     )
-                from ..replacement_library.build_replacement_library import (
-                    launch_build_replacement_library,
-                )
+            from ..replacement_library.build_replacement_library import (
+                launch_build_replacement_library,
+            )
 
-                launch_build_replacement_library(hydra_cfg)
-            elif _runtime_stats_are_sharded(hydra_cfg):
-                from ..replacement_library.build_replacement_library import (
-                    launch_build_replacement_library,
-                )
-
-                launch_build_replacement_library(hydra_cfg)
-            else:
-                from ..build_library_and_stats import launch_build_library_and_stats
-
-                launch_build_library_and_stats(hydra_cfg)
+            launch_build_replacement_library(hydra_cfg)
+            _calculate_static_workload_stats(config, hydra_cfg)
             try:
                 from ..candidates import build_candidate_library_from_checkpoint
 
