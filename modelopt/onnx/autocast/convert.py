@@ -23,6 +23,8 @@ reduced precision on the rest of the nodes. AutoCast automatically injects cast 
 nodes.
 """
 
+from copy import deepcopy
+
 import numpy as np
 import onnx
 
@@ -97,6 +99,14 @@ def convert_to_mixed_precision(
     # Load and process model
     model = onnx.load(onnx_path, load_external_data=True)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
+    original_network_io_metadata = (
+        {
+            "input": [deepcopy(io) for io in model.graph.input],
+            "output": [deepcopy(io) for io in model.graph.output],
+        }
+        if keep_io_types
+        else None
+    )
 
     # Get original model's opset version
     original_opset = onnx_utils.get_opset_version(model)
@@ -172,6 +182,7 @@ def convert_to_mixed_precision(
         init_conversion_max_bytes=init_conversion_max_bytes,
         custom_ops=graph_sanitizer.custom_ops,
         use_standalone_type_inference=use_standalone_type_inference,
+        original_network_io_metadata=original_network_io_metadata,
     )
 
     # Obtain reference data
@@ -227,6 +238,14 @@ def convert_to_f16(
                INT4 requires 21, NVFP4 requires 23).
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
+    original_network_io_metadata = (
+        {
+            "input": [deepcopy(io) for io in model.graph.input],
+            "output": [deepcopy(io) for io in model.graph.output],
+        }
+        if keep_io_types
+        else None
+    )
 
     # Check Q/DQ precision types in the model and determine required opset
     qdq_precisions = get_qdq_precisions(model)
@@ -285,6 +304,7 @@ def convert_to_f16(
         custom_ops=sanitizer.custom_ops,
         tensor_block_dict=tensor_block_dict,
         use_standalone_type_inference=use_standalone_type_inference,
+        original_network_io_metadata=original_network_io_metadata,
     )
     high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
     low_precision_nodes = [

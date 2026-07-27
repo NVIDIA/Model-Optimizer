@@ -20,7 +20,8 @@ from onnx import TensorProto, helper, numpy_helper
 
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
-from modelopt.onnx.autocast.convert import convert_to_mixed_precision
+from modelopt.onnx.autocast.convert import convert_to_f16, convert_to_mixed_precision
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.autocast.logging_config import configure_logging
 from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 
@@ -2181,3 +2182,100 @@ def test_custom_op_mode_preserves_known_scalar_custom_op_shape():
 
     output = next(vi for vi in propagated.graph.output if vi.name == "plugin_scalar")
     assert [dim.dim_value for dim in output.type.tensor_type.shape.dim] == []
+
+
+def _shape_of(value):
+    shape = []
+    for dim in value.type.tensor_type.shape.dim:
+        if dim.HasField("dim_value"):
+            shape.append(dim.dim_value)
+        elif dim.HasField("dim_param"):
+            shape.append(dim.dim_param)
+        else:
+            shape.append(None)
+    return shape
+
+
+def test_convert_to_f16_restores_public_io_metadata_from_entry_boundary():
+    graph_input = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+    graph_output = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [None, None])
+    graph_output.doc_string = "Public output dimensions intentionally unspecified"
+    node = helper.make_node("Identity", ["X"], ["Y"], name="Identity_0")
+    graph = helper.make_graph([node], "public_io_boundary", [graph_input], [graph_output])
+    model = helper.make_model(
+        graph,
+        producer_name="public_io_boundary",
+        opset_imports=[helper.make_opsetid("", 19)],
+        ir_version=10,
+    )
+
+    converted = convert_to_f16(
+        model, keep_io_types=True, op_block_list=[], trt_plugins=[], opset=19
+    )
+
+    output = next(vi for vi in converted.graph.output if vi.name == "Y")
+    assert output.type.tensor_type.elem_type == TensorProto.FLOAT
+    assert _shape_of(output) == [None, None]
+    assert output.doc_string == graph_output.doc_string
+    onnx.checker.check_model(converted, full_check=True)
+
+
+def test_convert_to_f16_refreshes_gathernd_pre_cast_declaration(monkeypatch):
+    def discover_test_plugins_without_trt(self):
+        self.custom_ops = {
+            node.op_type for node in self.model.graph.node if node.domain == "test.plugins"
+        }
+        self.custom_ops_low_precision_nodes = []
+
+    monkeypatch.setattr(GraphSanitizer, "find_custom_nodes", discover_test_plugins_without_trt)
+
+    data = helper.make_tensor_value_info("data", TensorProto.FLOAT, [1, 4, 2])
+    plugin_in = helper.make_tensor_value_info("plugin_in", TensorProto.FLOAT, [1])
+    last_token_embed = helper.make_tensor_value_info("last_token_embed", TensorProto.FLOAT, [1, 2])
+    plugin_y = helper.make_tensor_value_info("plugin_y", TensorProto.FLOAT, [1])
+    indices = numpy_helper.from_array(np.array([[3]], dtype=np.int64), name="indices")
+    gathernd = helper.make_node(
+        "GatherND",
+        ["data", "indices"],
+        ["last_token_embed"],
+        name="/lm_head/GatherND",
+        batch_dims=1,
+    )
+    plugin = helper.make_node(
+        "FakePlugin",
+        ["plugin_in"],
+        ["plugin_y"],
+        name="synthetic_plugin",
+        domain="test.plugins",
+    )
+    graph = helper.make_graph(
+        [gathernd, plugin],
+        "public_gathernd_pre_cast_declaration",
+        [data, plugin_in],
+        [last_token_embed, plugin_y],
+        initializer=[indices],
+    )
+    model = helper.make_model(
+        graph,
+        producer_name="public_gathernd_pre_cast_declaration",
+        opset_imports=[helper.make_opsetid("", 19), helper.make_opsetid("test.plugins", 1)],
+        ir_version=10,
+    )
+
+    converted = convert_to_f16(
+        model,
+        keep_io_types=True,
+        op_block_list=["FakePlugin"],
+        low_precision_type="fp16",
+    )
+
+    declarations = {
+        value.name: value
+        for value in (*converted.graph.input, *converted.graph.output, *converted.graph.value_info)
+    }
+    pre_cast = declarations["last_token_embed_pre_cast"]
+    assert pre_cast.type.tensor_type.elem_type == TensorProto.FLOAT16
+    assert _shape_of(pre_cast) == [1, 2]
+    assert declarations["last_token_embed"].type.tensor_type.elem_type == TensorProto.FLOAT
+    assert _shape_of(declarations["last_token_embed"]) == [1, 2]
+    onnx.checker.check_model(converted, full_check=True)
