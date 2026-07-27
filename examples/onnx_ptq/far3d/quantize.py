@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -109,7 +110,9 @@ def quantize_encoder(args):
     encoder_dir = Path(args.calibration_dir)
     if (encoder_dir / "encoder").is_dir():
         encoder_dir /= "encoder"
-    excluded_nodes = find_encoder_nodes_to_exclude(args.encoder_onnx)
+    excluded_nodes = [
+        rf"^{re.escape(name)}$" for name in find_encoder_nodes_to_exclude(args.encoder_onnx)
+    ]
     print(f"Excluding {len(excluded_nodes)} accuracy-sensitive nodes from quantization")
     quantize(
         onnx_path=args.encoder_onnx,
