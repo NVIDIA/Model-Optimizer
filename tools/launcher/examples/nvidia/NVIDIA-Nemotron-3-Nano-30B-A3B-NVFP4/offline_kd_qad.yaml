@@ -24,21 +24,29 @@
 #     Megatron resumes that state instead of starting the frozen dump forward
 #     pass fresh, and MegatronPretrainingSampler asserts "no samples left to
 #     consume" immediately.
-#   - task_0 stays on ModelOpt's default "local spec" (no --export-default-
-#     te-spec) and sets RUN_MMLU=false / RUN_EXPORT=false: quantize.sh's
-#     inline MMLU/export sub-steps overwrite MLM_EXTRA_ARGS with their own
-#     args, dropping any custom spec flag, so a save-time-only
-#     --export-default-te-spec would make those sub-steps reload under a
-#     mismatched spec and hit an _extra_state KeyError. Neither sub-step is
-#     needed anyway (task_3 does its own dedicated export).
-#   - task_2 (and task_3, which loads task_2's output) need
-#     --export-default-te-spec + --dist-ckpt-strictness log_all: ModelOpt's
-#     default SequentialMLP quant wrapper hard-disallows TP>1 and EP>1
-#     together, needed here to avoid an OOM in the KD loss's full-vocab
-#     softmax norm, and switching specs risks the same _extra_state mismatch
-#     the sibling Llama-3.2-1B QAD example works around the same way. task_1
-#     doesn't need either (TP=1, and it loads an unrelated, unquantized
-#     checkpoint).
+#   - task_0, task_2, and task_3 ALL use --export-default-te-spec (TE
+#     TEGroupedMLP experts). This MUST be consistent across every task that
+#     touches the *quantized* checkpoint: the NVFP4 quantizer calibration
+#     scales (linear_fc*.{weight,input}_quantizer._amax) are keyed by the MoE
+#     expert layout, so if task_0 saves under the default local spec
+#     (per-expert SequentialMLP) but task_2 loads under TE spec (grouped),
+#     ~93k expert _amax keys silently mismatch and --dist-ckpt-strictness
+#     log_all drops them -> the expert quantizers run uncalibrated -> the model
+#     is effectively random (MMLU ~25%). task_2 needs TE spec anyway (its
+#     default SequentialMLP quant wrapper hard-disallows TP>1 and EP>1 together,
+#     which task_2 requires to avoid an OOM in the KD loss's full-vocab softmax
+#     norm), so task_0 and task_3 match it. With the spec aligned, the only
+#     remaining load mismatch is the benign pre_mlp_layernorm._extra_state
+#     keys, which --dist-ckpt-strictness log_all correctly tolerates on
+#     task_2/task_3.
+#   - task_0 also needs RUN_MMLU=false / RUN_EXPORT=false: quantize.sh's inline
+#     MMLU/export sub-steps overwrite MLM_EXTRA_ARGS with their own args,
+#     dropping --export-default-te-spec, so they would reload the just-saved
+#     TE-spec checkpoint under the mismatched default spec and hit a KeyError.
+#     Neither sub-step is needed here (task_3 does its own dedicated export).
+#   - task_1 needs neither spec flag nor strictness override: it's the
+#     unquantized BF16 teacher (no _amax keys) at TP=1, loading an unrelated
+#     checkpoint.
 #   - All node/GPU counts here target 4-GPU nodes (e.g. OCI-HSG's B100 nodes):
 #     task_4's TRT-LLM eval needs native NVFP4 tensor-core support (Blackwell
 #     only) -- on Hopper (H100), TRT-LLM's fused MoE GEMM kernel has no valid
@@ -53,10 +61,14 @@
 #     Slurm's nodes x ntasks_per_node, and Megatron derives its own DP from
 #     world_size/(TP*PP*CP), so a DP env var here would be inert.
 #
-# MMLU_LOWER_BOUND=0.0 was the temporary bypass on task_0's inline MMLU gate;
-# RUN_MMLU=false now skips that gate entirely (see above), so this value is
-# currently a no-op. Revisit both before this pipeline is used for production
-# runs (see OfflineKD MMLU accuracy note in project history).
+# MMLU_LOWER_BOUND=0.6 is a real quality gate now that the spec-mismatch bug is
+# fixed (the trained model scores ~0.70 MMLU via task_4's TRT-LLM eval, up from
+# the ~0.25 random-chance the old --export-default-te-spec-less task_0 produced).
+# It is currently INERT because task_0's inline MMLU gate is disabled
+# (RUN_MMLU=false) -- re-enabling it would reload the TE-spec checkpoint under a
+# mismatched spec (see the RUN_MMLU note above). The effective quality signal is
+# task_4's MMLU. The value is kept meaningful (not 0.0) to document the expected
+# floor for whenever the inline gate is wired back up.
 #
 # Usage:
 #   source .env-slurm
@@ -72,11 +84,12 @@ pipeline:
       - --calib-size 32
       - --calib-max-sequence-length 512
       - --skip-generate
+      - --export-default-te-spec
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
       - EP: 4
-      - MMLU_LOWER_BOUND: 0.0
+      - MMLU_LOWER_BOUND: "0.6"
       - RUN_MMLU: "false"
       - RUN_EXPORT: "false"
       - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
