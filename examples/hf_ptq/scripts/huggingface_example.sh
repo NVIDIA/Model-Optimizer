@@ -177,13 +177,17 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         # summary to a sibling dir (kept out of the checkpoint $SAVE_PATH, which is uploaded
         # and consumed downstream). Off by default (no behavior change).
         MEM_MON_PREFIX=()
-        if [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" ]]; then
+        MEM_MON_SCRIPT="$script_dir/../../../tools/resource_monitor.py"
+        if [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" && ! -f "$MEM_MON_SCRIPT" ]]; then
+            echo "resource_monitor: $MEM_MON_SCRIPT not found (repo-root tools/ absent in this" \
+                 "distribution); continuing without the sidecar." >&2
+        elif [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" ]]; then
             if [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_DEVICE_ORDER:-}" != "PCI_BUS_ID" ]]; then
                 echo "resource_monitor: CUDA_VISIBLE_DEVICES set without CUDA_DEVICE_ORDER=PCI_BUS_ID;" \
                      "GPU columns may reflect different physical devices than the workload uses." >&2
             fi
             MEM_MON_DIR="${SAVE_PATH}_mem_monitor"
-            MEM_MON_PREFIX=(python "$script_dir/../../../tools/resource_monitor.py" \
+            MEM_MON_PREFIX=(python "$MEM_MON_SCRIPT" \
                 --gpus "${CUDA_VISIBLE_DEVICES:-all}" \
                 --out "$MEM_MON_DIR/mem_trace.csv" \
                 --summary "$MEM_MON_DIR/mem_peak.txt" --)
