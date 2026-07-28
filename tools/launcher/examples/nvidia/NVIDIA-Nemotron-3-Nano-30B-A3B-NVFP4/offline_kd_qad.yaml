@@ -1,92 +1,36 @@
-# Nemotron-3-Nano-30B-A3B NVFP4 Offline KD QAD pipeline.
+# Nemotron-3-Nano-30B-A3B NVFP4 Offline-KD QAD pipeline (cached-teacher-logits KD).
+#   task_0 quantize : PTQ BF16 -> NVFP4 MCore ckpt (in-domain calibration).
+#   task_1 dump     : frozen BF16 teacher, save top-K logits to /scratchspace/logits.
+#   task_2 student  : train NVFP4 student with --logits-load-dir.
+#   task_3 export   : trained student -> HF format.
+#   task_4 eval     : TRT-LLM MMLU.
 #
-# Two-stage knowledge distillation using cached teacher logits:
-#   task_0 (quantize): PTQ of BF16 teacher → NVFP4 MCore checkpoint.
-#   task_1 (dump):     Run BF16 teacher frozen, save top-K logits to /scratchspace/logits.
-#   task_2 (student):  Train NVFP4 student with --logits-load-dir.
-#   task_3 (export):   Export trained student checkpoint to HF format.
-#   task_4 (eval):     TRT-LLM evaluation of the exported checkpoint.
-#
-# Requirements:
-#   - nvcr.io/nvidia/nemo:26.06 (ships nvidia-resiliency-ext>=0.6.0, needed
-#     by task_1's --async-save + --use-persistent-ckpt-worker). Tasks 0-3 pin
-#     this container explicitly since the launcher's default slurm_factory
-#     container is a TensorRT-LLM image with no Megatron-LM/NeMo deps.
-#   - GOTCHA: nemo containers install ModelOpt into a venv at /opt/venv, whose
-#     site-packages precede /usr/local on sys.path, so the default
-#     modelopt_install_path is never consulted. Point it at the venv
-#     site-packages so the mounted (submodule-pinned) modelopt actually
-#     overrides the container's.
-#   - task_1's --finetune is required, not optional: MLM_MODEL_CKPT
-#     (/hf-local/.../BF16-MCore) is a shared, multi-tenant path that may hold
-#     another run's completed checkpoint (e.g. iter_0000128 with
-#     consumed_train_samples already at --train-samples). Without --finetune,
-#     Megatron resumes that state instead of starting the frozen dump forward
-#     pass fresh, and MegatronPretrainingSampler asserts "no samples left to
-#     consume" immediately.
-#   - task_0, task_2, and task_3 ALL use --export-default-te-spec (TE
-#     TEGroupedMLP experts). This MUST be consistent across every task that
-#     touches the *quantized* checkpoint: the NVFP4 quantizer calibration
-#     scales (linear_fc*.{weight,input}_quantizer._amax) are keyed by the MoE
-#     expert layout, so if task_0 saves under the default local spec
-#     (per-expert SequentialMLP) but task_2 loads under TE spec (grouped),
-#     ~93k expert _amax keys silently mismatch and --dist-ckpt-strictness
-#     log_all drops them -> the expert quantizers run uncalibrated -> the model
-#     is effectively random (MMLU ~25%). task_2 needs TE spec anyway (its
-#     default SequentialMLP quant wrapper hard-disallows TP>1 and EP>1 together,
-#     which task_2 requires to avoid an OOM in the KD loss's full-vocab softmax
-#     norm), so task_0 and task_3 match it. With the spec aligned, the only
-#     remaining load mismatch is the benign pre_mlp_layernorm._extra_state
-#     keys, which --dist-ckpt-strictness log_all correctly tolerates on
-#     task_2/task_3.
-#   - task_0 also needs RUN_MMLU=false / RUN_EXPORT=false: quantize.sh's inline
-#     MMLU/export sub-steps overwrite MLM_EXTRA_ARGS with their own args,
-#     dropping --export-default-te-spec, so they would reload the just-saved
-#     TE-spec checkpoint under the mismatched default spec and hit a KeyError.
-#     Neither sub-step is needed here (task_3 does its own dedicated export).
-#   - task_1 needs neither spec flag nor strictness override: it's the
-#     unquantized BF16 teacher (no _amax keys) at TP=1, loading an unrelated
-#     checkpoint.
-#   - All node/GPU counts here target 4-GPU nodes (e.g. OCI-HSG's B100 nodes):
-#     task_4's TRT-LLM eval needs native NVFP4 tensor-core support (Blackwell
-#     only) -- on Hopper (H100), TRT-LLM's fused MoE GEMM kernel has no valid
-#     tactic for this model's shapes and segfaults (`FusedMoeRunner::runMoe`).
-#     Since the whole pipeline must share a cluster with task_4, everything
-#     targets 4-GPU nodes.
-#   - task_0/task_1/task_2 use EP=4 (128 experts / 4 = 32 experts per rank).
-#   - Long context (seq 32768): the SFT corpus (train.jsonl) is raw, not
-#     pre-tokenized, and every sample is huge (>=170k chars, ~30k-360k tokens),
-#     so seq 32768 is fully consumed (truncation-bound, no padding waste). The
-#     model has position-embedding-type=none (Mamba + NoPE attention), so
-#     extending past the checkpoint's 8192 max_position_embeddings is safe.
-#     teacher (task_1) and student (task_2) MUST share seq-length AND CP: the
-#     cached top-K logits are stored per (iteration, microbatch, token) and
-#     sharded by CP, so both dump and load must partition the sequence
-#     identically.
-#   - CP=8 (up from the original CP=2 at seq 8192): scaling CP with seq-length
-#     keeps the per-GPU sequence chunk at seq/CP = 32768/8 = 4096 -- identical
-#     to the validated 69.98%-MMLU run -- so per-device activation/logit memory
-#     is unchanged. task_1 (TP=1) fits CP=8 on 2 nodes (8 GPUs, DP=1); task_2
-#     (TP=2) needs 4 nodes (16 GPUs, DP=1) for TP*CP = 2*8 = 16 = world.
-#   - No DP env var on task_1/task_2: NeMo Run's SlurmExecutor sets
-#     LAUNCH_SCRIPT=python, bypassing the torchrun/DP-based nproc_per_node
-#     calculation in conf/arguments.sh entirely -- world size comes from
-#     Slurm's nodes x ntasks_per_node, and Megatron derives its own DP from
-#     world_size/(TP*PP*CP), so a DP env var here would be inert. Here both
-#     resolve to DP=1 (task_1: 8/(1*1*8); task_2: 16/(2*1*8)).
-#
-# MMLU_LOWER_BOUND=0.6 is a real quality gate now that the spec-mismatch bug is
-# fixed (the trained model scores ~0.70 MMLU via task_4's TRT-LLM eval, up from
-# the ~0.25 random-chance the old --export-default-te-spec-less task_0 produced).
-# It is currently INERT because task_0's inline MMLU gate is disabled
-# (RUN_MMLU=false) -- re-enabling it would reload the TE-spec checkpoint under a
-# mismatched spec (see the RUN_MMLU note above). The effective quality signal is
-# task_4's MMLU. The value is kept meaningful (not 0.0) to document the expected
-# floor for whenever the inline gate is wired back up.
+# Key constraints:
+#   - Container nvcr.io/nvidia/nemo:26.06 (needs nvidia-resiliency-ext>=0.6.0 for
+#     task_1's --async-save). It uses a uv venv, so point modelopt_install_path at
+#     the venv site-packages and put the packaged Megatron-LM/Model-Optimizer on
+#     PYTHONPATH so they override the container's copies (see task_3).
+#   - task_0/task_2/task_3 must all pass --export-default-te-spec (TEGroupedMLP):
+#     NVFP4 expert _amax scales are keyed by MoE layout, so a save/load spec
+#     mismatch silently drops ~93k _amax keys (log_all) -> uncalibrated model
+#     (MMLU ~25%). task_2 needs TE spec regardless (its default SequentialMLP
+#     wrapper forbids TP>1 & EP>1, needed to avoid a KD-loss OOM);
+#     --dist-ckpt-strictness log_all then only tolerates benign _extra_state.
+#   - task_0 RUN_MMLU/RUN_EXPORT=false: quantize.sh's inline sub-steps drop
+#     --export-default-te-spec and would KeyError on the TE-spec ckpt (task_3 exports).
+#   - task_1 --finetune: MLM_MODEL_CKPT is a shared path that may hold another run's
+#     completed ckpt; without it the sampler asserts "no samples left to consume".
+#   - 4-GPU nodes (OCI-HSG B100): task_4's NVFP4 TRT-LLM eval needs Blackwell (Hopper
+#     segfaults in the fused MoE FP4 GEMM); the whole pipeline shares that cluster.
+#   - seq 32768: the SFT corpus is raw jsonl with very long samples (~30k-360k tok),
+#     so it's truncation-bound (no padding waste); position-embedding-type=none makes
+#     >8192 context safe. teacher & student MUST share seq-length AND CP (logits are
+#     CP-sharded). CP=8 keeps per-GPU seq/CP=4096 (the validated footprint): task_1
+#     TP1 on 2 nodes, task_2 TP2 on 4 nodes (TP*CP=16=world). DP resolves to 1; a DP
+#     env var is inert under NeMo Run's python launcher.
 #
 # Usage:
-#   source .env-slurm
-#   cd tools/launcher
+#   source .env-slurm && cd tools/launcher
 #   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4/offline_kd_qad.yaml --yes
 
 job_name: NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4-QAD-OfflineKD
@@ -94,10 +38,8 @@ pipeline:
   task_0:
     script: common/megatron_lm/quantize/quantize.sh
     args:
-      # In-domain calibration on the same SFT corpus task_1/task_2 train on
-      # (raw .jsonl the calib loader reads via its "messages" branch), rather
-      # than out-of-domain cnn_dailymail -- better-matched NVFP4 amax scales.
-      # 512 samples @ 8192 tokens (up from 32 @ 512) for a fuller calibration.
+      # In-domain calibration on the SFT corpus (raw .jsonl, read via the calib
+      # loader's "messages" branch) instead of cnn_dailymail -- better-matched amax.
       - --calib-dataset-path-or-name /hf-local/modelopt/nemotron-3-super-sft/train.jsonl
       - --calib-size 512
       - --calib-max-sequence-length 8192
@@ -107,7 +49,6 @@ pipeline:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
       - EP: 4
-      - MMLU_LOWER_BOUND: "0.6"
       - RUN_MMLU: "false"
       - RUN_EXPORT: "false"
       - PYTHONPATH: /nemo_run/code/modules/Megatron-LM
@@ -133,13 +74,9 @@ pipeline:
       - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
       - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
       - --micro-batch-size 1
-      # Must match task_2's --global-batch-size: the cached teacher logits are
-      # indexed per (iteration, microbatch), so teacher and student must see the
-      # same samples per iteration. Without this, task_1's global batch defaults
-      # to micro_batch*DP (=4 at DP=4 here) while task_2's is 8, and the student
-      # runs past the end of the teacher's dump (IndexError: microbatch index
-      # out of range). It only aligned on CW-DFW by coincidence (teacher DP=8
-      # there made the auto-default equal task_2's 8).
+      # Must match task_2's --global-batch-size: cached logits are indexed per
+      # (iteration, microbatch), so teacher and student must see the same samples
+      # per iteration (else "microbatch index out of range").
       - --global-batch-size 8
       - --attention-dropout 0.0
       - --hidden-dropout 0.0
@@ -214,8 +151,7 @@ pipeline:
       - --use-distributed-optimizer
       - --eval-iters 4
       - --eval-interval 1000
-      # = train-samples / global-batch-size (2048/8) so the trained student is
-      # checkpointed exactly once, at the final iteration (task_3 exports it).
+      # = train-samples / global-batch-size (2048/8): one save, at the final iter.
       - --save-interval 256
       - --log-interval 100
       - --export-default-te-spec
@@ -250,12 +186,9 @@ pipeline:
       - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - EXPORT_DIR: /scratchspace/export
       - PP: 4
-      # Put the packaged Megatron-LM AND Model-Optimizer first on PYTHONPATH.
-      # nemo:26.06 uses a uv venv, so the modelopt_install_path bind-mount at
-      # /opt/venv may be stale and the container's own modelopt shadows it --
-      # export then fails importing modelopt.torch.sparsity.weight_sparsity.config
-      # (absent in the container's older modelopt). PYTHONPATH forces the
-      # packaged modelopt, which has it. See nemo-container-uv-venv-path.
+      # Force the packaged modelopt onto PYTHONPATH: nemo:26.06's uv venv can
+      # shadow the /opt/venv bind-mount with its own older modelopt, which lacks
+      # modelopt.torch.sparsity.weight_sparsity.config that export imports.
       - PYTHONPATH: /nemo_run/code/modules/Megatron-LM:/nemo_run/code/modules/Model-Optimizer
     slurm_config:
       _factory_: "slurm_factory"
