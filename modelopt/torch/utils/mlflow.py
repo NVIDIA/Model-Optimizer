@@ -47,8 +47,11 @@ __all__ = [
     "validate_tracking_uri",
 ]
 
-# MLflow experiment names are stored in a VARCHAR(256) column by the SQL-backed stores.
+# MLflow experiment names are stored in a VARCHAR(256) column by the SQL-backed stores. The
+# per-component cap stops one pathological component from crowding out the others; the name
+# cap is what actually keeps the result storable.
 _MAX_COMPONENT_LEN = 100
+_MAX_NAME_LEN = 250
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -73,10 +76,12 @@ def validate_tracking_uri(uri: str) -> str:
         )
     parsed = urlparse(uri)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(
-            f"MLflow tracking URI must be http(s), got {uri!r}. "
-            "Did you mean https://" + uri.lstrip("/") + "?"
-        )
+        message = f"MLflow tracking URI must be http(s), got {uri!r}."
+        if not parsed.scheme:
+            # Only a bare host is plausibly a forgotten scheme; suggesting https://sqlite:///...
+            # for a URI that already has one would be nonsense.
+            message += f" Did you mean https://{uri.lstrip('/')}?"
+        raise ValueError(message)
     if not parsed.netloc:
         raise ValueError(f"MLflow tracking URI {uri!r} has no host.")
     return uri.rstrip("/")
@@ -104,9 +109,10 @@ def default_experiment_name(tool: str, model: str, variant: str, user: str | Non
         'alice/hf_ptq/Qwen3-0.6B-nvfp4'
     """
     owner = user if user is not None else current_user()
-    return (
+    name = (
         f"{_sanitize(owner)}/{_sanitize(tool)}/{_sanitize(Path(model).name)}-{_sanitize(variant)}"
     )
+    return name[:_MAX_NAME_LEN]
 
 
 def current_user() -> str:
@@ -178,6 +184,10 @@ class TeeStream:
             self._sink.flush()
 
     def __getattr__(self, name):
+        # Guard the wrapped attributes themselves: __getattr__ runs whenever they are absent
+        # (during unpickling, or on a copy), and delegating then would recurse forever.
+        if name in ("_stream", "_sink"):
+            raise AttributeError(name)
         return getattr(self._stream, name)
 
 
@@ -196,6 +206,11 @@ class MlflowRunLogger:
 
     Failures after the run is open are reported as warnings and never raised: losing a
     tracking server must not turn a successful job into a failed one.
+
+    Note:
+        ``command.txt`` records ``sys.argv`` verbatim and the log captures everything the
+        script prints, so anything secret on the command line or in the output is uploaded
+        with it. Pass credentials through the environment instead.
 
     Args:
         tracking_uri: Validated MLflow server URI (see :func:`validate_tracking_uri`).
@@ -261,7 +276,7 @@ class MlflowRunLogger:
             ImportError: If ``mlflow`` is not installed.
             ConnectionError: If the tracking server is unreachable.
         """
-        if not self.enabled:
+        if not self.enabled or self._run is not None:
             return
         self._start_time = time.time()
         self._start_capture()
@@ -309,7 +324,9 @@ class MlflowRunLogger:
         try:
             import mlflow
         except ImportError as e:
-            raise ImportError("MLflow tracking requires the 'mlflow' package") from e
+            raise ImportError(
+                "MLflow tracking requires the 'mlflow' package: pip install nvidia-modelopt[mlflow]"
+            ) from e
 
         self._check_reachable()
         mlflow.set_tracking_uri(self.tracking_uri)
@@ -410,6 +427,8 @@ class MlflowRunLogger:
                     handler.setStream(replacements[handler.stream])
 
     def _stop_capture(self) -> None:
+        # Only handlers seen at start are handed back; any registered since keeps writing to the
+        # tee, which is why TeeStream tolerates a closed sink rather than raising on it.
         if self._saved_streams is None:
             return
         for handler, stream in self._redirected_handlers:

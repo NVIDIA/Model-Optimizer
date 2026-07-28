@@ -125,6 +125,15 @@ def test_validate_tracking_uri_rejects_non_servers(uri):
         validate_tracking_uri(uri)
 
 
+def test_missing_scheme_is_the_only_case_that_suggests_https():
+    """Suggesting https://sqlite:///... for a URI that already has a scheme is nonsense."""
+    with pytest.raises(ValueError, match=r"Did you mean https://mlflow\.example\.com\?"):
+        validate_tracking_uri("mlflow.example.com")
+    with pytest.raises(ValueError) as excinfo:
+        validate_tracking_uri("sqlite:///mlflow.db")
+    assert "Did you mean" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("model", "variant", "expected"),
     [
@@ -160,6 +169,13 @@ def test_default_experiment_name_survives_unusable_username(monkeypatch):
     )
 
 
+def test_default_experiment_name_stays_storable():
+    """SQL-backed stores keep experiment names in a VARCHAR(256) column."""
+    name = default_experiment_name("t" * 150, "/m/" + "m" * 150, "v" * 150, user="u" * 150)
+
+    assert len(name) <= 250
+
+
 def test_tee_stream_writes_to_both_and_delegates():
     original, sink = io.StringIO(), io.StringIO()
     tee = TeeStream(original, sink)
@@ -171,6 +187,26 @@ def test_tee_stream_writes_to_both_and_delegates():
     assert sink.getvalue() == "hello\n"
     # Progress bars check isatty(); it must report the real stream, not the tee.
     assert tee.isatty() == original.isatty()
+
+
+def test_tee_stream_does_not_recurse_on_its_own_attributes():
+    """Delegating _stream/_sink when they are unset would recurse until the stack blows."""
+    tee = TeeStream.__new__(TeeStream)  # never ran __init__, so both are missing
+
+    with pytest.raises(AttributeError):
+        tee._stream
+
+
+def test_tee_stream_tolerates_a_closed_sink():
+    """Handlers registered after start keep the tee; writes must not raise once it is closed."""
+    original, sink = io.StringIO(), io.StringIO()
+    tee = TeeStream(original, sink)
+    sink.close()
+
+    tee.write("after close")
+    tee.flush()
+
+    assert original.getvalue() == "after close"
 
 
 def test_logger_is_inert_when_disabled(monkeypatch):
@@ -292,7 +328,7 @@ def test_logger_restores_streams_and_reports_failure(fake_mlflow, monkeypatch):
     assert ("hf_ptq.log", "logs") in fake_mlflow.artifacts
 
 
-def test_logger_never_raises_when_the_server_dies_mid_run(fake_mlflow):
+def test_logger_never_raises_when_the_server_dies_mid_run(fake_mlflow, capsys):
     logger = _logger()
     logger.start()
 
@@ -303,6 +339,21 @@ def test_logger_never_raises_when_the_server_dies_mid_run(fake_mlflow):
     logger.finish("FINISHED")
 
     assert not isinstance(sys.stdout, TeeStream)
+    # A swallowed upload failure must still be visible, or the run looks complete.
+    assert "server gone" in capsys.readouterr().out
+
+
+def test_start_is_idempotent(fake_mlflow):
+    """A second start would install a second tee and orphan the first temp directory."""
+    logger = _logger(run_name="first")
+    logger.start()
+    fake_mlflow.run_name = "clobbered"
+
+    logger.start()
+
+    assert fake_mlflow.run_name == "clobbered"  # no second start_run
+    assert isinstance(sys.stdout, TeeStream) and not isinstance(sys.stdout._stream, TeeStream)
+    logger.finish("FINISHED")
 
 
 def test_unreachable_server_fails_before_the_work_starts(monkeypatch):

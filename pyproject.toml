@@ -126,7 +126,11 @@ dev-test = [
     "torch-geometric",
 ]
 # Compound extras via self-references
-all = ["nvidia-modelopt[onnx,hf,puzzletron]"]
+mlflow = [ # Dependencies for modelopt.torch.utils.mlflow run tracking
+    "mlflow",
+]
+
+all = ["nvidia-modelopt[onnx,hf,puzzletron,mlflow]"]
 dev = ["nvidia-modelopt[all,dev-docs,dev-lint,dev-test]"]
 
 [project.urls]

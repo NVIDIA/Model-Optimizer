@@ -294,3 +294,42 @@ def test_mlflow_run_outputs_name_the_summaries(monkeypatch):
 
     assert files["summary/quant_summary.txt"] == Path("/tmp/out/.quant_summary.txt")
     assert files["summary/moe.html"] == Path("/tmp/out/.moe.html")
+
+
+def test_untracked_runs_do_not_gather_mlflow_inputs(monkeypatch):
+    """Without --mlflow the recipe must not be re-read: it is parsed again in quantize_main,
+    and the extra load prints a second '[load_recipe] loading:' line on every default run."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/ptq/nvfp4_default-kv_fp8_cast",
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+    calls = []
+    monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
+
+    logger = hf_ptq._start_mlflow_run(args)
+
+    assert not logger.enabled
+    assert calls == []
+
+
+def test_non_main_ranks_do_not_open_a_run(monkeypatch):
+    """Under torchrun only rank 0 uploads, so the other ranks must not touch the server."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--mlflow",
+        "https://mlflow.example.com",
+    )
+    args.dist_state = SimpleNamespace(is_main=False, world_size=8)
+    calls = []
+    monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
+
+    logger = hf_ptq._start_mlflow_run(args)
+
+    assert not logger.enabled
+    assert calls == []

@@ -1723,6 +1723,25 @@ def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
     return params, texts
 
 
+def _start_mlflow_run(args: argparse.Namespace) -> MlflowRunLogger:
+    """Open the MLflow run for this invocation, or return an inert logger if untracked.
+
+    Opened before the model loads so an unreachable server or a bad experiment name fails in
+    seconds rather than after a full calibration run.
+    """
+    logger = MlflowRunLogger(
+        args.mlflow,
+        args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        enabled=bool(args.mlflow) and args.dist_state.is_main,
+    )
+    if logger.enabled:
+        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
+        params, texts = _mlflow_run_inputs(args)
+        logger.start(params=params, texts=texts)
+    return logger
+
+
 def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
     """Summaries written by post_quantize, keyed by artifact path.
 
@@ -1746,16 +1765,7 @@ def main(args: argparse.Namespace):
 
     setup_distributed_args(args)
 
-    # Opened before the model loads so an unreachable server or a bad experiment name
-    # fails in seconds rather than after a full calibration run.
-    mlflow_logger = MlflowRunLogger(
-        args.mlflow,
-        args.mlflow_experiment,
-        run_name=args.mlflow_run_name,
-        enabled=bool(args.mlflow) and args.dist_state.is_main,
-    )
-    mlflow_params, mlflow_texts = _mlflow_run_inputs(args)
-    mlflow_logger.start(params=mlflow_params, texts=mlflow_texts)
+    mlflow_logger = _start_mlflow_run(args)
 
     status = "FAILED"
     try:
@@ -1796,8 +1806,12 @@ def main(args: argparse.Namespace):
             )
         status = "FINISHED"
     finally:
-        cleanup_distributed(args)
-        mlflow_logger.finish(status, files=_mlflow_run_outputs(args))
+        try:
+            cleanup_distributed(args)
+        finally:
+            # Nested so a failure tearing down the process group cannot leave the run
+            # stuck in RUNNING on the server.
+            mlflow_logger.finish(status, files=_mlflow_run_outputs(args))
 
 
 if __name__ == "__main__":
