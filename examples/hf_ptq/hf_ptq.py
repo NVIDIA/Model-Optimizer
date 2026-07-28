@@ -46,6 +46,7 @@ from example_utils import (
     setup_distributed_args,
     validate_fsdp2_supported,
 )
+from mlflow_utils import MlflowRunLogger, default_experiment_name, validate_tracking_uri
 from torch.utils.data import DataLoader
 from transformers import (
     AutoConfig,
@@ -1622,7 +1623,39 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--mlflow",
+        nargs="?",
+        const=os.environ.get("MLFLOW_TRACKING_URI", ""),
+        default=None,
+        help=(
+            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+            "uploading the command, the resolved recipe, the run log and the quantization "
+            "summaries. Pass the flag without a value to use $MLFLOW_TRACKING_URI."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_experiment",
+        default=None,
+        help=(
+            "MLflow experiment name. Default: "
+            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_run_name",
+        default=None,
+        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
+    )
+
     args = parser.parse_args()
+    if args.mlflow is not None:
+        try:
+            args.mlflow = validate_tracking_uri(args.mlflow)
+        except ValueError as e:
+            parser.error(str(e))
+        args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(args)
+
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
@@ -1667,6 +1700,12 @@ def main(args: argparse.Namespace):
 
     setup_distributed_args(args)
 
+    # Opened before the model loads so an unreachable server or a bad experiment name
+    # fails in seconds rather than after a full calibration run.
+    mlflow_logger = MlflowRunLogger(args)
+    mlflow_logger.start()
+
+    status = "FAILED"
     try:
         # launch a memory monitor to read the currently used GPU memory.
         launch_memory_monitor()
@@ -1703,8 +1742,10 @@ def main(args: argparse.Namespace):
                 default_pad_token,
                 device,
             )
+        status = "FINISHED"
     finally:
         cleanup_distributed(args)
+        mlflow_logger.finish(status)
 
 
 if __name__ == "__main__":

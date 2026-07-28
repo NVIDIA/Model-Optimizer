@@ -6,6 +6,8 @@ Changelog
 
 **New Features**
 
+- Add ``--mlflow <tracking-uri>`` to ``examples/hf_ptq/hf_ptq.py`` to record a PTQ run on an MLflow server: the invocation, the resolved recipe (``$import``\ s expanded), the run log and the quantization summaries are uploaded as artifacts, with the model / format / calibration settings as searchable params. The run is opened before the model loads so an unreachable server fails in seconds instead of after calibration, and a failed run is still recorded with its log attached. The experiment defaults to ``$USER/hf_ptq/<checkpoint basename>-<recipe name or --qformat>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
+
 **Backward Breaking Changes**
 
 **Deprecations**
