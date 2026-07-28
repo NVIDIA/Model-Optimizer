@@ -986,6 +986,52 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
+class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
+    """Config for the ``nvfp4_act_headroom`` calibration algorithm.
+
+    Calibrates the per-tensor global scale of NVFP4 *activation* (input) quantizers so that
+    the calibrated range sits in the lower part of the FP8 block-scale range, leaving headroom
+    above it for activations larger than any seen during calibration. Weight quantizers and
+    all non-NVFP4 quantizers are calibrated with plain ``max``.
+
+    See :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
+    """
+
+    _mutates_weights: ClassVar[bool] = False
+
+    method: Literal["nvfp4_act_headroom"] = ModeloptField("nvfp4_act_headroom")
+
+    anchor_percentile: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the anchor.",
+        description=(
+            "The global scale is anchored to this percentile of the per-block amax "
+            "distribution. Lower values anchor further into the low tail, which yields a "
+            "smaller global scale and less headroom."
+        ),
+    )
+
+    rho: float = ModeloptField(
+        default=16384.0,
+        gt=0.0,
+        lt=28672.0,
+        title="Headroom factor applied to the anchor (amax = rho * anchor).",
+        description=(
+            "Larger rho leaves more headroom above the calibrated range and less room below "
+            "it. Must stay below 28672, the FP8-E4M3 normal dynamic range."
+        ),
+    )
+
+    distributed_sync: bool | None = ModeloptField(
+        default=True,
+        title="Whether to sync the amax across the distributed processes.",
+        description="If True, the amax will be synced across the distributed processes.",
+    )
+
+
 class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 

@@ -41,7 +41,7 @@ from modelopt.torch.utils.distributed import is_initialized as dist_is_initializ
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4ActHeadroomCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .utils import (
@@ -66,6 +66,7 @@ __all__ = [
     "local_hessian_calibrate",
     "lsq",
     "max_calibrate",
+    "nvfp4_act_headroom_calibrate",
     "smoothquant",
     "svdquant",
 ]
@@ -488,6 +489,83 @@ def max_calibrate(
 
     # _amax is now cross-rank consistent across ranks.
     _finalize_with_shared_state(model, weight_patterns)
+
+
+def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
+    """True for an enabled NVFP4 (E2M1 + E4M3 scale) dynamic-block *input* quantizer.
+
+    These carry their per-tensor global scale in ``_amax`` and are calibrated like plain max
+    (the quantizer itself is not ``_dynamic``; only its per-block scales are).
+    """
+    if not isinstance(module, TensorQuantizer) or not name.endswith("input_quantizer"):
+        return False
+    if getattr(module, "_disabled", False) or getattr(module, "_dynamic", False):
+        return False
+    block_sizes = module.block_sizes
+    return (
+        block_sizes is not None
+        and block_sizes.get("type", None) == "dynamic"
+        and module.num_bits == (2, 1)
+        and block_sizes.get("scale_bits", None) == (4, 3)
+    )
+
+
+def _swap_in_nvfp4_act_headroom_calibrators(
+    model: nn.Module, *, anchor_percentile: float, rho: float
+) -> int:
+    """Swap in an :class:`NVFP4ActHeadroomCalibrator` for each qualifying NVFP4 input quantizer.
+
+    Returns the number of quantizers swapped.
+    """
+    count = 0
+    for name, module in model.named_modules():
+        if not _is_nvfp4_dynamic_input_quantizer(name, module):
+            continue
+        module._calibrator = NVFP4ActHeadroomCalibrator(
+            module.num_bits,
+            None,
+            module._unsigned,
+            block_size=module.block_sizes.get(-1, 16),
+            anchor_percentile=anchor_percentile,
+            rho=rho,
+        )
+        count += 1
+    return count
+
+
+@torch.no_grad()
+def nvfp4_act_headroom_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    *,
+    anchor_percentile: float = 1.0,
+    rho: float = 16384.0,
+    distributed_sync: bool = True,
+):
+    """Calibrate NVFP4 activation global scales with headroom; everything else uses max.
+
+    For NVFP4 dynamic-block *input* quantizers, the per-tensor global scale is derived from
+    the distribution of per-block activation amaxes so that headroom is left above the
+    calibrated range (see :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>`). Weight quantizers and
+    every other quantizer are calibrated exactly as in :func:`max_calibrate`.
+
+    Args:
+        model: model to be calibrated.
+        forward_loop: callable that runs calibration data through the model.
+        anchor_percentile: percentile of the per-block amaxes used as the anchor.
+        rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
+        distributed_sync: whether to sync amax across distributed processes
+            (see :func:`max_calibrate`).
+    """
+    n = _swap_in_nvfp4_act_headroom_calibrators(model, anchor_percentile=anchor_percentile, rho=rho)
+    print_rank_0(
+        f"nvfp4_act_headroom: calibrating {n} NVFP4 activation quantizer(s) "
+        f"(anchor_percentile={anchor_percentile}, rho={rho})."
+    )
+    # max_calibrate runs the forward loop once: the swapped-in calibrators accumulate their
+    # per-block histograms in the same pass that collects max stats for every other quantizer.
+    max_calibrate(model, forward_loop, distributed_sync=distributed_sync)
 
 
 def _mse_quant_func(x, amax, quantizer):

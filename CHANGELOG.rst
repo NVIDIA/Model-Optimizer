@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Quantization*
+
+- Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Plain ``max`` sets a tensor's global scale from the largest per-block amax seen during calibration, leaving no room above it, so any activation larger than the calibration max saturates. ``nvfp4_act_headroom`` instead anchors the global scale to a low percentile of the per-block amax distribution, ``amax = max(rho * anchor, floor)``, placing the calibrated blocks in the lower part of the FP8 block-scale range and leaving the rest as headroom; a high-percentile ``floor`` keeps the scale at or above the calibrated blocks so calibration data is never clipped, and a guardrail warns when the observed range is wider than FP8 scales can represent. Tunable via ``anchor_percentile`` (default 1) and ``rho`` (default 16384). Applies only to NVFP4 dynamic-block input quantizers; weight quantizers and all other quantizers keep plain ``max``. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` (dynamic NVFP4 W4A4 plus FP8 KV-cache cast) with only the calibration algorithm swapped, so it exports a standard NVFP4 checkpoint.
+
 **Backward Breaking Changes**
 
 **Deprecations**
