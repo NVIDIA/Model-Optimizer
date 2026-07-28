@@ -35,20 +35,26 @@ _MODELS = {
 def _assert_residual_adds_are_quantized(onnx_save_path):
     model = onnx.load(onnx_save_path)
     consumers = defaultdict(list)
+    producers = {}
     for node in model.graph.node:
         for input_name in node.input:
             consumers[input_name].append(node)
+        for output_name in node.output:
+            producers[output_name] = node
 
     residual_adds = [node for node in model.graph.node if node.op_type == "Add"]
     assert len(residual_adds) == 16
     for add in residual_adds:
-        add_consumers = consumers[add.output[0]]
-        assert len(add_consumers) == 1
-        quantizer_input = add_consumers[0]
-        if quantizer_input.op_type == "Cast":
-            add_consumers = consumers[quantizer_input.output[0]]
-        assert len(add_consumers) == 1
-        assert add_consumers[0].op_type.endswith("QuantizeLinear")
+        input_producers = [producers[input_name] for input_name in add.input]
+        input_producers = [
+            producers[node.input[0]] if node.op_type == "Cast" else node for node in input_producers
+        ]
+        assert any(
+            node.op_type.endswith("DequantizeLinear")
+            and producers[node.input[0]].op_type.endswith("QuantizeLinear")
+            for node in input_producers
+        )
+        assert [node.op_type for node in consumers[add.output[0]]] == ["Relu"]
 
 
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)

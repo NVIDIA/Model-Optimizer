@@ -54,7 +54,7 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 - Loads a pretrained timm torch model (default: ViT-Base).
 - Quantizes the torch model to FP8, MXFP8, INT8, NVFP4, or INT4_AWQ using ModelOpt.
 - For models with Conv2d layers (e.g., SwinTransformer), automatically overrides Conv2d quantization to FP8 (for MXFP8/NVFP4 modes) or INT8 (for INT4_AWQ mode) for TensorRT compatibility.
-- Quantizes ResNet residual-add outputs before activation for activation-quantized modes.
+- Quantizes ResNet shortcut inputs before residual addition for activation-quantized modes.
 - Exports the quantized model to ONNX.
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.

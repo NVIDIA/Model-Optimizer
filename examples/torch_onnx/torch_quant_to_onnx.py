@@ -220,10 +220,6 @@ def _disable_low_channel_conv_input_quantizers(model):
                 q.disable()
 
 
-def _quantize_residual_input(module, inputs):
-    return (module.residual_quantizer(inputs[0]),)
-
-
 def _add_resnet_residual_quantizers(model, quantize_mode, auto_quantization_formats, data_loader):
     if quantize_mode == "int8":
         num_bits = 8
@@ -243,12 +239,15 @@ def _add_resnet_residual_quantizers(model, quantize_mode, auto_quantization_form
     for block in model.modules():
         if not isinstance(block, block_types):
             continue
-        activation = block.act3 if isinstance(block, timm.models.resnet.Bottleneck) else block.act2
-        activation.residual_quantizer = TensorQuantizer(
-            QuantizerAttributeConfig(num_bits=num_bits, axis=None)
-        ).to(next(block.parameters()).device)
-        activation.register_forward_pre_hook(_quantize_residual_input)
-        residual_quantizers.append(activation.residual_quantizer)
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, axis=None)).to(
+            next(block.parameters()).device
+        )
+        if block.downsample is None:
+            block.downsample = torch.nn.Sequential()
+        elif not isinstance(block.downsample, torch.nn.Sequential):
+            block.downsample = torch.nn.Sequential(block.downsample)
+        block.downsample.add_module("residual_quantizer", quantizer)
+        residual_quantizers.append(quantizer)
 
     if not residual_quantizers:
         return
