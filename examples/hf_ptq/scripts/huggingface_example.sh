@@ -173,14 +173,20 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         else
             QUANT_SPEC_ARGS="--qformat=${QFORMAT// /,}"
         fi
-        # Opt-in memory/utilization sidecar: wraps the run and writes a CSV trace +
-        # peak summary under SAVE_PATH. Off by default (no behavior change).
+        # Opt-in memory/utilization sidecar: wraps the run and writes a CSV trace + peak
+        # summary to a sibling dir (kept out of the checkpoint $SAVE_PATH, which is uploaded
+        # and consumed downstream). Off by default (no behavior change).
         MEM_MON_PREFIX=()
-        if [[ "${MEM_MONITOR:-0}" == "1" ]]; then
+        if [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" ]]; then
+            if [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_DEVICE_ORDER:-}" != "PCI_BUS_ID" ]]; then
+                echo "resource_monitor: CUDA_VISIBLE_DEVICES set without CUDA_DEVICE_ORDER=PCI_BUS_ID;" \
+                     "GPU columns may reflect different physical devices than the workload uses." >&2
+            fi
+            MEM_MON_DIR="${SAVE_PATH}_mem_monitor"
             MEM_MON_PREFIX=(python "$script_dir/../../../tools/resource_monitor.py" \
-                --gpus "${CUDA_VISIBLE_DEVICES-all}" \
-                --out "$SAVE_PATH/mem_trace.csv" \
-                --summary "$SAVE_PATH/mem_peak.txt" --)
+                --gpus "${CUDA_VISIBLE_DEVICES:-all}" \
+                --out "$MEM_MON_DIR/mem_trace.csv" \
+                --summary "$MEM_MON_DIR/mem_peak.txt" --)
         fi
         "${MEM_MON_PREFIX[@]}" python hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \

@@ -169,6 +169,7 @@ class GpuSampler:
                 "--format=csv,noheader,nounits",
             ],
             text=True,
+            timeout=5,  # never let a hung nvidia-smi block the sampling loop
         )
         rows = []
         for line in out.strip().splitlines():
@@ -208,9 +209,15 @@ class GpuSampler:
                 result[i] = GpuSample(used, util, power, temp)
             return result
         if self._backend == "smi":
+            try:
+                rows = self._query_smi()
+            except Exception:
+                # A transient nvidia-smi failure (nonzero exit, driver reset, timeout)
+                # must not kill the monitor and orphan the wrapped workload; skip this sample.
+                return {}
             return {
                 i: GpuSample(used, util, power, temp)
-                for i, used, util, power, temp in self._query_smi()
+                for i, used, util, power, temp in rows
                 if i in self._wanted
             }
         return {}

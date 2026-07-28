@@ -27,7 +27,7 @@ from pathlib import Path
 
 import psutil
 
-_TOOLS_DIR = Path(__file__).resolve().parents[2] / "tools"
+_TOOLS_DIR = Path(__file__).resolve().parents[3] / "tools"
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
@@ -68,6 +68,30 @@ def test_gpus_accepts_space_separated_and_csv():
 def test_gpu_sampler_disabled():
     sampler = mm.GpuSampler([])
     assert sampler.indices == []
+    assert sampler.sample() == {}
+
+
+def test_query_smi_parsing(monkeypatch):
+    # nvidia-smi CSV parsing (incl. "[N/A]" -> None) is pure string logic; exercise it
+    # without a GPU by faking check_output. Row order: index, mem_used, util, power, temp.
+    fake = "0, 1024, 37, 250.5, 61\n1, [N/A], [N/A], [N/A], [N/A]\n"
+    monkeypatch.setattr(mm.subprocess, "check_output", lambda *a, **k: fake)
+    rows = mm.GpuSampler._query_smi()
+    assert rows[0] == (0, 1024 * mm.MB, 37, 250.5, 61)
+    assert rows[1] == (1, None, None, None, None)
+
+
+def test_sample_smi_failure_yields_empty(monkeypatch):
+    # A transient nvidia-smi failure during sampling must not raise (it would orphan the
+    # wrapped workload); sample() returns {} so the row is written with blank GPU cells.
+    sampler = mm.GpuSampler([])
+    sampler._backend = "smi"
+    sampler._wanted = {0}
+
+    def _boom(*a, **k):
+        raise mm.subprocess.CalledProcessError(1, "nvidia-smi")
+
+    monkeypatch.setattr(mm.subprocess, "check_output", _boom)
     assert sampler.sample() == {}
 
 
