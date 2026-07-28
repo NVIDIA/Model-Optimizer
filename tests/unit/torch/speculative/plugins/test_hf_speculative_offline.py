@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_tokenizer
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.eagle.default_config import default_eagle_config
@@ -38,6 +38,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.utils.plugins import transformers_dataset
 
 _mock_scripts = types.ModuleType("scripts")
 _mock_ar = types.ModuleType("scripts.ar_validate")
@@ -89,6 +90,24 @@ def test_vlm_data_module_passes_dflash_label_mode(monkeypatch):
         chat_template=None,
     )
     assert module["data_collator"] is collator.return_value
+
+
+def test_vlm_data_collator_accepts_unshifted_labels(monkeypatch):
+    """The real VLM collator must support DFlash's unshifted labels."""
+    processor = types.SimpleNamespace(tokenizer=get_tiny_tokenizer())
+    monkeypatch.setattr(
+        transformers_dataset.transformers.AutoProcessor,
+        "from_pretrained",
+        lambda *_args, **_kwargs: processor,
+    )
+
+    collator = transformers_dataset.VisionLanguageDataCollator(
+        processor="dummy-vlm-processor",
+        chat_template="{{ messages }}",
+        shift_labels=False,
+    )
+
+    assert collator.shift_labels is False
 
 
 # ---------------------------------------------------------------------------

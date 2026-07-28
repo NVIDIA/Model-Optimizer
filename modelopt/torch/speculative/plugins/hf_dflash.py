@@ -74,8 +74,8 @@ Draft model components:
 import logging
 
 import torch
-import transformers
 import torch.nn.functional as F
+import transformers
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -99,6 +99,30 @@ from .modeling_fakebase import (
 logger = logging.getLogger(__name__)
 
 __all__ = ["HFDFlashModel"]
+
+
+_QWEN3_VL_MROPE_WORKAROUND_VERSION = "5.3.0"
+_MULTIMODAL_FORWARD_KWARGS = frozenset(
+    {
+        "pixel_values",
+        "pixel_values_videos",
+        "image_grid_thw",
+        "video_grid_thw",
+        "mm_token_type_ids",
+        "image_sizes",
+        "images",
+        "videos",
+    }
+)
+
+
+def _multimodal_forward_kwargs(model_kwargs: dict) -> dict:
+    """Return collator fields accepted by Hugging Face multimodal forwards."""
+    return {
+        name: value
+        for name, value in model_kwargs.items()
+        if name in _MULTIMODAL_FORWARD_KWARGS and value is not None
+    }
 
 
 def _expand_qwen3_video_grid_thw(video_grid_thw: torch.Tensor) -> torch.Tensor:
@@ -217,7 +241,7 @@ class HFDFlashModel(DFlashModel):
         inputs_embeds,
         model_kwargs,
     ):
-        """Precompute Qwen3-VL mRoPE positions for Transformers 5.3 batches.
+        """Precompute Qwen3-VL mRoPE positions for Transformers 5.3.0 batches.
 
         The video encoder consumes one grid row per source video, whereas mRoPE
         consumes one row per rendered temporal-frame group.  Calling the
@@ -225,16 +249,20 @@ class HFDFlashModel(DFlashModel):
         conflict.  Construct the mRoPE positions with a frame-expanded copy,
         then pass the original grid to the vision encoder in ``forward``.
 
-        Prefer ``get_rope_index`` over ``compute_3d_position_ids``.  The latter
+        Transformers 5.4.0 performs this frame expansion in ``get_rope_index``
+        itself; only 5.3.0 needs the external workaround. See
+        https://github.com/huggingface/transformers/blob/v5.4.0/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py
+
+        Prefer ``get_rope_index`` over ``compute_3d_position_ids``. The latter
         writes ``rope_deltas`` into the base model even though DFlash training
         never supplies a cache.  Keeping this calculation side-effect free is
         important when the frozen target is reused for consecutive training
         batches or validation.
         """
+        model_type = str(getattr(self.config, "model_type", ""))
         if (
             position_ids is not None
-            or getattr(self.config, "model_type", None) != "qwen3_vl"
-            or not transformers.__version__.startswith("5.3.")
+            or not model_type.startswith("qwen3_vl")
             # Cached decoding uses the base model's rope_deltas path.  DFlash
             # training has no cache and is the only path that needs the
             # frame-expanded construction below.
@@ -244,14 +272,24 @@ class HFDFlashModel(DFlashModel):
 
         image_grid_thw = model_kwargs.get("image_grid_thw")
         video_grid_thw = model_kwargs.get("video_grid_thw")
-        mm_token_type_ids = model_kwargs.get("mm_token_type_ids")
-        backbone = getattr(self, "model", None)
-        get_rope_index = getattr(backbone, "get_rope_index", None)
-        compute_position_ids = getattr(backbone, "compute_3d_position_ids", None)
         if not isinstance(image_grid_thw, torch.Tensor) and not isinstance(
             video_grid_thw, torch.Tensor
         ):
             return position_ids
+
+        if transformers.__version__ != _QWEN3_VL_MROPE_WORKAROUND_VERSION:
+            if transformers.__version__.startswith("5.3."):
+                raise RuntimeError(
+                    "Qwen3-VL DFlash mRoPE supports Transformers 5.3.0 or >=5.4.0; "
+                    f"got {transformers.__version__}. A 5.3.x patch release may already "
+                    "expand video_grid_thw internally."
+                )
+            return position_ids
+
+        mm_token_type_ids = model_kwargs.get("mm_token_type_ids")
+        backbone = getattr(self, "model", None)
+        get_rope_index = getattr(backbone, "get_rope_index", None)
+        compute_position_ids = getattr(backbone, "compute_3d_position_ids", None)
         if (
             not isinstance(mm_token_type_ids, torch.Tensor)
             or input_ids is None
@@ -271,6 +309,18 @@ class HFDFlashModel(DFlashModel):
 
         rope_video_grid_thw = video_grid_thw
         if isinstance(video_grid_thw, torch.Tensor) and video_grid_thw.numel() > 0:
+            video_token_mask = mm_token_type_ids == 2
+            if isinstance(attention_mask, torch.Tensor):
+                video_token_mask = video_token_mask & attention_mask.bool()
+            video_group_starts = video_token_mask.clone()
+            video_group_starts[:, 1:] &= ~video_token_mask[:, :-1]
+            expected_video_groups = int(video_grid_thw[:, 0].sum())
+            actual_video_groups = int(video_group_starts.sum())
+            if actual_video_groups != expected_video_groups:
+                raise ValueError(
+                    "Qwen3-VL video frame groups do not match video_grid_thw: "
+                    f"expected {expected_video_groups}, found {actual_video_groups}."
+                )
             rope_video_grid_thw = _expand_qwen3_video_grid_thw(video_grid_thw)
 
         rope_kwargs = {
@@ -709,14 +759,15 @@ class HFDFlashModel(DFlashModel):
         - Label alignment: position k predicts token at anchor+k
         - Optional loss decay weighting
         """
-        position_ids = self._qwen3_vl_position_ids(
-            input_ids,
-            attention_mask,
-            position_ids,
-            past_key_values,
-            inputs_embeds,
-            kwargs,
-        )
+        if self.training:
+            position_ids = self._qwen3_vl_position_ids(
+                input_ids,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                inputs_embeds,
+                kwargs,
+            )
 
         if not self.training:
             if self.dflash_offline:
@@ -767,22 +818,10 @@ class HFDFlashModel(DFlashModel):
             # Multimodal models need the top-level conditional-generation forward so their
             # image/video features are inserted before the language model runs.  Keep the
             # long-standing narrow call for text-only models.
-            multimodal_keys = {
-                "pixel_values",
-                "pixel_values_videos",
-                "image_grid_thw",
-                "video_grid_thw",
-                "image_sizes",
-                "images",
-                "videos",
-            }
-            use_top_level_forward = any(kwargs.get(key) is not None for key in multimodal_keys)
+            base_forward_kwargs = _multimodal_forward_kwargs(kwargs)
+            use_top_level_forward = bool(base_forward_kwargs)
             with torch.no_grad():
                 if use_top_level_forward:
-                    base_forward_kwargs = dict(kwargs)
-                    # Training-only data keys are not accepted by Hugging Face model forwards.
-                    base_forward_kwargs.pop("assistant_masks", None)
-                    base_forward_kwargs.pop("loss_mask", None)
                     raw_outputs = super().forward(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
