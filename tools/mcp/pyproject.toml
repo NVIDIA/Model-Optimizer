@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "MCP server exposing ModelOpt launcher operations (submit, status, logs) as typed tools for codex / Claude Code agents"
 requires-python = ">=3.10"
 dependencies = [
+    "mlflow",
     "mcp>=1.0",
     "modelopt-launcher",
     "pyyaml",

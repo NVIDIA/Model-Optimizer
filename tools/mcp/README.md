@@ -21,10 +21,11 @@ Mode is determined by which args you pass, not by which tool you call. One tool,
 |---|---|
 | `list_examples` | Enumerate bundled launcher YAMLs under `tools/launcher/examples/` with model + description metadata extracted from each YAML. Discovery primitive — call this first when you don't know which YAML to launch. |
 | `verify_setup(executor, ...)` | Fail-fast probe for the named executor. Docker: `docker info` (daemon up) + `docker info --format` runtime-registry check (looks for `"nvidia"` runtime registered by the NVIDIA Container Toolkit — no image pull, daemon-fast). Slurm: `ssh -o BatchMode=yes -o ConnectTimeout=5` to the cluster login node. Returns structured failure on auth / network / daemon issues — no exception. |
-| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?, source_ref?, source_repo?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Before launching, materializes a managed Model-Optimizer checkout at `source_ref` (branch, tag, or SHA; default `main`) and initializes recursive submodules, then runs that checkout's launcher. Returns `experiment_id` (Slurm) or PID plus captured `experiment_id` when available (Docker) immediately; if Docker's short tail times out, it still returns PID with `experiment_id=None` and a persistent `stdout_log` under `$NEMORUN_HOME/.modelopt-mcp/docker-submit-logs/` for diagnostics. The actual job runs detached. Auto-runs `verify_setup` first by default (skippable). **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv, source_sha, source_root}` instead of `experiment_id`. Used by verify-task workflow stages (deployment_support, hidden_state_dump_support, mlm_eval, ...). |
+| `submit_job(yaml_path, hf_local? \| cluster_host?, ..., dry_run?, source_ref?, source_repo?, enable_mlflow?)` | Submit a launcher YAML. Mode resolved from mutually-exclusive args. Before launching, materializes a managed Model-Optimizer checkout at `source_ref` (branch, tag, or SHA; default `main`) and initializes recursive submodules, then runs that checkout's launcher. Returns `experiment_id` (Slurm) or PID plus captured `experiment_id` when available (Docker) immediately; if Docker's short tail times out, it still returns PID with `experiment_id=None` and a persistent `stdout_log` under `$NEMORUN_HOME/.modelopt-mcp/docker-submit-logs/` for diagnostics. The actual job runs detached. Auto-runs `verify_setup` first by default (skippable). When `enable_mlflow=True`, creates an MLflow run before launch and passes standard `MLFLOW_RUN_ID` / `MLFLOW_TRACKING_URI` into the job. **Pass `dry_run=True`** to validate the YAML via `launch.py --dryrun --yes` without contacting the cluster / spawning a container / running sbatch — returns `{ok, dry_run: True, validated: bool, diagnostic?, exit_code, stdout_tail, stderr_tail, argv, source_sha, source_root}` instead of `experiment_id`. |
 | `job_status(experiment_id)` | Filesystem-based status from nemo_run's experiment dir (`_DONE`, `status_*.out`). Returns `done` / `failed` / `running` plus per-task statuses. No in-memory registry; survives MCP server restarts. |
 | `job_logs(experiment_id, task?, tail?)` | Read `log_<task>.out` from the experiment dir. Per-task filtering + optional tail to truncate. |
-| `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. Returns the final status plus `waited_seconds`. |
+| `wait_for_experiment(experiment_id, timeout_sec?, poll_interval_sec?, finalize_mlflow?, mlflow_run_id?)` | Block until `job_status` returns `done` / `failed`, or until `timeout_sec` elapses. Single tool call replaces the agent's `while True: status; sleep` loop — saves tool-call turns and avoids overshooting the poll interval. When `finalize_mlflow=True`, fetches terminal Nemo/Slurm logs with `nemo experiment logs`, then attaches final pass/fail status and launcher logs to the MLflow run created by `submit_job(enable_mlflow=True)`. |
+| `finalize_mlflow_run(experiment_id, mlflow_run_id, mlflow_tracking_uri?)` | Fetch terminal Nemo/Slurm logs and attach final status plus launcher logs to an already-created MLflow run. Usually use `wait_for_experiment(..., finalize_mlflow=True)` instead. |
 | `provision_passwordless_ssh_dry_run(cluster_host, cluster_user, identity?)` | Operator UX helper. Inspects `~/.ssh/` and emits the exact `ssh-keygen` / `ssh-copy-id` commands the user should run to make `verify_setup(executor='slurm')` pass. No side effects — pure inspection + shell-command formatting. |
 | `read_cluster_artifact(experiment_id, path?, job_idx?)` | Pull artifact content from the remote cluster via nemo_run's tunnel primitives. With `path=None`, wraps `nemo experiment logs <id> <job_idx>` (built-in log fetch). With a `path`, uses the experiment's `Tunnel` to `cat` the file. No reinvented SSH. |
 | `open_draft_pr(target_repo, title, body, base_branch?, cwd?)` | Push the current branch and open a draft PR via `gh pr create --draft`. Validates `cwd` is a git repo before doing anything. On `gh` failure after a successful push, returns `branch_pushed=True` so the operator can retry just the PR-open step. |
@@ -115,14 +116,16 @@ result = mcp__modelopt__submit_job(
     identity="/home/alice/.ssh/id_ed25519",
     skip_verify=True,  # we just probed
     source_ref="main",  # optional; omit to use main
+    enable_mlflow=True,  # optional; passes MLFLOW_RUN_ID into the job
 )
-# {"ok": True, "experiment_id": "cicd_1781240000", "slurm_job_id": "12345", "source_sha": "...", ...}
+# {"ok": True, "experiment_id": "cicd_1781240000", "mlflow": {"mlflow_run_id": "..."}, ...}
 
-# 4. Poll until done
-while True:
-    status = mcp__modelopt__job_status(experiment_id="cicd_1781240000")
-    if status["status"] in ("done", "failed"):
-        break
+# 4. Poll until done and attach durable logs to MLflow
+status = mcp__modelopt__wait_for_experiment(
+    experiment_id=result["experiment_id"],
+    finalize_mlflow=True,
+    mlflow_run_id=result["mlflow"]["mlflow_run_id"],
+)
 
 # 5. Fetch logs
 logs = mcp__modelopt__job_logs(
@@ -147,6 +150,12 @@ For local Docker execution, drop `cluster_host`/`cluster_user`/`identity` and pa
 | `MODELOPT_MCP_DISABLE_MANAGED_SOURCE` | (optional) local dev | Set to `1` to skip managed checkout and invoke the installed `modelopt-launcher` entrypoint directly. |
 | `MODELOPT_MCP_UV` | (optional) `submit_job` | Override the `uv` binary used for `uv run --project <source>/tools/launcher ...`. |
 | `MODELOPT_LAUNCHER_EXAMPLES_DIR` | (optional) `list_examples` | Override the examples directory location. Defaults to `../launcher/examples/` relative to this package. |
+| `MLFLOW_TRACKING_URI` / `MODELOPT_MCP_MLFLOW_TRACKING_URI` | (optional) `submit_job(enable_mlflow=True)` | Tracking server for MCP-created runs. Defaults to `https://mlflow-modelopt.nvidia.com/`. |
+| `MODELOPT_MCP_MLFLOW_EXPERIMENT` | (optional) `submit_job(enable_mlflow=True)` | Experiment name for MCP-created runs. Defaults to `ci-tests`. |
+
+MCP-created MLflow runs default to the run name
+`<USER>/<cluster-host-or-executor>/<yaml-parent>/<yaml-stem>`. Passing
+`job_name` to `submit_job` overrides that run name.
 
 ## Design principles
 
