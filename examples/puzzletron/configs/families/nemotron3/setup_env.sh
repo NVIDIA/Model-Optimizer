@@ -50,7 +50,7 @@ activate_venv() {
 install_deps() {
     if [[ "${SKIP_APT}" != "1" ]]; then
         apt-get update
-        apt-get install -y build-essential cmake git ninja-build \
+        apt-get install -y build-essential cmake curl git ninja-build \
             python3 python3-dev python3-pip python3-venv
     fi
 
@@ -67,14 +67,14 @@ install_deps() {
 
     python -m pip install --upgrade pip \
         "setuptools>=80,<81" "setuptools-scm>=8" setuptools-rust wheel \
-        "packaging>=24.2" "cmake>=3.26.1" ninja jinja2
+        "packaging>=24.2" "cmake>=3.26.1" ninja jinja2 hydra-core immutabledict
 
     python -m pip install \
         torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
         --index-url https://download.pytorch.org/whl/cu129
 
-    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
-        python -m pip install --no-build-isolation -e "${VLLM_ROOT}"
+    VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
+    python -m pip install --no-build-isolation -e "${VLLM_ROOT}"
 
     python -m pip install -e "${AUTOMODEL_ROOT}"
     python -m pip install aiperf
