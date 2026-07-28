@@ -1,25 +1,4 @@
 document.addEventListener('DOMContentLoaded', () => {
-  const trimAnnouncementPostSidebar = () => {
-    if (!window.location.pathname.includes('/announcements/')) {
-      return;
-    }
-
-    const menu = document.querySelector('.wy-menu-vertical');
-    if (!menu) {
-      return;
-    }
-
-    menu.innerHTML = `
-      <p class="caption" role="heading"><span class="caption-text">Announcements</span></p>
-      <ul>
-        <li class="toctree-l1"><a class="reference internal" href="../index.html">Announcements</a></li>
-        <li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">API Docs</a></li>
-      </ul>
-    `;
-  };
-
-  trimAnnouncementPostSidebar();
-
   const search = document.querySelector('#announcement-search');
   const cards = Array.from(document.querySelectorAll('.announcement-card')).sort((left, right) => {
     return (right.dataset.date || '').localeCompare(left.dataset.date || '');
@@ -77,7 +56,11 @@ document.addEventListener('DOMContentLoaded', () => {
     button.addEventListener('click', () => {
       activeTag = button.dataset.tag || 'all';
       currentPage = 1;
-      tags.forEach((tag) => tag.classList.toggle('is-active', tag === button));
+      tags.forEach((tag) => {
+        const selected = tag === button;
+        tag.classList.toggle('is-active', selected);
+        tag.setAttribute('aria-pressed', selected ? 'true' : 'false');
+      });
       update();
     });
   });

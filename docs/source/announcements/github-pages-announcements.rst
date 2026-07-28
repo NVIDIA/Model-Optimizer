@@ -20,4 +20,4 @@ What Changes
 Authoring Flow
 **************
 
-Add a Sphinx page under ``docs/source/announcements/`` and link it from the announcements toctree in ``docs/source/index.rst``. The GitHub Pages workflow rebuilds the static site from committed source, so every announcement follows the same review path as code and docs.
+Add a Sphinx page under ``docs/source/announcements/``, add its ``.announcement-card`` metadata and link to ``docs/source/index.rst``, and link it from the announcements toctree when applicable. The GitHub Pages workflow rebuilds the static site from committed source, so every announcement follows the same review path as code and docs.

@@ -10,10 +10,10 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <label class="announcement-search-label" for="announcement-search">Search announcements</label>
        <input id="announcement-search" class="announcement-search" type="search" placeholder="Search announcements" autocomplete="off" />
        <div class="announcement-tags" aria-label="Announcement tags">
-         <button class="announcement-tag is-active" type="button" data-tag="all">All</button>
-         <button class="announcement-tag" type="button" data-tag="speculative-decoding">Speculative decoding</button>
-         <button class="announcement-tag" type="button" data-tag="docs">Docs</button>
-         <button class="announcement-tag" type="button" data-tag="github-pages">GitHub Pages</button>
+         <button class="announcement-tag is-active" type="button" data-tag="all" aria-pressed="true">All</button>
+         <button class="announcement-tag" type="button" data-tag="speculative-decoding" aria-pressed="false">Speculative decoding</button>
+         <button class="announcement-tag" type="button" data-tag="docs" aria-pressed="false">Docs</button>
+         <button class="announcement-tag" type="button" data-tag="github-pages" aria-pressed="false">GitHub Pages</button>
        </div>
      </div>
 
@@ -24,8 +24,8 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <p>The GitHub Pages site now starts with announcements while the existing API documentation remains available in the docs navigation.</p>
        <div class="announcement-card-tags"><span>release</span><span>docs</span><span>github-pages</span></div>
      </article>
-     <article class="announcement-card" data-date="2026-06-29" data-title="DSpark vs Domino: Same DFlash Backbone, Different Correction Heads" data-summary="DSpark and Domino both build on block-parallel DFlash draft generation but diverge in their token-level correction heads." data-tags="speculative-decoding dflash dspark domino architecture">
-       <div class="announcement-card-meta">June 29, 2026 &middot; ModelOpt Team</div>
+     <article class="announcement-card" data-date="2026-07-13" data-title="DSpark vs Domino: Same DFlash Backbone, Different Correction Heads" data-summary="DSpark and Domino both build on block-parallel DFlash draft generation but diverge in their token-level correction heads." data-tags="speculative-decoding dflash dspark domino architecture">
+       <div class="announcement-card-meta">July 13, 2026 &middot; ModelOpt Team</div>
        <h2><a href="announcements/dspark-vs-domino.html">DSpark vs Domino: Same DFlash Backbone, Different Correction Heads</a></h2>
        <p>DSpark and Domino share a DFlash backbone but make different correction-head tradeoffs: a stateless VanillaMarkov head versus a GRU.</p>
        <div class="announcement-card-tags"><span>speculative-decoding</span><span>dflash</span><span>architecture</span></div>
