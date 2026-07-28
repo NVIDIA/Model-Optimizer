@@ -848,9 +848,96 @@ def test_te_grouped_compiled_weight_quantizer_loop(
     destroy_model_parallel()
 
 
+def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1, monkeypatch):
+    """Real (unpatched) torch.compile parity for the per-expert weight-quantizer loop.
+
+    Complements test_te_grouped_compiled_weight_quantizer_loop, which fakes torch.compile to
+    assert wiring only. Here torch.compile is left intact so the opt-in loop is actually
+    compiled, executed, and back-propagated, and its numerics are checked against the eager
+    path built from identical weights and calibrated amax.
+    """
+    initialize_for_megatron(seed=SEED)
+
+    def build():
+        model = _gpt_model_provider(
+            tp_size=1,
+            hidden_size=32,
+            moe_grouped_gemm=True,
+            transformer_impl="transformer_engine",
+            num_moe_experts=4,
+        )
+        for module in model.modules():
+            if isinstance(module, TopKRouter):
+                module.topk = module.num_experts
+        return model
+
+    # Two identical models (same raw weights); one stays eager, one is real-compiled.
+    model_eager = build()
+    model_compiled = build()
+    model_compiled.load_state_dict(model_eager.state_dict())
+
+    # One cached input batch, shared across both models for an apples-to-apples compare.
+    forward = get_forward(model_eager)
+
+    monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+    mtq.quantize(model_eager, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+
+    monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+    mtq.quantize(model_compiled, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+
+    grouped_eager = [
+        m
+        for m in model_eager.modules()
+        if isinstance(getattr(m, "weight_quantizer", None), mtq.nn.GroupedQuantizer)
+    ]
+    grouped_compiled = [
+        m
+        for m in model_compiled.modules()
+        if isinstance(getattr(m, "weight_quantizer", None), mtq.nn.GroupedQuantizer)
+    ]
+    assert grouped_compiled and len(grouped_eager) == len(grouped_compiled)
+    # The opt-in path attached the real compiled loop (torch.compile left unpatched); the
+    # eager control model did not.
+    assert all(hasattr(m, "_compiled_weight_quantizer_loop") for m in grouped_compiled)
+    assert all(not hasattr(m, "_compiled_weight_quantizer_loop") for m in grouped_eager)
+
+    # Forward parity: the first call on model_compiled triggers real compilation.
+    out_eager = forward(model_eager)
+    out_compiled = forward(model_compiled)
+    torch.testing.assert_close(out_compiled, out_eager, rtol=1e-3, atol=1e-3)
+
+    # Backward parity: per-expert weight grads must be finite and match the eager path.
+    out_eager.sum().backward()
+    out_compiled.sum().backward()
+    for m_e, m_c in zip(grouped_eager, grouped_compiled):
+        for i in range(m_c.num_gemms):
+            g_e = getattr(m_e, f"weight{i}").grad
+            g_c = getattr(m_c, f"weight{i}").grad
+            assert g_c is not None and torch.isfinite(g_c).all()
+            torch.testing.assert_close(g_c, g_e, rtol=1e-2, atol=1e-2)
+
+    destroy_model_parallel()
+
+
+def _te_grouped_expert_magnitude(linear_name, local_idx):
+    """Distinct, known weight magnitude for each (linear, local-expert) pair.
+
+    Chosen so every per-expert weight quantizer sees a different amax (and fc1 vs fc2 differ
+    too), making divergence guaranteed by construction rather than by random initialization.
+    """
+    return {"linear_fc1": 0.25, "linear_fc2": 1.25}[linear_name] + 0.5 * local_idx
+
+
 def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_cfg, rank, size):
-    """TEGrouped keeps a per-expert weight quantizer (GroupedQuantizer) by default; each
-    expert's amax should match the corresponding SequentialMLP expert (no cross-expert sharing)."""
+    """TEGrouped keeps a per-expert weight quantizer (GroupedQuantizer) by default; each expert's
+    amax must equal the corresponding SequentialMLP expert's (no cross-expert sharing).
+
+    Divergence is made causal: each local expert's weights are filled with a distinct known
+    magnitude, so its weight amax is that magnitude by construction. The test then asserts
+    (a) grouped == sequential per expert, (b) each amax equals ITS OWN set magnitude, and
+    (c) the per-expert quantizer objects are distinct instances. A cross-expert-sharing
+    regression therefore fails deterministically, not by luck of the random init.
+    """
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
         expert_model_parallel_size=ep_size,
@@ -875,6 +962,19 @@ def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_c
         num_moe_experts=4,
         transformer_impl="modelopt",
     )
+
+    # Fill each local expert's grouped weights with a distinct, known magnitude so the per-expert
+    # weight amax is deterministic (== that magnitude) and diverges across experts by construction.
+    for te_mlp in (m for m in te_grouped.modules() if isinstance(m, TEGroupedMLP)):
+        for linear_name in ("linear_fc1", "linear_fc2"):
+            grouped_linear = getattr(te_mlp, linear_name)
+            for i in range(grouped_linear.num_gemms):
+                with torch.no_grad():
+                    getattr(grouped_linear, f"weight{i}").fill_(
+                        _te_grouped_expert_magnitude(linear_name, i)
+                    )
+
+    # Propagate the identical per-expert weights to the sequential model.
     copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
 
     for module in te_grouped.modules():
@@ -891,7 +991,6 @@ def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_c
     seq_modules = [m for m in sequential.modules() if isinstance(m, SequentialMLP)]
     assert len(te_modules) == len(seq_modules)
 
-    saw_per_expert_divergence = False
     for te_mlp, seq_mlp in zip(te_modules, seq_modules):
         for linear_name in ("linear_fc1", "linear_fc2"):
             te_wq = getattr(te_mlp, linear_name).weight_quantizer
@@ -901,23 +1000,37 @@ def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_c
                 f"got {len(te_wq)}"
             )
 
-            expert_amaxes = []
+            per_expert_amax = []
             for i, expert in enumerate(seq_mlp.local_experts):
                 te_amax = te_wq[i].amax
                 seq_amax = getattr(expert, linear_name).weight_quantizer.amax
+                expected = _te_grouped_expert_magnitude(linear_name, i)
                 assert te_amax is not None
+
+                # (a) grouped and sequential agree per expert (cross-implementation parity).
                 assert torch.allclose(te_amax, seq_amax, atol=1e-5, rtol=1e-5), (
                     f"TEGrouped expert {i} amax != Sequential expert {i} amax for {linear_name}"
                 )
-                expert_amaxes.append(te_amax.reshape(-1)[0])
+                # (b) causal: this expert's amax equals ITS OWN set magnitude, proving the amax
+                #     was computed from that expert's weights (no cross-expert leakage).
+                assert torch.allclose(
+                    te_amax, torch.full_like(te_amax, expected), rtol=1e-3, atol=1e-3
+                ), (
+                    f"{linear_name} expert {i}: amax {te_amax.reshape(-1)[0].item():.6f} "
+                    f"!= set magnitude {expected}"
+                )
+                # (c) each expert owns a distinct quantizer instance, not a shared one.
+                for j in range(i):
+                    assert te_wq[i] is not te_wq[j], (
+                        f"{linear_name}: experts {i} and {j} share a quantizer object"
+                    )
+                per_expert_amax.append(te_amax.reshape(-1)[0])
 
-            stacked = torch.stack(expert_amaxes)
-            if (stacked.max() - stacked.min()).item() > 1e-5:
-                saw_per_expert_divergence = True
-
-    assert saw_per_expert_divergence, (
-        "Expected per-expert weight amax to diverge across experts (proves no cross-expert sharing)."
-    )
+            # Divergence is now guaranteed by construction (distinct set magnitudes).
+            stacked = torch.stack(per_expert_amax)
+            assert (stacked.max() - stacked.min()).item() > 1e-4, (
+                f"{linear_name}: per-expert amax did not diverge despite distinct set magnitudes"
+            )
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
