@@ -177,7 +177,7 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         # peak summary under SAVE_PATH. Off by default (no behavior change).
         MEM_MON_PREFIX=()
         if [[ "${MEM_MONITOR:-0}" == "1" ]]; then
-            MEM_MON_PREFIX=(python scripts/mem_monitor.py \
+            MEM_MON_PREFIX=(python "$script_dir/../../../tools/resource_monitor.py" \
                 --gpus "${CUDA_VISIBLE_DEVICES-all}" \
                 --out "$SAVE_PATH/mem_trace.csv" \
                 --summary "$SAVE_PATH/mem_peak.txt" --)

@@ -13,14 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sidecar memory/utilization monitor for HF PTQ runs.
+r"""Cross-process resource monitor: sample a workload's GPU/CPU usage from the outside.
 
 Samples GPU (memory, utilization, power, temperature) and CPU (total/used/free memory,
-utilization) at a fixed interval while
-a *separate* workload process (e.g. ``hf_ptq.py``) runs, writes a CSV timeseries
-(overwriting any existing file), and prints a peak/mean/min summary on exit. This keeps profiling out of the workload
-itself, so it can verify per-run budgets (e.g. the single-GPU layerwise target of
-<=80 GB GPU / <=80 GB CPU) without perturbing calibration.
+utilization) at a fixed interval while a *separate* workload process (e.g. ``hf_ptq.py``)
+runs, writes a CSV timeseries (overwriting any existing file), and prints a peak/mean/min
+summary on exit. This keeps profiling out of the workload itself, so it can verify per-run
+budgets (e.g. the single-GPU layerwise target of <=80 GB GPU / <=80 GB CPU) without
+perturbing calibration.
+
+Not to be confused with ``modelopt.torch.utils.memory_monitor.GPUMemoryMonitor``: that is
+an *in-process* thread (import it inside your Python workload) that tracks device GPU memory
+only. This is a standalone *cross-process* tool that wraps any command, adds CPU + utilization
++ power/temperature, writes a CSV/summary, and survives an OOM/kill of the monitored process.
 
 GPU memory is read at the *device* level (via NVML, falling back to ``nvidia-smi``)
 so the monitor observes the workload's usage against the physical device budget
@@ -34,13 +39,13 @@ Two ways to bind the monitor to a workload:
 * **Wrap mode** (preferred) — pass the workload after ``--``; the monitor launches
   it, tracks its process tree (for RSS + CPU%), and exits with its return code::
 
-      python scripts/mem_monitor.py --gpus 2,3 --out mem.csv --summary peak.txt -- \\
+      python tools/resource_monitor.py --gpus 2,3 --out mem.csv --summary peak.txt -- \
           python hf_ptq.py ...
 
 * **Standalone** — run in the background and stop it with a signal, ``--duration``,
   or ``--pid`` (tracks that PID's tree and exits when it does)::
 
-      python scripts/mem_monitor.py --gpus 2,3 --out mem.csv & MON=$!
+      python tools/resource_monitor.py --gpus 2,3 --out mem.csv & MON=$!
       python hf_ptq.py ...
       kill "$MON"
 """
@@ -50,7 +55,7 @@ import contextlib
 import csv
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404 - wraps and monitors a user-provided workload command; no shell is used
 import sys
 import time
 from collections import namedtuple
@@ -94,7 +99,7 @@ def _resolve_gpu_indices(spec) -> list[int] | None:
         return [int(x) for x in spec.split(",") if x.strip()]
     except ValueError:
         print(
-            f"mem_monitor: --gpus={spec!r} is not integer indices "
+            f"resource_monitor: --gpus={spec!r} is not integer indices "
             "(UUID/MIG ids unsupported); disabling GPU monitoring.",
             file=sys.stderr,
         )
@@ -102,8 +107,7 @@ def _resolve_gpu_indices(spec) -> list[int] | None:
 
 
 class GpuSampler:
-    """Device-level GPU sampler (memory, utilization, power, temperature) backed by NVML,
-    falling back to ``nvidia-smi``.
+    """GPU sampler for memory/utilization/power/temperature via NVML (``nvidia-smi`` fallback).
 
     ``indices`` is a list of physical device indices, ``None`` for all devices, or
     an empty list to disable GPU sampling. ``self.indices`` holds the indices that
@@ -112,6 +116,7 @@ class GpuSampler:
     """
 
     def __init__(self, indices: list[int] | None):
+        """Resolve ``indices`` and open NVML/``nvidia-smi`` handles; see the class docstring."""
         self.indices: list[int] = []
         self._backend = None
         self._handles: dict[int, object] = {}
@@ -135,7 +140,7 @@ class GpuSampler:
             self._backend = "nvml"
             if indices is not None and (missing := [i for i in indices if i >= count]):
                 print(
-                    f"mem_monitor: requested GPU indices {missing} exceed device "
+                    f"resource_monitor: requested GPU indices {missing} exceed device "
                     f"count {count}; not monitored.",
                     file=sys.stderr,
                 )
@@ -157,7 +162,7 @@ class GpuSampler:
 
     @staticmethod
     def _query_smi() -> list[tuple]:
-        out = subprocess.check_output(
+        out = subprocess.check_output(  # nosec B603 B607 - fixed nvidia-smi argv; no shell
             [
                 "nvidia-smi",
                 "--query-gpu=index,memory.used,utilization.gpu,power.draw,temperature.gpu",
@@ -287,6 +292,7 @@ def _split_command(argv: list[str]) -> tuple[list[str], list[str] | None]:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse the monitor's CLI arguments (the tokens before any ``--`` separator)."""
     parser = argparse.ArgumentParser(
         description="Sidecar GPU/CPU memory, utilization, power & temperature monitor.",
         epilog="Append '-- <command>' to launch and monitor a workload, exiting with its return code.",
@@ -347,16 +353,17 @@ def _write_summary(path, duration, metrics: _Metrics):
 
 
 def main() -> None:
+    """Parse args, sample until the wrapped workload / duration ends, then write outputs."""
     monitor_argv, command = _split_command(sys.argv[1:])
     args = parse_args(monitor_argv)
     gpu = GpuSampler(_resolve_gpu_indices(args.gpus))
 
-    child = subprocess.Popen(command) if command else None
+    child = subprocess.Popen(command) if command else None  # nosec B603 - runs the user-supplied command argv directly; no shell
     target_pid = child.pid if child is not None else args.pid
     try:
         proc = psutil.Process(target_pid) if target_pid else None
     except psutil.NoSuchProcess:
-        print(f"mem_monitor: --pid {target_pid} is not a running process.", file=sys.stderr)
+        print(f"resource_monitor: --pid {target_pid} is not a running process.", file=sys.stderr)
         sys.exit(1)
 
     metrics = _Metrics(gpu.indices)

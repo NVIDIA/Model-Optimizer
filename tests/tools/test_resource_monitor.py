@@ -12,11 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for ``examples/hf_ptq/scripts/mem_monitor.py``.
+"""Unit tests for ``tools/resource_monitor.py``.
 
-The module lives next to the example scripts (not inside the ``modelopt`` package),
-so we add ``examples/hf_ptq/scripts/`` to ``sys.path`` before importing it. These
-tests are CPU-only: GPU sampling is exercised via the disabled (``none``) path.
+The module is a standalone script (not inside the ``modelopt`` package), so we add
+``tools/`` to ``sys.path`` before importing it. These tests are CPU-only: GPU sampling
+is exercised via the disabled (``none``) path.
 """
 
 import csv
@@ -27,13 +27,13 @@ from pathlib import Path
 
 import psutil
 
-_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq" / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+_TOOLS_DIR = Path(__file__).resolve().parents[2] / "tools"
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
 
-import mem_monitor as mm
+import resource_monitor as mm
 
-_SCRIPT = _SCRIPTS_DIR / "mem_monitor.py"
+_SCRIPT = _TOOLS_DIR / "resource_monitor.py"
 
 
 # ---------- helpers ---------------------------------------------------------
