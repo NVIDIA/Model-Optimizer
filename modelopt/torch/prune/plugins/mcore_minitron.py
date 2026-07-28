@@ -67,6 +67,7 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMoELayer,
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
+    _DynamicTEGroupedMLP,
     _DynamicTransformerLayer,
 )
 from modelopt.torch.nas.plugins.megatron_model_stats import (
@@ -974,6 +975,8 @@ class ImportanceEstimatorRegistry:
                 _register_mlp_importance(module, self)
             elif isinstance(module, _DynamicSequentialMLP):
                 _register_sequential_mlp_importance(module, self)
+            elif isinstance(module, _DynamicTEGroupedMLP):
+                _register_grouped_mlp_importance(module, self)
             elif isinstance(module, _DynamicMambaMixer):
                 _register_mamba_mixer_importance(module, self)
 
@@ -1399,6 +1402,46 @@ def _register_sequential_mlp_importance(
         module,
         "num_local_experts",
         lambda: _estimate_expert_importance(module),
+    )
+
+
+def _register_grouped_mlp_importance(
+    module: _DynamicTEGroupedMLP, registry: ImportanceEstimatorRegistry
+) -> None:
+    """Register importance estimators for TEGroupedMLP (grouped-GEMM MoE experts) modules.
+
+    Mirrors the SequentialMLP path: ``num_local_experts`` reuses the expert-L2 hook (TEGroupedMLP
+    shares SequentialMLP's forward signature), and ``moe_ffn_hidden_size`` is a single shared score
+    from the fused ``linear_fc2`` input activations (all experts' tokens), since experts prune
+    homogeneously.
+    """
+    # Expert importance for num_local_experts; also creates module._activations (the dict saved and
+    # restored by the per-rank score checkpoint). We stash the ffn score in it so re-pruning from a
+    # checkpoint recovers it without re-running the forward loop.
+    _register_sequential_mlp_importance(module, registry)
+    module._activations["ffn_activations"] = None
+
+    def _grouped_fc2_forward_hook(mod, module_inner, input, output):
+        """Collect ffn-channel activations from the fused linear_fc2 input (all experts' tokens)."""
+        # input[0] is the permuted intermediate [total_tokens, moe_ffn_hidden_size] (no batch dim)
+        acts = gather_from_tensor_model_parallel_region(input[0]).detach()[:, None, :]
+        acts = acts.to(torch.float32).abs().mean(dim=0).pow(2).sum(dim=0)  # [moe_ffn_hidden_size]
+        prev = mod._activations["ffn_activations"]
+        mod._activations["ffn_activations"] = acts if prev is None else prev + acts
+
+    def _estimate_grouped_ffn_importance(mod):
+        """Return the activation magnitude-based importance (L2 norm) of moe_ffn_hidden_size."""
+        acts = mod._activations["ffn_activations"]
+        assert acts is not None, "No activations collected for importance estimation."
+        return acts.pow(0.5)
+
+    registry.register_hook(
+        module.linear_fc2,
+        partial(_grouped_fc2_forward_hook, module),
+        hook_type="forward",
+    )
+    registry.register_importance(
+        module, "moe_ffn_hidden_size", lambda: _estimate_grouped_ffn_importance(module)
     )
 
 

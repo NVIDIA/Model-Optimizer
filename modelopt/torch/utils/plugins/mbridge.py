@@ -95,10 +95,9 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    # Pruning does not support grouped GEMM yet, so disable it for MoE models. Set the flag on the
-    # provider (the bridge's native, possibly custom/hybrid spec reads it at build time) rather than
-    # replacing the whole layer spec -- overwriting it would drop custom layers (e.g. Qwen3.5's
-    # GatedDeltaNet + gated-attention or Gemma3's custom spec).
+    # Set moe_grouped_gemm on the provider (the bridge's native, possibly custom/hybrid spec reads
+    # it at build time) rather than replacing the whole layer spec -- overwriting it would drop
+    # custom layers (e.g. Qwen3.5's GatedDeltaNet + gated-attention or Gemma3's custom spec).
     if HAS_HYBRID and isinstance(provider, (HybridModelProvider)):
         provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
         provider.moe_grouped_gemm = moe_grouped_gemm

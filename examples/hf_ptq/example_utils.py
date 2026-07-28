@@ -23,6 +23,8 @@ import os
 import shutil
 import warnings
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -48,9 +50,66 @@ try:
 except ImportError:
     snapshot_download = None
 
+from modelopt.torch.utils import distributed as dist_utils
+
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+
+@dataclass
+class DistributedState:
+    """Example-local distributed state for model loading, dataloader sharding, and rank-0 output."""
+
+    rank: int
+    world_size: int
+    device: torch.device | str
+    is_main: bool
+
+
+def setup_distributed_args(args):
+    """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
+    if getattr(args, "use_fsdp2", False):
+        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
+        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        dist_utils.setup(timeout=timedelta(hours=2))
+        rank = dist_utils.rank()
+        args.dist_state = DistributedState(
+            rank=rank,
+            world_size=dist_utils.size(),
+            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
+            is_main=rank == 0,
+        )
+    else:
+        args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
+
+
+def cleanup_distributed(args):
+    """Destroy the process group if ``--use_fsdp2`` set it up."""
+    if getattr(args, "use_fsdp2", False):
+        dist_utils.cleanup()
+
+
+def validate_fsdp2_supported(args, config):
+    """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
+    issues = []
+    if "vila" in args.pyt_ckpt_path.lower():
+        issues.append("VILA (custom builder + non-standard layer layout)")
+    if is_nemotron_vl(config) or _is_multimodal_config(config):
+        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    if getattr(config, "quantization_config", None) is not None:
+        issues.append("pack-quantized / compressed-tensors checkpoints")
+    if getattr(args, "specdec_offline_dataset", None) is not None:
+        issues.append("speculative decoding (--specdec_offline_dataset)")
+    if getattr(args, "low_memory_mode", False):
+        issues.append("--low_memory_mode (redundant with FSDP2)")
+
+    if issues:
+        raise NotImplementedError(
+            "--use_fsdp2 does not support:\n  - "
+            + "\n  - ".join(issues)
+            + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
+        )
 
 
 def run_nemotron_vl_preview(
@@ -370,6 +429,19 @@ def _apply_to_model_state_dict(
     if in_state_dict:
         model.load_state_dict(in_state_dict, strict=False)
     return out_state_dict
+
+
+def mtp_layer_prefixes_from_checkpoint(model_path: str) -> list[str]:
+    """MTP exclude-prefixes from a checkpoint's safetensors index (``[]`` if none); reads no tensors.
+
+    Local-index-only, matching :func:`load_mtp_weights`, so detection and re-attach stay in sync.
+    """
+    index_file = Path(model_path) / "model.safetensors.index.json"
+    if not index_file.exists():
+        return []
+    weight_map = json.load(open(index_file))["weight_map"]
+    mtp_keys = [k for k, v in weight_map.items() if "mtp" in k or "mtp" in v]
+    return list(_keys_to_prefixes(mtp_keys))
 
 
 def load_mtp_weights(

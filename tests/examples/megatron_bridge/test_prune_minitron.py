@@ -60,8 +60,9 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
         if megatron_format
         else {"output_hf_path": pruned_path}
     )
+    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
         hf_model_name_or_path=teacher_hf_path,
         pp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
@@ -126,8 +127,9 @@ def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
     prune_target_params = int(language_model_params * 0.7)
 
     pruned_model_path = tmp_path / "pruned"
+    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
         hf_model_name_or_path=teacher_hf_path,
         output_hf_path=pruned_model_path,
         pp_size=num_gpus,
