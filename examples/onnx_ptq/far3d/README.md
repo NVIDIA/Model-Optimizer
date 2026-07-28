@@ -143,6 +143,16 @@ precision=int8  # Use fp8 for FP8 models.
   far3d.decoder.${precision}.engine
 ```
 
-The evaluator reports the dataset metrics, including mAP. The DL4AGX reference reports 0.230 mAP for its INT8 encoder and mixed FP16/FP32 decoder, compared with 0.232 mAP for FP16 encoder and decoder. It reports neither an INT8 decoder nor FP8 results; validate the selected precision on the target TensorRT version and GPU.
-
 Use `--max-samples N` for an inference smoke test. Dataset metrics are skipped when only part of the validation set is processed.
+
+## Results on Argoverse 2 validation set
+
+The following results use TensorRT 10.11.0.33 on an NVIDIA RTX 6000 Ada Generation GPU. Model quantization uses PyTorch 2.8.0a0 from the 25.06 PyTorch container, while the FAR3D export and evaluation environment uses PyTorch 1.13.1. Accuracy is measured over all 23,522 validation frames after calibration with 512 batches sampled every 20 frames.
+
+| Encoder precision | Decoder precision | Framework | GPU compute time (ms) | Accuracy (mAP) |
+| --- | --- | --- | ---: | ---: |
+| INT8 | INT8 | TensorRT 10.11 | 25.4 | 0.124 |
+| FP8 | FP8 | TensorRT 10.11 | 31.2 | 0.000 |
+| FP8 | FP16 | TensorRT 10.11 | 31.5 | 0.241 |
+
+GPU compute time is the sum of the encoder and decoder median times reported by `trtexec`, with host-to-device and device-to-host transfers disabled. Results depend on the TensorRT version and GPU architecture and are not directly comparable with the DRIVE Orin-X measurements in the [DL4AGX reference](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt#results-on-argoverse2-validation-set).
