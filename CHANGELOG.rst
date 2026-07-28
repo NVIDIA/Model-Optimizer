@@ -12,6 +12,8 @@ Changelog
 
 **Bug Fixes**
 
+- Quantize residual-add outputs in the torch ONNX ResNet example.
+
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
 
