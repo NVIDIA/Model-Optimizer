@@ -152,7 +152,11 @@ def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
             captured["kwargs"] = kwargs
             return object()
 
-    monkeypatch.delattr(transformers, "AutoModelForVision2Seq", raising=False)
+    # ``transformers`` exposes auto classes lazily, so deleting this attribute
+    # lets its module-level ``__getattr__`` recreate the legacy class.  An
+    # explicit ``None`` models its absence and reliably exercises the v5
+    # fallback.
+    monkeypatch.setattr(transformers, "AutoModelForVision2Seq", None)
     monkeypatch.setattr(transformers, "AutoModelForImageTextToText", _FakeVLM)
 
     assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
