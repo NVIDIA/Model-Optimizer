@@ -312,10 +312,11 @@ seconds rather than after a full calibration. These artifacts are uploaded:
 | Artifact | Contents |
 | --- | --- |
 | `command.txt` | The full invocation, copy-pasteable |
+| `version.txt` | The ModelOpt version that ran |
 | `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
 | `logs/hf_ptq.log` | Everything the run printed, including the traceback if it crashed |
 | `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
-| `summary/moe.html` | Per-expert calibration token counts, for MoE models |
+| `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
 
 The model, format, recipe and calibration settings are also logged as searchable params,
 alongside `user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
@@ -330,6 +331,10 @@ Other flags:
 
 Authentication uses MLflow's own environment variables (`MLFLOW_TRACKING_TOKEN`, or
 `MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`).
+
+The tracking itself lives in `modelopt.torch.utils.mlflow`
+([`MlflowRunLogger`](../../modelopt/torch/utils/mlflow.py)), so other example scripts can
+record runs the same way; `hf_ptq.py` only supplies the params and artifacts specific to PTQ.
 
 > Note: only the main rank uploads, so `--use_fsdp2` runs produce a single run. The log
 > captures Python output; output written directly by native libraries (NCCL, CUDA) goes to

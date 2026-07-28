@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import yaml
 from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
@@ -46,7 +47,6 @@ from example_utils import (
     setup_distributed_args,
     validate_fsdp2_supported,
 )
-from mlflow_utils import MlflowRunLogger, default_experiment_name, validate_tracking_uri
 from torch.utils.data import DataLoader
 from transformers import (
     AutoConfig,
@@ -81,7 +81,12 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import (
+    MlflowRunLogger,
+    default_experiment_name,
+    print_rank_0,
+    validate_tracking_uri,
+)
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -1653,8 +1658,12 @@ def parse_args() -> argparse.Namespace:
         try:
             args.mlflow = validate_tracking_uri(args.mlflow)
         except ValueError as e:
-            parser.error(str(e))
-        args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(args)
+            parser.error(f"--mlflow: {e}")
+        args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
+            "hf_ptq",
+            args.pyt_ckpt_path,
+            Path(args.recipe).stem if args.recipe else args.qformat,
+        )
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
@@ -1691,6 +1700,43 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Params and start-time artifacts describing this PTQ run."""
+    params = {
+        "model": args.pyt_ckpt_path,
+        "qformat": args.qformat,
+        "kv_cache_qformat": args.kv_cache_qformat,
+        "recipe": args.recipe or "",
+        "calib_size": args.calib_size,
+        "calib_seq": args.calib_seq,
+        "batch_size": args.batch_size,
+        "sparsity_fmt": args.sparsity_fmt,
+        "export_path": args.export_path,
+        "world_size": args.dist_state.world_size,
+    }
+    texts = {}
+    if args.recipe:
+        # The resolved recipe, not the source file: a recipe may be a directory or use
+        # $imports, and only the resolved form is self-contained.
+        resolved = load_recipe(args.recipe).model_dump(mode="json")
+        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
+    return params, texts
+
+
+def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
+    """Summaries written by post_quantize, keyed by artifact path.
+
+    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
+    entries are skipped: the MoE table only exists for MoE models, and neither file is
+    written under ``--no-verbose``.
+    """
+    export_path = Path(args.export_path)
+    return {
+        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
+        "summary/moe.html": export_path / ".moe.html",
+    }
+
+
 def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
@@ -1702,8 +1748,14 @@ def main(args: argparse.Namespace):
 
     # Opened before the model loads so an unreachable server or a bad experiment name
     # fails in seconds rather than after a full calibration run.
-    mlflow_logger = MlflowRunLogger(args)
-    mlflow_logger.start()
+    mlflow_logger = MlflowRunLogger(
+        args.mlflow,
+        args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        enabled=bool(args.mlflow) and args.dist_state.is_main,
+    )
+    mlflow_params, mlflow_texts = _mlflow_run_inputs(args)
+    mlflow_logger.start(params=mlflow_params, texts=mlflow_texts)
 
     status = "FAILED"
     try:
@@ -1745,7 +1797,7 @@ def main(args: argparse.Namespace):
         status = "FINISHED"
     finally:
         cleanup_distributed(args)
-        mlflow_logger.finish(status)
+        mlflow_logger.finish(status, files=_mlflow_run_outputs(args))
 
 
 if __name__ == "__main__":

@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import getpass
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
@@ -197,3 +200,97 @@ def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
     # base disabled + base cost-excluded appended from the shared units (no introspection).
     assert "*output_layer*" in aq.disabled_layers
     assert aq.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+
+
+def test_mlflow_flag_defaults_the_experiment_name(monkeypatch):
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/ptq/nvfp4_default-kv_fp8_cast",
+        "--mlflow",
+        "https://mlflow.example.com/",
+    )
+
+    assert args.mlflow == "https://mlflow.example.com"
+    assert args.mlflow_experiment == "tester/hf_ptq/Qwen3-0.6B-nvfp4_default-kv_fp8_cast"
+    assert args.mlflow_run_name is None
+
+
+def test_mlflow_experiment_falls_back_to_qformat_without_a_recipe(monkeypatch):
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    _, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "nvidia/Llama-3.3-70B-Instruct",
+        "--qformat",
+        "nvfp4",
+        "--mlflow",
+        "https://mlflow.example.com",
+    )
+
+    assert args.mlflow_experiment == "tester/hf_ptq/Llama-3.3-70B-Instruct-nvfp4"
+
+
+def test_mlflow_is_off_by_default(monkeypatch):
+    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+
+    assert args.mlflow is None
+    assert args.mlflow_experiment is None
+
+
+def test_mlflow_rejects_a_bad_tracking_uri(monkeypatch):
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--mlflow", "not-a-url"
+        )
+
+
+def test_mlflow_flag_falls_back_to_the_environment(monkeypatch):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com/")
+    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--mlflow")
+
+    assert args.mlflow == "https://mlflow.example.com"
+
+
+def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "/models/Qwen3-0.6B",
+        "--recipe",
+        "general/ptq/nvfp4_default-kv_fp8_cast",
+    )
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+
+    params, texts = hf_ptq._mlflow_run_inputs(args)
+
+    assert params["model"] == "/models/Qwen3-0.6B"
+    assert params["recipe"] == "general/ptq/nvfp4_default-kv_fp8_cast"
+    # $imports are expanded, so the artifact stands alone.
+    recipe = yaml.safe_load(texts["recipe/resolved_recipe.yaml"])
+    assert recipe["metadata"]["recipe_type"] == "ptq"
+    assert recipe["quantize"]["quant_cfg"]
+
+
+def test_mlflow_run_inputs_omit_the_recipe_when_unused(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+
+    params, texts = hf_ptq._mlflow_run_inputs(args)
+
+    assert texts == {}
+    assert params["recipe"] == ""
+
+
+def test_mlflow_run_outputs_name_the_summaries(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", "/tmp/out"
+    )
+
+    files = hf_ptq._mlflow_run_outputs(args)
+
+    assert files["summary/quant_summary.txt"] == Path("/tmp/out/.quant_summary.txt")
+    assert files["summary/moe.html"] == Path("/tmp/out/.moe.html")
