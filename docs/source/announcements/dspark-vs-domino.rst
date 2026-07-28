@@ -4,7 +4,7 @@ DSpark vs Domino: Same DFlash Backbone, Different Correction Heads
 ##################################################################
 
 :Author: ModelOpt Team
-:Date: June 29, 2026
+:Date: July 13, 2026
 :Tags: speculative-decoding, dflash, dspark, domino, architecture
 
 DSpark (DeepSpec) and Domino both build on block-parallel DFlash draft generation but diverge sharply in their token-level correction heads. DSpark uses a stateless VanillaMarkov head that is fast and parallelizable during training; Domino uses a GRU that is more expressive but sequential at inference.
@@ -110,6 +110,8 @@ References
 
 Links
 *****
+
+These public references were checked during review.
 
 * `DeepSpec / DSpark repo <https://github.com/deepseek-ai/DeepSpec>`_
 * `DeepSeek-V4-Pro-DSpark checkpoint <https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-DSpark>`_
