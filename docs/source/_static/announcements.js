@@ -43,8 +43,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const matchingCards = () => {
     const query = search.value.trim().toLowerCase();
     return cards.filter((card) => {
-      const haystack = [card.dataset.title, card.dataset.summary, card.dataset.tags].join(' ').toLowerCase();
-      const tagMatch = activeTag === 'all' || (card.dataset.tags || '').split(' ').includes(activeTag);
+      const haystack =
+          [ card.dataset.title, card.dataset.summary, card.dataset.tags ].join(' ').toLowerCase();
+      const tagMatch =
+          activeTag === 'all' || (card.dataset.tags || '').split(' ').includes(activeTag);
       const searchMatch = !query || haystack.includes(query);
       return tagMatch && searchMatch;
     });
@@ -57,9 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const start = (currentPage - 1) * pageSize;
     const pageCards = new Set(matches.slice(start, start + pageSize));
 
-    cards.forEach((card) => {
-      card.hidden = !pageCards.has(card);
-    });
+    cards.forEach((card) => { card.hidden = !pageCards.has(card); });
 
     if (empty) {
       empty.hidden = matches.length !== 0;
