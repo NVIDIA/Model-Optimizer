@@ -14,6 +14,9 @@
 # limitations under the License.
 
 
+from collections import defaultdict
+
+import onnx
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
@@ -29,11 +32,30 @@ _MODELS = {
 }
 
 
+def _assert_residual_adds_are_quantized(onnx_save_path):
+    model = onnx.load(onnx_save_path)
+    consumers = defaultdict(list)
+    for node in model.graph.node:
+        for input_name in node.input:
+            consumers[input_name].append(node)
+
+    residual_adds = [node for node in model.graph.node if node.op_type == "Add"]
+    assert len(residual_adds) == 16
+    for add in residual_adds:
+        add_consumers = consumers[add.output[0]]
+        assert len(add_consumers) == 1
+        quantizer_input = add_consumers[0]
+        if quantizer_input.op_type == "Cast":
+            add_consumers = consumers[quantizer_input.output[0]]
+        assert len(add_consumers) == 1
+        assert add_consumers[0].op_type.endswith("QuantizeLinear")
+
+
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)
 @pytest.mark.parametrize("model_key", list(_MODELS))
-def test_torch_onnx(model_key, quantize_mode):
+def test_torch_onnx(tmp_path, model_key, quantize_mode):
     timm_model_name, model_kwargs = _MODELS[model_key]
-    onnx_save_path = f"{model_key}.{quantize_mode}.onnx"
+    onnx_save_path = tmp_path / f"{model_key}.{quantize_mode}.onnx"
 
     cmd_parts = extend_cmd_parts(
         ["python", "torch_quant_to_onnx.py"],
@@ -46,3 +68,6 @@ def test_torch_onnx(model_key, quantize_mode):
     )
     cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
+
+    if model_key == "resnet50":
+        _assert_residual_adds_are_quantized(onnx_save_path)

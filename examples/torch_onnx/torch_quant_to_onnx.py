@@ -34,6 +34,8 @@ from download_example_onnx import export_to_onnx
 from evaluation import evaluate
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 """
 Quantize a timm vision model and export to ONNX for TensorRT deployment.
@@ -216,6 +218,58 @@ def _disable_low_channel_conv_input_quantizers(model):
             q = getattr(mod, "input_quantizer", None)
             if q is not None and q.is_enabled:
                 q.disable()
+
+
+def _quantize_residual_input(module, inputs):
+    return (module.residual_quantizer(inputs[0]),)
+
+
+def _add_resnet_residual_quantizers(model, quantize_mode, auto_quantization_formats, data_loader):
+    if quantize_mode == "int8":
+        num_bits = 8
+    elif quantize_mode in ("fp8", "mxfp8", "nvfp4"):
+        # Dynamic block quantizers do not support the residual path's 4D tensors.
+        num_bits = (4, 3)
+    elif quantize_mode == "auto":
+        activation_formats = set(auto_quantization_formats) - {"INT4_AWQ_CFG"}
+        if not activation_formats:
+            return
+        num_bits = 8 if activation_formats == {"INT8_DEFAULT_CFG"} else (4, 3)
+    else:
+        return
+
+    residual_quantizers = []
+    block_types = (timm.models.resnet.BasicBlock, timm.models.resnet.Bottleneck)
+    for block in model.modules():
+        if not isinstance(block, block_types):
+            continue
+        activation = block.act3 if isinstance(block, timm.models.resnet.Bottleneck) else block.act2
+        activation.residual_quantizer = TensorQuantizer(
+            QuantizerAttributeConfig(num_bits=num_bits, axis=None)
+        ).to(next(block.parameters()).device)
+        activation.register_forward_pre_hook(_quantize_residual_input)
+        residual_quantizers.append(activation.residual_quantizer)
+
+    if not residual_quantizers:
+        return
+
+    for quantizer in residual_quantizers:
+        quantizer.disable_quant()
+        quantizer.enable_calib()
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for batch in data_loader:
+                model(batch["image"] if isinstance(batch, dict) else batch)
+    finally:
+        model.train(was_training)
+
+    for quantizer in residual_quantizers:
+        quantizer.load_calib_amax()
+        quantizer.disable_calib()
+        quantizer.enable_quant()
 
 
 def load_calibration_data(model, data_size, batch_size, device, with_labels=False):
@@ -579,6 +633,13 @@ def main():
         )
 
         quantized_model = quantize_model(model, config, data_loader)
+
+    _add_resnet_residual_quantizers(
+        quantized_model,
+        args.quantize_mode,
+        args.auto_quantization_formats,
+        data_loader,
+    )
 
     # MXFP8/NVFP4 lower their input quantizers to TRT DynamicQuantize (2D/3D only).
     # Disable quantizers on 4D-input layers (Swin's norm1 / downsample.norm / top-level norm).
