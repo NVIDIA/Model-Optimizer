@@ -53,13 +53,27 @@
 #     tactic for this model's shapes and segfaults (`FusedMoeRunner::runMoe`).
 #     Since the whole pipeline must share a cluster with task_4, everything
 #     targets 4-GPU nodes.
-#   - task_0/task_1/task_2 use EP=4 (not EP=8) to fit task_2's TP=2 within 2
-#     nodes x 4 GPUs: its expert-eligible pool is world_size/TP = 8/2 = 4.
+#   - task_0/task_1/task_2 use EP=4 (128 experts / 4 = 32 experts per rank).
+#   - Long context (seq 32768): the SFT corpus (train.jsonl) is raw, not
+#     pre-tokenized, and every sample is huge (>=170k chars, ~30k-360k tokens),
+#     so seq 32768 is fully consumed (truncation-bound, no padding waste). The
+#     model has position-embedding-type=none (Mamba + NoPE attention), so
+#     extending past the checkpoint's 8192 max_position_embeddings is safe.
+#     teacher (task_1) and student (task_2) MUST share seq-length AND CP: the
+#     cached top-K logits are stored per (iteration, microbatch, token) and
+#     sharded by CP, so both dump and load must partition the sequence
+#     identically.
+#   - CP=8 (up from the original CP=2 at seq 8192): scaling CP with seq-length
+#     keeps the per-GPU sequence chunk at seq/CP = 32768/8 = 4096 -- identical
+#     to the validated 69.98%-MMLU run -- so per-device activation/logit memory
+#     is unchanged. task_1 (TP=1) fits CP=8 on 2 nodes (8 GPUs, DP=1); task_2
+#     (TP=2) needs 4 nodes (16 GPUs, DP=1) for TP*CP = 2*8 = 16 = world.
 #   - No DP env var on task_1/task_2: NeMo Run's SlurmExecutor sets
 #     LAUNCH_SCRIPT=python, bypassing the torchrun/DP-based nproc_per_node
 #     calculation in conf/arguments.sh entirely -- world size comes from
 #     Slurm's nodes x ntasks_per_node, and Megatron derives its own DP from
-#     world_size/(TP*PP*CP), so a DP env var here would be inert.
+#     world_size/(TP*PP*CP), so a DP env var here would be inert. Here both
+#     resolve to DP=1 (task_1: 8/(1*1*8); task_2: 16/(2*1*8)).
 #
 # MMLU_LOWER_BOUND=0.6 is a real quality gate now that the spec-mismatch bug is
 # fixed (the trained model scores ~0.70 MMLU via task_4's TRT-LLM eval, up from
@@ -80,9 +94,13 @@ pipeline:
   task_0:
     script: common/megatron_lm/quantize/quantize.sh
     args:
-      - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
-      - --calib-size 32
-      - --calib-max-sequence-length 512
+      # In-domain calibration on the same SFT corpus task_1/task_2 train on
+      # (raw .jsonl the calib loader reads via its "messages" branch), rather
+      # than out-of-domain cnn_dailymail -- better-matched NVFP4 amax scales.
+      # 512 samples @ 8192 tokens (up from 32 @ 512) for a fuller calibration.
+      - --calib-dataset-path-or-name /hf-local/modelopt/nemotron-3-super-sft/train.jsonl
+      - --calib-size 512
+      - --calib-max-sequence-length 8192
       - --skip-generate
       - --export-default-te-spec
     environment:
@@ -104,10 +122,10 @@ pipeline:
   task_1:
     script: common/megatron_lm/train/sft.sh
     args:
-      - --seq-length 8192 --max-position-embeddings 8192
-      - --train-samples 1024
-      - --lr-decay-samples 256
-      - --lr-warmup-samples 128
+      - --seq-length 32768 --max-position-embeddings 32768
+      - --train-samples 2048
+      - --lr-decay-samples 512
+      - --lr-warmup-samples 256
       - --sft
       - --sft-tokenizer-prompt-format identity
       - --tokenizer-type SFTTokenizer
@@ -148,7 +166,7 @@ pipeline:
       - --async-save
       - --use-persistent-ckpt-worker
     environment:
-      - CP: 2
+      - CP: 8
       - TP: 1
       - PP: 1
       - EP: 4
@@ -168,10 +186,10 @@ pipeline:
   task_2:
     script: common/megatron_lm/train/sft.sh
     args:
-      - --seq-length 8192 --max-position-embeddings 8192
-      - --train-samples 1024
-      - --lr-decay-samples 256
-      - --lr-warmup-samples 128
+      - --seq-length 32768 --max-position-embeddings 32768
+      - --train-samples 2048
+      - --lr-decay-samples 512
+      - --lr-warmup-samples 256
       - --sft
       - --sft-tokenizer-prompt-format identity
       - --tokenizer-type SFTTokenizer
@@ -196,14 +214,16 @@ pipeline:
       - --use-distributed-optimizer
       - --eval-iters 4
       - --eval-interval 1000
-      - --save-interval 1000
+      # = train-samples / global-batch-size (2048/8) so the trained student is
+      # checkpointed exactly once, at the final iteration (task_3 exports it).
+      - --save-interval 256
       - --log-interval 100
       - --export-default-te-spec
       - --dist-ckpt-strictness log_all
       - --sequence-parallel
       - --logits-load-dir /scratchspace/logits
     environment:
-      - CP: 2
+      - CP: 8
       - TP: 2
       - PP: 1
       - EP: 4
@@ -215,7 +235,7 @@ pipeline:
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.06
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
-      nodes: 2
+      nodes: 4
       ntasks_per_node: 4
       gpus_per_node: 4
 
@@ -230,6 +250,13 @@ pipeline:
       - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - EXPORT_DIR: /scratchspace/export
       - PP: 4
+      # Put the packaged Megatron-LM AND Model-Optimizer first on PYTHONPATH.
+      # nemo:26.06 uses a uv venv, so the modelopt_install_path bind-mount at
+      # /opt/venv may be stale and the container's own modelopt shadows it --
+      # export then fails importing modelopt.torch.sparsity.weight_sparsity.config
+      # (absent in the container's older modelopt). PYTHONPATH forces the
+      # packaged modelopt, which has it. See nemo-container-uv-venv-path.
+      - PYTHONPATH: /nemo_run/code/modules/Megatron-LM:/nemo_run/code/modules/Model-Optimizer
     slurm_config:
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.06
