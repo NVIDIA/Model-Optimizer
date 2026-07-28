@@ -258,13 +258,14 @@ _NAS_MODEL_KWARGS = {
 }
 
 
-def _make_nas_hybrid_model(size):
+def _make_nas_hybrid_model(size, moe_grouped_gemm=False):
     return get_mcore_mamba_hybrid_model(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
         transformer_impl="transformer_engine",
         bf16=False,
+        moe_grouped_gemm=moe_grouped_gemm,
         **_NAS_MODEL_KWARGS,
     ).cuda()
 
@@ -335,7 +336,8 @@ def _assert_top_k_candidates(searcher_state, constraint_key, expected_top_k, k=1
 
 def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
     set_seed(SEED)
-    model = _make_nas_hybrid_model(size)
+    # Covers grouped-GEMM (TEGroupedMLP) MoE pruning; the memory_mb test below covers SequentialMLP.
+    model = _make_nas_hybrid_model(size, moe_grouped_gemm=True)
 
     baseline_params, baseline_active = mcore_param_count(
         model.config,
@@ -430,7 +432,8 @@ def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
     set_seed(SEED)
     dtype_bytes = 2
     sequence_length = 128
-    model = _make_nas_hybrid_model(size)
+    # Covers SequentialMLP MoE pruning; the params test above covers grouped-GEMM (TEGroupedMLP).
+    model = _make_nas_hybrid_model(size, moe_grouped_gemm=False)
 
     _, _, _, baseline_memory_mb = mcore_memory_footprint_mb(
         model.config,

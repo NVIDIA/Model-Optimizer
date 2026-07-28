@@ -57,6 +57,42 @@ def test_distill_llm(tmp_path, num_gpus):
     assert (distilled_hf_path / "config.json").exists()
 
 
+def test_distill_validate_only(tmp_path, num_gpus):
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    train_iters = 2
+    output_dir = tmp_path / "distill_output"
+    hf_export_path = tmp_path / "distilled_hf"
+    distill_cmd_parts = extend_cmd_parts(
+        [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "distill.py",
+            "--use_mock_data",
+            "--validate_only",
+        ],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        output_dir=output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        seq_length=16,
+        mbs=1,
+        gbs=4,
+        train_iters=train_iters,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
+        eval_iters=1,
+        log_interval=1,
+        hf_export_path=hf_export_path,
+    )
+    output = run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+
+    assert "skipping training ..." in output
+    assert "iteration 0 on validation set" in output
+    assert not (output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
+    assert not (hf_export_path / "config.json").exists()
+
+
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
 def test_distill_vlm(tmp_path, num_gpus):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the

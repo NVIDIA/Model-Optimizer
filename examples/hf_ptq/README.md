@@ -471,33 +471,37 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ## Multi-Node Post-Training Quantization with FSDP2
 
-ModelOpt enables quantization of LLMs across multiple GPU nodes using various quantization formats. It leverages HuggingFace's Accelerate library and FSDP2 for distributed model sharding and calibration.
+ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
 ### Usage
 
-For distributed execution across multiple nodes, use the `accelerate` library. A template configuration file (`fsdp2.yaml`) is provided and can be customized for user specific requirements.
+#### Slurm (recommended)
 
-On each node run the following command:
+Slurm orchestrates launching the job on every node for you, so this is the easiest way to run a multi-node PTQ. A ready-to-run example that quantizes Nemotron-3-Super to NVFP4 is provided in [`slurm/multinode_fsdp2_ptq.slurm`](./slurm/multinode_fsdp2_ptq.slurm). Edit the `CONFIG` block (container image, model path, export path, recipe) and submit:
 
 ```bash
-accelerate launch --config_file fsdp2.yaml \
-    --num_machines=<num_nodes> \
-    --machine_rank=<current_node_rank> \
-    --main_process_ip=<node0_ip_addr> \
-    --main_process_port=<port> \
-    --fsdp_transformer_layer_cls_to_wrap=<decoder_layer_name>
-     multinode_ptq.py \
-    --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_experts_only/nvfp4_omlp_only/nvfp4_awq/int8> \
-    --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
-    --batch_size <calib_batch_size> \
-    --calib_size <num_calib_samples> \
-    --dataset <dataset> \
-    --export_path <export_path> \
-    --trust_remote_code
+sbatch --nodes=2 slurm/multinode_fsdp2_ptq.slurm
 ```
 
-The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
+#### Manual (run on each node)
+
+Without Slurm, start `torchrun` on every node yourself:
+
+```bash
+torchrun \
+    --nnodes=<num_nodes> --node_rank=<current_node_rank> \
+    --master_addr=<node0_ip_addr> --master_port=<port> \
+    --nproc_per_node=<num_gpus_per_node> \
+    hf_ptq.py \
+    --pyt_ckpt_path <path_to_model> \
+    --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+    --batch_size <calib_batch_size> \
+    --calib_size <num_calib_samples> \
+    --export_path <export_path> \
+    --use_fsdp2
+```
+
+See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 

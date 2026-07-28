@@ -427,11 +427,14 @@ def _get_fsdp2_mesh(module: nn.Module):
         return None
 
     fsdp_state = _get_module_state(module)
-    if (
-        fsdp_state._fsdp_param_group
-        and fsdp_state._fsdp_param_group.post_forward_mesh_info is not None
-    ):
-        return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
+    pg = fsdp_state._fsdp_param_group
+    if pg is None:
+        return None
+    # A root FSDP module has reshard_after_forward=False by default, so its
+    # post_forward_mesh_info is None; fall back to the sharding mesh (mesh_info),
+    # which is the same FSDP shard mesh (post_forward_mesh_info is only the reshard target).
+    mesh_info = pg.post_forward_mesh_info or pg.mesh_info
+    return mesh_info.mesh if mesh_info is not None else None
 
 
 def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
@@ -514,8 +517,6 @@ def fsdp2_weight_access_and_writeback_context(
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context.
     """
-    assert isinstance(root_model, torch.distributed.fsdp.FSDPModule), "We only support FSDP2"
-
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
@@ -538,28 +539,48 @@ def fsdp2_weight_access_and_writeback_context(
             assert (
                 fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
             ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        collected = param.redistribute(
+        unsharded_dtensor = param.redistribute(
             placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
             device_mesh=original_device_mesh,
         )
-        originals[name] = (param, collected, original_placements, original_device_mesh)
-        _set_parameter(module, name, nn.Parameter(collected.to_local()))
-
-    yield
-
-    # Write back and restore original DTensor parameters.
-    for name, (
-        original_param,
-        collected,
-        original_placements,
-        original_device_mesh,
-    ) in originals.items():
-        original_param.to_local().data.copy_(
-            collected.redistribute(
-                placements=original_placements, device_mesh=original_device_mesh
-            ).to_local()
+        unsharded_tensor = unsharded_dtensor.to_local()
+        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
+        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+        gpu_tensor = (
+            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
         )
-        _set_parameter(module, name, original_param)
+        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
+        originals[name] = (
+            param,
+            unsharded_dtensor,
+            original_placements,
+            original_device_mesh,
+            cpu_writeback_tensor,
+            gpu_tensor,
+        )
+        _set_parameter(module, name, nn.Parameter(gpu_tensor))
+
+    try:
+        yield
+    finally:
+        # Write back and restore original DTensor parameters. Runs on both success
+        # and exception so the module never lingers with the temporary local params.
+        for name, (
+            original_param,
+            unsharded_dtensor,
+            original_placements,
+            original_device_mesh,
+            cpu_writeback_tensor,
+            gpu_tensor,
+        ) in originals.items():
+            if cpu_writeback_tensor is not None:
+                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
+            original_param.to_local().data.copy_(
+                unsharded_dtensor.redistribute(
+                    placements=original_placements, device_mesh=original_device_mesh
+                ).to_local()
+            )
+            _set_parameter(module, name, original_param)
 
 
 @contextmanager
