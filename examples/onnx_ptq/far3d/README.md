@@ -151,8 +151,10 @@ The following results use TensorRT 10.11.0.33 on an NVIDIA RTX 6000 Ada Generati
 
 | Encoder precision | Decoder precision | Framework | GPU compute time (ms) | Accuracy (mAP) |
 | --- | --- | --- | ---: | ---: |
-| INT8 | INT8 | TensorRT 10.11 | 25.4 | 0.124 |
-| FP8 | FP8 | TensorRT 10.11 | 31.2 | 0.000 |
+| FP32 | FP32 | TensorRT 10.11 | 92.5 | 0.241 |
+| FP16 | FP32 | TensorRT 10.11 | 47.8 | 0.241 |
+| FP16 | FP16 | TensorRT 10.11 | 45.0 | 0.241 |
+| INT8 | FP16 | TensorRT 10.11 | 24.6 | 0.236 |
 | FP8 | FP16 | TensorRT 10.11 | 31.5 | 0.241 |
 
 GPU compute time is the sum of the encoder and decoder median times reported by `trtexec`, with host-to-device and device-to-host transfers disabled. Results depend on the TensorRT version and GPU architecture and are not directly comparable with the DRIVE Orin-X measurements in the [DL4AGX reference](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt#results-on-argoverse2-validation-set).
