@@ -1,24 +1,25 @@
-# `.agents/` — agent-agnostic source of truth
+# `.agents/` — agent compatibility and shared config
 
-This directory is the canonical location for assets shared by AI coding agents
-working in this repository (Claude Code, Codex, Cursor, …).
+This directory exposes the ModelOpt plugin skills to repository-local agents
+and holds shared configuration.
 
 ## Layout
 
 ```text
 .agents/
-├── skills/                 # SKILL.md files (canonical)
-│   └── <skill-name>/SKILL.md
+├── skills → ../plugins/modelopt/skills
+├── plugins/
+│   └── marketplace.json   # Codex marketplace
 ├── scripts/                # shared helper scripts (sync-upstream-skills.sh, …)
 └── clusters.yaml.example   # remote-cluster config template
+
+plugins/modelopt/
+├── .claude-plugin/
+├── .codex-plugin/
+└── skills/                 # canonical SKILL.md files
+    ├── common/             # shared skill support files
+    └── <skill-name>/SKILL.md
 ```
-
-## Why this exists
-
-Different agents look for skills/config in vendor-specific directories. Rather
-than maintaining N copies that drift out of sync, **`.agents/` is the single
-source of truth** — each agent's guidance or install mechanism points here
-directly.
 
 ## How each agent finds these
 
@@ -26,21 +27,18 @@ Each agent points at `.agents/` through whatever mechanism it supports — never
 a copy:
 
 - **Claude Code** only auto-discovers skills under `.claude/skills/`, so
-  `.claude/` holds relative in-repo symlinks back into `.agents/`:
-  `.claude/skills → ../.agents/skills`, `.claude/scripts → ../.agents/scripts`,
-  and `.claude/clusters.yaml.example → ../.agents/clusters.yaml.example`. These
-  follow the same committed-symlink pattern already used elsewhere in this repo
-  (e.g. `CLAUDE.md`, `tools/launcher/modules/Model-Optimizer`).
-- **Future agents** (Codex, Cursor, …) add their own symlink or config pointing
-  at `.agents/`.
+  `.claude/skills/` holds relative symlinks into `.agents/skills/`.
+- **Repository agents** use `.agents/skills`, a relative symlink into the
+  plugin.
+- **Claude Code and Codex plugins** load `plugins/modelopt/skills` directly.
 
 ## Editing rules
 
-- **Always edit files under `.agents/`**.
+- **Always edit skills under `plugins/modelopt/skills/`**.
 - Vendored-verbatim skills (`launching-evals`, `accessing-mlflow`) are managed
   by `.agents/scripts/sync-upstream-skills.sh` — do not modify by hand.
-- New skills go in `.agents/skills/<skill-name>/SKILL.md` following the
-  conventions of existing skills (e.g. `.agents/skills/monitor/SKILL.md`).
+- New skills go in `plugins/modelopt/skills/<skill-name>/SKILL.md`.
+- Shared support files go in `plugins/modelopt/skills/common/`.
 
 ## Project-level cluster config
 
