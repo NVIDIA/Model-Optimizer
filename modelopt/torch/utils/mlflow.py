@@ -27,7 +27,6 @@ import re
 import shlex
 import shutil
 import socket
-import subprocess  # nosec B404
 import sys
 import tempfile
 import time
@@ -53,6 +52,35 @@ __all__ = [
 _MAX_COMPONENT_LEN = 100
 _MAX_NAME_LEN = 250
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+# Anything uploaded or printed passes through _redact first: a tracking URI may carry
+# ``user:token@`` and a caller's own flags may carry a secret.
+_SECRET_NAME = re.compile(r"token|api[-_]?key|password|passwd|secret|credential", re.IGNORECASE)
+_URI_USERINFO = re.compile(r"(?<=://)[^/\s@]+(?=@)")
+_MASK = "***"
+
+
+def _redact(value: Any) -> Any:
+    """Mask credentials embedded in a URI, leaving non-strings untouched."""
+    return _URI_USERINFO.sub(_MASK, value) if isinstance(value, str) else value
+
+
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Mask the value of any ``--*token*`` style option, and credentials in any URI."""
+    redacted: list[str] = []
+    mask_next = False
+    for token in argv:
+        if mask_next and not token.startswith("-"):
+            redacted.append(_MASK)
+        elif token.startswith("-") and _SECRET_NAME.search(token):
+            option, sep, _ = token.partition("=")
+            redacted.append(option + sep + _MASK if sep else option)
+        else:
+            redacted.append(_redact(token))
+        mask_next = (
+            token.startswith("-") and _SECRET_NAME.search(token) is not None and "=" not in token
+        )
+    return redacted
 
 
 def validate_tracking_uri(uri: str) -> str:
@@ -116,21 +144,32 @@ def _sanitize(component: str) -> str:
 
 
 def _git_sha() -> str:
-    """Short commit of the ModelOpt source, or ``"unknown"`` outside a checkout."""
+    """Short commit of the ModelOpt source, or ``"unknown"`` outside a git checkout.
+
+    Read out of ``.git`` rather than by shelling out to ``git``, which keeps the library
+    free of subprocess use.
+    """
+    git_dir = Path(__file__).resolve().parents[3] / ".git"
     try:
-        return subprocess.check_output(  # nosec B603 B607
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except (subprocess.CalledProcessError, OSError):
-        return "unknown"
+        head = (git_dir / "HEAD").read_text().strip()
+        if not head.startswith("ref: "):
+            return head[:9]  # detached HEAD
+        ref = head.removeprefix("ref: ")
+        loose = git_dir / ref
+        if loose.is_file():
+            return loose.read_text().strip()[:9]
+        for line in (git_dir / "packed-refs").read_text().splitlines():
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref:
+                return sha[:9]
+    except OSError:
+        pass
+    return "unknown"
 
 
 def _command_text() -> str:
     """The invocation, as a copy-pasteable line."""
-    lines = [shlex.join([sys.executable, *sys.argv])]
+    lines = [shlex.join([sys.executable, *_redact_argv(sys.argv)])]
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size > 1:
         lines += [
@@ -194,9 +233,9 @@ class MlflowRunLogger:
     tracking server must not turn a successful job into a failed one.
 
     Note:
-        ``command.txt`` records ``sys.argv`` verbatim and the log captures everything the
-        script prints, so anything secret on the command line or in the output is uploaded
-        with it. Pass credentials through the environment instead.
+        ``command.txt`` masks ``--*token*``-style option values and credentials embedded in
+        a URI, but the captured log is whatever the script printed, so a secret echoed to
+        stdout still reaches the server. Prefer passing credentials via the environment.
 
     *tracking_uri* must already be validated (see :func:`validate_tracking_uri`),
     *experiment_name* is created if absent, *run_name* defaults to the UTC start time
@@ -239,7 +278,8 @@ class MlflowRunLogger:
         if self._run is None:
             return ""
         info = self._run.info
-        return f"{self.tracking_uri}/#/experiments/{info.experiment_id}/runs/{info.run_id}"
+        uri = _redact(self.tracking_uri)
+        return f"{uri}/#/experiments/{info.experiment_id}/runs/{info.run_id}"
 
     def start(
         self,
@@ -265,8 +305,21 @@ class MlflowRunLogger:
             self._open_run()
             self._log_inputs(params, tags, texts)
         except Exception:
+            # start_run() may already have succeeded, and the caller gets an exception
+            # rather than a logger to call finish() on, so close the run here.
+            self._abort_run()
             self._stop_capture()
             raise
+
+    def _abort_run(self) -> None:
+        """End a run that failed before :meth:`start` returned, so it is not left RUNNING."""
+        if self._run is None:
+            return
+        try:
+            self._mlflow.end_run(status="FAILED")
+        except Exception as e:
+            print(f"[mlflow] WARNING: could not close the interrupted run: {e}")
+        self._run = None
 
     def finish(
         self,
@@ -327,7 +380,9 @@ class MlflowRunLogger:
 
     def _log_inputs(self, params, tags, texts) -> None:
         if params:
-            self._mlflow.log_params(params)
+            self._mlflow.log_params(
+                {k: _MASK if _SECRET_NAME.search(k) else _redact(v) for k, v in params.items()}
+            )
         self._mlflow.set_tags(
             {
                 "user": current_user(),

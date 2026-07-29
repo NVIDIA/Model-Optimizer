@@ -314,10 +314,10 @@ seconds rather than after a full calibration.
 
 | Artifact | Contents |
 | --- | --- |
-| `command.txt` | The full invocation, copy-pasteable |
+| `command.txt` | The full invocation, copy-pasteable, with credentials masked |
 | `version.txt` | The ModelOpt version that ran |
 | `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
-| `logs/hf_ptq.log` | Everything the run printed, including the traceback if it crashed |
+| `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
 | `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
 | `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
 

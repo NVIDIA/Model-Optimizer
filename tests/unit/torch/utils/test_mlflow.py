@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 import modelopt
 from modelopt.torch.utils.mlflow import (
@@ -80,8 +81,6 @@ class FakeMlflow:
 def fake_mlflow(monkeypatch):
     fake = FakeMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", fake)
-    import requests
-
     monkeypatch.setattr(requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
     return fake
 
@@ -357,8 +356,6 @@ def test_start_is_idempotent(fake_mlflow):
 
 
 def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
-    import requests
-
     monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
     monkeypatch.setattr(
         requests,
@@ -373,3 +370,95 @@ def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
 
     # The capture must be torn down so the failure is readable on the console.
     assert sys.stdout is stdout
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # A secret-looking option masks the value that follows it.
+        (["--hf_token", "hf_abc123"], ["--hf_token", "***"]),
+        (["--api-key=abc123"], ["--api-key=***"]),
+        (["--password", "hunter2", "--verbose"], ["--password", "***", "--verbose"]),
+        # Credentials embedded in a URI are masked wherever they appear.
+        (
+            ["--mlflow", "https://user:tok@mlflow.example.com"],
+            ["--mlflow", "https://***@mlflow.example.com"],
+        ),
+        # Ordinary arguments are untouched, including values that merely contain the word.
+        (["--dataset", "token_data"], ["--dataset", "token_data"]),
+        (["--pyt_ckpt_path", "/models/Qwen3-0.6B"], ["--pyt_ckpt_path", "/models/Qwen3-0.6B"]),
+    ],
+)
+def test_redact_argv_masks_credentials(argv, expected):
+    from modelopt.torch.utils.mlflow import _redact_argv
+
+    assert _redact_argv(argv) == expected
+
+
+def test_command_artifact_carries_no_secrets(fake_mlflow, monkeypatch):
+    """argv reaches the server as command.txt, so secrets in it must not."""
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--hf_token", "hf_abc123", "--mlflow", "https://u:tok@host"]
+    )
+    logger = _logger()
+
+    logger.start()
+    logger.finish("FINISHED")
+
+    command = fake_mlflow.texts["command.txt"]
+    assert "run.py" in command and "--hf_token" in command
+    for secret in ("hf_abc123", "u:tok"):
+        assert secret not in command
+
+
+def test_params_and_run_url_mask_credentials(monkeypatch):
+    """A credential-bearing tracking URI is usable, but must not be echoed or uploaded."""
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
+    monkeypatch.setattr(sys, "argv", ["run.py"])
+    logger = MlflowRunLogger(
+        "https://user:tok@mlflow.example.com", "tester/hf_ptq/m-nvfp4", run_name="masked"
+    )
+
+    logger.start(params={"hf_token": "secret", "endpoint": "https://u:p@host", "qformat": "nvfp4"})
+    url = logger.run_url
+    logger.finish("FINISHED")
+
+    assert fake.params == {"hf_token": "***", "endpoint": "https://***@host", "qformat": "nvfp4"}
+    assert "tok" not in url and "https://***@mlflow.example.com" in url
+    # The real URI is still what talks to the server.
+    assert fake.tracking_uri == "https://user:tok@mlflow.example.com"
+
+
+def test_failure_after_start_run_does_not_orphan_the_run(monkeypatch):
+    """If logging the inputs fails, the run would otherwise sit in RUNNING forever."""
+    fake = FakeMlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    monkeypatch.setattr(requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("network blip")
+
+    fake.log_params = explode
+    logger = _logger()
+    stdout = sys.stdout
+
+    with pytest.raises(RuntimeError, match="network blip"):
+        logger.start(params={"model": "x"})
+
+    assert fake.status == "FAILED"
+    assert sys.stdout is stdout
+    # finish() is now inert: the caller never got a logger to call it on anyway.
+    logger.finish("FINISHED")
+    assert fake.status == "FAILED"
+
+
+def test_git_sha_is_read_without_a_subprocess():
+    """Bandit forbids the subprocess call this used to make; it reads .git directly now."""
+    from modelopt.torch.utils import mlflow as mlflow_module
+
+    sha = mlflow_module._git_sha()
+
+    assert sha == "unknown" or (1 <= len(sha) <= 9 and all(c in "0123456789abcdef" for c in sha))
+    assert "subprocess" not in dir(mlflow_module)
