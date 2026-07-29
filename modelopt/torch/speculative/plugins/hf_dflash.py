@@ -72,6 +72,7 @@ Draft model components:
 """
 
 import logging
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -288,8 +289,9 @@ class HFDFlashModel(DFlashModel):
 
         mm_token_type_ids = model_kwargs.get("mm_token_type_ids")
         backbone = getattr(self, "model", None)
-        get_rope_index = getattr(backbone, "get_rope_index", None)
-        compute_position_ids = getattr(backbone, "compute_3d_position_ids", None)
+        # Probed dynamically: which one exists depends on the Transformers version.
+        get_rope_index: Any = getattr(backbone, "get_rope_index", None)
+        compute_position_ids: Any = getattr(backbone, "compute_3d_position_ids", None)
         if (
             not isinstance(mm_token_type_ids, torch.Tensor)
             or input_ids is None

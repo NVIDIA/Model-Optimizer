@@ -144,9 +144,7 @@ def test_qwen3_vl_transformers_530_position_ids_expand_video_grid(monkeypatch):
         inputs_embeds=None,
         model_kwargs={
             "video_grid_thw": original_grid,
-            "mm_token_type_ids": torch.tensor(
-                [[2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 0, 0]]
-            ),
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 0, 0]]),
         },
     )
 
@@ -197,7 +195,7 @@ def test_qwen3_vl_transformers_53_patch_release_raises(monkeypatch):
     )
     monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.1")
 
-    with pytest.raises(RuntimeError, match="5.3.0 or >=5.4.0"):
+    with pytest.raises(RuntimeError, match=r"5\.3\.0 or >=5\.4\.0"):
         HFDFlashModel._qwen3_vl_position_ids(
             fake_model,
             input_ids=torch.ones(1, 4, dtype=torch.long),

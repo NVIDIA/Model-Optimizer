@@ -396,9 +396,7 @@ class DFlashExporter(SpeculativeDecodingExporter):
             # Inherit the target's RoPE base: DFlash injects target KV into every draft
             # layer, so their RoPE bases must match. Transformers 5 stores rope_theta
             # in rope_parameters rather than a top-level config attribute.
-            "rope_theta": _get_rope_theta(
-                base_config, _get_rope_theta(draft_config, 1000000.0)
-            ),
+            "rope_theta": _get_rope_theta(base_config, _get_rope_theta(draft_config, 1000000.0)),
             # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,
