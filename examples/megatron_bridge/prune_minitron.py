@@ -42,6 +42,7 @@ import argparse
 import json
 import os
 import re
+import sys
 
 import torch
 from megatron.bridge import AutoBridge
@@ -238,6 +239,12 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--score_lower_bound",
+        type=float,
+        default=None,
+        help="If set, fail the job when the NAS-based pruned model's score is below this bound.",
+    )
+    parser.add_argument(
         "--ss_channel_divisor",
         type=int,
         default=None,
@@ -296,6 +303,11 @@ def get_args() -> argparse.Namespace:
         parser.error(
             "At least one of --prune_export_config, --prune_target_params,"
             " --prune_target_active_params, or --prune_target_memory_mb is required."
+        )
+    if args.score_lower_bound is not None and args.prune_export_config:
+        parser.error(
+            "--score_lower_bound requires NAS-based scoring (--prune_score_func), "
+            "not --prune_export_config."
         )
 
     # Post-process arguments
@@ -667,6 +679,18 @@ def main(args: argparse.Namespace):
 
         copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
+
+    # Accuracy gate: exit non-zero if pruned model's score is below the bound
+    if args.score_lower_bound is not None:
+        best_score = pruning_scores["best"].get("score")
+        assert best_score is not None, "No scored best candidate in pruning_scores"
+        passed = best_score >= args.score_lower_bound
+        print_rank_0(
+            f"[score_gate] final pruned model {args.prune_score_func} score = {best_score:.4f} "
+            f"(lower_bound {args.score_lower_bound}) -> {'PASS' if passed else 'FAIL'}"
+        )
+        if not passed:
+            sys.exit(1)
 
     print_rank_0("Done!")
 
