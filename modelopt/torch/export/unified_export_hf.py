@@ -1180,7 +1180,36 @@ def _export_transformers_checkpoint_streaming(
                     continue
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
+            # Release GPU tensors added by export handlers before hook.post_forward
+            # runs, to prevent cross-layer accumulation on disk-offloaded models.
+            #
+            # Two categories accumulate without explicit cleanup:
+            #
+            # 1. CUDA *buffers* on any sub-module (weight_scale, weight_scale_2,
+            #    input_scale): AlignDevicesHook.post_forward uses offload_buffers=False
+            #    by default, so it never offloads buffers.  Pre-existing buffers in
+            #    disk-offloaded layers live on CPU, so any CUDA buffer encountered here
+            #    was registered by the export handlers and is safe to drop.
+            #
+            # 2. CUDA *parameters* on modules WITHOUT _hf_hook: _export_fused_experts
+            #    creates fresh nn.Module objects (one per expert × projection) and adds
+            #    them to the layer via add_module() *after* weight_access_and_writeback
+            #    captured its materialized list.  hook.post_forward never visits these
+            #    new modules, so their packed NVFP4 weight parameters (~5 GB per MoE
+            #    layer) stay live on GPU.  Modules WITH _hf_hook are original model
+            #    modules whose parameters hook.post_forward will meta-ify; leave those
+            #    alone.
+            for sub_mod in layer_module.modules():
+                for buf_name in list(sub_mod._buffers):
+                    buf = sub_mod._buffers[buf_name]
+                    if buf is not None and buf.device.type == "cuda":
+                        sub_mod._buffers[buf_name] = None
+                if not hasattr(sub_mod, "_hf_hook"):
+                    for param_name, param in list(sub_mod._parameters.items()):
+                        if param is not None and param.device.type == "cuda":
+                            sub_mod._parameters[param_name] = None
         ctx.reset_tied_caches()
+        torch.cuda.empty_cache()
 
     # Non-decoder modules with offload hooks (embed_tokens, norm, lm_head, etc.)
     for name, module in model.named_modules():
