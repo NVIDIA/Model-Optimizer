@@ -549,6 +549,65 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
     assert execution["post.run.materialized"]["instances"] == 1
 
 
+def test_render_execution_uses_vllm_mesh_for_post_mip_downstream_evaluation() -> None:
+    state = {
+        "answers": {
+            "infrastructure": {
+                "gpus_per_node": 8,
+                "workers": {"pool": 8, "sharded": 8},
+                "runner": {"slurm": {}},
+                "meshes": {
+                    "common": {"tp": 1, "cp": 1, "pp": 1, "dp_shard": 2, "ep": 1},
+                    "bypass": {"tp": 1, "cp": 1, "pp": 1, "dp_shard": 1, "ep": 1},
+                    "global_kd": {"tp": 1, "cp": 1, "pp": 1, "dp_shard": 1, "ep": 1},
+                },
+            }
+        },
+    }
+    experiment = {
+        "embedding_pruning": {"widths": []},
+        "vllm_stats": {"runtime_stats": {"topology": {"gpu_group_size": 1}}},
+        "post_mip": {
+            "flows": {
+                "run": {
+                    "nodes": {
+                        "materialized": {"type": "materialize"},
+                        "lmms_eval": {
+                            "type": "downstream_evaluation",
+                            "input": "materialized",
+                            "config": {
+                                "topology": {
+                                    "tensor_parallel_size": 4,
+                                    "pipeline_parallel_size": 2,
+                                    "data_parallel_size": 1,
+                                    "prefill_context_parallel_size": 1,
+                                    "decode_context_parallel_size": 1,
+                                    "enable_expert_parallel": False,
+                                    "gpu_group_size": 8,
+                                }
+                            },
+                        },
+                    }
+                }
+            }
+        },
+    }
+
+    stages = render_execution(state, experiment, "production")["execution"]["stages"]
+
+    assert stages["post.run.lmms_eval"]["strategy"] == "sharded"
+    assert stages["post.run.lmms_eval"]["instances"] == 8
+    assert stages["post.run.lmms_eval"]["parallel"] == {
+        "tp": 4,
+        "cp": 1,
+        "pp": 2,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 1,
+        "sequence_parallel": False,
+    }
+
+
 def test_render_execution_caps_post_mip_workers_at_upstream_top_k() -> None:
     common = {
         "tp": 1,

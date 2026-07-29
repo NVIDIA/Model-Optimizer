@@ -62,7 +62,6 @@ _DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
     "aiperf": ExecutionStrategy.SHARDED,
 }
 
-
 _POST_MIP_NODE_METADATA = {
     "filter": {"kind": "selector", "accepts": {"config", "checkpoint"}},
     "manual_filter": {"kind": "selector", "accepts": {"config", "checkpoint"}},
@@ -87,7 +86,6 @@ _POST_MIP_NODE_METADATA = {
     "downstream_evaluation": {
         "kind": "evaluator",
         "accepts": {"checkpoint"},
-        "implemented": False,
     },
 }
 
@@ -489,7 +487,7 @@ def compile_campaign_plan(
                         parallel[key] = node_config[key]
                     elif key in global_kd and key not in parallel:
                         parallel[key] = global_kd[key]
-            if dynamic["node_type"] == "aiperf":
+            if dynamic["node_type"] in {"aiperf", "downstream_evaluation"}:
                 topology = _mapping(node_config.get("topology"))
                 topology_mesh = vllm_topology_to_mesh(topology)
                 if override:
@@ -498,7 +496,7 @@ def compile_campaign_plan(
                     if ParallelMesh.from_mapping(overridden) != topology_mesh:
                         raise ValueError(
                             f"{stage_id} execution parallel override conflicts with "
-                            "its AIPerf topology"
+                            "its vLLM topology"
                         )
                 mesh = topology_mesh
             else:

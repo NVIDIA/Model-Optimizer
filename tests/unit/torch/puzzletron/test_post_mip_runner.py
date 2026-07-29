@@ -16,12 +16,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.post_mip import runner
+from modelopt.torch.puzzletron.post_mip.records import ArtifactKind
 from modelopt.torch.puzzletron.post_mip.runner import (
     _exception_diagnostics,
     _needs_puzzletron_process_group,
@@ -184,3 +187,96 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     assert "requests_per_concurrency" not in captured
     assert "best_selection_mode" not in captured
     assert result["metrics"] == {}
+
+
+def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
+    argv, env, timeout = runner._lmms_eval_command(
+        {
+            "command_prefix": ["python", "-m", "lmms_eval"],
+            "tasks": ["ifeval", "gsm8k"],
+            "batch_size": 2,
+            "limit": 8,
+            "cache_dir": tmp_path / "cache",
+            "timeout_seconds": 123,
+            "topology": {
+                "tensor_parallel_size": 4,
+                "pipeline_parallel_size": 2,
+                "data_parallel_size": 1,
+                "prefill_context_parallel_size": 1,
+                "decode_context_parallel_size": 1,
+                "enable_expert_parallel": False,
+                "gpu_group_size": 8,
+            },
+            "model_args": {"dtype": "bfloat16"},
+        },
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    model_args = argv[argv.index("--model_args") + 1]
+    assert argv[:5] == ["python", "-m", "lmms_eval", "--model", "vllm"]
+    assert argv[argv.index("--tasks") + 1] == "ifeval,gsm8k"
+    assert argv[argv.index("--batch_size") + 1] == "2"
+    assert argv[argv.index("--limit") + 1] == "8"
+    assert "model=/ckpts/candidate" in model_args
+    assert "tensor_parallel_size=4" in model_args
+    assert "pipeline_parallel_size=2" in model_args
+    assert "gpu_group_size" not in model_args
+    assert env["LMMS_EVAL_HOME"] == str(tmp_path / "cache")
+    assert timeout == 123
+
+
+def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
+        del env, capture_output, text, timeout, check
+        captured["argv"] = argv
+        output = Path(cwd) / "nested"
+        output.mkdir(parents=True)
+        (output / "results.json").write_text(
+            json.dumps(
+                {
+                    "results": {
+                        "ifeval": {"prompt_level_strict_acc,none": 0.5},
+                        "gsm8k": {"exact_match,strict-match": 0.75},
+                    }
+                }
+            )
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    node = SimpleNamespace(
+        node_id="lmms_eval",
+        flow_id="runtime",
+        stage_id="post.runtime.lmms_eval",
+        config={
+            "config": {
+                "command_prefix": ["python", "-m", "lmms_eval"],
+                "tasks": ["ifeval", "gsm8k"],
+                "limit": 4,
+                "topology": {"gpu_group_size": 1},
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    result = runner._downstream_evaluation(
+        {"puzzle_dir": str(tmp_path)},
+        node,
+        source,
+        "execution",
+    )
+
+    assert captured["argv"][:3] == ["python", "-m", "lmms_eval"]
+    assert result["metrics"] == {
+        "gsm8k.exact_match_strict-match": 0.75,
+        "ifeval.prompt_level_strict_acc_none": 0.5,
+    }
+    assert Path(result["result_path"]).is_file()
+    assert Path(result["raw_result_path"]).name == "results.json"
