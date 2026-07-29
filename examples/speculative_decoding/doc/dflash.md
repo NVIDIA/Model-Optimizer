@@ -281,6 +281,30 @@ DFlash supports checkpoint resume transparently. Rotary embeddings are lazily
 initialized on first forward (matching EAGLE3's `_maybe_init_rope` pattern),
 avoiding meta-tensor issues during `from_pretrained` model construction.
 
+### Warm Start / Fine-Tuning (`dflash_init_checkpoint`)
+
+To fine-tune an already-trained drafter instead of training from scratch, set
+`dflash.dflash_init_checkpoint` to a local directory containing an exported
+DFlash checkpoint (the z-lab-compatible `model.safetensors` layout produced by
+`export_hf_checkpoint.py`; for a public drafter, download it first, e.g.
+`hf download z-lab/Qwen3-8B-DFlash-b16`):
+
+```yaml
+dflash:
+  dflash_init_checkpoint: /path/to/Qwen3-8B-DFlash-b16
+```
+
+The weights are loaded into `model.dflash_module` right after conversion.
+`dflash_architecture_config` must describe the same draft architecture as the
+checkpoint — note that draft head/MLP dims default to `Qwen3Config` values, not
+the base model's, so set `num_attention_heads` / `num_key_value_heads` /
+`head_dim` / `intermediate_size` explicitly. `dflash_block_size` may differ from
+the checkpoint's (weights are block-size agnostic); a `mask_token_id` or
+`target_layer_ids` mismatch loads but logs a degradation warning. Restore of a
+saved training checkpoint ignores the field. See
+`tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash_finetune.yaml` for a
+full fine-tuning pipeline.
+
 ### Export
 
 ```bash

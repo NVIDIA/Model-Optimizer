@@ -144,6 +144,19 @@ class DFlashConfig(ModeloptBaseConfig):
         default={}, description="Config for the DFlash draft module architecture."
     )
 
+    dflash_init_checkpoint: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Warm-start the draft module from an exported DFlash checkpoint before "
+            "fine-tuning. Must be a local directory containing ``model.safetensors`` in the "
+            "DFlashExporter / z-lab layout (e.g. a downloaded copy of "
+            "``z-lab/Qwen3-8B-DFlash-b16``). ``dflash_architecture_config`` must describe "
+            "the same draft architecture as the checkpoint (weights are block-size "
+            "agnostic, so ``dflash_block_size`` may differ). Ignored on restore — restored "
+            "models load their own trained weights."
+        ),
+    )
+
     dflash_use_torch_compile: bool = ModeloptField(
         default=True,
         description="Whether to use torch.compile on DFlash forward/loss methods.",

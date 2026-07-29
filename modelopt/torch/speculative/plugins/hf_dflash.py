@@ -71,7 +71,9 @@ Draft model components:
            lazy rope pattern needed for MLA models.
 """
 
+import json
 import logging
+import os
 
 import torch
 import torch.nn.functional as F
@@ -306,6 +308,12 @@ class HFDFlashModel(DFlashModel):
         if base_device.type != "meta":
             self.dflash_module.to(self._base_model.dtype).to(base_device)
 
+        # Warm-start the draft module from an exported DFlash checkpoint (fine-tuning).
+        # Restore paths never reach here with a checkpoint set: restore_dflash_model
+        # clears the field since restored weights come from the restored model itself.
+        if config.dflash_init_checkpoint:
+            self._load_draft_init_weights(config.dflash_init_checkpoint)
+
         # Delete base model layers for offline training (save memory)
         if self.dflash_offline:
             self._base_model._modules.pop("layers")
@@ -316,6 +324,91 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
         return DFlashModule(dflash_config)
+
+    def _load_draft_init_weights(self, checkpoint: str):
+        """Warm-start ``self.dflash_module`` from an exported DFlash draft checkpoint.
+
+        ``checkpoint`` is a local directory holding ``model.safetensors`` (DFlashExporter /
+        z-lab layout). Keys map 1:1 onto ``dflash_module``. Missing keys are tolerated
+        only for submodules entirely absent from the checkpoint (e.g. the Domino/DSpark
+        heads when warm-starting from a plain DFlash backbone); partial overlap within a
+        submodule means an architecture mismatch and raises.
+        """
+        from safetensors.torch import load_file
+
+        weights_path = os.path.join(checkpoint, "model.safetensors")
+        if not os.path.isfile(weights_path):
+            raise ValueError(
+                f"dflash_init_checkpoint must be a local directory containing "
+                f"model.safetensors; not found at {weights_path}."
+            )
+
+        self._check_init_checkpoint_config(checkpoint, weights_path)
+
+        param = next(self.dflash_module.parameters())
+        state_dict = {
+            key: value.to(param.dtype)
+            for key, value in load_file(weights_path, device=str(param.device)).items()
+        }
+        arch_hint = (
+            "Set dflash_architecture_config to the checkpoint's architecture "
+            "(num_hidden_layers, heads, intermediate_size, ...)."
+        )
+        try:
+            # strict=False tolerates missing/unexpected keys but still raises on shape
+            # mismatches (e.g. a different draft depth changing the fc fusion width).
+            missing, unexpected = self.dflash_module.load_state_dict(state_dict, strict=False)
+        except RuntimeError as e:
+            raise ValueError(
+                f"DFlash init checkpoint {checkpoint} does not match the draft architecture "
+                f"built from dflash_architecture_config: {e} {arch_hint}"
+            ) from e
+        ckpt_submodules = {key.split(".", 1)[0] for key in state_dict}
+        hard_missing = [key for key in missing if key.split(".", 1)[0] in ckpt_submodules]
+        if unexpected or hard_missing:
+            raise ValueError(
+                f"DFlash init checkpoint {checkpoint} does not match the draft architecture "
+                f"built from dflash_architecture_config (unexpected keys: {unexpected}, "
+                f"missing keys: {hard_missing}). {arch_hint}"
+            )
+        if missing:
+            logger.warning(
+                "DFlash: submodules not in init checkpoint %s train from scratch: %s",
+                checkpoint,
+                sorted({key.split(".", 1)[0] for key in missing}),
+            )
+        logger.info(
+            "DFlash: warm-started draft module from %s (%d tensors).",
+            checkpoint,
+            len(state_dict),
+        )
+
+    def _check_init_checkpoint_config(self, checkpoint: str, weights_path: str):
+        """Warn when the init checkpoint's config disagrees with this conversion.
+
+        A ``mask_token_id`` or ``target_layer_ids`` mismatch loads cleanly (shapes match)
+        but silently degrades the warm start: the mask embedding and the fc fusion columns
+        were trained for the checkpoint's values.
+        """
+        config_path = os.path.join(os.path.dirname(weights_path), "config.json")
+        if not os.path.isfile(config_path):
+            return
+        with open(config_path) as f:
+            ckpt_dflash_config = json.load(f).get("dflash_config", {})
+        for name, ours in (
+            ("mask_token_id", self.mask_token_id),
+            ("target_layer_ids", list(self.target_layer_ids)),
+        ):
+            ckpt_value = ckpt_dflash_config.get(name)
+            if ckpt_value is not None and ckpt_value != ours:
+                logger.warning(
+                    "DFlash: init checkpoint %s was trained with %s=%s but this conversion "
+                    "uses %s — the warm start will be degraded.",
+                    checkpoint,
+                    name,
+                    ckpt_value,
+                    ours,
+                )
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""

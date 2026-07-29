@@ -80,4 +80,7 @@ def restore_dflash_model(
 ) -> nn.Module:
     """Function for restoring a previously converted model to a DFlash model."""
     assert not metadata, "No metadata expected!"
+    # Never warm-start on restore: the restored model loads its own trained weights,
+    # and the init checkpoint may no longer exist where the model was trained.
+    config.dflash_init_checkpoint = None
     return convert_to_dflash_model(model, config)[0]
