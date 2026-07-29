@@ -1030,6 +1030,7 @@ def _export_transformers_checkpoint_streaming(
     is_modelopt_qlora: bool = False,
     export_dir: Path | str = ".",
     max_shard_size: int | str = "10GB",
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
     **kwargs,
 ) -> tuple[None, dict[str, Any]]:
     """Export a disk/CPU-offloaded model by streaming tensors layer-by-layer to shard files.
@@ -1217,6 +1218,19 @@ def _export_transformers_checkpoint_streaming(
             continue
         seen_keys.add(name)
         _stream_tensor(name, tensor)
+
+    # Tensors the model never held — e.g. MTP weights, which HF leaves orphaned because it
+    # builds only num_hidden_layers decoders. They are already materialized and skip the
+    # per-tensor postprocessing, matching how the batch path merges them after
+    # postprocess_state_dict; only the hub-name reversal applies.
+    for name, tensor in (extra_state_dict or {}).items():
+        if name in seen_keys:
+            continue
+        seen_keys.add(name)
+        writer.add(
+            name_mapper(name) if name_mapper is not None else name,
+            tensor.detach().contiguous().cpu(),
+        )
 
     writer.finalize()
 
@@ -1908,16 +1922,12 @@ def export_hf_checkpoint(
                     "save_modelopt_state=True is not supported in the streaming offload export "
                     "path and will be ignored."
                 )
-            if extra_state_dict:
-                warnings.warn(
-                    "extra_state_dict is not supported in the streaming offload export path "
-                    "and will be ignored."
-                )
             _, hf_quant_config = _export_transformers_checkpoint_streaming(
                 model,
                 dtype,
                 export_dir=export_dir,
                 max_shard_size=max_shard_size,
+                extra_state_dict=extra_state_dict,
                 **kwargs,
             )
             if getattr(model, "hf_quantizer", None) is not None:

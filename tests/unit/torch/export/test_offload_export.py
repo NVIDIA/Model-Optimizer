@@ -361,3 +361,21 @@ def test_sync_tied_input_amax_skips_offloaded_modules():
     assert merged == 0
     assert model.a.input_quantizer._amax.item() == 1.0
     assert model.b.input_quantizer._amax.item() == 9.0
+
+
+def test_streaming_shard_writer_accepts_extra_tensors():
+    """extra_state_dict tensors must land in the shards.
+
+    MTP weights are orphaned — HF builds only num_hidden_layers decoders, so they are
+    never in model.state_dict() and reach export only via extra_state_dict. The streaming
+    path used to drop them, silently losing 19 tensors relative to the batch export.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("model.layers.0.weight", torch.ones(4, 4))
+        writer.add("mtp.fc.weight", torch.full((2, 2), 7.0))
+        weight_map = writer.finalize()
+
+        assert "mtp.fc.weight" in weight_map
+        with safe_open(str(Path(tmpdir) / weight_map["mtp.fc.weight"]), framework="pt") as f:
+            assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
