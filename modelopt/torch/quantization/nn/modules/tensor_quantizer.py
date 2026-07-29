@@ -678,10 +678,14 @@ class TensorQuantizer(nn.Module):
             return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
-            # A constant_amax buffer is registered at config time (on CPU) and may not have
-            # followed a later `model.to(device)`; align it with the input device on the fly.
             if amax.device != inputs.device:
-                amax = amax.to(inputs.device)
+                # Quantizers can be inserted after the model is on CUDA. Recreate configured
+                # constants on-device so CUDA graph capture does not copy from the CPU buffer.
+                amax = (
+                    inputs.new_full((), self._constant_amax, dtype=torch.float32)
+                    if self._constant_amax is not None
+                    else amax.to(inputs.device)
+                )
         else:
             reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(inputs, self._axis)
             amax = quant_utils.reduce_amax(inputs, axis=reduce_axis, keepdims=True).detach()

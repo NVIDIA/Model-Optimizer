@@ -39,6 +39,30 @@ class TestBlockQuantCuda(BlockQuantTester):
     device = "cuda"
 
 
+def test_constant_amax_after_cuda_model_init_is_graph_safe():
+    quantizer = tensor_quantizer.TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            constant_amax=2688.0,
+        )
+    )
+    inputs = torch.randn(2, 16, device="cuda")
+
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        quantizer(inputs)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        outputs = quantizer(inputs)
+    graph.replay()
+
+    assert torch.isfinite(outputs).all()
+
+
 class TestTensorQuantizerE4M3:
     @pytest.mark.parametrize(
         ("E", "M", "axis"), [(5, 2, None), (4, 3, None), (4, 3, 1), (7, 3, None)]
