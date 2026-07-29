@@ -17,6 +17,8 @@
 The default recipe quantizes weights, inputs, and projection outputs to NVFP4 so
 TensorRT can keep inter-layer activations in FP4. Embedding models export pooled,
 normalized embeddings; reranking models export relevance logits.
+
+This example is experimental because its accuracy has not been validated.
 """
 
 import argparse
@@ -46,6 +48,7 @@ __all__ = [
 
 DEFAULT_RECIPE = "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj"
 
+# TODO: Add an accuracy evaluation pipeline for the embedding and reranking models.
 CALIBRATION_TEXTS = [
     ("What is the capital of France?", "Paris is the capital and most populous city of France."),
     ("How do vaccines work?", "Vaccines train the immune system to recognize pathogens."),

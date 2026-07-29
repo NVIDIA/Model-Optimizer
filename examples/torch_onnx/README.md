@@ -100,6 +100,8 @@ python ../onnx_ptq/evaluate.py \
 
 ## HF Embedding and Reranking Models
 
+> **Experimental:** Accuracy has not yet been validated for this example.
+
 `hf_embedding_quant_to_onnx.py` quantizes an HF text-embedding or reranking
 model (bidirectional Llama encoders such as
 [nvidia/llama-nemotron-embed-1b-v2](https://huggingface.co/nvidia/llama-nemotron-embed-1b-v2)
