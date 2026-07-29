@@ -162,8 +162,9 @@ QAD defaults:
 Keep `train_iters=1000` from the first run so the cosine schedule has a stable
 horizon. Set `save_interval=50`, `eval_interval=25`, `eval_iters=2`,
 `exit_interval=150`, and `exit_duration_in_mins=220` for the initial stage. This
-preserves checkpoints at iterations 50, 100, and 150. The duration exit is a
-checkpointing safety margin, not the training target.
+preserves checkpoints at iterations 50, 100, and 150 when the stage reaches its
+iteration exit. The duration exit is a checkpointing safety margin, not the
+training target.
 
 Use one result-bearing Slurm job per stage and put Pyxis container flags on the
 final `srun`. Fold startup validation into that job; do not submit separate GPU
@@ -183,7 +184,11 @@ decreasing smoothed trend, not a decrease at every noisy step:
    decrease, stop at the checkpoint ending that second window. Preserve the
    latest known-good checkpoint and diagnose before resuming.
 
-At the initial exit:
+Record the actual exit iteration. If the duration exit happens before checkpoint
+150 exists, mark the stage incomplete and resume or relaunch the same output
+directory. Do not export, benchmark, or label an earlier checkpoint as QAD-150.
+
+Once checkpoint 150 exists:
 
 1. Confirm the smoothed QAD/KD loss decreased, learning rate is sensible,
    gradient norm is non-pathological, and checkpoints 50, 100, and 150 exist.
@@ -205,9 +210,10 @@ user direction.
 
 ## 8. Report evidence
 
-Report exact source revision, commands, Slurm job/account/partition, container,
-paths, topology derivation, dataset configs/seed/token budget/materialized
-counts, PTQ format, reused evaluation run IDs, checkpoint iterations,
-loss/LR/grad trend, scheduler state, and BF16/PTQ/QAD benchmark scores. State
-which scores were reused versus newly evaluated. Support success with both
-scheduler and log evidence; identify the first real error when a run fails.
+Report the exact ModelOpt source revision, commands, Slurm job/account/partition,
+container, paths, topology derivation, dataset IDs/configs/seed/token
+budget/materialized counts, PTQ format, reused evaluation run IDs, checkpoint
+iterations, loss/LR/grad trend, scheduler state, and BF16/PTQ/QAD benchmark
+scores. State which scores were reused versus newly evaluated. Support success
+with both scheduler and log evidence; identify the first real error when a run
+fails.
