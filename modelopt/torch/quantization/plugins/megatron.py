@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Support quantization for megatron linear layers."""
+"""Support quantization for megatron modules."""
 
 import types
 from contextlib import contextmanager
@@ -42,7 +42,13 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
+from ..nn import (
+    QuantEmbedding,
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -313,6 +319,85 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 CUSTOM_MODEL_PLUGINS.add(megatron_replace_quant_module_hook)
 
 
+def _get_default_megatron_parallel_state() -> ParallelState:
+    try:
+        data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+    except AssertionError:
+        warn_rank_0("Context parallel group is not initialized, using data parallel group")
+        data_parallel_group = get_data_parallel_group()
+    return ParallelState(
+        data_parallel_group,
+        mcore_parallel.get_tensor_model_parallel_group(),
+    )
+
+
+@QuantModuleRegistry.register(
+    {megatron_parallel.VocabParallelEmbedding: "megatron_VocabParallelEmbedding"}
+)
+class _MegatronVocabParallelEmbedding(QuantEmbedding):
+    """Quantized Megatron vocab-parallel embedding."""
+
+    def _setup(self):
+        if not hasattr(self, "parallel_state") or self.parallel_state is None:
+            self.parallel_state = _get_default_megatron_parallel_state()
+        super()._setup()
+
+    def _process_quantizer_amax(self, k, v, quantizer_state_dict):
+        if v.ndim == 4:
+            quantizer_state_dict[k] = v.squeeze(1).squeeze(-1)
+        else:
+            quantizer_state_dict[k] = (
+                v.view(self.weight.shape[0], -1) if v.numel() > 1 else v.view(-1)
+            )
+
+    def _get_shard_axis_dict(self, state_dict):
+        """Get sharded axes for vocab-parallel embedding quantizer states.
+
+        VocabParallelEmbedding shards the embedding table along the vocabulary
+        dimension (dim=0). Weight quantizer states with a non-None axis follow
+        that row/vocab sharding. Per-tensor states remain replicated.
+        """
+        shard_axis_dict = {}
+        for k in state_dict:
+            if k.endswith("_global_amax"):
+                continue
+            if "weight_quantizer." in k:
+                weight_quantizer_axis = self.get_submodule(k.rsplit(".", 1)[0]).axis
+                if weight_quantizer_axis is not None:
+                    shard_axis_dict[k] = 0
+        return shard_axis_dict
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        metadata = ensure_metadata_has_dp_cp_group(metadata)
+
+        quantizer_state_dict = {}
+        for k, v in self.state_dict(prefix="", keep_vars=True).items():
+            if k.startswith("weight_quantizer.") and "_amax" in k:
+                self._process_quantizer_amax(k, v, quantizer_state_dict)
+            elif "quantizer" in k:
+                warn_rank_0(
+                    f"Quantizer state {k} is not supported for sharded_state_dict. "
+                    "Please use regular state_dict."
+                )
+
+        sharded_axis_dict = self._get_shard_axis_dict(quantizer_state_dict)
+        sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+        sharded_state_dict.update(
+            **make_sharded_tensors_for_checkpoint(
+                quantizer_state_dict, prefix, sharded_axis_dict, sharded_offsets
+            )
+        )
+        return sharded_state_dict
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        for k in list(state_dict.keys()):
+            if "weight_quantizer" not in k:
+                continue
+            name = k.split(prefix)[-1] if prefix else k
+            state_dict[k] = state_dict[k].view_as(self.state_dict()[name])
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
 class _MegatronParallelLinear(_ParallelLinear):
     _functionals_to_replace = [
         (megatron_parallel, "linear_with_grad_accumulation_and_async_allreduce"),
@@ -321,16 +406,7 @@ class _MegatronParallelLinear(_ParallelLinear):
 
     def _setup(self):
         if not hasattr(self, "parallel_state") or self.parallel_state is None:
-            data_parallel_group = None
-            try:
-                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
-            except AssertionError:
-                warn_rank_0("Context parallel group is not initialized, using data parallel group")
-                data_parallel_group = get_data_parallel_group()
-            self.parallel_state = ParallelState(
-                data_parallel_group,
-                mcore_parallel.get_tensor_model_parallel_group(),
-            )
+            self.parallel_state = _get_default_megatron_parallel_state()
 
         if getattr(self, "gradient_accumulation_fusion", False):
             warn_rank_0(

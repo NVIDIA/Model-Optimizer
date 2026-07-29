@@ -311,11 +311,11 @@ def is_quantized(module):
 
 def is_quantized_linear(module):
     """Check if a module is a quantized linear module."""
-    from ..nn import QuantModule, TensorQuantizer
+    from ..nn import QuantEmbedding, QuantModule, TensorQuantizer
 
     # Embedding has a 2D weight but is not a GEMM op, so calibration passes that operate
     # on linear activations (AWQ, SmoothQuant, SVDQuant) must skip it.
-    if isinstance(module, nn.Embedding):
+    if isinstance(module, (nn.Embedding, QuantEmbedding)):
         return False
 
     return (

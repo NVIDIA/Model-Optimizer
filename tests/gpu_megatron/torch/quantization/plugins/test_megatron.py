@@ -48,7 +48,11 @@ from megatron.core.parallel_state import (
     get_data_parallel_group,
     get_tensor_model_parallel_group,
 )
-from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from megatron.core.tensor_parallel.layers import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+    VocabParallelEmbedding,
+)
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 
@@ -57,6 +61,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import HardDisabledTensorQuantizer
 from modelopt.torch.quantization.plugins.megatron import (
     _QuantTEMCoreRowParallelLinear,
     get_mcore_layerwise_calibration_layers,
@@ -116,6 +121,63 @@ def test_convert_megatron_parallel_linear(distributed_setup_size_1):
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1, out_2)
+
+    # Clean up since this is not a spawned process
+    destroy_model_parallel()
+
+
+def test_convert_megatron_vocab_parallel_embedding(distributed_setup_size_1):
+    initialize_for_megatron(seed=SEED)
+    set_seed(SEED)
+
+    assert VocabParallelEmbedding in QuantModuleRegistry
+
+    model_ref = _gpt_model_provider(tp_size=1, hidden_size=64, vocab_size=64)
+    model_test = _gpt_model_provider(tp_size=1, hidden_size=64, vocab_size=64)
+    model_test.load_state_dict(model_ref.state_dict())
+
+    mtq.replace_quant_module(model_test)
+    word_embeddings = model_test.embedding.word_embeddings
+    assert isinstance(word_embeddings, VocabParallelEmbedding)
+    assert hasattr(word_embeddings, "weight_quantizer")
+    assert hasattr(word_embeddings, "input_quantizer")
+    assert hasattr(word_embeddings, "output_quantizer")
+    assert isinstance(word_embeddings.input_quantizer, HardDisabledTensorQuantizer)
+    assert not word_embeddings.input_quantizer.is_enabled
+    assert not word_embeddings.output_quantizer.is_enabled
+    assert not is_quantized_linear(word_embeddings)
+
+    mtq.set_quantizer_attributes_partial(model_test, "*", {"enable": False})
+
+    prompt_tokens = torch.randint(
+        0, model_ref.vocab_size, (2, model_ref.max_sequence_length)
+    ).cuda()
+    logits_ref = run_mcore_inference(model_ref, prompt_tokens)
+    logits_test = run_mcore_inference(model_test, prompt_tokens)
+    assert torch.allclose(logits_ref, logits_test)
+
+    # Clean up since this is not a spawned process
+    destroy_model_parallel()
+
+
+def test_megatron_vocab_parallel_embedding_weight_quantization(distributed_setup_size_1):
+    initialize_for_megatron(seed=SEED)
+    set_seed(SEED)
+
+    model = _gpt_model_provider(tp_size=1, hidden_size=64, vocab_size=64)
+    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    def forward_fn(model):
+        return run_mcore_inference(model, prompt_tokens)
+
+    model = mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), forward_fn)
+    word_embeddings = model.embedding.word_embeddings
+
+    assert isinstance(word_embeddings, VocabParallelEmbedding)
+    assert word_embeddings.weight_quantizer.is_enabled
+    assert word_embeddings.weight_quantizer.amax is not None
+    assert isinstance(word_embeddings.input_quantizer, HardDisabledTensorQuantizer)
+    assert not word_embeddings.input_quantizer.is_enabled
 
     # Clean up since this is not a spawned process
     destroy_model_parallel()
