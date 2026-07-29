@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Example Slurm runner config for the v2 orchestrator."""
+# Example Slurm runner config for the v2 orchestrator.
 
 runner:
   kind: slurm
@@ -11,15 +11,14 @@ runner:
     partition_interactive: interactive
     partition_batch: batch
     # Optional. CPU/IO stages fall back to one GPU when omitted.
-    partition_cpu: null
+    partition_cpu:
     interactive_max_nodes: 2
     time_limit: "4:00:00"
     log_dir: puzzle_runs/logs
   execution_contract:
-    repository: /shared/modelopt
-    venv: /shared/modelopt/.venv
-    container: /path/to/container.sqsh
-    container_mounts: /shared:/shared
-    prerun_commands:
-      - source /path/to/site-setup.sh
+    repository: .
+    venv: .venv
+    container:
+    container_mounts:
+    prerun_commands: []
     postrun_commands: []

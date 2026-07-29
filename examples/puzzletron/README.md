@@ -22,7 +22,7 @@ campaign report.
 
 The configs below are the exact current-code entry points for the completed
 campaigns. Each verified report is a self-contained HTML file that embeds all
-sanity-check outputs, stage manifests, and evaluation results — they can be
+sanity-check outputs, stage manifests, and evaluation results, they can be
 100s of MB. Download them to disk and open locally rather than previewing in a
 browser tab.
 
@@ -80,10 +80,12 @@ local defaults-versus-customize decisions at every section:
 
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py \
-  --defaults nv-internal/sepehr_defaults.yaml
+  --defaults nv-internal/puzzletron_defaults.example.yaml
 ```
 
-The defaults file is loaded only when passed explicitly. Selection prompts have
+The example defaults use only repository-relative values. Copy the file and add
+site-specific data, scheduler, and container settings before selecting it.
+Defaults are loaded only when passed explicitly. Selection prompts have
 a visible **← Back** action; text and numeric prompts accept `:back`. Every
 accepted answer and the exact navigation frame are saved in
 `answers_v2.yaml`, so an interrupted session can resume with:

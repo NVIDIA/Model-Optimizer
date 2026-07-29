@@ -11,14 +11,11 @@ runner:
     interactive_max_nodes: 2
     max_nodes: 20
     time_limit: "4:00:00"
-    log_dir: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/puzzle_runs/qwen-moe/logs
+    log_dir: puzzle_runs/qwen-moe/logs
   execution_contract:
-    repository: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen
-    venv: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen/.venv_new
-    container: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/enroot/pytorch_25p05.sqsh
-    container_mounts: /lustre:/lustre
-    prerun_commands:
-      - source /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
-      - export VLLM_ROOT=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/vllm_new
-      - export AUTOMODEL_ROOT=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/Automodel_new
+    repository: .
+    venv: .venv
+    container:
+    container_mounts:
+    prerun_commands: []
     postrun_commands: []

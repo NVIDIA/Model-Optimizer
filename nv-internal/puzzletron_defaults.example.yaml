@@ -1,0 +1,12 @@
+schema_version: 1
+infrastructure:
+  execution_contract:
+    repository: .
+    venv: .venv
+    container:
+    container_mounts:
+    prerun_commands: []
+  runner:
+    kind: slurm
+    slurm:
+      partition_cpu:
