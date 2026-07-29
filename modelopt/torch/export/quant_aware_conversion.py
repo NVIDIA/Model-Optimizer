@@ -287,6 +287,37 @@ def _assert_experts_pre_expanded(
             )
 
 
+def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[RenameRule]:
+    """Drop child-model reverse renames when the child namespace already exists.
+
+    Transformers collects conversions recursively, so a text-only ``model.*`` ->
+    ``model.language_model.*`` reverse can also reach its parent VLM. In that model,
+    ``model.language_model`` is already registered and applying the rule globally
+    would capture both that namespace and siblings such as ``model.visual``.
+    """
+    named_modules = getattr(model, "named_modules", None)
+    if not callable(named_modules):
+        return rules
+
+    module_names = {name for name, _ in named_modules() if name}
+    probe_suffix = ".\x00modelopt_namespace_probe"
+    kept: list[RenameRule] = []
+    for rule in rules:
+        pattern = re.compile(rule.pattern)
+        shadowed = False
+        for module_name in module_names:
+            mapped = pattern.sub(rule.repl, module_name + probe_suffix)
+            if not mapped.endswith(probe_suffix):
+                continue
+            mapped_parent = mapped[: -len(probe_suffix)]
+            if mapped_parent in module_names and mapped_parent.startswith(module_name + "."):
+                shadowed = True
+                break
+        if not shadowed:
+            kept.append(rule)
+    return kept
+
+
 def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list[str]]:
     """Derive reverse rules from the model's transformers conversion mapping.
 
@@ -373,6 +404,7 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
     # reorder rename runs last and does not destroy the anchor the MoE container/gate
     # renames rely on. Expert leaf renames act on disjoint ``.experts.<i>.<leaf>``
     # substrings and are applied first.
+    weight_renamings = _drop_shadowed_prefix_renames(model, weight_renamings)
     rename_rules = leaf_renamings + list(reversed(weight_renamings))
     return split_rules, rename_rules, expert_fused_leaves
 
