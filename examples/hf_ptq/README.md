@@ -307,7 +307,10 @@ python hf_ptq.py \
 ```
 
 The run is opened *before* the model loads, so a bad URI or a missing token fails within
-seconds rather than after a full calibration. These artifacts are uploaded:
+seconds rather than after a full calibration.
+
+<details>
+<summary>Uploaded artifacts</summary>
 
 | Artifact | Contents |
 | --- | --- |
@@ -318,8 +321,10 @@ seconds rather than after a full calibration. These artifacts are uploaded:
 | `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
 | `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
 
-The model, format, recipe and calibration settings are also logged as searchable params,
-alongside `user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
+</details>
+
+Every command-line argument is also logged as a searchable param, alongside
+`user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
 still recorded, with status `FAILED` and its log attached.
 
 Other flags:

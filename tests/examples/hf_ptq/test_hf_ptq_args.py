@@ -267,7 +267,7 @@ def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch):
 
     params, texts = hf_ptq._mlflow_run_inputs(args)
 
-    assert params["model"] == "/models/Qwen3-0.6B"
+    assert params["pyt_ckpt_path"] == "/models/Qwen3-0.6B"
     assert params["recipe"] == "general/ptq/nvfp4_default-kv_fp8_cast"
     # $imports are expanded, so the artifact stands alone.
     recipe = yaml.safe_load(texts["recipe/resolved_recipe.yaml"])
@@ -282,7 +282,7 @@ def test_mlflow_run_inputs_omit_the_recipe_when_unused(monkeypatch):
     params, texts = hf_ptq._mlflow_run_inputs(args)
 
     assert texts == {}
-    assert params["recipe"] == ""
+    assert params["recipe"] is None
 
 
 def test_mlflow_run_outputs_name_the_summaries(monkeypatch):
@@ -333,3 +333,20 @@ def test_non_main_ranks_do_not_open_a_run(monkeypatch):
 
     assert not logger.enabled
     assert calls == []
+
+
+def test_mlflow_params_track_every_cli_argument(monkeypatch):
+    """Params are derived from the parsed args, so a new flag needs no bookkeeping here."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+    args.dist_state = SimpleNamespace(is_main=True, world_size=4)
+
+    params, _ = hf_ptq._mlflow_run_inputs(args)
+
+    tracked = set(vars(args)) - hf_ptq._MLFLOW_NON_PARAM_ARGS
+    assert tracked <= set(params)
+    # The tracking settings describe the destination, not the run, and dist_state is an object.
+    assert not {"mlflow", "mlflow_experiment", "mlflow_run_name", "dist_state"} & set(params)
+    assert params["world_size"] == 4
+    # A flag added to the parser later is picked up without editing _mlflow_run_inputs.
+    args.some_future_flag = "future"
+    assert hf_ptq._mlflow_run_inputs(args)[0]["some_future_flag"] == "future"

@@ -131,7 +131,7 @@ mlflow = [ # Dependencies for modelopt.torch.utils.mlflow run tracking
 ]
 
 all = ["nvidia-modelopt[onnx,hf,puzzletron,mlflow]"]
-dev = ["nvidia-modelopt[all,dev-docs,dev-lint,dev-test]"]
+dev = ["nvidia-modelopt[all,mlflow,dev-docs,dev-lint,dev-test]"]
 
 [project.urls]
 Homepage = "https://github.com/NVIDIA/Model-Optimizer"

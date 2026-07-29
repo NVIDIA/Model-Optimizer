@@ -1700,20 +1700,16 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+# Derived state and the tracking settings themselves; everything else argparse parsed is a
+# parameter of the run. Deriving the list means a new flag is tracked without touching this.
+_MLFLOW_NON_PARAM_ARGS = frozenset({"dist_state", "mlflow", "mlflow_experiment", "mlflow_run_name"})
+
+
 def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
     """Params and start-time artifacts describing this PTQ run."""
-    params = {
-        "model": args.pyt_ckpt_path,
-        "qformat": args.qformat,
-        "kv_cache_qformat": args.kv_cache_qformat,
-        "recipe": args.recipe or "",
-        "calib_size": args.calib_size,
-        "calib_seq": args.calib_seq,
-        "batch_size": args.batch_size,
-        "sparsity_fmt": args.sparsity_fmt,
-        "export_path": args.export_path,
-        "world_size": args.dist_state.world_size,
-    }
+    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
+    # dist_state is an object, so record the one field worth searching on.
+    params["world_size"] = args.dist_state.world_size
     texts = {}
     if args.recipe:
         # The resolved recipe, not the source file: a recipe may be a directory or use
