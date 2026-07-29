@@ -68,6 +68,16 @@ class ExportContext:
             self.tied_cache = None
             self.moe_tied_cache = None
 
+    def reset_tied_caches(self) -> None:
+        """Drop dedup state between materialization windows.
+
+        The streaming export frees each module after exporting it, so a recycled
+        address would alias the next module to the wrong weights. Genuine sharing is
+        always within one window, so nothing is lost.
+        """
+        self.tied_cache.clear()
+        self.moe_tied_cache.clear()
+
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
 

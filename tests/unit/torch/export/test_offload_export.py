@@ -309,3 +309,55 @@ def test_postprocess_vision_model_summary_idxs_dropped():
         "vision_model.radio_model.summary_idxs", torch.tensor([0, 1]), 448.0, None
     )
     assert key is None
+
+
+# ---------------------------------------------------------------------------
+# data_ptr identity under offload
+#
+# Both guards below exist because ``data_ptr()`` only identifies a tensor while
+# that tensor is resident. Getting this wrong silently exported wrong weights:
+# meta tensors all report 0, and freed addresses are recycled by the allocator.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAmaxQuantizer(nn.Module):
+    def __init__(self, value: float):
+        super().__init__()
+        self.register_buffer("_amax", torch.tensor(value))
+        self.is_enabled = True
+
+    @property
+    def amax(self):
+        return self._amax
+
+    @amax.setter
+    def amax(self, v):
+        self._amax = v
+
+
+class _MetaLinearWithInputQuantizer(nn.Module):
+    def __init__(self, amax: float):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(4, 4, device="meta"))
+        self.input_quantizer = _FakeAmaxQuantizer(amax)
+
+
+def test_sync_tied_input_amax_skips_offloaded_modules():
+    """Untied modules whose weights are offloaded must not be merged together.
+
+    Every meta tensor reports ``data_ptr() == 0``, so without the residency guard
+    these two unrelated Linears land in one group and both get amax 9.0.
+    """
+    from modelopt.torch.export.quant_utils import sync_tied_input_amax
+
+    model = nn.Module()
+    model._tied_weights_keys = {"b.weight": "a.weight"}
+    model.a = _MetaLinearWithInputQuantizer(1.0)
+    model.b = _MetaLinearWithInputQuantizer(9.0)
+
+    with pytest.warns(UserWarning, match="offloaded weights"):
+        merged = sync_tied_input_amax(model)
+
+    assert merged == 0
+    assert model.a.input_quantizer._amax.item() == 1.0
+    assert model.b.input_quantizer._amax.item() == 9.0

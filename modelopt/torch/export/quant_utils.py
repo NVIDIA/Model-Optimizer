@@ -1604,11 +1604,19 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     from collections import defaultdict
 
     by_dp: dict = defaultdict(list)
+    skipped_candidates = 0
     for _, m in model.named_modules():
         # Fused MoE: 3-D source tensors with shared input quantizers
         first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
-        first_proj = getattr(m, first_proj_attr, None)
         first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
+        # data_ptr() only identifies a tensor that is resident: every meta tensor reports
+        # 0, which would collapse unrelated modules into a single tied group and merge
+        # their amaxes model-wide.
+        if any(p.is_meta for p in m.parameters(recurse=False)):
+            if hasattr(m, "input_quantizer") or hasattr(m, first_proj_input_quantizer_attr):
+                skipped_candidates += 1
+            continue
+        first_proj = getattr(m, first_proj_attr, None)
         if (
             hasattr(m, first_proj_input_quantizer_attr)
             and first_proj is not None
@@ -1624,6 +1632,16 @@ def sync_tied_input_amax(model: nn.Module) -> int:
             and isinstance(m.weight, torch.nn.Parameter)
         ):
             by_dp[("dense", m.weight.data_ptr())].append(m)
+
+    # Only meaningful when the model declares ties: without them there is nothing to lose
+    # by skipping non-resident modules, and an unconditional warning on every offloaded
+    # export would be noise.
+    if skipped_candidates and getattr(model, "_tied_weights_keys", None):
+        warn(
+            f"sync_tied_input_amax: {skipped_candidates} quantized module(s) have offloaded "
+            "weights and were skipped, so ties among them were not merged; those modules keep "
+            "their per-side input_scale."
+        )
 
     def _merge(quantizers: list) -> bool:
         """Max-merge amaxes across the quantizer list. Returns True on merge."""
