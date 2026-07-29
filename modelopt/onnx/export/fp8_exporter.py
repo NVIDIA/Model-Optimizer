@@ -31,6 +31,7 @@ from .base_exporter import ONNXQuantExporter
 # when using 1/448 as the Q scale (single fixed value — softmax range is data-independent).
 _FP8_E4M3_MAX = 448.0
 _FP8_E4M3_SOFTMAX_SCALE = 1.0 / _FP8_E4M3_MAX
+_FP8_MIN_CONV_CHANNELS = 16
 
 
 class FP8QuantExporter(ONNXQuantExporter):
@@ -188,6 +189,10 @@ class FP8QuantExporter(ONNXQuantExporter):
 
             weight_input = node.inputs[1]
             if not isinstance(weight_input, gs.Constant):
+                continue
+            if any(
+                channels <= _FP8_MIN_CONV_CHANNELS for channels in weight_input.values.shape[:2]
+            ):
                 continue
 
             # Skip if weight already has a DQ producer

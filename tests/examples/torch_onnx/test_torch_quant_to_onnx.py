@@ -32,8 +32,9 @@ _MODELS = {
 }
 
 
-def _assert_residual_adds_are_quantized(onnx_save_path):
+def _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode):
     model = onnx.load(onnx_save_path)
+    initializers = {initializer.name: initializer for initializer in model.graph.initializer}
     consumers = defaultdict(list)
     producers = {}
     for node in model.graph.node:
@@ -42,7 +43,12 @@ def _assert_residual_adds_are_quantized(onnx_save_path):
         for output_name in node.output:
             producers[output_name] = node
 
-    residual_adds = [node for node in model.graph.node if node.op_type == "Add"]
+    residual_adds = [
+        node
+        for node in model.graph.node
+        if node.op_type == "Add"
+        and [consumer.op_type for consumer in consumers[node.output[0]]] == ["Relu"]
+    ]
     assert len(residual_adds) == 16
     for add in residual_adds:
         input_producers = [producers[input_name] for input_name in add.input]
@@ -54,7 +60,60 @@ def _assert_residual_adds_are_quantized(onnx_save_path):
             and producers[node.input[0]].op_type.endswith("QuantizeLinear")
             for node in input_producers
         )
-        assert [node.op_type for node in consumers[add.output[0]]] == ["Relu"]
+
+    if quantize_mode not in ("int8", "fp8"):
+        return
+
+    activation_quantizers = [
+        node
+        for node in model.graph.node
+        if node.op_type.endswith("QuantizeLinear") and node.input[0] not in initializers
+    ]
+    assert len(activation_quantizers) == (54 if quantize_mode == "int8" else 52)
+    assert len({node.input[0] for node in activation_quantizers}) == len(activation_quantizers)
+    assert all(
+        producers.get(node.input[0]) is None or producers[node.input[0]].op_type != "Cast"
+        for node in activation_quantizers
+    )
+
+    dq_fanouts = [
+        sorted(consumer.op_type for consumer in consumers[node.output[0]])
+        for node in model.graph.node
+        if node.op_type.endswith("DequantizeLinear")
+    ]
+    assert dq_fanouts.count(["Add", "Conv"]) == 12
+    assert dq_fanouts.count(["Conv", "Conv"]) == 4
+    assert dq_fanouts.count(["Add"]) == 4
+
+    gemm = next(node for node in model.graph.node if node.op_type == "Gemm")
+    assert all(
+        producers.get(input_name) is None
+        or not producers[input_name].op_type.endswith("DequantizeLinear")
+        for input_name in gemm.input
+    )
+
+    global_pool = next(node for node in model.graph.node if node.op_type == "GlobalAveragePool")
+    pool_input_producer = producers[global_pool.input[0]]
+    if quantize_mode == "int8":
+        assert pool_input_producer.op_type.endswith("DequantizeLinear")
+        weight_quantizers = [
+            node
+            for node in model.graph.node
+            if node.op_type.endswith("QuantizeLinear") and node.input[0] in initializers
+        ]
+        assert len(weight_quantizers) == 53
+        assert all(
+            initializers[node.input[0]].data_type == onnx.TensorProto.FLOAT16
+            for node in weight_quantizers
+        )
+    else:
+        assert pool_input_producer.op_type == "Relu"
+        first_conv = next(node for node in model.graph.node if node.op_type == "Conv")
+        assert all(
+            producers.get(input_name) is None
+            or not producers[input_name].op_type.endswith("DequantizeLinear")
+            for input_name in first_conv.input
+        )
 
 
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)
@@ -76,4 +135,4 @@ def test_torch_onnx(tmp_path, model_key, quantize_mode):
     run_example_command(cmd_parts, "torch_onnx")
 
     if model_key == "resnet50":
-        _assert_residual_adds_are_quantized(onnx_save_path)
+        _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode)
