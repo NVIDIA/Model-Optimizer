@@ -61,12 +61,6 @@ def validate_tracking_uri(uri: str) -> str:
     Only ``http(s)`` servers are accepted; MLflow's local ``file:`` / ``sqlite:`` backends
     are not a useful destination for a shared record of a run.
 
-    Args:
-        uri: The tracking URI to validate, e.g. ``https://mlflow.example.com/``.
-
-    Returns:
-        The URI with any trailing slash removed.
-
     Raises:
         ValueError: If *uri* is empty, has no host, or is not an http(s) URL.
     """
@@ -91,18 +85,10 @@ def default_experiment_name(tool: str, model: str, variant: str, user: str | Non
     """Build an experiment name of the form ``<user>/<tool>/<model>-<variant>``.
 
     Only the basename of *model* is used, so a local checkpoint directory and an
-    ``org/name`` Hugging Face id collapse to the same readable name. Each component is
-    reduced to ``[A-Za-z0-9._-]`` so the ``/`` separators stay meaningful.
-
-    Args:
-        tool: Name of the script producing the run, e.g. ``"hf_ptq"``.
-        model: Checkpoint path or Hugging Face model id.
-        variant: What distinguishes this run of *tool* on *model*, e.g. a recipe name
-            or a quantization format.
-        user: Owner of the run. Defaults to the current user.
-
-    Returns:
-        The experiment name.
+    ``org/name`` Hugging Face id collapse to the same readable name; *variant* is whatever
+    distinguishes this run of *tool* on *model*, such as a recipe name or a quantization
+    format. Each component is reduced to ``[A-Za-z0-9._-]`` so the ``/`` separators stay
+    meaningful, and *user* defaults to the current user.
 
     Example:
         >>> default_experiment_name("hf_ptq", "/models/Qwen3-0.6B/", "nvfp4", user="alice")
@@ -212,12 +198,10 @@ class MlflowRunLogger:
         script prints, so anything secret on the command line or in the output is uploaded
         with it. Pass credentials through the environment instead.
 
-    Args:
-        tracking_uri: Validated MLflow server URI (see :func:`validate_tracking_uri`).
-        experiment_name: Experiment to log under; created if it does not exist.
-        run_name: Name for the run. Defaults to the UTC start time, ``YYYYmmdd-HHMMSS``.
-        enabled: When false, every method returns immediately. Use this to skip
-            non-main ranks or a missing ``--mlflow`` flag.
+    *tracking_uri* must already be validated (see :func:`validate_tracking_uri`),
+    *experiment_name* is created if absent, *run_name* defaults to the UTC start time
+    ``YYYYmmdd-HHMMSS``, and ``enabled=False`` makes every method a no-op -- which is how
+    callers skip non-main ranks or an absent flag.
 
     Example:
         >>> logger = MlflowRunLogger(uri, "alice/hf_ptq/Qwen3-0.6B-nvfp4")
@@ -242,9 +226,9 @@ class MlflowRunLogger:
         self.experiment_name = experiment_name
         self.run_name = run_name
         self.enabled = enabled
+        self._mlflow: Any = None
         self._run: Any = None
-        self._log_dir: Path | None = None
-        self._log_name = Path(sys.argv[0]).stem or "run"
+        self._log_path: Path | None = None
         self._saved_streams: tuple | None = None
         self._redirected_handlers: list[tuple[logging.StreamHandler, Any]] = []
         self._start_time = 0.0
@@ -265,12 +249,9 @@ class MlflowRunLogger:
     ) -> None:
         """Open the run: capture output, verify the server, upload the inputs.
 
-        Args:
-            params: Searchable parameters describing the run's configuration.
-            tags: Extra tags, merged over the defaults (user, hostname, ModelOpt
-                version and commit).
-            texts: Artifacts to upload as text, keyed by artifact path. Uploaded here
-                rather than at the end so they survive a crash.
+        *params* are searchable; *tags* merge over the defaults (user, hostname, ModelOpt
+        version and commit); *texts* maps artifact path to content, uploaded here rather
+        than at the end so it survives a crash.
 
         Raises:
             ImportError: If ``mlflow`` is not installed.
@@ -294,14 +275,11 @@ class MlflowRunLogger:
         files: Mapping[str, Path | str] | None = None,
         metrics: dict[str, float] | None = None,
     ) -> None:
-        """Upload the run's outputs and close it with *status*.
+        """Upload the run's outputs and close it with *status*, e.g. ``"FINISHED"``.
 
-        Args:
-            status: MLflow run status, typically ``"FINISHED"`` or ``"FAILED"``.
-            texts: Artifacts to upload as text, keyed by artifact path.
-            files: Artifacts to upload from disk, keyed by artifact path. Entries whose
-                file does not exist are skipped, so callers can list optional outputs.
-            metrics: Extra metrics, merged over the default ``total_time_s``.
+        *texts* and *files* both map artifact path to content, from memory and from disk
+        respectively; a *files* entry whose file is absent is skipped, so callers can list
+        optional outputs. *metrics* merges over the default ``total_time_s``.
         """
         if not self.enabled or self._run is None:
             self._stop_capture()
@@ -312,29 +290,27 @@ class MlflowRunLogger:
             print(f"[mlflow] WARNING: could not upload run outputs: {e}")
         self._stop_capture()
         try:
-            import mlflow
-
-            mlflow.end_run(status=status)
+            self._mlflow.end_run(status=status)
             print(f"[mlflow] {status}: {self.run_url}")
         except Exception as e:
             print(f"[mlflow] WARNING: could not close the run: {e}")
 
     def _open_run(self) -> None:
-        # Optional dependency: only scripts that enable tracking need it installed.
         try:
-            import mlflow
+            import mlflow  # optional dependency: only needed once tracking is enabled
         except ImportError as e:
             raise ImportError(
                 "MLflow tracking requires the 'mlflow' package: pip install nvidia-modelopt[mlflow]"
             ) from e
 
         self._check_reachable()
+        self._mlflow = mlflow
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
-        run_name = self.run_name or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        self._run = mlflow.start_run(run_name=run_name)
-        print(f"[mlflow] experiment: {self.experiment_name}")
-        print(f"[mlflow] run: {self.run_url}")
+        self._run = mlflow.start_run(
+            run_name=self.run_name or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        )
+        print(f"[mlflow] experiment: {self.experiment_name}\n[mlflow] run: {self.run_url}")
 
     def _check_reachable(self) -> None:
         """Fail fast on an unreachable host.
@@ -350,11 +326,9 @@ class MlflowRunLogger:
             raise ConnectionError(f"MLflow server {self.tracking_uri} is unreachable: {e}") from e
 
     def _log_inputs(self, params, tags, texts) -> None:
-        import mlflow
-
         if params:
-            mlflow.log_params(params)
-        mlflow.set_tags(
+            self._mlflow.log_params(params)
+        self._mlflow.set_tags(
             {
                 "user": current_user(),
                 "hostname": socket.gethostname(),
@@ -363,53 +337,54 @@ class MlflowRunLogger:
                 **(tags or {}),
             }
         )
-        mlflow.log_text(_command_text(), "command.txt")
-        # Also a tag, for searching; as an artifact it travels with the rest of the run.
-        mlflow.log_text(f"{modelopt.__version__}\n", "version.txt")
-        for artifact_path, text in (texts or {}).items():
-            mlflow.log_text(text, artifact_path)
+        # The version is a tag as well, for searching; the artifact travels with the run.
+        self._log_texts(
+            {
+                "command.txt": _command_text(),
+                "version.txt": f"{modelopt.__version__}\n",
+                **(texts or {}),
+            }
+        )
 
     def _log_outputs(self, texts, files, metrics) -> None:
-        import mlflow
-
-        mlflow.log_metrics({"total_time_s": time.time() - self._start_time, **(metrics or {})})
-        for artifact_path, text in (texts or {}).items():
-            mlflow.log_text(text, artifact_path)
+        elapsed = time.time() - self._start_time
+        self._mlflow.log_metrics({"total_time_s": elapsed, **(metrics or {})})
+        self._log_texts(texts)
         sys.stdout.flush()
         sys.stderr.flush()
-        if self._log_dir is not None:
-            self._log_file(f"logs/{self._log_name}.log", self._log_dir / f"{self._log_name}.log")
+        if self._log_path is not None:
+            self._log_file(f"logs/{self._log_path.name}", self._log_path)
         for artifact_path, local in (files or {}).items():
             if Path(local).is_file():
                 self._log_file(artifact_path, Path(local))
 
+    def _log_texts(self, texts) -> None:
+        for artifact_path, text in (texts or {}).items():
+            self._mlflow.log_text(text, artifact_path)
+
     def _log_file(self, artifact_path: str, local: Path) -> None:
         """Upload *local* to *artifact_path*, staging a copy when it must be renamed."""
-        import mlflow
-
         target = PurePosixPath(artifact_path)
         directory = str(target.parent) if str(target.parent) != "." else None
         if local.name == target.name:
-            mlflow.log_artifact(str(local), artifact_path=directory)
+            self._mlflow.log_artifact(str(local), artifact_path=directory)
             return
         # log_artifact keeps the local basename, so rename via a staged copy rather than
         # reading the file into memory -- these can be hundreds of MB.
         with tempfile.TemporaryDirectory() as staging:
             staged = Path(staging) / target.name
             shutil.copy2(local, staged)
-            mlflow.log_artifact(str(staged), artifact_path=directory)
+            self._mlflow.log_artifact(str(staged), artifact_path=directory)
 
     def _start_capture(self) -> None:
-        self._log_dir = Path(tempfile.mkdtemp(prefix="modelopt-mlflow-"))
-        sink = open(self._log_dir / f"{self._log_name}.log", "w", buffering=1, encoding="utf-8")
-        original_stdout, original_stderr = sys.stdout, sys.stderr
-        self._saved_streams = (original_stdout, original_stderr, sink)
-        sys.stdout = TeeStream(original_stdout, sink)
-        sys.stderr = TeeStream(original_stderr, sink)
-        self._redirect_log_handlers(
-            {original_stdout: sys.stdout, original_stderr: sys.stderr},
-        )
-        print(f"[mlflow] capturing this run's log to {self._log_dir / f'{self._log_name}.log'}")
+        script = Path(sys.argv[0]).stem or "run"
+        self._log_path = Path(tempfile.mkdtemp(prefix="modelopt-mlflow-")) / f"{script}.log"
+        sink = open(self._log_path, "w", buffering=1, encoding="utf-8")
+        stdout, stderr = sys.stdout, sys.stderr
+        self._saved_streams = (stdout, stderr, sink)
+        sys.stdout, sys.stderr = TeeStream(stdout, sink), TeeStream(stderr, sink)
+        self._redirect_log_handlers({stdout: sys.stdout, stderr: sys.stderr})
+        print(f"[mlflow] capturing this run's log to {self._log_path}")
 
     def _redirect_log_handlers(self, replacements: dict) -> None:
         """Point already-configured logging handlers at the tee.
@@ -437,6 +412,6 @@ class MlflowRunLogger:
         sys.stdout, sys.stderr, sink = self._saved_streams
         sink.close()
         self._saved_streams = None
-        if self._log_dir is not None:
-            shutil.rmtree(self._log_dir, ignore_errors=True)
-            self._log_dir = None
+        if self._log_path is not None:
+            shutil.rmtree(self._log_path.parent, ignore_errors=True)
+            self._log_path = None

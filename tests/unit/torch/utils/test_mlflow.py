@@ -301,7 +301,7 @@ def test_capture_includes_preconfigured_library_logging(fake_mlflow, monkeypatch
 
     try:
         logger.start()
-        log_path = logger._log_dir / "hf_ptq.log"
+        log_path = logger._log_path
         library_logger.warning("Rate limited. Waiting 169.0s before retry")
         captured = log_path.read_text()
         logger.finish("FINISHED")
