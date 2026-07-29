@@ -35,6 +35,17 @@ from .custom import _ParallelLinear
 _TE_VERSION = Version(te.__version__)
 
 _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
+_PER_EXPERT_QUANTIZER_ENV = "MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER"
+
+
+def _te_per_expert_quantizers_enabled() -> bool:
+    """Whether ``TEGroupedLinear`` gives each fused expert its own weight quantizer (opt-in).
+
+    Default (env unset / ``"0"``) is the legacy single shared weight quantizer for all experts.
+    ``QuantizeConfig.te_per_expert_quantizers=True`` sets this env var during ``convert``; it can
+    also be set directly.
+    """
+    return os.getenv(_PER_EXPERT_QUANTIZER_ENV, "0") == "1"
 
 
 def _assert_te_fp8_enabled():
@@ -148,9 +159,14 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after setup.
         delattr(self, "weight")
 
-        # Each fused expert gets its own weight quantizer (independent amax). Storing them in a
-        # GroupedQuantizer (an nn.ModuleList) surfaces them as ``weight_quantizer.{i}``, which the
-        # fused-experts name normalizer maps to ``*weight_quantizer`` so the stock configs apply.
+        # Opt-in (``QuantizeConfig.te_per_expert_quantizers``): each fused expert gets its own
+        # weight quantizer (independent amax), stored in a GroupedQuantizer (an nn.ModuleList)
+        # surfaced as ``weight_quantizer.{i}`` so the fused-experts name normalizer maps them to
+        # ``*weight_quantizer`` and the stock configs apply. Default (legacy) keeps the single
+        # shared weight quantizer that ``super()._setup()`` installed above.
+        if not _te_per_expert_quantizers_enabled():
+            return
+
         self.weight_quantizer = GroupedQuantizer(
             *(copy.deepcopy(self.weight_quantizer) for _ in range(self.num_gemms))
         )
@@ -185,6 +201,11 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # static recipes on export and overwrites frozen amax on every QAD resume. Only
         # re-calibrate a quantizer whose loaded amax is shape-INCOMPATIBLE with its weight
         # (a genuine TP/EP change between save and restore); otherwise keep it as-is.
+        # Per-expert amax preservation only applies when each expert has its own quantizer; with
+        # the legacy single shared quantizer, super().modelopt_post_restore already handled it.
+        if not isinstance(self.weight_quantizer, GroupedQuantizer):
+            return
+
         from modelopt.torch.quantization.model_calib import max_calibrate
 
         for i in range(self.num_gemms):
@@ -200,21 +221,44 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             try:
                 wq_i(weight_i)  # dry-run: succeeds iff the loaded amax fits this weight
                 shape_ok = True
-            except Exception:
+            except Exception as e:
+                # Only a genuine amax/weight shape mismatch (a TP/EP change between save and
+                # restore) may fall through to the max|W| recompute below. A CUDA/OOM/device or
+                # any other error must NOT be silently turned into a recompute -- that would
+                # discard the stored MSE/static/QAD amax this block exists to preserve. Re-raise
+                # anything that is not clearly a shape mismatch.
+                msg = str(e).lower()
+                is_shape_mismatch = (
+                    isinstance(e, RuntimeError)
+                    and any(
+                        k in msg for k in ("size", "shape", "must match", "broadcast", "dimension")
+                    )
+                    and not any(k in msg for k in ("cuda", "out of memory", "device-side", "nccl"))
+                )
+                if not is_shape_mismatch:
+                    raise
                 shape_ok = False
             finally:
                 q._fake_quant = prev_fake
             if shape_ok:
                 continue  # loaded amax is valid -> keep it, do NOT recompute
+            # Recompute is lossy for static recipes; never do it silently.
+            warnings.warn(
+                f"{type(self).__name__}: restored amax {tuple(q._amax.shape)} for expert {i} "
+                f"weight_quantizer is shape-incompatible with weight {tuple(weight_i.shape)} "
+                f"(likely a TP/EP change); recomputing as max|W| and discarding the stored "
+                f"MSE/static/QAD amax for this expert."
+            )
             wq_i.reset_amax()
             max_calibrate(wq_i, lambda wq, w=weight_i: wq(w), distributed_sync=False)
 
     def iter_weights_for_calibration(self):
         """Yield ``(weight_i, weight_quantizer)`` for each of the ``num_gemms`` grouped weights."""
+        grouped = isinstance(self.weight_quantizer, GroupedQuantizer)
         for i in range(self.num_gemms):
             weight_i = getattr(self, f"weight{i}", None)
             if weight_i is not None:
-                yield weight_i, self.weight_quantizer[i]
+                yield weight_i, (self.weight_quantizer[i] if grouped else self.weight_quantizer)
 
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
@@ -245,14 +289,18 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
         weights = tuple(args[weights_start : weights_start + num_gemms])
         # Calibration mutates collector state and must stay outside Inductor/CUDAGraph capture.
-        use_compiled_loop = hasattr(self, "_compiled_weight_quantizer_loop") and not any(
-            _is_calibrating(quantizer) for quantizer in self.weight_quantizer
+        grouped = isinstance(self.weight_quantizer, GroupedQuantizer)
+        use_compiled_loop = (
+            grouped
+            and hasattr(self, "_compiled_weight_quantizer_loop")
+            and not any(_is_calibrating(quantizer) for quantizer in self.weight_quantizer)
         )
         if use_compiled_loop:
             quantized_weights = self._compiled_weight_quantizer_loop(*weights)
         else:
             quantized_weights = tuple(
-                self.weight_quantizer[gemm_idx](weight) for gemm_idx, weight in enumerate(weights)
+                (self.weight_quantizer[gemm_idx] if grouped else self.weight_quantizer)(weight)
+                for gemm_idx, weight in enumerate(weights)
             )
         for gemm_idx, quantized_weight in enumerate(quantized_weights):
             new_args[weights_start + gemm_idx] = quantized_weight

@@ -15,6 +15,7 @@
 
 import copy
 import math
+import os
 import re
 from contextlib import nullcontext
 from functools import partial
@@ -66,6 +67,7 @@ from modelopt.torch.quantization.plugins.megatron import (
 )
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
+    _PER_EXPERT_QUANTIZER_ENV,
 )
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -916,6 +918,58 @@ def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1,
             assert g_c is not None and torch.isfinite(g_c).all()
             torch.testing.assert_close(g_c, g_e, rtol=1e-2, atol=1e-2)
 
+    destroy_model_parallel()
+
+
+@pytest.mark.parametrize("per_expert", [False, True])
+def test_te_grouped_per_expert_quantizer_toggle(distributed_setup_size_1, monkeypatch, per_expert):
+    """``QuantizeConfig.te_per_expert_quantizers`` toggles per-expert TEGroupedLinear quantizers.
+
+    Default (False) keeps the legacy single shared weight quantizer for all fused experts; True
+    installs a GroupedQuantizer per TEGroupedLinear with one quantizer per fused expert.
+    """
+    # Clean env so the default case is not polluted by a prior enabled run.
+    monkeypatch.delenv(_PER_EXPERT_QUANTIZER_ENV, raising=False)
+
+    initialize_for_megatron(seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(model)
+    for module in model.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    if per_expert:
+        cfg["te_per_expert_quantizers"] = True
+    mtq.quantize(model, cfg, forward)
+
+    grouped_linears = [
+        getattr(mlp, name)
+        for mlp in model.modules()
+        if isinstance(mlp, TEGroupedMLP)
+        for name in ("linear_fc1", "linear_fc2")
+    ]
+    assert grouped_linears
+    for gl in grouped_linears:
+        wq = gl.weight_quantizer
+        if per_expert:
+            assert isinstance(wq, mtq.nn.GroupedQuantizer), (
+                "te_per_expert_quantizers=True should install a per-expert GroupedQuantizer"
+            )
+            assert len(wq) == gl.num_gemms
+        else:
+            assert not isinstance(wq, mtq.nn.GroupedQuantizer) and isinstance(
+                wq, mtq.nn.TensorQuantizer
+            ), "default (te_per_expert_quantizers=False) should keep one shared weight quantizer"
+
+    # convert() sets the env var directly; reset it so the enabled case cannot leak to other tests.
+    os.environ.pop(_PER_EXPERT_QUANTIZER_ENV, None)
     destroy_model_parallel()
 
 

@@ -1559,6 +1559,17 @@ class QuantizeConfig(ModeloptBaseConfig):
         validate_default=True,
     )
 
+    te_per_expert_quantizers: bool = ModeloptField(
+        default=False,
+        title="Per-expert weight quantizers for Transformer Engine grouped experts",
+        description=(
+            "If True, each fused expert of a Transformer Engine ``TEGroupedLinear`` "
+            "(``TEGroupedMLP``) gets its own weight quantizer with an independent ``amax``. "
+            "If False (default, legacy behavior), a single weight quantizer is shared across all "
+            "experts in the layer."
+        ),
+    )
+
     effective_bits: float | None = ModeloptField(
         default=None,
         title="Effective bits per element (autoquant cost override)",

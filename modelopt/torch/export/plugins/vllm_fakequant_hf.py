@@ -31,6 +31,7 @@ from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import (
     AnyQuantizer,
+    GroupedQuantizer,
     QuantModule,
     SequentialQuantizer,
     TensorQuantizer,
@@ -628,7 +629,10 @@ def export_hf_vllm_fq_checkpoint(
                 for attr_name, quantizer in module.named_children():
                     if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
                         continue
-                    if isinstance(quantizer, SequentialQuantizer):
+                    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
+                        # GroupedQuantizer (per-expert TEGroupedLinear) and SequentialQuantizer
+                        # both hold sub-quantizers; disable each so the widened
+                        # _check_all_weight_quantizers_disabled(AnyQuantizer) check passes.
                         quantizer.disable()
                         for sub in quantizer:
                             wqs_to_restore.append((sub, sub._rotate))
