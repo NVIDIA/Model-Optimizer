@@ -29,7 +29,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 20 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 21 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -37,6 +37,7 @@ supported combinations.
 | `fp8_default-kv_fp8_cast` | FP8 W8A8, all linears | FP8 (constant amax) | max |
 | `nvfp4_default-kv_fp8` | NVFP4 W4A4, all linears | FP8 (calibrated) | max |
 | `nvfp4_default-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | max |
+| `nvfp4_act_headroom-kv_fp8_cast` | NVFP4 W4A4, all linears | FP8 (constant amax) | nvfp4_act_headroom |
 | `nvfp4_default-kv_nvfp4_cast` | NVFP4 W4A4, all linears | NVFP4 (constant amax) | max |
 | `nvfp4_default-kv_none-gptq` | NVFP4 W4A4 (static W), all linears | none | GPTQ (layerwise) |
 | `nvfp4_mlp_only-kv_fp8` | NVFP4 W4A4, MLP + MoE experts | FP8 (calibrated) | max |

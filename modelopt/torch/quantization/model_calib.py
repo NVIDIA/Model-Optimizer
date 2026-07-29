@@ -21,7 +21,7 @@ import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -512,15 +512,16 @@ def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
 
 def _swap_in_nvfp4_act_headroom_calibrators(
     model: nn.Module, *, anchor_percentile: float, rho: float
-) -> int:
+) -> list[tuple[nn.Module, Any]]:
     """Swap in an :class:`NVFP4ActHeadroomCalibrator` for each qualifying NVFP4 input quantizer.
 
-    Returns the number of quantizers swapped.
+    Returns ``(quantizer, original_calibrator)`` pairs so the caller can restore them.
     """
-    count = 0
+    swapped: list[tuple[nn.Module, Any]] = []
     for name, module in model.named_modules():
         if not _is_nvfp4_dynamic_input_quantizer(name, module):
             continue
+        swapped.append((module, module._calibrator))
         module._calibrator = NVFP4ActHeadroomCalibrator(
             module.num_bits,
             None,
@@ -529,8 +530,7 @@ def _swap_in_nvfp4_act_headroom_calibrators(
             anchor_percentile=anchor_percentile,
             rho=rho,
         )
-        count += 1
-    return count
+    return swapped
 
 
 @torch.no_grad()
@@ -558,14 +558,28 @@ def nvfp4_act_headroom_calibrate(
         distributed_sync: whether to sync amax across distributed processes
             (see :func:`max_calibrate`).
     """
-    n = _swap_in_nvfp4_act_headroom_calibrators(model, anchor_percentile=anchor_percentile, rho=rho)
+    swapped = _swap_in_nvfp4_act_headroom_calibrators(
+        model, anchor_percentile=anchor_percentile, rho=rho
+    )
+    if not swapped:
+        warn_rank_0(
+            "nvfp4_act_headroom: no NVFP4 dynamic-block input quantizer matched, so this is "
+            "equivalent to plain max calibration. Check that the recipe enables NVFP4 "
+            "activation quantizers."
+        )
     print_rank_0(
-        f"nvfp4_act_headroom: calibrating {n} NVFP4 activation quantizer(s) "
+        f"nvfp4_act_headroom: calibrating {len(swapped)} NVFP4 activation quantizer(s) "
         f"(anchor_percentile={anchor_percentile}, rho={rho})."
     )
     # max_calibrate runs the forward loop once: the swapped-in calibrators accumulate their
     # per-block histograms in the same pass that collects max stats for every other quantizer.
-    max_calibrate(model, forward_loop, distributed_sync=distributed_sync)
+    # The calibrators are restored afterwards so this algorithm does not leak into a later
+    # calibration of the same model, and so a repeat run starts from a fresh histogram.
+    try:
+        max_calibrate(model, forward_loop, distributed_sync=distributed_sync)
+    finally:
+        for quantizer, original_calibrator in swapped:
+            quantizer._calibrator = original_calibrator
 
 
 def _mse_quant_func(x, amax, quantizer):

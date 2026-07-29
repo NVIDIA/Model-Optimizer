@@ -15,6 +15,8 @@
 
 """Tests for the ``nvfp4_act_headroom`` activation global-scale calibration."""
 
+import warnings
+
 import pytest
 import torch
 
@@ -25,6 +27,7 @@ from modelopt.torch.quantization.model_calib import (
     _swap_in_nvfp4_act_headroom_calibrators,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.utils import reduce_block_amax
 
 NVFP4_CFG = {
     "num_bits": (2, 1),
@@ -65,13 +68,88 @@ def test_amax_is_rho_times_anchor():
 
 
 def test_amax_never_below_calibrated_max():
-    """A range wider than FP8 can hold warns and falls back to the no-clipping floor."""
+    """A range too wide for rho warns and degenerates to plain max -- never below it."""
     x = torch.zeros(64, 64)
     x[0, :16] = 100.0  # one large block, the rest tiny
     x[1:, :] = 1e-3
-    with pytest.warns(UserWarning, match="exceeds the FP8 scale range"):
+    with pytest.warns(UserWarning, match="leaves no headroom"):
         amax = _calibrate(NVFP4ActHeadroomCalibrator(rho=1.0, anchor_percentile=1.0), x)
-    assert amax >= 100.0 * 0.9
+    assert amax == pytest.approx(100.0)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "gaussian",
+        "heavy_tail",
+        "sparse",
+        "outlier",
+        "wide_dynamic_range",
+        "constant",
+    ],
+)
+def test_amax_is_never_below_observed_max(case):
+    """The no-clipping invariant holds on every distribution, guardrail path included."""
+    g = torch.Generator().manual_seed(7)
+    if case == "gaussian":
+        x = torch.randn(512, 256, generator=g)
+    elif case == "heavy_tail":
+        x = torch.randn(512, 256, generator=g) * torch.exp(torch.randn(512, 256, generator=g) * 2)
+    elif case == "sparse":
+        x = torch.randn(512, 256, generator=g) * (torch.rand(512, 256, generator=g) > 0.9)
+    elif case == "outlier":
+        x = torch.randn(512, 256, generator=g)
+        x[0, 0] = 5000.0
+    elif case == "wide_dynamic_range":
+        # Per-token magnitudes spanning ~6 decades: the regime that trips the guardrail.
+        x = torch.randn(2048, 1024, generator=g) * torch.logspace(-4, 2, 2048).unsqueeze(1)
+    else:
+        x = torch.full((256, 256), 0.5)
+
+    cal = NVFP4ActHeadroomCalibrator(anchor_percentile=1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        amax = _calibrate(cal, x)
+    observed_max = float(reduce_block_amax(x, block_sizes={-1: 16}).max())
+    assert amax >= observed_max, f"{case}: amax {amax} clips observed max {observed_max}"
+
+
+def test_anchor_percentile_zero_rejected():
+    """percentile 0 would defeat the low-tail mask, so it is rejected up front."""
+    with pytest.raises(ValueError, match="anchor_percentile must be in"):
+        NVFP4ActHeadroomCalibrator(anchor_percentile=0.0)
+
+
+def test_ragged_last_dim_is_handled():
+    """Activations whose last dim is not a multiple of the block size must not crash."""
+    g = torch.Generator().manual_seed(3)
+    x = torch.randn(32, 70, generator=g)  # 70 % 16 != 0
+    amax = _calibrate(NVFP4ActHeadroomCalibrator(anchor_percentile=1.0), x)
+    assert amax > 0
+    assert amax >= float(x.abs().max())
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_nan_inf_activations_rejected(bad):
+    """NaN/Inf must be reported rather than silently mis-binned."""
+    x = torch.randn(32, 64)
+    x[0, 0] = bad
+    with pytest.raises(AssertionError, match=r"nan|inf"):
+        NVFP4ActHeadroomCalibrator().collect(x)
+
+
+def test_calibrator_is_restored_after_calibration():
+    """The swapped calibrator must not leak into later calibrations of the same model."""
+    from modelopt.torch.quantization.model_calib import max_calibrate
+
+    data = torch.randn(16, 64)
+    model = mtq.quantize(_Net(), ACT_ONLY_CFG, lambda m: m(data))
+    assert not isinstance(model.fc1.input_quantizer._calibrator, NVFP4ActHeadroomCalibrator)
+
+    headroom_amax = float(model.fc1.input_quantizer.amax)
+    # A subsequent plain-max calibration must produce a plain-max scale, not a headroom one.
+    max_calibrate(model, lambda m: m(data))
+    assert float(model.fc1.input_quantizer.amax) < headroom_amax
 
 
 def test_lower_anchor_percentile_gives_smaller_amax():
@@ -123,8 +201,8 @@ def test_only_nvfp4_input_quantizers_are_selected():
 
 def test_swap_installs_calibrator_with_config_values():
     model = mtq.quantize(_Net(), ACT_ONLY_CFG, lambda m: m(torch.randn(8, 64)))
-    n = _swap_in_nvfp4_act_headroom_calibrators(model, anchor_percentile=5.0, rho=1024.0)
-    assert n == 2  # fc1 and fc2 input quantizers
+    swapped = _swap_in_nvfp4_act_headroom_calibrators(model, anchor_percentile=5.0, rho=1024.0)
+    assert len(swapped) == 2  # fc1 and fc2 input quantizers
     cal = model.fc1.input_quantizer._calibrator
     assert isinstance(cal, NVFP4ActHeadroomCalibrator)
     assert cal._anchor_percentile == 5.0

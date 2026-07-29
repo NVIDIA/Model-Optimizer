@@ -1004,7 +1004,7 @@ class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
 
     anchor_percentile: float = ModeloptField(
         default=1.0,
-        ge=0.0,
+        gt=0.0,
         le=100.0,
         title="Percentile of the per-block activation amaxes used as the anchor.",
         description=(

@@ -47,20 +47,21 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
     This calibrator instead anchors the global scale to a low percentile of the per-block
     amax distribution::
 
-        amax = max(rho * anchor, floor)
+        amax = max(rho * anchor, observed_max)
 
-    where ``anchor`` is the per-block amax at ``anchor_percentile`` and ``floor`` is a high
-    percentile of the same distribution. Multiplying the low anchor by ``rho`` places the
-    calibrated blocks in the lower part of the FP8 scale range and leaves the rest as upward
-    headroom, while ``floor`` keeps the scale at or above the calibrated blocks so
-    calibration data is never clipped.
+    where ``anchor`` is the per-block amax at ``anchor_percentile``. Multiplying the low anchor
+    by ``rho`` places the calibrated blocks in the lower part of the FP8 scale range and leaves
+    the rest as upward headroom. The result is floored at the largest per-block amax observed
+    during calibration, so the scale never sits below the calibrated data; when that floor wins
+    (a per-block range too wide for ``rho`` to clear) the calibrator warns and the result
+    degenerates to plain ``max``.
 
     Args:
         num_bits: quantizer ``num_bits`` (``(2, 1)`` for NVFP4); kept for interface parity.
         axis: unused (the global scale is per-tensor); kept for interface parity.
         unsigned: unused; kept for interface parity.
         block_size: NVFP4 block width along the last dim.
-        anchor_percentile: percentile of the per-block amaxes used as the anchor.
+        anchor_percentile: percentile of the per-block amaxes used as the anchor; must be > 0.
         rho: headroom factor applied to the anchor. Must be in ``(0, 28672)``.
         num_bins: number of log2 histogram bins.
         log2_min: low end of the log2 range covered by the histogram.
@@ -87,8 +88,8 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
                 f"rho must be in (0, {_FP8_NORMAL_DYNAMIC_RANGE}); got {rho}. Larger rho gives "
                 "more headroom above the calibrated range but less room below it."
             )
-        if not (0.0 <= anchor_percentile <= 100.0):
-            raise ValueError(f"anchor_percentile must be in [0, 100]; got {anchor_percentile}.")
+        if not (0.0 < anchor_percentile <= 100.0):
+            raise ValueError(f"anchor_percentile must be in (0, 100]; got {anchor_percentile}.")
         self._block_size = block_size
         self._anchor_percentile = float(anchor_percentile)
         self._rho = float(rho)
@@ -106,9 +107,23 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
     @torch.no_grad()
     def collect(self, x: torch.Tensor) -> None:
         """Accumulate the per-block amax histogram for one activation batch."""
+        x = x.detach()
+        # Zero-pad a ragged tail so activations whose last dim is not a multiple of the block
+        # size are handled instead of tripping the divisibility assert in reduce_block_amax.
+        # Padding with zeros cannot change any block's amax.
+        remainder = x.shape[-1] % self._block_size
+        if remainder:
+            x = torch.nn.functional.pad(x, (0, self._block_size - remainder))
         # reduce_block_amax already takes abs().
-        block_amax = reduce_block_amax(x.detach(), block_sizes={-1: self._block_size})
+        block_amax = reduce_block_amax(x, block_sizes={-1: self._block_size})
         block_amax = block_amax.flatten().float()
+
+        assert not torch.any(torch.isnan(block_amax)), (
+            f"detected nan values in amax. nan in original tensor: {torch.any(torch.isnan(x))}"
+        )
+        assert not torch.any(torch.isinf(block_amax)), (
+            f"detected inf values in amax. inf in original tensor: {torch.any(torch.isinf(x))}"
+        )
 
         cur_max = block_amax.max()
         self._running_max = (
@@ -129,7 +144,7 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         """Value at ``percentile`` of the histogram, ignoring bins below ``floor_value``."""
         if self._hist is None:
             return None
-        counts = self._hist.float().clone()
+        counts = self._hist.float()
         if floor_value is not None and floor_value > 0:
             floor_bin = int(self._bin_index(torch.log2(torch.tensor(floor_value))).item())
             counts[:floor_bin] = 0
@@ -151,6 +166,7 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         if self._hist is None or self._running_max is None:
             return None
 
+        running_max = float(self._running_max)
         floor = self._percentile(_FLOOR_PERCENTILE)
         anchor = (
             self._percentile(
@@ -163,16 +179,27 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
             # Percentiles collapsed despite a non-empty histogram: fall back to plain max.
             return self._running_max.clone()
 
-        if floor / anchor > _FP8_NORMAL_DYNAMIC_RANGE:
+        # The observed max is the no-clipping bound: the returned scale never sits below it, so
+        # calibration data is never clipped. Headroom is whatever the anchor term adds on top.
+        headroom_amax = self._rho * anchor
+        if headroom_amax <= running_max:
+            exceeds_window = floor / anchor > _FP8_NORMAL_DYNAMIC_RANGE
             warnings.warn(
-                f"[nvfp4_act_headroom] per-block amax range {floor / anchor:.1f} exceeds the FP8 "
-                f"scale range ({_FP8_NORMAL_DYNAMIC_RANGE:.0f}); no global scale can hold both "
-                "ends. Using the no-clipping floor, which leaves no headroom. Reduce the range "
-                "with outlier mitigation (SmoothQuant / per-channel / higher precision)."
+                f"[nvfp4_act_headroom] per-block amax range {floor / anchor:.1f} leaves no "
+                f"headroom at rho={self._rho:g}; falling back to the observed max. "
+                + (
+                    f"The range also exceeds the FP8 scale range "
+                    f"({_FP8_NORMAL_DYNAMIC_RANGE:.0f}), so no global scale can hold both ends. "
+                    "Reduce the range with outlier mitigation (SmoothQuant / per-channel / "
+                    "higher precision)."
+                    if exceeds_window
+                    else "Lower anchor_percentile or raise rho for more headroom."
+                ),
+                stacklevel=2,
             )
-            amax = floor
+            amax = running_max
         else:
-            amax = max(self._rho * anchor, floor)
+            amax = headroom_amax
 
         return torch.tensor(float(amax), dtype=torch.float32, device=self._running_max.device)
 
