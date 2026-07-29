@@ -35,17 +35,6 @@ from .custom import _ParallelLinear
 _TE_VERSION = Version(te.__version__)
 
 _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
-_PER_EXPERT_QUANTIZER_ENV = "MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER"
-
-
-def _te_per_expert_quantizers_enabled() -> bool:
-    """Whether ``TEGroupedLinear`` gives each fused expert its own weight quantizer (opt-in).
-
-    Default (env unset / ``"0"``) is the legacy single shared weight quantizer for all experts.
-    ``QuantizeConfig.te_per_expert_quantizers=True`` sets this env var during ``convert``; it can
-    also be set directly.
-    """
-    return os.getenv(_PER_EXPERT_QUANTIZER_ENV, "0") == "1"
 
 
 def _assert_te_fp8_enabled():
@@ -159,14 +148,10 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after setup.
         delattr(self, "weight")
 
-        # Opt-in (``QuantizeConfig.te_per_expert_quantizers``): each fused expert gets its own
-        # weight quantizer (independent amax), stored in a GroupedQuantizer (an nn.ModuleList)
-        # surfaced as ``weight_quantizer.{i}`` so the fused-experts name normalizer maps them to
-        # ``*weight_quantizer`` and the stock configs apply. Default (legacy) keeps the single
-        # shared weight quantizer that ``super()._setup()`` installed above.
-        if not _te_per_expert_quantizers_enabled():
-            return
-
+        # Each fused expert gets its own weight quantizer (independent amax), stored in a
+        # GroupedQuantizer (an nn.ModuleList) surfaced as ``weight_quantizer.{i}`` so the
+        # fused-experts name normalizer maps them to ``*weight_quantizer`` and the stock configs
+        # apply. This replaces the single shared weight quantizer ``super()._setup()`` installed.
         self.weight_quantizer = GroupedQuantizer(
             *(copy.deepcopy(self.weight_quantizer) for _ in range(self.num_gemms))
         )
@@ -201,8 +186,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # static recipes on export and overwrites frozen amax on every QAD resume. Only
         # re-calibrate a quantizer whose loaded amax is shape-INCOMPATIBLE with its weight
         # (a genuine TP/EP change between save and restore); otherwise keep it as-is.
-        # Per-expert amax preservation only applies when each expert has its own quantizer; with
-        # the legacy single shared quantizer, super().modelopt_post_restore already handled it.
+        # weight_quantizer is a GroupedQuantizer (one per expert) after _setup; guard defensively.
         if not isinstance(self.weight_quantizer, GroupedQuantizer):
             return
 

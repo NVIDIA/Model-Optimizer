@@ -15,7 +15,6 @@
 
 import copy
 import math
-import os
 import re
 from contextlib import nullcontext
 from functools import partial
@@ -67,7 +66,6 @@ from modelopt.torch.quantization.plugins.megatron import (
 )
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
-    _PER_EXPERT_QUANTIZER_ENV,
 )
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -921,16 +919,12 @@ def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1,
     destroy_model_parallel()
 
 
-@pytest.mark.parametrize("per_expert", [False, True])
-def test_te_grouped_per_expert_quantizer_toggle(distributed_setup_size_1, monkeypatch, per_expert):
-    """``QuantizeConfig.te_per_expert_quantizers`` toggles per-expert TEGroupedLinear quantizers.
+def test_te_grouped_per_expert_quantizer_default(distributed_setup_size_1):
+    """TEGroupedLinear installs a per-expert GroupedQuantizer (one quantizer per fused expert).
 
-    Default (False) keeps the legacy single shared weight quantizer for all fused experts; True
-    installs a GroupedQuantizer per TEGroupedLinear with one quantizer per fused expert.
+    Per-expert weight quantization is unconditional: every ``TEGroupedLinear`` gets a
+    ``GroupedQuantizer`` with ``num_gemms`` independent quantizers, not a single shared one.
     """
-    # Clean env so the default case is not polluted by a prior enabled run.
-    monkeypatch.delenv(_PER_EXPERT_QUANTIZER_ENV, raising=False)
-
     initialize_for_megatron(seed=SEED)
     model = _gpt_model_provider(
         tp_size=1,
@@ -944,10 +938,7 @@ def test_te_grouped_per_expert_quantizer_toggle(distributed_setup_size_1, monkey
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
 
-    cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
-    if per_expert:
-        cfg["te_per_expert_quantizers"] = True
-    mtq.quantize(model, cfg, forward)
+    mtq.quantize(model, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
 
     grouped_linears = [
         getattr(mlp, name)
@@ -958,18 +949,11 @@ def test_te_grouped_per_expert_quantizer_toggle(distributed_setup_size_1, monkey
     assert grouped_linears
     for gl in grouped_linears:
         wq = gl.weight_quantizer
-        if per_expert:
-            assert isinstance(wq, mtq.nn.GroupedQuantizer), (
-                "te_per_expert_quantizers=True should install a per-expert GroupedQuantizer"
-            )
-            assert len(wq) == gl.num_gemms
-        else:
-            assert not isinstance(wq, mtq.nn.GroupedQuantizer) and isinstance(
-                wq, mtq.nn.TensorQuantizer
-            ), "default (te_per_expert_quantizers=False) should keep one shared weight quantizer"
+        assert isinstance(wq, mtq.nn.GroupedQuantizer), (
+            "TEGroupedLinear should install a per-expert GroupedQuantizer"
+        )
+        assert len(wq) == gl.num_gemms
 
-    # convert() sets the env var directly; reset it so the enabled case cannot leak to other tests.
-    os.environ.pop(_PER_EXPERT_QUANTIZER_ENV, None)
     destroy_model_parallel()
 
 

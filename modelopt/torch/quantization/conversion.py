@@ -16,7 +16,6 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
-import os
 import re
 import warnings
 from collections.abc import Callable
@@ -65,12 +64,6 @@ def convert_to_quantized_model(model: ModelLikeModule, config: QuantizeConfig) -
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    # TEGroupedLinear per-expert weight quantizers are an opt-in structural choice made in the
-    # module's _setup (during replace_quant_module), before quant_cfg is applied. Bridge the config
-    # flag to the env var the TE plugin reads so per-expert quantizers are created only when
-    # requested; the default keeps the legacy single shared quantizer.
-    if config.get("te_per_expert_quantizers"):
-        os.environ["MODELOPT_TEGROUPED_PER_EXPERT_QUANTIZER"] = "1"
     replace_quant_module(model, version=ModeloptStateManager(model).state_version)
     set_quantizer_by_cfg(model, config.get("quant_cfg", []))
 
