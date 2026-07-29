@@ -154,7 +154,9 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         target = percentile / 100.0 * total
         cdf = torch.cumsum(counts, dim=0)
         bin_idx = int(torch.searchsorted(cdf, target).clamp(0, self._num_bins - 1).item())
-        # Bin center back to a value in linear space.
+        # Reconstruct at the bin center. Which representative is used (center vs. a bin edge
+        # vs. interpolating within the bin from the cdf) shifts every calibrated scale, so it
+        # is kept fixed to keep scales comparable across runs and existing checkpoints.
         log2_val = self._log2_min + (bin_idx + 0.5) / self._num_bins * (
             self._log2_max - self._log2_min
         )
