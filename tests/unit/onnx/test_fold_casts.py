@@ -172,22 +172,30 @@ def test_convert_q_data_initializers_is_noop_below_min_opset():
     assert weight.data_type == TensorProto.FLOAT
 
 
-def test_convert_q_data_initializers_requires_fp16_scale():
+def test_convert_q_data_initializers_skips_non_fp16_scale(caplog):
     model = _initializer_q_model(opset=19)
     scale = next(
         initializer for initializer in model.graph.initializer if initializer.name == "scale"
     )
     scale.CopyFrom(numpy_helper.from_array(np.array(0.1, dtype=np.float32), "scale"))
-    with pytest.raises(ValueError, match="Q scales must be FP16"):
-        _convert_q_data_initializers_to_fp16(model)
+    converted = _convert_q_data_initializers_to_fp16(model)
+    weight = next(
+        initializer for initializer in converted.graph.initializer if initializer.name == "w"
+    )
+    assert weight.data_type == TensorProto.FLOAT
+    assert "node 'q' has FLOAT scale" in caplog.text
 
 
-def test_convert_q_data_initializers_rejects_fp32_graph_input_scale():
+def test_convert_q_data_initializers_skips_fp32_graph_input_scale(caplog):
     model = _initializer_q_model(opset=19)
     scale = next(
         initializer for initializer in model.graph.initializer if initializer.name == "scale"
     )
     model.graph.initializer.remove(scale)
     model.graph.input.append(helper.make_tensor_value_info("scale", TensorProto.FLOAT, []))
-    with pytest.raises(ValueError, match="Q scales must be FP16"):
-        _convert_q_data_initializers_to_fp16(model)
+    converted = _convert_q_data_initializers_to_fp16(model)
+    weight = next(
+        initializer for initializer in converted.graph.initializer if initializer.name == "w"
+    )
+    assert weight.data_type == TensorProto.FLOAT
+    assert "node 'q' has FLOAT scale" in caplog.text

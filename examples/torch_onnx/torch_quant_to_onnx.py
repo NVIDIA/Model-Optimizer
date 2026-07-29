@@ -343,6 +343,15 @@ def _add_auto_resnet_residual_quantizers(model, auto_quantization_formats, data_
     _calibrate_new_quantizers(model, residual_quantizers, data_loader)
 
 
+def _set_quantizer_enabled(module, name, enabled):
+    quantizer = getattr(module, name, None) if module is not None else None
+    if quantizer is not None:
+        if enabled:
+            quantizer.enable()
+        else:
+            quantizer.disable()
+
+
 def _finalize_resnet_quantizers(
     model, quantize_mode, auto_quantization_formats, data_loader, residual_quantizers
 ):
@@ -353,7 +362,7 @@ def _finalize_resnet_quantizers(
 
     if quantize_mode in ("int8", "fp8"):
         for block in blocks:
-            block.conv1.input_quantizer.disable()
+            _set_quantizer_enabled(getattr(block, "conv1", None), "input_quantizer", False)
             if block.downsample is not None:
                 downsample_conv = next(
                     (
@@ -364,11 +373,12 @@ def _finalize_resnet_quantizers(
                     None,
                 )
                 if downsample_conv is not None:
-                    downsample_conv.input_quantizer.disable()
-        model.fc.input_quantizer.disable()
-        model.fc.weight_quantizer.disable()
+                    _set_quantizer_enabled(downsample_conv, "input_quantizer", False)
+        fc = getattr(model, "fc", None)
+        _set_quantizer_enabled(fc, "input_quantizer", False)
+        _set_quantizer_enabled(fc, "weight_quantizer", False)
         if quantize_mode == "int8":
-            model.global_pool.input_quantizer.enable()
+            _set_quantizer_enabled(getattr(model, "global_pool", None), "input_quantizer", True)
     elif quantize_mode == "auto":
         _add_auto_resnet_residual_quantizers(model, auto_quantization_formats, data_loader)
 
