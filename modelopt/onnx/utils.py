@@ -1521,22 +1521,10 @@ def _convert_q_data_initializers_to_fp16(onnx_model: onnx.ModelProto) -> onnx.Mo
         if not q_consumers:
             continue
 
-        invalid_scale = None
         for q_node in q_consumers:
             scale_type = tensor_types.get(q_node.input[1]) if len(q_node.input) >= 2 else None
             if scale_type != onnx.TensorProto.FLOAT16:
-                invalid_scale = (q_node, scale_type)
-                break
-        if invalid_scale is not None:
-            q_node, scale_type = invalid_scale
-            scale_type_name = (
-                "unknown" if scale_type is None else onnx.TensorProto.DataType.Name(scale_type)
-            )
-            logger.warning(
-                f"Skipping FP16 conversion for Q data initializer '{name}': "
-                f"node '{q_node.name}' has {scale_type_name} scale"
-            )
-            continue
+                raise ValueError("Q scales must be FP16 before converting Q data initializers")
 
         fp16_initializer = onnx.numpy_helper.from_array(
             convert_np_to_float16(onnx.numpy_helper.to_array(initializer)), initializer.name
