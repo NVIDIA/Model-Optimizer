@@ -16,18 +16,22 @@
  */
 
 #include <ATen/ATen.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/PhiloxUtils.cuh>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 #include <cuda/std/bit>
 #include <cuda/std/tuple>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 
 #include <torch/extension.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cub/cub.cuh>
+#include <mutex>
 
 #include "tensor_quant_mx.h"
 
@@ -52,6 +56,26 @@ static __device__ __host__ __inline__ float quantize(const float x, const float 
 
   // Apply sign.
   return sign * xabs;
+}
+
+static __device__ __inline__ float quantize_e2m1_stochastic(const float x, const float scale,
+                                                            const float unscale,
+                                                            const float random) {
+  const float scaled = fabsf(x) * scale;
+  if (isinf(scaled) || isnan(scaled) || scaled >= e2m1_table_values[7]) {
+    const float saturated = e2m1_table_values[7] * unscale;
+    return x < 0.0f ? -saturated : saturated;
+  }
+
+  int lower_index = 0;
+  while (scaled > e2m1_table_values[lower_index + 1]) {
+    ++lower_index;
+  }
+  const float lower = e2m1_table_values[lower_index];
+  const float upper = e2m1_table_values[lower_index + 1];
+  const float upper_probability = (scaled - lower) / (upper - lower);
+  const float rounded = random <= upper_probability ? upper : lower;
+  return copysignf(rounded * unscale, x);
 }
 
 /*
@@ -236,12 +260,13 @@ __device__ float compute_max(const float x, const int block_size, const float cl
 
 }; // namespace
 
-template <typename T, typename T_y, int THREAD_X, int THREAD_Y>
+template <bool STOCHASTIC_ROUNDING, typename T, typename T_y, int THREAD_X, int THREAD_Y>
 __global__ void amax_and_convert_kernel(const T *x, T_y *y, const int64_t n, const int blocksize,
                                         const int actual_cols, const int padded_cols, Types format,
                                         Types scale_format, const float *global_amax = nullptr,
                                         const bool per_channel_scaling = false,
-                                        const int ncols = -1) {
+                                        const int ncols = -1,
+                                        const at::PhiloxCudaState philox_args = {}) {
   // map thread -> element
   const uint64_t block_idx = blockIdx.x * blockDim.y + threadIdx.y;
   const int thread_id = threadIdx.x;
@@ -290,7 +315,14 @@ __global__ void amax_and_convert_kernel(const T *x, T_y *y, const int64_t n, con
   if (in_padding)
     return;
 
-  y[real_idx] = quantize(thread_val, scale, unscale, format);
+  if constexpr (STOCHASTIC_ROUNDING) {
+    auto [seed, offset] = at::cuda::philox::unpack(philox_args);
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, real_idx, offset, &state);
+    y[real_idx] = quantize_e2m1_stochastic(thread_val, scale, unscale, curand_uniform(&state));
+  } else {
+    y[real_idx] = quantize(thread_val, scale, unscale, format);
+  }
 }
 
 std::tuple<float *, bool> get_global_scaling(at::Tensor x, std::optional<at::Tensor> global_amax) {
@@ -312,19 +344,19 @@ std::tuple<float *, bool> get_global_scaling(at::Tensor x, std::optional<at::Ten
 
 using output_t = std::tuple<at::Tensor, std::optional<at::Tensor>>;
 
-#define DISPATCH_FUSED_AMAX_KERNEL(T, TX, TY)                                                      \
-  amax_and_convert_kernel<scalar_t, T, TX, TY>                                                     \
+#define DISPATCH_FUSED_AMAX_KERNEL(T, TX, TY, STOCHASTIC_ROUNDING, PHILOX_ARGS)                    \
+  amax_and_convert_kernel<STOCHASTIC_ROUNDING, scalar_t, T, TX, TY>                                \
       <<<blocks, block, 0, c10::cuda::getCurrentCUDAStream()>>>(                                   \
           x.data_ptr<scalar_t>(), y.data_ptr<T>(), n, blocksize, actual_cols, padded_cols, format, \
-          scale_format, global_amax_ptr, per_channel_scaling, x.size(-1))
+          scale_format, global_amax_ptr, per_channel_scaling, x.size(-1), PHILOX_ARGS)
 
-#define DISPATCH_SINGLE_TYPE(T)                                                                    \
+#define DISPATCH_SINGLE_TYPE(T, STOCHASTIC_ROUNDING, PHILOX_ARGS)                                  \
   if (blocksize == 8) {                                                                            \
-    DISPATCH_FUSED_AMAX_KERNEL(T, 8, blocks_per_cta);                                              \
+    DISPATCH_FUSED_AMAX_KERNEL(T, 8, blocks_per_cta, STOCHASTIC_ROUNDING, PHILOX_ARGS);            \
   } else if (blocksize == 16) {                                                                    \
-    DISPATCH_FUSED_AMAX_KERNEL(T, 16, blocks_per_cta);                                             \
+    DISPATCH_FUSED_AMAX_KERNEL(T, 16, blocks_per_cta, STOCHASTIC_ROUNDING, PHILOX_ARGS);           \
   } else if (blocksize == 32) {                                                                    \
-    DISPATCH_FUSED_AMAX_KERNEL(T, 32, blocks_per_cta);                                             \
+    DISPATCH_FUSED_AMAX_KERNEL(T, 32, blocks_per_cta, STOCHASTIC_ROUNDING, PHILOX_ARGS);           \
   } else {                                                                                         \
     throw std::invalid_argument("Blocksize for fused call must be one of {8, 16, 32}");            \
   }
@@ -353,7 +385,10 @@ using output_t = std::tuple<at::Tensor, std::optional<at::Tensor>>;
 int pad_dim_to_blocksize(const int dim, const int bs) { return dim + (bs - (dim % bs)); }
 
 at::Tensor fused_amax_convert(at::Tensor x, const int blocksize, Types format, Types scale_format,
-                              std::optional<at::Tensor> global_amax) {
+                              std::optional<at::Tensor> global_amax,
+                              const bool stochastic_rounding) {
+  TORCH_CHECK(!stochastic_rounding || format == Types::E2M1,
+              "Stochastic rounding is supported only for E2M1 payloads.");
   std::optional<at::Tensor> global_amax_float = std::nullopt;
 
   if (global_amax.has_value()) {
@@ -380,8 +415,21 @@ at::Tensor fused_amax_convert(at::Tensor x, const int blocksize, Types format, T
 
   auto [global_amax_ptr, per_channel_scaling] = get_global_scaling(x, global_amax_float);
 
-  DISPATCH_FLOAT_AND_HALF_AND_BFLOAT(x.scalar_type(), "fused_amax_convert_kernel",
-                                     { DISPATCH_SINGLE_TYPE(scalar_t); });
+  if (stochastic_rounding) {
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator(x.get_device()));
+    at::PhiloxCudaState philox_args;
+    {
+      std::lock_guard<std::mutex> lock(gen->mutex_);
+      philox_args = gen->philox_cuda_state(1);
+    }
+    DISPATCH_FLOAT_AND_HALF_AND_BFLOAT(x.scalar_type(), "fused_amax_convert_kernel",
+                                       { DISPATCH_SINGLE_TYPE(scalar_t, true, philox_args); });
+  } else {
+    DISPATCH_FLOAT_AND_HALF_AND_BFLOAT(x.scalar_type(), "fused_amax_convert_kernel", {
+      DISPATCH_SINGLE_TYPE(scalar_t, false, at::PhiloxCudaState{});
+    });
+  }
 
   return y;
 }
@@ -394,7 +442,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_amax_convert", &fused_amax_convert,
         "Compute block amax and quantize the tensor to mx formats", py::arg("inputs"),
         py::arg("block_size"), py::arg("format"), py::arg("scale_format"),
-        py::arg("global_amax") = py::none());
+        py::arg("global_amax") = py::none(), py::arg("stochastic_rounding") = false);
   m.def("convert_to_exmy", &convert_to_types, "Convert value to exmy format.", py::arg("x"),
         py::arg("format"));
   py::enum_<Types>(m, "Types")

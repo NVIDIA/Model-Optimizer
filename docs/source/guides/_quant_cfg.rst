@@ -99,6 +99,7 @@ with the default attributes of
         "num_bits":                 8,       # 8-bit integer quantization
         "axis":                     None,    # per-tensor scale (no per-channel axis)
         "fake_quant":               True,    # simulate quantization in forward pass (PTQ / QAT)
+        "stochastic_rounding":       False,   # deterministic E2M1 payload rounding by default
         "unsigned":                 False,   # signed integer range, e.g. [-128, 127] for INT8
         "narrow_range":             False,   # full range; True would restrict to [-127, 127] for INT8
         "type":                     "static",  # static calibration (not dynamic per-inference)
@@ -116,6 +117,14 @@ with the default attributes of
 In practice this means an un-configured but enabled quantizer performs **INT8 per-tensor static
 fake-quantization** with a max-calibrated scale. This is rarely the intended behavior — every
 quantizer you want active should be explicitly configured with a ``cfg`` entry.
+
+For MXFP4 or dynamic NVFP4 fake quantization, set ``stochastic_rounding=True`` to
+stochastically round only the E2M1 payload; block-scale rounding and deployment export remain
+deterministic. The option uses PyTorch's CUDA generator, so resetting
+``torch.cuda.manual_seed(...)`` reproduces results for the same device, input shape, kernel launch
+configuration, and RNG call order. Consecutive calls advance the generator state. Bitwise identity
+is not guaranteed across GPU architectures, launch-geometry changes, distributed rank ordering,
+or future RNG implementation changes.
 
 ----------
 

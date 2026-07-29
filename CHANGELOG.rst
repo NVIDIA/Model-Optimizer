@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Quantization*
+
+- Add opt-in stochastic rounding for E2M1 payloads in dynamic MXFP4 and NVFP4 fake quantization.
+
 **Backward Breaking Changes**
 
 **Deprecations**

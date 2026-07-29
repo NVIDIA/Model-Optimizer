@@ -81,6 +81,52 @@ class TestTensorQuantizerfp4:
 
         assert fp4_quantizer._get_amax(x) == x.abs().amax()
 
+    @pytest.mark.parametrize("scale_bits", [(8, 0), (4, 3)])
+    def test_stochastic_rounding_is_propagated(self, scale_bits):
+        quantizer = tensor_quantizer.TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": scale_bits},
+                stochastic_rounding=True,
+            )
+        ).cuda()
+        x = torch.full((64, 16), 2.25, device="cuda")
+        x[:, -1] = 6.0
+        amax = None if scale_bits == (8, 0) else x.abs().amax()
+
+        torch.cuda.manual_seed(1234)
+        output = quantizer(x)
+        torch.cuda.manual_seed(1234)
+        reference = tensor_quant.dynamic_block_quant(
+            x,
+            16,
+            amax,
+            None,
+            (2, 1),
+            scale_bits,
+            None,
+            "dynamic",
+            True,
+            True,
+        )
+
+        assert torch.equal(output, reference)
+
+    def test_missing_stochastic_rounding_state_defaults_to_deterministic(self):
+        quantizer = tensor_quantizer.TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (8, 0)},
+            )
+        ).cuda()
+        del quantizer._stochastic_rounding
+        x = torch.randn(2, 16, device="cuda")
+        rng_state = torch.cuda.get_rng_state()
+
+        quantizer(x)
+
+        assert torch.equal(rng_state, torch.cuda.get_rng_state())
+
     @pytest.mark.parametrize("pass_through_bwd", [True, False])
     def test_fp4_backward(self, pass_through_bwd):
         fp4_quantizer = tensor_quantizer.TensorQuantizer(

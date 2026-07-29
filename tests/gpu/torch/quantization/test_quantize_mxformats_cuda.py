@@ -37,6 +37,29 @@ def _get_test_inputs_outputs(test_in, test_out, block_size, in_size):
     )
 
 
+def _stochastic_e2m1(inputs, scale_bits):
+    global_amax = torch.tensor(2688.0, device=inputs.device) if scale_bits == (4, 3) else None
+    return cuda_ext_mx.fused_amax_convert(
+        inputs,
+        inputs.shape[-1],
+        cuda_ext_mx.Types.E2M1,
+        getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
+        global_amax,
+        True,
+    )
+
+
+def _deterministic_e2m1(inputs, scale_bits):
+    global_amax = torch.tensor(2688.0, device=inputs.device) if scale_bits == (4, 3) else None
+    return cuda_ext_mx.fused_amax_convert(
+        inputs,
+        inputs.shape[-1],
+        cuda_ext_mx.Types.E2M1,
+        getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
+        global_amax,
+    )
+
+
 @pytest.mark.parametrize("shape", shapes)
 @pytest.mark.parametrize("block_size", block_sizes)
 @pytest.mark.parametrize("dtype", dtypes)
@@ -95,6 +118,106 @@ def test_mxfp4(block_size, dtype):
         None,
     )
     assert torch.allclose(expected_outputs, outputs)
+
+
+@pytest.mark.parametrize("scale_bits", [(8, 0), (4, 3)])
+def test_stochastic_e2m1_rng_contract(scale_bits):
+    inputs = torch.full((64, 16), 2.25, device="cuda")
+    inputs[:, -1] = 6.0
+
+    torch.cuda.manual_seed(1234)
+    first = _stochastic_e2m1(inputs, scale_bits)
+    torch.cuda.manual_seed(1234)
+    repeated = _stochastic_e2m1(inputs, scale_bits)
+    successive = _stochastic_e2m1(inputs, scale_bits)
+    torch.cuda.manual_seed(5678)
+    different_seed = _stochastic_e2m1(inputs, scale_bits)
+
+    assert torch.equal(first, repeated)
+    assert not torch.equal(repeated, successive)
+    assert not torch.equal(first, different_seed)
+
+
+def test_default_e2m1_does_not_consume_cuda_rng():
+    inputs = torch.randn(8, 16, device="cuda")
+    state = torch.cuda.get_rng_state()
+
+    cuda_ext_mx.fused_amax_convert(
+        inputs,
+        16,
+        cuda_ext_mx.Types.E2M1,
+        cuda_ext_mx.Types.E8M0,
+        None,
+    )
+
+    assert torch.equal(state, torch.cuda.get_rng_state())
+
+
+@pytest.mark.parametrize("dtype", dtypes)
+@pytest.mark.parametrize("scale_bits", [(8, 0), (4, 3)])
+def test_stochastic_e2m1_legal_values_and_invariants(dtype, scale_bits):
+    table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
+    between = torch.tensor([0.2, 0.6, 1.2, 1.7, 2.3, 3.4, 4.5], device="cuda")
+    inputs = torch.zeros((2 * (table.numel() + between.numel()), 16), device="cuda")
+    values = torch.cat((table, between))
+    inputs[: values.numel(), 0] = values
+    inputs[values.numel() :, 0] = -values
+    inputs[:, -1] = 6.0
+    inputs = inputs.to(dtype)
+
+    outputs = _stochastic_e2m1(inputs, scale_bits)[:, 0].float()
+    deterministic = _deterministic_e2m1(inputs, scale_bits)[:, 0].float()
+    invariant_indices = torch.arange(table.numel(), device="cuda")
+    positive = outputs[: values.numel()]
+    negative = outputs[values.numel() :]
+
+    assert torch.equal(outputs[invariant_indices], deterministic[invariant_indices])
+    negative_invariant_indices = invariant_indices + values.numel()
+    assert torch.equal(
+        outputs[negative_invariant_indices],
+        deterministic[negative_invariant_indices],
+    )
+    positive_between = positive[table.numel() : table.numel() + between.numel()]
+    negative_between = negative[table.numel() : table.numel() + between.numel()]
+    assert torch.all(
+        torch.isclose(positive_between, table[:-1], atol=1e-5, rtol=0)
+        | torch.isclose(positive_between, table[1:], atol=1e-5, rtol=0)
+    )
+    assert torch.all(
+        torch.isclose(negative_between, -table[:-1], atol=1e-5, rtol=0)
+        | torch.isclose(negative_between, -table[1:], atol=1e-5, rtol=0)
+    )
+
+
+@pytest.mark.parametrize("scale_bits", [(8, 0), (4, 3)])
+def test_stochastic_e2m1_saturates_nan_to_positive_max(scale_bits):
+    negative_nan = torch.copysign(torch.tensor(float("nan")), torch.tensor(-1.0))
+    inputs = torch.zeros((1, 16), device="cuda")
+    inputs[0, :2] = torch.tensor([float("nan"), negative_nan], device="cuda")
+    inputs[0, -1] = 6.0
+
+    outputs = _stochastic_e2m1(inputs, scale_bits)
+
+    assert torch.allclose(outputs[0, :2], outputs.new_tensor([6.0, 6.0]), atol=1e-5, rtol=0)
+
+
+@pytest.mark.parametrize("scale_bits", [(8, 0), (4, 3)])
+def test_stochastic_e2m1_is_unbiased(scale_bits):
+    num_samples = 16384
+    target = 2.25
+    upper_probability = 0.25
+    inputs = torch.full((num_samples, 16), target, device="cuda")
+    inputs[:, -1] = 6.0
+
+    torch.cuda.manual_seed(1234)
+    samples = _stochastic_e2m1(inputs, scale_bits)[:, 0]
+    probability_tolerance = 6 * (upper_probability * (1 - upper_probability) / num_samples) ** 0.5
+
+    observed_upper_probability = (
+        torch.isclose(samples, samples.new_tensor(3.0), atol=1e-5).float().mean()
+    )
+    assert abs(observed_upper_probability - upper_probability) <= probability_tolerance
+    assert abs(samples.mean() - target) <= probability_tolerance
 
 
 def test_mxfp6():

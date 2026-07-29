@@ -457,6 +457,15 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""If True, enable fake quantization.""",
     )
 
+    stochastic_rounding: bool = ModeloptField(
+        default=False,
+        title="Enable stochastic rounding.",
+        description=(
+            "If True, stochastically round E2M1 payloads during dynamic block fake "
+            "quantization. Supported for MXFP4 and dynamic NVFP4 only."
+        ),
+    )
+
     unsigned: bool = ModeloptField(
         default=False,
         title="Enable unsigned quantization.",
@@ -713,6 +722,26 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         assert not (self.use_constant_amax and self.constant_amax is not None), (
             "use_constant_amax and constant_amax are mutually exclusive; set only one."
         )
+        return self
+
+    @model_validator(mode="after")
+    def validate_stochastic_rounding(self):
+        """Restrict stochastic rounding to dynamic E2M1 fake quantization."""
+        if not self.stochastic_rounding:
+            return self
+        if not (
+            self.fake_quant
+            and self.num_bits == (2, 1)
+            and self.block_sizes is not None
+            and self.block_sizes.get("type") == "dynamic"
+        ):
+            raise ValueError(
+                "stochastic_rounding=True requires fake, dynamic block E2M1 quantization."
+            )
+        if self.block_sizes.get("scale_bits") not in [(8, 0), (4, 3)]:
+            raise ValueError(
+                "stochastic_rounding=True requires scale_bits to be exactly (8, 0) or (4, 3)."
+            )
         return self
 
 

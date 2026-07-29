@@ -85,6 +85,64 @@ def test_need_calibration_with_list_cfg():
     assert not need_calibration(cfg_dynamic)
 
 
+class TestStochasticRoundingConfig:
+    @pytest.mark.parametrize("scale_bits", [(8, 0), (4, 3)])
+    def test_dynamic_e2m1_fake_quantization_is_supported(self, scale_bits):
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "dynamic", "scale_bits": scale_bits},
+            stochastic_rounding=True,
+        )
+
+        assert cfg.stochastic_rounding
+        assert QuantizerAttributeConfig(**cfg.model_dump()).stochastic_rounding
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"num_bits": (4, 3)},
+            {"block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)}},
+            {"block_sizes": None},
+            {"fake_quant": False},
+        ],
+    )
+    def test_unsupported_quantization_is_rejected(self, overrides):
+        attributes = {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "stochastic_rounding": True,
+            **overrides,
+        }
+
+        with pytest.raises(
+            ValidationError,
+            match="requires fake, dynamic block E2M1 quantization",
+        ):
+            QuantizerAttributeConfig(**attributes)
+
+    @pytest.mark.parametrize("scale_bits", [None, (5, 2)], ids=["missing", "unsupported"])
+    def test_unsupported_scale_format_is_rejected(self, scale_bits):
+        block_sizes = {-1: 16, "type": "dynamic"}
+        if scale_bits is not None:
+            block_sizes["scale_bits"] = scale_bits
+
+        with pytest.raises(
+            ValidationError,
+            match=r"requires scale_bits to be exactly \(8, 0\) or \(4, 3\)",
+        ):
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes=block_sizes,
+                stochastic_rounding=True,
+            )
+
+    def test_default_is_deterministic(self):
+        cfg = QuantizerAttributeConfig()
+
+        assert cfg.stochastic_rounding is False
+        assert "stochastic_rounding" not in cfg.model_dump(exclude_unset=True)
+
+
 class TestNormalizeQuantCfgList:
     def test_new_format_passthrough(self):
         """New-format entries are returned unchanged (only canonical defaults added)."""

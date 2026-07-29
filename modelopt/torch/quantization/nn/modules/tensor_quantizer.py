@@ -916,6 +916,7 @@ class TensorQuantizer(nn.Module):
                 getattr(self, "_trt_high_precision_dtype", None),
                 getattr(self, "_onnx_quantizer_type", None),
                 self._pass_through_bwd,
+                getattr(self, "_stochastic_rounding", False),
             )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8

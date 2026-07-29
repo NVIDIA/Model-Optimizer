@@ -157,11 +157,12 @@ def _quantize_impl_abstract(
 def _dynamic_block_quantize_impl(
     inputs: torch.Tensor,
     block_size: int,
-    amax: torch.Tensor,
+    amax: torch.Tensor | None,
     num_bits: int,
     exponent_bits: int,
     scale_num_bits: int,
     scale_exponent_bits: int,
+    stochastic_rounding: bool = False,
 ):
     scale_bits = (scale_exponent_bits, scale_num_bits - scale_exponent_bits - 1)
     if exponent_bits != 0:
@@ -169,7 +170,9 @@ def _dynamic_block_quantize_impl(
     if num_bits in mx_format_map:
         assert scale_bits in mx_format_map, f"Scale bits should be in {mx_format_map.keys()}"
         if scale_bits != (8, 0):
-            assert amax.is_cuda, "amax must be a CUDA tensor for dynamic block quantization."
+            assert amax is not None and amax.is_cuda, (
+                "amax must be a CUDA tensor for dynamic block quantization."
+            )
             if amax.numel() != 1:
                 amax = amax.amax()
         if (
@@ -179,6 +182,7 @@ def _dynamic_block_quantize_impl(
             and hasattr(triton_kernel, "fp4_fake_quant_block")  # requires compute >= 8.9
             and not DISABLE_TRITON_KERNEL
             and amax is not None
+            and not stochastic_rounding
         ):
             return triton_kernel.fp4_fake_quant_block(inputs, amax)
         cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
@@ -188,6 +192,7 @@ def _dynamic_block_quantize_impl(
             getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
             getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
             amax,
+            stochastic_rounding,
         )
     else:
         raise NotImplementedError(
@@ -203,6 +208,7 @@ def _dynamic_block_quantize_impl_abstract(
     exponent_bits: int,
     scale_num_bits: int,
     scale_exponent_bits: int,
+    stochastic_rounding: bool = False,
 ):
     """Register an abstract implementation for dynamic block quantization.
 
@@ -228,12 +234,12 @@ try:
     torch.library.define(
         "tensorrt::dynamic_block_quantize_op",
         "(Tensor input, int block_size, Tensor amax, int num_bits, int exponent_bits, "
-        "int scale_num_bits, int scale_exponent_bits) -> Tensor",
+        "int scale_num_bits, int scale_exponent_bits, bool stochastic_rounding=False) -> Tensor",
     )
     torch.library.define(
         "tensorrt::dynamic_block_quantize_op.overload",
         "(Tensor input, int block_size, None amax, int num_bits, int exponent_bits, "
-        "int scale_num_bits, int scale_exponent_bits) -> Tensor",
+        "int scale_num_bits, int scale_exponent_bits, bool stochastic_rounding=False) -> Tensor",
     )
 
     # Implement the None amax case
@@ -245,8 +251,18 @@ try:
         exponent_bits: int,
         scale_num_bits: int,
         scale_exponent_bits: int,
+        stochastic_rounding: bool = False,
     ):
-        return torch.empty_like(inputs)
+        return _dynamic_block_quantize_impl(
+            inputs,
+            block_size,
+            amax,
+            num_bits,
+            exponent_bits,
+            scale_num_bits,
+            scale_exponent_bits,
+            stochastic_rounding,
+        )
 
     # Register the implementation for both CPU and CUDA
     torch.library.impl("tensorrt::quantize_op", ["cpu", "cuda"])(_quantize_impl)
@@ -470,6 +486,7 @@ def _dynamic_block_quantize_forward(
     trt_high_precision_dtype=None,
     onnx_quantizer_type="dynamic",
     pass_through_bwd=True,
+    stochastic_rounding=False,
 ):
     """Forward method."""
     if isinstance(num_bits, int):
@@ -490,6 +507,7 @@ def _dynamic_block_quantize_forward(
         exponent_bits,
         scale_num_bits,
         scale_exponent_bits,
+        stochastic_rounding,
     )
     return outputs
 
@@ -498,7 +516,7 @@ class DynamicBlockQuantizationFunction(Function):
     """Dynamic block quantization functional."""
 
     @staticmethod
-    @symbolic_helper.parse_args("v", "i", "v", "t", "is", "is", "s", "s", "b")
+    @symbolic_helper.parse_args("v", "i", "v", "t", "is", "is", "s", "s", "b", "b")
     def symbolic(
         g,
         inputs,
@@ -510,6 +528,7 @@ class DynamicBlockQuantizationFunction(Function):
         trt_high_precision_dtype=None,
         onnx_quantizer_type="dynamic",
         pass_through_bwd=True,
+        stochastic_rounding=False,
     ):
         """ONNX symbolic function."""
         from .export_onnx import export_fp4, export_mxfp8
@@ -547,6 +566,7 @@ class DynamicBlockQuantizationFunction(Function):
         trt_high_precision_dtype=None,
         onnx_quantizer_type="dynamic",
         pass_through_bwd=True,
+        stochastic_rounding=False,
     ):
         """Forward method."""
         _save_for_backward_if_needed(ctx, pass_through_bwd, inputs, amax)
@@ -560,12 +580,13 @@ class DynamicBlockQuantizationFunction(Function):
             trt_high_precision_dtype,
             onnx_quantizer_type,
             pass_through_bwd,
+            stochastic_rounding,
         )
 
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=9)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=10)
 
 
 class StaticBlockwiseFP4FakeQuantFunction(Function):
