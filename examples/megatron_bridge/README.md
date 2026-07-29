@@ -130,6 +130,11 @@ The distillation script expects pre-tokenized data in Megatron's binary format (
 See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megatron-frameworks)**
 for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
 
+If you do not already have a suitable dataset, start with
+[data/nemotron-cascade-2-blend.yaml](data/nemotron-cascade-2-blend.yaml). It defines a general-purpose
+mixture of SFT data for QAD. Copy it, set the tokenizer for the target model, and adjust the output directory,
+token budget, sources, and weights as needed before preparing data.
+
 ### Distillation with Real Data
 
 Example usage to distill a 4B student (HF) from an 8B teacher (HF) on 8 GPUs (TP=8, PP=1):

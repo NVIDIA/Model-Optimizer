@@ -1,3 +1,4 @@
+# Set to the target model's Hugging Face ID or local tokenizer path.
 tokenizer: <target-model-tokenizer>
 output_dir: <session-model-workspace>/data/nemotron-cascade-2-through-150
 target_tokens: 2_600_000_000

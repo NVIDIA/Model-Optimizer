@@ -105,8 +105,10 @@ every target model and cluster.
 
 ## 5. Prepare only the next data tranche
 
-Copy `assets/nemotron-cascade-2-blend.yaml`, then set its tokenizer, output
-directory, and token budget. Run:
+Copy `examples/megatron_bridge/data/nemotron-cascade-2-blend.yaml` into the
+session workspace, replace the tokenizer placeholder with the target model's
+Hugging Face ID or local path, and set the output directory and token budget.
+Run:
 
 ```bash
 python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend \
