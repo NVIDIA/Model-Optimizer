@@ -4,10 +4,14 @@
 runner:
   kind: slurm
   slurm:
-    account: coreai_dlalgo_llm
+    # Required. Replace with the Slurm account for your site.
+    account: your_account
+    # Replace these generic partition names if your site uses different names.
     partition: batch
     partition_interactive: interactive
     partition_batch: batch
+    # Optional. CPU/IO stages use the regular one-node partition when unset.
+    partition_cpu: null
     interactive_max_nodes: 2
     max_nodes: 20
     time_limit: "4:00:00"
@@ -15,7 +19,9 @@ runner:
   execution_contract:
     repository: .
     venv: .venv
-    container:
-    container_mounts:
+    # Optional. Leave null to execute directly in the worker environment.
+    container: null
+    # Optional and used only when a container is configured.
+    container_mounts: null
     prerun_commands: []
     postrun_commands: []

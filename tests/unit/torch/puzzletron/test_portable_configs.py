@@ -18,26 +18,44 @@
 from pathlib import Path
 
 import yaml
-
 from puzzletron_orchestrator.compiler import load_runner_config
+
 from puzzletron_setup.v2.defaults import load_defaults
 
 REPOSITORY_ROOT = Path(__file__).parents[4]
 
 
 def test_runner_examples_use_repository_relative_defaults() -> None:
-    runner_paths = (
+    slurm_runner_paths = (
         "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
         "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
     )
 
-    for relative_path in runner_paths:
+    for relative_path in slurm_runner_paths:
         runner = load_runner_config(REPOSITORY_ROOT / relative_path)
         assert runner.contract.repository == "."
         assert runner.contract.venv == ".venv"
         assert runner.contract.container is None
         assert runner.contract.container_mounts is None
         assert not runner.contract.prerun_commands
+        assert runner.slurm is not None
+        assert runner.slurm.account == "your_account"
+        assert runner.slurm.partition_cpu is None
+
+    baremetal = load_runner_config(
+        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
+    )
+    assert baremetal.contract.repository == "."
+    assert baremetal.contract.venv == ".venv"
+    assert baremetal.contract.setup_env is None
+
+
+def test_execution_example_is_valid_yaml() -> None:
+    path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.example.yaml"
+
+    config = yaml.safe_load(path.read_text())
+
+    assert config["execution"]["defaults"]["gpus_per_node"] == 8
 
 
 def test_setup_defaults_are_portable_and_valid() -> None:
@@ -63,3 +81,41 @@ def test_nemotron_model_uses_hugging_face_identity() -> None:
     config = yaml.safe_load(path.read_text())
 
     assert config["input_hf_model_path"] == config["model_info"]["hf_repo"]
+
+
+def test_active_examples_use_portable_value_shapes() -> None:
+    slurm_paths = (
+        "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
+        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
+    )
+
+    for relative_path in slurm_paths:
+        runner = load_runner_config(REPOSITORY_ROOT / relative_path)
+        assert not Path(runner.contract.repository).is_absolute()
+        assert not Path(runner.contract.venv).is_absolute()
+        assert runner.slurm is not None
+        assert runner.slurm.account.startswith("REPLACE_WITH_")
+
+    baremetal = load_runner_config(
+        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
+    )
+    assert baremetal.baremetal is not None
+    assert baremetal.baremetal.rendezvous_host.startswith("REPLACE_WITH_")
+    assert all(host.hostname.startswith("REPLACE_WITH_") for host in baremetal.baremetal.hosts)
+
+    defaults_paths = sorted((REPOSITORY_ROOT / "nv-internal").glob("*_defaults*.yaml"))
+    assert [path.name for path in defaults_paths] == ["puzzletron_defaults.example.yaml"]
+
+
+def test_optional_yaml_values_are_explicit() -> None:
+    paths = (
+        "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
+        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
+        "nv-internal/puzzletron_defaults.example.yaml",
+    )
+
+    for relative_path in paths:
+        content = (REPOSITORY_ROOT / relative_path).read_text()
+        assert "partition_cpu: null" in content
+        assert "container: null" in content
+        assert "container_mounts: null" in content

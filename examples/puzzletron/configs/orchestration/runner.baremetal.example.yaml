@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Example bare-metal runner config for the v2 orchestrator."""
+# Example bare-metal runner config for the v2 orchestrator.
 
 runner:
   kind: baremetal
   inventory:
+    # Replace these generic names with hosts reachable from the controller.
     rendezvous_host: node-a
     rendezvous_port_base: 29500
     hosts:
@@ -14,6 +15,7 @@ runner:
       - hostname: node-b
         gpus: 8
   execution_contract:
-    repository: /shared/modelopt
-    venv: /shared/modelopt/.venv
-    setup_env: ""
+    repository: .
+    venv: .venv
+    # Optional. Set to a worker-side environment setup script when needed.
+    setup_env: null

@@ -1219,7 +1219,7 @@ def _ask_infrastructure(
         default="",
         description=(
             "Use /host/path:/container/path; separate multiple mounts with commas, for "
-            "example /lustre:/lustre,/datasets:/datasets."
+            "example /data:/data,/models:/models."
         ),
     ).strip()
     prerun = prompts.text("Pre-run commands separated by ';;' (blank for none):", default="")

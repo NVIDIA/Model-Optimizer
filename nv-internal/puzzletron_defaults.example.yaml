@@ -3,10 +3,15 @@ infrastructure:
   execution_contract:
     repository: .
     venv: .venv
-    container:
-    container_mounts:
+    # Optional. Leave null to execute directly in the worker environment.
+    container: null
+    # Optional and used only when a container is configured.
+    container_mounts: null
     prerun_commands: []
   runner:
     kind: slurm
     slurm:
-      partition_cpu:
+      # Add the required Slurm account for your site before using this file.
+      # account: your_account
+      # Optional. CPU/IO stages use the regular partition when unset.
+      partition_cpu: null
