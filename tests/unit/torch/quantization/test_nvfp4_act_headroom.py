@@ -152,6 +152,36 @@ def test_calibrator_is_restored_after_calibration():
     assert float(model.fc1.input_quantizer.amax) < headroom_amax
 
 
+def test_shared_state_knobs_are_forwarded_to_max_calibrate():
+    """shared_states / sync_expert_weight_amax reach max_calibrate, as they do for `max`."""
+    import modelopt.torch.quantization.model_calib as mc
+
+    seen = {}
+    real = mc.max_calibrate
+
+    def spy(model, forward_loop=None, distributed_sync=True, **kwargs):
+        seen.update(kwargs)
+        return real(model, forward_loop, distributed_sync)
+
+    cfg = {
+        **ACT_ONLY_CFG,
+        "algorithm": {
+            "method": "nvfp4_act_headroom",
+            "anchor_percentile": 1,
+            "shared_states": {"weight_global_amax": {"patterns": [r".*fc1"]}},
+            "sync_expert_weight_amax": True,
+        },
+    }
+    mc.max_calibrate = spy
+    try:
+        mtq.quantize(_Net(), cfg, lambda m: m(torch.randn(8, 64)))
+    finally:
+        mc.max_calibrate = real
+
+    assert seen["sync_expert_weight_amax"] is True
+    assert seen["shared_states"] == {"weight_global_amax": {"patterns": [r".*fc1"]}}
+
+
 def test_lower_anchor_percentile_gives_smaller_amax():
     """anchor_percentile is tunable and monotone: a lower percentile anchors lower."""
     torch.manual_seed(0)

@@ -986,7 +986,7 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
-class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
+class NVFP4ActHeadroomCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Config for the ``nvfp4_act_headroom`` calibration algorithm.
 
     Calibrates the per-tensor global scale of NVFP4 *activation* (input) quantizers so that
@@ -1029,6 +1029,15 @@ class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
         default=True,
         title="Whether to sync the amax across the distributed processes.",
         description="If True, the amax will be synced across the distributed processes.",
+    )
+
+    sync_expert_weight_amax: bool = ModeloptField(
+        default=False,
+        title="Share one weight amax across local experts in a SequentialMLP MoE layer.",
+        description=(
+            "Forwarded to max calibration, which handles the weight quantizers for this "
+            "algorithm. See :class:`MaxCalibConfig` for details."
+        ),
     )
 
 

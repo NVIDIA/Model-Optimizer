@@ -541,6 +541,8 @@ def nvfp4_act_headroom_calibrate(
     anchor_percentile: float = 1.0,
     rho: float = 16384.0,
     distributed_sync: bool = True,
+    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    sync_expert_weight_amax: bool = False,
 ):
     """Calibrate NVFP4 activation global scales with headroom; everything else uses max.
 
@@ -557,6 +559,14 @@ def nvfp4_act_headroom_calibrate(
         rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
         distributed_sync: whether to sync amax across distributed processes
             (see :func:`max_calibrate`).
+        shared_states: shared quantization-state grouping, forwarded to :func:`max_calibrate`.
+        sync_expert_weight_amax: share one weight amax across local experts in a SequentialMLP
+            MoE layer, forwarded to :func:`max_calibrate`.
+
+    .. note::
+        Under data parallelism the per-rank scales are combined by :func:`max_calibrate` with a
+        ``MAX`` all-reduce, so the result is the largest per-rank headroom scale rather than the
+        scale implied by pooling every rank's per-block distribution.
     """
     swapped = _swap_in_nvfp4_act_headroom_calibrators(
         model, anchor_percentile=anchor_percentile, rho=rho
@@ -576,7 +586,13 @@ def nvfp4_act_headroom_calibrate(
     # The calibrators are restored afterwards so this algorithm does not leak into a later
     # calibration of the same model, and so a repeat run starts from a fresh histogram.
     try:
-        max_calibrate(model, forward_loop, distributed_sync=distributed_sync)
+        max_calibrate(
+            model,
+            forward_loop,
+            distributed_sync=distributed_sync,
+            sync_expert_weight_amax=sync_expert_weight_amax,
+            shared_states=shared_states,
+        )
     finally:
         for quantizer, original_calibrator in swapped:
             quantizer._calibrator = original_calibrator
