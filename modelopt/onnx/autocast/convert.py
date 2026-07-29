@@ -23,6 +23,8 @@ reduced precision on the rest of the nodes. AutoCast automatically injects cast 
 nodes.
 """
 
+from copy import deepcopy
+
 import numpy as np
 import onnx
 
@@ -42,6 +44,17 @@ For 512, the unit in last place (ULP) is 0.5, for 1024 it is 1.0, etc.
 DEFAULT_DATA_MAX = 512
 DEFAULT_INIT_MAX = np.finfo(np.float16).max
 LATEST_IR_VERSION_SUPPORTED_BY_ORT = 10
+
+
+def _capture_network_io_metadata(
+    model: onnx.ModelProto, keep_io_types: bool
+) -> dict[str, list[onnx.ValueInfoProto]] | None:
+    if not keep_io_types:
+        return None
+    return {
+        "input": [deepcopy(io) for io in model.graph.input],
+        "output": [deepcopy(io) for io in model.graph.output],
+    }
 
 
 def convert_to_mixed_precision(
@@ -97,6 +110,7 @@ def convert_to_mixed_precision(
     # Load and process model
     model = onnx.load(onnx_path, load_external_data=True)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
+    original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
     # Get original model's opset version
     original_opset = onnx_utils.get_opset_version(model)
@@ -172,6 +186,7 @@ def convert_to_mixed_precision(
         init_conversion_max_bytes=init_conversion_max_bytes,
         custom_ops=graph_sanitizer.custom_ops,
         use_standalone_type_inference=use_standalone_type_inference,
+        original_network_io_metadata=original_network_io_metadata,
     )
 
     # Obtain reference data
@@ -227,6 +242,7 @@ def convert_to_f16(
                INT4 requires 21, NVFP4 requires 23).
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
+    original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
     # Check Q/DQ precision types in the model and determine required opset
     qdq_precisions = get_qdq_precisions(model)
@@ -285,6 +301,7 @@ def convert_to_f16(
         custom_ops=sanitizer.custom_ops,
         tensor_block_dict=tensor_block_dict,
         use_standalone_type_inference=use_standalone_type_inference,
+        original_network_io_metadata=original_network_io_metadata,
     )
     high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
     low_precision_nodes = [

@@ -1532,6 +1532,21 @@ def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.Node
             break
 
 
+def _sync_value_info_elem_type(graph: onnx.GraphProto, tensor_name: str, elem_type: int) -> None:
+    """Synchronize declarations for a tensor whose producer dtype changed."""
+    for value_info in list(graph.value_info) + list(graph.input) + list(graph.output):
+        if value_info.name == tensor_name and value_info.type.HasField("tensor_type"):
+            value_info.type.tensor_type.elem_type = elem_type
+
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                _sync_value_info_elem_type(attr.g, tensor_name, elem_type)
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    _sync_value_info_elem_type(subgraph, tensor_name, elem_type)
+
+
 def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     """Removes both sequential casts and casts that don't change precision.
 
@@ -1571,6 +1586,9 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                 assert len(cast_producers) == 1 and cast_producers[0].op_type == "Constant"
                 constant_producer = cast_producers[0]
                 _convert_constant_values(constant_producer, node)
+                _sync_value_info_elem_type(
+                    onnx_model.graph, constant_producer.output[0], get_cast_to_type(node)
+                )
                 _bypass_cast_node(onnx_model, node)
                 logger.debug(f"Found foldable Constant->Cast pattern, removing {node.name}")
 
