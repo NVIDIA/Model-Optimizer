@@ -1,17 +1,25 @@
 schema_version: 1
 infrastructure:
   execution_contract:
+    # Runnable when setup and orchestration start from a checkout visible on every worker.
+    # Otherwise, replace "." with the worker-visible repository path.
     repository: .
+    # Sourced as <venv>/bin/activate after changing into the repository.
+    # Use a repository-relative path or an absolute path visible on every worker.
     venv: .venv
-    # Optional. Leave null to execute directly in the worker environment.
+    # Optional. Set to an image/path accepted by the cluster's srun container plugin.
+    # Leave null to execute directly in the worker environment.
     container: null
-    # Optional and used only when a container is configured.
+    # Optional and used only with a container. Use comma-separated
+    # /host/path:/container/path entries, for example /data:/data,/models:/models.
     container_mounts: null
+    # Optional shell commands run in order before virtualenv activation.
+    # Example: ["module load cuda", "export HF_HOME=/data/huggingface"]
     prerun_commands: []
   runner:
     kind: slurm
     slurm:
       # Add the required Slurm account for your site before using this file.
-      # account: your_account
+      # account: REPLACE_WITH_SLURM_ACCOUNT
       # Optional. CPU/IO stages use the regular partition when unset.
       partition_cpu: null

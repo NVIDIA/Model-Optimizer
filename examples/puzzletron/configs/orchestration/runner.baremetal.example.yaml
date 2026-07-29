@@ -6,16 +6,22 @@
 runner:
   kind: baremetal
   inventory:
-    # Replace these generic names with hosts reachable from the controller.
-    rendezvous_host: node-a
+    # Required placeholders. Replace both host values with SSH hosts reachable
+    # from the controller; the rendezvous host must match one inventory hostname.
+    rendezvous_host: REPLACE_WITH_PRIMARY_HOST
     rendezvous_port_base: 29500
     hosts:
-      - hostname: node-a
+      - hostname: REPLACE_WITH_PRIMARY_HOST
         gpus: 8
-      - hostname: node-b
+      - hostname: REPLACE_WITH_SECONDARY_HOST
         gpus: 8
   execution_contract:
+    # Runnable when the same checkout is visible on every SSH host.
+    # Otherwise, replace "." with the repository path shared by those hosts.
     repository: .
+    # Sourced as <venv>/bin/activate after changing into the repository.
+    # Use a repository-relative path or an absolute path visible on every host.
     venv: .venv
-    # Optional. Set to a worker-side environment setup script when needed.
+    # Optional script sourced before virtualenv activation on every host.
+    # Leave null when the worker login environment needs no additional setup.
     setup_env: null

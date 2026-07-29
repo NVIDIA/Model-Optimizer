@@ -1,8 +1,11 @@
 # @package _global_
 
+# Runnable public Hugging Face repository ID; this is not a placeholder.
+# Setup-generated bundles replace it with the model source selected by the user.
 input_hf_model_path: Qwen/Qwen3.5-9B
 
 model_info:
+  # Canonical public identity used for model metadata and revision checks.
   hf_repo: Qwen/Qwen3.5-9B
   model_type: qwen3_5_text
   architectures: [Qwen3_5ForConditionalGeneration]

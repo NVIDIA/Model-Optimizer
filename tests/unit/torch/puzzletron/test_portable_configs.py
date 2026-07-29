@@ -39,7 +39,7 @@ def test_runner_examples_use_repository_relative_defaults() -> None:
         assert runner.contract.container_mounts is None
         assert not runner.contract.prerun_commands
         assert runner.slurm is not None
-        assert runner.slurm.account == "your_account"
+        assert runner.slurm.account == "REPLACE_WITH_SLURM_ACCOUNT"
         assert runner.slurm.partition_cpu is None
 
     baremetal = load_runner_config(
@@ -48,6 +48,12 @@ def test_runner_examples_use_repository_relative_defaults() -> None:
     assert baremetal.contract.repository == "."
     assert baremetal.contract.venv == ".venv"
     assert baremetal.contract.setup_env is None
+    assert baremetal.baremetal is not None
+    assert baremetal.baremetal.rendezvous_host == "REPLACE_WITH_PRIMARY_HOST"
+    assert [host.hostname for host in baremetal.baremetal.hosts] == [
+        "REPLACE_WITH_PRIMARY_HOST",
+        "REPLACE_WITH_SECONDARY_HOST",
+    ]
 
 
 def test_execution_example_is_valid_yaml() -> None:
@@ -72,15 +78,21 @@ def test_setup_defaults_are_portable_and_valid() -> None:
     }
 
 
-def test_nemotron_model_uses_hugging_face_identity() -> None:
-    path = (
-        REPOSITORY_ROOT
-        / "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml"
+def test_model_examples_label_runnable_hugging_face_identities() -> None:
+    paths = (
+        "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml",
+        "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml",
+        "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/model.yaml",
     )
 
-    config = yaml.safe_load(path.read_text())
+    for relative_path in paths:
+        content = (REPOSITORY_ROOT / relative_path).read_text()
+        config = yaml.safe_load(content)
 
-    assert config["input_hf_model_path"] == config["model_info"]["hf_repo"]
+        assert config["input_hf_model_path"] == config["model_info"]["hf_repo"]
+        assert not config["input_hf_model_path"].startswith("REPLACE_WITH_")
+        assert "Runnable public Hugging Face repository ID" in content
+        assert "Setup-generated bundles replace it" in content
 
 
 def test_active_examples_use_portable_value_shapes() -> None:
@@ -119,3 +131,39 @@ def test_optional_yaml_values_are_explicit() -> None:
         assert "partition_cpu: null" in content
         assert "container: null" in content
         assert "container_mounts: null" in content
+
+
+def test_required_example_values_use_visible_placeholders() -> None:
+    slurm_paths = (
+        "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
+        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
+    )
+
+    for relative_path in slurm_paths:
+        content = (REPOSITORY_ROOT / relative_path).read_text()
+        assert "account: REPLACE_WITH_SLURM_ACCOUNT" in content
+
+    defaults = (REPOSITORY_ROOT / "nv-internal/puzzletron_defaults.example.yaml").read_text()
+    assert "# account: REPLACE_WITH_SLURM_ACCOUNT" in defaults
+
+    baremetal = (
+        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
+    ).read_text()
+    assert baremetal.count("REPLACE_WITH_PRIMARY_HOST") == 2
+    assert baremetal.count("REPLACE_WITH_SECONDARY_HOST") == 1
+
+
+def test_execution_contract_examples_explain_runnable_and_optional_values() -> None:
+    slurm_paths = (
+        "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
+        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
+        "nv-internal/puzzletron_defaults.example.yaml",
+    )
+
+    for relative_path in slurm_paths:
+        content = (REPOSITORY_ROOT / relative_path).read_text()
+        assert "checkout visible on every worker" in content
+        assert "Sourced as <venv>/bin/activate" in content
+        assert "accepted by the cluster's srun container plugin" in content
+        assert "/data:/data,/models:/models" in content
+        assert "before virtualenv activation" in content
