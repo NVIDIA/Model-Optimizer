@@ -610,7 +610,19 @@ def load_vlm_or_llm(
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
     if _is_vlm:
-        model_cls = transformers.AutoModelForVision2Seq
+        # ``AutoModelForVision2Seq`` was renamed in Transformers 5. Prefer the
+        # legacy alias when present, then use the current auto-model entry point.
+        model_cls = getattr(transformers, "AutoModelForVision2Seq", None)
+        if model_cls is None:
+            model_cls = getattr(transformers, "AutoModelForImageTextToText", None)
+        if model_cls is None:
+            architecture = (getattr(model_config, "architectures", None) or [None])[0]
+            model_cls = getattr(transformers, architecture, None) if architecture else None
+        if model_cls is None:
+            raise ValueError(
+                f"Cannot load VLM model type {model_config.model_type!r}: no compatible "
+                "Transformers vision-language auto model is available."
+            )
     else:
         model_cls = transformers.AutoModelForCausalLM
 

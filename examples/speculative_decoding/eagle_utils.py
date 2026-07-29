@@ -139,8 +139,11 @@ def make_speculative_data_module(
             data_collator = VisionLanguageDataCollator(
                 processor=data_args.vlm_processor,
                 train_len=train_len,
+                chat_template=chat_template,
                 local_image_path=data_args.vlm_img_dir,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
             )
 
     else:

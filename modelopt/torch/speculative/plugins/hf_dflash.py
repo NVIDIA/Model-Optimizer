@@ -638,12 +638,48 @@ class HFDFlashModel(DFlashModel):
             )
             target_hidden = base_outputs.target_hidden
         else:
-            # TODO: For co-training the base model, remove no_grad and eval() switch.
+            # Multimodal models must run through their top-level forward so image/video
+            # features are inserted into the language-model inputs. Text-only models
+            # retain the narrow call that has served DFlash training historically.
+            multimodal_keys = {
+                "pixel_values",
+                "pixel_values_videos",
+                "image_grid_thw",
+                "video_grid_thw",
+                "image_sizes",
+                "images",
+                "videos",
+            }
+            use_top_level_forward = any(
+                kwargs.get(key) is not None for key in multimodal_keys
+            )
             with torch.no_grad():
-                raw_outputs = super().forward(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
+                if use_top_level_forward:
+                    base_forward_kwargs = dict(kwargs)
+                    base_forward_kwargs["return_dict"] = True
+                    raw_outputs = super().forward(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=inputs_embeds,
+                        use_cache=False,
+                        output_attentions=output_attentions,
+                        output_hidden_states=True,
+                        cache_position=cache_position,
+                        **base_forward_kwargs,
+                    )
+                else:
+                    raw_outputs = super().forward(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                    )
+
+            if not getattr(raw_outputs, "hidden_states", None):
+                raise RuntimeError(
+                    "The base model did not return hidden states required for DFlash training. "
+                    "Ensure its top-level multimodal forward supports output_hidden_states=True."
                 )
             offset = 1
             selected = [raw_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
@@ -674,8 +710,13 @@ class HFDFlashModel(DFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            # Zero loss that still flows through dflash_module for DDP gradient sync
-            dummy = self.dflash_module.fc.weight.sum() * 0.0
+            # Keep every trainable draft parameter in the graph so DDP can complete
+            # reduction when this rank has no valid answer-only labels.
+            dummy = sum(
+                (parameter.reshape(-1)[0] * 0.0 for parameter in self.dflash_module.parameters()
+                 if parameter.requires_grad),
+                torch.zeros((), device=device),
+            )
             return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
 
         # 4. Build draft inputs
