@@ -46,6 +46,15 @@ import re
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
+
+try:  # nemo:26.08+
+    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+
+    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
+    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
+except ImportError:  # nemo:26.06 and earlier
+    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
+
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -98,6 +107,14 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
+            "TEGroupedMLP (grouped GEMM). Only affects MoE models."
+        ),
+    )
 
     target_group = parser.add_mutually_exclusive_group(required=True)
     target_group.add_argument(
@@ -373,7 +390,7 @@ def main(args: argparse.Namespace):
             "mtp_num_layers": 0,  # MTP is not supported during calibration
         },
         init_model_parallel=True,
-        moe_grouped_gemm=False,
+        moe_grouped_gemm=not args.no_moe_grouped_gemm,
     )
 
     # TODO: Support pruning with MTP heads enabled (e.g. Qwen3.5 mtp_num_hidden_layers=1).
@@ -494,18 +511,9 @@ def main(args: argparse.Namespace):
         )
 
         match = re.fullmatch(r"mmlu_(\d+)pct_bs(\d+)", args.prune_score_func)
-        legacy_match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
         if match:
             mmlu_frac = float(match.group(1)) / 100.0
             batch_size = int(match.group(2))
-        elif legacy_match:
-            warn_rank_0(
-                f"Score function '{args.prune_score_func}' uses the deprecated format "
-                "'mmlu_<N>pct'. Use 'mmlu_<N>pct_bs<bs>' to specify the evaluation batch size. "
-                "Falling back to batch_size=1."
-            )
-            mmlu_frac = float(legacy_match.group(1)) / 100.0
-            batch_size = 1
         else:
             raise ValueError(
                 f"Invalid score function: {args.prune_score_func}. "
@@ -541,7 +549,7 @@ def main(args: argparse.Namespace):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, MambaModelProvider):
+    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -615,6 +623,8 @@ def main(args: argparse.Namespace):
             if sorted_layers is not None
             else set(range(1, mcore_cfg.num_layers + 1))
         )
+        # layer_types is the HF per-layer attention-cadence field (mcore's linear_attention_freq /
+        # moe_layer_freq have no HF equivalent under those names, so only layer_types needs slicing).
         if hasattr(text_cfg, "layer_types"):
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
@@ -635,7 +645,9 @@ def main(args: argparse.Namespace):
                     "distillation cannot recover this vision-path change -- consider full VLM "
                     "training/distillation instead of LM-only to recover vision quality."
                 )
-        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
+        if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
+            hf_cfg, "hybrid_override_pattern"
+        ):
             hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
         # Mark MTP as disabled on the HF text config written after pruning

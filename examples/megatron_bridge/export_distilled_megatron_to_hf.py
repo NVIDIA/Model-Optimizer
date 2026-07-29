@@ -40,10 +40,22 @@ Example VLM (checkpoint reshards on load, so TP/PP/EP need not match training):
         --megatron_path /tmp/distill-out/checkpoints/iter_0000500 \
         --hf_export_path /tmp/distilled-vlm-hf_iter_0000500
 
+Example selected validation iterations:
+
+    torchrun --nproc_per_node 1 export_distilled_megatron_to_hf.py \
+        --student_hf_path Qwen/Qwen3-0.6B \
+        --megatron_path /tmp/distill-out/checkpoints \
+        --hf_export_path /tmp/distilled-hf-validation \
+        --export_iterations all
+
+    Replace ``all`` with explicit iteration numbers, e.g. ``200 400 600``, to export only
+    selected checkpoints.
+
 See `README.md` in this directory for more details.
 """
 
 import argparse
+from pathlib import Path
 
 import torch
 from megatron.bridge import AutoBridge
@@ -56,6 +68,42 @@ from modelopt.torch.utils.plugins.mbridge import (
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
 )
+
+# Megatron-Bridge checkpoint iteration directories use names like ``iter_0000100``.
+_ITER_DIR_PREFIX = "iter_"
+
+
+def _iteration_dir_name(iteration: int) -> str:
+    return f"{_ITER_DIR_PREFIX}{iteration:07d}"
+
+
+def _get_checkpoint_export_paths(args: argparse.Namespace) -> list[tuple[Path, Path]]:
+    """Return ``(Megatron checkpoint path, HF export path)`` pairs for this invocation."""
+    megatron_path = Path(args.megatron_path)
+    hf_export_path = Path(args.hf_export_path)
+
+    if not args.export_iterations:
+        return [(megatron_path, hf_export_path)]
+
+    if len(args.export_iterations) == 1 and args.export_iterations[0].lower() == "all":
+        checkpoint_dirs = [
+            path
+            for path in megatron_path.iterdir()
+            if path.is_dir() and path.name.startswith(_ITER_DIR_PREFIX)
+        ]
+        checkpoint_dirs = sorted(checkpoint_dirs)
+    else:
+        iterations = sorted({int(iteration) for iteration in args.export_iterations})
+        checkpoint_dirs = [
+            megatron_path / _iteration_dir_name(iteration) for iteration in iterations
+        ]
+        for checkpoint_dir in checkpoint_dirs:
+            if not checkpoint_dir.is_dir():
+                raise ValueError(f"Checkpoint not found: {checkpoint_dir}")
+
+    return [
+        (checkpoint_dir, hf_export_path / checkpoint_dir.name) for checkpoint_dir in checkpoint_dirs
+    ]
 
 
 def export_llm_to_hf(
@@ -132,13 +180,29 @@ def get_args() -> argparse.Namespace:
         "--megatron_path",
         type=str,
         required=True,
-        help="Distilled Megatron checkpoint to convert (an iter_* directory or its parent).",
+        help=(
+            "Distilled Megatron checkpoint to convert, or checkpoint root when using "
+            "--export_iterations."
+        ),
     )
     parser.add_argument(
         "--hf_export_path",
         type=str,
         required=True,
-        help="Directory to write the exported HuggingFace checkpoint to.",
+        help=(
+            "Directory to write the exported HuggingFace checkpoint to. When exporting multiple "
+            "checkpoints, each checkpoint is written under this root as iter_<iteration>."
+        ),
+    )
+    parser.add_argument(
+        "--export_iterations",
+        nargs="+",
+        default=None,
+        help=(
+            "Export checkpoints from the checkpoint root passed to --megatron_path. Use "
+            "'all' for every iter_<iteration> checkpoint, or pass selected iteration numbers, "
+            "for example: --export_iterations all or --export_iterations 100 200 300."
+        ),
     )
     parser.add_argument(
         "--student_hf_model",
@@ -161,6 +225,7 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace):
+    checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
     is_vlm = hasattr(
         AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
         "vision_config",
@@ -169,9 +234,7 @@ def main(args: argparse.Namespace):
     if is_vlm:
         # Build the full VLM (vision tower / projector + original LM from HF), then overwrite the LM
         # with the distilled checkpoint weights, then export the assembled VLM.
-        print_rank_0(
-            f"Reassembling distilled VLM and exporting to HF format at {args.hf_export_path}"
-        )
+        print_rank_0("Reassembling distilled VLM and exporting to HF format")
         _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
             hf_model_name_or_path=args.student_hf_path,
             trust_remote_code=args.trust_remote_code,
@@ -187,34 +250,37 @@ def main(args: argparse.Namespace):
             init_model_parallel=True,
             load_weights=True,  # vision tower / projector + original LM; the LM is overwritten below
         )
-        # Load only the distilled language-model weights (skip ModelOpt-state restore -- the kd_loss
-        # mode / teacher are irrelevant for export and would otherwise require a teacher model).
-        load_modelopt_megatron_checkpoint(
-            [full_model.language_model], args.megatron_path, restore_modelopt_state=False
-        )
-        save_vlm_to_hf(
-            full_model,
-            args.hf_export_path,
-            args.student_hf_path,
-            trust_remote_code=args.trust_remote_code,
-        )
-        print_rank_0(f"Saved distilled VLM to {args.hf_export_path} in HF format")
+        for megatron_path, hf_export_path in checkpoint_export_paths:
+            # Load only the distilled language-model weights (skip ModelOpt-state restore -- the kd_loss
+            # mode / teacher are irrelevant for export and would otherwise require a teacher model).
+            load_modelopt_megatron_checkpoint(
+                [full_model.language_model], str(megatron_path), restore_modelopt_state=False
+            )
+            save_vlm_to_hf(
+                full_model,
+                str(hf_export_path),
+                args.student_hf_path,
+                trust_remote_code=args.trust_remote_code,
+            )
+            print_rank_0(f"Saved distilled VLM to {hf_export_path} in HF format")
     else:
-        print_rank_0(f"Exporting distilled checkpoint to HF format at {args.hf_export_path}")
+        print_rank_0("Exporting distilled checkpoint(s) to HF format")
         # Save rank before destroying process group (dist.rank() won't work after destruction).
         is_rank_0 = dist.rank() == 0
         # export_ckpt creates its own temporary process group; destroy this one first so cleanup
         # does not hang on a barrier once rank 0 has left.
         dist.cleanup()
         if is_rank_0:
-            export_llm_to_hf(
-                megatron_path=args.megatron_path,
-                hf_export_path=args.hf_export_path,
-                student_hf_path=args.student_hf_path,
-                template_hf=args.student_hf_model,
-                trust_remote_code=args.trust_remote_code,
-            )
-        print_rank_0(f"Exported HuggingFace checkpoint to {args.hf_export_path}")
+            for megatron_path, hf_export_path in checkpoint_export_paths:
+                print(f"Exporting {megatron_path} to HF format at {hf_export_path}")
+                export_llm_to_hf(
+                    megatron_path=str(megatron_path),
+                    hf_export_path=str(hf_export_path),
+                    student_hf_path=args.student_hf_path,
+                    template_hf=args.student_hf_model,
+                    trust_remote_code=args.trust_remote_code,
+                )
+                print(f"Exported HuggingFace checkpoint to {hf_export_path}")
 
 
 if __name__ == "__main__":

@@ -88,6 +88,25 @@ def cp_gather_logits(local_logits: torch.Tensor, cp_group, global_seq_len: int) 
     return torch.cat(chunks, dim=1)
 
 
+def _assert_mamba_within_int32_indexing(model: MegatronModule, batch_size: int, seq_length: int):
+    """Guard Mamba2 calibration against int32 activation-indexing overflow.
+
+    The SSD Triton kernels index activations with int32, so ``batch * seq * mamba in_proj`` must stay
+    < 2**31 or they hit a cryptic CUDA 'illegal memory access'. Fail fast with the max safe batch.
+    """
+    d = getattr(model, "_modelopt_max_mamba_in_proj", None)
+    if d is None:
+        d = max(
+            (m.in_proj.weight.shape[0] for m in model.modules() if hasattr(m, "in_proj")), default=0
+        )
+        model._modelopt_max_mamba_in_proj = d
+    if d and batch_size * seq_length * d >= 2**31:
+        raise ValueError(
+            f"{batch_size=} x {seq_length=} x mamba in_proj={d} overflows int32 in the Mamba2 kernels. "
+            f"Reduce calibration batch size to <= {2**31 // (seq_length * d)}."
+        )
+
+
 def get_current_memory_info():
     """Get current memory usage."""
     remaining_mem, total_mem = torch.cuda.mem_get_info()
@@ -156,6 +175,9 @@ def megatron_prefill(
         tokens = input_ids
 
     padded_seq_len = tokens.shape[-1]
+
+    # Fail fast with a clear message if the Mamba activation would overflow int32 kernel indexing.
+    _assert_mamba_within_int32_indexing(model, batch_size, padded_seq_len)
 
     cp_size = mpu.get_context_parallel_world_size()
 

@@ -26,6 +26,7 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 
 ## Latest News
 
+- [2026/06/26] [BLOG: Creating the NVIDIA Nemotron 3 Ultra NVFP4 Checkpoint with NVIDIA Model Optimizer](https://developer.nvidia.com/blog/creating-the-nvidia-nemotron-3-ultra-nvfp4-checkpoint-with-nvidia-model-optimizer/): How we quantized Nemotron 3 Ultra (550B) to NVFP4 with Model Optimizer — up to 5.9× higher decode-heavy inference throughput than GLM-5.1 754B FP4 while matching BF16 accuracy. [NVFP4 Checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4) on Hugging Face.
 - [2026/05/27] [**End-to-end Optimization tutorial for Nemotron-3-Nano-30B-A3B**](./examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16): Pruning + two-phase distillation + FP8 quantization achieving 2.6× vLLM throughput and 2.6× memory reduction.
 - [2026/05/13] [**Puzzletron**](./examples/puzzletron): A new algorithm for heterogeneous pruning & NAS of LLM and VLM models.
 - [2026/04/15] Customer story: [Domyn compresses Colosseum-355B → 260B using ModelOpt's Minitron pruning + distillation](https://www.domyn.com/blog/domyn-large-the-journey-of-a-european-sovereign-ai-model-for-regulated-industries)
