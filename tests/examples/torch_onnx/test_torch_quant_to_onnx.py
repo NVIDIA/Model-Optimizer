@@ -61,6 +61,13 @@ def _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode):
             for node in input_producers
         )
 
+    first_conv = next(node for node in model.graph.node if node.op_type == "Conv")
+    assert all(
+        producers.get(input_name) is None
+        or not producers[input_name].op_type.endswith("DequantizeLinear")
+        for input_name in first_conv.input
+    )
+
     if quantize_mode not in ("int8", "fp8"):
         return
 
@@ -69,7 +76,7 @@ def _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode):
         for node in model.graph.node
         if node.op_type.endswith("QuantizeLinear") and node.input[0] not in initializers
     ]
-    assert len(activation_quantizers) == (54 if quantize_mode == "int8" else 52)
+    assert len(activation_quantizers) == (53 if quantize_mode == "int8" else 52)
     assert len({node.input[0] for node in activation_quantizers}) == len(activation_quantizers)
     assert all(
         producers.get(node.input[0]) is None or producers[node.input[0]].op_type != "Cast"
@@ -101,19 +108,13 @@ def _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode):
             for node in model.graph.node
             if node.op_type.endswith("QuantizeLinear") and node.input[0] in initializers
         ]
-        assert len(weight_quantizers) == 53
+        assert len(weight_quantizers) == 52
         assert all(
             initializers[node.input[0]].data_type == onnx.TensorProto.FLOAT16
             for node in weight_quantizers
         )
     else:
         assert pool_input_producer.op_type == "Relu"
-        first_conv = next(node for node in model.graph.node if node.op_type == "Conv")
-        assert all(
-            producers.get(input_name) is None
-            or not producers[input_name].op_type.endswith("DequantizeLinear")
-            for input_name in first_conv.input
-        )
 
 
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)

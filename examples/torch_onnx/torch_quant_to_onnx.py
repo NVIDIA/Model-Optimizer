@@ -152,15 +152,19 @@ def get_quant_config(quantize_mode):
     return config
 
 
-def filter_func(name):
+def filter_func(name, model=None):
     """Filter function to exclude certain layers from quantization.
 
+    A ResNet's top-level ``conv1`` consumes three-channel image input, for which TensorRT
+    cannot find an FP8 Q→Conv tactic on Blackwell.
     ``downsample.reduction`` (Swin/SwinV2) is excluded because it operates on 4D tensors
     and TRT's DynamicQuantize layer (used for MXFP8/NVFP4) requires 2D/3D input.
     Other 4D-input layers (e.g. Swin's ``norm1``, ``downsample.norm``, top-level ``norm``)
     are handled dynamically by ``_disable_high_rank_input_quantizers`` via a forward-pass
     rank probe — that avoids false positives on ViT, whose same-named ``norm`` sees 3D input.
     """
+    if isinstance(model, timm.models.resnet.ResNet) and name.startswith("conv1."):
+        return True
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
         r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|"
@@ -202,27 +206,6 @@ def _disable_high_rank_input_quantizers(model, input_shape, device):
         return
     prefixes = tuple(n + "." for n in high_rank)
     mtq.disable_quantizer(model, lambda n: n.startswith(prefixes))
-
-
-def _disable_low_channel_conv_input_quantizers(model):
-    """Disable input quantization on Conv2d modules with at most 16 input or output channels.
-
-    The first Conv2d of an image backbone (e.g. ResNet50's ``conv1``) consumes raw
-    RGB input. TensorRT does not reliably accelerate FP8 convolutions with such small
-    channel dimensions, so ONNX PTQ leaves the entire Conv in high precision. On
-    Blackwell, TRT can also fail to find a tactic for the first-layer Q→Conv fusion:
-
-        Error Code 10: Could not find any implementation for node
-        /conv1/input_quantizer/TRT_FP8QuantizeLinear ... [ElementWise]
-
-    Ada (8.9) happens to have a tactic, which is why local runs pass. Swin/ViT's
-    ``patch_embed.proj`` is already excluded via ``filter_func``.
-    """
-    for _, mod in model.named_modules():
-        if isinstance(mod, torch.nn.Conv2d) and min(mod.in_channels, mod.out_channels) <= 16:
-            q = getattr(mod, "input_quantizer", None)
-            if q is not None and q.is_enabled:
-                q.disable()
 
 
 def _quantize_module_input(module, inputs):
@@ -492,7 +475,7 @@ def quantize_model(model, config, data_loader=None):
 
     # Disable filtered quantizers BEFORE calibrating override quantizers so we don't
     # waste time calibrating quantizers that are about to be turned off.
-    mtq.disable_quantizer(quantized_model, filter_func)
+    mtq.disable_quantizer(quantized_model, lambda name: filter_func(name, quantized_model))
 
     # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize().
     if data_loader is not None:
@@ -584,7 +567,7 @@ def auto_quantize_model(
     )
 
     # Disable quantization for specified layers
-    mtq.disable_quantizer(quantized_model, filter_func)
+    mtq.disable_quantizer(quantized_model, lambda name: filter_func(name, quantized_model))
 
     _disable_dead_quantizers(quantized_model)
 
@@ -781,15 +764,6 @@ def main():
     )
     if uses_dynamic_quantize:
         _disable_high_rank_input_quantizers(quantized_model, input_shape, device)
-
-    # FP8-family modes emit TRT_FP8QuantizeLinear on the first-layer conv; Blackwell has
-    # no tactic for that 3-channel Q→Conv fusion. Skip for pure INT8 (unaffected).
-    uses_fp8_conv_input = args.quantize_mode in ("fp8", "mxfp8", "nvfp4") or (
-        args.quantize_mode == "auto"
-        and any(fmt != "INT8_DEFAULT_CFG" for fmt in args.auto_quantization_formats)
-    )
-    if uses_fp8_conv_input:
-        _disable_low_channel_conv_input_quantizers(quantized_model)
 
     # Print quantization summary
     print("\nQuantization Summary:")

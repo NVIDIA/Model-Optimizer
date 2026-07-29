@@ -41,18 +41,23 @@ def _graph(nodes, inputs, outputs):
 
 
 @pytest.mark.parametrize(
-    ("output_channels", "input_channels", "expected_count"),
-    [(64, 3, 0), (16, 64, 0), (64, 16, 0), (64, 17, 1)],
+    ("direct_input", "input_channels", "expected_count"),
+    [(True, 3, 0), (True, 17, 1), (False, 3, 1)],
 )
-def test_quantize_conv_weights_to_fp8_skips_small_channels(
-    output_channels, input_channels, expected_count
+def test_quantize_conv_weights_to_fp8_skips_unquantized_rgb_graph_input(
+    direct_input, input_channels, expected_count
 ):
     x = gs.Variable("x", dtype=np.float16, shape=[1, input_channels, 32, 32])
-    weight = gs.Constant(
-        "weight", np.ones((output_channels, input_channels, 3, 3), dtype=np.float16)
-    )
+    conv_input = x
+    nodes = []
+    if not direct_input:
+        conv_input = gs.Variable("conv_input", dtype=np.float16, shape=x.shape)
+        nodes.append(gs.Node(op="Identity", inputs=[x], outputs=[conv_input]))
+
+    weight = gs.Constant("weight", np.ones((64, input_channels, 3, 3), dtype=np.float16))
     y = gs.Variable("y", dtype=np.float16)
-    graph = _graph([gs.Node(op="Conv", inputs=[x, weight], outputs=[y])], [x], [y])
+    nodes.append(gs.Node(op="Conv", inputs=[conv_input, weight], outputs=[y]))
+    graph = _graph(nodes, [x], [y])
 
     assert FP8QuantExporter._quantize_conv_weights_to_fp8(graph) == expected_count
 

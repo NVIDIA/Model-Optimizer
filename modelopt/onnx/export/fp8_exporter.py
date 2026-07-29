@@ -31,7 +31,6 @@ from .base_exporter import ONNXQuantExporter
 # when using 1/448 as the Q scale (single fixed value — softmax range is data-independent).
 _FP8_E4M3_MAX = 448.0
 _FP8_E4M3_SOFTMAX_SCALE = 1.0 / _FP8_E4M3_MAX
-_FP8_MIN_CONV_CHANNELS = 16
 
 
 class FP8QuantExporter(ONNXQuantExporter):
@@ -173,6 +172,9 @@ class FP8QuantExporter(ONNXQuantExporter):
         2. Quantize weights to FP8E4M3FN
         3. Insert a DequantizeLinear(fp8_weights, scale) before the Conv weight input
 
+        An RGB Conv that directly consumes an unquantized graph input is treated as a
+        filtered input stem and left entirely in high precision.
+
         Args:
             graph: The onnx-graphsurgeon graph to modify in-place.
 
@@ -180,6 +182,7 @@ class FP8QuantExporter(ONNXQuantExporter):
             Number of Conv weight DQ nodes inserted.
         """
         count = 0
+        graph_inputs = {tensor.name for tensor in graph.inputs}
 
         for node in list(graph.nodes):
             if node.op != "Conv":
@@ -190,11 +193,8 @@ class FP8QuantExporter(ONNXQuantExporter):
             weight_input = node.inputs[1]
             if not isinstance(weight_input, gs.Constant):
                 continue
-            if any(
-                channels <= _FP8_MIN_CONV_CHANNELS for channels in weight_input.values.shape[:2]
-            ):
+            if node.inputs[0].name in graph_inputs and weight_input.values.shape[1] == 3:
                 continue
-
             # Skip if weight already has a DQ producer
             if any(out.op == "DequantizeLinear" for out in weight_input.outputs):
                 continue
