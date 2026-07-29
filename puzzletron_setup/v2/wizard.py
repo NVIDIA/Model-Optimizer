@@ -3641,7 +3641,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                     strategy=_post_mip_strategy(node),
                     batch=1,
                 )
-            elif node.node_type == "aiperf":
+            elif node.node_type in {"aiperf", "downstream_evaluation"}:
                 node_preview["resources"] = {
                     "instances": int(session.state.get_field("infrastructure.gpus_per_node", 8)),
                     "topology": node.config.get("topology", {}),
@@ -3738,7 +3738,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                     "aiperf",
                     "global_kd",
                     ("PTQ — unavailable", "unavailable"),
-                    ("Downstream evaluation — unavailable", "unavailable"),
+                    "downstream_evaluation",
                 ],
                 default="evaluation",
             )
@@ -3812,6 +3812,18 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                     "concurrency": list(configured["concurrency"]),
                     "benchmark_timeout": 900,
                 }
+            elif node_type == "downstream_evaluation":
+                configured = _downstream_evaluation_setting_prompt(
+                    session,
+                    f"post_mip.{run_id}.{node_id}",
+                    {},
+                    inventory=context["model"].inventory,
+                    pruning=_mapping_copy(_pruning_payload(session.state)),
+                    stage_id=f"post.{run_id}.{node_id}",
+                )
+                if configured is BACK:
+                    return False
+                config = configured
             elif node_type == "global_kd":
                 max_steps = session.integer(
                     f"post_mip.{run_id}.{node_id}.max_steps",
@@ -4079,6 +4091,83 @@ def _serving_setting_prompt(
     return values
 
 
+def _downstream_evaluation_setting_prompt(
+    session: WizardSession,
+    prefix: str,
+    defaults: Mapping[str, Any],
+    *,
+    inventory: Any,
+    pruning: Mapping[str, Any],
+    stage_id: str,
+) -> Any:
+    """Ask lmms-eval task settings and the vLLM topology used to run them."""
+
+    def validate_tasks(value: str) -> bool | str:
+        tasks = [item.strip() for item in value.split(",") if item.strip()]
+        return True if tasks else "Enter at least one lmms-eval task."
+
+    raw_default_tasks = defaults.get("tasks", ("ifeval", "gsm8k"))
+    default_tasks = (
+        str(raw_default_tasks)
+        if isinstance(raw_default_tasks, str)
+        else ",".join(str(item) for item in raw_default_tasks)
+    )
+    default_model_args = _mapping_copy(defaults.get("model_args"))
+    tasks = session.text(
+        f"{prefix}.tasks",
+        "lmms-eval tasks (comma-separated):",
+        default=default_tasks,
+        validate=validate_tasks,
+    )
+    if tasks is BACK:
+        return BACK
+    limit = session.integer(
+        f"{prefix}.limit",
+        "lmms-eval sample limit:",
+        default=int(defaults.get("limit", 128)),
+        minimum=1,
+    )
+    batch_size = session.integer(
+        f"{prefix}.batch_size",
+        "lmms-eval batch size:",
+        default=int(defaults.get("batch_size", 1)),
+        minimum=1,
+    )
+    timeout = session.integer(
+        f"{prefix}.timeout_seconds",
+        "Per-candidate lmms-eval timeout (seconds):",
+        default=int(defaults.get("timeout_seconds", 3600)),
+        minimum=1,
+    )
+    if BACK in (limit, batch_size, timeout):
+        return BACK
+    topology = _vllm_topology_prompt(
+        session,
+        f"{prefix}.topology",
+        _mapping_copy(defaults.get("topology")),
+        inventory=inventory,
+        pruning=pruning,
+        stage_id=stage_id,
+        label_prefix="lmms-eval vLLM",
+    )
+    if topology is BACK:
+        return BACK
+    return {
+        "model": str(defaults.get("model", "vllm")),
+        "tasks": [item.strip() for item in str(tasks).split(",") if item.strip()],
+        "limit": int(limit),
+        "batch_size": int(batch_size),
+        "log_samples": bool(defaults.get("log_samples", True)),
+        "topology": topology,
+        "model_args": {
+            **default_model_args,
+            "dtype": default_model_args.get("dtype", "bfloat16"),
+            "gpu_memory_utilization": default_model_args.get("gpu_memory_utilization", 0.85),
+        },
+        "timeout_seconds": int(timeout),
+    }
+
+
 def _configure_dynamic_resources(
     session: WizardSession,
     editor: PostMIPFlowEditor,
@@ -4131,7 +4220,7 @@ def _configure_dynamic_resources(
             "resource": "gpu",
             "gpus_per_node": gpus_per_node,
         }
-        if node.node_type == "aiperf":
+        if node.node_type in {"aiperf", "downstream_evaluation"}:
             topology = _mapping_copy(node.config.get("topology"))
             allocation_mesh = vllm_topology_to_mesh(topology)
             entry["parallel"] = {

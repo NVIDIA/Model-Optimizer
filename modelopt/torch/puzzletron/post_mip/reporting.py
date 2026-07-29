@@ -16,6 +16,7 @@ from typing import Any
 __all__ = [
     "build_post_mip_report_payloads",
     "render_aiperf_report",
+    "render_downstream_evaluation_report",
     "render_evaluation_report",
     "render_global_kd_report",
 ]
@@ -353,6 +354,16 @@ def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:
         f"<div id='{_text(section_id)}-throughput' class='plotly-chart depth-chart' "
         "role='img' aria-label='AIPerf throughput trade-offs'></div>"
         f"{table}"
+    )
+
+
+def render_downstream_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str:
+    """Render lmms-eval task metrics for downstream-evaluation nodes."""
+
+    return render_evaluation_report(section_id, payload).replace(
+        "<h3>Candidate evaluation</h3>",
+        "<h3>Downstream evaluation</h3>",
+        1,
     )
 
 

@@ -25,6 +25,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from ..identity import canonicalize, stable_hash
+from ..orchestration.mesh import normalize_vllm_topology
 from .base import CompiledPostMIPNode, NodeKind, compile_post_mip_flows
 from .filters import apply_filter
 from .records import ArtifactKind, CandidateLedger, CandidateSet, NodeObservation
@@ -523,6 +525,292 @@ def _aiperf(
     }
 
 
+_LMMS_EVAL_MODEL_ARG_FIELDS = frozenset(
+    {
+        "dtype",
+        "gpu_memory_utilization",
+        "max_model_len",
+        "trust_remote_code",
+        "tokenizer",
+        "tokenizer_mode",
+        "enforce_eager",
+        "limit_mm_per_prompt",
+        "reasoning_parser",
+    }
+)
+
+
+def _as_cli_bool(value: bool) -> str:
+    return "True" if value else "False"
+
+
+def _as_lmms_eval_arg(value: Any) -> str:
+    if isinstance(value, bool):
+        return _as_cli_bool(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+def _join_cli_values(value: Any, *, path: str) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{path} must not be empty")
+        return text
+    if not isinstance(value, Sequence):
+        raise TypeError(f"{path} must be a string or sequence")
+    values = [str(item).strip() for item in value]
+    if not values or any(not item for item in values):
+        raise ValueError(f"{path} must contain at least one non-empty value")
+    return ",".join(values)
+
+
+def _model_arg_string(values: Mapping[str, Any]) -> str:
+    parts = []
+    for key, value in values.items():
+        if value is None:
+            continue
+        key_text = str(key).strip()
+        if not key_text or "," in key_text or "=" in key_text:
+            raise ValueError(f"invalid lmms-eval model_args key: {key!r}")
+        rendered = _as_lmms_eval_arg(value)
+        if "," in rendered:
+            raise ValueError(
+                f"lmms-eval model_args value for {key_text!r} contains a comma; "
+                "provide model_args as a preformatted string instead"
+            )
+        parts.append(f"{key_text}={rendered}")
+    if not parts:
+        raise ValueError("lmms-eval model_args must contain at least the checkpoint path")
+    return ",".join(parts)
+
+
+def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
+    raw = settings.get("model_args")
+    checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
+    topology = dict(settings.get("topology") or {})
+    canonical_topology = normalize_vllm_topology(topology) if topology else {}
+    derived = {
+        checkpoint_arg: checkpoint,
+    }
+    if canonical_topology:
+        derived.update(
+            {
+                "tensor_parallel_size": canonical_topology["tp"],
+                "pipeline_parallel_size": canonical_topology["pp"],
+                "data_parallel_size": canonical_topology["dp"],
+                "enable_expert_parallel": canonical_topology["enable_expert_parallel"],
+                "distributed_executor_backend": canonical_topology[
+                    "distributed_executor_backend"
+                ],
+            }
+        )
+    for key in _LMMS_EVAL_MODEL_ARG_FIELDS:
+        if key in settings:
+            derived[key] = settings[key]
+
+    if isinstance(raw, str):
+        prefix = raw.strip().strip(",")
+        suffix = _model_arg_string(derived)
+        return ",".join(part for part in (prefix, suffix) if part)
+    if raw is not None and not isinstance(raw, Mapping):
+        raise TypeError("downstream_evaluation.config.model_args must be a mapping or string")
+    merged = dict(raw or {})
+    for key, value in derived.items():
+        merged.setdefault(key, value)
+    return _model_arg_string(merged)
+
+
+def _command_prefix(settings: Mapping[str, Any]) -> list[str]:
+    raw = settings.get("command_prefix")
+    if raw is None:
+        return [sys.executable, "-m", "lmms_eval"]
+    if isinstance(raw, str):
+        values = [raw]
+    else:
+        values = [str(item) for item in raw]
+    if not values or any(not value for value in values):
+        raise ValueError("downstream_evaluation.config.command_prefix must not be empty")
+    return values
+
+
+def _lmms_eval_command(
+    settings: Mapping[str, Any],
+    *,
+    checkpoint: str,
+    output_path: Path,
+) -> tuple[list[str], dict[str, str], float | None]:
+    """Build a deterministic lmms-eval CLI invocation for one realized checkpoint."""
+
+    tasks = _join_cli_values(settings.get("tasks"), path="downstream_evaluation.config.tasks")
+    argv = [
+        *_command_prefix(settings),
+        "--model",
+        str(settings.get("model", "vllm")),
+        "--model_args",
+        _merge_lmms_eval_model_args(settings, checkpoint),
+        "--tasks",
+        tasks,
+        "--batch_size",
+        str(settings.get("batch_size", 1)),
+        "--output_path",
+        str(output_path),
+    ]
+    optional_fields = {
+        "limit": "--limit",
+        "num_fewshot": "--num_fewshot",
+        "seed": "--seed",
+        "verbosity": "--verbosity",
+        "device": "--device",
+        "use_cache": "--use_cache",
+    }
+    for key, flag in optional_fields.items():
+        value = settings.get(key)
+        if value is not None:
+            argv.extend([flag, str(value)])
+    if settings.get("gen_kwargs") is not None:
+        argv.extend(
+            [
+                "--gen_kwargs",
+                (
+                    settings["gen_kwargs"]
+                    if isinstance(settings["gen_kwargs"], str)
+                    else _model_arg_string(dict(settings["gen_kwargs"]))
+                ),
+            ]
+        )
+    if bool(settings.get("log_samples", False)):
+        argv.append("--log_samples")
+    argv.extend(str(item) for item in settings.get("extra_args") or ())
+
+    env = os.environ.copy()
+    for key, value in dict(settings.get("env") or {}).items():
+        if value is not None:
+            env[str(key)] = str(value)
+    if settings.get("cache_dir") is not None:
+        env.setdefault("LMMS_EVAL_HOME", str(settings["cache_dir"]))
+    timeout = settings.get("timeout_seconds", settings.get("timeout"))
+    return argv, env, (float(timeout) if timeout is not None else None)
+
+
+def _metric_key(value: Any) -> str:
+    return (
+        str(value)
+        .strip()
+        .replace(" ", "_")
+        .replace(",", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
+
+
+def _flatten_lmms_eval_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
+    results = payload.get("results")
+    if not isinstance(results, Mapping):
+        return {}
+    metrics = {}
+    for task_name, task_payload in results.items():
+        if not isinstance(task_payload, Mapping):
+            continue
+        for metric_name, value in task_payload.items():
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                metrics[f"{_metric_key(task_name)}.{_metric_key(metric_name)}"] = float(value)
+    return metrics
+
+
+def _lmms_eval_result_payload(output_path: Path) -> tuple[dict[str, Any], Path]:
+    candidates = []
+    for path in sorted(output_path.rglob("*.json")):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, Mapping) and isinstance(payload.get("results"), Mapping):
+            candidates.append((path.stat().st_mtime_ns, path, dict(payload)))
+    if not candidates:
+        raise FileNotFoundError(f"lmms-eval wrote no JSON results below {output_path}")
+    _mtime, path, payload = max(candidates, key=lambda item: item[0])
+    return payload, path
+
+
+def _downstream_evaluation(
+    config: dict[str, Any],
+    node: CompiledPostMIPNode,
+    source,
+    execution_identity: str,
+) -> dict[str, Any]:
+    if source.artifact_kind is not ArtifactKind.CHECKPOINT:
+        raise ValueError("downstream_evaluation requires materialized checkpoint artifacts")
+    settings = dict(node.config.get("config") or {})
+    output_root = (
+        _execution_root(config, node, execution_identity)
+        / "raw"
+        / source.architecture_id
+        / "lmms_eval"
+    )
+    output = output_root / f"attempt_{uuid.uuid4().hex}"
+    output.mkdir(parents=True, exist_ok=True)
+    argv, env, timeout = _lmms_eval_command(
+        settings,
+        checkpoint=str(source.artifact["checkpoint"]),
+        output_path=output,
+    )
+    command_path = output / "command.json"
+    _atomic_json(
+        command_path,
+        {
+            "argv": argv,
+            "env_overrides": sorted(str(key) for key in dict(settings.get("env") or {})),
+            "timeout": timeout,
+        },
+    )
+    # Campaign config controls the executable and arguments, but subprocess receives
+    # an argv list directly; no shell parsing is involved.
+    result = subprocess.run(
+        argv,
+        cwd=str(output),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        tail = "\n".join(detail[-20:])
+        raise RuntimeError(
+            f"lmms-eval failed with exit code {result.returncode}"
+            + (f": {tail}" if tail else "")
+        )
+    payload, result_path = _lmms_eval_result_payload(output)
+    metrics = _flatten_lmms_eval_metrics(payload)
+    if not metrics:
+        raise RuntimeError(f"lmms-eval result has no numeric task metrics: {result_path}")
+    summary_path = output / "summary.json"
+    _atomic_json(
+        summary_path,
+        {
+            "architecture_id": source.architecture_id,
+            "checkpoint": source.artifact["checkpoint"],
+            "metrics": metrics,
+            "result_path": str(result_path),
+        },
+    )
+    return {
+        "metrics": metrics,
+        "result_path": str(summary_path),
+        "raw_result_path": str(result_path),
+        "command_path": str(command_path),
+    }
+
+
 def _post_mip_kd_settings(
     config: Mapping[str, Any],
     node_settings: Mapping[str, Any],
@@ -582,6 +870,8 @@ def _run_candidate(
         result = _evaluate(config, node, source, execution_identity)
     elif node.node_type == "aiperf":
         result = _aiperf(config, node, source, execution_identity)
+    elif node.node_type == "downstream_evaluation":
+        result = _downstream_evaluation(config, node, source, execution_identity)
     elif node.node_type == "global_kd":
         result = _global_kd(config, node, source, execution_identity)
     else:
@@ -649,7 +939,7 @@ def run_post_mip_node_shard(
                     row = _run_candidate(config, node, ledger, revision_id, execution_identity)
                 row = {**row, "execution_identity": execution_identity}
             except Exception as error:
-                timed_out = node.node_type == "aiperf" and isinstance(
+                timed_out = node.node_type in {"aiperf", "downstream_evaluation"} and isinstance(
                     error, (subprocess.TimeoutExpired, TimeoutError)
                 )
                 row = {
@@ -661,12 +951,14 @@ def run_post_mip_node_shard(
                     **_exception_diagnostics(error),
                 }
                 if timed_out:
-                    timeout_field = (
-                        "benchmark_timeout"
-                        if isinstance(error, subprocess.TimeoutExpired)
-                        else "readiness_timeout"
+                    timeout_field = "benchmark_timeout"
+                    if node.node_type == "downstream_evaluation":
+                        timeout_field = "timeout_seconds"
+                    elif not isinstance(error, subprocess.TimeoutExpired):
+                        timeout_field = "readiness_timeout"
+                    default_timeout = 3600 if node.node_type == "downstream_evaluation" else (
+                        600 if timeout_field == "benchmark_timeout" else 1200
                     )
-                    default_timeout = 600 if timeout_field == "benchmark_timeout" else 1200
                     row["timeout_seconds"] = float(
                         getattr(error, "timeout", None)
                         or (node.config.get("config") or {}).get(timeout_field, default_timeout)
