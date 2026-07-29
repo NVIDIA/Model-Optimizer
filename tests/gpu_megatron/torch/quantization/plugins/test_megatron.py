@@ -848,6 +848,7 @@ def test_te_grouped_compiled_weight_quantizer_loop(
     destroy_model_parallel()
 
 
+@pytest.mark.timeout(90)  # real torch.compile: cap runaway inductor recompiles without flaking CI
 def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1, monkeypatch):
     """Real (unpatched) torch.compile parity for the per-expert weight-quantizer loop.
 
