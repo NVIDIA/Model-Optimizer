@@ -1192,7 +1192,7 @@ def _export_transformers_checkpoint_streaming(
             #    was registered by the export handlers and is safe to drop.
             #
             # 2. CUDA *parameters* on modules WITHOUT _hf_hook: _export_fused_experts
-            #    creates fresh nn.Module objects (one per expert × projection) and adds
+            #    creates fresh nn.Module objects (one per expert x projection) and adds
             #    them to the layer via add_module() *after* weight_access_and_writeback
             #    captured its materialized list.  hook.post_forward never visits these
             #    new modules, so their packed NVFP4 weight parameters (~5 GB per MoE

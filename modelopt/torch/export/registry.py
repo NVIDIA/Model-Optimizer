@@ -73,10 +73,13 @@ class ExportContext:
 
         The streaming export frees each module after exporting it, so a recycled
         address would alias the next module to the wrong weights. Genuine sharing is
-        always within one window, so nothing is lost.
+        always within one window, so nothing is lost. No-op when dedup is already
+        disabled (FSDP2), which recycles addresses for the same reason.
         """
-        self.tied_cache.clear()
-        self.moe_tied_cache.clear()
+        if self.tied_cache is not None:
+            self.tied_cache.clear()
+        if self.moe_tied_cache is not None:
+            self.moe_tied_cache.clear()
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

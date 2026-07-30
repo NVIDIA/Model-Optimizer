@@ -119,6 +119,8 @@ def validate_fsdp2_supported(args, config):
             + "\n  - ".join(issues)
             + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
         )
+
+
 def run_nemotron_vl_preview(
     full_model,
     tokenizer,
