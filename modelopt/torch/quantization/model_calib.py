@@ -511,7 +511,7 @@ def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
 
 
 def _swap_in_nvfp4_act_headroom_calibrators(
-    model: nn.Module, *, anchor_percentile: float, rho: float
+    model: nn.Module, *, anchor_percentile: float, upper_percentile: float, rho: float
 ) -> list[tuple[nn.Module, Any]]:
     """Swap in an :class:`NVFP4ActHeadroomCalibrator` for each qualifying NVFP4 input quantizer.
 
@@ -528,6 +528,7 @@ def _swap_in_nvfp4_act_headroom_calibrators(
             module._unsigned,
             block_size=module.block_sizes.get(-1, 16),
             anchor_percentile=anchor_percentile,
+            upper_percentile=upper_percentile,
             rho=rho,
         )
     return swapped
@@ -539,6 +540,7 @@ def nvfp4_act_headroom_calibrate(
     forward_loop: ForwardLoop | None = None,
     *,
     anchor_percentile: float = 1.0,
+    upper_percentile: float = 99.99,
     rho: float = 16384.0,
     distributed_sync: bool = True,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
@@ -556,6 +558,8 @@ def nvfp4_act_headroom_calibrate(
         model: model to be calibrated.
         forward_loop: callable that runs calibration data through the model.
         anchor_percentile: percentile of the per-block amaxes used as the anchor.
+        upper_percentile: percentile of the per-block amaxes used as the top of the calibrated
+            range; ``100`` uses the literal observed max.
         rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
         distributed_sync: whether to sync amax across distributed processes
             (see :func:`max_calibrate`).
@@ -569,7 +573,7 @@ def nvfp4_act_headroom_calibrate(
         scale implied by pooling every rank's per-block distribution.
     """
     swapped = _swap_in_nvfp4_act_headroom_calibrators(
-        model, anchor_percentile=anchor_percentile, rho=rho
+        model, anchor_percentile=anchor_percentile, upper_percentile=upper_percentile, rho=rho
     )
     if not swapped:
         warn_rank_0(
@@ -579,7 +583,8 @@ def nvfp4_act_headroom_calibrate(
         )
     print_rank_0(
         f"nvfp4_act_headroom: calibrating {len(swapped)} NVFP4 activation quantizer(s) "
-        f"(anchor_percentile={anchor_percentile}, rho={rho})."
+        f"(anchor_percentile={anchor_percentile}, upper_percentile={upper_percentile}, "
+        f"rho={rho})."
     )
     # max_calibrate runs the forward loop once: the swapped-in calibrators accumulate their
     # per-block histograms in the same pass that collects max stats for every other quantizer.

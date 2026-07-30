@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,10 +28,7 @@ __all__ = ["NVFP4ActHeadroomCalibrator"]
 # outside this ratio cannot all be represented as normal FP8 values by one global scale.
 _FP8_NORMAL_DYNAMIC_RANGE = 28672.0
 
-# High percentile of the per-block amax distribution used as the no-clipping floor.
-_FLOOR_PERCENTILE = 99.99
-
-# Per-block amaxes below ``floor / _ANCHOR_FLOOR_RATIO`` are ignored when locating the
+# Per-block amaxes below ``upper / _ANCHOR_FLOOR_RATIO`` are ignored when locating the
 # anchor, so a tail of near-zero blocks cannot drag the global scale down.
 _ANCHOR_FLOOR_RATIO = 1e6
 
@@ -47,14 +44,19 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
     This calibrator instead anchors the global scale to a low percentile of the per-block
     amax distribution::
 
-        amax = max(rho * anchor, observed_max)
+        amax = max(rho * anchor, upper)
 
-    where ``anchor`` is the per-block amax at ``anchor_percentile``. Multiplying the low anchor
-    by ``rho`` places the calibrated blocks in the lower part of the FP8 scale range and leaves
-    the rest as upward headroom. The result is floored at the largest per-block amax observed
-    during calibration, so the scale never sits below the calibrated data; when that floor wins
-    (a per-block range too wide for ``rho`` to clear) the calibrator warns and the result
-    degenerates to plain ``max``.
+    where ``anchor`` is the per-block amax at ``anchor_percentile`` and ``upper`` is the
+    per-block amax at ``upper_percentile``. Multiplying the low anchor by ``rho`` places the
+    calibrated blocks in the lower part of the FP8 scale range and leaves the rest as upward
+    headroom; ``upper`` is the top of the range the scale commits to representing.
+
+    ``upper_percentile`` defaults to 99.99 rather than the literal maximum on purpose. A single
+    freak block far above the rest would otherwise drag the global scale up so far that every
+    other block's FP8 block scale falls below subnormal and flushes to zero -- losing the whole
+    tensor to protect one value. The default clips those rare blocks instead. Set
+    ``upper_percentile=100`` to use the literal observed max, which guarantees no calibration
+    data is clipped at the cost of that exposure.
 
     Args:
         num_bits: quantizer ``num_bits`` (``(2, 1)`` for NVFP4); kept for interface parity.
@@ -62,6 +64,8 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         unsigned: unused; kept for interface parity.
         block_size: NVFP4 block width along the last dim.
         anchor_percentile: percentile of the per-block amaxes used as the anchor; must be > 0.
+        upper_percentile: percentile of the per-block amaxes used as the top of the calibrated
+            range. ``100`` uses the literal observed max (no calibration data is clipped).
         rho: headroom factor applied to the anchor. Must be in ``(0, 28672)``.
         num_bins: number of log2 histogram bins.
         log2_min: low end of the log2 range covered by the histogram.
@@ -76,6 +80,7 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         *,
         block_size=16,
         anchor_percentile=1.0,
+        upper_percentile=99.99,
         rho=16384.0,
         num_bins=512,
         log2_min=-40.0,
@@ -91,7 +96,10 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         if not (0.0 < anchor_percentile <= 100.0):
             raise ValueError(f"anchor_percentile must be in (0, 100]; got {anchor_percentile}.")
         self._block_size = block_size
+        if not (0.0 < upper_percentile <= 100.0):
+            raise ValueError(f"upper_percentile must be in (0, 100]; got {upper_percentile}.")
         self._anchor_percentile = float(anchor_percentile)
+        self._upper_percentile = float(upper_percentile)
         self._rho = float(rho)
         self._num_bins = int(num_bins)
         self._log2_min = float(log2_min)
@@ -168,38 +176,42 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
         if self._hist is None or self._running_max is None:
             return None
 
-        running_max = float(self._running_max)
-        floor = self._percentile(_FLOOR_PERCENTILE)
+        upper = (
+            float(self._running_max)
+            if self._upper_percentile >= 100.0
+            else self._percentile(self._upper_percentile)
+        )
         anchor = (
             self._percentile(
-                self._anchor_percentile, floor_value=floor / _ANCHOR_FLOOR_RATIO if floor else None
+                self._anchor_percentile, floor_value=upper / _ANCHOR_FLOOR_RATIO if upper else None
             )
-            if floor
+            if upper
             else None
         )
-        if not floor or floor <= 0 or not anchor or anchor <= 0:
+        if not upper or upper <= 0 or not anchor or anchor <= 0:
             # Percentiles collapsed despite a non-empty histogram: fall back to plain max.
             return self._running_max.clone()
 
-        # The observed max is the no-clipping bound: the returned scale never sits below it, so
-        # calibration data is never clipped. Headroom is whatever the anchor term adds on top.
+        # ``upper`` is the top of the range the scale commits to representing; the anchor term
+        # only ever raises the scale above it. Blocks above ``upper`` are clipped -- see the
+        # class docstring for why that is preferred to chasing a lone outlier.
         headroom_amax = self._rho * anchor
-        if headroom_amax <= running_max:
-            exceeds_window = floor / anchor > _FP8_NORMAL_DYNAMIC_RANGE
+        if headroom_amax <= upper:
+            span = upper / anchor
             warnings.warn(
-                f"[nvfp4_act_headroom] per-block amax range {floor / anchor:.1f} leaves no "
-                f"headroom at rho={self._rho:g}; falling back to the observed max. "
+                f"[nvfp4_act_headroom] per-block amax range {span:.1f} leaves no headroom at "
+                f"rho={self._rho:g}; the scale falls back to the top of the calibrated range. "
                 + (
                     f"The range also exceeds the FP8 scale range "
-                    f"({_FP8_NORMAL_DYNAMIC_RANGE:.0f}), so no global scale can hold both ends. "
-                    "Reduce the range with outlier mitigation (SmoothQuant / per-channel / "
-                    "higher precision)."
-                    if exceeds_window
+                    f"({_FP8_NORMAL_DYNAMIC_RANGE:.0f}), so no permitted rho can clear it and no "
+                    "single global scale holds both ends. Reduce the range with outlier "
+                    "mitigation (SmoothQuant / per-channel / higher precision)."
+                    if span > _FP8_NORMAL_DYNAMIC_RANGE
                     else "Lower anchor_percentile or raise rho for more headroom."
                 ),
                 stacklevel=2,
             )
-            amax = running_max
+            amax = upper
         else:
             amax = headroom_amax
 
@@ -213,5 +225,6 @@ class NVFP4ActHeadroomCalibrator(_Calibrator):
     def __repr__(self):
         return (
             f"NVFP4ActHeadroomCalibrator(anchor_percentile={self._anchor_percentile}, "
-            f"rho={self._rho}, block_size={self._block_size})"
+            f"upper_percentile={self._upper_percentile}, rho={self._rho}, "
+            f"block_size={self._block_size})"
         )

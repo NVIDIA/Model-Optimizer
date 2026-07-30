@@ -994,6 +994,10 @@ class NVFP4ActHeadroomCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     above it for activations larger than any seen during calibration. Weight quantizers and
     all non-NVFP4 quantizers are calibrated with plain ``max``.
 
+    The top of the calibrated range is ``upper_percentile`` (default 99.99) rather than the
+    literal maximum, so rare blocks far above the rest are clipped instead of dragging the
+    global scale up until every other block flushes to zero.
+
     See :class:`NVFP4ActHeadroomCalibrator
     <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
     """
@@ -1011,6 +1015,19 @@ class NVFP4ActHeadroomCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
             "The global scale is anchored to this percentile of the per-block amax "
             "distribution. Lower values anchor further into the low tail, which yields a "
             "smaller global scale and less headroom."
+        ),
+    )
+
+    upper_percentile: float = ModeloptField(
+        default=99.99,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the top of the range.",
+        description=(
+            "The global scale is floored at this percentile, so per-block amaxes above it are "
+            "clipped. The default excludes the rarest blocks on purpose: chasing a lone outlier "
+            "pushes every other block's FP8 block scale below subnormal. Set to 100 to use the "
+            "literal observed max, which guarantees no calibration data is clipped."
         ),
     )
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,10 +21,12 @@ import pytest
 import torch
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization import model_calib
 from modelopt.torch.quantization.calib import NVFP4ActHeadroomCalibrator
 from modelopt.torch.quantization.model_calib import (
     _is_nvfp4_dynamic_input_quantizer,
     _swap_in_nvfp4_act_headroom_calibrators,
+    max_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import reduce_block_amax
@@ -67,14 +69,14 @@ def test_amax_is_rho_times_anchor():
     assert amax == pytest.approx(1024.0 * 0.5, rel=0.05)
 
 
-def test_amax_never_below_calibrated_max():
-    """A range too wide for rho warns and degenerates to plain max -- never below it."""
+def test_range_too_wide_for_rho_falls_back_to_the_calibrated_top():
+    """A range too wide for rho warns and falls back to the top of the calibrated range."""
     x = torch.zeros(64, 64)
     x[0, :16] = 100.0  # one large block, the rest tiny
     x[1:, :] = 1e-3
     with pytest.warns(UserWarning, match="leaves no headroom"):
         amax = _calibrate(NVFP4ActHeadroomCalibrator(rho=1.0, anchor_percentile=1.0), x)
-    assert amax == pytest.approx(100.0)
+    assert amax == pytest.approx(100.0, rel=0.06)  # within one histogram bin of the top block
 
 
 @pytest.mark.parametrize(
@@ -88,8 +90,8 @@ def test_amax_never_below_calibrated_max():
         "constant",
     ],
 )
-def test_amax_is_never_below_observed_max(case):
-    """The no-clipping invariant holds on every distribution, guardrail path included."""
+def test_upper_percentile_100_never_clips(case):
+    """upper_percentile=100 is the documented no-clipping setting; verify it holds."""
     g = torch.Generator().manual_seed(7)
     if case == "gaussian":
         x = torch.randn(512, 256, generator=g)
@@ -106,12 +108,37 @@ def test_amax_is_never_below_observed_max(case):
     else:
         x = torch.full((256, 256), 0.5)
 
-    cal = NVFP4ActHeadroomCalibrator(anchor_percentile=1.0)
+    cal = NVFP4ActHeadroomCalibrator(anchor_percentile=1.0, upper_percentile=100.0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         amax = _calibrate(cal, x)
     observed_max = float(reduce_block_amax(x, block_sizes={-1: 16}).max())
     assert amax >= observed_max, f"{case}: amax {amax} clips observed max {observed_max}"
+
+
+def test_default_clips_rare_outliers_to_protect_the_bulk():
+    """A lone freak block is clipped by default; chasing it would flush the tensor to zero."""
+    g = torch.Generator().manual_seed(11)
+    x = torch.randn(4096, 256, generator=g).abs() + 1e-3
+    x[0, :16] = 3e7  # one block ~7 orders of magnitude above the rest
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        default = _calibrate(NVFP4ActHeadroomCalibrator(anchor_percentile=1.0), x)
+        literal = _calibrate(
+            NVFP4ActHeadroomCalibrator(anchor_percentile=1.0, upper_percentile=100.0), x
+        )
+
+    # The default ignores the outlier, keeping the scale near the bulk of the distribution.
+    assert default < 3e7
+    # Honouring it instead drags the scale orders of magnitude higher, which is exactly the
+    # exposure upper_percentile=100 opts into.
+    assert literal > 100 * default
+
+
+def test_upper_percentile_out_of_range_rejected():
+    with pytest.raises(ValueError, match="upper_percentile must be in"):
+        NVFP4ActHeadroomCalibrator(upper_percentile=0.0)
 
 
 def test_anchor_percentile_zero_rejected():
@@ -140,8 +167,6 @@ def test_nan_inf_activations_rejected(bad):
 
 def test_calibrator_is_restored_after_calibration():
     """The swapped calibrator must not leak into later calibrations of the same model."""
-    from modelopt.torch.quantization.model_calib import max_calibrate
-
     data = torch.randn(16, 64)
     model = mtq.quantize(_Net(), ACT_ONLY_CFG, lambda m: m(data))
     assert not isinstance(model.fc1.input_quantizer._calibrator, NVFP4ActHeadroomCalibrator)
@@ -154,10 +179,8 @@ def test_calibrator_is_restored_after_calibration():
 
 def test_shared_state_knobs_are_forwarded_to_max_calibrate():
     """shared_states / sync_expert_weight_amax reach max_calibrate, as they do for `max`."""
-    import modelopt.torch.quantization.model_calib as mc
-
     seen = {}
-    real = mc.max_calibrate
+    real = model_calib.max_calibrate
 
     def spy(model, forward_loop=None, distributed_sync=True, **kwargs):
         seen.update(kwargs)
@@ -172,11 +195,11 @@ def test_shared_state_knobs_are_forwarded_to_max_calibrate():
             "sync_expert_weight_amax": True,
         },
     }
-    mc.max_calibrate = spy
+    model_calib.max_calibrate = spy
     try:
         mtq.quantize(_Net(), cfg, lambda m: m(torch.randn(8, 64)))
     finally:
-        mc.max_calibrate = real
+        model_calib.max_calibrate = real
 
     assert seen["sync_expert_weight_amax"] is True
     assert seen["shared_states"] == {"weight_global_amax": {"patterns": [r".*fc1"]}}
@@ -231,11 +254,14 @@ def test_only_nvfp4_input_quantizers_are_selected():
 
 def test_swap_installs_calibrator_with_config_values():
     model = mtq.quantize(_Net(), ACT_ONLY_CFG, lambda m: m(torch.randn(8, 64)))
-    swapped = _swap_in_nvfp4_act_headroom_calibrators(model, anchor_percentile=5.0, rho=1024.0)
+    swapped = _swap_in_nvfp4_act_headroom_calibrators(
+        model, anchor_percentile=5.0, upper_percentile=99.99, rho=1024.0
+    )
     assert len(swapped) == 2  # fc1 and fc2 input quantizers
     cal = model.fc1.input_quantizer._calibrator
     assert isinstance(cal, NVFP4ActHeadroomCalibrator)
     assert cal._anchor_percentile == 5.0
+    assert cal._upper_percentile == 99.99
     assert cal._rho == 1024.0
 
 
