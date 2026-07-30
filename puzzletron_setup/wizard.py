@@ -635,7 +635,19 @@ def _ask_aiperf_config(
     runtime: Mapping[str, Any],
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ask for one AIPerf node's independent Serving topology and workload."""
+    """
+    Configure an AIPerf serving topology and workload.
+    
+    Parameters:
+        prompts (PromptSession): Interactive prompt session.
+        detailed (bool): Whether to collect detailed workload settings.
+        moe (bool): Whether to configure expert parallelism for a mixture-of-experts model.
+        runtime (Mapping[str, Any]): Runtime defaults for input length, output length, and concurrency.
+        defaults (Mapping[str, Any] | None): Existing topology and workload values to use as defaults.
+    
+    Returns:
+        dict[str, Any]: AIPerf workload configuration containing serving topology, token counts, concurrency, and timeout settings.
+    """
     defaults = dict(defaults or {})
     topology_defaults = dict(defaults.get("topology") or {})
     checkpoint = prompts.checkpoint()
@@ -735,7 +747,18 @@ def _ask_downstream_evaluation_config(
     moe: bool,
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ask for lmms-eval task and vLLM settings."""
+    """
+    Collect lmms-eval tasks, sampling settings, vLLM topology, and evaluation timeout.
+    
+    Parameters:
+        prompts (PromptSession): Interactive prompt session.
+        detailed (bool): Whether to prompt for the per-candidate timeout.
+        moe (bool): Whether to offer expert parallelism for the vLLM topology.
+        defaults (Mapping[str, Any] | None): Previously saved configuration values to use as prompt defaults.
+    
+    Returns:
+        dict[str, Any]: Downstream evaluation configuration containing tasks, sampling settings, vLLM topology, model arguments, and timeout.
+    """
 
     defaults = defaults or {}
     tasks = prompts.text(
@@ -846,6 +869,21 @@ def _default_flow(
     objective: Mapping[str, Any] | None = None,
     include_initial_filter: bool = True,
 ) -> dict[str, Any]:
+    """
+    Build an opinionated post-MIP evaluation and selection flow.
+    
+    Parameters:
+        run_id (str): Identifier of the MIP run used as the flow source.
+        run (Mapping[str, Any]): MIP run configuration, including objectives and homogeneous candidate settings.
+        runtime (Mapping[str, Any]): Runtime workload settings for the serving evaluation.
+        data (Mapping[str, Any]): Dataset settings used to configure evaluation block size.
+        prefix (str): Prefix applied to generated node identifiers.
+        objective (Mapping[str, Any] | None): Objective to use for the flow; defaults to the first objective in the run.
+        include_initial_filter (bool): Whether to include the initial MIP-score filtering node.
+    
+    Returns:
+        dict[str, Any]: Flow definition containing its source specification and ordered orchestration nodes.
+    """
     def node_id(name: str) -> str:
         return f"{prefix}{name}"
 
@@ -1005,6 +1043,20 @@ def _custom_flow(
     detailed: bool,
     moe: bool,
 ) -> dict[str, Any]:
+    """
+    Interactively build a post-MIP orchestration flow for a run.
+    
+    Parameters:
+    	run_id (str): Identifier of the MIP run associated with the flow.
+    	runtime (Mapping[str, Any]): Runtime settings used to configure serving evaluations.
+    	data (Mapping[str, Any]): Data settings used to configure model evaluations.
+    	used_ids (set[str]): Node identifiers already used by other flows.
+    	detailed (bool): Whether to collect detailed configuration options.
+    	moe (bool): Whether the selected model is a mixture-of-experts model.
+    
+    Returns:
+    	dict[str, Any]: A flow definition containing the run source and configured post-MIP nodes.
+    """
     nodes: OrderedDict[str, Any] = OrderedDict()
     available_metrics = ["mip.score"]
     transformer_nodes = []
@@ -1221,6 +1273,20 @@ def _resource_rows(
     gpus_per_node: int,
     workers: Mapping[str, int],
 ) -> list[dict[str, Any]]:
+    """
+    Builds a resource plan for each campaign execution stage.
+    
+    Parameters:
+    	state (AnswerState): Campaign state containing post-MIP flows and execution mode.
+    	common (Mapping[str, int]): Common parallel mesh dimensions.
+    	bypass (Mapping[str, int]): Bypass parallel mesh dimensions.
+    	global_kd (Mapping[str, int]): Global knowledge-distillation mesh dimensions.
+    	gpus_per_node (int): Number of GPUs available on each node.
+    	workers (Mapping[str, int]): Worker limits for pool and sharded workloads.
+    
+    Returns:
+    	list[dict[str, Any]]: Resource rows containing each stage name, instance count, GPUs per instance, and required node count.
+    """
     from .bundle import _post_mip_candidate_limits, _serving_parallel
 
     rows = []

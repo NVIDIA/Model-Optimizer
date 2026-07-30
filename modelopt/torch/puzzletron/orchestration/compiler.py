@@ -58,6 +58,15 @@ _DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
+    """
+    Convert a mapping to a dictionary.
+    
+    Parameters:
+        value (Any): Value to normalize.
+    
+    Returns:
+        dict[str, Any]: A dictionary copy of the value, or an empty dictionary if the value is not a mapping.
+    """
     return dict(value) if isinstance(value, Mapping) else {}
 
 

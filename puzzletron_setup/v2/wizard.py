@@ -3597,6 +3597,17 @@ def _post_mip_strategy(node: NodeDraft) -> str:
 
 
 def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
+    """
+    Configure post-MIP flows for each configured MIP run.
+    
+    Parameters:
+    	session (WizardSession): Interactive wizard session used to read and store configuration.
+    	resolver (DefaultsResolver): Resolver for stage resource defaults.
+    	context (dict): Wizard context containing the inspected model and its inventory.
+    
+    Returns:
+    	bool: `True` when post-MIP flows are configured, `False` if the user backs out.
+    """
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
     sequence = int(session.state.get_field("data.sequence_length", 4096))
@@ -4023,7 +4034,19 @@ def _serving_setting_prompt(
     pruning: Mapping[str, Any],
     stage_id: str,
 ) -> Any:
-    """Ask the complete AIPerf workload and serving-only parallel setting."""
+    """
+    Collect serving workload parameters and its vLLM parallel topology.
+    
+    Parameters:
+        prefix (str): State path prefix used for the interactive prompts.
+        defaults (Mapping[str, Any]): Default serving settings.
+        inventory (Any): Model inventory used to validate the topology.
+        pruning (Mapping[str, Any]): Pruning configuration used to validate the topology.
+        stage_id (str): Stage associated with the serving topology.
+    
+    Returns:
+        Any: The configured serving settings, or `BACK` if the user navigates backward.
+    """
     values = {}
     for name, label, default in (
         ("input_tokens", "Serving input sequence length (ISL):", defaults["input_tokens"]),
@@ -4100,9 +4123,31 @@ def _downstream_evaluation_setting_prompt(
     pruning: Mapping[str, Any],
     stage_id: str,
 ) -> Any:
-    """Ask lmms-eval task settings and the vLLM topology used to run them."""
+    """
+    Prompt for lmms-eval tasks and the vLLM configuration used to run them.
+    
+    Parameters:
+    	session (WizardSession): Interactive wizard session.
+    	prefix (str): State path prefix for the prompted settings.
+    	defaults (Mapping[str, Any]): Default downstream evaluation settings.
+    	inventory (Any): Model inventory used to validate the vLLM topology.
+    	pruning (Mapping[str, Any]): Pruning configuration used to validate the vLLM topology.
+    	stage_id (str): Stage identifier associated with the vLLM topology.
+    
+    Returns:
+    	dict: Configured lmms-eval settings, including tasks, sampling limits, timeout, vLLM topology, and model arguments; `BACK` if the user backs out.
+    """
 
     def validate_tasks(value: str) -> bool | str:
+        """
+        Validate a comma-separated list of lmms-eval tasks.
+        
+        Parameters:
+        	value (str): The task list to validate.
+        
+        Returns:
+        	bool | str: `True` if at least one task is provided, otherwise an error message.
+        """
         tasks = [item.strip() for item in value.split(",") if item.strip()]
         return True if tasks else "Enter at least one lmms-eval task."
 
@@ -4176,7 +4221,19 @@ def _configure_dynamic_resources(
     *,
     ask: bool,
 ) -> Any:
-    """Attach an independent resource/batch card to every node in one flow."""
+    """
+    Configure independent resources for each node in a post-MIP flow.
+    
+    Parameters:
+    	session (WizardSession): Interactive session used to read state and collect resource settings.
+    	editor (PostMIPFlowEditor): Flow editor containing the nodes to configure.
+    	flow_id (str): Identifier of the post-MIP flow.
+    	model (Any): Model information used to validate parallel profiles.
+    	ask (bool): Whether to prompt for per-node resource and batch customization.
+    
+    Returns:
+    	True when configuration completes, or BACK if the user exits during a prompt.
+    """
     registry = ResourceProfileRegistry.from_dict(
         session.state.collection("parallel_profiles") or {}
     )
