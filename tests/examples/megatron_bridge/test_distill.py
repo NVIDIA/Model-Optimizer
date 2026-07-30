@@ -14,7 +14,6 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
-import importlib
 import sys
 from pathlib import Path
 
@@ -31,6 +30,11 @@ from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
 
+# distill.py imports sibling example modules by filename, so make that directory importable first.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
+
+import distill
+
 
 @pytest.mark.parametrize(
     ("option", "value", "message"),
@@ -43,9 +47,6 @@ from modelopt.torch.puzzletron.anymodel import convert_model
     ],
 )
 def test_distill_rejects_invalid_intervals(monkeypatch, capsys, option, value, message):
-    example_dir = Path(__file__).parents[3] / "examples" / "megatron_bridge"
-    monkeypatch.syspath_prepend(str(example_dir))
-    distill = importlib.import_module("distill")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -65,16 +66,14 @@ def test_distill_rejects_invalid_intervals(monkeypatch, capsys, option, value, m
         ],
     )
 
-    with pytest.raises(SystemExit, match="2"):
+    with pytest.raises(SystemExit) as exc_info:
         distill.get_args()
 
+    assert exc_info.value.code == 2
     assert message in capsys.readouterr().err
 
 
 def test_distill_allows_zero_eval_iters(monkeypatch):
-    example_dir = Path(__file__).parents[3] / "examples" / "megatron_bridge"
-    monkeypatch.syspath_prepend(str(example_dir))
-    distill = importlib.import_module("distill")
     monkeypatch.setattr(
         sys,
         "argv",

@@ -9,142 +9,61 @@ description: >-
 
 # ModelOpt Quantization-Aware Distillation
 
-QAD is expensive. Use it only to recover a material, apples-to-apples PTQ
-benchmark gap and only when the user explicitly requests QAD for the target
-model or run. Do not infer permission from a quantized checkpoint, evaluation
-gap, or recipe-search result.
+QAD is expensive. Run it only when the user explicitly authorizes QAD for the
+target model or run. A Day-0, PTQ, evaluation, comparison, or recipe-search
+request alone is not authorization to start QAD.
 
-## 1. Read the supported workflow
+## Follow the supported workflow
 
-Read these sources before constructing commands:
+Before constructing commands, read:
 
-- `examples/megatron_bridge/README.md`, especially Post-Training Quantization,
-  Data Preparation, Quantization Aware Distillation, export, and Slurm usage
-- `examples/dataset/MEGATRON_DATA_PREP.md`, especially token-budgeted blends
+- `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
+  export, and Slurm usage
 - `examples/megatron_bridge/{quantize.py,distill.py}` via `--help`
+- `skills/common/{environment-setup,workspace-management,slurm-setup}.md`; also
+  `skills/common/remote-execution.md` for remote Slurm
 
-Treat them as the source of truth for mutable flags, containers, model support,
-and checkpoint formats. Do not copy their full command lines into new wrappers.
-The deprecated `examples/llm_qad` flow is not the default.
+Treat the example README and `--help` output as authoritative for mutable flags,
+commands, containers, and checkpoint formats. This skill supports Slurm only.
 
-## 2. Reuse or establish the gap
+## Execute in this order
 
-When QAD follows `evaluation`, `compare-results`, or `quant-recipe-search`,
-reuse the validated BF16/PTQ scores and exact benchmark configuration; do not
-rerun valid baselines. Record their run IDs, metric, direction, uncertainty, and
-acceptable delta. Use `evaluation` and `compare-results` only for missing,
-unvalidated, or non-comparable results. Stop if the gap is not material.
+1. **Confirm the gap.** Reuse only validated, comparable BF16/PTQ results and
+   the exact benchmark configuration from preceding evaluation or recipe
+   search; run missing, invalid, or non-comparable baselines. Set the recovery
+   target to the user's acceptable BF16 delta, or the benchmark-noise envelope
+   if none is supplied. Stop if the initial gap already meets that target.
+2. **Reproduce PTQ and verify compatibility.** In the target runtime, require
+   `AutoBridge.can_handle()` for the target model and PTQ through `quantize.py`
+   to succeed while preserving the exact preceding PTQ config or recipe:
+   format, layer selection, calibration data/count, sequence length, and seed.
+   A changed quantization setting is a new PTQ candidate and must be evaluated
+   before QAD. In the master-rank `.quant_summary.txt`, require finite positive
+   `amax` for enabled static quantizers; accept `dynamic`/format-defined `None`
+   only when the recipe intends it. Treat the summary as rank-local under model
+   parallelism.
+3. **Choose topology explicitly.** Derive the smallest fitting node count and
+   TP/PP/CP/EP/ETP from student and teacher architecture, 32K activation memory,
+   and available GPU memory. Prefer CP before TP for small long-context models;
+   keep EP=1 for dense models. For MoE require:
 
-Reuse the preceding PTQ config or recipe to reproduce PTQ with
-`examples/megatron_bridge/quantize.py`; do not use the usual HF checkpoint as
-the QAD student. Preserve the quantization format, layer selection, calibration
-dataset, sample count, sequence length, and seed. Choose Megatron execution
-topology separately without changing quantization semantics. If any quantization
-setting must change, treat it as a new PTQ candidate and evaluate it before QAD.
+   - `DP = world_size / (TP * PP * CP)`
+   - `EDP = world_size / (ETP * EP * PP)`
+   - integral DP/EDP, `num_experts % EP == 0`, and
+     `GBS % (MBS * DP) == 0`
 
-In the exact runtime, confirm `AutoBridge.can_handle()` accepts the model, then
-reproduce PTQ with `quantize.py`. Sanity-check the checkpoint's master-rank
-`.quant_summary.txt`: every enabled statically calibrated quantizer it lists
-must have a finite, positive `amax`. Accept `dynamic` or format-defined `None`
-only when the preserved recipe intentionally uses dynamic or MX quantization;
-with model parallelism, do not treat this rank-local summary as exhaustive.
-Stop on unsupported conversion, failed PTQ, missing ModelOpt state, or
-unexpected `amax`.
+4. **Prepare the full capped dataset once.** Copy
+   `examples/megatron_bridge/data/nemotron-cascade-2-blend.yaml`, set the target
+   tokenizer and workspace path, and materialize it before training. Use the
+   generated random sample for packed 32K sequences and its 1% validation
+   holdout; do not download separate validation data or use mock data as
+   evidence.
+5. **Run staged QAD.** Use one result-bearing Slurm job per stage and fold startup
+   validation into it; do not submit separate GPU preflight jobs. Use the
+   defaults below and evaluate checkpoint 150 before deciding whether to
+   continue.
 
-## 3. Set up Slurm execution
-
-Read `skills/common/environment-setup.md` and detect whether the Slurm target is
-local or remote. This version of the skill supports Slurm only; stop if the
-target is not Slurm.
-
-- On local Slurm, follow `skills/common/workspace-management.md` and
-  `skills/common/slurm-setup.md` directly. Do not add SSH or sync steps.
-- On remote Slurm, also follow `skills/common/remote-execution.md`: establish
-  its persistent SSH session, create matching local and remote session/model
-  workspaces, and sync the source plus the two-script Slurm wrapper/inner runner.
-
-Use the common account, partition, registry-auth, submission, and monitoring
-procedures in either case.
-
-Keep the reused BF16/PTQ run references and configs with the reproduced PTQ
-Megatron checkpoint, QAD checkpoints, data, logs, exports, and new benchmark
-results in the same session/model workspace. QAD must start from the checkpoint
-produced by `examples/megatron_bridge/quantize.py` because it carries the
-ModelOpt state; an exported HF PTQ checkpoint is not a substitute.
-
-## 4. Choose topology explicitly
-
-Inspect model parameter count and architecture, sequence length, GPU count/type
-and memory, then choose the smallest topology that fits both student and teacher:
-
-1. Choose node count from model-state plus activation memory; do not start with
-   an oversized multi-node topology.
-2. Use TP only when model-state/GEMM size warrants it, and preserve attention
-   head and hidden-size divisibility.
-3. Use CP to distribute the 32K context when activation/attention memory is the
-   constraint. Prefer CP before TP for a small dense model at long context.
-4. Keep EP=1 for dense models. For MoE, choose EP from expert count, memory, and
-   available ranks, and inspect the current `distill.py` value for expert tensor
-   parallelism (ETP); do not assume ETP equals TP.
-5. Add PP only when layer/model state still does not fit.
-
-For MoE, Megatron folds two overlapping meshes onto the same ranks within each
-PP stage; EP/ETP do not multiply the dense TP/CP mesh:
-
-- Attention DP: `DP = world_size / (TP * PP * CP)`
-- Expert DP: `EDP = world_size / (ETP * EP * PP)`
-
-Require both divisions to be integral, `num_experts % EP == 0`, and
-`GBS % (MBS * DP) == 0`. Record nodes, GPUs/node, TP/PP/CP/EP/ETP/DP/EDP, MBS,
-GPU memory, and why each non-one dimension is needed.
-
-Example only: for the requested one-node, eight-H100 Qwen3-0.6B validation at
-32K, TP=1, PP=1, CP=4, EP=1, DP=2, MBS=1 is a reasonable starting point. This
-is validation evidence, not a default topology; derive a fresh topology for
-every target model and cluster.
-
-## 5. Prepare only the next data tranche
-
-Copy `examples/megatron_bridge/data/nemotron-cascade-2-blend.yaml` into the
-session workspace, replace the tokenizer placeholder with the target model's
-Hugging Face ID or local path, and set the output directory and token budget.
-Run:
-
-```bash
-python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend \
-  --config <copied-blend.yaml>
-```
-
-The utility streams `nvidia/Nemotron-Cascade-2-SFT-Data`, applies a deterministic
-approximate buffer shuffle, and stops at the token budget. Never snapshot or
-materialize the full dataset. For the initial step-150 gate, the default
-2.6-billion-token budget covers
-`150 * 512 * 32768` tokens plus a small margin. Use a much smaller explicit
-budget for workflow validation. At very small budgets, use a representative
-subset of source configs rather than giving a rare config too few documents
-for Megatron's train/validation split.
-
-Pass the generated `data_blend.txt` entries as `distill.py --data_paths`.
-The supported real-data `GPTDatasetConfig` shuffles documents and concatenates
-them into fixed-length 32K samples, so sequences are packed instead of padded.
-It deterministically holds out 1% of those shuffled documents for validation
-with `split="99,1,0"`; bounded materialization uses shuffle seed 42, while the
-training seed controls ordering within the Megatron splits. Do not download a
-duplicate validation copy. With the defaults, two GBS-512 32K validation
-batches consume 33.6M tokens from the nominal 26M-token holdout, so about 1.3
-passes per validation event is accepted. Recalculate this ratio when changing
-GBS, sequence length, or `eval_iters`, and increase the token budget rather than
-allowing substantially more repetition. Treat this loss as a training-health
-signal; the independent benchmark remains the recovery gate. Do not use mock
-data as training evidence.
-
-## 6. Reproduce PTQ, then run staged QAD
-
-Use the verified Megatron PTQ checkpoint from step 2. Reuse a valid preceding
-PTQ evaluation; run a new PTQ evaluation only when the baseline is missing,
-invalid, or non-comparable, or a quantization setting changed. Follow the
-current Megatron Bridge README for QAD, resume, and export commands. Apply these
-QAD defaults:
+## Default training policy
 
 | Setting | Default |
 | --- | --- |
@@ -154,66 +73,33 @@ QAD defaults:
 | Training cap | 1000 iterations |
 | Global batch size | 512 |
 | Dataset | `nvidia/Nemotron-Cascade-2-SFT-Data` |
+| Materialized token budget | 17.3B, prepared once before training |
 | Validation | every 25 iterations; deterministic 1% holdout; 2 batches |
 | Checkpoint interval | 50 iterations |
 | Initial benchmark/exit | iteration 150 |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
-Keep `train_iters=1000` from the first run so the cosine schedule has a stable
-horizon. Set `save_interval=50`, `eval_interval=25`, `eval_iters=2`,
-`exit_interval=150`, and `exit_duration_in_mins=220` for the initial stage. This
-preserves checkpoints at iterations 50, 100, and 150 when the stage reaches its
-iteration exit. The duration exit is a checkpointing safety margin, not the
-training target.
+Keep `train_iters=1000` from the first launch. A duration exit before checkpoint
+150 is incomplete: resume the same run and do not label or benchmark an earlier
+checkpoint as QAD-150.
 
-Use one result-bearing Slurm job per stage and put Pyxis container flags on the
-final `srun`. Fold startup validation into that job; do not submit separate GPU
-preflight or smoke jobs.
+Monitor smoothed QAD/KD loss, learning rate, and gradient norm. Stop on non-finite
+loss, repeated skipped iterations, or a sustained spike. Starting at iteration
+100, stop and diagnose if two consecutive 50-step windows fail to lower median
+loss.
 
-## 7. Monitor loss, then benchmark
+Export and evaluate checkpoint 150 with the exact BF16/PTQ benchmark
+configuration. Stop if it meets the recovery target. Otherwise continue only
+when partial recovery is positive beyond run noise and training is healthy.
+Choose later absolute checkpoints from that evidence.
 
-Monitor the running log instead of waiting for the stage to finish. Record total
-or logits-distillation loss every log interval. The expected signal is a
-decreasing smoothed trend, not a decrease at every noisy step:
+Resume the same Megatron output directory without changing prepared data, data
+paths/cache, seed, checkpoint lineage, optimizer, scheduler, iteration, or
+consumed-sample state. Among Megatron training arguments, change only the
+absolute `exit_interval`; keep topology unchanged, never restart from PTQ, and
+never reset training progress. Stop when the recovery target is met, recovery
+plateaus or regresses, training diverges, or iteration 1000 is reached.
 
-1. From iteration 100 onward, compare the median loss in each 50-step window
-   with the preceding window.
-2. Treat non-finite loss, NaN iterations, repeated skipped iterations, or a
-   sharp sustained increase as immediate failure.
-3. Flag one flat or rising window. If a second consecutive window also fails to
-   decrease, stop at the checkpoint ending that second window. Preserve the
-   latest known-good checkpoint and diagnose before resuming.
-
-Record the actual exit iteration. If the duration exit happens before checkpoint
-150 exists, mark the stage incomplete and resume or relaunch the same output
-directory. Do not export, benchmark, or label an earlier checkpoint as QAD-150.
-
-Once checkpoint 150 exists:
-
-1. Confirm the smoothed QAD/KD loss decreased, learning rate is sensible,
-   gradient norm is non-pathological, and checkpoints 50, 100, and 150 exist.
-2. Export that QAD checkpoint with the current quantized Megatron exporter.
-3. Evaluate QAD-150 with the exact step-2 benchmark configuration. Reuse
-   validated, comparable BF16/PTQ results; run only missing, invalid, or
-   non-comparable baselines.
-4. Calculate the original gap and recovery. For higher-is-better metrics:
-   `gap = BF16 - PTQ`, `recovered = QAD - PTQ`, and
-   `recovery_fraction = recovered / gap`.
-
-Continue only if benchmark recovery is positive beyond run noise and loss is
-stable. Choose the next absolute checkpoint from the evidence (for example 300,
-500, 750, or 1000), resume the same output directory with `train_iters=1000`,
-retain `eval_interval=25`, `eval_iters=2`, and `save_interval=50`, and set only
-`exit_interval` to that target. Stop on recovered gap, plateau, regression,
-divergence, or iteration 1000. Never raise the 1000-step cap without explicit
-user direction.
-
-## 8. Report evidence
-
-Report the exact ModelOpt source revision, commands, Slurm job/account/partition,
-container, paths, topology derivation, dataset IDs/configs/seed/token
-budget/materialized counts, PTQ format, reused evaluation run IDs, checkpoint
-iterations, loss/LR/grad trend, scheduler state, and BF16/PTQ/QAD benchmark
-scores. State which scores were reused versus newly evaluated. Support success
-with both scheduler and log evidence; identify the first real error when a run
-fails.
+Report exact revisions and commands; Slurm job/container/topology; sampled data
+configuration and counts; PTQ recipe; checkpoint, loss, optimizer, and scheduler
+state; and comparable BF16/PTQ/QAD results.
