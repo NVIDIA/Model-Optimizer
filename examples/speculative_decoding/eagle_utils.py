@@ -141,6 +141,9 @@ def make_speculative_data_module(
                 train_len=train_len,
                 local_image_path=data_args.vlm_img_dir,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
+                chat_template=chat_template,
             )
 
     else:
@@ -515,8 +518,9 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
                 raise RuntimeError(
                     f"Failed to capture loop variables in patched _templated_ring_attention: {e}"
                 ) from e
-            # Set attn mask to permuted TTT mask
-            if "attn_bias" in kwargs:
+            # Set attn mask to permuted TTT mask. Newer torch omits the attn_bias kwarg on the
+            # forward call, so key off grad_out instead to tell forward from backward.
+            if patch_enbabled and "grad_out" not in kwargs:
                 kwargs["attn_bias"] = _get_sharded_ttt_msk(
                     i, rank, size, query.shape[2], ttt_step, query.dtype
                 )

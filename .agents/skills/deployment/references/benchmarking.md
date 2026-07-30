@@ -121,5 +121,5 @@ baseline precision of the same model) at matched ISL/OSL.
 - **Match the serving config across compared runs** — image, tensor/expert
   parallelism, KV dtype, and token shapes must be identical, or the comparison
   isn't apples-to-apples.
-- **NVFP4 on Blackwell sm_103 needs a cu130 image** — see the vLLM note in the
+- **NVFP4 on Blackwell sm_103 needs a CUDA-13 image** — see the vLLM note in the
   main `SKILL.md`; a wrong image serves nothing (or the coherence gate fails).

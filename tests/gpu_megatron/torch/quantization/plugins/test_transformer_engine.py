@@ -18,6 +18,7 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
+import transformer_engine as te
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.quantize_common import quantize_model_and_forward
 
@@ -25,8 +26,6 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 from modelopt.torch.quantization.nn import QuantModule
-
-te = pytest.importorskip("transformer_engine")
 
 
 class TELinear(nn.Module):

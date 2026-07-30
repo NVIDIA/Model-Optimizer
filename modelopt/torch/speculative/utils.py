@@ -552,12 +552,17 @@ def get_ttt_msk_func(seq_length, ttt_step):
 
 
 @contextlib.contextmanager
-def enable_cp_ttt_patch():
+def enable_cp_ttt_patch(cp_size: int = 1):
     """Context manager to enable CP TTT patch."""
     import modelopt.torch.speculative.plugins.hf_eagle
 
     modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = True
-    with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]):
+    # Under CP, restrict to cudnn: MATH decomposes SDPA and breaks on DTensors. Elsewhere keep
+    # MATH, since cudnn is unavailable on CPU and for some head dims.
+    backends = [SDPBackend.CUDNN_ATTENTION]
+    if cp_size == 1:
+        backends.append(SDPBackend.MATH)
+    with sdpa_kernel(backends):
         try:
             yield
         finally:
@@ -610,7 +615,13 @@ def load_vlm_or_llm(
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
     if _is_vlm:
-        model_cls = transformers.AutoModelForVision2Seq
+        # Transformers 5 renamed AutoModelForVision2Seq to
+        # AutoModelForImageTextToText.  Prefer the pre-5 name so this loader
+        # continues to support the Transformers 4 environments used by older
+        # speculative-decoding jobs.
+        model_cls = getattr(transformers, "AutoModelForVision2Seq", None)
+        if model_cls is None:
+            model_cls = transformers.AutoModelForImageTextToText
     else:
         model_cls = transformers.AutoModelForCausalLM
 

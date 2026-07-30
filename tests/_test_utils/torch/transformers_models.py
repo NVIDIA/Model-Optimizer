@@ -34,10 +34,13 @@ from transformers import (
     Gemma3Config,
     GptOssConfig,
     LlamaConfig,
+    LlamaForSequenceClassification,
+    MixtralConfig,
     NemotronConfig,
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
+    Qwen3VLConfig,
     T5Config,
     T5ForConditionalGeneration,
     ViTConfig,
@@ -202,9 +205,6 @@ create_tiny_qwen3_moe_dir = partial(_create_tiny_qwen3_dir, moe=True)
 
 ##### Qwen3-VL #####
 def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3VL requires transformers>=4.57
-    from transformers import Qwen3VLConfig
-
     set_seed(SEED)
 
     # Defaults: hidden_size=num_attention_heads*head_dim (e.g. 4*8=32).
@@ -567,6 +567,25 @@ def create_tiny_gpt_oss_dir(
     )
 
 
+##### MIXTRAL #####
+def get_tiny_mixtral(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "num_local_experts": 4,
+        "num_experts_per_tok": 2,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    kwargs.update(config_kwargs)
+    return AutoModelForCausalLM.from_config(MixtralConfig(**kwargs))
+
+
 ##### LLAMA #####
 def get_tiny_llama(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
@@ -590,6 +609,35 @@ def create_tiny_llama_dir(
     return _create_tiny_llm_dir(
         Path(tmp_path) / "tiny_llama",
         get_tiny_llama,
+        with_tokenizer=with_tokenizer,
+        **config_kwargs,
+    )
+
+
+def get_tiny_llama_seq_cls(**config_kwargs) -> PreTrainedModel:
+    set_seed(SEED)
+    kwargs = {
+        "dtype": torch.bfloat16,
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+        "num_labels": 1,
+        "pad_token_id": 0,
+    }
+    kwargs.update(config_kwargs)
+    return LlamaForSequenceClassification(LlamaConfig(**kwargs))
+
+
+def create_tiny_llama_seq_cls_dir(
+    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
+) -> Path:
+    return _create_tiny_llm_dir(
+        Path(tmp_path) / "tiny_llama_seq_cls",
+        get_tiny_llama_seq_cls,
         with_tokenizer=with_tokenizer,
         **config_kwargs,
     )
@@ -641,10 +689,6 @@ def get_tiny_bert(**config_kwargs) -> PreTrainedModel:
     }
     kwargs.update(config_kwargs)
     return AutoModelForQuestionAnswering.from_config(BertConfig(**kwargs))
-
-
-def create_tiny_bert_dir(tmp_path: Path | str, **config_kwargs) -> Path:
-    return _create_tiny_llm_dir(Path(tmp_path) / "tiny_bert", get_tiny_bert, **config_kwargs)
 
 
 ##### ViT (vision) #####

@@ -18,11 +18,9 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-import transformers
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
-from packaging.version import Version
 
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
@@ -59,9 +57,6 @@ def test_puzzletron(
     hybrid_override_pattern: str,
     has_moe_layers: bool,
 ):
-    if "Qwen3-VL" in hf_model_name and Version(transformers.__version__) < Version("4.57.0"):
-        pytest.skip("Qwen3-VL is not supported with transformers < 4.57.0")
-
     if "Nemotron" in hf_model_name:
         pytest.importorskip("mamba_ssm", reason="mamba_ssm required for Nemotron tests")
 
