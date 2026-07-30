@@ -23,6 +23,8 @@ reduced precision on the rest of the nodes. AutoCast automatically injects cast 
 nodes.
 """
 
+from copy import deepcopy
+
 import numpy as np
 import onnx
 
@@ -30,7 +32,11 @@ import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.autocast.logging_config import logger
-from modelopt.onnx.autocast.nodeclassifier import NodeClassifier, NodeRuleBase
+from modelopt.onnx.autocast.nodeclassifier import (
+    DisabledNodeNameRegexRule,
+    NodeClassifier,
+    NodeRuleBase,
+)
 from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner
 from modelopt.onnx.utils import get_min_opset_for_precisions, get_qdq_precisions
@@ -42,6 +48,17 @@ For 512, the unit in last place (ULP) is 0.5, for 1024 it is 1.0, etc.
 DEFAULT_DATA_MAX = 512
 DEFAULT_INIT_MAX = np.finfo(np.float16).max
 LATEST_IR_VERSION_SUPPORTED_BY_ORT = 10
+
+
+def _capture_network_io_metadata(
+    model: onnx.ModelProto, keep_io_types: bool
+) -> dict[str, list[onnx.ValueInfoProto]] | None:
+    if not keep_io_types:
+        return None
+    return {
+        "input": [deepcopy(io) for io in model.graph.input],
+        "output": [deepcopy(io) for io in model.graph.output],
+    }
 
 
 def convert_to_mixed_precision(
@@ -97,6 +114,7 @@ def convert_to_mixed_precision(
     # Load and process model
     model = onnx.load(onnx_path, load_external_data=True)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
+    original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
     # Get original model's opset version
     original_opset = onnx_utils.get_opset_version(model)
@@ -172,6 +190,7 @@ def convert_to_mixed_precision(
         init_conversion_max_bytes=init_conversion_max_bytes,
         custom_ops=graph_sanitizer.custom_ops,
         use_standalone_type_inference=use_standalone_type_inference,
+        original_network_io_metadata=original_network_io_metadata,
     )
 
     # Obtain reference data
@@ -206,6 +225,7 @@ def convert_to_f16(
     trt_plugins: list[str] | None = [],
     use_standalone_type_inference: bool = False,
     opset: int | None = None,
+    nodes_to_exclude: list[str] | None = None,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision, using PrecisionConverter.
 
@@ -225,8 +245,10 @@ def convert_to_f16(
                (22 for bf16, 19 for fp16) and Q/DQ node requirements. The opset may be automatically
                increased if Q/DQ nodes in the model require a higher version (e.g., FP8 requires 19,
                INT4 requires 21, NVFP4 requires 23).
+        nodes_to_exclude: List of regex patterns to match node names that should remain in FP32.
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
+    original_network_io_metadata = _capture_network_io_metadata(model, keep_io_types)
 
     # Check Q/DQ precision types in the model and determine required opset
     qdq_precisions = get_qdq_precisions(model)
@@ -285,10 +307,17 @@ def convert_to_f16(
         custom_ops=sanitizer.custom_ops,
         tensor_block_dict=tensor_block_dict,
         use_standalone_type_inference=use_standalone_type_inference,
+        original_network_io_metadata=original_network_io_metadata,
     )
-    high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
+    node_name_rule = DisabledNodeNameRegexRule(nodes_to_exclude or [])
+    high_precision_nodes = [
+        node.name
+        for node in model.graph.node
+        if node.op_type in op_block_list or node_name_rule.check(node)
+    ]
+    high_precision_node_set = set(high_precision_nodes)
     low_precision_nodes = [
-        node.name for node in model.graph.node if node.op_type not in op_block_list
+        node.name for node in model.graph.node if node.name not in high_precision_node_set
     ]
     model_mod = precision_converter.convert(high_precision_nodes, low_precision_nodes)
     return model_mod

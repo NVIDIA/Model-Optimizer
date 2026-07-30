@@ -37,7 +37,7 @@ quantize:
   algorithm:
     method: mse
     fp8_scale_sweep: true   # MSE refines only static NVFP4 weights; FP8 layers stay max-calibrated
-    layerwise: false        # Qwen3.5 decoder layers nested under model.language_model.layers
+    layerwise: {enable: false}  # Qwen3.5 decoder layers nested under model.language_model.layers
   quant_cfg:
     - $import: base_disable_all
     # FP8 base on every weight/input quantizer:

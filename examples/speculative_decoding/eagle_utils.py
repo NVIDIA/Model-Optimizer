@@ -59,12 +59,16 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
+    final_aux_is_base_hidden=False,
 ) -> dict:
     """Create data module for speculative decoding training.
 
     Args:
         shift_labels: If True, labels are shifted by 1 for autoregressive training (EAGLE3).
             If False, labels are unshifted for diffusion-style training (DFlash).
+        final_aux_is_base_hidden: Streaming only. True when the draft's top aux layer is the
+            base's final layer, so the last captured plane is both the final aux feature and
+            the base (KD-target) hidden instead of an extra dedicated plane.
     """
     # Load chat template from file if provided
     chat_template = None
@@ -115,6 +119,7 @@ def make_speculative_data_module(
             model=data_args.streaming_model_name,
             max_seq_len=train_len,
             answer_only_loss=answer_only_loss,
+            final_aux_is_base_hidden=final_aux_is_base_hidden,
         )
         train_dataset = EagleVllmStreamingDataset(
             entries=ds,
@@ -141,6 +146,9 @@ def make_speculative_data_module(
                 train_len=train_len,
                 local_image_path=data_args.vlm_img_dir,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
+                chat_template=chat_template,
             )
 
     else:
@@ -515,8 +523,9 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
                 raise RuntimeError(
                     f"Failed to capture loop variables in patched _templated_ring_attention: {e}"
                 ) from e
-            # Set attn mask to permuted TTT mask
-            if "attn_bias" in kwargs:
+            # Set attn mask to permuted TTT mask. Newer torch omits the attn_bias kwarg on the
+            # forward call, so key off grad_out instead to tell forward from backward.
+            if patch_enbabled and "grad_out" not in kwargs:
                 kwargs["attn_bias"] = _get_sharded_ttt_msk(
                     i, rank, size, query.shape[2], ttt_step, query.dtype
                 )

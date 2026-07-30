@@ -70,6 +70,11 @@ python torch_quant_to_onnx.py \
     --onnx_save_path=<path to save the exported ONNX model>
 ```
 
+Quantization configs are loaded from the YAML preset recipes under
+`modelopt_recipes/configs/ptq/presets/model/`, selected by `--quantize_mode`. Pass
+`--recipe=<preset basename or path to a QuantizeConfig YAML>` to use a different
+recipe (e.g. `--recipe=nvfp4_awq_lite` or `--recipe=/path/to/my_quant_cfg.yaml`).
+
 ResNet AutoQuantize searches FP8 and INT8 at eight effective bits and keeps its
 residual connections in FP8.
 
@@ -96,6 +101,72 @@ python ../onnx_ptq/evaluate.py \
     --engine_precision=stronglyTyped \
     --model_name=<timm model name>
 ```
+
+## HF Embedding and Reranking Models
+
+> **Experimental:** Accuracy has not yet been validated for this example.
+
+`hf_embedding_quant_to_onnx.py` quantizes an HF text-embedding or reranking
+model (bidirectional Llama encoders such as
+[nvidia/llama-nemotron-embed-1b-v2](https://huggingface.co/nvidia/llama-nemotron-embed-1b-v2)
+and
+[nvidia/llama-nemotron-rerank-1b-v2](https://huggingface.co/nvidia/llama-nemotron-rerank-1b-v2))
+with a PTQ recipe and exports it to ONNX. Embedding models are exported with
+mean pooling and L2 normalization on top of the encoder; reranking
+(sequence-classification) models are exported to their relevance logits. Both
+graphs take `input_ids` and `attention_mask` with dynamic batch/sequence axes.
+
+The default recipe
+(`modelopt_recipes/huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
+quantizes weights and activations to NVFP4 and additionally quantizes the
+projection-Linear outputs. Without output-side quantization, quantized GEMMs
+emit FP16 activations, so FP8/FP4 engines can use as much or more activation
+memory than an unquantized FP16 engine; quantizing the projection outputs keeps
+inter-layer activations in the low-precision format. An FP8 twin of the recipe
+(`fp8_output_quant_proj.yaml`, pass it via `--recipe`) applies the same idea to
+the FP8 preset. With TensorRT 10.16 on RTX PRO 6000 Blackwell (strongly-typed
+engines, 5 dynamic-shape profiles up to 32x512), engine activation memory:
+
+| Model | FP16 | `fp8` preset | fp8 recipe | `nvfp4` preset | nvfp4 recipe |
+|-------|-----:|-------------:|-----------:|---------------:|-------------:|
+| llama-nemotron-embed-1b-v2 | 1040 MiB | 1392 MiB | 1096 MiB | 1040 MiB | 516 MiB |
+| llama-nemotron-rerank-1b-v2 | 1040 MiB | 1392 MiB | 1096 MiB | 520 MiB | 331 MiB |
+
+### Usage
+
+```bash
+python hf_embedding_quant_to_onnx.py \
+    --model_path=nvidia/llama-nemotron-embed-1b-v2 \
+    --trust_remote_code \
+    --recipe=huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj \
+    --onnx_save_path=llama_nemotron_embed_nvfp4.onnx
+
+# Reranking variant (auto-detected from the model architecture)
+python hf_embedding_quant_to_onnx.py \
+    --model_path=nvidia/llama-nemotron-rerank-1b-v2 \
+    --trust_remote_code \
+    --onnx_save_path=llama_nemotron_rerank_nvfp4.onnx
+```
+
+### Building a TensorRT engine with trtexec
+
+NVFP4 requires a Blackwell GPU (SM100+) and TensorRT 10.11 or later. Build a
+strongly-typed engine with dynamic shapes (add optimization profiles matching
+your serving batch sizes and sequence lengths):
+
+```bash
+trtexec --onnx=llama_nemotron_embed_nvfp4.onnx \
+    --stronglyTyped \
+    --saveEngine=llama_nemotron_embed_nvfp4.plan \
+    --minShapes=input_ids:1x2,attention_mask:1x2 \
+    --optShapes=input_ids:32x128,attention_mask:32x128 \
+    --maxShapes=input_ids:32x512,attention_mask:32x512
+```
+
+The exported `.onnx` references a sibling weights file (`<name>.onnx_data`);
+keep the two files in the same directory when building. To inspect the chosen
+kernels and per-profile activation memory, add
+`--profilingVerbosity=detailed --exportLayerInfo=<path>.json --verbose`.
 
 ## LLM Quantization and Export with TensorRT-Edge-LLM
 
@@ -287,7 +358,7 @@ The `auto` mode enables mixed precision quantization by searching for the optima
 python torch_quant_to_onnx.py \
     --timm_model_name=vit_base_patch16_224 \
     --quantize_mode=auto \
-    --auto_quantization_formats NVFP4_AWQ_LITE_CFG FP8_DEFAULT_CFG \
+    --auto_quantization_formats nvfp4_awq_lite fp8 \
     --effective_bits=4.8 \
     --num_score_steps=128 \
     --calibration_data_size=512 \

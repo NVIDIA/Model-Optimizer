@@ -16,9 +16,9 @@
 
 import pytest
 import torch
-from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
+    create_tiny_deepseek_v3_dir,
     create_tiny_gemma3vl_dir,
     create_tiny_nemotron_h_dir,
     create_tiny_qwen3_5_moe_vl_dir,
@@ -28,62 +28,76 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 
 @pytest.mark.parametrize(
-    ("create_teacher", "megatron_format"),
+    ("create_teacher", "expected_pruned_config"),
     [
-        # Dense Qwen3 LM, exported back to HF (reloadable to verify the pruned param count).
+        # Dense Qwen3 LM.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_qwen3_dir(
                 tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
             ),
-            False,
+            {},
             id="qwen3",
         ),
-        # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid. Saved in Megatron checkpoint
-        # format because HF export of a pruned NemotronH requires transformers<5.
+        # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid.
+        # MTP heads are enabled so the run covers dropping them during calibration.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_nemotron_h_dir(
-                tmp_path, with_tokenizer=True, return_model=True
+                tmp_path,
+                with_tokenizer=True,
+                return_model=True,
+                num_nextn_predict_layers=1,
+                mtp_hybrid_override_pattern="*E",
             ),
-            True,
+            {"n_shared_experts": 1},
             id="nemotron_h",
+        ),
+        # DeepSeek-V3: MLA (Q-LoRA) + MoE sizing the shared expert as
+        # n_shared_experts * moe_intermediate_size, so it covers candidate_filter end-to-end:
+        # without the filter the search picks a shared size that is not a multiple of the routed
+        # one and the reload below fails on the resulting shape mismatch.
+        pytest.param(
+            # n_group=1 so num_moe_experts stays divisible by it after expert pruning.
+            lambda tmp_path, num_gpus: create_tiny_deepseek_v3_dir(
+                tmp_path,
+                with_tokenizer=True,
+                return_model=True,
+                num_hidden_layers=num_gpus,
+                n_group=1,
+                topk_group=1,
+            ),
+            {"n_shared_experts": 1},
+            id="deepseek_v3",
         ),
     ],
 )
-def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
+def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):
     teacher_hf_path, teacher_model = create_teacher(tmp_path, num_gpus)
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
-    output_kwarg = (
-        {"output_megatron_path": pruned_path}
-        if megatron_format
-        else {"output_hf_path": pruned_path}
-    )
-    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
         hf_model_name_or_path=teacher_hf_path,
+        output_hf_path=pruned_path,
         pp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=8,
         seq_length=16,
         prune_target_params=prune_target_params,
         prune_score_func="mmlu_1pct_bs32",
+        score_lower_bound=0.0,  # exercise the score-gate path without coupling to the model's acc
         ss_channel_divisor=4,
         hparams_to_skip="num_attention_heads",
         top_k=1,
-        **output_kwarg,
     )
     run_example_command(prune_command_parts, example_path="megatron_bridge")
 
-    if megatron_format:
-        # HF reload of a pruned NemotronH needs transformers<5; just verify the Megatron checkpoint.
-        assert (pruned_path / "latest_checkpointed_iteration.txt").exists()
-    else:
-        assert (pruned_path / "config.json").exists()
-        pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
-        assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
+    assert (pruned_path / "config.json").exists()
+    pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
+    assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
+    for field, expected in expected_pruned_config.items():
+        assert getattr(pruned_model.config, field) == expected
 
 
 @pytest.mark.parametrize(
@@ -111,10 +125,6 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
                 max_position_embeddings=1024,
             ),
             id="qwen3_5_moe_vl",
-            marks=pytest.mark.skipif(
-                not qwen35_moe_bridge_supported(),
-                reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
-            ),
         ),
     ],
 )
@@ -127,9 +137,8 @@ def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
     prune_target_params = int(language_model_params * 0.7)
 
     pruned_model_path = tmp_path / "pruned"
-    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
         hf_model_name_or_path=teacher_hf_path,
         output_hf_path=pruned_model_path,
         pp_size=num_gpus,
@@ -138,6 +147,7 @@ def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
         seq_length=1024,
         prune_target_params=prune_target_params,
         prune_score_func="mmlu_1pct_bs32",
+        score_lower_bound=0.0,  # exercise the score-gate path without coupling to the model's acc
         ss_channel_divisor=4,
         # Allow depth pruning (the primary param lever once hidden_size is fixed for VLMs).
         max_depth_pruning=0.6,

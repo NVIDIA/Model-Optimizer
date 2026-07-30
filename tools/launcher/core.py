@@ -51,17 +51,20 @@ def get_default_env(experiment_title=None):
         "SPECDEC_BENCH_S3_KEY_ID": os.getenv("SPECDEC_BENCH_S3_KEY_ID", ""),
         "SPECDEC_BENCH_S3_SECRET": os.getenv("SPECDEC_BENCH_S3_SECRET", ""),
     }
+    # HF_HOME / TRITON_CACHE_DIR default under the shared /{title} mount, but honor
+    # an env override so a user can point them at a personally-writable path (the
+    # shared cache is owned by the CI account and blocks other users' cache locks).
     slurm_env = {
-        "TRITON_CACHE_DIR": f"/{title}/triton-cache",
-        "HF_HOME": f"/{title}/hf-cache",
+        "TRITON_CACHE_DIR": os.getenv("TRITON_CACHE_DIR", f"/{title}/triton-cache"),
+        "HF_HOME": os.getenv("HF_HOME", f"/{title}/hf-cache"),
         "HF_TOKEN": os.getenv("HF_TOKEN", ""),
         "MLM_SKIP_INSTALL": "1",
         "LAUNCH_SCRIPT": "python",
         **specdec_s3,
     }
     local_env = {
-        "TRITON_CACHE_DIR": f"/{title}/triton-cache",
-        "HF_HOME": f"/{title}/hf-cache",
+        "TRITON_CACHE_DIR": os.getenv("TRITON_CACHE_DIR", f"/{title}/triton-cache"),
+        "HF_HOME": os.getenv("HF_HOME", f"/{title}/hf-cache"),
         "HF_TOKEN": os.getenv("HF_TOKEN", ""),
         "MLM_SKIP_INSTALL": "1",
         **specdec_s3,
@@ -106,9 +109,21 @@ def register_factory(name, fn):
 
 @dataclass
 class SandboxTask:
-    """A single task with a script, slurm config, args, and environment."""
+    """A single task with a script (or inline command), slurm config, args, and environment."""
 
     script: str = None
+    # Inline shell command run instead of `script` (mutually exclusive; setting
+    # `args` too is rejected — put everything in the command). Lets one-liner jobs
+    # live in the YAML without a wrapper .sh. Must be a SINGLE line: the --yaml CLI
+    # layer rejects multi-line values, so YAMLs use a folded scalar (>-) and `&&`.
+    inline: str = None
+    # pip requirements installed in the container before the command runs
+    # (`pip install [-r reqs_file] [reqs] && <command>`). `reqs` is a raw
+    # pip-install arg string (e.g. "transformers<5 fire"); `reqs_file` is a
+    # requirements.txt path relative to the run dir (e.g.
+    # modules/Model-Optimizer/examples/llm_eval/requirements.txt).
+    reqs: str = None
+    reqs_file: str = None
     slurm_config: object = None  # Patched at runtime by set_slurm_config_type()
     args: list[str] = None
     environment: list[dict[str, str]] = None
@@ -320,6 +335,12 @@ class SandboxPipeline:
                         task.environment = {k: _resolve(v) for k, v in task.environment.items()}
                 if task.args:
                     task.args = [_resolve(a) for a in task.args]
+                if task.inline:
+                    task.inline = _resolve(task.inline)
+                if task.reqs:
+                    task.reqs = _resolve(task.reqs)
+                if task.reqs_file:
+                    task.reqs_file = _resolve(task.reqs_file)
 
 
 # ---------------------------------------------------------------------------
@@ -603,13 +624,16 @@ def build_docker_executor(
         f"{exp_title_src}:/{experiment_title}",
     ]
 
+    # Default to host uid:gid so artifacts aren't root-owned; docker_user="root"
+    # lets a job read root-only image paths (e.g. /opt/Megatron-Bridge in NeMo).
+    docker_user = getattr(slurm_config, "docker_user", None) or f"{os.getuid()}:{os.getgid()}"
     executor = run.DockerExecutor(
         num_gpus=-1,
         runtime="nvidia",
         ipc_mode="host",
         container_image=slurm_config.container,
         volumes=container_mounts,
-        additional_kwargs={"user": f"{os.getuid()}:{os.getgid()}", "entrypoint": ""},
+        additional_kwargs={"user": docker_user, "entrypoint": ""},
         packager=packager,
     )
     return executor
@@ -761,6 +785,12 @@ def run_jobs(
                     continue
                 task_name = f"{job_name}_{task_id}"
                 task_args = [] if task.args is None else task.args
+                if bool(task.script) == bool(task.inline):
+                    raise ValueError(f"{task_name}: set exactly one of `script` or `inline`.")
+                if task.inline and task_args:
+                    raise ValueError(
+                        f"{task_name}: `args` is only for `script`; put them in the `inline` command."
+                    )
 
                 task_env = {}
                 if task.environment is not None:
@@ -803,7 +833,42 @@ def run_jobs(
                 if job.allow_to_fail and hasattr(executor, "dependency_type"):
                     executor.dependency_type = "afterany"
 
-                task_instance = run.Script(task.script, args=task_args, env=task_env)
+                # Optional reqs: pip-install before the command. reqs_file is a
+                # requirements.txt path; reqs is a raw arg string (shlex-quoted so
+                # < > = are literal, letting YAMLs write it unquoted).
+                reqs_prefix = ""
+                if task.reqs or task.reqs_file:
+                    pkgs = ["-r", shlex.quote(task.reqs_file)] if task.reqs_file else []
+                    pkgs += [shlex.quote(tok) for tok in shlex.split(task.reqs or "")]
+                    install = "python -m pip install " + " ".join(pkgs)
+                    # On Slurm, srun runs this inline on every rank (ntasks_per_node), so install
+                    # once per node on local rank 0 behind a filesystem barrier — concurrent pip on
+                    # one node corrupts the env. The marker lives in the working dir (/nemo_run/code,
+                    # the shared job dir), so its name folds in job/step/node IDs: per-step avoids
+                    # reusing a stale marker from an earlier task in the same experiment, and
+                    # per-node stops another node's rank 0 from satisfying this node's barrier. Local
+                    # rank 0 installs and touches the marker; the other local ranks wait for it and
+                    # fail (final `[ -f ]`) if it never appears (rank-0 install error). Local
+                    # single-process runs just install as rank 0 and never wait.
+                    marker = (
+                        ".modelopt_launcher_reqs_done_"
+                        "${SLURM_JOB_ID:-0}_${SLURM_STEP_ID:-0}_${SLURM_NODEID:-0}"
+                    )
+                    reqs_prefix = (
+                        f'if [ "${{SLURM_LOCALID:-0}}" -eq 0 ]; then '
+                        f"{install} && touch {marker}; "
+                        f"else for _ in $(seq 600); do [ -f {marker} ] && break; sleep 1; done; "
+                        f"[ -f {marker} ]; fi && "
+                    )
+                if task.inline:
+                    task_instance = run.Script(inline=reqs_prefix + task.inline, env=task_env)
+                elif reqs_prefix:  # reqs + script path: wrap the bash call inline
+                    # Quote the script path; task_args keep the launcher's shell-word-split
+                    # convention (a "--flag value" item expands to two args), as run.Script does.
+                    script_cmd = " ".join(["bash", shlex.quote(task.script), *task_args])
+                    task_instance = run.Script(inline=reqs_prefix + script_cmd, env=task_env)
+                else:
+                    task_instance = run.Script(task.script, args=task_args, env=task_env)
                 print(f"job {job_name} task {task_id} slurm_config: {task.slurm_config}")
 
                 if dependency is None:

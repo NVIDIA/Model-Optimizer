@@ -22,11 +22,15 @@ jobs:
     secrets: inherit
     with:
       files: |
-        .github/actions/cache-extensions/**
+        .github/actions/**
+        .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
+        modelopt_recipes/**
         noxfile.py
         pyproject.toml
+        tests/_test_utils/**
+        tests/conftest.py
         tests/gpu/**
         tests/gpu_megatron/**
         tests/gpu_trtllm/**
@@ -46,10 +50,15 @@ jobs:
             container_image: nvcr.io/nvidia/pytorch:26.05-py3
           - example: gpu_megatron
             timeout: 60
-            container_image: nvcr.io/nvidia/nemo:26.06
+            container_image: nvcr.io/nvidia/nemo:26.08
           - example: gpu_trtllm
             timeout: 15
             container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
+          # Covers the RoutedExperts layout (0.24+)
+          - example: gpu_vllm
+            timeout: 15
+            container_image: docker.io/vllm/vllm-openai:v0.26.0
+          # Covers the legacy FusedMoE / SharedFusedMoE registration branches (vLLM < 0.24)
           - example: gpu_vllm
             timeout: 15
             container_image: docker.io/vllm/vllm-openai:v0.20.0
@@ -85,7 +94,7 @@ jobs:
           # Use `python3` (the vllm image has no `python` on PATH)
           python3 -m pip install nox && nox -s ${{ matrix.example }}
       - name: Upload GPU coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml

@@ -14,13 +14,13 @@
 # limitations under the License.
 
 import argparse
-import copy
 import json
 import re
 import subprocess
 import sys
 import warnings
 from pathlib import Path
+from typing import Any
 
 # Add onnx_ptq to path for shared modules
 sys.path.insert(0, str(Path(__file__).parent.parent / "onnx_ptq"))
@@ -34,7 +34,9 @@ from download_example_onnx import export_to_onnx
 from evaluation import evaluate
 
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import load_recipe
+from modelopt.recipe import load_config, load_recipe
+from modelopt.recipe.presets import MODEL_QUANT_PRESET_DIR
+from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
 
@@ -57,19 +59,25 @@ The script will:
 
 mp.set_start_method("spawn", force=True)  # Needed for data loader with multiple workers
 
-QUANT_CONFIG_DICT: dict[str, dict] = {
-    "fp8": mtq.FP8_DEFAULT_CFG,
-    "int8": mtq.INT8_DEFAULT_CFG,
-    "mxfp8": mtq.MXFP8_DEFAULT_CFG,
-    "nvfp4": mtq.NVFP4_DEFAULT_CFG,
-    "int4_awq": mtq.INT4_AWQ_CFG,
-}
+
+def load_quant_config(recipe: str) -> dict:
+    """Load a quantization config from a recipe YAML.
+
+    ``recipe`` is either a preset basename under
+    ``modelopt_recipes/configs/ptq/presets/model/`` (e.g. ``nvfp4``) or a path to a
+    ``QuantizeConfig`` YAML file (filesystem or built-in recipe library).
+    """
+    if "/" not in recipe and not recipe.endswith((".yml", ".yaml")):
+        recipe = f"{MODEL_QUANT_PRESET_DIR}/{recipe}"
+    return load_config(recipe, schema_type=QuantizeConfig).model_dump()
+
 
 _RESNET_RECIPES = {
     "fp8": "timm/resnet/ptq/fp8",
     "int8": "timm/resnet/ptq/int8",
     "auto": "timm/resnet/auto_quantize/fp8_int8_at_8p0bits",
 }
+
 
 _FP8_CONV_OVERRIDE: list = [
     {
@@ -113,30 +121,28 @@ _FP8_MHA_OVERRIDE: list = [
     },
 ]
 
-# Auto-quantize format configs that use block quantization and need Conv2d overrides for TRT.
+# Auto-quantize format presets that use block quantization and need Conv2d overrides for TRT.
 # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
 _NEEDS_FP8_CONV_OVERRIDE: set[str] = {
-    "NVFP4_AWQ_LITE_CFG",
-    "NVFP4_DEFAULT_CFG",
-    "MXFP8_DEFAULT_CFG",
+    "nvfp4_awq_lite",
+    "nvfp4",
+    "mxfp8",
 }
-_NEEDS_INT8_CONV_OVERRIDE: set[str] = {"INT4_AWQ_CFG"}
+_NEEDS_INT8_CONV_OVERRIDE: set[str] = {"int4_awq"}
 
 
 def get_quant_config(quantize_mode, recipe=None):
     """Get quantization config, overriding Conv2d for TRT compatibility.
 
-    TensorRT only supports FP8 and INT8 for Conv layers.
+    The config is loaded from ``recipe`` when given, else from the preset YAML
+    matching ``quantize_mode``. TensorRT only supports FP8 and INT8 for Conv layers.
     - For FP8: add MHA-aware LayerNorm output quantizer so TRT fuses shared Q/DQ into
       downstream attention matmuls. Softmax-output Q/DQ is inserted by the FP8 ONNX
       exporter's post-processing (fixed 1/448 scale, no calibration needed).
     - For MXFP8, NVFP4: override Conv2d to FP8
     - For INT4_AWQ: override Conv2d to INT8
     """
-    if recipe is not None:
-        return recipe.quantize.model_dump()
-
-    config: dict = copy.deepcopy(QUANT_CONFIG_DICT[quantize_mode])
+    config: dict = load_quant_config(recipe or quantize_mode)
     if quantize_mode == "fp8":
         config["quant_cfg"].extend(_FP8_MHA_OVERRIDE)
     elif quantize_mode in ("mxfp8", "nvfp4"):
@@ -400,7 +406,8 @@ def auto_quantize_model(
     Args:
         model: PyTorch model to quantize
         data_loader: DataLoader with image-label dict batches
-        quantization_formats: List of quantization format config names or dicts
+        quantization_formats: List of quantization recipe names (preset basenames,
+            e.g. ``nvfp4_awq_lite``) or config dicts
         effective_bits: Target effective bits constraint
         num_calib_steps: Number of calibration steps
         num_score_steps: Number of scoring steps for sensitivity analysis
@@ -411,10 +418,10 @@ def auto_quantize_model(
     _disable_inplace_relu(model)
     if recipe is None:
         constraints = {"effective_bits": 4.8 if effective_bits is None else effective_bits}
-        format_configs = []
+        format_configs: list[dict[str, Any] | str] = []
         for fmt in quantization_formats:
             if isinstance(fmt, str):
-                config = copy.deepcopy(getattr(mtq, fmt))
+                config = load_quant_config(fmt)
                 if fmt in _NEEDS_FP8_CONV_OVERRIDE:
                     config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
                 elif fmt in _NEEDS_INT8_CONV_OVERRIDE:
@@ -506,6 +513,17 @@ def main():
         help="Type of quantization to apply. Default is MXFP8.",
     )
     parser.add_argument(
+        "--recipe",
+        type=str,
+        default=None,
+        help=(
+            "Quantization config recipe: a preset basename under "
+            "modelopt_recipes/configs/ptq/presets/model/ or a path to a QuantizeConfig "
+            "YAML. Defaults to the preset matching --quantize_mode. Not supported with "
+            "--quantize_mode=auto."
+        ),
+    )
+    parser.add_argument(
         "--onnx_save_path",
         required=True,
         help="The save path to save the ONNX model.",
@@ -540,14 +558,14 @@ def main():
         "--auto_quantization_formats",
         nargs="+",
         choices=[
-            "NVFP4_AWQ_LITE_CFG",
-            "FP8_DEFAULT_CFG",
-            "MXFP8_DEFAULT_CFG",
-            "INT8_DEFAULT_CFG",
-            "INT4_AWQ_CFG",
+            "nvfp4_awq_lite",
+            "fp8",
+            "mxfp8",
+            "int8",
+            "int4_awq",
         ],
-        default=["NVFP4_AWQ_LITE_CFG", "FP8_DEFAULT_CFG"],
-        help="Quantization formats to search from for auto mode (e.g., NVFP4_AWQ_LITE_CFG FP8_DEFAULT_CFG)",
+        default=["nvfp4_awq_lite", "fp8"],
+        help="Quantization preset recipes to search from for auto mode (e.g., nvfp4_awq_lite fp8)",
     )
     parser.add_argument(
         "--effective_bits",
@@ -555,7 +573,7 @@ def main():
         default=None,
         help=(
             "Target effective bits for auto quantization. Defaults to 4.8 without a recipe "
-            "and overrides the recipe when provided."
+            "and overrides the ResNet recipe when provided."
         ),
     )
     parser.add_argument(
@@ -583,6 +601,12 @@ def main():
 
     args = parser.parse_args()
 
+    if args.recipe and args.quantize_mode == "auto":
+        parser.error(
+            "--recipe is not supported with --quantize_mode=auto; "
+            "use --auto_quantization_formats instead."
+        )
+
     # Create model and move to appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_kwargs = json.loads(args.model_kwargs) if args.model_kwargs else {}
@@ -607,7 +631,7 @@ def main():
         )
         print(f"Base Model - Top-1 Accuracy: {top1:.2f}%, Top-5 Accuracy: {top5:.2f}%")
 
-    resnet_recipe = _get_resnet_recipe(model, args.quantize_mode)
+    resnet_recipe = None if args.recipe else _get_resnet_recipe(model, args.quantize_mode)
     if resnet_recipe is not None:
         CUSTOM_POST_CONVERSION_PLUGINS.add(_add_resnet_residual_quantizers)
 
@@ -636,7 +660,11 @@ def main():
         # Note: MXFP8 is dynamic and does not need calibration itself, but when
         # Conv2d layers are overridden to FP8 (for TRT compatibility), those FP8
         # quantizers require calibration data.
-        config = get_quant_config(args.quantize_mode, resnet_recipe)
+        config = (
+            resnet_recipe.quantize.model_dump()
+            if resnet_recipe is not None
+            else get_quant_config(args.quantize_mode, args.recipe)
+        )
 
         data_loader = load_calibration_data(
             model,
@@ -665,7 +693,7 @@ def main():
         args.quantize_mode == "auto"
         and (
             resnet_recipe is not None
-            or any(fmt != "INT8_DEFAULT_CFG" for fmt in args.auto_quantization_formats)
+            or any(fmt not in {"int8", "int4_awq"} for fmt in args.auto_quantization_formats)
         )
     )
     if uses_fp8_conv_input:

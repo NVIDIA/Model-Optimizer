@@ -11,7 +11,7 @@ The Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalon
 Before using ModelOpt-Windows, the following components must be installed:
 
       - NVIDIA GPU and Graphics Driver
-      - Python version >= 3.10 and < 3.13
+      - Python version >= 3.10 and < 3.14
       - Visual Studio 2022 / MSVC / C/C++ Build Tools
       - CUDA Toolkit and matching CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using `onnxruntime-gpu` or CUDA EP)
 
@@ -38,6 +38,12 @@ To install the ONNX module of ModelOpt-Windows, run the following command:
     pip install "nvidia-modelopt[onnx]"
 
 If you install ModelOpt-Windows without the extra ``[onnx]`` option, only the minimal core dependencies and the PyTorch module (``torch``) will be installed. Support for ONNX model quantization requires installing with ``[onnx]``.
+
+.. note::
+
+    Windows ARM64 users should follow the :ref:`Windows on Arm installation guide
+    <Install-Page-Windows-ARM64>`. Some Windows x64 dependencies selected by the standard
+    ``onnx`` extra are not suitable for ARM64 and must be replaced with native packages.
 
 **4. ONNX Model Quantization: Setup ONNX Runtime Execution Provider for Calibration**
 
@@ -119,6 +125,15 @@ Ensure the following steps are verified:
                 python -c "import cupy; print(cupy.__version__, cupy.cuda.runtime.runtimeGetVersion(), cupy.arange(3).sum())"
 
       - **Environment Variables**: For workflows using CUDA dependencies (e.g., CUDA EP-based calibration), ensure environment variables such as ``CUDA_PATH``, ``CUDA_PATH_V12_x``, or ``CUDA_PATH_V13_x`` point to the intended Toolkit. Reopen the command prompt after changing persistent environment variables.
+      - **Windows ARM64 Architecture**: For Windows on Arm, verify that the interpreter and any
+        locally built PyArrow wheel are native ARM64 packages:
+
+            .. code-block:: bat
+
+                python -c "import platform; assert platform.machine().lower() in {'arm64', 'aarch64'}; print(platform.machine())"
+                python -c "import pyarrow; import pyarrow.compute; import pyarrow.dataset; import pyarrow.parquet; print(pyarrow.__version__)"
+
+        Skip the PyArrow command when the selected workflow does not require PyArrow.
       - **ModelOpt-Windows Import Check**: Run the following command to ensure the installation is successful:
 
             .. code-block:: python

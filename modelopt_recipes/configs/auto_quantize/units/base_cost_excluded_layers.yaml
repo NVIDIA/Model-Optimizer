@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Base cost-excluded layer patterns for AutoQuantize (spliced into a recipe's cost_excluded_layers
-# via ``$import``, and appended by the deprecated-CLI shim). These are VL patterns; appending them
-# unconditionally is safe: on a non-VL model nothing matches, so cost_weight 0 is a no-op, while on
-# a VL model it keeps the vision tower / MTP out of the bit-budget denominator. This avoids the old
-# model-introspection path while preserving VL cost behavior.
+# Base cost-excluded layer patterns for AutoQuantize, spliced into a recipe's cost_excluded_layers
+# via ``$import``. These are VL patterns; including them unconditionally is safe: on a non-VL model
+# nothing matches, so cost_weight 0 is a no-op, while on a VL model it keeps the vision tower / MTP
+# out of the bit-budget denominator.
 
 # modelopt-schema: modelopt.recipe.config.LayerPatternList
   - "*visual*"

@@ -14,5 +14,5 @@ config:
 # Vendored upstream skills — kept byte-identical to upstream via
 # .agents/scripts/sync-upstream-skills.sh; do not reformat.
 ignores:
-  - ".agents/skills/launching-evals/**"
-  - ".agents/skills/accessing-mlflow/**"
+  - "plugins/modelopt/skills/launching-evals/**"
+  - "plugins/modelopt/skills/accessing-mlflow/**"

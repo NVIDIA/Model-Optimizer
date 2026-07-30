@@ -139,3 +139,16 @@ def test_dflash_rope_theta_inherits_base():
     """rope_theta is inherited from the target/base config (draft drafts for the base)."""
     config = _make_dflash_exporter(base_rope_theta=5000000.0)._export_config()
     assert config["rope_theta"] == 5000000.0
+
+
+def test_dflash_rope_theta_inherits_base_rope_parameters():
+    """Transformers 5 stores the target RoPE base in rope_parameters."""
+    exporter = _make_dflash_exporter(base_rope_theta=None)
+    exporter.model.config.rope_parameters = {
+        "rope_type": "default",
+        "rope_theta": 5000000.0,
+    }
+
+    config = exporter._export_config()
+
+    assert config["rope_theta"] == 5000000.0

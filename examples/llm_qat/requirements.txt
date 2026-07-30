@@ -1,3 +1,5 @@
+# Accelerate 1.14 regresses FSDP2 handling of shared parameters.
+accelerate>=1.0.0,<1.14
 flash-attn>=2.6.0
 liger-kernel>=0.5.0; platform_system != 'Darwin' and platform_system != 'Windows'
 py7zr

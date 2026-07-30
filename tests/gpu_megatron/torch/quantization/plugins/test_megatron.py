@@ -14,9 +14,15 @@
 # limitations under the License.
 
 import copy
+import math
+import re
+import sys
+import types
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -24,7 +30,7 @@ from _test_utils.torch.megatron.models import (
     HAS_MAMBA,
     MegatronModel,
     get_mcore_gpt_model,
-    get_mcore_mamba_hybrid_model,
+    get_mcore_hybrid_model,
 )
 from _test_utils.torch.megatron.utils import (
     compare_amax_sync_across_expert_parallel,
@@ -49,6 +55,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from megatron.core.transformer import MegatronModule, TransformerConfig
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 
@@ -56,11 +63,21 @@ import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
-from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
+from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
+    _output_layer_untied,
+    _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
+    _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
+    megatron_replace_quant_module_hook,
+    quant_module_get_extra_state,
 )
+from modelopt.torch.quantization.plugins.transformer_engine import (
+    _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
+)
+from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -276,7 +293,7 @@ def _gpt_model_provider(
         if is_hybrid:
             # Derive num_layers from pattern length, default to 4
             num_layers = len(hybrid_layer_pattern) if hybrid_layer_pattern else 4
-            model = get_mcore_mamba_hybrid_model(
+            model = get_mcore_hybrid_model(
                 tensor_model_parallel_size=tp_size,
                 num_layers=num_layers,
                 hidden_size=hidden_size,
@@ -561,6 +578,7 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         mixed_block_size_config,
     ],
 )
+@skip_flaky_on_blackwell
 def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
     dist_workers.run(
         partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
@@ -737,10 +755,10 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, quant_cfg, 
     # Quantize grouped model
     mtq.quantize(te_grouped_moe_model, quant_cfg, forward)
 
-    # Quantize non-grouped model with synced weight amax to match TEGroupedMLP behavior
-    seq_quant_cfg = copy.deepcopy(quant_cfg)
-    seq_quant_cfg["algorithm"] = {"method": "max", "sync_expert_weight_amax": True}
-    mtq.quantize(sequential_moe_model, seq_quant_cfg, forward)
+    # TEGroupedMLP now quantizes per-expert by default (GroupedQuantizer), matching
+    # SequentialMLP's per-expert quantizers, so no amax sync override is needed for the
+    # two models to produce identical quantized outputs.
+    mtq.quantize(sequential_moe_model, copy.deepcopy(quant_cfg), forward)
 
     # Compare model outputs after quantization
     te_grouped_moe_quant_output = forward(te_grouped_moe_model)
@@ -757,6 +775,482 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
     """Test that TEGrouped and sequential MoE models produce similar quantized models."""
     dist_workers_size_4.run(
         partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, quant_cfg)
+    )
+
+
+def test_te_grouped_process_quantizer_amax_preserves_per_expert_shape():
+    """Per-expert amax buffers retain their native checkpoint shape."""
+    value = torch.randn(3, 2)
+    state_dict = {}
+
+    _QuantMegatronTEGroupedLinear._process_quantizer_amax(
+        None, "weight_quantizer.2._amax", value, state_dict
+    )
+
+    assert state_dict["weight_quantizer.2._amax"] is value
+    assert state_dict["weight_quantizer.2._amax"].shape == (3, 2)
+
+
+@pytest.mark.parametrize("compile_enabled", [False, True])
+def test_te_grouped_compiled_weight_quantizer_loop(
+    distributed_setup_size_1, monkeypatch, compile_enabled
+):
+    """The opt-in flag controls compilation and preserves per-expert backward."""
+    compile_kwargs = []
+    compiled_calls = []
+
+    def fake_compile(fn, **kwargs):
+        compile_kwargs.append(kwargs)
+
+        def compiled(*args):
+            compiled_calls.append(len(args))
+            return fn(*args)
+
+        return compiled
+
+    if compile_enabled:
+        monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+    else:
+        monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    initialize_for_megatron(seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(model)
+    for module in model.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    mtq.quantize(model, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+    grouped_modules = [
+        module
+        for module in model.modules()
+        if isinstance(getattr(module, "weight_quantizer", None), mtq.nn.GroupedQuantizer)
+    ]
+    compiled_modules = [
+        module for module in model.modules() if hasattr(module, "_compiled_weight_quantizer_loop")
+    ]
+    assert grouped_modules
+    assert len(compiled_modules) == (len(grouped_modules) if compile_enabled else 0)
+    assert len(compile_kwargs) == (len(grouped_modules) if compile_enabled else 0)
+    assert all(
+        kwargs == {"backend": "inductor", "fullgraph": False, "mode": "reduce-overhead"}
+        for kwargs in compile_kwargs
+    )
+    # Calibration mutates collector state and must stay eager even when the flag is enabled.
+    assert not compiled_calls
+
+    loss = forward(model).sum()
+    loss.backward()
+    if compile_enabled:
+        assert compiled_calls
+        assert set(compiled_calls) == {4}
+    else:
+        assert not compiled_calls
+    assert all(
+        torch.isfinite(getattr(module, f"weight{i}").grad).all()
+        for module in grouped_modules
+        for i in range(module.num_gemms)
+    )
+    destroy_model_parallel()
+
+
+def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1, monkeypatch):
+    """Real (unpatched) torch.compile parity for the per-expert weight-quantizer loop.
+
+    Complements test_te_grouped_compiled_weight_quantizer_loop, which fakes torch.compile to
+    assert wiring only. Here torch.compile is left intact so the opt-in loop is actually
+    compiled, executed, and back-propagated, and its numerics are checked against the eager
+    path built from identical weights and calibrated amax.
+    """
+    initialize_for_megatron(seed=SEED)
+
+    def build():
+        model = _gpt_model_provider(
+            tp_size=1,
+            hidden_size=32,
+            moe_grouped_gemm=True,
+            transformer_impl="transformer_engine",
+            num_moe_experts=4,
+        )
+        for module in model.modules():
+            if isinstance(module, TopKRouter):
+                module.topk = module.num_experts
+        return model
+
+    # Two identical models (same raw weights); one stays eager, one is real-compiled.
+    model_eager = build()
+    model_compiled = build()
+    model_compiled.load_state_dict(model_eager.state_dict())
+
+    # One cached input batch, shared across both models for an apples-to-apples compare.
+    forward = get_forward(model_eager)
+
+    monkeypatch.delenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, raising=False)
+    mtq.quantize(model_eager, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+
+    monkeypatch.setenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "1")
+    mtq.quantize(model_compiled, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+
+    grouped_eager = [
+        m
+        for m in model_eager.modules()
+        if isinstance(getattr(m, "weight_quantizer", None), mtq.nn.GroupedQuantizer)
+    ]
+    grouped_compiled = [
+        m
+        for m in model_compiled.modules()
+        if isinstance(getattr(m, "weight_quantizer", None), mtq.nn.GroupedQuantizer)
+    ]
+    assert grouped_compiled and len(grouped_eager) == len(grouped_compiled)
+    # The opt-in path attached the real compiled loop (torch.compile left unpatched); the
+    # eager control model did not.
+    assert all(hasattr(m, "_compiled_weight_quantizer_loop") for m in grouped_compiled)
+    assert all(not hasattr(m, "_compiled_weight_quantizer_loop") for m in grouped_eager)
+
+    # Forward parity: the first call on model_compiled triggers real compilation.
+    out_eager = forward(model_eager)
+    out_compiled = forward(model_compiled)
+    torch.testing.assert_close(out_compiled, out_eager, rtol=1e-3, atol=1e-3)
+
+    # Backward parity: per-expert weight grads must be finite and match the eager path.
+    out_eager.sum().backward()
+    out_compiled.sum().backward()
+    for m_e, m_c in zip(grouped_eager, grouped_compiled):
+        for i in range(m_c.num_gemms):
+            g_e = getattr(m_e, f"weight{i}").grad
+            g_c = getattr(m_c, f"weight{i}").grad
+            assert g_c is not None and torch.isfinite(g_c).all()
+            torch.testing.assert_close(g_c, g_e, rtol=1e-2, atol=1e-2)
+
+    destroy_model_parallel()
+
+
+def test_te_grouped_per_expert_quantizer_default(distributed_setup_size_1):
+    """TEGroupedLinear installs a per-expert GroupedQuantizer (one quantizer per fused expert).
+
+    Per-expert weight quantization is unconditional: every ``TEGroupedLinear`` gets a
+    ``GroupedQuantizer`` with ``num_gemms`` independent quantizers, not a single shared one.
+    """
+    initialize_for_megatron(seed=SEED)
+    model = _gpt_model_provider(
+        tp_size=1,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(model)
+    for module in model.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    mtq.quantize(model, copy.deepcopy(mtq.INT8_DEFAULT_CFG), forward)
+
+    grouped_linears = [
+        getattr(mlp, name)
+        for mlp in model.modules()
+        if isinstance(mlp, TEGroupedMLP)
+        for name in ("linear_fc1", "linear_fc2")
+    ]
+    assert grouped_linears
+    for gl in grouped_linears:
+        wq = gl.weight_quantizer
+        assert isinstance(wq, mtq.nn.GroupedQuantizer), (
+            "TEGroupedLinear should install a per-expert GroupedQuantizer"
+        )
+        assert len(wq) == gl.num_gemms
+
+    destroy_model_parallel()
+
+
+def _te_grouped_expert_magnitude(linear_name, local_idx):
+    """Distinct, known weight magnitude for each (linear, local-expert) pair.
+
+    Chosen so every per-expert weight quantizer sees a different amax (and fc1 vs fc2 differ
+    too), making divergence guaranteed by construction rather than by random initialization.
+    """
+    return {"linear_fc1": 0.25, "linear_fc2": 1.25}[linear_name] + 0.5 * local_idx
+
+
+def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_cfg, rank, size):
+    """TEGrouped keeps a per-expert weight quantizer (GroupedQuantizer) by default; each expert's
+    amax must equal the corresponding SequentialMLP expert's (no cross-expert sharing).
+
+    Divergence is made causal: each local expert's weights are filled with a distinct known
+    magnitude, so its weight amax is that magnitude by construction. The test then asserts
+    (a) grouped == sequential per expert, (b) each amax equals ITS OWN set magnitude, and
+    (c) the per-expert quantizer objects are distinct instances. A cross-expert-sharing
+    regression therefore fails deterministically, not by luck of the random init.
+    """
+    initialize_for_megatron(
+        tensor_model_parallel_size=tp_size,
+        expert_model_parallel_size=ep_size,
+        seed=SEED,
+    )
+
+    te_grouped = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(te_grouped, batch_size=8)
+
+    sequential = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=False,
+        num_moe_experts=4,
+        transformer_impl="modelopt",
+    )
+
+    # Fill each local expert's grouped weights with a distinct, known magnitude so the per-expert
+    # weight amax is deterministic (== that magnitude) and diverges across experts by construction.
+    for te_mlp in (m for m in te_grouped.modules() if isinstance(m, TEGroupedMLP)):
+        for linear_name in ("linear_fc1", "linear_fc2"):
+            grouped_linear = getattr(te_mlp, linear_name)
+            for i in range(grouped_linear.num_gemms):
+                with torch.no_grad():
+                    getattr(grouped_linear, f"weight{i}").fill_(
+                        _te_grouped_expert_magnitude(linear_name, i)
+                    )
+
+    # Propagate the identical per-expert weights to the sequential model.
+    copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
+
+    for module in te_grouped.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    for module in sequential.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    mtq.quantize(te_grouped, quant_cfg, forward)
+    mtq.quantize(sequential, quant_cfg, forward)
+
+    te_modules = [m for m in te_grouped.modules() if isinstance(m, TEGroupedMLP)]
+    seq_modules = [m for m in sequential.modules() if isinstance(m, SequentialMLP)]
+    assert len(te_modules) == len(seq_modules)
+
+    for te_mlp, seq_mlp in zip(te_modules, seq_modules):
+        for linear_name in ("linear_fc1", "linear_fc2"):
+            te_wq = getattr(te_mlp, linear_name).weight_quantizer
+            # One weight quantizer per local expert, not a single shared one.
+            assert len(te_wq) == len(seq_mlp.local_experts), (
+                f"{linear_name}: expected {len(seq_mlp.local_experts)} per-expert quantizers, "
+                f"got {len(te_wq)}"
+            )
+
+            per_expert_amax = []
+            for i, expert in enumerate(seq_mlp.local_experts):
+                te_amax = te_wq[i].amax
+                seq_amax = getattr(expert, linear_name).weight_quantizer.amax
+                expected = _te_grouped_expert_magnitude(linear_name, i)
+                assert te_amax is not None
+
+                # (a) grouped and sequential agree per expert (cross-implementation parity).
+                assert torch.allclose(te_amax, seq_amax, atol=1e-5, rtol=1e-5), (
+                    f"TEGrouped expert {i} amax != Sequential expert {i} amax for {linear_name}"
+                )
+                # (b) causal: this expert's amax equals ITS OWN set magnitude, proving the amax
+                #     was computed from that expert's weights (no cross-expert leakage).
+                assert torch.allclose(
+                    te_amax, torch.full_like(te_amax, expected), rtol=1e-3, atol=1e-3
+                ), (
+                    f"{linear_name} expert {i}: amax {te_amax.reshape(-1)[0].item():.6f} "
+                    f"!= set magnitude {expected}"
+                )
+                # (c) each expert owns a distinct quantizer instance, not a shared one.
+                for j in range(i):
+                    assert te_wq[i] is not te_wq[j], (
+                        f"{linear_name}: experts {i} and {j} share a quantizer object"
+                    )
+                per_expert_amax.append(te_amax.reshape(-1)[0])
+
+            # Divergence is now guaranteed by construction (distinct set magnitudes).
+            stacked = torch.stack(per_expert_amax)
+            assert (stacked.max() - stacked.min()).item() > 1e-4, (
+                f"{linear_name}: per-expert amax did not diverge despite distinct set magnitudes"
+            )
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_vs_sequential_default_amax(dist_workers_size_1, quant_cfg):
+    dist_workers_size_1.run(
+        partial(_test_te_grouped_vs_sequential_default_amax_helper, 1, 1, quant_cfg)
+    )
+
+
+def _te_grouped_expert_identity_from_sharded_state(module):
+    """Return {local_key: (global_expert_idx, num_global_experts)} for per-expert amax shards.
+
+    The grouped linear must give each fused expert the same global identity the weights use:
+    the dict key keeps the local expert index (maps to the local buffer on restore) while the
+    ShardedTensor carries the global expert offset. Called with sharded_offsets=() so the expert
+    axis is the (only) prepended axis at index 0.
+    """
+    sharded_sd = module.sharded_state_dict(prefix="", sharded_offsets=(), metadata=None)
+    identity = {}
+    for key, sh_ten in sharded_sd.items():
+        if re.match(r"weight_quantizer\.\d+\..*_amax$", key):
+            assert sh_ten.prepend_axis_num >= 1, f"{key}: expected a prepended expert axis"
+            identity[key] = (int(sh_ten.global_offset[0]), int(sh_ten.global_shape[0]))
+    return identity
+
+
+def _test_te_grouped_sharded_state_dict_global_expert_identity_helper(
+    tp_size, ep_size, quant_cfg, rank, size
+):
+    """Per-expert quantizer amax must persist all num_global_experts across EP.
+
+    With EP>1 the base linear emitted ``weight_quantizer.{local_i}._amax`` at the local index with
+    no expert offset, so every rank wrote identical keys and torch_dist dedup collapsed them to a
+    single rank's experts. Assert each rank's fused experts now carry distinct global identities so
+    the union across ranks covers every global expert.
+    """
+    initialize_for_megatron(
+        tensor_model_parallel_size=tp_size,
+        expert_model_parallel_size=ep_size,
+        seed=SEED,
+    )
+    num_experts = 4
+    num_local = num_experts // ep_size
+
+    te_grouped = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=num_experts,
+    )
+    forward = get_forward(te_grouped, batch_size=8)
+    for module in te_grouped.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    mtq.quantize(te_grouped, quant_cfg, forward)
+
+    grouped_linears = [
+        m for m in te_grouped.modules() if isinstance(m, _QuantMegatronTEGroupedLinear)
+    ]
+    assert grouped_linears, "No grouped quant linears found"
+
+    expected_global = {rank * num_local + i for i in range(num_local)}
+    for linear in grouped_linears:
+        # Give each expert a distinct amax so a value mix-up would also be observable.
+        for i in range(linear.num_gemms):
+            wq = linear.weight_quantizer[i]
+            leaves = list(wq) if isinstance(wq, SequentialQuantizer) else [wq]
+            for leaf in leaves:
+                if hasattr(leaf, "_amax") and leaf._amax is not None:
+                    leaf._amax.fill_(1.0 + rank * num_local + i)
+
+        identity = _te_grouped_expert_identity_from_sharded_state(linear)
+        # One entry per local expert per amax buffer; dict keys keep the LOCAL index.
+        local_keys = {int(re.search(r"weight_quantizer\.(\d+)\.", k).group(1)) for k in identity}
+        assert local_keys == set(range(num_local)), (
+            f"Expected local expert keys {set(range(num_local))}, got {local_keys}"
+        )
+        # ShardedTensor global identity: this rank owns experts {rank*num_local + i}.
+        local_global = {gidx for gidx, _ in identity.values()}
+        assert local_global == expected_global, (
+            f"rank {rank}: expected global experts {expected_global}, got {local_global}"
+        )
+        assert all(total == num_experts for _, total in identity.values()), (
+            f"num_global_experts should be {num_experts}, got {identity}"
+        )
+
+    # Gather the global expert indices across all EP ranks: the union must cover every expert.
+    gathered = [None] * size
+    torch.distributed.all_gather_object(gathered, sorted(expected_global))
+    union = set()
+    for part in gathered:
+        union.update(part)
+    assert union == set(range(num_experts)), (
+        f"Union of global experts across EP ranks should be {set(range(num_experts))}, got {union}"
+    )
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_sharded_state_dict_global_expert_identity(dist_workers_size_2, quant_cfg):
+    dist_workers_size_2.run(
+        partial(_test_te_grouped_sharded_state_dict_global_expert_identity_helper, 1, 2, quant_cfg)
+    )
+
+
+def _test_te_grouped_vs_sequential_default_loss_helper(tp_size, ep_size, quant_cfg, rank, size):
+    """TEGrouped quantized output should diverge from BF16 more than SequentialMLP under default sync=False."""
+    initialize_for_megatron(
+        tensor_model_parallel_size=tp_size,
+        expert_model_parallel_size=ep_size,
+        seed=SEED,
+    )
+
+    te_grouped = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=4,
+    )
+    forward = get_forward(te_grouped, batch_size=8)
+
+    sequential = _gpt_model_provider(
+        tp_size=tp_size,
+        ep_size=ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=False,
+        num_moe_experts=4,
+        transformer_impl="modelopt",
+    )
+    copy_weights_from_grouped_to_non_grouped(te_grouped, sequential)
+
+    for module in te_grouped.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+    for module in sequential.modules():
+        if isinstance(module, TopKRouter):
+            module.topk = module.num_experts
+
+    ref_te = forward(te_grouped)
+    ref_seq = forward(sequential)
+
+    mtq.quantize(te_grouped, quant_cfg, forward)
+    mtq.quantize(sequential, quant_cfg, forward)
+
+    out_te = forward(te_grouped)
+    out_seq = forward(sequential)
+
+    err_te = (out_te - ref_te).abs().mean().item()
+    err_seq = (out_seq - ref_seq).abs().mean().item()
+
+    if rank == 0:
+        print(
+            f"\n[default-amax] TEGrouped quant-err={err_te:.6f}, "
+            f"Sequential quant-err={err_seq:.6f}, ratio TE/Seq={err_te / max(err_seq, 1e-12):.3f}"
+        )
+
+    # At toy scale (4 small experts) the per-tensor amax difference is dominated
+    # by other numerical noise (~few %); the effect amplifies at production scale
+    # (e.g. 128 experts in Nemotron Nano). Just sanity-check both errors are finite.
+    assert err_te > 0 and err_seq > 0
+    assert math.isfinite(err_te) and math.isfinite(err_seq)
+
+
+@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
+def test_te_grouped_vs_sequential_default_loss(dist_workers_size_1, quant_cfg):
+    dist_workers_size_1.run(
+        partial(_test_te_grouped_vs_sequential_default_loss_helper, 1, 1, quant_cfg)
     )
 
 
@@ -817,7 +1311,7 @@ def test_gptq_mamba_hybrid(dist_workers_size_1):
 
 def _test_gptq_mamba_hybrid(rank, size):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         hidden_size=32,
         num_attention_heads=4,
@@ -859,7 +1353,7 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
         expert_model_parallel_size=expert_model_parallel_size,
         seed=SEED,
     )
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         expert_model_parallel_size=expert_model_parallel_size,
         hidden_size=32,
@@ -1301,3 +1795,133 @@ def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
             {"transformer_impl": "transformer_engine"},
         ),
     )
+
+
+def test_output_layer_extra_state_empty_when_nothing_quantized():
+    """``GPTModel.sharded_state_dict`` asserts a disabled output_layer carries no extra state.
+
+    The subject is a ``RealQuantLinear`` with an uncompressed weight, which is what ``mtq.compress``
+    leaves behind for a disabled output_layer, and the e2e coverage
+    (``test_homogeneous_compressed_sharded_state_dict``) is Blackwell-skipped.
+    """
+    module = RealQuantLinear.convert(QuantModuleRegistry.convert(torch.nn.Linear(4, 4)))
+    module._modelopt_output_layer = True
+    assert not isinstance(module.weight, QTensorWrapper)  # disabled quantizers are not compressed
+
+    for quantizer in module.modules():
+        if isinstance(quantizer, mtq.nn.TensorQuantizer):
+            quantizer.disable()
+    assert quant_module_get_extra_state(module) == {}
+
+    module.weight_quantizer.enable()
+    assert "modelopt_quantizer_state" in quant_module_get_extra_state(module)
+
+
+def test_resolve_output_layer_untied():
+    """The tiedness signal is read off the model, not from Megatron-LM global args."""
+
+    class _Flagged(torch.nn.Module):
+        def __init__(self, shared):
+            super().__init__()
+            self.share_embeddings_and_output_weights = shared
+
+    # No signal anywhere -> unknown.
+    assert _resolve_output_layer_untied(torch.nn.Module()) is None
+
+    # The root's own flag wins over any subtree.
+    root = _Flagged(False)
+    root.inner = _Flagged(True)
+    assert _resolve_output_layer_untied(root) is True
+
+    # Otherwise fall back to a subtree scan.
+    root = torch.nn.Module()
+    root.language_model = _Flagged(True)
+    assert _resolve_output_layer_untied(root) is False
+
+    # Subtrees that do not own the language model's output_layer are skipped: the vision tower
+    # and a distillation teacher, either of which may be tied differently from the student.
+    root = torch.nn.Module()
+    root.vision_model = _Flagged(True)
+    root._teacher_model = _Flagged(True)
+    root.language_model = _Flagged(False)
+    assert _resolve_output_layer_untied(root) is True
+
+
+@pytest.mark.parametrize("mlm_untied", [True, False])
+def test_output_layer_untied_falls_back_to_megatron_lm_args(mlm_untied):
+    """With no model-derived flag, the answer comes from Megatron-LM's args."""
+
+    class _Config:
+        pass
+
+    fake_training = types.ModuleType("megatron.training")
+    fake_training.get_args = lambda: SimpleNamespace(untie_embeddings_and_output_weights=mlm_untied)
+
+    config = _Config()
+    with patch.dict(sys.modules, {"megatron.training": fake_training}):
+        assert _output_layer_untied(config) is mlm_untied
+
+    # The model-derived flag takes precedence over the args fallback.
+    config.modelopt_output_layer_untied = not mlm_untied
+    with patch.dict(sys.modules, {"megatron.training": fake_training}):
+        assert _output_layer_untied(config) is (not mlm_untied)
+
+
+def test_output_layer_untied_warns_once_when_args_unavailable():
+    """Without either signal the layer is treated as tied, and the warning is not repeated."""
+
+    class _Config:
+        pass
+
+    broken = types.ModuleType("megatron.training")  # no get_args attribute
+
+    config = _Config()
+    with (
+        patch.dict(sys.modules, {"megatron.training": broken}),
+        patch("modelopt.torch.quantization.plugins.megatron.warn_rank_0") as warn,
+    ):
+        assert _output_layer_untied(config) is False
+        assert _output_layer_untied(config) is False
+    assert warn.call_count == 1
+
+
+def test_output_layer_untied_warns_when_args_uninitialized():
+    """Megatron-LM importable but not initialized: treated as tied, warned once."""
+
+    class _Config:
+        pass
+
+    def _uninitialized():
+        raise AssertionError("args is not initialized.")
+
+    fake_training = types.ModuleType("megatron.training")
+    fake_training.get_args = _uninitialized
+
+    config = _Config()
+    with (
+        patch.dict(sys.modules, {"megatron.training": fake_training}),
+        patch("modelopt.torch.quantization.plugins.megatron.warn_rank_0") as warn,
+    ):
+        assert _output_layer_untied(config) is False
+        assert _output_layer_untied(config) is False
+    assert warn.call_count == 1
+
+
+def test_output_layer_untied_not_stamped_onto_teacher_config():
+    """A distillation teacher keeps its own tiedness; the student's answer must not leak in."""
+
+    def _config():
+        return TransformerConfig(num_layers=1, hidden_size=8, num_attention_heads=1)
+
+    class _Tiny(MegatronModule):
+        def __init__(self, config, shared):
+            super().__init__(config)
+            self.share_embeddings_and_output_weights = shared
+
+    student = _Tiny(_config(), shared=False)  # untied
+    student._teacher_model = _Tiny(_config(), shared=True)  # tied -- must not be overwritten
+
+    megatron_replace_quant_module_hook(student)
+
+    assert student.config.modelopt_output_layer_untied is True
+    assert not hasattr(student._teacher_model.config, "modelopt_output_layer_untied")

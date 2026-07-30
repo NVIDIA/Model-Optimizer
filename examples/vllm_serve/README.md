@@ -4,7 +4,7 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-The general fakequant example is tested with vLLM 0.9.0 and 0.19.1. The compact
+The general fakequant example is tested with vLLM 0.9.0, 0.19.1, and 0.26.0. The compact
 NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 ## Prepare environment
@@ -61,6 +61,67 @@ Step 4 (Optional): using lm_eval to run evaluation
 ```bash
 lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,base_url=http://127.0.0.1:8000/v1/completions,num_concurrent=1,max_retries=3,tokenized_requests=False,batch_size=128,tokenizer_backend=None
 ```
+
+## Tracking a serve with MLflow
+
+Pass `--mlflow <tracking-uri>`, or set MLflow's own `MLFLOW_TRACKING_URI`, to record what
+this server actually quantized, so the numbers an evaluation produces can be traced back to
+a recipe:
+
+```bash
+RECIPE_PATH=<PATH_TO_RECIPE> python vllm_serve_fakequant.py <model_path> -tp 8 \
+  --host 0.0.0.0 --port 8000 \
+  --mlflow https://<your-mlflow-server>/
+```
+
+This is the *quantization* tracking server. It is unrelated to any tracking server an
+evaluation harness exports its scores to — NeMo Evaluator Launcher, for instance, has its
+own `export.mlflow.tracking_uri`. Keep the two separate.
+
+Quantization runs in the vLLM **worker**, not in `vllm_serve_fakequant.py`, so that is where
+the run is recorded: the launcher validates the URI and hands the settings to the workers
+through the environment, and global rank 0 opens the run. It opens *before the weights
+load*, so a bad URI or a missing token fails within seconds rather than after a load and a
+full calibration, and it closes `FINISHED` once the model is quantized and warmed up —
+serving itself is not tracked.
+
+<details>
+<summary>Uploaded artifacts</summary>
+
+| Artifact | Contents |
+| --- | --- |
+| `command.txt` | The launcher's full invocation, copy-pasteable, with credentials masked |
+| `version.txt` | The ModelOpt version that ran |
+| `recipe/resolved_recipe.yaml` | `RECIPE_PATH` with its `$import`s expanded, so it stands alone |
+| `recipe/quant_cfg.yaml` | `QUANT_CFG` and `KV_QUANT_CFG` merged, plus any MLA fixup — only when no recipe is used, since a recipe's config is already in `resolved_recipe.yaml` |
+| `logs/<script>.log` | The rank-0 worker's Python stdout/stderr, including the traceback if it crashed |
+| `summary/quant_summary.txt` | The per-quantizer summary |
+
+</details>
+
+The quantization settings from the table above are logged as searchable params, alongside
+the serving settings (`tensor_parallel_size`, `max_model_len`, `dtype`, `kv_cache_dtype`, …)
+and `user` / `hostname` / `modelopt_version` / `git_sha` / `vllm_version` tags. The
+`checkpoint_path` tag is the checkpoint being served, which is the same key
+`examples/hf_ptq/hf_ptq.py` tags its runs with — so the PTQ run that produced a checkpoint
+and every serve of it can be found together.
+
+Other flags:
+
+- `--mlflow_experiment` — defaults to
+  `$USER/vllm_serve_fakequant/<model basename>-<recipe name>`, falling back to
+  `$QUANT_CFG`/`$KV_QUANT_CFG` when no recipe is used.
+- `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
+- `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
+  from the environment is best-effort — if the client is missing or the server is
+  unreachable the server warns and serves untracked. An explicit `--mlflow` fails loudly
+  instead.
+
+Tracking needs the client: `pip install nvidia-modelopt[mlflow]` (already in this example's
+`Dockerfile`). Authentication uses MLflow's own environment variables
+(`MLFLOW_TRACKING_TOKEN`, or `MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`); with
+`--distributed-executor-backend ray` those are forwarded to the workers along with the
+tracking settings, since a Ray worker starts with a clean environment.
 
 ## Load QAT/PTQ model and serve in vLLM (WIP)
 

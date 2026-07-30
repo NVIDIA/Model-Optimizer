@@ -27,12 +27,10 @@ editing if/elif chains inside ``unified_export_hf.py``.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-
-from modelopt.torch.utils.distributed import is_fsdp2_model
 
 __all__ = [
     "ExportContext",
@@ -46,27 +44,16 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    The tied-weight dedup caches must be scoped to one export invocation: a
-    process-global cache would carry stale entries whose ``data_ptr`` keys can be
-    recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
+    Tied-weight dedup is not a handler concern: the driver builds one name-based
+    :class:`TiedWeightMap` and feeds it to ``sync_tied_input_amax`` and
+    ``postprocess_state_dict`` directly. Both dense and fused-MoE tied weights are packed
+    independently and their duplicate keys are dropped by name there, so the context
+    carries no tied-weight map (handlers never consulted it).
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        # FSDP2 may recycle data_ptr() values as modules are resharded, so pointer-keyed dedup can
-        # falsely alias distinct weights. Disable it for FSDP2; consequently, legitimately tied
-        # packed weights and scale buffers are not re-aliased and may be stored as duplicates.
-        # TODO: replace this with stable, name-based tied-group deduplication.
-        if is_fsdp2_model(self.model):
-            self.tied_cache = None
-            self.moe_tied_cache = None
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

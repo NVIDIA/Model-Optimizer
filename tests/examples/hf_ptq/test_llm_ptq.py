@@ -71,13 +71,13 @@ def test_ptq_whisper(command):
 @pytest.mark.parametrize(
     "command",
     [
-        PTQCommand(quant="int8_sq", kv_cache_quant="none"),
-        PTQCommand(quant="int8_sq", kv_cache_quant="none", tp=2, pp=2),
-        PTQCommand(quant="int8_wo", kv_cache_quant="none"),
+        PTQCommand(quant="int8_smoothquant", kv_cache_quant="none"),
+        PTQCommand(quant="int8_smoothquant", kv_cache_quant="none", tp=2, pp=2),
+        PTQCommand(quant="int8_weight_only", kv_cache_quant="none"),
         PTQCommand(quant="int4_awq", kv_cache_quant="none"),
-        PTQCommand(quant="w4a8_awq", kv_cache_quant="none"),
+        PTQCommand(quant="w4a8_awq_beta", kv_cache_quant="none"),
         PTQCommand(quant="nvfp4"),
-        PTQCommand(quant="nvfp4_awq"),
+        PTQCommand(quant="nvfp4_awq_lite"),
         # autoquant (recipe-driven)
         PTQCommand(
             recipe="general/auto_quantize/nvfp4_fp8_at_5p4bits",
@@ -85,7 +85,7 @@ def test_ptq_whisper(command):
             kv_cache_quant="none",
         ),
         # kv_cache
-        PTQCommand(quant="nvfp4_awq", kv_cache_quant="nvfp4"),
+        PTQCommand(quant="nvfp4_awq_lite", kv_cache_quant="nvfp4"),
         PTQCommand(quant="fp8", kv_cache_quant="fp8_cast", min_sm=89),
         # autoquant_kv_cache (recipe-driven; KV via --kv_cache_quant fallback)
         PTQCommand(

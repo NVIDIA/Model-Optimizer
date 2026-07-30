@@ -109,9 +109,41 @@ If `trust_remote_code` needs to be true, please append the command with the `--t
 
 ### TensorRT-LLM
 
+Uses the `trtllm` backend built into lm-eval (>= 0.4.12), which loads the quantized
+checkpoint directly with the TensorRT-LLM LLM API.
+
 ```sh
-python lm_eval_tensorrt_llm.py --model trt-llm --model_args tokenizer=<HF model folder>,checkpoint_dir=<Quantized checkpoint dir> --tasks <comma separated tasks> --batch_size <max batch size>
+python lm_eval_trtllm.py --model trtllm \
+    --model_args model=<Quantized checkpoint dir>,tokenizer=<HF model folder>,tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,max_output_len=512 \
+    --tasks <comma separated tasks> \
+    --batch_size <max batch size>
 ```
+
+> **_NOTE:_** Loglikelihood tasks (mmlu, hellaswag, arc, ...) need **TensorRT-LLM >=
+> 1.3.0rc11**, which is when the engine started returning the requested token in every
+> `prompt_logprobs` entry. Earlier releases return only the top-1 token per position, so a
+> continuation token's logprob cannot be recovered and the run aborts with a clear error.
+> Generative tasks (gsm8k, ifeval) are unaffected.
+
+> **_NOTE:_** Set `max_input_len` and `max_output_len` explicitly. They default to 2048 and
+> 512, and prompts longer than `max_input_len` are silently truncated — 5-shot MMLU or
+> gsm8k prompts exceed 2048 tokens. `max_seq_len` of the engine is their sum.
+
+> **_NOTE:_** `tensor_parallel_size` defaults to 1; set it to the number of GPUs the
+> checkpoint needs. `pipeline_parallel_size` is also supported.
+
+> **_NOTE:_** Use `lm_eval_trtllm.py` rather than the plain `lm_eval` CLI. lm-eval 0.4.12's
+> `trtllm` backend misaligns TensorRT-LLM's `prompt_logprobs` by one position, so every
+> loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
+> `lm_eval_trtllm.py` overrides the alignment. It goes away once the fix lands upstream.
+
+> **_NOTE:_** The backend forwards only a fixed set of arguments to TensorRT-LLM, so the
+> tuning the old `lm_eval_tensorrt_llm.py` applied is not reachable: expert parallelism is
+> left at the TensorRT-LLM default (MoE checkpoints can fail in DeepEP kernels on some
+> GPUs, e.g. SM 12.0) and the KV cache uses 90% of free GPU memory rather than 70%. Lower
+> `tensor_parallel_size` if you hit either.
+
+`lm_eval_tensorrt_llm.py` (`--model trt-llm`) has been removed; use the command above.
 
 ## MMLU
 
@@ -123,7 +155,8 @@ Download data
 
 ```bash
 mkdir -p data
-wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -O data/mmlu.tar
+wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+    https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar -O data/mmlu.tar
 tar -xf data/mmlu.tar -C data && mv data/data data/mmlu
 cd ..
 ```

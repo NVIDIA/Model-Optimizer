@@ -59,12 +59,14 @@ from pathlib import Path
 
 import torch
 from megatron.bridge import AutoBridge
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.plugins.mbridge import (
+    is_vlm_config,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
 )
@@ -213,6 +215,16 @@ def get_args() -> argparse.Namespace:
         "correct for homogeneous students; unused for VLMs.",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically. VLMs only: the "
+            "LLM path reads the expert layout from the checkpoint and ignores this flag."
+        ),
+    )
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
@@ -226,10 +238,15 @@ def get_args() -> argparse.Namespace:
 
 def main(args: argparse.Namespace):
     checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
-    )
+    # This path drops quantization, so a QAD checkpoint would export silently unquantized.
+    # ``has_modelopt_state`` ignores ``kd_loss``, so plain distillation still passes.
+    quantized = [str(p) for p, _ in checkpoint_export_paths if has_modelopt_state(str(p))]
+    if quantized:
+        raise ValueError(
+            f"{quantized[0]} is quantized; this script exports full precision only and would drop "
+            "the quantizers. Use export_quantized_megatron_to_hf.py instead."
+        )
+    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
 
     if is_vlm:
         # Build the full VLM (vision tower / projector + original LM from HF), then overwrite the LM
@@ -238,6 +255,8 @@ def main(args: argparse.Namespace):
         _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
             hf_model_name_or_path=args.student_hf_path,
             trust_remote_code=args.trust_remote_code,
+            # Mirrors distill.py's unquantized branch
+            moe_grouped_gemm=not args.no_moe_grouped_gemm,
             provider_overrides={
                 "tensor_model_parallel_size": args.tp_size,
                 "pipeline_model_parallel_size": args.pp_size,
@@ -288,5 +307,7 @@ if __name__ == "__main__":
     args = get_args()
     try:
         main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()

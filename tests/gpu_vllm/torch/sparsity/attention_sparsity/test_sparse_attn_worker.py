@@ -28,7 +28,7 @@ import torch
 import vllm
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends import flashinfer as flashinfer_backend
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend, FlashAttentionImpl
 from vllm.v1.attention.backends.flashinfer import (
     FlashInferBackend,
     FlashInferImpl,
@@ -206,10 +206,16 @@ def isolated_flashinfer_builder_patch():
 def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
     monkeypatch, isolated_flashinfer_builder_patch
 ):
-    """The real builder result must retain the common metadata contract."""
+    """The real builder result must retain the common metadata contract.
+
+    ``causal=True`` keeps the real ``build`` on the all-TRTLLM path, which needs no workspace
+    buffers or wrapper planning; the stashed fields are path-independent.
+    """
     monkeypatch.setattr(flashinfer_backend, "use_trtllm_attention", lambda *_args, **_kwargs: True)
     assert patch_flashinfer_metadata_builder() is True
     builder = object.__new__(FlashInferMetadataBuilder)
+    # vLLM >= 0.26 splits ``q_data_type`` per phase and carries the resolved decode kernel on the builder
+    decode_kernel_enum = getattr(flashinfer_backend, "FlashInferDecodeKernel", None)
     builder.__dict__.update(
         reorder_batch_threshold=1,
         page_size=16,
@@ -218,6 +224,11 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         dcp_world_size=1,
         cache_dtype=torch.float16,
         q_data_type=torch.float16,
+        q_data_type_prefill=torch.float16,
+        q_data_type_decode=torch.float16,
+        flashinfer_trtllm_api_decode_kernel=(
+            next(iter(decode_kernel_enum)) if decode_kernel_enum is not None else None
+        ),
         attention_config=SimpleNamespace(use_trtllm_attention=True),
         has_sinks=False,
         use_trtllm_decode_attention=True,
@@ -233,7 +244,7 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         max_seq_len=16,
         block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
         slot_mapping=torch.tensor([0], dtype=torch.int64),
-        causal=False,
+        causal=True,
     )
 
     metadata = builder.build(0, common, fast_build=False)
@@ -530,6 +541,76 @@ def _make_flash_attention_impl(*, sparse=False, quantized=False):
     return impl
 
 
+def _flash_attention_kv_cache(num_blocks, page_size, num_kv_heads, head_size):
+    layout = vllm_plugin._flash_attention_kv_cache_layout()
+    if layout == "packed":
+        shape = [num_blocks, num_kv_heads, page_size, 2 * head_size]
+    else:
+        shape = [num_blocks, page_size, num_kv_heads, head_size]
+        shape.insert(0 if layout == "kv-first" else 1, 2)
+    return torch.zeros(shape, dtype=torch.float16)
+
+
+@pytest.mark.parametrize(
+    ("layout", "backend_shape"),
+    [
+        ("kv-first", (2, 3, 16, 1, 16)),
+        ("blocks-first", (3, 2, 16, 1, 16)),
+        ("packed", (3, 1, 16, 32)),
+    ],
+)
+def test_flash_attention_forward_follows_backend_kv_cache_layout(
+    monkeypatch, layout, backend_shape
+):
+    impl = _make_flash_attention_impl(sparse=True)
+    if layout == "packed":
+        shape = [3, impl.num_kv_heads, 16, 2 * impl.head_size]
+    else:
+        shape = [3, 16, impl.num_kv_heads, impl.head_size]
+        shape.insert(0 if layout == "kv-first" else 1, 2)
+    monkeypatch.setattr(
+        FlashAttentionBackend, "get_kv_cache_shape", staticmethod(lambda *_args: backend_shape)
+    )
+    vllm_plugin._flash_attention_kv_cache_layout.cache_clear()
+    kv_cache = torch.zeros(shape, dtype=torch.float16)
+    query = torch.zeros(4, impl.num_heads, impl.head_size, dtype=torch.float16)
+    metadata = _flash_attention_metadata(query.shape[0], 16)
+    captured = {}
+
+    def fake_attention(query, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+
+    try:
+        impl.forward(
+            layer=None,
+            query=query,
+            key=query,
+            value=query,
+            kv_cache=kv_cache,
+            attn_metadata=metadata,
+            output=torch.empty_like(query),
+        )
+    finally:
+        vllm_plugin._flash_attention_kv_cache_layout.cache_clear()
+
+    if layout == "packed":
+        expected_key_cache, expected_value_cache = kv_cache.transpose(1, 2).split(
+            impl.head_size, dim=-1
+        )
+    else:
+        expected_key_cache, expected_value_cache = kv_cache.unbind(0 if layout == "kv-first" else 1)
+    assert captured["k_cache"].shape == expected_key_cache.shape
+    assert captured["v_cache"].shape == expected_value_cache.shape
+    assert captured["k_cache"].stride() == expected_key_cache.stride()
+    assert captured["v_cache"].stride() == expected_value_cache.stride()
+    assert captured["k_cache"].data_ptr() == expected_key_cache.data_ptr()
+    assert captured["v_cache"].data_ptr() == expected_value_cache.data_ptr()
+    assert captured["page_size"] == 16
+
+
 def _flash_attention_mixed_metadata(decode_len=1, prefill_len=17):
     query_lens = (decode_len, prefill_len)
     seq_lens = (16, 34)
@@ -557,7 +638,7 @@ def test_flash_attention_mixed_batch_splits_decode_and_prefill(monkeypatch, quan
     prefill_tokens = 17
     impl = _make_flash_attention_impl(sparse=True, quantized=quantized)
     query = torch.zeros(1 + prefill_tokens, 2, 64, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 4, 16, 2, 64, dtype=torch.float16)
+    kv_cache = _flash_attention_kv_cache(4, 16, 2, 64)
     metadata = _flash_attention_mixed_metadata(decode_len=1, prefill_len=prefill_tokens)
     layer = SimpleNamespace(
         _query_quant_in_kernel=quantized,
@@ -750,7 +831,7 @@ def test_forward_delegates_cascade_metadata_to_vllm(monkeypatch):
     """Cascade/prefix-cache metadata should use vLLM's native implementation."""
     impl = _clone_sparse_impl(_make_old_impl())
     q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = _flash_attention_kv_cache(1, 16, impl.num_kv_heads, impl.head_size)
     output = torch.empty_like(q)
     attn_metadata = type("AttnMetadata", (), {"use_cascade": True})()
     called = {}
@@ -827,9 +908,7 @@ def test_forward_delegates_launches_without_effective_sparse_work(
     impl = _clone_sparse_impl(_make_old_impl())
     impl.sparse_kw = sparse_kw
     q = torch.zeros(max_query_len, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(
-        2, 1, max_seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16
-    )
+    kv_cache = _flash_attention_kv_cache(1, max_seq_len, impl.num_kv_heads, impl.head_size)
     output = torch.empty_like(q)
     attn_metadata = _flash_attention_metadata(max_query_len, max_seq_len)
     called = {}
@@ -892,7 +971,7 @@ def test_forward_resolves_calibrated_skip_softmax_threshold(monkeypatch):
         "target_sparse_ratio": {"prefill": 0.4, "decode": 0.6},
     }
     q = torch.zeros(max_query_len, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 1, seq_len, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = _flash_attention_kv_cache(1, seq_len, impl.num_kv_heads, impl.head_size)
     attn_metadata = _flash_attention_metadata(max_query_len, seq_len)
     captured = {}
 
@@ -969,7 +1048,7 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     }
     q = torch.full((4, impl.num_heads, impl.head_size), 2.0, dtype=torch.float16)
     q[2:] = 10_000
-    kv_cache = torch.zeros(2, 4, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = _flash_attention_kv_cache(4, 16, impl.num_kv_heads, impl.head_size)
     metadata = SimpleNamespace(
         num_actual_tokens=q.shape[0],
         max_query_len=1,
@@ -1012,8 +1091,15 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
         "v_qdq_scale": 1.0,
     }
     key_cache, value_cache, block_table, seq_lens, decode_kw = calls["decode"]
-    assert key_cache.data_ptr() == kv_cache[0].data_ptr()
-    assert value_cache.data_ptr() == kv_cache[1].data_ptr()
+    layout = vllm_plugin._flash_attention_kv_cache_layout()
+    if layout == "packed":
+        expected_key_cache, expected_value_cache = kv_cache.transpose(1, 2).split(
+            impl.head_size, dim=-1
+        )
+    else:
+        expected_key_cache, expected_value_cache = kv_cache.unbind(0 if layout == "kv-first" else 1)
+    assert key_cache.data_ptr() == expected_key_cache.data_ptr()
+    assert value_cache.data_ptr() == expected_value_cache.data_ptr()
     assert block_table is metadata.block_table
     assert seq_lens is metadata.seq_lens
     assert calls["query"].shape[0] == metadata.seq_lens.shape[0]
@@ -1037,7 +1123,7 @@ def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
     }
     impl.sparse_kw = {"skip_softmax_threshold": 0.001}
     q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = _flash_attention_kv_cache(1, 16, impl.num_kv_heads, impl.head_size)
     metadata = _flash_attention_metadata(1, 16)
     captured = {}
 
@@ -1129,7 +1215,7 @@ def test_forward_allows_chunked_prefill_metadata(monkeypatch):
     q_len = 4
     kv_len = 10
     q = torch.zeros(q_len, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
+    kv_cache = _flash_attention_kv_cache(1, 16, impl.num_kv_heads, impl.head_size)
     attn_metadata = _flash_attention_metadata(q_len, kv_len)
     captured = {}
 

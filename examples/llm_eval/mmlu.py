@@ -284,6 +284,7 @@ def main(
             medusa_choices=medusa_choices,
             max_seq_len=MAX_SEQ_LEN,
             max_batch_size=1,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
         )
     else:
         model = select_model(

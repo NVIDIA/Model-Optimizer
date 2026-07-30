@@ -135,7 +135,7 @@ def test_gptq_e2e_flow(quant_cfg, tiny_tokenizer):
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"] = {"method": "gptq", "layerwise": True}
+    quant_cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
         tokenizer=tiny_tokenizer,

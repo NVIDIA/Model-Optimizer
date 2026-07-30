@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.distributed as dist
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.distributed.utils import init_process
 
 import modelopt.torch.opt as mto
@@ -91,16 +92,7 @@ def pytest_collection_modifyitems(config, items):
         item.add_marker(pytest.mark.timeout(_DEFAULT_TIMEOUT[group]))
 
 
-@pytest.fixture
-def tiny_tokenizer():
-    """Real tiny HF tokenizer (vocab=128) shared across unit and gpu test lanes."""
-    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
-    # at module load, which we don't want to trigger at conftest import time.
-    from _test_utils.torch.transformers_models import get_tiny_tokenizer
-
-    return get_tiny_tokenizer()
-
-
+# General Fixtures #################################################################################
 @pytest.fixture
 def skip_on_windows():
     if platform.system() == "Windows":
@@ -161,3 +153,29 @@ def enable_hf_checkpointing():
 def project_root_path(request: pytest.FixtureRequest) -> Path:
     """Fixture providing the project root path for tests."""
     return Path(request.config.rootpath)
+
+
+# Transformers Models Fixtures #####################################################################
+@pytest.fixture
+def tiny_tokenizer():
+    """Real tiny HF tokenizer (vocab=128) shared across unit and gpu test lanes."""
+    # Lazy import: transformers_models.py runs ``pytest.importorskip("transformers")``
+    # at module load, which we don't want to trigger at conftest import time.
+    from _test_utils.torch.transformers_models import get_tiny_tokenizer
+
+    return get_tiny_tokenizer()
+
+
+@pytest.fixture(scope="session")
+def tiny_wan22_path(tmp_path_factory):
+    """Tiny Wan 2.2 pipeline dir, built once per session (the build is the expensive part).
+
+    Shared by the gpu sparse-attention tests and the diffusers example tests.
+    """
+    # Lazy import for the same reason as ``tiny_tokenizer``: diffusers_models.py pulls in
+    # transformers at module load.
+    from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
+
+    pipeline_dir = create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22"))
+    with assert_unmodified_tree(pipeline_dir) as path:
+        yield str(path)

@@ -20,6 +20,11 @@ import torch
 from torch import nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
+from modelopt.torch.quantization.tensor_quant import fp4_cast_ste
 
 NVFP4_LSQ_POST_MSE_CFG = {
     "quant_cfg": {
@@ -149,11 +154,6 @@ def test_lsq_quantize_e2e(config):
 
 def test_lsq_fp4_fake_quantize_differentiable():
     """Test that _fake_quantize in FP4 LSQ mode is differentiable."""
-    from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
-        StaticBlockScaleQuantizer,
-        TensorQuantizer,
-    )
-
     device = torch.device("cuda")
     tq = TensorQuantizer()
     tq._num_bits = (2, 1)
@@ -184,8 +184,6 @@ def test_lsq_fp4_fake_quantize_differentiable():
 
 def test_lsq_fp4_cast_ste():
     """Test fp4_cast_ste on GPU."""
-    from modelopt.torch.quantization.tensor_quant import fp4_cast_ste
-
     device = torch.device("cuda")
     x = torch.tensor([[-3.0, 1.5, 0.0, 6.0, -6.0, 0.5, -0.5, 2.0]], device=device)
     x.requires_grad_(True)

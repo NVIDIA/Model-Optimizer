@@ -134,3 +134,31 @@ def test_load_vlm_or_llm_offline_zero_layers(monkeypatch):
     model = load_vlm_or_llm("fake-model", use_offline_training=True, use_fake_base=False)
     assert captured_kwargs.get("num_hidden_layers") == 0
     assert model.config.num_orig_hidden_layers == 4
+
+
+def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
+    """Transformers 5 loads VLMs through AutoModelForImageTextToText."""
+    cfg = transformers.PretrainedConfig()
+    cfg.model_type = "qwen3_vl"
+    cfg.text_config = object()
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: cfg)
+
+    captured = {}
+
+    class _FakeVLM:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return object()
+
+    # ``transformers`` exposes auto classes lazily, so deleting this attribute
+    # lets its module-level ``__getattr__`` recreate the legacy class.  An
+    # explicit ``None`` models its absence and reliably exercises the v5
+    # fallback.
+    monkeypatch.setattr(transformers, "AutoModelForVision2Seq", None, raising=False)
+    monkeypatch.setattr(transformers, "AutoModelForImageTextToText", _FakeVLM)
+
+    assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
+    assert captured["args"] == ("qwen3-vl",)
+    assert captured["kwargs"]["torch_dtype"] == "auto"

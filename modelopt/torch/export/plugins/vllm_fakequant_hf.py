@@ -29,7 +29,13 @@ import torch.nn as nn
 import modelopt.torch.opt as mto
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
-from modelopt.torch.quantization.nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -125,9 +131,7 @@ def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
         if not isinstance(module, QuantModule):
             continue
         for attr_name, quantizer in module.named_children():
-            if attr_name.endswith("weight_quantizer") and isinstance(
-                quantizer, (TensorQuantizer, SequentialQuantizer)
-            ):
+            if attr_name.endswith("weight_quantizer") and isinstance(quantizer, AnyQuantizer):
                 if quantizer.is_enabled:
                     raise RuntimeError(
                         f"vLLM fakequant export: {attr_name!r} must be disabled before saving "
@@ -625,7 +629,10 @@ def export_hf_vllm_fq_checkpoint(
                 for attr_name, quantizer in module.named_children():
                     if not (attr_name.endswith("weight_quantizer") and quantizer.is_enabled):
                         continue
-                    if isinstance(quantizer, SequentialQuantizer):
+                    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
+                        # GroupedQuantizer (per-expert TEGroupedLinear) and SequentialQuantizer
+                        # both hold sub-quantizers; disable each so the widened
+                        # _check_all_weight_quantizers_disabled(AnyQuantizer) check passes.
                         quantizer.disable()
                         for sub in quantizer:
                             wqs_to_restore.append((sub, sub._rotate))

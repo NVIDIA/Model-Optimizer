@@ -18,6 +18,7 @@
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
   w4a8_awq_beta: configs/ptq/presets/model/w4a8_awq_beta
   fp8: configs/ptq/presets/model/fp8
 
@@ -40,3 +41,8 @@ auto_quantize:
   # models use a recipe under huggingface/<model>/auto_quantize/ that appends to this set.
   disabled_layers:
     - $import: base_disabled_layers
+
+  # Base (model-agnostic) cost-excluded layers, spliced from the shared unit: VL vision
+  # towers / MTP are kept out of the effective-bits denominator. No-op on non-VL models.
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers

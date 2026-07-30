@@ -78,7 +78,7 @@ mtq.quantize(model=transformer, config=quant_config, forward_func=forward_pass)
 
 > *<sup>1.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.*
 
-> *<sup>2.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later*
+> *<sup>2.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v1.2 or later*
 
 > *<sup>3.</sup>The SVDQuant Perf in TRT might not good as the [Nunchaku: MIT-Nvidia](https://github.com/nunchaku-tech/nunchaku) at this moment.*
 

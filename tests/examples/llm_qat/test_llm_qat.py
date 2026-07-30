@@ -14,8 +14,12 @@
 # limitations under the License.
 
 
+import json
+
 import pytest
+import torch
 from _test_utils.examples.run_command import run_example_command
+from safetensors.torch import load_file
 
 # Mapping from backend name to accelerate config file
 BACKEND_CONFIGS = {
@@ -86,6 +90,18 @@ def _run_train(config: str, extra_cmd_args: list[str], backend: str = "fsdp2", c
         setup_free_port=True,
     )
 
+
+def _run_export(ckpt_dir: str, export_dir: str):
+    run_example_command(
+        [
+            "python", "export.py",
+            "--pyt_ckpt_path", ckpt_dir,
+            "--export_path", export_dir,
+        ],
+        "llm_qat",
+    )
+
+
 def test_dataset_utils_pretokenize(tiny_qwen3_path, tmp_path):
     """Test dataset_utils.py standalone CLI pre-tokenization."""
     cache_dir = tmp_path / "dataset_cache"
@@ -152,17 +168,42 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
     )
 
     # Step 2: LoRA QAT
+    lora_qat_output_dir = tmp_path / "lora_qat"
     _run_train(
         "configs/train/qat_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",
             "--lora", "True",
-            "--output_dir", str(tmp_path / "lora_qat"),
+            "--output_dir", str(lora_qat_output_dir),
         ],
         backend="fsdp2",
         cache_dir=cache_dir,
     )
+
+    # Step 3: Export. This checkpoint is fake-quantized, so the calibrated amaxes rather than
+    # packed weights are what must survive the load.
+    export_dir = tmp_path / "lora_qat_export"
+    _run_export(str(lora_qat_output_dir), str(export_dir))
+
+    base_model_dir = export_dir / "base_model"
+    with open(base_model_dir / "hf_quant_config.json") as f:
+        assert json.load(f)["quantization"]["quant_algo"] == "NVFP4"
+
+    base_weights = load_file(base_model_dir / "model.safetensors")
+    assert not any("base_layer" in k or k.endswith("_amax") for k in base_weights)
+
+    # LoRA freezes the base model, so a direct PTQ export is a trusted oracle for every calibrated
+    # value. This catches scales that keep their key but were reset to defaults.
+    ptq_export_dir = tmp_path / "ptq_export"
+    _run_export(str(ptq_output_dir), str(ptq_export_dir))
+    reference = load_file(ptq_export_dir / "model.safetensors")
+
+    scales = [k for k in reference if k.endswith(("_scale", "_scale_2"))]
+    assert scales, "no NVFP4 scales in the reference PTQ export"
+    for key in scales:
+        assert key in base_weights, f"{key} missing from the LoRA-QAT export"
+        assert torch.equal(base_weights[key], reference[key]), f"{key} does not match PTQ export"
 
 
 @pytest.mark.parametrize("backend", [
@@ -219,14 +260,37 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
     )
 
     # Step 2: QLoRA training
+    qlora_output_dir = tmp_path / "qlora"
     _run_train(
         "configs/train/qlora_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",
             "--lora", "True",
-            "--output_dir", str(tmp_path / "qlora"),
+            "--output_dir", str(qlora_output_dir),
         ],
         backend="ddp",
         cache_dir=cache_dir,
     )
+
+    # Step 3: Export the QLoRA checkpoint for deployment
+    export_dir = tmp_path / "qlora_export"
+    _run_export(str(qlora_output_dir), str(export_dir))
+
+    # The base model is exported compressed; the adapters stay at the top level.
+    base_model_dir = export_dir / "base_model"
+    assert (export_dir / "adapter_model.safetensors").is_file()
+    assert (base_model_dir / "hf_quant_config.json").is_file()
+
+    with open(base_model_dir / "hf_quant_config.json") as f:
+        assert json.load(f)["quantization"]["quant_algo"] == "NVFP4"
+
+    # NVFP4 needs the packed weight and *both* scales to be dequantizable downstream.
+    base_weights = load_file(base_model_dir / "model.safetensors")
+    packed_weights = [k for k, v in base_weights.items() if k.endswith(".weight") and v.dtype == torch.uint8]
+    assert packed_weights, "no NVFP4-packed weights found in the exported base model"
+    for key in packed_weights:
+        prefix = key.removesuffix(".weight")
+        assert f"{prefix}.weight_scale" in base_weights
+        assert f"{prefix}.weight_scale_2" in base_weights
+    assert not any("base_layer" in k or "lora" in k for k in base_weights)

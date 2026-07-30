@@ -17,10 +17,21 @@ import copy
 import json
 import os
 import shutil
+from contextlib import nullcontext
 
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.quantization.offload import (
+    make_cpu_offloaded_model,
+    make_layerwise_cfg,
+    make_layerwise_checkpoint_cfg,
+    make_tiny_llama_and_inputs,
+)
+from _test_utils.torch.quantization.quant_utils import (
+    assert_nvfp4_static_amaxes_fp32,
+    nvfp4_static_amax_dtypes,
+)
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from accelerate.hooks import AlignDevicesHook, add_hook_to_module
@@ -28,7 +39,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
-from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import (
     enable_weight_access_and_writeback,
     is_quantized_linear,
@@ -60,26 +70,6 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
 }
 
 
-def _nvfp4_static_amax_dtypes(model):
-    amax_dtypes = {}
-    for name, module in model.named_modules():
-        if (
-            isinstance(module, TensorQuantizer)
-            and module.is_nvfp4_static
-            and module.amax is not None
-        ):
-            amax_dtypes[name] = module.amax.dtype
-    return amax_dtypes
-
-
-def _assert_nvfp4_static_amaxes_fp32(amax_dtypes, model_dtype, label):
-    assert amax_dtypes, f"{label}: expected NVFP4 static amaxes for model dtype {model_dtype}"
-    assert all(amax_dtype == torch.float32 for amax_dtype in amax_dtypes.values()), (
-        f"{label}: expected all NVFP4 static amaxes to be fp32 for model dtype {model_dtype}, "
-        f"got {amax_dtypes}"
-    )
-
-
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_transformers_mse_calibrate_fp32_amax_save_restore(tmp_path, dtype):
     if get_cuda_ext_mx() is None:
@@ -91,8 +81,8 @@ def test_transformers_mse_calibrate_fp32_amax_save_restore(tmp_path, dtype):
     cfg = copy.deepcopy(NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG)
 
     mtq.quantize(model, cfg, lambda model: model(input_ids))
-    amax_dtypes = _nvfp4_static_amax_dtypes(model)
-    _assert_nvfp4_static_amaxes_fp32(amax_dtypes, dtype, "mse calibrated")
+    amax_dtypes = nvfp4_static_amax_dtypes(model)
+    assert_nvfp4_static_amaxes_fp32(amax_dtypes, dtype, "mse calibrated")
 
     with torch.no_grad():
         output = model(input_ids).logits.detach().clone()
@@ -102,8 +92,8 @@ def test_transformers_mse_calibrate_fp32_amax_save_restore(tmp_path, dtype):
     model.save_pretrained(ckpt_path)
     assert os.path.exists(ckpt_path / "modelopt_state.pth")
     restored_model = AutoModelForCausalLM.from_pretrained(ckpt_path, torch_dtype=dtype).cuda()
-    restored_amax_dtypes = _nvfp4_static_amax_dtypes(restored_model)
-    _assert_nvfp4_static_amaxes_fp32(restored_amax_dtypes, dtype, "restored")
+    restored_amax_dtypes = nvfp4_static_amax_dtypes(restored_model)
+    assert_nvfp4_static_amaxes_fp32(restored_amax_dtypes, dtype, "restored")
 
     with torch.no_grad():
         restored_output = restored_model(input_ids).logits.detach().clone()
@@ -150,61 +140,21 @@ def test_cpu_offloaded_tinyllama(tmp_path):
     assert torch.allclose(output_ref.logits, output_test.logits)
 
 
-def _make_cpu_offloaded_model(tmp_path, num_hidden_layers=3):
-    """Create a tiny LLaMA model with layer 0 offloaded to CPU via accelerate."""
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_hidden_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-
-    with init_empty_weights():
-        model = AutoModelForCausalLM.from_config(config)
-
-    device_map = {
-        n: 0
-        for n, m in model.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-
-    model = load_checkpoint_and_dispatch(model, tiny_llama_dir, device_map=device_map)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
-    return model, config, tiny_llama_dir, inputs
-
-
-def _make_layerwise_cfg(base_cfg):
-    """Add layerwise=True to a quant config's algorithm field."""
-    cfg = copy.deepcopy(base_cfg)
-    algo = cfg.get("algorithm", "max")
-    if isinstance(algo, str):
-        cfg["algorithm"] = {"method": algo, "layerwise": True}
-    else:
-        algo["layerwise"] = True
-    return cfg
-
-
-def _make_layerwise_checkpoint_cfg(base_cfg, checkpoint_dir):
-    """Add layerwise=True and layerwise_checkpoint_dir to a quant config's algorithm field."""
-    cfg = _make_layerwise_cfg(base_cfg)
-    cfg["algorithm"]["layerwise_checkpoint_dir"] = checkpoint_dir
-    return cfg
-
-
 @pytest.mark.parametrize("use_checkpoint", [False, True], ids=["no_ckpt", "ckpt"])
 def test_layerwise_calibrate_cpu_offloaded(tmp_path, use_checkpoint):
     """Layerwise calibration on CPU-offloaded model matches GPU-only reference."""
     quant_cfg = mtq.NVFP4_AWQ_LITE_CFG
     num_layers = 3
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
+    tiny_llama_dir, config, inputs = make_tiny_llama_and_inputs(tmp_path, num_layers)
 
     if use_checkpoint:
         ckpt_dir = str(tmp_path / "seq_ckpt")
-        seq_cfg = _make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
+        seq_cfg = make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
     else:
-        seq_cfg = _make_layerwise_cfg(quant_cfg)
+        seq_cfg = make_layerwise_cfg(quant_cfg)
 
     # Reference: GPU-only model with layerwise calibration
-    ref_cfg = _make_layerwise_cfg(quant_cfg)
+    ref_cfg = make_layerwise_cfg(quant_cfg)
     model_ref = AutoModelForCausalLM.from_pretrained(
         tiny_llama_dir, torch_dtype=config.torch_dtype
     ).cuda()
@@ -247,12 +197,10 @@ def test_sequential_checkpoint_resume_cpu_offloaded(tmp_path):
     """Resume from a partial checkpoint on a CPU-offloaded model matches a full run."""
     quant_cfg = mtq.NVFP4_AWQ_LITE_CFG
     num_layers = 3
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
+    tiny_llama_dir, config, inputs = make_tiny_llama_and_inputs(tmp_path, num_layers)
 
     ckpt_dir = str(tmp_path / "seq_ckpt")
-    seq_ckpt_cfg = _make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
+    seq_ckpt_cfg = make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
 
     # Full reference run with checkpointing
     with init_empty_weights():
@@ -300,12 +248,10 @@ def test_sequential_checkpoint_resume_cpu_offloaded(tmp_path):
 def test_sequential_checkpoint_resume_multi_offload(tmp_path):
     """Resume with multiple layers offloaded exercises per-layer device resolution."""
     num_layers = 3
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
+    tiny_llama_dir, config, inputs = make_tiny_llama_and_inputs(tmp_path, num_layers)
 
     ckpt_dir = str(tmp_path / "seq_ckpt")
-    seq_ckpt_cfg = _make_layerwise_checkpoint_cfg(mtq.INT4_AWQ_CFG, ckpt_dir)
+    seq_ckpt_cfg = make_layerwise_checkpoint_cfg(mtq.INT4_AWQ_CFG, ckpt_dir)
 
     def _make_multi_offload_model():
         with init_empty_weights():
@@ -347,14 +293,14 @@ def test_sequential_checkpoint_resume_multi_offload(tmp_path):
 def _make_gptq_sequential_cfg(base_cfg):
     """Create a sequential GPTQ config from a base quantization config."""
     cfg = copy.deepcopy(base_cfg)
-    cfg["algorithm"] = {"method": "gptq", "layerwise": True}
+    cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     return cfg
 
 
 def _make_gptq_sequential_checkpoint_cfg(base_cfg, checkpoint_dir):
     """Create a sequential GPTQ config with checkpoint dir."""
     cfg = _make_gptq_sequential_cfg(base_cfg)
-    cfg["algorithm"]["layerwise_checkpoint_dir"] = checkpoint_dir
+    cfg["algorithm"]["layerwise"]["checkpoint_dir"] = checkpoint_dir
     return cfg
 
 
@@ -362,9 +308,7 @@ def _make_gptq_sequential_checkpoint_cfg(base_cfg, checkpoint_dir):
 def test_sequential_gptq_cpu_offloaded(tmp_path, use_checkpoint):
     """Sequential GPTQ (weight-modifying) on CPU-offloaded model matches GPU-only reference."""
     num_layers = 3
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
+    tiny_llama_dir, config, inputs = make_tiny_llama_and_inputs(tmp_path, num_layers)
 
     if use_checkpoint:
         ckpt_dir = str(tmp_path / "gptq_ckpt")
@@ -381,7 +325,7 @@ def test_sequential_gptq_cpu_offloaded(tmp_path, use_checkpoint):
     output_ref = model_ref(inputs)
 
     # Test: CPU-offloaded model
-    model, _, _, _ = _make_cpu_offloaded_model(tmp_path / "offloaded", num_hidden_layers=num_layers)
+    model, _, _, _ = make_cpu_offloaded_model(tmp_path / "offloaded", num_hidden_layers=num_layers)
     mtq.quantize(model, seq_cfg, lambda model: model(inputs))
     output_test = model(inputs)
 
@@ -398,9 +342,7 @@ def test_sequential_gptq_cpu_offloaded(tmp_path, use_checkpoint):
 def test_sequential_gptq_checkpoint_resume_cpu_offloaded(tmp_path):
     """GPTQ checkpoint resume with CPU offloading restores modified weights correctly."""
     num_layers = 3
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
+    tiny_llama_dir, config, inputs = make_tiny_llama_and_inputs(tmp_path, num_layers)
 
     ckpt_dir = str(tmp_path / "gptq_ckpt")
     seq_ckpt_cfg = _make_gptq_sequential_checkpoint_cfg(mtq.NVFP4_AWQ_LITE_CFG, ckpt_dir)
@@ -474,8 +416,6 @@ class _TupleUnpackingModel(torch.nn.Module):
 
 def test_skip_dummy_has_no_hf_hook(monkeypatch):
     """Dummies must not carry _hf_hook from the original layer."""
-    from contextlib import nullcontext
-
     monkeypatch.setattr(
         LayerActivationCollector,
         "_decoder_layer_support",
@@ -512,8 +452,6 @@ def test_skip_dummy_has_no_hf_hook(monkeypatch):
 
 
 def _assert_persistent_materialization_bypasses_top_hook(layer):
-    from modelopt.torch.quantization.utils import persistent_materialization
-
     assert hasattr(layer, "_hf_hook")
     original_old_forward = layer._old_forward
 
@@ -533,7 +471,7 @@ def _assert_persistent_materialization_bypasses_top_hook(layer):
 
 def test_persistent_materialization_cpu_offloaded(tmp_path):
     """persistent_materialization keeps CPU-offloaded weights on GPU and writes back modifications."""
-    model, config, _, inputs = _make_cpu_offloaded_model(tmp_path)
+    model, config, _, inputs = make_cpu_offloaded_model(tmp_path)
     offloaded_layer = model.model.layers[0]
 
     # Verify offloaded (meta device)
@@ -695,18 +633,16 @@ def test_layerwise_calibrate_disk_offloaded(tmp_path, use_checkpoint):
     """Layerwise calibration on disk-offloaded model matches GPU-only reference."""
     quant_cfg = mtq.NVFP4_AWQ_LITE_CFG
     num_layers = 3
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-    inputs = torch.randint(0, config.vocab_size, (1, 4)).cuda()
+    tiny_llama_dir, config, inputs = make_tiny_llama_and_inputs(tmp_path, num_layers)
 
     if use_checkpoint:
         ckpt_dir = str(tmp_path / "seq_ckpt")
-        seq_cfg = _make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
+        seq_cfg = make_layerwise_checkpoint_cfg(quant_cfg, ckpt_dir)
     else:
-        seq_cfg = _make_layerwise_cfg(quant_cfg)
+        seq_cfg = make_layerwise_cfg(quant_cfg)
 
     # Reference: GPU-only model with layerwise calibration
-    ref_cfg = _make_layerwise_cfg(quant_cfg)
+    ref_cfg = make_layerwise_cfg(quant_cfg)
     model_ref = AutoModelForCausalLM.from_pretrained(
         tiny_llama_dir, torch_dtype=config.torch_dtype
     ).cuda()

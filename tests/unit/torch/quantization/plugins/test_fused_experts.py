@@ -641,12 +641,20 @@ class TestExportFusedExperts:
 # Tests for tied-experts dedup in _export_fused_experts
 # ---------------------------------------------------------------------------
 def _build_two_moe_blocks(tie: bool) -> nn.Module:
-    """Build a parent with two _SyntheticSparseMoeBlock children, optionally with tied 3-D params."""
+    """Build a parent with two _SyntheticSparseMoeBlock children, optionally with tied 3-D params.
+
+    When ``tie`` is set the parent both shares the 3-D expert Parameters and declares the tie via
+    ``_tied_weights_keys``, so the name-based map resolves it (object sharing alone is not enough).
+    """
     parent = nn.Module()
     parent.encoder = _SyntheticSparseMoeBlock()
     parent.decoder = _SyntheticSparseMoeBlock()
     if tie:
         tie_fused_experts_3d_params(parent.encoder.experts, parent.decoder.experts)
+        parent._tied_weights_keys = {
+            r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj",
+            r"^encoder\.experts\.down_proj$": "decoder.experts.down_proj",
+        }
     return parent
 
 
@@ -685,30 +693,16 @@ class TestExportFusedExpertsTiedDedup:
         if QuantModuleRegistry.get(mod_type) is not None:
             QuantModuleRegistry.unregister(mod_type)
 
-    def test_per_expert_buffers_share_data_ptr_for_tied_fused_experts(self):
-        """Two tied FusedExperts modules: every per-expert .weight + scale buffer shares data_ptr."""
+    def test_tied_fused_experts_pack_independently_to_equal_values(self):
+        """Tied FusedExperts pack independently: distinct data_ptrs, equal bytes (dropped by name later)."""
         parent = _build_two_moe_blocks(tie=True)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Per-call dedup caches threaded through both export calls; int keys
-            # for per-expert wrapper dedup, tuple keys for module-level dedup.
-            tied_cache: dict = {}
-            moe_tied_cache: dict = {}
-            _export_fused_experts(
-                parent.encoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
-            _export_fused_experts(
-                parent.decoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))
@@ -716,41 +710,23 @@ class TestExportFusedExpertsTiedDedup:
                 for proj_name in ("gate_proj", "up_proj", "down_proj"):
                     enc_proj = getattr(enc_expert, proj_name)
                     dec_proj = getattr(dec_expert, proj_name)
-                    assert enc_proj.weight.data_ptr() == dec_proj.weight.data_ptr()
-                    for scale_attr in ("weight_scale", "weight_scale_2"):
-                        if hasattr(enc_proj, scale_attr) and hasattr(dec_proj, scale_attr):
-                            assert (
-                                getattr(enc_proj, scale_attr).data_ptr()
-                                == getattr(dec_proj, scale_attr).data_ptr()
-                            )
+                    # independent storage (no aliasing) ...
+                    assert enc_proj.weight.data_ptr() != dec_proj.weight.data_ptr()
+                    # ... but byte-identical, so postprocess drops one by name
+                    assert torch.equal(enc_proj.weight, dec_proj.weight)
         finally:
             self._cleanup_registry(expert_type)
 
-    def test_per_expert_buffers_have_independent_data_ptrs_for_untied_fused_experts(self):
-        """Two untied FusedExperts modules: per-expert buffers stay independent (no false-positive alias)."""
+    def test_untied_fused_experts_have_independent_buffers(self):
+        """Untied FusedExperts stay fully independent — no aliasing, distinct values."""
         parent = _build_two_moe_blocks(tie=False)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Same fresh caches as the positive case — confirms that even with
-            # dedup enabled, untied modules with distinct source data_ptrs do
-            # not get falsely aliased.
-            tied_cache: dict = {}
-            moe_tied_cache: dict = {}
-            _export_fused_experts(
-                parent.encoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
-            _export_fused_experts(
-                parent.decoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))
@@ -1415,3 +1391,141 @@ class TestNonGatedFusedExperts:
             assert quant.get("quant_algo") is not None
         finally:
             self._cleanup_registry(expert_type)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the real transformers Qwen3-VL MoE text experts
+# ---------------------------------------------------------------------------
+QWEN_HIDDEN_DIM = 32
+QWEN_INTERMEDIATE_DIM = 12
+QWEN_NUM_EXPERTS = 4
+QWEN_TOP_K = 2
+
+
+def _make_qwen3_vl_moe_experts():
+    """Build a tiny real ``Qwen3VLMoeTextExperts`` with initialized weights."""
+    from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeTextConfig
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
+
+    config = Qwen3VLMoeTextConfig(
+        hidden_size=QWEN_HIDDEN_DIM,
+        intermediate_size=QWEN_HIDDEN_DIM,
+        moe_intermediate_size=QWEN_INTERMEDIATE_DIM,
+        num_experts=QWEN_NUM_EXPERTS,
+        num_experts_per_tok=QWEN_TOP_K,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        vocab_size=128,
+    )
+    # The fused forward of transformers>=5.12 dispatches on this; ``eager`` is the only
+    # backend that routes through ``F.linear`` and therefore through the quantizer hooks.
+    config._experts_implementation = "eager"
+    experts = Qwen3VLMoeTextExperts(config)
+    # Weights are created with ``torch.empty``; fill them so comparisons are meaningful.
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for param in experts.parameters():
+            param.normal_(std=0.02)
+    return experts
+
+
+def _qwen3_vl_moe_is_new_layout():
+    """True when transformers>=5.12 moved the experts onto the generic fused layout."""
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
+
+    return hasattr(Qwen3VLMoeTextExperts, "_apply_gate")
+
+
+def _qwen3_vl_moe_forward_args():
+    """Routing inputs for the installed layout, sized so every expert is hit.
+
+    The two layouts disagree on both argument order and routing-weight shape, and the
+    pre-5.12 eval-mode forward computes a dense weighted sum over all experts. Zeroing the
+    weights outside the top-k keeps that dense path equal to the sparse per-expert loop.
+    """
+    seq_len = QWEN_NUM_EXPERTS // QWEN_TOP_K
+    torch.manual_seed(0)
+    hidden_states = torch.randn(seq_len, QWEN_HIDDEN_DIM)
+    router_indices = torch.arange(QWEN_NUM_EXPERTS, dtype=torch.long).reshape(seq_len, QWEN_TOP_K)
+    top_k_weights = torch.softmax(torch.randn(seq_len, QWEN_TOP_K), dim=-1)
+
+    if _qwen3_vl_moe_is_new_layout():
+        return hidden_states, router_indices, top_k_weights
+
+    routing_weights = torch.zeros(seq_len, QWEN_NUM_EXPERTS)
+    routing_weights.scatter_(1, router_indices, top_k_weights)
+    return hidden_states.unsqueeze(0), routing_weights, router_indices
+
+
+class TestQwen3VLMoeTextExperts:
+    """The registered wrapper must match the installed transformers layout (nvbug 6518551)."""
+
+    @staticmethod
+    def _experts_type():
+        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
+
+        return Qwen3VLMoeTextExperts
+
+    def test_registration_matches_installed_layout(self):
+        """transformers>=5.12 experts must be left to the generic fused-experts wrapper."""
+        from modelopt.torch.quantization.plugins.huggingface import _QuantQwen3VLMoeTextExperts
+
+        registered = QuantModuleRegistry.get(self._experts_type())
+        if _qwen3_vl_moe_is_new_layout():
+            # Statically registering the legacy wrapper here would shadow on-the-fly
+            # detection and crash on ``self.hidden_size`` during conversion.
+            assert registered is None
+            assert _fused_experts_wrapper_class(_make_qwen3_vl_moe_experts()) is _QuantFusedExperts
+        else:
+            # The pre-5.12 forward uses ``torch.bmm``, which the generic wrapper cannot
+            # intercept, so the explicit registration must stay in place.
+            assert registered is not None
+            assert issubclass(registered, _QuantQwen3VLMoeTextExperts)
+
+    def test_convert_and_forward_matches_reference(self):
+        """Conversion must succeed and stay numerically transparent before calibration."""
+        experts = _make_qwen3_vl_moe_experts()
+        experts_type = self._experts_type()
+        registered_before = QuantModuleRegistry.get(experts_type)
+
+        reference = _make_qwen3_vl_moe_experts()
+        args = _qwen3_vl_moe_forward_args()
+
+        model = nn.Module()
+        model.experts = experts
+        register_fused_experts_on_the_fly(model)
+        try:
+            converted = QuantModuleRegistry.convert(experts)
+            with torch.no_grad():
+                out_ref = reference(*args)
+                out_test = converted(*args)
+            assert torch.allclose(out_ref, out_test, atol=1e-4), (
+                f"Max diff: {(out_ref - out_test).abs().max().item()}"
+            )
+        finally:
+            if registered_before is None and QuantModuleRegistry.get(experts_type) is not None:
+                QuantModuleRegistry.unregister(experts_type)
+
+    def test_quantize_collects_amax(self):
+        """Calibration must actually reach the experts rather than silently no-op."""
+        experts_type = self._experts_type()
+        registered_before = QuantModuleRegistry.get(experts_type)
+
+        model = nn.Module()
+        model.experts = _make_qwen3_vl_moe_experts()
+        args = _qwen3_vl_moe_forward_args()
+        model.forward = lambda: model.experts(*args)
+
+        try:
+            mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop=lambda m: m())
+            amaxes = [
+                m.amax
+                for m in model.experts.modules()
+                if isinstance(m, TensorQuantizer) and getattr(m, "amax", None) is not None
+            ]
+            assert amaxes, "No amax collected: the experts were not quantized"
+            assert all(a.abs().sum() > 0 for a in amaxes)
+        finally:
+            if registered_before is None and QuantModuleRegistry.get(experts_type) is not None:
+                QuantModuleRegistry.unregister(experts_type)

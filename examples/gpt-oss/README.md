@@ -57,11 +57,12 @@ If you are training Huggingface models with trainer classes from Huggingface suc
 A real end-to-end example for this is in `sft.py` in this folder. To perform QAT with full parameter SFT on GPT-OSS 20B model, run:
 
 ```sh
-# Other supported quantization configs include NVFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_ONLY_CFG etc.
+# Other supported quantization recipes include general/ptq/nvfp4_mlp_weight_only, or
+# general/ptq/nvfp4_mlp_only-kv_fp8 (also quantizes activations and the KV cache to FP8, which needs calibration).
 # [Optional] For faster FlashAttention3, add '--attn_implementation kernels-community/vllm-flash-attn3'
 accelerate launch --config_file configs/zero3.yaml sft.py \
     --config configs/sft_full.yaml --model_name_or_path openai/gpt-oss-20b \
-    --quant_cfg MXFP4_MLP_WEIGHT_ONLY_CFG \
+    --recipe general/ptq/mxfp4_mlp_weight_only \
     --output_dir gpt-oss-20b-qat
 ```
 
@@ -89,7 +90,7 @@ accelerate launch --config_file configs/zero3.yaml sft.py \
 # Step 2: Perform QAT on the high precision SFT checkpoint
 accelerate launch --config_file configs/zero3.yaml sft.py \
     --config configs/sft_full.yaml --model_name_or_path gpt-oss-20b-sft \
-    --quant_cfg MXFP4_MLP_WEIGHT_ONLY_CFG \
+    --recipe general/ptq/mxfp4_mlp_weight_only \
     --output_dir gpt-oss-20b-qat \
 ```
 
@@ -160,7 +161,7 @@ Here is how to run LoRA QAT for GPT OSS 120B model:
 ```bash
 python sft.py --config configs/sft_lora.yaml \
     --model_name_or_path openai/gpt-oss-120b \
-    --quant_cfg MXFP4_MLP_WEIGHT_ONLY_CFG \
+    --recipe general/ptq/mxfp4_mlp_weight_only \
     --output_dir gpt-oss-120b-lora-qat
 ```
 

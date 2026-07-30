@@ -94,27 +94,15 @@ if [ "$LOW_MEMORY_MODE" = "true" ]; then
     PTQ_ARGS+=" --low_memory_mode "
 fi
 
-# AutoQuantize runs via an AutoQuantize --recipe or the deprecated --auto_quantize_bits CLI path.
-# Auto-generate a checkpoint path (to save/restore the search state) when the user didn't supply one.
-if [ -z "$AUTO_QUANTIZE_CHECKPOINT" ] && { [[ "$RECIPE" == *auto_quantize* ]] || [ -n "$AUTO_QUANTIZE_BITS" ]; }; then
+# AutoQuantize runs via an AutoQuantize --recipe. Auto-generate a checkpoint path (to save/restore
+# the search state) when the user didn't supply one.
+if [ -z "$AUTO_QUANTIZE_CHECKPOINT" ] && [[ "$RECIPE" == *auto_quantize* ]]; then
     AUTO_QUANTIZE_CHECKPOINT="${ROOT_SAVE_PATH}/auto_quantize_checkpoints/${MODEL_NAME}.pth"
     mkdir -p "$(dirname "$AUTO_QUANTIZE_CHECKPOINT")"
     echo "Auto-generated auto_quantize checkpoint path: $AUTO_QUANTIZE_CHECKPOINT"
 fi
 if [ -n "$AUTO_QUANTIZE_CHECKPOINT" ]; then
     PTQ_ARGS+=" --auto_quantize_checkpoint=$AUTO_QUANTIZE_CHECKPOINT "
-fi
-
-# Deprecated AutoQuantize CLI flags: passed through to hf_ptq.py, which converts them into an
-# AutoQuantizeConfig on the fly. Prefer an AutoQuantize --recipe.
-if [ -n "$AUTO_QUANTIZE_BITS" ]; then
-    PTQ_ARGS+=" --auto_quantize_bits=$AUTO_QUANTIZE_BITS "
-    PTQ_ARGS+=" --auto_quantize_method=${AUTO_QUANTIZE_METHOD:-gradient} "
-    PTQ_ARGS+=" --auto_quantize_score_size=${AUTO_QUANTIZE_SCORE_SIZE:-128} "
-    PTQ_ARGS+=" --auto_quantize_cost_model=${AUTO_QUANTIZE_COST_MODEL:-weight} "
-    if [ -n "$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO" ]; then
-        PTQ_ARGS+=" --auto_quantize_active_moe_expert_ratio=$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO "
-    fi
 fi
 
 if [ -n "$CALIB_DATASET" ]; then
@@ -173,7 +161,26 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         else
             QUANT_SPEC_ARGS="--qformat=${QFORMAT// /,}"
         fi
-        python hf_ptq.py \
+        # Opt-in memory/utilization sidecar: wraps the run and writes a CSV trace + peak
+        # summary to a sibling dir (kept out of the checkpoint $SAVE_PATH, which is uploaded
+        # and consumed downstream). Off by default (no behavior change).
+        MEM_MON_PREFIX=()
+        MEM_MON_SCRIPT="$script_dir/../../../tools/resource_monitor.py"
+        if [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" && ! -f "$MEM_MON_SCRIPT" ]]; then
+            echo "resource_monitor: $MEM_MON_SCRIPT not found (repo-root tools/ absent in this" \
+                 "distribution); continuing without the sidecar." >&2
+        elif [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" ]]; then
+            if [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_DEVICE_ORDER:-}" != "PCI_BUS_ID" ]]; then
+                echo "resource_monitor: CUDA_VISIBLE_DEVICES set without CUDA_DEVICE_ORDER=PCI_BUS_ID;" \
+                     "GPU columns may reflect different physical devices than the workload uses." >&2
+            fi
+            MEM_MON_DIR="${SAVE_PATH}_mem_monitor"
+            MEM_MON_PREFIX=(python "$MEM_MON_SCRIPT" \
+                --gpus "${CUDA_VISIBLE_DEVICES:-all}" \
+                --out "$MEM_MON_DIR/mem_trace.csv" \
+                --summary "$MEM_MON_DIR/mem_peak.txt" --)
+        fi
+        "${MEM_MON_PREFIX[@]}" python hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
             --sparsity_fmt=$SPARSITY_FMT \
@@ -278,11 +285,18 @@ if [[ $TASKS =~ "lm_eval" ]]; then
 
     pip install -r requirements.txt
 
-    echo "Using the following config: max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE"
+    # lm-eval's `trtllm` backend defaults to 1 GPU; shard over every visible one instead.
+    # Override LM_EVAL_TP to lower it -- TRT-LLM enables expert parallelism at higher TP,
+    # which fails in DeepEP kernels for MoE checkpoints on some GPUs (e.g. SM 12.0).
+    LM_EVAL_TP=${LM_EVAL_TP:-$(python -c "import torch; print(max(torch.cuda.device_count(), 1))")}
 
-    python lm_eval_tensorrt_llm.py \
-        --model trt-llm \
-        --model_args tokenizer=$MODEL_PATH,checkpoint_dir=$SAVE_PATH,max_gen_toks=$BUILD_MAX_OUTPUT_LEN \
+    echo "Using the following config: max input $BUILD_MAX_INPUT_LEN max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE tp $LM_EVAL_TP"
+
+    # max_input_len defaults to 2048, which silently truncates 5-shot prompts, so pass it
+    # explicitly; the engine's max_seq_len is max_input_len + max_output_len.
+    python lm_eval_trtllm.py \
+        --model trtllm \
+        --model_args "model=$SAVE_PATH,tokenizer=$MODEL_ABS_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=$BUILD_MAX_INPUT_LEN,max_output_len=$BUILD_MAX_OUTPUT_LEN" \
         --tasks $LM_EVAL_TASKS \
         --batch_size $BUILD_MAX_BATCH_SIZE $lm_eval_flags | tee $LM_EVAL_RESULT
 
@@ -304,14 +318,29 @@ if [[ $TASKS =~ "mmlu" ]]; then
     fi
     if [[ ! -d "$MMLU_DATA_PATH" ]] || [[ ! $(ls -A $MMLU_DATA_PATH) ]]; then
         echo "Preparing the MMLU test data"
-        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -O /tmp/mmlu.tar
+        MMLU_TAR="$(mktemp "${TMPDIR:-/tmp}/mmlu.XXXXXX")" || exit 1
+        trap 'rm -f "$MMLU_TAR"' EXIT
+        # Revision-pinned HuggingFace mirror of the Berkeley tarball, which is unreachable. Bound
+        # the retries, which otherwise outlast the callers' timeouts, and resume rather than refetch.
+        wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+            https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar \
+            -O "$MMLU_TAR" || {
+            echo "[ERROR] Could not download the MMLU test data. Set MMLU_DATA_PATH to a local copy."
+            exit 1
+        }
         mkdir -p data
-        tar -xf /tmp/mmlu.tar -C data && mv data/data $MMLU_DATA_PATH
+        tar -xf "$MMLU_TAR" -C data && mv data/data $MMLU_DATA_PATH
+        rm -f "$MMLU_TAR"  # 166MB; do not hold it for the rest of the eval
+        trap - EXIT
     fi
 
     mmlu_flags=""
     if [ -n "$MMLU_LIMIT" ]; then
         mmlu_flags+=" --limit $MMLU_LIMIT "
+    fi
+
+    if $TRUST_REMOTE_CODE; then
+        mmlu_flags+=" --trust_remote_code "
     fi
 
     python mmlu.py \

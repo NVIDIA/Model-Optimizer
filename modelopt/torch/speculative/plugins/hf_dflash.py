@@ -72,9 +72,12 @@ Draft model components:
 """
 
 import logging
+from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
+import transformers
 from transformers import PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config as _Qwen3Config
 from transformers.trainer_pt_utils import LabelSmoother
@@ -98,6 +101,54 @@ from .modeling_fakebase import (
 logger = logging.getLogger(__name__)
 
 __all__ = ["HFDFlashModel"]
+
+
+_QWEN3_VL_MROPE_WORKAROUND_VERSION = "5.3.0"
+_MULTIMODAL_FORWARD_KWARGS = frozenset(
+    {
+        "pixel_values",
+        "pixel_values_videos",
+        "image_grid_thw",
+        "video_grid_thw",
+        "mm_token_type_ids",
+        "image_sizes",
+        "images",
+        "videos",
+    }
+)
+
+
+def _multimodal_forward_kwargs(model_kwargs: dict) -> dict:
+    """Return collator fields accepted by Hugging Face multimodal forwards."""
+    return {
+        name: value
+        for name, value in model_kwargs.items()
+        if name in _MULTIMODAL_FORWARD_KWARGS and value is not None
+    }
+
+
+def _expand_qwen3_video_grid_thw(video_grid_thw: torch.Tensor) -> torch.Tensor:
+    """Return the per-frame video grid representation used by Qwen3-VL RoPE.
+
+    Qwen3-VL's video processor emits one ``[T, H, W]`` row per source video, but
+    its rendered prompt contains a separate visual-token group for every temporal
+    frame.  Transformers 5.3's ``get_rope_index`` consumes one grid row per
+    rendered group, while the vision encoder still requires the original one-row-
+    per-video representation.  This helper is therefore used *only* for mRoPE
+    position construction; callers must keep the original tensor for the model
+    forward.
+    """
+    if video_grid_thw.ndim != 2 or video_grid_thw.shape[-1] != 3:
+        raise ValueError(
+            "Qwen3-VL video_grid_thw must have shape [num_videos, 3], got "
+            f"{tuple(video_grid_thw.shape)}."
+        )
+    if torch.any(video_grid_thw[:, 0] <= 0):
+        raise ValueError("Qwen3-VL video_grid_thw temporal lengths must be positive.")
+
+    expanded_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
+    expanded_grid_thw[:, 0] = 1
+    return expanded_grid_thw
 
 
 def _dpace_position_weights(
@@ -182,6 +233,125 @@ class HFDFlashModel(DFlashModel):
             or getattr(self.config, "llm_config", None)
             or self.config
         )
+
+    def _qwen3_vl_position_ids(
+        self,
+        input_ids,
+        attention_mask,
+        position_ids,
+        past_key_values,
+        inputs_embeds,
+        model_kwargs,
+    ):
+        """Precompute Qwen3-VL mRoPE positions for Transformers 5.3.0 batches.
+
+        The video encoder consumes one grid row per source video, whereas mRoPE
+        consumes one row per rendered temporal-frame group.  Calling the
+        top-level model with the original video grid makes the two contracts
+        conflict.  Construct the mRoPE positions with a frame-expanded copy,
+        then pass the original grid to the vision encoder in ``forward``.
+
+        Transformers 5.4.0 performs this frame expansion in ``get_rope_index``
+        itself; only 5.3.0 needs the external workaround. See
+        https://github.com/huggingface/transformers/blob/v5.4.0/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py
+
+        Prefer ``get_rope_index`` over ``compute_3d_position_ids``. The latter
+        writes ``rope_deltas`` into the base model even though DFlash training
+        never supplies a cache.  Keeping this calculation side-effect free is
+        important when the frozen target is reused for consecutive training
+        batches or validation.
+        """
+        model_type = str(getattr(self.config, "model_type", ""))
+        if (
+            position_ids is not None
+            or not model_type.startswith("qwen3_vl")
+            # Cached decoding uses the base model's rope_deltas path.  DFlash
+            # training has no cache and is the only path that needs the
+            # frame-expanded construction below.
+            or past_key_values is not None
+        ):
+            return position_ids
+
+        image_grid_thw = model_kwargs.get("image_grid_thw")
+        video_grid_thw = model_kwargs.get("video_grid_thw")
+        if not isinstance(image_grid_thw, torch.Tensor) and not isinstance(
+            video_grid_thw, torch.Tensor
+        ):
+            return position_ids
+
+        if transformers.__version__ != _QWEN3_VL_MROPE_WORKAROUND_VERSION:
+            if transformers.__version__.startswith("5.3."):
+                raise RuntimeError(
+                    "Qwen3-VL DFlash mRoPE supports Transformers 5.3.0 or >=5.4.0; "
+                    f"got {transformers.__version__}. A 5.3.x patch release may already "
+                    "expand video_grid_thw internally."
+                )
+            return position_ids
+
+        mm_token_type_ids = model_kwargs.get("mm_token_type_ids")
+        backbone = getattr(self, "model", None)
+        # Probed dynamically: which one exists depends on the Transformers version.
+        get_rope_index: Any = getattr(backbone, "get_rope_index", None)
+        compute_position_ids: Any = getattr(backbone, "compute_3d_position_ids", None)
+        if (
+            not isinstance(mm_token_type_ids, torch.Tensor)
+            or input_ids is None
+            or (not callable(get_rope_index) and not callable(compute_position_ids))
+        ):
+            raise ValueError(
+                "Qwen3-VL DFlash training requires input_ids, mm_token_type_ids, and "
+                "a Qwen3-VL model with get_rope_index or compute_3d_position_ids. "
+                "Use the Qwen3-VL AutoProcessor without dropping mm_token_type_ids."
+            )
+
+        if mm_token_type_ids.shape != input_ids.shape:
+            raise ValueError(
+                "Qwen3-VL mm_token_type_ids must have the same shape as input_ids, got "
+                f"{tuple(mm_token_type_ids.shape)} and {tuple(input_ids.shape)}."
+            )
+
+        rope_video_grid_thw = video_grid_thw
+        if isinstance(video_grid_thw, torch.Tensor) and video_grid_thw.numel() > 0:
+            video_token_mask = mm_token_type_ids == 2
+            if isinstance(attention_mask, torch.Tensor):
+                video_token_mask = video_token_mask & attention_mask.bool()
+            video_group_starts = video_token_mask.clone()
+            video_group_starts[:, 1:] &= ~video_token_mask[:, :-1]
+            expected_video_groups = int(video_grid_thw[:, 0].sum())
+            actual_video_groups = int(video_group_starts.sum())
+            if actual_video_groups != expected_video_groups:
+                raise ValueError(
+                    "Qwen3-VL video frame groups do not match video_grid_thw: "
+                    f"expected {expected_video_groups}, found {actual_video_groups}."
+                )
+            rope_video_grid_thw = _expand_qwen3_video_grid_thw(video_grid_thw)
+
+        rope_kwargs = {
+            "input_ids": input_ids,
+            "image_grid_thw": image_grid_thw,
+            "video_grid_thw": rope_video_grid_thw,
+            "attention_mask": attention_mask,
+            "mm_token_type_ids": mm_token_type_ids,
+        }
+        if callable(get_rope_index):
+            position_ids, _ = get_rope_index(**rope_kwargs)
+        else:
+            position_ids = compute_position_ids(
+                **rope_kwargs,
+                inputs_embeds=inputs_embeds,
+                past_key_values=past_key_values,
+            )
+
+        expected_shape = (3, *input_ids.shape)
+        valid_position_ids = isinstance(position_ids, torch.Tensor) and (
+            tuple(position_ids.shape) == expected_shape
+        )
+        if not valid_position_ids:
+            raise RuntimeError(
+                "Qwen3-VL produced invalid mRoPE position ids: expected shape "
+                f"{expected_shape}, got {getattr(position_ids, 'shape', None)}."
+            )
+        return position_ids
 
     def _find_base_model_parts(self):
         """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths.
@@ -272,15 +442,45 @@ class HFDFlashModel(DFlashModel):
             self.dflash_config.hidden_size // self.dflash_config.num_attention_heads,
         )
         self.dflash_config.block_size = self.dflash_block_size
+        # On the draft config so _build_draft_module stays a pure function of it.
+        self.dflash_config.attention_sink_bias = self.dflash_attention_sink
 
-        # Target layer IDs
+        # Which base layers feed the draft's `fc`: explicit ids win, else the uniform default.
         num_target_layers = (
             base_config.num_orig_hidden_layers
             if self.dflash_offline
             else base_config.num_hidden_layers
         )
         num_draft_layers = self.dflash_config.num_hidden_layers
-        self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+        user_target_layer_ids = config.dflash_architecture_config.get("target_layer_ids")
+        if user_target_layer_ids:
+            if len(user_target_layer_ids) != num_draft_layers:
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids has "
+                    f"{len(user_target_layer_ids)} entries but the draft has "
+                    f"{num_draft_layers} layers; one target layer per draft layer is required."
+                )
+            if max(user_target_layer_ids) >= num_target_layers:
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
+                    f"references a layer beyond the base model's {num_target_layers} layers."
+                )
+            if len(set(user_target_layer_ids)) != len(user_target_layer_ids):
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
+                    "contains duplicates; each draft layer needs a distinct capture layer "
+                    "(the streaming producer captures each base layer at most once)."
+                )
+            # forward() indexes hidden_states[lid + 1], where a negative id silently wraps.
+            if min(user_target_layer_ids) < 0:
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
+                    "must be non-negative base-layer indices."
+                )
+            self.target_layer_ids = list(user_target_layer_ids)
+            logger.info("DFlash: using explicit target_layer_ids %s", self.target_layer_ids)
+        else:
+            self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
         self.dflash_config.target_layer_ids = self.target_layer_ids
 
         # mask_token_id: validated by DFlashConfig, auto-detected from tokenizer context
@@ -297,6 +497,10 @@ class HFDFlashModel(DFlashModel):
         # Factory hook: subclasses (e.g. Domino) override to build an augmented
         # draft module while reusing all of DFlash's modify() setup.
         self.dflash_module = self._build_draft_module(self.dflash_config)
+        # Warm start from an exported draft checkpoint, before the dtype/device move below
+        # so the loaded tensors get cast alongside the rest of the module.
+        if self.dflash_init_checkpoint:
+            self._load_init_checkpoint(self.dflash_init_checkpoint)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
         if self.dflash_offline:
@@ -316,6 +520,81 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
         return DFlashModule(dflash_config)
+
+    # Draft-module entries that legitimately come from the base model rather than the
+    # exported draft checkpoint, so their absence (or presence) is not an error.
+    _INIT_CKPT_IGNORED_KEYS = ("embed_tokens.weight", "lm_head.weight")
+
+    def _load_init_checkpoint(self, path: str):
+        """Warm-start ``self.dflash_module`` from an exported draft checkpoint.
+
+        Accepts either the export directory (containing ``model.safetensors``) or the
+        safetensors file itself. The architecture is fixed by ``dflash_architecture_config``
+        at this point, so the checkpoint has to match it: any missing, unexpected, or
+        wrong-shaped tensor raises. Loading part of a draft and leaving the rest randomly
+        initialized looks like a warm start but trains from a corrupted starting point, so
+        it is rejected instead of warned about.
+        """
+        from safetensors.torch import load_file
+
+        ckpt = Path(path)
+        if ckpt.is_dir():
+            ckpt = ckpt / "model.safetensors"
+        if not ckpt.is_file():
+            raise FileNotFoundError(
+                f"dflash_init_checkpoint: no draft weights at {ckpt}. Expected an exported "
+                "draft directory containing model.safetensors, or the file itself."
+            )
+
+        state_dict = load_file(str(ckpt))
+        # Tolerate a `dflash_module.` prefix so a raw training checkpoint also works.
+        state_dict = {
+            (k.split("dflash_module.", 1)[1] if "dflash_module." in k else k): v
+            for k, v in state_dict.items()
+        }
+        state_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if k not in self._INIT_CKPT_IGNORED_KEYS and "rotary_emb" not in k
+        }
+
+        # Shape-check against the module's own view of each key. Subclasses may remap keys
+        # on load (DSpark accepts a nested ``markov_head.`` layout), so resolve through the
+        # same hooks first — otherwise a wrong-shaped remapped tensor would skip this check
+        # and fail later with a much less obvious error.
+        module_sd = self.dflash_module.state_dict()
+        resolved = dict(state_dict)
+        for hook in self.dflash_module._load_state_dict_pre_hooks.values():
+            hook(resolved, "", None, True, [], [], [])
+        mismatched = [
+            f"{k}: checkpoint {tuple(v.shape)} vs module {tuple(module_sd[k].shape)}"
+            for k, v in resolved.items()
+            if k in module_sd and v.shape != module_sd[k].shape
+        ]
+        if mismatched:
+            raise ValueError(
+                "dflash_init_checkpoint: shape mismatch between "
+                f"{ckpt} and the configured draft architecture:\n  " + "\n  ".join(mismatched)
+            )
+
+        # strict=False, then check by hand: the module's own load hooks (e.g. DSpark's
+        # markov_head remap) run first, and buffers such as rotary_emb are excluded above.
+        incompatible = self.dflash_module.load_state_dict(state_dict, strict=False)
+        missing = [
+            k
+            for k in incompatible.missing_keys
+            if "rotary_emb" not in k and k not in self._INIT_CKPT_IGNORED_KEYS
+        ]
+        if missing or incompatible.unexpected_keys:
+            raise ValueError(
+                f"dflash_init_checkpoint: {ckpt} does not match the configured draft "
+                "architecture.\n"
+                f"  missing from checkpoint: {sorted(missing)}\n"
+                f"  unexpected in checkpoint: {sorted(incompatible.unexpected_keys)}"
+            )
+        logger.info(
+            "DFlash: warm-started draft module from %s (%d tensors).", ckpt, len(state_dict)
+        )
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""
@@ -398,13 +677,18 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_attention_mask(
         self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device, window=None
     ):
-        """Build SDPA attention mask: context (causal) + draft (bidirectional within block).
+        """Build SDPA attention mask: context (causal) + draft (per ``dflash_draft_attention``).
 
-        When ``window`` is not None, all layers use non-causal sliding-window attention
-        (MiMo-style): each draft query only sees context positions within ``window`` tokens
-        before its own position. Block-internal attention stays bidirectional and is left
-        un-windowed (the config enforces ``window >= block_size``, so a full block always
-        fits inside the window and windowing it would be a no-op).
+        When ``window`` is not None, all layers use sliding-window attention: each draft
+        query only sees context positions within ``window`` tokens before its own position.
+        Block-internal attention is left un-windowed (the config enforces
+        ``window >= block_size``, so a full block always fits inside the window and windowing
+        it would be a no-op).
+
+        Block-internal visibility follows ``self.dflash_draft_attention``:
+        ``"bidirectional"`` (default, MiMo-style) lets every query see the whole block, while
+        ``"causal"`` restricts a query at block position ``i`` to draft positions ``<= i`` so
+        the block is modelled autoregressively.
         """
         bsz = anchor_positions.shape[0]
         block_size = self.dflash_block_size
@@ -429,6 +713,12 @@ class HFDFlashModel(DFlashModel):
         is_draft = kv_indices >= seq_len
         kv_block_ids = (kv_indices - seq_len) // block_size
         mask_draft = is_draft & (q_block_ids == kv_block_ids)
+        if self.dflash_draft_attention == "causal":
+            # Autoregressive within the block: query at block position i sees draft
+            # positions <= i only. Compare positions *within* the block so the term is
+            # independent of which block the query belongs to.
+            kv_pos_in_block = (kv_indices - seq_len) % block_size
+            mask_draft = mask_draft & (kv_pos_in_block <= (q_indices % block_size))
         # Valid block
         valid_block = block_keep_mask.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
 
@@ -440,24 +730,33 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     def _build_generate_swa_mask(self, ctx_len, bsz, dtype, device):
-        """Generation-time SWA mask [B, 1, block_size, ctx_len + block_size], or None.
+        """Generation-time mask [B, 1, block_size, ctx_len + block_size], or None.
 
-        Returns None with full attention (KV cache with no mask): all positions attend
-        freely to context and each other within the block. With sliding-window attention,
+        Returns None only when there is nothing to mask: full attention over the context
+        *and* bidirectional blocks (KV cache with no mask). With sliding-window attention,
         each block query only sees context within ``dflash_swa_window_size`` tokens before
         its real position (ctx_len + position-in-block), matching training and vLLM
-        inference; block kv stays fully visible (bidirectional / un-windowed).
+        inference; block kv is left un-windowed. With ``dflash_draft_attention="causal"``
+        the block is additionally lower-triangular, mirroring
+        :meth:`_build_draft_attention_mask` so generation matches training.
         """
-        if self.dflash_swa_window_size is None:
-            return None
         window = self.dflash_swa_window_size
+        causal = self.dflash_draft_attention == "causal"
+        if window is None and not causal:
+            return None
         block_size = self.dflash_block_size
         kv_len = ctx_len + block_size
         kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
-        q_real_pos = torch.arange(ctx_len, ctx_len + block_size, device=device).view(1, 1, -1, 1)
+        q_pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1, 1)
+        q_real_pos = ctx_len + q_pos_in_block
         is_ctx = kv_idx < ctx_len
-        # Context kv kept iff within the window; block kv (>= ctx_len) always visible.
-        keep = (~is_ctx) | (kv_idx > q_real_pos - window)
+        # Context kv kept iff within the window (when windowing); block kv always visible
+        # unless the block is causal, in which case only positions <= the query's.
+        keep_ctx = is_ctx if window is None else (is_ctx & (kv_idx > q_real_pos - window))
+        keep_block = ~is_ctx
+        if causal:
+            keep_block = keep_block & ((kv_idx - ctx_len) <= q_pos_in_block)
+        keep = keep_ctx | keep_block
         attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
         attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask
@@ -592,6 +891,16 @@ class HFDFlashModel(DFlashModel):
         - Label alignment: position k predicts token at anchor+k
         - Optional loss decay weighting
         """
+        if self.training:
+            position_ids = self._qwen3_vl_position_ids(
+                input_ids,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                inputs_embeds,
+                kwargs,
+            )
+
         if not self.training:
             if self.dflash_offline:
                 raise RuntimeError(
@@ -638,12 +947,37 @@ class HFDFlashModel(DFlashModel):
             )
             target_hidden = base_outputs.target_hidden
         else:
-            # TODO: For co-training the base model, remove no_grad and eval() switch.
+            # Multimodal models need the top-level conditional-generation forward so their
+            # image/video features are inserted before the language model runs.  Keep the
+            # long-standing narrow call for text-only models.
+            base_forward_kwargs = _multimodal_forward_kwargs(kwargs)
+            use_top_level_forward = bool(base_forward_kwargs)
             with torch.no_grad():
-                raw_outputs = super().forward(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    output_hidden_states=True,
+                if use_top_level_forward:
+                    raw_outputs = super().forward(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=inputs_embeds,
+                        use_cache=False,
+                        output_attentions=output_attentions,
+                        output_hidden_states=True,
+                        cache_position=cache_position,
+                        return_dict=True,
+                        **base_forward_kwargs,
+                    )
+                else:
+                    raw_outputs = super().forward(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                    )
+
+            if not getattr(raw_outputs, "hidden_states", None):
+                raise RuntimeError(
+                    "The base model did not return hidden states required for DFlash training. "
+                    "Ensure its top-level multimodal forward supports output_hidden_states=True."
                 )
             offset = 1
             selected = [raw_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
@@ -652,16 +986,15 @@ class HFDFlashModel(DFlashModel):
                 target_hidden=target_hidden, logits=raw_outputs.logits
             )
 
-        # 2. Build loss mask.
-        # When labels are provided (answer_only_loss), they already encode both
-        # assistant masking and padding (-100 for both). When labels are not
-        # provided, fall back to attention_mask for padding only.
+        # 2. Build loss mask. Labels carry optional answer-only masking, but do
+        # not in general mark padded tokens with -100 (the VLM collator creates
+        # them from padded input_ids). Always intersect with attention_mask so
+        # anchor sampling and loss never include the padded tail.
+        loss_mask = torch.ones(bsz, seq_len, device=device)
         if labels is not None:
-            loss_mask = (labels != LabelSmoother.ignore_index).float()
-        elif attention_mask is not None:
-            loss_mask = attention_mask.float()
-        else:
-            loss_mask = torch.ones(bsz, seq_len, device=device)
+            loss_mask = loss_mask * (labels != LabelSmoother.ignore_index).float()
+        if attention_mask is not None:
+            loss_mask = loss_mask * attention_mask.float()
 
         # In offline training, assistant mask is dumped and passed as kwarg.
         if kwargs.get("loss_mask") is not None:
@@ -674,8 +1007,16 @@ class HFDFlashModel(DFlashModel):
         n_blocks = anchor_positions.shape[1]
 
         if n_blocks == 0 or not block_keep_mask.any():
-            # Zero loss that still flows through dflash_module for DDP gradient sync
-            dummy = self.dflash_module.fc.weight.sum() * 0.0
+            # Keep all trainable draft parameters in the graph so DDP can reduce a rank
+            # that receives an all-masked answer-only batch.
+            dummy = sum(
+                (
+                    parameter.reshape(-1)[0] * 0.0
+                    for parameter in self.dflash_module.parameters()
+                    if parameter.requires_grad
+                ),
+                torch.zeros((), device=device),
+            )
             return ModelOutput(loss=dummy, logits=base_outputs.logits, train_acc=[[0.0]])
 
         # 4. Build draft inputs

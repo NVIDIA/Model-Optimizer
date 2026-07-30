@@ -14,13 +14,12 @@
 # limitations under the License.
 
 # AutoQuantize recipe: per-layer search over {FP8 (W8A8), NVFP4 weight-only (W4A16)}
-# at 6.0 effective bits, active-MoE cost model. Recipe form of the CLI command:
-#   --qformat fp8,w4a16_nvfp4 --auto_quantize_bits 6.0 --auto_quantize_method gradient
-#   --auto_quantize_cost_model active_moe --auto_quantize_active_moe_expert_ratio 0.03125
+# at 6.0 effective bits, active-MoE cost model with a 0.03125 routed-expert active ratio.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
   fp8: configs/ptq/presets/model/fp8
   w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
 
@@ -51,3 +50,8 @@ auto_quantize:
   # huggingface/<model>/auto_quantize/ that extends this set.
   disabled_layers:
     - $import: base_disabled_layers
+
+  # Base (model-agnostic) cost-excluded layers, spliced from the shared unit: VL vision
+  # towers / MTP are kept out of the effective-bits denominator. No-op on non-VL models.
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers

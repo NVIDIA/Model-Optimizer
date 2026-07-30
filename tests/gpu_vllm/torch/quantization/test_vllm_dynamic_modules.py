@@ -29,6 +29,8 @@ TinyDeepseekV3 (+ MLAAttention).
 from __future__ import annotations
 
 import gc
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -56,6 +58,15 @@ from modelopt.torch.quantization.plugins.vllm import (
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
+
+
+def _load_example_module(name: str):
+    """Import a module from ``examples/vllm_serve/`` by path (not an installed package)."""
+    path = Path(__file__).parents[4] / "examples/vllm_serve" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"{name}_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class _NativeAttention(torch.nn.Module):
@@ -307,6 +318,9 @@ def _quantize_and_summarize(self):
         "missing_quantizers": missing_quantizers,
         "quantizers_without_amax": quantizers_without_amax,
         "enabled_quantizer_count": enabled_quantizer_count,
+        "quantizer_names": sorted(
+            name for name, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        ),
     }
 
 
@@ -339,9 +353,17 @@ def _shutdown_llm(llm):
 @pytest.fixture(scope="module")
 def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
-    # Helper default ``max_position_embeddings=32`` would clash with vLLM's
-    # ``max_model_len=64`` set in ``_boot_llm``.
-    model_dir = create_tiny_llama_dir(tmp, max_position_embeddings=64)
+    # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
+    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
+    model_dir = create_tiny_llama_dir(
+        tmp,
+        hidden_size=128,
+        intermediate_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=64,
+        head_dim=64,
+    )
     llm = _boot_llm(model_dir)
     try:
         yield llm
@@ -352,7 +374,7 @@ def tiny_llama_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_qwen3_moe_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
-    # head_dim=64 with num_heads=2 is broadly supported by vLLM's attention backends.
+    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
     model_dir = create_tiny_qwen3_moe_dir(
         tmp,
         hidden_size=128,
@@ -378,7 +400,11 @@ def tiny_qwen3_moe_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_deepseek_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_deepseek")
-    model_dir = create_tiny_deepseek_v3_dir(tmp)
+    # vLLM >= 0.26 only accepts a fixed set of MLA dimension triples (its MLA prefill backend
+    # selector rejects the helper's 16/16/16 default); use the real DeepSeek 128/64/128 one.
+    model_dir = create_tiny_deepseek_v3_dir(
+        tmp, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
+    )
     llm = _boot_llm(model_dir, moe_backend="triton", enable_expert_parallel=True)
     try:
         yield llm
@@ -436,6 +462,19 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
 
     _assert_quantizer_amax_is_static(summary)
 
+    # The vllm_serve reload helper must map HF expert keys onto module paths that exist here:
+    # a stale mapping is dropped silently at load and serves uncalibrated experts.
+    reload_utils = _load_example_module("vllm_reload_utils")
+    for hf_key, expected_quantizer in (
+        ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+    ):
+        action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
+        assert action == "group", (hf_key, action)
+        module_path = vllm_key.rsplit("._amax", 1)[0]
+        assert module_path.endswith(expected_quantizer), vllm_key
+        assert module_path in summary["quantizer_names"], (vllm_key, summary["quantizer_names"])
+
 
 def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     """Tiny DeepSeek-V3 covers MLAAttention (and again FusedMoE)."""
@@ -448,6 +487,15 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
     assert summary["moe_count"] >= 2, summary
 
     _assert_quantizer_amax_is_static(summary)
+
+    # ``n_shared_experts=1``: vLLM merges the shared expert's gate/up into ``gate_up_proj``, so
+    # the reload helper must merge those HF keys too rather than copying them through.
+    reload_utils = _load_example_module("vllm_reload_utils")
+    action, vllm_key, _ = reload_utils._convert_key_for_vllm(
+        "model.layers.0.mlp.shared_experts.gate_proj.input_quantizer._amax", 1.0
+    )
+    assert action == "group", (action, vllm_key)
+    assert vllm_key.rsplit("._amax", 1)[0] in summary["quantizer_names"], vllm_key
 
 
 def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):

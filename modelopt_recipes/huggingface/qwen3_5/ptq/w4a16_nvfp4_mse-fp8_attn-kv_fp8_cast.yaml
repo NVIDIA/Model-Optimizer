@@ -39,6 +39,6 @@ quantize:
   algorithm:
     method: mse
     fp8_scale_sweep: true
-    layerwise: false
+    layerwise: {enable: false}
   quant_cfg:
     - $import: shared_quant_cfg

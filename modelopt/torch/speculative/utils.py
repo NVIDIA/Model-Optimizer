@@ -22,6 +22,7 @@ import os
 import sys
 import warnings
 from collections import Counter, defaultdict, deque
+from collections.abc import Mapping
 
 import torch
 import torch.distributed
@@ -40,13 +41,27 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 )
 
 
+def get_conversation_input_ids(tokenizer, conversations):
+    """Return the chat-template token ids as a flat list[int]."""
+    input_ids = tokenizer.apply_chat_template(
+        conversations, add_generation_prompt=False, tokenize=True, return_tensors=None
+    )
+    if isinstance(input_ids, Mapping):
+        input_ids = input_ids["input_ids"]  # transformers>=5 returns a BatchEncoding
+    if isinstance(input_ids, torch.Tensor):
+        input_ids = input_ids.flatten().tolist()
+    if input_ids and isinstance(input_ids[0], list | tuple):
+        assert len(input_ids) == 1, f"expected a single conversation, got {len(input_ids)}"
+        input_ids = list(input_ids[0])  # unwrap a single-conversation batch dim
+    assert not input_ids or isinstance(input_ids[0], int), (
+        f"expected flat token ids, got {input_ids[:1]}"
+    )
+    return input_ids
+
+
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
-    conversations = tokenizer.apply_chat_template(text)
-    # Transformers5.x returns a BatchEncoding from apply_chat_template
-    if hasattr(conversations, "input_ids"):
-        conversations = conversations.input_ids
-    counter = Counter(conversations)
+    counter = Counter(get_conversation_input_ids(tokenizer, text))
     vocab = counter.most_common(target_vocab_size)
     mapping = torch.zeros(target_vocab_size, dtype=torch.int64)
     assert len(vocab) == target_vocab_size, (
@@ -552,12 +567,17 @@ def get_ttt_msk_func(seq_length, ttt_step):
 
 
 @contextlib.contextmanager
-def enable_cp_ttt_patch():
+def enable_cp_ttt_patch(cp_size: int = 1):
     """Context manager to enable CP TTT patch."""
     import modelopt.torch.speculative.plugins.hf_eagle
 
     modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = True
-    with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]):
+    # Under CP, restrict to cudnn: MATH decomposes SDPA and breaks on DTensors. Elsewhere keep
+    # MATH, since cudnn is unavailable on CPU and for some head dims.
+    backends = [SDPBackend.CUDNN_ATTENTION]
+    if cp_size == 1:
+        backends.append(SDPBackend.MATH)
+    with sdpa_kernel(backends):
         try:
             yield
         finally:
@@ -610,7 +630,13 @@ def load_vlm_or_llm(
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
 
     if _is_vlm:
-        model_cls = transformers.AutoModelForVision2Seq
+        # Transformers 5 renamed AutoModelForVision2Seq to
+        # AutoModelForImageTextToText.  Prefer the pre-5 name so this loader
+        # continues to support the Transformers 4 environments used by older
+        # speculative-decoding jobs.
+        model_cls = getattr(transformers, "AutoModelForVision2Seq", None)
+        if model_cls is None:
+            model_cls = transformers.AutoModelForImageTextToText
     else:
         model_cls = transformers.AutoModelForCausalLM
 

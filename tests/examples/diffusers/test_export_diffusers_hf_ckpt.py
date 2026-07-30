@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -21,6 +22,7 @@ import pytest
 from _test_utils.examples.models import FLUX_SCHNELL_PATH, SDXL_PATH
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_sm
+from safetensors import safe_open
 
 
 class DiffuserHfExportModel(NamedTuple):
@@ -177,8 +179,6 @@ def _module_prefixes(keys: set[str], suffix: str) -> set[str]:
 
 def _block_indices(prefixes: set[str]) -> set[int]:
     """transformer_blocks indices referenced by a set of module prefixes."""
-    import re
-
     indices = set()
     for prefix in prefixes:
         match = re.search(r"transformer_blocks\.(\d+)\.", prefix)
@@ -227,8 +227,6 @@ _QWEN_SVDQUANT_SKIPPED_SUFFIXES = (
 def test_qwen_image_hf_ckpt_export(
     qwen_model: QwenHfExportModel, tiny_qwen_image_path: str, tmp_path: Path
 ) -> None:
-    from safetensors import safe_open
-
     hf_ckpt_dir = qwen_model.quantize_and_export_hf(tiny_qwen_image_path, tmp_path)
     assert hf_ckpt_dir.exists(), f"HF checkpoint directory was not created: {hf_ckpt_dir}"
 

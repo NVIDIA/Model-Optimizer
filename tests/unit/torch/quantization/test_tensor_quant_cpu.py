@@ -317,19 +317,130 @@ def test_fold_weight_disables_quantizer_without_extra_transform(
         unregister_quant_backend(backend_name)
 
 
-def test_fold_weight_keep_attrs_keeps_amax(monkeypatch):
+def test_fold_weight_keep_attrs_keeps_calibration_attrs_inactive(monkeypatch):
     calls = []
     backend_name = "test_fold_backend_keep"
     qlinear = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
     try:
         qlinear.weight_quantizer.amax = torch.tensor(1.0)
+        qlinear.weight_quantizer.pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+        inputs = torch.randn(2, 4)
+        output_before = qlinear(inputs)
 
         qlinear.fold_weight(keep_attrs=True)
 
         assert hasattr(qlinear.weight_quantizer, "_amax")
+        assert hasattr(qlinear.weight_quantizer, "_pre_quant_scale")
+        assert qlinear.weight_quantizer.pre_quant_scale is None
         assert not qlinear.weight_quantizer.is_enabled
+        assert torch.allclose(qlinear(inputs), output_before)
     finally:
         unregister_quant_backend(backend_name)
+
+
+def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
+    calls = []
+    backend_name = "test_temporary_fold_backend"
+    qlinear = _make_qlinear_with_backend(
+        monkeypatch,
+        calls,
+        backend_name,
+        rotate={"enable": True},
+    )
+    try:
+        quantizer = qlinear.weight_quantizer
+        quantizer.amax = torch.tensor(1.0)
+        quantizer.pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+        original_weight = qlinear.weight.detach().clone()
+        original_storage = qlinear.weight.data_ptr()
+        original_rotate = quantizer._rotate
+        original_pre_quant_scale = quantizer.pre_quant_scale.detach().clone()
+        original_input_dtype = quantizer._input_dtype
+        inputs = torch.randn(2, 4)
+        output_before = qlinear(inputs)
+
+        with (
+            pytest.raises(RuntimeError, match="test error"),
+            mtq.temporarily_fold_weights(qlinear, snapshot_device="cpu"),
+        ):
+            assert not torch.equal(qlinear.weight, original_weight)
+            assert qlinear.weight.data_ptr() == original_storage
+            assert not quantizer.is_enabled
+            assert not quantizer.rotate_is_enabled
+            assert hasattr(quantizer, "_pre_quant_scale")
+            assert quantizer.pre_quant_scale is None
+            assert torch.allclose(qlinear(inputs), output_before)
+            raise RuntimeError("test error")
+
+        assert torch.equal(qlinear.weight, original_weight)
+        assert qlinear.weight.data_ptr() == original_storage
+        assert quantizer.is_enabled
+        assert quantizer._rotate == original_rotate
+        assert torch.equal(quantizer.pre_quant_scale, original_pre_quant_scale)
+        assert quantizer._input_dtype == original_input_dtype
+        assert torch.allclose(qlinear(inputs), output_before)
+    finally:
+        unregister_quant_backend(backend_name)
+
+
+def test_temporarily_fold_weights_handles_disabled_transform_and_none_weight():
+    disabled = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+    disabled.weight_quantizer.pre_quant_scale = pre_quant_scale
+    disabled.weight_quantizer.disable()
+    original_weight = disabled.weight.detach().clone()
+
+    tied_output = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    tied_output.weight = None
+
+    with mtq.temporarily_fold_weights(torch.nn.ModuleList([disabled, tied_output])):
+        assert torch.equal(disabled.weight, original_weight * pre_quant_scale)
+        assert not disabled.weight_quantizer.is_enabled
+        assert disabled.weight_quantizer.pre_quant_scale is None
+        assert tied_output.weight_quantizer.is_enabled
+
+    assert torch.equal(disabled.weight, original_weight)
+    assert not disabled.weight_quantizer.is_enabled
+    assert torch.equal(disabled.weight_quantizer.pre_quant_scale, pre_quant_scale)
+    assert tied_output.weight_quantizer.is_enabled
+
+
+def test_temporarily_fold_weights_restores_when_folding_fails(monkeypatch):
+    first_calls = []
+    second_calls = []
+    first_backend = "test_temporary_fold_first_backend"
+    second_backend = "test_temporary_fold_failing_backend"
+    first = _make_qlinear_with_backend(monkeypatch, first_calls, first_backend)
+    second = _make_qlinear_with_backend(monkeypatch, second_calls, second_backend)
+
+    def failing_backend(inputs, _quantizer):
+        raise RuntimeError("fold failed")
+
+    unregister_quant_backend(second_backend)
+    register_quant_backend(second_backend, failing_backend)
+    model = torch.nn.ModuleList([first, second])
+    original_weights = [module.weight.detach().clone() for module in model]
+    try:
+        with pytest.raises(RuntimeError, match="fold failed"), mtq.temporarily_fold_weights(model):
+            pass
+
+        for module, original_weight in zip(model, original_weights):
+            assert torch.equal(module.weight, original_weight)
+            assert module.weight_quantizer.is_enabled
+    finally:
+        unregister_quant_backend(first_backend)
+        unregister_quant_backend(second_backend)
+
+
+def test_temporarily_fold_weights_rejects_sequential_quantizer():
+    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    qlinear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+
+    with (
+        pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"),
+        mtq.temporarily_fold_weights(qlinear),
+    ):
+        pass
 
 
 WINT4INT8_CFG = {
@@ -427,3 +538,24 @@ def test_set_quantizer_cxt_restores_on_exception():
         if isinstance(module, TensorQuantizer)
     }
     assert post_state == pre_state
+
+
+def test_preserve_quantizer_attributes_context_restores_type_and_properties():
+    model = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    model.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    original_states = [
+        quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
+    ]
+
+    with mtq.preserve_quantizer_attributes_context(model):
+        mtq.set_quantizer_by_cfg(
+            model,
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}}],
+        )
+        assert isinstance(model.weight_quantizer, TensorQuantizer)
+
+    assert isinstance(model.weight_quantizer, SequentialQuantizer)
+    restored_states = [
+        quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
+    ]
+    assert restored_states == original_states
