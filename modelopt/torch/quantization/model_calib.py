@@ -491,13 +491,13 @@ def max_calibrate(
     _finalize_with_shared_state(model, weight_patterns)
 
 
-def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
-    """True for an enabled NVFP4 (E2M1 + E4M3 scale) dynamic-block *input* quantizer.
+def _is_nvfp4_dynamic_activation_quantizer(module: nn.Module) -> bool:
+    """True for an enabled NVFP4 (E2M1 + E4M3 scale) dynamic-block quantizer leaf.
 
     These carry their per-tensor global scale in ``_amax`` and are calibrated like plain max
     (the quantizer itself is not ``_dynamic``; only its per-block scales are).
     """
-    if not isinstance(module, TensorQuantizer) or not name.endswith("input_quantizer"):
+    if not isinstance(module, TensorQuantizer):
         return False
     if getattr(module, "_disabled", False) or getattr(module, "_dynamic", False):
         return False
@@ -510,6 +510,18 @@ def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
     )
 
 
+def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
+    """True for an *input* quantizer holding at least one qualifying NVFP4 leaf.
+
+    ``input_quantizer`` may be a :class:`SequentialQuantizer`, whose leaves are submodules
+    named ``...input_quantizer.<i>``. Matching on the container name and then walking the
+    leaves keeps those wrapped quantizers from silently falling back to plain max.
+    """
+    if not name.endswith("input_quantizer"):
+        return False
+    return any(_is_nvfp4_dynamic_activation_quantizer(q) for q in _iter_leaf_quantizers(module))
+
+
 def _swap_in_nvfp4_act_headroom_calibrators(
     model: nn.Module, *, anchor_percentile: float, upper_percentile: float, rho: float
 ) -> list[tuple[nn.Module, Any]]:
@@ -519,18 +531,22 @@ def _swap_in_nvfp4_act_headroom_calibrators(
     """
     swapped: list[tuple[nn.Module, Any]] = []
     for name, module in model.named_modules():
-        if not _is_nvfp4_dynamic_input_quantizer(name, module):
+        if not name.endswith("input_quantizer"):
             continue
-        swapped.append((module, module._calibrator))
-        module._calibrator = NVFP4ActHeadroomCalibrator(
-            module.num_bits,
-            None,
-            module._unsigned,
-            block_size=module.block_sizes.get(-1, 16),
-            anchor_percentile=anchor_percentile,
-            upper_percentile=upper_percentile,
-            rho=rho,
-        )
+        # Walk SequentialQuantizer leaves so wrapped NVFP4 inputs are calibrated too.
+        for leaf in _iter_leaf_quantizers(module):
+            if not _is_nvfp4_dynamic_activation_quantizer(leaf):
+                continue
+            swapped.append((leaf, leaf._calibrator))
+            leaf._calibrator = NVFP4ActHeadroomCalibrator(
+                leaf.num_bits,
+                None,
+                leaf._unsigned,
+                block_size=leaf.block_sizes.get(-1, 16),
+                anchor_percentile=anchor_percentile,
+                upper_percentile=upper_percentile,
+                rho=rho,
+            )
     return swapped
 
 

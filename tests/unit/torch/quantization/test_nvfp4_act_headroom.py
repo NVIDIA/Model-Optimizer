@@ -28,7 +28,7 @@ from modelopt.torch.quantization.model_calib import (
     _swap_in_nvfp4_act_headroom_calibrators,
     max_calibrate,
 )
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import reduce_block_amax
 
 NVFP4_CFG = {
@@ -250,6 +250,36 @@ def test_only_nvfp4_input_quantizers_are_selected():
     # FP8 input quantizer -> not selected.
     fp8_in = TensorQuantizer(mtq.config.QuantizerAttributeConfig(num_bits=(4, 3)))
     assert not _is_nvfp4_dynamic_input_quantizer("layer.input_quantizer", fp8_in)
+
+
+def test_sequential_quantizer_leaves_are_calibrated():
+    """A SequentialQuantizer input must not silently fall back to plain max.
+
+    Its leaves are submodules named ``...input_quantizer.<i>``, so a plain
+    ``endswith("input_quantizer")`` check on the leaf name would skip them.
+    """
+    cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*input_quantizer", "cfg": [NVFP4_CFG, NVFP4_CFG]},
+        ],
+        "algorithm": {"method": "nvfp4_act_headroom", "anchor_percentile": 1},
+    }
+    torch.manual_seed(0)
+    data = torch.randn(16, 64)
+    model = mtq.quantize(_Net(), cfg, lambda m: m(data))
+    assert isinstance(model.fc1.input_quantizer, SequentialQuantizer)
+
+    swapped = _swap_in_nvfp4_act_headroom_calibrators(
+        model, anchor_percentile=1.0, upper_percentile=99.99, rho=16384.0
+    )
+    # Both leaves of both layers, not zero and not just the containers.
+    assert len(swapped) == 4
+    assert all(isinstance(q, TensorQuantizer) for q, _ in swapped)
+
+    # And the calibrated scale really is the headroom one, not plain max.
+    for leaf in model.fc1.input_quantizer:
+        assert float(leaf.amax) > float(data.abs().max())
 
 
 def test_swap_installs_calibrator_with_config_values():
