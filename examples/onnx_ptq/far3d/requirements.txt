@@ -1,0 +1,20 @@
+--extra-index-url https://pypi.nvidia.com
+--find-links https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
+
+av2==0.2.1
+einops
+ipython<9
+kornia==0.6.12
+mmcv-full==1.7.0
+mmdet==2.28.2
+mmsegmentation==0.30.0
+numpy<1.24
+onnx
+onnx-graphsurgeon==0.6.1
+onnxruntime
+onnxsim
+opencv-python==4.5.5.64
+refile
+setuptools<81
+tensorrt-cu12-bindings==10.11.0.33
+yapf==0.32.0

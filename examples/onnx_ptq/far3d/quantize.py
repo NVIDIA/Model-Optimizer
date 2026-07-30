@@ -92,9 +92,11 @@ def find_encoder_nodes_to_exclude(onnx_path):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Quantize the FAR3D ONNX models")
-    parser.add_argument("encoder_onnx", help="Path to far3d.encoder.onnx")
-    parser.add_argument("decoder_onnx", help="Path to far3d.decoder.onnx")
-    parser.add_argument("calibration_dir", help="Directory created by prepare_calibration.py")
+    parser.add_argument("--encoder-onnx", required=True, help="Path to far3d.encoder.onnx")
+    parser.add_argument("--decoder-onnx", required=True, help="Path to far3d.decoder.onnx")
+    parser.add_argument(
+        "--calibration-dir", required=True, help="Directory created by prepare_calibration.py"
+    )
     parser.add_argument("--quantization-mode", choices=("int8", "fp8"), default="int8")
     parser.add_argument("--encoder-output")
     parser.add_argument("--decoder-output")

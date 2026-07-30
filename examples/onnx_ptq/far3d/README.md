@@ -52,7 +52,7 @@ Use `/opt/far3d/bin/python` for data preparation, export, and evaluation. It sel
 ```bash
 export PYTHONPATH=/workspace/far3d-trt/dependencies/Far3D
 cd /workspace/far3d-trt
-/opt/far3d/bin/python /opt/modelopt/examples/onnx_ptq/far3d/prepare_metadata.py data/av2
+/opt/far3d/bin/python /opt/Model-Optimizer/examples/onnx_ptq/far3d/prepare_metadata.py data/av2
 ```
 
 ## 2. Export the ONNX models
@@ -85,7 +85,7 @@ trtexec \
 Extract 512 batches sampled every 20 frames from the Argoverse 2 validation loader:
 
 ```bash
-/opt/far3d/bin/python /opt/modelopt/examples/onnx_ptq/far3d/prepare_calibration.py \
+/opt/far3d/bin/python /opt/Model-Optimizer/examples/onnx_ptq/far3d/prepare_calibration.py \
   dependencies/Far3D/projects/configs/far3d.py \
   data/far3d_calibration \
   --encoder-engine far3d.encoder.fp16.engine \
@@ -101,10 +101,10 @@ The calibration directory contains separate `encoder/` and `decoder/` batches. D
 Use the base Python environment for Model Optimizer:
 
 ```bash
-python /opt/modelopt/examples/onnx_ptq/far3d/quantize.py \
-  far3d.encoder.onnx \
-  far3d.decoder.onnx \
-  data/far3d_calibration
+python /opt/Model-Optimizer/examples/onnx_ptq/far3d/quantize.py \
+  --encoder-onnx far3d.encoder.onnx \
+  --decoder-onnx far3d.decoder.onnx \
+  --calibration-dir data/far3d_calibration
 ```
 
 Both models use max calibration. INT8 is the default; use `--quantization-mode fp8` to produce `far3d.encoder.fp8.onnx` and `far3d.decoder.fp8.onnx` instead. FP8 deployment requires an FP8-capable GPU.
@@ -137,7 +137,7 @@ When using `--fp16-decoder`, build `far3d.decoder.onnx` as `far3d.decoder.fp16.e
 
 ```bash
 precision=int8  # Use fp8 for FP8 models.
-/opt/far3d/bin/python /opt/modelopt/examples/onnx_ptq/far3d/evaluate.py \
+/opt/far3d/bin/python /opt/Model-Optimizer/examples/onnx_ptq/far3d/evaluate.py \
   dependencies/Far3D/projects/configs/far3d.py \
   far3d.encoder.${precision}.engine \
   far3d.decoder.${precision}.engine
