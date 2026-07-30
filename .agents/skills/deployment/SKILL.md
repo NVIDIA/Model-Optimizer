@@ -130,9 +130,8 @@ For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 > default cu12 build has **no sm_103 FP4 kernel**, so vLLM loads the checkpoint
 > then dies at engine init with `CUDA error: no kernel image is available for
 > execution on the device` (affects the `flashinfer` and `cutlass` NVFP4
-> backends; `marlin` separately fails on non-64-divisible layer dims). If a
-> pinned release predates the model's arch, use `cu130-nightly-<arch>` instead
-> (Qwen3.5-9B's `qwen3_5` needed it). Cross-check via
+> backends; `marlin` separately fails on non-64-divisible layer dims).
+> Cross-check via
 > `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the raw
 > markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For
 > multimodal models on sm_103, also pass `--mm-encoder-attn-backend TRITON_ATTN`
@@ -147,6 +146,18 @@ python -m sglang.launch_server \
     --tp <num_gpus> \
     --host 0.0.0.0 --port 8000
 ```
+
+For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
+
+> **Cross-check SGLang launch flags via the SGLang cookbook** (the SGLang analog
+> of `recipes.vllm.ai`): `docs.sglang.io/cookbook/<category>/<org>/<model>` (e.g.
+> `.../autoregressive/DeepSeek/DeepSeek-V4`) — authoritative for parallelism, MoE
+> backends, strategy flags, Docker image, and min version. Select the variant via
+> the URL fragment `#hw=...&variant=...&quant=...&strategy=...&nodes=...`. The
+> page is **JS-rendered** — fetch the raw markdown at
+> `raw.githubusercontent.com/sgl-project/sglang/main/docs_new/cookbook/<category>/<org>/<model>.mdx`.
+> SM120 (RTX PRO 6000) needs the `lmsysorg/sglang:dev` nightly (`:latest` lacks
+> SM120). See `references/sglang.md` for the full backend/flag matrix.
 
 #### TRT-LLM (direct)
 
@@ -182,6 +193,14 @@ curl -s http://localhost:8000/v1/completions \
 ```
 
 All checks must pass before reporting success to the user.
+
+### 5b. Benchmark throughput/latency (optional)
+
+If the user asks to benchmark, measure throughput/latency, or compare precisions,
+use **AIPerf** (Apache-2.0, OpenAI-compatible client benchmark). See
+`references/benchmarking.md` for install, the pre-benchmark coherence gate, the
+`aiperf profile` flags (notably `--extra-inputs ignore_eos:true`), suggested
+token shapes, and how to read `profile_export_aiperf.json`.
 
 ### 6. Remote deployment (SSH/SLURM)
 

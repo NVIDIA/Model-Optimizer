@@ -27,6 +27,7 @@ from warnings import warn
 
 import torch
 import torch.distributed
+from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
 
 __all__ = [
@@ -34,7 +35,9 @@ __all__ = [
     "ParallelState",
     "backend",
     "barrier",
+    "fsdp2_wrap",
     "is_available",
+    "is_fsdp2_model",
     "is_initialized",
     "is_master",
     "rank",
@@ -216,6 +219,82 @@ def cleanup():
         with suppress(Exception):
             barrier()
         torch.distributed.destroy_process_group()
+
+
+def is_fsdp2_model(model) -> bool:
+    """Return True if any submodule of ``model`` has been wrapped with FSDP2 ``fully_shard``."""
+    return any(isinstance(m, FSDPModule) for m in model.modules())
+
+
+def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
+    """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
+
+    By default (``shard_root=True``) the root module is wrapped too, so embed/lm_head/norm are
+    sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
+    (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
+    detection result.
+    """
+    # Lazy import: layerwise_calib imports this module at top level (circular).
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    if decoder_layers is None:
+        raise RuntimeError(
+            "Could not auto-detect decoder layers; FSDP2 wrap requires a standard HF causal-LM layout."
+        )
+
+    fsdp_kwargs: dict[str, Any] = {"reshard_after_forward": True}
+    if mp_policy is not None:
+        fsdp_kwargs["mp_policy"] = mp_policy
+    if cpu_offload:
+        fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+
+    # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
+    config = getattr(model, "config", None)
+    architectures = list(getattr(config, "architectures", []) or [])
+    for layer in decoder_layers:
+        fully_shard(layer, **fsdp_kwargs)
+    if shard_root:
+        fully_shard(model, **fsdp_kwargs)
+    if config is not None and architectures:
+        config.architectures = architectures
+
+    return decoder_layers
+
+
+def broadcast_state_dict(
+    state_dict_or_none: dict | None,
+    src: int,
+    device: torch.device,
+    pg=None,
+) -> dict:
+    """Broadcast a dict of CPU tensors from rank ``src`` to all ranks.
+
+    Two phases: (1) broadcast metadata (key list + shape/dtype) via
+    ``broadcast_object_list``, (2) broadcast each tensor via ``dist.broadcast``.
+    Source rank passes the populated dict; non-source ranks pass ``None``.
+    Returns a dict of tensors on ``device`` on every rank.
+    """
+    is_src = torch.distributed.get_rank() == src
+    meta: list[Any] = (
+        [{name: (tuple(t.shape), t.dtype) for name, t in state_dict_or_none.items()}]
+        if is_src and state_dict_or_none is not None
+        else [None]
+    )
+    torch.distributed.broadcast_object_list(meta, src=src, group=pg)
+    meta_dict = meta[0]
+    assert meta_dict is not None, f"src rank {src} passed no state dict to broadcast"
+
+    src_state_dict = state_dict_or_none or {}
+    out: dict[str, torch.Tensor] = {}
+    for name, (shape, dtype) in meta_dict.items():
+        if is_src:
+            t = src_state_dict[name].to(device)
+        else:
+            t = torch.empty(shape, dtype=dtype, device=device)
+        torch.distributed.broadcast(t, src=src, group=pg)
+        out[name] = t
+    return out
 
 
 class DistributedProcessGroup:

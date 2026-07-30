@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qwen3.6 MoE AutoQuantize search based on the Qwen3.5-MoE model-specific
+# W4A16/FP8 PTQ recipe. Unmatched modules retain that fixed baseline while the
+# selected module families participate in the active-MoE budgeted search.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  fp8: configs/ptq/presets/model/fp8
+  model_quant_cfg: huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast.quant_cfg
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Qwen3.6 MoE module-specific search based on the Qwen3.5-MoE W4A16/FP8 PTQ
+    recipe: shared experts, attention, and lm_head searched over W4A16 NVFP4
+    and FP8 at 6.0 active-MoE effective bits.
+
+# Keep this baseline equivalent to the model-specific PTQ recipe without
+# modifying that recipe or duplicating its quantizer rules.
+quantize:
+  algorithm:
+    method: max
+    layerwise:
+      enable: false
+  quant_cfg:
+    - $import: model_quant_cfg
+
+auto_quantize:
+  constraints:
+    effective_bits: 6.0
+    cost_model: active_moe
+    cost:
+      active_moe_expert_ratio: 0.03125
+
+  module_search_spaces:
+    # Search these active/sensitive families over W4A16 and W8A8/FP8. Keep
+    # every matched group quantized rather than exposing BF16 as a candidate.
+    - module_name_patterns:
+        - "*mlp.shared_expert*"
+        - "*linear_attn*"
+        - "*self_attn*"
+        - "*lm_head*"
+      candidate_formats:
+        - $import: w4a16_nvfp4
+        - $import: fp8
+      allow_no_quant: false
+
+  auto_quantize_method: gradient
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+
+  cost_excluded_layers:
+    - "*visual*"
+    - "*mtp*"
+    - "*vision_tower*"

@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# AutoQuantize recipe: per-layer search over {FP8 (W8A8), NVFP4 weight-only (W4A16)}
+# at 6.0 effective bits, active-MoE cost model. Recipe form of the CLI command:
+#   --qformat fp8,w4a16_nvfp4 --auto_quantize_bits 6.0 --auto_quantize_method gradient
+#   --auto_quantize_cost_model active_moe --auto_quantize_active_moe_expert_ratio 0.03125
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  fp8: configs/ptq/presets/model/fp8
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Mixed FP8 + NVFP4-weight-only per-layer search at 6.0 effective bits with the
+    active-MoE cost model (expert ratio 0.03125).
+
+auto_quantize:
+  constraints:
+    effective_bits: 6.0
+    cost_model: active_moe
+    cost:
+      active_moe_expert_ratio: 0.03125
+
+  candidate_formats:
+    # LP cost comes from the presets' numerics (NVFP4 weight = 4.5 via configs/numerics/nvfp4,
+    # FP8 = 8); no per-candidate effective_bits override needed.
+    - $import: fp8
+    - $import: w4a16_nvfp4
+
+  auto_quantize_method: gradient
+  score_size: 128
+  # kv_cache omitted -> falls back to --kv_cache_qformat (none in the reference command).
+
+  # Base (model-agnostic) non-quantizable layers. Arch-specific models use a recipe under
+  # huggingface/<model>/auto_quantize/ that extends this set.
+  disabled_layers:
+    - $import: base_disabled_layers

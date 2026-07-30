@@ -160,10 +160,15 @@ class _QuantTEGroupedLinear(_ParallelLinear):
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
         _assert_te_fp8_enabled()
-        # Locate `inp` and the m_splits-bearing arg by parameter name. The second
-        # slot was renamed from `m_splits` (TE < 2.10) to `non_tensor_args` (TE
-        # 2.10+, where m_splits is now at non_tensor_args[0]). `*weights_and_biases`
-        # is always the trailing variadic — 2 * num_gemms tensors (weights, then biases).
+        # Locate `inp` by parameter name in the un-patched `_GroupedLinear.forward`
+        # signature — robust to TE versions that move the m_splits/non_tensor_args
+        # slot around (e.g. `m_splits` was packed into `non_tensor_args[0]` in TE
+        # 2.10-2.15, then split back out into its own arg in TE 2.16+).
+        # `num_gemms` comes from `self.num_gemms` (set by the public
+        # `GroupedLinear.__init__`) rather than from introspecting `*args`, so it's
+        # unaffected by that churn.
+        # `*weights_and_biases` is always the trailing variadic — 2 * num_gemms tensors
+        # (weights, then biases).
         # See `te_quantized_linear_fn` for why we look up `_forward` here.
         # `_forward` path receives a leading None (placeholder ctx); `_apply` does not.
         orig_forward = getattr(
@@ -174,10 +179,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         sig_params = list(inspect.signature(orig_forward).parameters)
         ctx_offset = 0 if func_name == "_forward" else 1
         inp_pos = sig_params.index("inp") - ctx_offset
-        if "non_tensor_args" in sig_params:
-            num_gemms = len(args[sig_params.index("non_tensor_args") - ctx_offset][0])
-        else:
-            num_gemms = len(args[sig_params.index("m_splits") - ctx_offset])
+        num_gemms = self.num_gemms
         weights_start = len(args) - 2 * num_gemms
 
         new_args = list(args)

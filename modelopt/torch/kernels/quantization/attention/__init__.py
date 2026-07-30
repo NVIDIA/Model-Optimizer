@@ -13,4 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantization-specific attention kernel pieces (placeholder for combined sparse+quant path)."""
+"""Quantization-specific attention kernel pieces.
+
+``bmm2_qdq.py`` holds the operand-specific NVFP4 helpers for the attention
+``P @ V`` matmul and the V-cache finalization kernel. This package initializer
+does not import that module, so importing the package alone does not require Triton.
+"""

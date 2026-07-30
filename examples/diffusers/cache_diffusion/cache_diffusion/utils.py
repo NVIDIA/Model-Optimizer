@@ -24,8 +24,8 @@ SDXL_DEFAULT_CONFIG = [
 
 PIXART_DEFAULT_CONFIG = [
     {
-        "wildcard_or_filter_func": lambda name: not re.search(
-            r"transformer_blocks\.(2[1-7])\.", name
+        "wildcard_or_filter_func": lambda name: (
+            not re.search(r"transformer_blocks\.(2[1-7])\.", name)
         ),
         "select_cache_step_func": lambda step: (step % 3) != 0,
     }

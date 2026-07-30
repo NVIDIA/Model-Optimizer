@@ -228,7 +228,7 @@ class GPTOSS:
         pytest.importorskip("tensorrt_llm")
 
         # Use override path if provided, otherwise use original model path
-        deploy_model_path = model_path_override if model_path_override else self.model_path
+        deploy_model_path = model_path_override or self.model_path
 
         # Prepare benchmark data
         tensorrt_llm_workspace = "/app/tensorrt_llm"

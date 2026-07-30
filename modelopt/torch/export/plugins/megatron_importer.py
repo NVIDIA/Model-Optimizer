@@ -51,6 +51,30 @@ with import_plugin("megatron"):
     has_mcore = True
 
 
+class _MambaConv1dCompat(torch.nn.Module):
+    """Expose direct Mamba conv params through the legacy Conv1d state_dict keys."""
+
+    def __init__(self, mixer):
+        super().__init__()
+        self.weight = mixer.conv1d_weight
+        self.bias = mixer.conv1d_bias
+
+
+def _get_mamba_conv1d(mixer):
+    conv1d = getattr(mixer, "conv1d", None)
+    if conv1d is not None:
+        return conv1d
+
+    if hasattr(mixer, "conv1d_weight") and hasattr(mixer, "conv1d_bias"):
+        # Megatron-LM PR #4899 / commit 35992ba changed MambaMixer fields from
+        # `conv1d` to direct `conv1d_weight` and `conv1d_bias` parameters.
+        return _MambaConv1dCompat(mixer)
+
+    raise AttributeError(
+        "MambaMixer does not have `conv1d` or `conv1d_weight`/`conv1d_bias` fields."
+    )
+
+
 class GPTModelImporter:
     """Megatron Core GPTModel HuggingFace Importer.
 
@@ -561,7 +585,7 @@ class GPTModelImporter:
         self.rules["A_log"](layer.mixer.A_log, layer_id)
         self.rules["D"](layer.mixer.D, layer_id)
         self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
-        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id)
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
 
@@ -720,7 +744,7 @@ class GPTModelImporter:
                 elif get_expert_tensor_parallel_world_size() > 1:
                     # ETP supports for packed MoE
                     # ETP is not supported for gpt-oss model
-                    if self.arch in ["GptOssForCausalLM"]:
+                    if self.arch == "GptOssForCausalLM":
                         raise ValueError("ETP is not supported for gpt-oss model")
                     self.rules["local_experts.linear_fc1_etp"](
                         layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp

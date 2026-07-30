@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import random
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import requests
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from .logging import print_rank_0, warn_rank_0
@@ -293,7 +295,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: sample["text"],
     },
     "wikitext": {
-        "config": {"path": "wikitext", "name": "wikitext-103-v1", "split": ["train"]},
+        "config": {"path": "Salesforce/wikitext", "name": "wikitext-103-v1", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
 }
@@ -730,9 +732,9 @@ def get_dataloader_from_dataset(
 ) -> DataLoader:
     """Wrap a pre-tokenized torch Dataset in a DataLoader, with optional DistributedSampler."""
     if distributed:
-        from torch.utils.data.distributed import DistributedSampler
-
-        sampler = DistributedSampler(dataset, **(sampler_kwargs or {}))
+        # Default the sampler's shuffle to this function's ``shuffle`` (DistributedSampler otherwise
+        # defaults to True); an explicit ``sampler_kwargs["shuffle"]`` still wins.
+        sampler = DistributedSampler(dataset, **{"shuffle": shuffle, **(sampler_kwargs or {})})
         return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
@@ -747,6 +749,8 @@ def get_dataset_dataloader(
     include_labels: bool = False,
     apply_chat_template: bool = False,
     pack: bool = False,
+    distributed: bool = False,
+    sampler_kwargs: dict | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
@@ -759,7 +763,7 @@ def get_dataset_dataloader(
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset (interpreted as number of *output
             rows* in both ``pack=False`` and ``pack=True`` modes — in packed mode the
-            loader oversamples raw text 4x to ensure enough docs to fill all rows).
+            loader oversamples raw text 16x to ensure enough docs to fill all rows).
         max_sample_length: Maximum length of a sample (or per-row length under ``pack=True``).
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader (ignored when
@@ -776,6 +780,10 @@ def get_dataset_dataloader(
             ``num_samples`` rows) is padded. Default ``False`` for backwards-compatibility
             with the prior one-doc-per-row tokenize-and-pad behavior; calibration
             callers should pass ``True``.
+        distributed: If True, shard the dataset across ranks with a ``DistributedSampler``
+            (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
+            and ``rank``.
+        sampler_kwargs: Keyword args for the ``DistributedSampler`` when ``distributed=True``.
 
     Returns:
         An instance of dataloader.
@@ -829,9 +837,9 @@ def get_dataset_dataloader(
 
     # Sample count semantics:
     # - pack=False: gather exactly `num_sample` raw docs per source, one per output row.
-    # - pack=True:  oversample 8x per source to ensure enough raw docs to fill all rows,
+    # - pack=True:  oversample 16x per source to ensure enough raw docs to fill all rows,
     #               since each row greedily packs multiple docs.
-    sample_multiplier = 8 if pack else 1
+    sample_multiplier = 16 if pack else 1
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
@@ -854,10 +862,11 @@ def get_dataset_dataloader(
         )
         if input_ids.shape[0] < total_rows:
             warn_rank_0(
-                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
-                f"requested — raw text exhausted before filling all rows (8x oversample "
-                f"of num_samples was insufficient). Increase `num_samples` or shorten "
-                f"`max_sample_length`."
+                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} requested — "
+                f"raw text exhausted before filling all rows ({sample_multiplier}x oversample of "
+                "num_samples was insufficient). Shorten `max_sample_length` or supply longer, "
+                "more token-dense samples; increasing `num_samples` only helps if the source can "
+                "provide additional useful content."
             )
         if device:
             input_ids = input_ids.to(device)
@@ -865,7 +874,12 @@ def get_dataset_dataloader(
         tokenized_dataset = _CustomDataset(
             {"input_ids": input_ids, "attention_mask": attention_mask}
         )
-        return DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
+        return get_dataloader_from_dataset(
+            tokenized_dataset,
+            batch_size=batch_size,
+            distributed=distributed,
+            sampler_kwargs=sampler_kwargs,
+        )
 
     batch_encoded = tokenizer(
         all_samples,
@@ -898,9 +912,12 @@ def get_dataset_dataloader(
             }
         )
 
-    calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
-
-    return calib_dataloader
+    return get_dataloader_from_dataset(
+        tokenized_dataset,
+        batch_size=batch_size,
+        distributed=distributed,
+        sampler_kwargs=sampler_kwargs,
+    )
 
 
 def get_supported_datasets() -> list[str]:
@@ -920,9 +937,29 @@ def get_supported_datasets() -> list[str]:
     return list(SUPPORTED_DATASET_CONFIG.keys()) + list(DATASET_COMBOS.keys())
 
 
+_NESTED_USE_CACHE_CONFIG_ATTRS = ("text_config",)
+
+
+def _iter_use_cache_configs(model: torch.nn.Module) -> Iterator[Any]:
+    """Yield the top-level config and Step3.7-style nested text config."""
+    seen: set[int] = set()
+    config = getattr(model, "config", None)
+    if config is None:
+        return
+
+    for candidate in (
+        config,
+        *(getattr(config, attr, None) for attr in _NESTED_USE_CACHE_CONFIG_ATTRS),
+    ):
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        yield candidate
+
+
 @contextmanager
 def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
-    """Set ``model.config.use_cache = False`` for the duration of the block.
+    """Set model config ``use_cache`` flags to ``False`` for the duration of the block.
 
     KV caching is unwanted during calibration / memory-probe forward passes:
     it wastes memory, and for hybrid Mamba/attention models (e.g., NemotronH)
@@ -931,23 +968,26 @@ def _disable_use_cache(model: torch.nn.Module) -> Iterator[None]:
     present) also sidesteps configs that never assign the attribute at all
     — e.g., ``Step3p5Config`` from stepfun-ai/Step-3.5-Flash — where forward
     code that reads ``self.config.use_cache`` would otherwise raise
-    ``AttributeError``. The prior value is restored on exit if one existed.
+    ``AttributeError``. Step3.7 keeps the relevant language config nested
+    under ``text_config``; that config object is handled the same way. The
+    prior value is restored on exit if one existed.
     """
-    config = getattr(model, "config", None)
-    if config is None:
-        yield
-        return
-    had_attr = hasattr(config, "use_cache")
-    prev = config.use_cache if had_attr else None
-    config.use_cache = False
+    states = []
+    for config in _iter_use_cache_configs(model):
+        had_attr = hasattr(config, "use_cache")
+        prev = config.use_cache if had_attr else None
+        config.use_cache = False
+        states.append((config, had_attr, prev))
+
     try:
         yield
     finally:
-        if had_attr:
-            config.use_cache = prev
-        else:
-            with suppress(AttributeError):
-                delattr(config, "use_cache")
+        for config, had_attr, prev in reversed(states):
+            if had_attr:
+                config.use_cache = prev
+            else:
+                with suppress(AttributeError):
+                    delattr(config, "use_cache")
 
 
 def get_max_batch_size(
@@ -973,7 +1013,9 @@ def get_max_batch_size(
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
+    # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+    infer_method = model.generate if is_enc_dec else model
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -1123,7 +1165,9 @@ def _forward_loop(
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
+        # how FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+        infer_method = model.generate if is_enc_dec else model
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):
@@ -1208,7 +1252,17 @@ def create_forward_loop(
 
 
 def model_type_is_enc_dec(model):
-    enc_dec_model_list = ["t5", "bart", "whisper"]
+    # Substring match against `model.__class__.__name__.lower()` — entries are
+    # the lowercased class-name form (no underscores). Calibration then uses
+    # `model.generate` to run the full denoising loop.
+    #
+    # Note: this list intentionally diverges from ``is_enc_dec`` in
+    # ``examples/llm_ptq/example_utils.py`` (which keys by ``model_type``
+    # string and is used for preview-decode slicing). DiffusionGemma is
+    # included here so calibration uses ``.generate()`` end-to-end, but
+    # deliberately excluded there so the preview decode treats its
+    # prompt+canvas output as AR-style.
+    enc_dec_model_list = ["t5", "bart", "whisper", "diffusiongemma"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 
@@ -1243,15 +1297,28 @@ def download_hf_dataset_as_jsonl(
         json_keys = [json_keys]
     jsonl_paths: list[str] = []
 
-    try:
-        response = requests.get(
-            f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}",
-            headers=build_hf_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
+    # The HF datasets-server /splits endpoint is intermittently unavailable
+    # (transient 5xx). Retry with backoff so a momentary outage doesn't fail the
+    # whole preprocess run; fail fast on client errors (e.g. 404 unknown dataset).
+    splits_url = f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}"
+    response = None
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            response = requests.get(splits_url, headers=build_hf_headers(), timeout=10)
+            response.raise_for_status()
+            break
+        except requests.RequestException as e:
+            last_exc = e
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and status < 500:
+                break  # client error — retrying won't help
+            if attempt < 3:
+                time.sleep(2**attempt)  # 1s, 2s, 4s
+    if response is None or not response.ok:
+        raise RuntimeError(
+            f"Failed to fetch dataset splits for {dataset_name}: {last_exc}"
+        ) from last_exc
 
     response_json = response.json()
     print_rank_0(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")

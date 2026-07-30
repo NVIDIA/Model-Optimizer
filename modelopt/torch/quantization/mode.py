@@ -39,6 +39,7 @@ from .config import (
     CompressConfig,
     GPTQCalibConfig,
     LocalHessianCalibConfig,
+    LSQConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -62,6 +63,7 @@ from .model_calib import (
     gptq,
     layerwise_calibrate,
     local_hessian_calibrate,
+    lsq,
     max_calibrate,
     mse_calibrate,
     smoothquant,
@@ -223,8 +225,12 @@ def wrapped_calib_func(
     """
     kwargs = config.model_dump()
     method = kwargs.pop("method")
-    layerwise = kwargs.pop("layerwise", False)
-    checkpoint_dir = kwargs.pop("layerwise_checkpoint_dir", None)
+    layerwise_cfg = kwargs.pop("layerwise", None) or {}
+    layerwise = layerwise_cfg.get("enable", False)
+    checkpoint_dir = layerwise_cfg.get("checkpoint_dir")
+    qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", False)
+    save_every = layerwise_cfg.get("save_every", 1)
+    calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -244,8 +250,8 @@ def wrapped_calib_func(
             # future algorithms that need full-model context must add a guard here.
             if not supports_layerwise:
                 raise ValueError(
-                    f"Calibration algorithm '{method}' does not support layerwise=True. "
-                    "Set layerwise=False, or override `_supports_layerwise = True` on the "
+                    f"Calibration algorithm '{method}' does not support layerwise.enable=True. "
+                    "Set layerwise.enable=False, or override `_supports_layerwise = True` on the "
                     "corresponding CalibrateModeDescriptor once the algorithm is made "
                     "compatible with per-layer calibration."
                 )
@@ -257,6 +263,9 @@ def wrapped_calib_func(
                 forward_loop=forward_loop,
                 calib_func=func,
                 checkpoint_dir=checkpoint_dir,
+                get_qdq_activations_from_prev_layer=qdq_from_prev,
+                save_every=save_every,
+                calib_mutates_weights=calib_mutates_weights,
                 **kwargs,
             )
         else:
@@ -526,3 +535,15 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+@CalibrateModeRegistry.register_mode
+class LSQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for LSQ (Learned Scale Quantization) algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LSQConfig
+
+    _calib_func = lsq

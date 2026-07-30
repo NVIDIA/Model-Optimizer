@@ -25,6 +25,7 @@ from modelopt.torch.utils.dataset_utils import (
     DATASET_COMBOS,
     _disable_use_cache,
     _forward_loop,
+    _iter_use_cache_configs,
     _pack_documents_into_rows,
     _process_batch,
     get_dataset_dataloader,
@@ -222,6 +223,45 @@ def test_disable_use_cache_without_existing_attr():
     assert not hasattr(model.config, "use_cache")
 
 
+@pytest.mark.parametrize("prev_value", [True, False])
+def test_disable_use_cache_with_nested_text_config_existing_attr(prev_value):
+    """Nested text config `use_cache` is disabled and restored."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = _Config()
+    model.config.text_config.use_cache = prev_value
+
+    with _disable_use_cache(model):
+        assert model.config.use_cache is False
+        assert model.config.text_config.use_cache is False
+
+    assert not hasattr(model.config, "use_cache")
+    assert model.config.text_config.use_cache is prev_value
+
+
+def test_disable_use_cache_with_nested_text_config_without_existing_attr():
+    """Nested text config `use_cache` is removed if it was added by the context."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = _Config()
+
+    with _disable_use_cache(model):
+        assert model.config.use_cache is False
+        assert model.config.text_config.use_cache is False
+
+    assert not hasattr(model.config, "use_cache")
+    assert not hasattr(model.config.text_config, "use_cache")
+
+
+def test_iter_use_cache_configs_deduplicates_text_config_alias():
+    """The same config object is patched once if `config.text_config is config`."""
+    model = torch.nn.Linear(4, 4)
+    model.config = _Config()
+    model.config.text_config = model.config
+
+    assert list(_iter_use_cache_configs(model)) == [model.config]
+
+
 def test_forward_loop_runs_under_disabled_use_cache():
     """`_forward_loop` runs forward on every batch and restores `use_cache` on exit."""
     seen_use_cache: list[bool] = []
@@ -273,7 +313,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
 
     seen_batch_sizes: list[int] = []
 
-    def fake_forward(x):
+    def fake_call(x):
         seen_batch_sizes.append(x.shape[0])
         # First call is the single-batch probe — succeeds.
         # Second call is the target-batch attempt — OOMs.
@@ -282,7 +322,9 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             raise torch.cuda.OutOfMemoryError
 
     model = Mock(spec=torch.nn.Module)
-    model.forward = fake_forward
+    # get_max_batch_size calls the module (model(...)) so FSDP2 hooks fire, not model.forward,
+    # so route the mock's __call__ via side_effect.
+    model.side_effect = fake_call
     model.__class__.__name__ = "DummyModel"  # not enc/dec
 
     free_before = 1000
@@ -304,7 +346,7 @@ def test_get_max_batch_size_oom_retry_shrinks_input():
             sample_input_single_batch=sample_input,
         )
 
-    # Forward calls: probe(1), retry-at-target(10), retry-after-halve(5)
+    # Model calls: probe(1), retry-at-target(10), retry-after-halve(5)
     assert seen_batch_sizes == [1, 10, 5]
     # Final batch is 5 -> regulated to 4 (5 // 4 * 4 = 4).
     assert result == 4
@@ -659,7 +701,7 @@ def test_multi_source_pack_shuffles_to_avoid_dominance(monkeypatch, tiny_tokeniz
     """With ``pack=True`` and 2+ sources, samples are shuffled so a long-doc source
     can't silently exhaust the row budget and drop the other sources.
 
-    Without shuffle, source A's 8x-oversampled docs would all come first in
+    Without shuffle, source A's 16x-oversampled docs would all come first in
     ``all_samples`` and (with sufficient row consumption per doc) fill every row.
     With the deterministic shuffle, both sources appear within the first
     ``total_rows`` worth of consumed samples.

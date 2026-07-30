@@ -16,6 +16,7 @@
 """Command-line entrypoint for ONNX PTQ."""
 
 import argparse
+import json
 import os
 
 import numpy as np
@@ -28,6 +29,32 @@ from modelopt.onnx.quantization.autotune.utils import (
 from modelopt.onnx.quantization.quantize import quantize
 
 __all__ = ["main"]
+
+
+def parse_input_shapes_profile(value: str) -> list[dict[str, str]]:
+    """Parse input shapes profile from an inline JSON value or a JSON file path."""
+    try:
+        if os.path.exists(value):
+            validate_file_size(value, 1024 * 1024)
+            with open(value, encoding="utf-8") as profile_file:
+                profile = json.load(profile_file)
+        else:
+            profile = json.loads(value)
+    except (OSError, json.JSONDecodeError) as e:
+        raise argparse.ArgumentTypeError(
+            "input_shapes_profile must be a JSON file path or an inline JSON list of dictionaries"
+        ) from e
+
+    if not isinstance(profile, list) or not all(isinstance(item, dict) for item in profile):
+        raise argparse.ArgumentTypeError("input_shapes_profile must be a JSON list of dictionaries")
+
+    for item in profile:
+        if not all(isinstance(key, str) and isinstance(val, str) for key, val in item.items()):
+            raise argparse.ArgumentTypeError(
+                "input_shapes_profile dictionaries must contain only string keys and string values"
+            )
+
+    return profile
 
 
 def validate_file_size(file_path: str, max_size_bytes: int) -> None:
@@ -61,6 +88,32 @@ def get_parser() -> argparse.ArgumentParser:
     group = argparser.add_mutually_exclusive_group(required=False)
     argparser.add_argument(
         "--onnx_path", required=True, type=str, help="Input onnx model without Q/DQ nodes."
+    )
+    argparser.add_argument(
+        "--model_id",
+        required=False,
+        type=str,
+        help=(
+            "Hugging Face model ID, local config directory, or local config.json path used "
+            "to infer EP input shape profiles when --input_shapes_profile is not provided."
+        ),
+    )
+    argparser.add_argument(
+        "--input_shapes_profile",
+        required=False,
+        type=parse_input_shapes_profile,
+        help=(
+            "Input shape profile provider options as an inline JSON list or a path to a JSON file. "
+            "The list must have one dictionary per --calibration_eps entry, in the same order. "
+            'Example: \'[{"nv_profile_min_shapes":"input_ids:1x1",'
+            '"nv_profile_opt_shapes":"input_ids:1x512",'
+            '"nv_profile_max_shapes":"input_ids:1x1024"},{}]\'.'
+        ),
+    )
+    argparser.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow custom code when resolving --model_id with Hugging Face transformers.",
     )
     argparser.add_argument(
         "--quantize_mode",
@@ -301,6 +354,14 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     argparser.add_argument(
+        "--target_dla",
+        action="store_true",
+        help=(
+            "If set, enables Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has "
+            "effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution."
+        ),
+    )
+    argparser.add_argument(
         "--autotune",
         nargs="?",
         const="default",
@@ -494,6 +555,7 @@ def main():
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
         opset=args.opset,
+        target_dla=args.target_dla,
         autotune=autotune_enabled,
         autotune_output_dir=args.autotune_output_dir,
         autotune_num_schemes_per_region=args.autotune_schemes_per_region,
@@ -507,6 +569,9 @@ def main():
         autotune_warmup_runs=args.autotune_warmup_runs,
         autotune_timing_runs=args.autotune_timing_runs,
         autotune_trtexec_args=args.autotune_trtexec_args,
+        input_shapes_profile=args.input_shapes_profile,
+        model_id=args.model_id,
+        trust_remote_code=args.trust_remote_code,
     )
 
 

@@ -72,3 +72,6 @@ AGENTS.override.md
 
 # Ignore SonarQube analysis
 .sonar/
+
+# Claude Code runtime lock (ephemeral process state — never commit)
+.claude/scheduled_tasks.lock

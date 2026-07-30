@@ -17,13 +17,40 @@ import contextlib
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.utils.distributed as dist
 
+
+@pytest.fixture(scope="session")
+def tiny_tokenizer_path(tmp_path_factory):
+    tokenizer_path = tmp_path_factory.mktemp("tiny_tokenizer")
+    get_tiny_tokenizer().save_pretrained(tokenizer_path)
+    return str(tokenizer_path)
+
+
 apex_destroy = None
 with contextlib.suppress(ImportError):
     from apex.transformer.parallel_state import destroy_model_parallel as apex_destroy
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _prebuild_quant_cuda_extensions():
+    """Prebuild quant CUDA extensions before per-test timeouts start.
+
+    First-use JIT compilation can take minutes in CI, so build the base, FP8, and MX
+    extensions during session setup and let tests fall back to on-demand JIT if needed.
+
+    Doing it here in session setup (``pyproject`` sets ``timeout_func_only``) keeps the
+    build off the per-test clock and, unlike the ``_extensions/test_torch_extensions.py``
+    prebuild tests, runs regardless of test selection/ordering (e.g. ``-k`` filters) and
+    is not itself capped by a per-test timeout. Worker subprocesses then load the cached
+    .so from the shared ``TORCH_EXTENSIONS_DIR``.
+    """
+    import modelopt.torch.quantization.extensions as ext
+
+    ext.precompile()
 
 
 def megatron_worker_teardown(rank, world_size):

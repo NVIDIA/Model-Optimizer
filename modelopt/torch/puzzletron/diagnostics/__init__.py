@@ -12,6 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Re-export ``examples/hf_ptq/example_utils`` so tests can import it via
+``from _test_utils.examples.hf_ptq_example_utils import example_utils``
+without per-file ``sys.path`` shims.
+"""
 
 """Offline diagnostic reports for Puzzletron artifacts."""
 
