@@ -141,6 +141,9 @@ def make_speculative_data_module(
                 train_len=train_len,
                 local_image_path=data_args.vlm_img_dir,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
+                chat_template=chat_template,
             )
 
     else:
