@@ -1610,11 +1610,11 @@ def sync_tied_input_amax(model: nn.Module) -> int:
         # Fused MoE: 3-D source tensors with shared input quantizers
         first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
         first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
-        # data_ptr() only identifies a tensor that is resident: every meta tensor reports
-        # 0, which would collapse unrelated modules into a single tied group and merge
-        # their amaxes model-wide. A sharded DTensor is no better -- its address belongs
-        # to a local shard the allocator recycles on reshard, which is why FSDP2 disables
-        # pointer-keyed dedup outright (see ExportContext.__post_init__).
+        # data_ptr() only identifies a tensor that is resident. Meta tensors and DTensors
+        # both report 0 -- a DTensor's real address is reachable only through to_local() --
+        # so without this guard every such module collapses into one tied group and has its
+        # amax merged model-wide. This is why FSDP2 disables pointer-keyed dedup outright
+        # (see ExportContext.__post_init__).
         if any(p.is_meta or isinstance(p, DTensor) for p in m.parameters(recurse=False)):
             if hasattr(m, "input_quantizer") or hasattr(m, first_proj_input_quantizer_attr):
                 skipped_candidates += 1

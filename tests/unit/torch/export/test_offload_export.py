@@ -34,6 +34,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight, _StreamingShardWriter
+from modelopt.torch.quantization.utils import core_utils
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 
 # ---------------------------------------------------------------------------
@@ -394,3 +395,30 @@ def test_export_context_dedup_follows_weight_residency():
     offloaded_ctx = ExportContext(model=offloaded, dtype=torch.float16)
     assert offloaded_ctx.tied_cache is None
     assert offloaded_ctx.moe_tied_cache is None
+
+
+def test_export_context_dedup_disabled_for_fsdp2(monkeypatch):
+    """FSDP2 shards recycle addresses, so its dedup opt-out must survive the offload rework."""
+    monkeypatch.setattr(core_utils, "is_fsdp2_model", lambda _: True)
+
+    ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
+    assert ctx.tied_cache is None
+    assert ctx.moe_tied_cache is None
+
+
+def test_tied_weights_exported_independently_without_cache():
+    """With dedup off, tied modules each pack their own weight instead of aliasing.
+
+    Guards the offload path: an alias would make two shard entries share storage, which
+    the writer must then drop or copy. Independent tensors keep both keys intact.
+    """
+    shared = nn.Parameter(torch.randn(16, 16))
+    first, second = nn.Linear(16, 16, bias=False), nn.Linear(16, 16, bias=False)
+    first.weight = second.weight = shared
+
+    for linear in (first, second):
+        mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 16)))
+        _export_quantized_weight(linear, torch.float16, _tied_cache=None)
+
+    assert first.weight.data_ptr() != second.weight.data_ptr()
+    assert torch.equal(first.weight, second.weight)
