@@ -23,6 +23,7 @@ from warnings import warn
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from modelopt import __version__
 from modelopt.torch.quantization.model_calib import (
@@ -1611,8 +1612,10 @@ def sync_tied_input_amax(model: nn.Module) -> int:
         first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
         # data_ptr() only identifies a tensor that is resident: every meta tensor reports
         # 0, which would collapse unrelated modules into a single tied group and merge
-        # their amaxes model-wide.
-        if any(p.is_meta for p in m.parameters(recurse=False)):
+        # their amaxes model-wide. A sharded DTensor is no better -- its address belongs
+        # to a local shard the allocator recycles on reshard, which is why FSDP2 disables
+        # pointer-keyed dedup outright (see ExportContext.__post_init__).
+        if any(p.is_meta or isinstance(p, DTensor) for p in m.parameters(recurse=False)):
             if hasattr(m, "input_quantizer") or hasattr(m, first_proj_input_quantizer_attr):
                 skipped_candidates += 1
             continue
