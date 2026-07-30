@@ -33,7 +33,13 @@ metadata:
 quantize:
   algorithm:
     method: nvfp4_act_headroom
+    # amax = max(rho * anchor, upper), where anchor and upper are the per-block activation
+    # amaxes at anchor_percentile and upper_percentile. All three are shown at their defaults.
+    # Set upper_percentile to 100 to use the literal observed max, which never clips
+    # calibration data but lets a single outlier block dominate the global scale.
     anchor_percentile: 1
+    upper_percentile: 99.99
+    rho: 16384
   quant_cfg:
     - $import: base_disable_all
     - $import: w4a4_nvfp4_nvfp4
