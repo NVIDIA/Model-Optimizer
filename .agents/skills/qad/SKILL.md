@@ -58,10 +58,10 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
    generated random sample for packed 32K sequences and its 1% validation
    holdout; do not download separate validation data or use mock data as
    evidence.
-5. **Run staged QAD.** Use one result-bearing Slurm job per stage and fold startup
-   validation into it; do not submit separate GPU preflight jobs. Use the
-   defaults below and evaluate checkpoint 150 before deciding whether to
-   continue.
+5. **Run and monitor QAD.** Submit one QAD training job and fold startup
+   validation into it; do not submit separate GPU preflight jobs or split
+   training into iteration stages. Let training continue while evaluating saved
+   checkpoints, and cancel the training job when a stop condition below is met.
 
 ## Default training policy
 
@@ -74,31 +74,48 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
 | Global batch size | 512 |
 | Dataset | `nvidia/Nemotron-Cascade-2-SFT-Data` |
 | Materialized token budget | 17.3B, prepared once before training |
-| Validation | every 25 iterations; deterministic 1% holdout; 2 batches |
+| Training validation | every 25 iterations; deterministic 1% holdout; 2 batches |
 | Checkpoint interval | 50 iterations |
-| Initial benchmark/exit | iteration 150 |
+| Loss logging | every 10 iterations |
+| Recovery benchmark | 150, then every 100 iterations while training runs |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
-Keep `train_iters=1000` from the first launch. A duration exit before checkpoint
-150 is incomplete: resume the same run and do not label or benchmark an earlier
-checkpoint as QAD-150.
+Keep `train_iters=1000` from the first launch and do not set `exit_interval`.
+Benchmark saved checkpoints 150, 250, 350, and so on while the training job
+continues. If `exit_duration_in_mins` ends the allocation first, resume the same
+run.
 
-Monitor smoothed QAD/KD loss, learning rate, and gradient norm. Stop on non-finite
-loss, repeated skipped iterations, or a sustained spike. Starting at iteration
-100, stop and diagnose if two consecutive 50-step windows fail to lower median
-loss.
+Monitor smoothed QAD/KD loss, learning rate, and gradient norm. Cancel immediately
+on non-finite loss, repeated skipped iterations, or a sustained spike; preserve
+the latest complete checkpoint and do not wait for another save. With
+`log_interval=10`, require the loss aggregate reported at iteration 50
+(iterations 41–50) to be lower than the one at iteration 10 (iterations 1–10);
+otherwise diagnose and cancel under the evidence-driven rule below.
 
-Export and evaluate checkpoint 150 with the exact BF16/PTQ benchmark
-configuration. Stop if it meets the recovery target. Otherwise continue only
-when partial recovery is positive beyond run noise and training is healthy.
-Choose later absolute checkpoints from that evidence.
+At each recovery checkpoint, first export and evaluate only the one to three
+benchmarks with the largest measured PTQ drops, using their exact BF16/PTQ
+configurations. At checkpoint 150, compare them with PTQ; at 250, 350, and later,
+compare them with the prior QAD checkpoint. If the targeted set improves beyond
+run noise, run the remaining original PTQ benchmark suite at that same
+checkpoint. Otherwise do not run the full suite. Declare the recovery target
+met only from a full-suite result at that checkpoint. Wait until a recovery
+checkpoint is fully committed before export; never read one still being written.
 
-Resume the same Megatron output directory without changing prepared data, data
-paths/cache, seed, checkpoint lineage, optimizer, scheduler, iteration, or
-consumed-sample state. Among Megatron training arguments, change only the
-absolute `exit_interval`; keep topology unchanged, never restart from PTQ, and
-never reset training progress. Stop when the recovery target is met, recovery
-plateaus or regresses, training diverges, or iteration 1000 is reached.
+For normal duration resumes, use the same Megatron output directory without
+changing prepared data, data paths/cache, seed, topology, checkpoint lineage,
+optimizer, scheduler, iteration, or consumed-sample state; never restart from
+PTQ or reset training progress. If emergency cancellation occurs before the
+first complete QAD checkpoint, report that no resumable QAD state exists and
+diagnose before relaunching from PTQ.
+
+Cancel the training job when the recovery target is met. Otherwise continue
+while training is healthy and recovery has not regressed beyond run noise. At
+each recovery checkpoint, compare the median of the five latest 10-step loss
+aggregates with the preceding five. If benchmark change is flat within run
+noise, continue only when the latest loss median is lower; otherwise cancel.
+Cancel on recovery regression beyond run noise. For an evidence-driven
+cancellation, wait only for an in-progress scheduled save to commit; do not
+continue to create a future checkpoint. Never train past iteration 1000.
 
 Report exact revisions and commands; Slurm job/container/topology; sampled data
 configuration and counts; PTQ recipe; checkpoint, loss, optimizer, and scheduler
