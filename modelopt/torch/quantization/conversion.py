@@ -25,7 +25,7 @@ from typing import Any, cast
 import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule, ModeloptStateManager
-from modelopt.torch.opt.dynamic import _DMRegistryCls
+from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import get_unwrapped_name
 
@@ -364,9 +364,21 @@ def _match_quantizer(
 
     # Get the parent module of this quantizer. When name has no dots (root-level quantizer),
     # ".".join([]) == "" and get_submodule("") returns the model itself (PyTorch convention).
-    return parent_class is None or isinstance(
-        full_model.get_submodule(".".join(name.split(".")[:-1])), parent_class
-    )
+    if parent_class is None:
+        return True
+
+    parent_module = full_model.get_submodule(".".join(name.split(".")[:-1]))
+    if isinstance(parent_module, parent_class):
+        return True
+    if not isinstance(parent_module, DynamicModule):
+        return False
+
+    try:
+        parent_class_key = QuantModuleRegistry.get_key_from_dm(parent_class)
+        registered_parent_class = QuantModuleRegistry.get_registered_class(parent_class_key)
+    except KeyError:
+        return False
+    return issubclass(parent_module.original_cls, registered_parent_class)
 
 
 def set_quantizer_attributes_full(

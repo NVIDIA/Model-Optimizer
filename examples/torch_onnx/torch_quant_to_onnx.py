@@ -34,8 +34,9 @@ from download_example_onnx import export_to_onnx
 from evaluation import evaluate
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.plugins.timm import is_resnet_quantization_supported
 
 """
 Quantize a timm vision model and export to ONNX for TensorRT deployment.
@@ -63,6 +64,15 @@ QUANT_CONFIG_DICT: dict[str, dict] = {
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
     "int4_awq": mtq.INT4_AWQ_CFG,
 }
+_RESNET_RECIPE_DIR = "timm/resnet/ptq"
+_RESNET_QUANTIZE_MODES = {"fp8", "int8", "mxfp8", "nvfp4"}
+_RESNET_AUTO_RECIPE_NAMES = {
+    "FP8_DEFAULT_CFG": "fp8",
+    "INT8_DEFAULT_CFG": "int8",
+    "MXFP8_DEFAULT_CFG": "mxfp8",
+    "NVFP4_DEFAULT_CFG": "nvfp4",
+    "NVFP4_AWQ_LITE_CFG": "nvfp4_awq_lite",
+}
 
 _FP8_CONV_OVERRIDE: list = [
     {
@@ -87,13 +97,6 @@ _INT8_CONV_OVERRIDE: list = [
         "parent_class": "nn.Conv2d",
         "quantizer_name": "*input_quantizer",
         "cfg": {"num_bits": 8, "axis": None},
-    },
-]
-
-_FP8_RESIDUAL_OVERRIDE: list = [
-    {
-        "quantizer_name": "*residual_quantizer.input_quantizer",
-        "cfg": {"num_bits": (4, 3), "axis": None},
     },
 ]
 
@@ -123,7 +126,7 @@ _NEEDS_FP8_CONV_OVERRIDE: set[str] = {
 _NEEDS_INT8_CONV_OVERRIDE: set[str] = {"INT4_AWQ_CFG"}
 
 
-def get_quant_config(quantize_mode):
+def get_quant_config(quantize_mode, model=None):
     """Get quantization config, overriding Conv2d for TRT compatibility.
 
     TensorRT only supports FP8 and INT8 for Conv layers.
@@ -133,6 +136,9 @@ def get_quant_config(quantize_mode):
     - For MXFP8, NVFP4: override Conv2d to FP8
     - For INT4_AWQ: override Conv2d to INT8
     """
+    if is_resnet_quantization_supported(model) and quantize_mode in _RESNET_QUANTIZE_MODES:
+        return load_recipe(f"{_RESNET_RECIPE_DIR}/{quantize_mode}").quantize.model_dump()
+
     config: dict = copy.deepcopy(QUANT_CONFIG_DICT[quantize_mode])
     if quantize_mode == "fp8":
         config["quant_cfg"].extend(_FP8_MHA_OVERRIDE)
@@ -142,7 +148,6 @@ def get_quant_config(quantize_mode):
             f"Overriding Conv2d quantization to FP8 for '{quantize_mode}' mode."
         )
         config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
-        config["quant_cfg"].extend(_FP8_RESIDUAL_OVERRIDE)
     elif quantize_mode == "int4_awq":
         warnings.warn(
             "TensorRT only supports FP8/INT8 for Conv layers. "
@@ -152,19 +157,28 @@ def get_quant_config(quantize_mode):
     return config
 
 
-def filter_func(name, model=None):
+def get_auto_quant_config(format_name, model):
+    recipe_name = _RESNET_AUTO_RECIPE_NAMES.get(format_name)
+    if is_resnet_quantization_supported(model) and recipe_name is not None:
+        return load_recipe(f"{_RESNET_RECIPE_DIR}/{recipe_name}").quantize.model_dump()
+
+    config = copy.deepcopy(getattr(mtq, format_name))
+    if format_name in _NEEDS_FP8_CONV_OVERRIDE:
+        config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
+    elif format_name in _NEEDS_INT8_CONV_OVERRIDE:
+        config["quant_cfg"].extend(_INT8_CONV_OVERRIDE)
+    return config
+
+
+def filter_func(name):
     """Filter function to exclude certain layers from quantization.
 
-    A ResNet's top-level ``conv1`` consumes three-channel image input, for which TensorRT
-    cannot find an FP8 Q→Conv tactic on Blackwell.
     ``downsample.reduction`` (Swin/SwinV2) is excluded because it operates on 4D tensors
     and TRT's DynamicQuantize layer (used for MXFP8/NVFP4) requires 2D/3D input.
     Other 4D-input layers (e.g. Swin's ``norm1``, ``downsample.norm``, top-level ``norm``)
     are handled dynamically by ``_disable_high_rank_input_quantizers`` via a forward-pass
     rank probe — that avoids false positives on ViT, whose same-named ``norm`` sees 3D input.
     """
-    if isinstance(model, timm.models.resnet.ResNet) and name.startswith("conv1."):
-        return True
     pattern = re.compile(
         r".*(time_emb_proj|time_embedding|conv_in|conv_out|conv_shortcut|add_embedding|"
         r"pos_embed|time_text_embed|context_embedder|norm_out|x_embedder|patch_embed|cpb_mlp|"
@@ -206,173 +220,6 @@ def _disable_high_rank_input_quantizers(model, input_shape, device):
         return
     prefixes = tuple(n + "." for n in high_rank)
     mtq.disable_quantizer(model, lambda n: n.startswith(prefixes))
-
-
-def _quantize_module_input(module, inputs):
-    return (module.input_quantizer(inputs[0]), *inputs[1:])
-
-
-def _calibrate_new_quantizers(model, quantizers, data_loader):
-    enabled_quantizers = [
-        module
-        for module in model.modules()
-        if isinstance(module, TensorQuantizer) and module.is_enabled
-    ]
-    for quantizer in enabled_quantizers:
-        quantizer.disable_quant()
-    for quantizer in quantizers:
-        quantizer.enable_calib()
-
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            for batch in data_loader:
-                model(batch["image"] if isinstance(batch, dict) else batch)
-        for quantizer in quantizers:
-            quantizer.load_calib_amax(strict=False)
-    finally:
-        model.train(was_training)
-        for quantizer in quantizers:
-            quantizer.disable_calib()
-        for quantizer in enabled_quantizers:
-            quantizer.enable_quant()
-
-    _disable_invalid_quantizers(quantizers)
-
-
-def _append_resnet_residual_quantizer(block, num_bits):
-    device = next(block.parameters()).device
-    quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, axis=None)).to(device)
-    residual_quantizer = torch.nn.Sequential()
-    residual_quantizer.add_module("input_quantizer", quantizer)
-    if block.downsample is None:
-        block.downsample = torch.nn.Sequential()
-    elif not isinstance(block.downsample, torch.nn.Sequential):
-        block.downsample = torch.nn.Sequential(block.downsample)
-    block.downsample.add_module("residual_quantizer", residual_quantizer)
-    return quantizer
-
-
-def _prepare_resnet_quantizers(model, quantize_mode):
-    """Install ResNet shortcut quantizers before the standard calibration pass.
-
-    INT8 and FP8 share one block-input Q/DQ between ``conv1`` and an identity shortcut;
-    projection blocks additionally quantize the downsample output immediately before ``Add``.
-    MXFP8 and NVFP4 use per-tensor FP8 on every 4D shortcut because their dynamic block
-    quantizers only support 2D/3D tensors. INT4-AWQ is skipped because it is weight-only.
-    Auto mode is configured after its per-block format search.
-    """
-    block_types = (timm.models.resnet.BasicBlock, timm.models.resnet.Bottleneck)
-    blocks = [block for block in model.modules() if isinstance(block, block_types)]
-    if (
-        not blocks
-        or quantize_mode in ("auto", "int4_awq")
-        or any(
-            hasattr(block, "input_quantizer")
-            or (block.downsample is not None and hasattr(block.downsample, "residual_quantizer"))
-            for block in blocks
-        )
-    ):
-        return []
-
-    num_bits = 8 if quantize_mode == "int8" else (4, 3)
-    device = next(model.parameters()).device
-    residual_quantizers = []
-    for block in blocks:
-        if quantize_mode in ("int8", "fp8"):
-            quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, axis=None)).to(
-                device
-            )
-            block.add_module("input_quantizer", quantizer)
-            block.register_forward_pre_hook(_quantize_module_input)
-            residual_quantizers.append(quantizer)
-
-            if block.downsample is None:
-                continue
-
-        residual_quantizers.append(_append_resnet_residual_quantizer(block, num_bits))
-
-    if quantize_mode == "int8":
-        quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=num_bits, axis=None)).to(
-            device
-        )
-        model.global_pool.add_module("input_quantizer", quantizer)
-        model.global_pool.register_forward_pre_hook(_quantize_module_input)
-        residual_quantizers.append(quantizer)
-
-    return residual_quantizers
-
-
-def _disable_invalid_quantizers(quantizers):
-    for quantizer in quantizers:
-        if not quantizer.is_enabled:
-            continue
-        amax = quantizer.amax
-        if (
-            amax is None
-            or not torch.is_tensor(amax)
-            or torch.any(torch.isnan(amax))
-            or torch.all(amax <= 0)
-        ):
-            quantizer.disable()
-
-
-def _add_auto_resnet_residual_quantizers(model, auto_quantization_formats, data_loader):
-    """Calibrate shortcuts with each block's AutoQuantize-selected activation format."""
-    activation_formats = set(auto_quantization_formats) - {"INT4_AWQ_CFG"}
-    if not activation_formats:
-        return
-    fallback_num_bits = 8 if activation_formats == {"INT8_DEFAULT_CFG"} else (4, 3)
-    residual_quantizers = []
-    block_types = (timm.models.resnet.BasicBlock, timm.models.resnet.Bottleneck)
-    for block in model.modules():
-        if not isinstance(block, block_types):
-            continue
-        last_conv = block.conv3 if isinstance(block, timm.models.resnet.Bottleneck) else block.conv2
-        selected_quantizer = getattr(last_conv, "input_quantizer", None)
-        num_bits = (
-            selected_quantizer.num_bits
-            if selected_quantizer is not None
-            and selected_quantizer.is_enabled
-            and selected_quantizer.num_bits in (8, (4, 3))
-            else fallback_num_bits
-        )
-        residual_quantizers.append(_append_resnet_residual_quantizer(block, num_bits))
-
-    _calibrate_new_quantizers(model, residual_quantizers, data_loader)
-
-
-def _finalize_resnet_quantizers(
-    model, quantize_mode, auto_quantization_formats, data_loader, residual_quantizers
-):
-    block_types = (timm.models.resnet.BasicBlock, timm.models.resnet.Bottleneck)
-    blocks = [block for block in model.modules() if isinstance(block, block_types)]
-    if not blocks:
-        return
-
-    if quantize_mode in ("int8", "fp8"):
-        for block in blocks:
-            block.conv1.input_quantizer.disable()
-            if block.downsample is not None:
-                downsample_conv = next(
-                    (
-                        module
-                        for module in block.downsample.modules()
-                        if isinstance(module, torch.nn.Conv2d)
-                    ),
-                    None,
-                )
-                if downsample_conv is not None:
-                    downsample_conv.input_quantizer.disable()
-        model.fc.input_quantizer.disable()
-        model.fc.weight_quantizer.disable()
-        if quantize_mode == "int8":
-            model.global_pool.input_quantizer.enable()
-    elif quantize_mode == "auto":
-        _add_auto_resnet_residual_quantizers(model, auto_quantization_formats, data_loader)
-
-    _disable_invalid_quantizers(residual_quantizers)
 
 
 def load_calibration_data(model, data_size, batch_size, device, with_labels=False):
@@ -419,16 +266,14 @@ def _disable_dead_quantizers(model):
     calibrates to ``amax == 0``. Disable such dead quantizers — they have nothing
     meaningful to quantize and would otherwise break ONNX export.
     """
-    for _, mod in model.named_modules():
-        for attr in ("input_quantizer", "output_quantizer", "weight_quantizer"):
-            q = getattr(mod, attr, None)
-            if q is None or not q.is_enabled:
-                continue
-            amax = q.amax
-            if amax is None or not torch.is_tensor(amax):
-                continue
-            if torch.any(torch.isnan(amax)) or torch.all(amax <= 0):
-                q.disable()
+    for quantizer in model.modules():
+        if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
+            continue
+        amax = quantizer.amax
+        if amax is None or not torch.is_tensor(amax):
+            continue
+        if torch.any(torch.isnan(amax)) or torch.all(amax <= 0):
+            quantizer.disable()
 
 
 def _calibrate_uncalibrated_quantizers(model, data_loader):
@@ -438,15 +283,16 @@ def _calibrate_uncalibrated_quantizers(model, data_loader):
     be calibrated because the MXFP8/NVFP4 quantization pipeline skips standard
     calibration. This function explicitly calibrates those uncalibrated quantizers.
     """
-    uncalibrated = []
-    for _, module in model.named_modules():
-        for attr_name in ("input_quantizer", "weight_quantizer"):
-            if not hasattr(module, attr_name):
-                continue
-            quantizer = getattr(module, attr_name)
-            if quantizer.is_enabled and not quantizer.block_sizes and quantizer.amax is None:
-                quantizer.enable_calib()
-                uncalibrated.append(quantizer)
+    uncalibrated = [
+        quantizer
+        for quantizer in model.modules()
+        if isinstance(quantizer, TensorQuantizer)
+        and quantizer.is_enabled
+        and not quantizer.block_sizes
+        and quantizer.amax is None
+    ]
+    for quantizer in uncalibrated:
+        quantizer.enable_calib()
 
     if not uncalibrated:
         return
@@ -473,9 +319,8 @@ def quantize_model(model, config, data_loader=None):
     else:
         quantized_model = mtq.quantize(model, config)
 
-    # Disable filtered quantizers BEFORE calibrating override quantizers so we don't
-    # waste time calibrating quantizers that are about to be turned off.
-    mtq.disable_quantizer(quantized_model, lambda name: filter_func(name, quantized_model))
+    if not is_resnet_quantization_supported(quantized_model):
+        mtq.disable_quantizer(quantized_model, filter_func)
 
     # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize().
     if data_loader is not None:
@@ -514,7 +359,7 @@ def auto_quantize_model(
     model,
     data_loader,
     quantization_formats,
-    effective_bits=4.8,
+    effective_bits=None,
     num_calib_steps=512,
     num_score_steps=128,
 ):
@@ -532,23 +377,18 @@ def auto_quantize_model(
         Tuple of (quantized_model, search_state_dict)
     """
     _disable_inplace_relu(model)
+    if effective_bits is None:
+        effective_bits = 8.0 if is_resnet_quantization_supported(model) else 4.8
     constraints = {"effective_bits": effective_bits}
 
     # Convert string format names to config objects, incorporating Conv2d TRT overrides.
     # TRT DynamicQuantize requires 2D/3D input, but Conv2d operates on 4D tensors.
     # By including the overrides in the format configs, the auto_quantize search
     # correctly accounts for Conv2d being FP8/INT8 in the effective_bits budget.
-    format_configs = []
-    for fmt in quantization_formats:
-        if isinstance(fmt, str):
-            config = copy.deepcopy(getattr(mtq, fmt))
-            if fmt in _NEEDS_FP8_CONV_OVERRIDE:
-                config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
-            elif fmt in _NEEDS_INT8_CONV_OVERRIDE:
-                config["quant_cfg"].extend(_INT8_CONV_OVERRIDE)
-            format_configs.append(config)
-        else:
-            format_configs.append(fmt)
+    format_configs = [
+        get_auto_quant_config(fmt, model) if isinstance(fmt, str) else fmt
+        for fmt in quantization_formats
+    ]
 
     print(f"Starting auto-quantization search with {len(format_configs)} formats...")
     print(f"Effective bits constraint: {effective_bits}")
@@ -566,8 +406,8 @@ def auto_quantize_model(
         verbose=True,
     )
 
-    # Disable quantization for specified layers
-    mtq.disable_quantizer(quantized_model, lambda name: filter_func(name, quantized_model))
+    if not is_resnet_quantization_supported(quantized_model):
+        mtq.disable_quantizer(quantized_model, filter_func)
 
     _disable_dead_quantizers(quantized_model)
 
@@ -638,6 +478,7 @@ def main():
         nargs="+",
         choices=[
             "NVFP4_AWQ_LITE_CFG",
+            "NVFP4_DEFAULT_CFG",
             "FP8_DEFAULT_CFG",
             "MXFP8_DEFAULT_CFG",
             "INT8_DEFAULT_CFG",
@@ -649,8 +490,11 @@ def main():
     parser.add_argument(
         "--effective_bits",
         type=float,
-        default=4.8,
-        help="Target effective bits for auto quantization constraint. Default is 4.8.",
+        default=None,
+        help=(
+            "Target effective bits for auto quantization. Defaults to 8.0 for ResNet "
+            "and 4.8 for other models."
+        ),
     )
     parser.add_argument(
         "--num_score_steps",
@@ -701,8 +545,6 @@ def main():
         )
         print(f"Base Model - Top-1 Accuracy: {top1:.2f}%, Top-5 Accuracy: {top5:.2f}%")
 
-    residual_quantizers = []
-
     # Quantize model based on mode
     if args.quantize_mode == "auto":
         # Auto quantization requires labels for loss computation
@@ -727,15 +569,7 @@ def main():
         # Note: MXFP8 is dynamic and does not need calibration itself, but when
         # Conv2d layers are overridden to FP8 (for TRT compatibility), those FP8
         # quantizers require calibration data.
-        config = get_quant_config(args.quantize_mode)
-        block_types = (timm.models.resnet.BasicBlock, timm.models.resnet.Bottleneck)
-        if args.quantize_mode != "int4_awq" and any(
-            isinstance(module, block_types) for module in model.modules()
-        ):
-            conversion_config = copy.deepcopy(config)
-            conversion_config["algorithm"] = None
-            model = mtq.quantize(model, conversion_config)
-            residual_quantizers = _prepare_resnet_quantizers(model, args.quantize_mode)
+        config = get_quant_config(args.quantize_mode, model)
 
         data_loader = load_calibration_data(
             model,
@@ -746,14 +580,6 @@ def main():
         )
 
         quantized_model = quantize_model(model, config, data_loader)
-
-    _finalize_resnet_quantizers(
-        quantized_model,
-        args.quantize_mode,
-        args.auto_quantization_formats,
-        data_loader,
-        residual_quantizers,
-    )
 
     # MXFP8/NVFP4 lower their input quantizers to TRT DynamicQuantize (2D/3D only).
     # Disable quantizers on 4D-input layers (Swin's norm1 / downsample.norm / top-level norm).

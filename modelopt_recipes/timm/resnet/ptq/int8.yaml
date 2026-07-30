@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  int8: configs/numerics/int8
+  int8_per_channel: configs/numerics/int8_per_channel
+  resnet: timm/resnet/ptq/static_int8.quant_cfg
+
+metadata:
+  recipe_type: ptq
+  description: INT8 ResNet PTQ with quantized residual inputs.
+
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*weight_quantizer'
+      cfg:
+        $import: int8_per_channel
+    - quantizer_name: '*input_quantizer'
+      cfg:
+        $import: int8
+    - $import: default_disabled_quantizers
+    - $import: resnet
+    - quantizer_name: 'fc.*'
+      enable: false

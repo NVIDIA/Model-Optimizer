@@ -58,6 +58,9 @@ with import_plugin("peft"):
 with import_plugin("torch_geometric"):
     from .pytorch_geometric import *
 
+with import_plugin("timm"):
+    from .timm import *
+
 with import_plugin("transformer_engine"):
     from .transformer_engine import *
 

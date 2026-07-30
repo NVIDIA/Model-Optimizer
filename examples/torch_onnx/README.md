@@ -54,7 +54,8 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 - Loads a pretrained timm torch model (default: ViT-Base).
 - Quantizes the torch model to FP8, MXFP8, INT8, NVFP4, or INT4_AWQ using ModelOpt.
 - For models with Conv2d layers (e.g., SwinTransformer), automatically overrides Conv2d quantization to FP8 (for MXFP8/NVFP4 modes) or INT8 (for INT4_AWQ mode) for TensorRT compatibility.
-- Quantizes ResNet shortcut inputs before residual addition for activation-quantized modes.
+- Uses the [timm ResNet PTQ recipes](../../modelopt_recipes/timm/resnet/ptq/) to
+  quantize shortcut inputs before residual addition.
 - Exports the quantized model to ONNX.
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.
@@ -274,7 +275,7 @@ The `auto` mode enables mixed precision quantization by searching for the optima
 
 | Parameter | Default | Description |
 | :--- | :---: | :--- |
-| `--effective_bits` | 4.8 | Target average bits per weight across the model. Lower values = more compression but potentially lower accuracy. The search algorithm finds the optimal per-layer format assignment that meets this constraint while minimizing accuracy loss. For example, 4.8 means an average of 4.8 bits per weight (mix of FP4 and FP8 layers). |
+| `--effective_bits` | 4.8 (8.0 for ResNet) | Target average bits per weight across the model. Lower values = more compression but potentially lower accuracy. The ResNet default remains feasible when Conv2d candidates use FP8 or INT8. |
 | `--num_score_steps` | 128 | Number of forward/backward passes used to compute per-layer sensitivity scores via gradient-based analysis. Higher values provide more accurate sensitivity estimates but increase search time. Recommended range: 64-256. |
 | `--calibration_data_size` | 512 | Number of calibration samples used for both sensitivity scoring and calibration. For auto mode, labels are required for loss computation. |
 
