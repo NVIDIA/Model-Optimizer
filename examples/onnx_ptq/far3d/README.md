@@ -14,7 +14,7 @@ cd DL4AGX
 git submodule update --init --recursive
 cd AV-Solutions/far3d-trt/dependencies/Far3D
 git apply ../../patch/far3d.patch
-git apply /path/to/Model-Optimizer/examples/onnx_ptq/far3d/far3d_pytorch_25_06.patch
+git apply /path/to/Model-Optimizer/examples/onnx_ptq/far3d/far3d_optional_flash_attn.patch
 cd ../..
 ```
 
