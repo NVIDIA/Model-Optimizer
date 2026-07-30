@@ -252,11 +252,11 @@ def test_only_nvfp4_input_quantizers_are_selected():
     assert not _is_nvfp4_dynamic_input_quantizer("layer.input_quantizer", fp8_in)
 
 
-def test_sequential_quantizer_leaves_are_calibrated():
-    """A SequentialQuantizer input must not silently fall back to plain max.
+def test_sequential_quantizer_activation_is_rejected():
+    """SequentialQuantizer activations are unsupported and must fail loudly, not silently.
 
-    Its leaves are submodules named ``...input_quantizer.<i>``, so a plain
-    ``endswith("input_quantizer")`` check on the leaf name would skip them.
+    Their leaves are submodules named ``...input_quantizer.<i>``, so a name-based match would
+    skip them and leave those activations on plain max without any signal.
     """
     cfg = {
         "quant_cfg": [
@@ -266,20 +266,56 @@ def test_sequential_quantizer_leaves_are_calibrated():
         "algorithm": {"method": "nvfp4_act_headroom", "anchor_percentile": 1},
     }
     torch.manual_seed(0)
-    data = torch.randn(16, 64)
-    model = mtq.quantize(_Net(), cfg, lambda m: m(data))
-    assert isinstance(model.fc1.input_quantizer, SequentialQuantizer)
+    with pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"):
+        mtq.quantize(_Net(), cfg, lambda m: m(torch.randn(16, 64)))
 
-    swapped = _swap_in_nvfp4_act_headroom_calibrators(
-        model, anchor_percentile=1.0, upper_percentile=99.99, rho=16384.0
+
+def test_rejection_leaves_the_model_untouched():
+    """Validation happens before any calibrator is swapped, so a rejected model is unchanged."""
+    torch.manual_seed(0)
+    model = mtq.quantize(
+        _Net(),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*fc1*input_quantizer", "cfg": NVFP4_CFG},
+                {"quantizer_name": "*fc2*input_quantizer", "cfg": [NVFP4_CFG, NVFP4_CFG]},
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(torch.randn(16, 64)),
     )
-    # Both leaves of both layers, not zero and not just the containers.
-    assert len(swapped) == 4
-    assert all(isinstance(q, TensorQuantizer) for q, _ in swapped)
+    before = model.fc1.input_quantizer._calibrator
+    with pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"):
+        _swap_in_nvfp4_act_headroom_calibrators(
+            model, anchor_percentile=1.0, upper_percentile=99.99, rho=16384.0
+        )
+    assert model.fc1.input_quantizer._calibrator is before
 
-    # And the calibrated scale really is the headroom one, not plain max.
-    for leaf in model.fc1.input_quantizer:
-        assert float(leaf.amax) > float(data.abs().max())
+
+def test_non_nvfp4_sequential_activation_is_ignored():
+    """Only SequentialQuantizers wrapping NVFP4 leaves are rejected; others are irrelevant."""
+    torch.manual_seed(0)
+    fp8 = {"num_bits": (4, 3)}
+    model = mtq.quantize(
+        _Net(),
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {"quantizer_name": "*input_quantizer", "cfg": [fp8, fp8]},
+            ],
+            "algorithm": "max",
+        },
+        lambda m: m(torch.randn(16, 64)),
+    )
+    assert isinstance(model.fc1.input_quantizer, SequentialQuantizer)
+    # No NVFP4 leaf anywhere, so nothing to reject and nothing to swap.
+    assert (
+        _swap_in_nvfp4_act_headroom_calibrators(
+            model, anchor_percentile=1.0, upper_percentile=99.99, rho=16384.0
+        )
+        == []
+    )
 
 
 def test_swap_installs_calibrator_with_config_values():

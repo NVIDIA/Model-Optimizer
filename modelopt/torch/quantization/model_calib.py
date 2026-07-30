@@ -511,15 +511,12 @@ def _is_nvfp4_dynamic_activation_quantizer(module: nn.Module) -> bool:
 
 
 def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
-    """True for an *input* quantizer holding at least one qualifying NVFP4 leaf.
+    """True for a plain NVFP4 dynamic-block *input* quantizer.
 
-    ``input_quantizer`` may be a :class:`SequentialQuantizer`, whose leaves are submodules
-    named ``...input_quantizer.<i>``. Matching on the container name and then walking the
-    leaves keeps those wrapped quantizers from silently falling back to plain max.
+    :class:`SequentialQuantizer` activation quantizers are not supported by this algorithm and
+    are rejected in :func:`_swap_in_nvfp4_act_headroom_calibrators` rather than matched here.
     """
-    if not name.endswith("input_quantizer"):
-        return False
-    return any(_is_nvfp4_dynamic_activation_quantizer(q) for q in _iter_leaf_quantizers(module))
+    return name.endswith("input_quantizer") and _is_nvfp4_dynamic_activation_quantizer(module)
 
 
 def _swap_in_nvfp4_act_headroom_calibrators(
@@ -529,24 +526,34 @@ def _swap_in_nvfp4_act_headroom_calibrators(
 
     Returns ``(quantizer, original_calibrator)`` pairs so the caller can restore them.
     """
+    # Validate before mutating anything, so a rejected model is left untouched. A
+    # SequentialQuantizer wraps several quantizers over one activation; this algorithm derives a
+    # single global scale per tensor and has no defined behavior for that composition, so reject
+    # it explicitly instead of silently leaving those activations on plain max.
+    for name, module in model.named_modules():
+        if not name.endswith("input_quantizer") or not isinstance(module, SequentialQuantizer):
+            continue
+        if any(_is_nvfp4_dynamic_activation_quantizer(q) for q in _iter_leaf_quantizers(module)):
+            raise NotImplementedError(
+                f"nvfp4_act_headroom does not support SequentialQuantizer activation quantizers, "
+                f"but {name!r} is one wrapping an NVFP4 dynamic-block quantizer. Use a single "
+                f"activation quantizer config for these modules, or calibrate with 'max'."
+            )
+
     swapped: list[tuple[nn.Module, Any]] = []
     for name, module in model.named_modules():
-        if not name.endswith("input_quantizer"):
+        if not _is_nvfp4_dynamic_input_quantizer(name, module):
             continue
-        # Walk SequentialQuantizer leaves so wrapped NVFP4 inputs are calibrated too.
-        for leaf in _iter_leaf_quantizers(module):
-            if not _is_nvfp4_dynamic_activation_quantizer(leaf):
-                continue
-            swapped.append((leaf, leaf._calibrator))
-            leaf._calibrator = NVFP4ActHeadroomCalibrator(
-                leaf.num_bits,
-                None,
-                leaf._unsigned,
-                block_size=leaf.block_sizes.get(-1, 16),
-                anchor_percentile=anchor_percentile,
-                upper_percentile=upper_percentile,
-                rho=rho,
-            )
+        swapped.append((module, module._calibrator))
+        module._calibrator = NVFP4ActHeadroomCalibrator(
+            module.num_bits,
+            None,
+            module._unsigned,
+            block_size=module.block_sizes.get(-1, 16),
+            anchor_percentile=anchor_percentile,
+            upper_percentile=upper_percentile,
+            rho=rho,
+        )
     return swapped
 
 
@@ -579,6 +586,10 @@ def nvfp4_act_headroom_calibrate(
         rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
         distributed_sync: whether to sync amax across distributed processes
             (see :func:`max_calibrate`).
+
+    Raises:
+        NotImplementedError: if an NVFP4 activation quantizer is a ``SequentialQuantizer``,
+            which this algorithm does not support.
         shared_states: shared quantization-state grouping, forwarded to :func:`max_calibrate`.
         sync_expert_weight_amax: share one weight amax across local experts in a SequentialMLP
             MoE layer, forwarded to :func:`max_calibrate`.
