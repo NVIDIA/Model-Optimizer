@@ -35,7 +35,7 @@ from safetensors.torch import save_file
 
 from modelopt import __version__
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
-from modelopt.torch.utils import import_plugin
+from modelopt.torch.utils import import_plugin, warn_rank_0
 
 from .convert_hf_config import convert_hf_quant_config_format
 from .model_config import (
@@ -1058,7 +1058,17 @@ class GPTModelExporter:
 
         has_weight = hasattr(module, "weight")
         grouped_wq = getattr(module, "weight_quantizer", None)
-        per_expert_wq = isinstance(grouped_wq, GroupedQuantizer)
+        # Quantized TE grouped experts must be per-expert (GroupedQuantizer); None = unquantized MLP.
+        assert grouped_wq is None or isinstance(grouped_wq, GroupedQuantizer), (
+            f"TEGroupedLinear.weight_quantizer must be GroupedQuantizer or None, got "
+            f"{type(grouped_wq).__name__}; pre-0.47 single-quantizer checkpoints are not supported."
+        )
+        if grouped_wq is not None and num_experts > len(grouped_wq):
+            warn_rank_0(
+                f"TEGroupedMLP has {num_experts} local experts but only {len(grouped_wq)} "
+                f"per-expert weight quantizers; experts >= {len(grouped_wq)} reuse expert "
+                f"{len(grouped_wq) - 1}'s scales (TP/EP-mismatch fallback)."
+            )
 
         ep_size = (
             get_expert_model_parallel_world_size() if torch.distributed.is_initialized() else 1
@@ -1114,6 +1124,9 @@ class GPTModelExporter:
         local_expert_state: dict[str, torch.Tensor] = {}
         seen_qformat = None
         seen_block_size = None
+        # Dynamic quantizers we populate a temporary export-only amax on; reset in finally so
+        # export leaves module state unchanged (else a dynamic-NVFP4 quantizer keeps a stale max|W|).
+        temp_amax_wqs: list = []
         try:
             for local_id in range(num_experts):
                 global_id = local_expert_indices[local_id]
@@ -1121,8 +1134,7 @@ class GPTModelExporter:
                 weight_key = f"weight{local_id}"
 
                 module.weight = getattr(module, weight_key)
-                if per_expert_wq:
-                    assert isinstance(grouped_wq, GroupedQuantizer)
+                if grouped_wq is not None:
                     module.weight_quantizer = grouped_wq[min(local_id, len(grouped_wq) - 1)]
                     # Dynamic-NVFP4 per-expert quantizers carry no stored amax, but
                     # weight_scale_2 derivation asserts one. Max-calibration weight amax
@@ -1130,6 +1142,7 @@ class GPTModelExporter:
                     _wq = module.weight_quantizer
                     if getattr(_wq, "_amax", None) is None and getattr(_wq, "is_enabled", False):
                         _wq.amax = module.weight.detach().abs().max().float()
+                        temp_amax_wqs.append(_wq)
 
                 name_to_value, qformat, block_size = self._get_quantized_state(
                     module, self.dtype, prefix=prefix
@@ -1168,7 +1181,9 @@ class GPTModelExporter:
                         continue
                     local_expert_state[expert_prefix + key] = val.detach().cpu().clone()
         finally:
-            if per_expert_wq:
+            for _wq in temp_amax_wqs:
+                _wq.reset_amax()
+            if grouped_wq is not None:
                 module.weight_quantizer = grouped_wq
             if not has_weight and hasattr(module, "weight"):
                 delattr(module, "weight")

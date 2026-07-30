@@ -238,8 +238,10 @@ def quant_module_set_extra_state(self, state: Any):
                     # module loaded at smaller EP (e.g. EP1 export from an EP16 ckpt) has more
                     # experts than the saved state. Per-expert properties are uniform across
                     # experts (amax rides separately as globally-indexed sharded tensors), so
-                    # fall back to expert 0's state.
-                    fallback = re.sub(r"\.\d+$", ".0", name)
+                    # fall back to expert 0's state. Rewrite only the expert index right after
+                    # weight_quantizer, preserving deeper suffixes (e.g. a SequentialQuantizer level
+                    # weight_quantizer.<i>.<lvl>); non-expert names are left unchanged.
+                    fallback = re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name)
                     quantizer_substate = quantizer_state.get(fallback)
                 if quantizer_substate is None:
                     continue
@@ -305,11 +307,8 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
             if type(module) in QuantModuleRegistry:
-                # Skip output_layer w/o enabled weight_quantizer
-                if name.endswith("output_layer") and not getattr(
-                    getattr(module, "weight_quantizer", None), "is_enabled", False
-                ):
-                    continue
+                # Register for EVERY QuantModule incl. output_layer: the old is_enabled gate ran
+                # pre-replacement (weight_quantizer None) so it skipped output_layer -> static amax dropped on save.
                 register_modelopt_extra_state_callbacks(
                     module,
                     quant_module_get_extra_state,

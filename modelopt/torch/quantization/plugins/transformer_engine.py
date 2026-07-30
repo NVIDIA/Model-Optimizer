@@ -196,6 +196,8 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             weight_i = getattr(self, f"weight{i}", None)
             if weight_i is None:
                 continue
+            if weight_i.device.type != "cuda":
+                continue  # export loads weights on CPU; the fp4 dry-run needs CUDA — keep loaded amax
             wq_i = self.weight_quantizer[i]
             q = wq_i[0] if isinstance(wq_i, SequentialQuantizer) else wq_i
             if not hasattr(q, "_amax") or q._amax is None:
