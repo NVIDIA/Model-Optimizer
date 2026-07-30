@@ -30,6 +30,7 @@ import socket
 import sys
 import tempfile
 import time
+import traceback
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -37,14 +38,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import modelopt
+from modelopt.torch.utils.logging import TeeStream
 
-__all__ = [
-    "MlflowRunLogger",
-    "TeeStream",
-    "current_user",
-    "default_experiment_name",
-    "validate_tracking_uri",
-]
+__all__ = ["MlflowRunLogger", "current_user", "default_experiment_name", "validate_tracking_uri"]
 
 # MLflow experiment names are stored in a VARCHAR(256) column by the SQL-backed stores. The
 # per-component cap stops one pathological component from crowding out the others; the name
@@ -70,7 +66,9 @@ def _redact_argv(argv: list[str]) -> list[str]:
     redacted: list[str] = []
     mask_next = False
     for token in argv:
-        if mask_next and not token.startswith("-"):
+        if mask_next:
+            # Unconditionally, since a secret may itself start with "-"; an option there
+            # instead would mean the caller passed no value, which argparse rejects anyway.
             redacted.append(_MASK)
         elif token.startswith("-") and _SECRET_NAME.search(token):
             option, sep, _ = token.partition("=")
@@ -179,41 +177,6 @@ def _command_text() -> str:
             "wrapper is not part of sys.argv and is therefore not shown above.",
         ]
     return "\n".join(lines) + "\n"
-
-
-class TeeStream:
-    """Mirror a text stream to *sink* while passing writes through to *stream*.
-
-    Scripts that report progress with bare ``print()`` have no log file; wrapping
-    ``sys.stdout``/``sys.stderr`` in this is what produces one. Attribute access falls
-    through to the wrapped stream so ``isatty()`` keeps progress bars behaving. Native
-    (C-level) writes go straight to the real file descriptor and are *not* captured.
-    """
-
-    def __init__(self, stream, sink):
-        """Wrap *stream*, mirroring everything written to it into the open file *sink*."""
-        self._stream = stream
-        self._sink = sink
-
-    def write(self, data: str) -> int:
-        """Write to both the original stream and the sink."""
-        self._stream.write(data)
-        if not self._sink.closed:
-            self._sink.write(data)
-        return len(data)
-
-    def flush(self) -> None:
-        """Flush both the original stream and the sink."""
-        self._stream.flush()
-        if not self._sink.closed:
-            self._sink.flush()
-
-    def __getattr__(self, name):
-        # Guard the wrapped attributes themselves: __getattr__ runs whenever they are absent
-        # (during unpickling, or on a copy), and delegating then would recurse forever.
-        if name in ("_stream", "_sink"):
-            raise AttributeError(name)
-        return getattr(self._stream, name)
 
 
 class MlflowRunLogger:
@@ -337,6 +300,8 @@ class MlflowRunLogger:
         if not self.enabled or self._run is None:
             self._stop_capture()
             return
+        if status != "FINISHED":
+            self._note_active_exception()
         try:
             self._log_outputs(texts, files, metrics)
         except Exception as e:
@@ -347,6 +312,20 @@ class MlflowRunLogger:
             print(f"[mlflow] {status}: {self.run_url}")
         except Exception as e:
             print(f"[mlflow] WARNING: could not close the run: {e}")
+
+    def _note_active_exception(self) -> None:
+        """Append the exception being handled to the captured log.
+
+        :meth:`finish` runs from the caller's ``finally``, which is *before* the interpreter
+        prints the traceback to ``sys.stderr`` -- no longer teed by then -- so the log would
+        otherwise stop at the last line the script printed. Written to the file only, so the
+        console still shows the traceback exactly once.
+        """
+        if sys.exc_info()[0] is None or self._saved_streams is None:
+            return
+        sink = self._saved_streams[2]
+        if not sink.closed:
+            sink.write("\n" + traceback.format_exc())
 
     def _open_run(self) -> None:
         try:
@@ -371,6 +350,7 @@ class MlflowRunLogger:
         Any HTTP response -- including 401 -- means the host is up, so authorization is
         left to the first real API call, which reports it precisely.
         """
+        # Optional dependency, like mlflow itself: requests arrives with it, not with modelopt.
         import requests
 
         try:

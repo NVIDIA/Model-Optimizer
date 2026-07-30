@@ -81,12 +81,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
-from modelopt.torch.utils import (
-    MlflowRunLogger,
-    default_experiment_name,
-    print_rank_0,
-    validate_tracking_uri,
-)
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -94,6 +89,11 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from modelopt.torch.utils.mlflow import (
+    MlflowRunLogger,
+    default_experiment_name,
+    validate_tracking_uri,
+)
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -1719,23 +1719,29 @@ def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
     return params, texts
 
 
-def _start_mlflow_run(args: argparse.Namespace) -> MlflowRunLogger:
-    """Open the MLflow run for this invocation, or return an inert logger if untracked.
-
-    Opened before the model loads so an unreachable server or a bad experiment name fails in
-    seconds rather than after a full calibration run.
-    """
-    logger = MlflowRunLogger(
+def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
+    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
+    return MlflowRunLogger(
         args.mlflow,
         args.mlflow_experiment,
         run_name=args.mlflow_run_name,
         enabled=bool(args.mlflow) and args.dist_state.is_main,
     )
-    if logger.enabled:
+
+
+def _start_mlflow_run(logger: MlflowRunLogger, args: argparse.Namespace) -> None:
+    """Open the run before the model loads, so a bad URI fails in seconds not hours."""
+    if not logger.enabled:
         # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        params, texts = _mlflow_run_inputs(args)
-        logger.start(params=params, texts=texts)
-    return logger
+        return
+    params, texts = _mlflow_run_inputs(args)
+    logger.start(params=params, tags=_mlflow_run_tags(args), texts=texts)
+
+
+def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
+    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
+    checkpoint it produced can be found together on one tracking server."""
+    return {"model": Path(args.pyt_ckpt_path).name, "checkpoint_path": args.pyt_ckpt_path}
 
 
 def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
@@ -1761,10 +1767,15 @@ def main(args: argparse.Namespace):
 
     setup_distributed_args(args)
 
-    mlflow_logger = _start_mlflow_run(args)
+    mlflow_logger = _mlflow_logger(args)
 
     status = "FAILED"
     try:
+        # Opened inside the try: start() is fatal by design, and skipping
+        # cleanup_distributed would leave the other ranks blocked on the first collective
+        # until the NCCL timeout.
+        _start_mlflow_run(mlflow_logger, args)
+
         # launch a memory monitor to read the currently used GPU memory.
         launch_memory_monitor()
 

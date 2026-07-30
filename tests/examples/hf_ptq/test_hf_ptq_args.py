@@ -310,7 +310,8 @@ def test_untracked_runs_do_not_gather_mlflow_inputs(monkeypatch):
     calls = []
     monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
 
-    logger = hf_ptq._start_mlflow_run(args)
+    logger = hf_ptq._mlflow_logger(args)
+    hf_ptq._start_mlflow_run(logger, args)
 
     assert not logger.enabled
     assert calls == []
@@ -329,7 +330,8 @@ def test_non_main_ranks_do_not_open_a_run(monkeypatch):
     calls = []
     monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
 
-    logger = hf_ptq._start_mlflow_run(args)
+    logger = hf_ptq._mlflow_logger(args)
+    hf_ptq._start_mlflow_run(logger, args)
 
     assert not logger.enabled
     assert calls == []
@@ -350,3 +352,14 @@ def test_mlflow_params_track_every_cli_argument(monkeypatch):
     # A flag added to the parser later is picked up without editing _mlflow_run_inputs.
     args.some_future_flag = "future"
     assert hf_ptq._mlflow_run_inputs(args)[0]["some_future_flag"] == "future"
+
+
+def test_mlflow_tags_identify_the_checkpoint(monkeypatch):
+    """model/checkpoint_path match the evaluation side's convention, so a PTQ run and the
+    evaluations of the checkpoint it produced can be correlated on one server."""
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+
+    assert hf_ptq._mlflow_run_tags(args) == {
+        "model": "Qwen3-0.6B",
+        "checkpoint_path": "/models/Qwen3-0.6B",
+    }

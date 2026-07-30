@@ -24,9 +24,11 @@ import pytest
 import requests
 
 import modelopt
+from modelopt.torch.utils.logging import TeeStream
 from modelopt.torch.utils.mlflow import (
     MlflowRunLogger,
-    TeeStream,
+    _git_sha,
+    _redact_argv,
     default_experiment_name,
     validate_tracking_uri,
 )
@@ -47,6 +49,7 @@ class FakeMlflow:
         self.texts = {}
         self.metrics = {}
         self.artifacts = []
+        self.artifact_text = {}
 
     def set_tracking_uri(self, uri):
         self.tracking_uri = uri
@@ -69,6 +72,7 @@ class FakeMlflow:
 
     def log_artifact(self, local_path, artifact_path=None):
         self.artifacts.append((Path(local_path).name, artifact_path))
+        self.artifact_text[Path(local_path).name] = Path(local_path).read_text()
 
     def log_metrics(self, metrics):
         self.metrics.update(metrics)
@@ -385,13 +389,13 @@ def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
             ["--mlflow", "https://***@mlflow.example.com"],
         ),
         # Ordinary arguments are untouched, including values that merely contain the word.
+        # A secret value can itself start with "-".
+        (["--hf_token", "-secret"], ["--hf_token", "***"]),
         (["--dataset", "token_data"], ["--dataset", "token_data"]),
         (["--pyt_ckpt_path", "/models/Qwen3-0.6B"], ["--pyt_ckpt_path", "/models/Qwen3-0.6B"]),
     ],
 )
 def test_redact_argv_masks_credentials(argv, expected):
-    from modelopt.torch.utils.mlflow import _redact_argv
-
     assert _redact_argv(argv) == expected
 
 
@@ -456,9 +460,36 @@ def test_failure_after_start_run_does_not_orphan_the_run(monkeypatch):
 
 def test_git_sha_is_read_without_a_subprocess():
     """Bandit forbids the subprocess call this used to make; it reads .git directly now."""
-    from modelopt.torch.utils import mlflow as mlflow_module
-
-    sha = mlflow_module._git_sha()
+    sha = _git_sha()
 
     assert sha == "unknown" or (1 <= len(sha) <= 9 and all(c in "0123456789abcdef" for c in sha))
-    assert "subprocess" not in dir(mlflow_module)
+    assert "subprocess" not in dir(sys.modules["modelopt.torch.utils.mlflow"])
+
+
+def test_failed_run_uploads_the_traceback(fake_mlflow, monkeypatch):
+    """finish() runs from the caller's finally, before the interpreter prints the traceback,
+    so without help the log stops at the last line the script printed."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+    logger.start()
+    print("calibrating")
+
+    try:
+        raise RuntimeError("calibration exploded")
+    except RuntimeError:
+        logger.finish("FAILED")
+
+    log = fake_mlflow.artifact_text["hf_ptq.log"]
+    assert "calibrating" in log
+    assert "Traceback (most recent call last)" in log
+    assert "RuntimeError: calibration exploded" in log
+
+
+def test_successful_run_uploads_no_traceback(fake_mlflow, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+
+    logger.start()
+    logger.finish("FINISHED")
+
+    assert "Traceback" not in fake_mlflow.artifact_text["hf_ptq.log"]
