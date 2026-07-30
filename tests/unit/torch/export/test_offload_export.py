@@ -379,3 +379,22 @@ def test_streaming_shard_writer_accepts_extra_tensors():
         assert "mtp.fc.weight" in weight_map
         with safe_open(str(Path(tmpdir) / weight_map["mtp.fc.weight"]), framework="pt") as f:
             assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
+
+
+def test_export_context_disables_tie_dedup_when_weights_move():
+    """Offloaded models get no pointer-keyed dedup — data_ptr is not a stable identity.
+
+    An offloaded module's weights are freed when its materialization window closes, so a
+    recycled address would alias an unrelated module. Tied-weight export is therefore
+    supported on the resident path only, matching what FSDP2 already does.
+    """
+    from modelopt.torch.export.registry import ExportContext
+
+    resident = nn.Linear(8, 8)
+    offloaded, _ = _make_offloaded_linear()
+
+    assert ExportContext(model=resident, dtype=torch.float16).tied_cache == {}
+    ctx = ExportContext(model=offloaded, dtype=torch.float16)
+
+    assert ctx.tied_cache is None
+    assert ctx.moe_tied_cache is None

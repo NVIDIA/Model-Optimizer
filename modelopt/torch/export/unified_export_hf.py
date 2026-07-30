@@ -1219,7 +1219,6 @@ def _export_transformers_checkpoint_streaming(
                     for param_name, param in list(sub_mod._parameters.items()):
                         if param is not None and param.device.type == "cuda":
                             sub_mod._parameters[param_name] = None
-        ctx.reset_tied_caches()
         torch.cuda.empty_cache()
 
     # Non-decoder modules whose weights are not directly readable (embed_tokens, norm,
@@ -1240,7 +1239,6 @@ def _export_transformers_checkpoint_streaming(
                     continue
                 seen_keys.add(full_key)
                 _stream_tensor(full_key, tensor)
-        ctx.reset_tied_caches()
 
     # GPU-resident parameters and persistent buffers (not covered by the above loops).
     # named_buffers() includes non-persistent buffers that state_dict() excludes; filter them.
