@@ -1907,6 +1907,7 @@ def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_pa
     [
         "general/auto_quantize/nvfp4_fp8_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
         "general/auto_quantize/w4a16_nvfp4_fp8_at_6p0bits-active_moe",
@@ -1923,6 +1924,21 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
     assert "*output_layer*" in recipe.auto_quantize.disabled_layers
     assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+
+
+def test_load_recipe_kv_autoquantize_contract():
+    recipe = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits")
+    aq = recipe.auto_quantize
+
+    assert aq.constraints.effective_bits is None
+    assert aq.constraints.kv_effective_bits == 5.4
+    assert aq.auto_quantize_method == "kl_div"
+    assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
+    for fmt in aq.candidate_formats:
+        (entry,) = fmt.quant_cfg
+        assert entry.quantizer_name == "*[kv]_bmm_quantizer"
+        assert entry.cfg.use_constant_amax
+        assert fmt.algorithm["skip_forward_without_activation_calib"]
 
 
 def _all_shipped_ptq_recipe_paths():

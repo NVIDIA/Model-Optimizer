@@ -1054,7 +1054,7 @@ def _postprocess_single_tensor(
 def postprocess_state_dict(
     state_dict: dict,
     maxbound: float,
-    quantization: str | None,
+    quantization: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool = False,
     tied_map: "TiedWeightMap | None" = None,
 ) -> dict:
@@ -1063,7 +1063,8 @@ def postprocess_state_dict(
     Args:
         state_dict: The full model state_dict.
         maxbound: The maximum bound value for the output quantizer.
-        quantization: The KV cache quantization format.
+        quantization: The uniform KV cache quantization format, or a per-attention-layer
+            ``{layer_name: {"quant_algo": ...}}`` mapping for mixed precision.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
         tied_map: Optional :class:`TiedWeightMap`. When provided, tied-weight
             dedup is authoritative and name-based: a declared alias key whose canonical
@@ -1084,6 +1085,18 @@ def postprocess_state_dict(
 
     post_state_dict = {}
 
+    def _kv_quantization_for_key(key: str) -> str | None:
+        if not isinstance(quantization, dict):
+            return quantization
+        matches = [
+            (layer_name, layer_config.get("quant_algo"))
+            for layer_name, layer_config in quantization.items()
+            if key == layer_name or key.startswith(layer_name + ".")
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda item: len(item[0]))[1]
+
     for key, value in state_dict.items():
         # Skip problematic parameters for specific model architectures, e.g., Nemotron Nano VL models
         if key == "vision_model.radio_model.summary_idxs":
@@ -1101,15 +1114,18 @@ def postprocess_state_dict(
                 prefix = key[: -len(old_suffix)]
 
                 if "_amax" in key:
-                    assert quantization in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
-                        "Invalid KV cache quantization format."
-                    )
+                    layer_quantization = _kv_quantization_for_key(key)
+                    assert layer_quantization in [
+                        KV_CACHE_FP8,
+                        KV_CACHE_NVFP4,
+                        KV_CACHE_NVFP4_AFFINE,
+                    ], "Invalid KV cache quantization format."
                     assert maxbound > 0, "Maxbound must be greater than zero."
 
                     value = value.float() / maxbound
 
                     # Warn if scale exceeds threshold
-                    if quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                    if layer_quantization == KV_CACHE_FP8 and value.item() > 0.5:
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
@@ -1601,7 +1617,7 @@ def get_quant_config(
     block_size = None
 
     # Create base config
-    quant_config = {
+    quant_config: dict[str, Any] = {
         "producer": {
             "name": "modelopt",
             "version": __version__,
@@ -1619,7 +1635,9 @@ def get_quant_config(
     # It also holds awq_block_size information for applicable layers.
     layer_config_dict = {}
 
-    kv_cache_format = QUANTIZATION_NONE
+    kv_cache_formats: set[str] = set()
+    kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
+    kv_cache_eligible_layers = 0
     for name, module in dict(model.named_modules()).items():
         # Check for standard quantizers or any quantizers from weight attributes
         weight_names = list(weight_attr_names(module))
@@ -1675,18 +1693,22 @@ def get_quant_config(
         not_enabled = SimpleNamespace(is_enabled=False)
 
         # Find kv cache quant format
+        has_kv_quantizers = all(
+            hasattr(module, quantizer_name)
+            for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer")
+        )
+        if has_kv_quantizers:
+            kv_cache_eligible_layers += 1
+
         if (
             getattr(module, "k_bmm_quantizer", not_enabled).is_enabled
             or getattr(module, "v_bmm_quantizer", not_enabled).is_enabled
             or getattr(module, "output_quantizer", not_enabled).is_enabled
         ):
             module_kv_quant = get_kv_cache_dtype(module)
-            if kv_cache_format == QUANTIZATION_NONE:
-                kv_cache_format = module_kv_quant
-            else:
-                assert kv_cache_format == module_kv_quant, (
-                    "Do not support mixed precision kv cache quantization"
-                )
+            if module_kv_quant != QUANTIZATION_NONE:
+                kv_cache_formats.add(module_kv_quant)
+                kv_cache_quantized_layers[name] = {"quant_algo": module_kv_quant}
 
     # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
     # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise
@@ -1699,8 +1721,23 @@ def get_quant_config(
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
-    if kv_cache_format is not None:
-        quant_config["quantization"]["kv_cache_quant_algo"] = kv_cache_format
+    all_kv_layers_quantized = (
+        kv_cache_eligible_layers > 0 and len(kv_cache_quantized_layers) == kv_cache_eligible_layers
+    )
+    if len(kv_cache_formats) == 1 and all_kv_layers_quantized:
+        quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
+    elif kv_cache_quantized_layers:
+        weight_quant_algo = quant_config["quantization"].get("quant_algo")
+        if weight_quant_algo not in (None, "MIXED_PRECISION"):
+            raise NotImplementedError(
+                "Mixed-precision KV-cache export with a uniform quantized-weight format is "
+                "not supported yet. Use BF16 weights or a mixed-weight AutoQuant recipe."
+            )
+        quant_config["quantization"]["quant_algo"] = "MIXED_PRECISION"
+        quant_config["quantization"].setdefault("quantized_layers", {})
+        quant_config["quantization"]["kv_cache_quant_algo"] = "MIXED_PRECISION"
+        quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
+        quant_config["quantization"]["kv_cache_schema_version"] = 1
 
     return quant_config
 

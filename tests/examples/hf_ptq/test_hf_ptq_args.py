@@ -83,6 +83,23 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
 
 
+def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "fp8_cast"
+    )
+    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["search_domain"] == "kv_cache"
+    assert inputs["constraints"] == {"kv_effective_bits": 5.4}
+    assert inputs["method"] == "kl_div"
+    assert [config["effective_bits"] for config, _ in inputs["quantization_formats"]] == [
+        8.0,
+        4.5,
+    ]
+    assert "kv_cache_quant_cfg" not in inputs
+
+
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
     key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""

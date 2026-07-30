@@ -422,8 +422,26 @@ leaving the original recipe unchanged.
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
 
-KV cache is applied as a uniform post-step, not part of the per-layer search. An AutoQuantize recipe
-falls back to `--kv_cache_qformat` (default `fp8_cast`) unless it sets an explicit `kv_cache` field.
+Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall back to
+`--kv_cache_qformat` (default `fp8_cast`) unless they set an explicit `kv_cache` field.
+
+KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
+`candidate_formats` are complete K/V cache configs with exact config-level `effective_bits`;
+BF16 is used only as the isolated-KL reference, not as a solver choice. The shipped canary recipe
+searches cast-mode FP8 (8.0 bits/scalar) and packed NVFP4 (4.5 bits/scalar) at 5.4 bits/scalar:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path Qwen/Qwen3-1.7B \
+  --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
+  --auto_quantize_checkpoint /path/to/kv_autoquant.pth \
+  --export_path /path/to/qwen3-1.7b-mixed-kv
+```
+
+Cast candidates use constant amax and skip the PTQ calibration forward. Unified HF export records
+the selected formats in `kv_cache_quantized_layers` and writes the JSON-safe sensitivity report to
+`kv_cache_auto_quantize_report.json`; `--auto_quantize_checkpoint` stores the resumable raw search
+state.
 
 The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
 interrupted search (skips re-scoring):

@@ -39,12 +39,14 @@ from modelopt.torch.utils import atomic_print
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
+from .kv_cache_auto_quant import auto_quantize_kv_cache as _auto_quantize_kv_cache
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
 from .utils import is_quantized
 
 __all__ = [
     "auto_quantize",
+    "auto_quantize_kv_cache",
     "calibrate",
     "compute_quantization_mse",
     "disable_quantizer",
@@ -654,6 +656,73 @@ def auto_quantize(
     searcher.search(model, search_constraints, config=search_config)
 
     return model, searcher.state_dict()
+
+
+def auto_quantize_kv_cache(
+    model: nn.Module,
+    constraints: dict[str, Any],
+    quantization_formats: list[dict[str, Any] | tuple[dict[str, Any], str]],
+    data_loader: Iterable,
+    forward_step: Callable[[nn.Module, Any], torch.Tensor],
+    *,
+    num_calib_steps: int = 512,
+    num_score_steps: int = 128,
+    disabled_layers: list[str] | str | None = None,
+    verbose: bool = False,
+    checkpoint: str | None = None,
+) -> tuple[nn.Module, dict[str, Any]]:
+    """Search layer-wise KV-cache formats using isolated forward KL sensitivity.
+
+    Unlike weight AutoQuant, BF16/no-quant is only the scoring reference and is
+    not an implicit solver choice. Each supplied format must configure K and V
+    together and declare exact config-level ``effective_bits``. Formats use their
+    own calibration algorithm; cast-mode constant-amax candidates skip calibration
+    forwards and provide the fastest turnaround.
+
+    Args:
+        model: Model whose attention K/V quantizers will be searched.
+        constraints: A ``{"kv_effective_bits": target}`` storage constraint.
+        quantization_formats: Candidate ``QuantizeConfig`` dictionaries, optionally
+            paired with display names.
+        data_loader: Re-iterable calibration and scoring batches.
+        forward_step: Callable returning the full logits tensor for one batch.
+        num_calib_steps: Maximum calibration batches per candidate.
+        num_score_steps: Maximum batches used for isolated forward-KL scoring.
+        disabled_layers: Optional layer-name patterns excluded from the search and
+            preserved in their existing KV-cache format.
+        verbose: Whether to print progress and selected formats.
+        checkpoint: Optional path for resumable calibration and sensitivity state.
+
+    Returns:
+        The converted model with the selected per-layer K/V quantizers and a
+        JSON-safe sensitivity report.
+    """
+    processed_formats = []
+    for idx, candidate in enumerate(quantization_formats):
+        if isinstance(candidate, tuple):
+            raw_config, name = candidate
+        else:
+            raw_config, name = candidate, f"KV_CACHE_FORMAT_{idx}"
+        if not isinstance(raw_config, dict):
+            raise TypeError("KV-cache AutoQuant formats must be config dictionaries.")
+        if not isinstance(name, str) or not name:
+            raise ValueError("KV-cache AutoQuant candidate names must be non-empty strings.")
+        processed_formats.append((raw_config, name))
+
+    if not is_quantized(model):
+        model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+    return _auto_quantize_kv_cache(
+        model,
+        constraints,
+        processed_formats,
+        data_loader,
+        forward_step,
+        num_calib_steps=num_calib_steps,
+        num_score_steps=num_score_steps,
+        disabled_layers=disabled_layers,
+        verbose=verbose,
+        checkpoint=checkpoint,
+    )
 
 
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):

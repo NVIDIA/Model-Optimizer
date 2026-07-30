@@ -278,7 +278,7 @@ def build_reverse_name_mapper(model):
 
 
 def revert_quant_config_names(quantization: dict, mapper) -> None:
-    """Revert ``exclude_modules`` / ``quantized_layers`` keys to hub names, in place.
+    """Revert layer-reference keys to hub names, in place.
 
     ``mapper`` is the callable from :func:`build_reverse_name_mapper` (a no-op when
     ``None``). Applies to the ModelOpt ``{"quantization": {...}}`` sub-dict before it is
@@ -293,6 +293,11 @@ def revert_quant_config_names(quantization: dict, mapper) -> None:
     quantized_layers = quantization.get("quantized_layers")
     if isinstance(quantized_layers, dict) and quantized_layers:
         quantization["quantized_layers"] = {mapper(k): v for k, v in quantized_layers.items()}
+    kv_cache_quantized_layers = quantization.get("kv_cache_quantized_layers")
+    if isinstance(kv_cache_quantized_layers, dict) and kv_cache_quantized_layers:
+        quantization["kv_cache_quantized_layers"] = {
+            mapper(k): v for k, v in kv_cache_quantized_layers.items()
+        }
 
 
 def _assert_experts_pre_expanded(

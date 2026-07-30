@@ -269,6 +269,14 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     if kv_cache_quant_algo:
         if kv_cache_quant_algo == "FP8":
             new_config["kv_cache_scheme"] = {"dynamic": False, "num_bits": 8, "type": "float"}
+        elif kv_cache_quant_algo == "MIXED_PRECISION":
+            new_config["kv_cache_quant_algo"] = kv_cache_quant_algo
+            new_config["kv_cache_quantized_layers"] = original_quantization_details.get(
+                "kv_cache_quantized_layers", {}
+            )
+            new_config["kv_cache_schema_version"] = original_quantization_details.get(
+                "kv_cache_schema_version", 1
+            )
         else:
             # TODO: Handle other kv cache quantization algorithms
             new_config["kv_cache_scheme"] = kv_cache_quant_algo

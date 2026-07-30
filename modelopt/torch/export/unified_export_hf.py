@@ -15,6 +15,7 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import copy
 import json
 import re
 import tempfile
@@ -1010,12 +1011,18 @@ def _export_transformers_checkpoint(
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    quantization_details = quant_config["quantization"]
+    kv_cache_format = quantization_details["kv_cache_quant_algo"]
+    kv_cache_postprocess_config = (
+        quantization_details["kv_cache_quantized_layers"]
+        if kv_cache_format == "MIXED_PRECISION"
+        else kv_cache_format
+    )
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict,
         kv_cache_max_bound,
-        kv_cache_format,
+        kv_cache_postprocess_config,
         is_modelopt_qlora,
         tied_map=tied_map,
     )
@@ -1461,6 +1468,7 @@ def _write_hf_export_config(
     model: nn.Module,
     hf_quant_config: dict | None,
     export_dir: Path,
+    name_mapper: Callable[[str], str] | None = None,
 ) -> None:
     """Write hf_quant_config.json (if quantized) and embed quantization_config into config.json."""
     quantization_details = (hf_quant_config or {}).get("quantization", {})
@@ -1473,6 +1481,29 @@ def _write_hf_export_config(
         with open(f"{export_dir}/hf_quant_config.json", "w") as file:
             json.dump(hf_quant_config, file, indent=4)
         quantization_config = convert_hf_quant_config_format(hf_quant_config)
+
+        kv_autoquant_report = next(
+            (
+                getattr(module, "_modelopt_kv_cache_auto_quantize_state")
+                for module in model.modules()
+                if hasattr(module, "_modelopt_kv_cache_auto_quantize_state")
+            ),
+            None,
+        )
+        if kv_autoquant_report is not None:
+            kv_autoquant_report = copy.deepcopy(kv_autoquant_report)
+            if name_mapper is not None:
+                kv_autoquant_report["layers"] = {
+                    name_mapper(name): value
+                    for name, value in kv_autoquant_report["layers"].items()
+                }
+                signature_layers = kv_autoquant_report.get("search_signature", {}).get(
+                    "layers", []
+                )
+                for layer in signature_layers:
+                    layer["name"] = name_mapper(layer["name"])
+            with open(f"{export_dir}/kv_cache_auto_quantize_report.json", "w") as file:
+                json.dump(kv_autoquant_report, file, indent=4)
 
     original_config = f"{export_dir}/config.json"
     with open(original_config) as file:
@@ -1571,6 +1602,7 @@ def export_hf_checkpoint(
             )
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
+            name_mapper = None
             try:
                 name_mapper = build_reverse_name_mapper(model)
                 if name_mapper is not None and hf_quant_config:
@@ -1580,7 +1612,7 @@ def export_hf_checkpoint(
                     f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
                     "names may not match the original HF hub checkpoint."
                 )
-            _write_hf_export_config(model, hf_quant_config, export_dir)
+            _write_hf_export_config(model, hf_quant_config, export_dir, name_mapper)
             return
 
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
@@ -1602,6 +1634,7 @@ def export_hf_checkpoint(
         # and fails). Best-effort and atomic: any failure (an op we cannot reverse yet,
         # transformers API drift, unexpected shapes) falls back to the in-memory names for BOTH
         # weights and config so they stay mutually consistent.
+        name_mapper = None
         try:
             name_mapper = build_reverse_name_mapper(model)
             export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
@@ -1636,7 +1669,7 @@ def export_hf_checkpoint(
         finally:
             _unpatch_revert_weight_conversion(_patches)
 
-        _write_hf_export_config(model, hf_quant_config, export_dir)
+        _write_hf_export_config(model, hf_quant_config, export_dir, name_mapper)
 
     except Exception as e:
         warnings.warn(
