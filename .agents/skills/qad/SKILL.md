@@ -30,9 +30,8 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
 
 1. **Confirm the gap.** Reuse only validated, comparable BF16/PTQ results and
    the exact benchmark configuration from preceding evaluation or recipe
-   search; run missing, invalid, or non-comparable baselines. Set the recovery
-   target to the user's acceptable BF16 delta, or the benchmark-noise envelope
-   if none is supplied. Stop if the initial gap already meets that target.
+   search; run missing, invalid, or non-comparable baselines. Stop if the PTQ
+   gap to BF16 is already below 1%.
 2. **Reproduce PTQ and verify compatibility.** In the target runtime, require
    `AutoBridge.can_handle()` for the target model and PTQ through `quantize.py`
    to succeed while preserving the exact preceding PTQ config or recipe:
@@ -80,47 +79,26 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
 | Recovery benchmark | 150, then every 100 iterations while training runs |
 | Slurm duration exit | 220 minutes for a 4-hour allocation |
 
-Keep `train_iters=1000` from the first launch and do not set `exit_interval`.
-Benchmark saved checkpoints 150, 250, 350, and so on while the training job
-continues. After a representative allocation, estimate jobs to the next
-checkpoint as `ceil(remaining_iters / observed_iters_per_allocation)`, using
-end-to-end progress that includes startup, validation, and saves. Before then,
-treat the early seconds-per-iteration estimate as a lower bound and provision
-one additional allocation. Resume after a duration exit under the rule below.
+## Run policy
 
-Monitor smoothed QAD/KD loss, learning rate, and gradient norm. Cancel immediately
-on non-finite loss, repeated skipped iterations, or a sustained spike; preserve
-the latest complete checkpoint and do not wait for another save. With
-`log_interval=10`, require the loss aggregate reported at iteration 50
-(iterations 41–50) to be lower than the one at iteration 10 (iterations 1–10);
-otherwise diagnose and cancel under the evidence-driven rule below.
-
-At each recovery checkpoint, first export and evaluate only the one to three
-benchmarks with the largest measured PTQ drops, using their exact BF16/PTQ
-configurations. At checkpoint 150, new recovery means QAD-150 over PTQ; later it
-means improvement over the prior evaluated QAD checkpoint. In all cases, judge
-BF16-gap recovery against the fixed BF16/PTQ baselines. When the targeted set
-shows new recovery beyond run noise, run the remaining original PTQ benchmark
-suite at that same checkpoint; otherwise do not. Declare the recovery target met
-only from a full-suite result at that checkpoint. Wait until a recovery
-checkpoint is fully committed before export; never read one still being written.
-
-For normal duration resumes, use the same Megatron output directory without
-changing prepared data, data paths/cache, seed, topology, checkpoint lineage,
-optimizer, scheduler, iteration, or consumed-sample state; never restart from
-PTQ or reset training progress. If emergency cancellation occurs before the
-first complete QAD checkpoint, report that no resumable QAD state exists and
-diagnose before relaunching from PTQ.
-
-Cancel the training job when the recovery target is met. Otherwise continue
-while training is healthy and recovery has not regressed beyond run noise. At
-each recovery checkpoint, compare the median of the five latest 10-step loss
-aggregates with the preceding five. If benchmark change is flat within run
-noise, continue only when the latest loss median is lower; otherwise cancel.
-Cancel on recovery regression beyond run noise. For an evidence-driven
-cancellation, wait only for an in-progress scheduled save to commit; do not
-continue to create a future checkpoint. Never train past iteration 1000.
-
-Report exact revisions and commands; Slurm job/container/topology; sampled data
-configuration and counts; PTQ recipe; checkpoint, loss, optimizer, and scheduler
-state; and comparable BF16/PTQ/QAD results.
+- Keep `train_iters=1000` and leave `exit_interval` unset.
+- From initial step timing, submit only enough sequential jobs to reach
+  checkpoint 150; never submit through iteration 1000 upfront. At each recovery
+  checkpoint, submit to the next only after its targeted evaluation and any
+  triggered full suite, and only if the BF16 gap remains at least 1% and
+  recovery has neither plateaued nor regressed.
+- Give all training jobs the same run-specific job name and
+  `--dependency=singleton`; record job IDs and, on any stop, cancel pending jobs
+  before the active job.
+- Cancel on non-finite loss, repeated skipped iterations, or a sustained spike.
+  At iteration 50, require the loss aggregate to be lower than at iteration 10.
+- At each recovery checkpoint, first evaluate the one to three benchmarks with
+  the largest PTQ drops. Run the remaining original PTQ suite at that checkpoint
+  only after recovery beyond run noise.
+- Cancel when the full-suite gap to BF16 is below 1%, benchmark recovery
+  regresses beyond run noise, or benchmark recovery and loss both plateau.
+- After a duration exit, resume the latest QAD checkpoint in the same output
+  directory with unchanged prepared data paths/cache, seed, topology, optimizer,
+  scheduler, iteration, and consumed-sample state; do not restart from PTQ.
+- Report the PTQ recipe, data sample, Slurm topology, loss/state, checkpoints,
+  and comparable BF16/PTQ/QAD results.
