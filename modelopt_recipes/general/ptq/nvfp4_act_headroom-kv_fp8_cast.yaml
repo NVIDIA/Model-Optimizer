@@ -40,6 +40,10 @@ quantize:
     anchor_percentile: 1
     upper_percentile: 99.99
     rho: 16384
+    # Weight scales are an orthogonal axis: swap in mse or local_hessian here to combine a
+    # different weight calibration with the same activation policy.
+    weight_scale_algorithm:
+      method: max
   quant_cfg:
     - $import: base_disable_all
     - $import: w4a4_nvfp4_nvfp4

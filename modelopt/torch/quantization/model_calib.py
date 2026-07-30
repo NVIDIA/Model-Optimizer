@@ -565,17 +565,19 @@ def nvfp4_act_headroom_calibrate(
     anchor_percentile: float = 1.0,
     upper_percentile: float = 99.99,
     rho: float = 16384.0,
-    distributed_sync: bool = True,
-    shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
-    sync_expert_weight_amax: bool = False,
+    weight_scale_algorithm: Any = None,
 ):
-    """Calibrate NVFP4 activation global scales with headroom; everything else uses max.
+    """Calibrate NVFP4 activation global scales with headroom.
 
     For NVFP4 dynamic-block *input* quantizers, the per-tensor global scale is derived from
     the distribution of per-block activation amaxes so that headroom is left above the
     calibrated range (see :class:`NVFP4ActHeadroomCalibrator
-    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>`). Weight quantizers and
-    every other quantizer are calibrated exactly as in :func:`max_calibrate`.
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>`).
+
+    Weight scales are an orthogonal concern and are delegated to ``weight_scale_algorithm``,
+    so a recipe can combine this activation policy with ``max``, ``mse`` or ``local_hessian``
+    weights. Each of those runs max calibration first, so the activation collectors installed
+    here are populated in that pass and any later refinement touches only weights.
 
     Args:
         model: model to be calibrated.
@@ -584,20 +586,19 @@ def nvfp4_act_headroom_calibrate(
         upper_percentile: percentile of the per-block amaxes used as the top of the calibrated
             range; ``100`` uses the literal observed max.
         rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
-        distributed_sync: whether to sync amax across distributed processes
-            (see :func:`max_calibrate`).
+        weight_scale_algorithm: config for the algorithm that calibrates the *weight* scales --
+            ``{"method": "max"}`` (the default), ``"mse"`` or ``"local_hessian"``, plus that
+            algorithm's own options such as ``distributed_sync`` and ``shared_states``.
+            ``None`` is treated as ``{"method": "max"}``.
 
     Raises:
         NotImplementedError: if an NVFP4 activation quantizer is a ``SequentialQuantizer``,
             which this algorithm does not support.
-        shared_states: shared quantization-state grouping, forwarded to :func:`max_calibrate`.
-        sync_expert_weight_amax: share one weight amax across local experts in a SequentialMLP
-            MoE layer, forwarded to :func:`max_calibrate`.
 
     .. note::
-        Under data parallelism the per-rank scales are combined by :func:`max_calibrate` with a
-        ``MAX`` all-reduce, so the result is the largest per-rank headroom scale rather than the
-        scale implied by pooling every rank's per-block distribution.
+        Under data parallelism the per-rank scales are combined with a ``MAX`` all-reduce, so
+        the result is the largest per-rank headroom scale rather than the scale implied by
+        pooling every rank's per-block distribution.
     """
     swapped = _swap_in_nvfp4_act_headroom_calibrators(
         model, anchor_percentile=anchor_percentile, upper_percentile=upper_percentile, rho=rho
@@ -617,13 +618,11 @@ def nvfp4_act_headroom_calibrate(
     # per-block histograms in the same pass that collects max stats for every other quantizer.
     # The calibrators are restored afterwards so this algorithm does not leak into a later
     # calibration of the same model, and so a repeat run starts from a fresh histogram.
+    # Default to max rather than the helper's own default, so selecting this activation policy
+    # never silently changes how weights are calibrated.
     try:
-        max_calibrate(
-            model,
-            forward_loop,
-            distributed_sync=distributed_sync,
-            sync_expert_weight_amax=sync_expert_weight_amax,
-            shared_states=shared_states,
+        _run_weight_scale_calibration(
+            model, forward_loop, weight_scale_algorithm or {"method": "max"}
         )
     finally:
         for quantizer, original_calibrator in swapped:
@@ -2265,8 +2264,11 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
-def _run_scale_calibration(model, forward_loop, scale_algorithm):
-    """Run scale calibration."""
+def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
+    """Run the weight-scale calibration algorithm.
+
+    These algorithms set *weight* scales; activation scales are the caller's concern.
+    """
     if scale_algorithm is None:
         scale_algorithm = {"method": "mse"}
 
@@ -2309,7 +2311,7 @@ def lsq(
         tied_amax: If True, pre and post share a single tensor.
         quantize_pre_scale: If False, skip FP8 quantization for the LSQ pre scale.
     """
-    _run_scale_calibration(model, forward_loop, scale_algorithm)
+    _run_weight_scale_calibration(model, forward_loop, scale_algorithm)
 
     name_to_module = dict(model.named_modules())
     seen_modules: set[int] = set()

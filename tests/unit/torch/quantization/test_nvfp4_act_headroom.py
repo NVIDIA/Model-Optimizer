@@ -177,32 +177,76 @@ def test_calibrator_is_restored_after_calibration():
     assert float(model.fc1.input_quantizer.amax) < headroom_amax
 
 
-def test_shared_state_knobs_are_forwarded_to_max_calibrate():
-    """shared_states / sync_expert_weight_amax reach max_calibrate, as they do for `max`."""
-    seen = {}
-    real = model_calib.max_calibrate
+def _spy_on(name, calls, stand_in=None):
+    """Replace a model_calib entry point with a recording spy, returning the original."""
+    real = getattr(model_calib, name)
+    run = stand_in if stand_in is not None else real
 
-    def spy(model, forward_loop=None, distributed_sync=True, **kwargs):
-        seen.update(kwargs)
-        return real(model, forward_loop, distributed_sync)
+    def spy(model, forward_loop=None, **kwargs):
+        calls.append((name, kwargs))
+        return run(model, forward_loop)
 
-    cfg = {
-        **ACT_ONLY_CFG,
-        "algorithm": {
-            "method": "nvfp4_act_headroom",
-            "anchor_percentile": 1,
-            "shared_states": {"weight_global_amax": {"patterns": [r".*fc1"]}},
-            "sync_expert_weight_amax": True,
-        },
-    }
-    model_calib.max_calibrate = spy
+    setattr(model_calib, name, spy)
+    return real
+
+
+def _quantize_with(weight_scale_algorithm, calls, spy_name, stand_in=None):
+    cfg = {**ACT_ONLY_CFG, "algorithm": {**ACT_ONLY_CFG["algorithm"]}}
+    if weight_scale_algorithm is not None:
+        cfg["algorithm"]["weight_scale_algorithm"] = weight_scale_algorithm
+    real = _spy_on(spy_name, calls, stand_in)
     try:
-        mtq.quantize(_Net(), cfg, lambda m: m(torch.randn(8, 64)))
+        torch.manual_seed(0)
+        return mtq.quantize(_Net(), cfg, lambda m: m(torch.randn(16, 64)))
     finally:
-        model_calib.max_calibrate = real
+        setattr(model_calib, spy_name, real)
 
-    assert seen["sync_expert_weight_amax"] is True
-    assert seen["shared_states"] == {"weight_global_amax": {"patterns": [r".*fc1"]}}
+
+def test_weight_scale_algorithm_defaults_to_max():
+    """Choosing this activation policy must not change how weights are calibrated."""
+    calls = []
+    model = _quantize_with(None, calls, "max_calibrate")
+    assert [c[0] for c in calls] == ["max_calibrate"]
+    # Sparse dispatch: none of the nested config's unset defaults are forwarded as kwargs.
+    assert calls[0][1] == {}
+    assert float(model.fc1.input_quantizer.amax) > 0
+
+
+def test_weight_scale_algorithm_dispatches_to_mse_with_its_options():
+    """A different weight algorithm is selectable, and the activation scale is unaffected.
+
+    The real MSE weight pass needs triton (static NVFP4) or CUDA (dynamic), so this asserts the
+    dispatch and option plumbing and that the headroom activation scale still lands.
+    """
+    calls = []
+    model = _quantize_with(
+        {"method": "mse", "fp8_scale_sweep": True},
+        calls,
+        "mse_calibrate",
+        stand_in=model_calib.max_calibrate,
+    )
+    assert [c[0] for c in calls] == ["mse_calibrate"]
+    assert calls[0][1] == {"fp8_scale_sweep": True}
+    data_max = float(torch.randn(16, 64).abs().max())
+    assert float(model.fc1.input_quantizer.amax) > data_max  # still the headroom scale
+
+
+def test_weight_scale_algorithm_owns_the_shared_state_knobs():
+    """distributed_sync / shared_states / sync_expert_weight_amax belong to the weight pass."""
+    calls = []
+    _quantize_with(
+        {
+            "method": "max",
+            "sync_expert_weight_amax": True,
+            "shared_states": {"weight_global_amax": {"patterns": [r".*fc1"]}},
+        },
+        calls,
+        "max_calibrate",
+    )
+    assert calls[0][1] == {
+        "sync_expert_weight_amax": True,
+        "shared_states": {"weight_global_amax": {"patterns": [r".*fc1"]}},
+    }
 
 
 def test_lower_anchor_percentile_gives_smaller_amax():
