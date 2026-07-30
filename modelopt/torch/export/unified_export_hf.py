@@ -895,6 +895,7 @@ def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
+    keep_fused_experts: bool = False,
 ) -> None:
     """Process all quantized modules in model, export weights in-place.
 
@@ -908,7 +909,12 @@ def _process_quantized_modules(
             If True, modules with base_layer attribute are skipped.
     """
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        keep_fused_experts=keep_fused_experts,
+    )
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
@@ -993,10 +999,22 @@ def _export_transformers_checkpoint(
             f"{synced_input} tied module group(s)"
         )
 
+    # No-gather distributed FSDP2 export keeps MoE experts FUSED + sharded during the quantize fold
+    # (each rank materializes only its LOCAL experts instead of all N on every rank -- the split
+    # happens later on the sharded weight in the writer). Same condition as the deferred write below.
+    keep_fused_experts = (
+        defer_distributed_fsdp2_write
+        and is_fsdp2_model(model)
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    )
+
     # Process all quantized modules and export weights
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    _process_quantized_modules(model, dtype, is_modelopt_qlora)
+    _process_quantized_modules(
+        model, dtype, is_modelopt_qlora, keep_fused_experts=keep_fused_experts
+    )
     _reconstruct_fused_moe_linear(model)
 
     if (
