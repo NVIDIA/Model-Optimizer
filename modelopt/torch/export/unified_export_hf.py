@@ -1043,12 +1043,17 @@ def _export_transformers_checkpoint_streaming(
     responsible for writing ``hf_quant_config.json`` and updating ``config.json`` with
     ``quantization_config``.
     """
-    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+    from modelopt.torch.quantization.utils.core_utils import (
+        enable_weight_access_and_writeback,
+        requires_weight_materialization,
+    )
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     export_dir = Path(export_dir)
+    # Materialization dispatch walks the module tree from the root; without this cache each
+    # call re-derives it, which is O(N^2) over a MoE model's expert modules.
+    name_to_module = dict(model.named_modules())
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
     if dtype is None:
@@ -1137,6 +1142,10 @@ def _export_transformers_checkpoint_streaming(
             "The model architecture is not supported by LayerActivationCollector."
         )
     decoder_layer_ids = {id(m) for m in decoder_layers}
+    # Descendants too, not just the layers: an offloaded layer's children return to meta
+    # when its window closes, so a child-level check would re-enter and re-export weights
+    # this pass already packed.
+    decoder_owned_ids = {id(m) for layer in decoder_layers for m in layer.modules()}
 
     # --- Persistent-buffer predicate (mirrors state_dict() which excludes non-persistent) ---
     def _is_persistent_buffer(name: str) -> bool:
@@ -1164,11 +1173,13 @@ def _export_transformers_checkpoint_streaming(
             return
         writer.add(new_key, new_value.detach().contiguous().cpu())
 
-    # Decoder layers (offloaded: materialize one at a time)
+    # Decoder layers: materialize one at a time
     for layer_name, layer_module in model.named_modules():
         if id(layer_module) not in decoder_layer_ids:
             continue
-        with enable_weight_access_and_writeback(layer_module, layer_module, writeback=False):
+        with enable_weight_access_and_writeback(
+            layer_module, model, name_to_module, writeback=False
+        ):
             for sub_name, sub_mod in layer_module.named_modules():
                 full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -1211,20 +1222,14 @@ def _export_transformers_checkpoint_streaming(
         ctx.reset_tied_caches()
         torch.cuda.empty_cache()
 
-    # Non-decoder modules with offload hooks (embed_tokens, norm, lm_head, etc.)
+    # Non-decoder modules whose weights are not directly readable (embed_tokens, norm,
+    # lm_head, ...). Containers are skipped: their children get their own window.
     for name, module in model.named_modules():
-        if id(module) in decoder_layer_ids:
+        if id(module) in decoder_owned_ids:
             continue
-        if not hasattr(module, "_hf_hook"):
+        if not requires_weight_materialization(module, model, name_to_module):
             continue
-        if _get_offload_hook(module._hf_hook) is None:
-            continue
-        if not (
-            any(p is not None and p.is_meta for p in module._parameters.values())
-            or any(b is not None and b.is_meta for b in module._buffers.values())
-        ):
-            continue
-        with enable_weight_access_and_writeback(module, module, writeback=False):
+        with enable_weight_access_and_writeback(module, model, name_to_module, writeback=False):
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
