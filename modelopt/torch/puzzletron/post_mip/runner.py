@@ -470,6 +470,18 @@ def _evaluate(
 def _aiperf(
     config: dict[str, Any], node: CompiledPostMIPNode, source, execution_identity: str
 ) -> dict[str, Any]:
+    """
+    Run an AIPerf benchmark for a candidate checkpoint across configured concurrency levels.
+    
+    Parameters:
+    	config (dict[str, Any]): Runtime configuration used to determine the artifact output directory.
+    	node (CompiledPostMIPNode): Node configuration containing benchmark settings.
+    	source: Candidate source containing the checkpoint to benchmark.
+    	execution_identity (str): Identity of the current node execution.
+    
+    Returns:
+    	dict[str, Any]: A mapping containing aggregated benchmark metrics and raw artifact paths.
+    """
     from ..benchmarks import run_aiperf_sweep
 
     settings = dict(node.config.get("config") or {})
@@ -541,10 +553,27 @@ _LMMS_EVAL_MODEL_ARG_FIELDS = frozenset(
 
 
 def _as_cli_bool(value: bool) -> str:
+    """Convert a boolean value to its CLI string representation.
+    
+    Parameters:
+    	value (bool): The boolean value to convert.
+    
+    Returns:
+    	str: "True" for a true value or "False" for a false value.
+    """
     return "True" if value else "False"
 
 
 def _as_lmms_eval_arg(value: Any) -> str:
+    """
+    Convert a supported value to its deterministic LMMS-Eval argument representation.
+    
+    Parameters:
+    	value (Any): The value to convert.
+    
+    Returns:
+    	str: A string representation suitable for an LMMS-Eval argument.
+    """
     if isinstance(value, bool):
         return _as_cli_bool(value)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -555,6 +584,20 @@ def _as_lmms_eval_arg(value: Any) -> str:
 
 
 def _join_cli_values(value: Any, *, path: str) -> str:
+    """
+    Convert a string or sequence of values into a comma-separated string.
+    
+    Parameters:
+        value (Any): String or sequence of values to join.
+        path (str): Configuration path used in validation error messages.
+    
+    Returns:
+        str: The stripped input string or comma-separated sequence values.
+    
+    Raises:
+        TypeError: If value is neither a string nor a sequence.
+        ValueError: If value or any sequence item is empty.
+    """
     if isinstance(value, str):
         text = value.strip()
         if not text:
@@ -569,6 +612,18 @@ def _join_cli_values(value: Any, *, path: str) -> str:
 
 
 def _model_arg_string(values: Mapping[str, Any]) -> str:
+    """
+    Build a comma-separated lmms-eval model arguments string.
+    
+    Parameters:
+    	values (Mapping[str, Any]): Model argument names and values to serialize.
+    
+    Returns:
+    	str: The serialized model arguments.
+    
+    Raises:
+    	ValueError: If an argument key or value is invalid, or if no arguments are provided.
+    """
     parts = []
     for key, value in values.items():
         if value is None:
@@ -589,6 +644,16 @@ def _model_arg_string(values: Mapping[str, Any]) -> str:
 
 
 def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
+    """
+    Merge checkpoint, topology, and configured values into an LMMS-Eval model-arguments string.
+    
+    Parameters:
+    	settings (Mapping[str, Any]): LMMS-Eval settings containing optional model arguments and topology.
+    	checkpoint (str): Path to the checkpoint supplied to the evaluator.
+    
+    Returns:
+    	str: Comma-separated LMMS-Eval model arguments.
+    """
     raw = settings.get("model_args")
     checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
     topology = dict(settings.get("topology") or {})
@@ -625,6 +690,18 @@ def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) ->
 
 
 def _command_prefix(settings: Mapping[str, Any]) -> list[str]:
+    """
+    Build the command prefix used to invoke LMMS-Eval.
+    
+    Parameters:
+    	settings (Mapping[str, Any]): Downstream evaluation settings containing an optional command prefix.
+    
+    Returns:
+    	list[str]: The configured command-prefix arguments, or the default Python module invocation.
+    
+    Raises:
+    	ValueError: If the configured command prefix is empty.
+    """
     raw = settings.get("command_prefix")
     if raw is None:
         return [sys.executable, "-m", "lmms_eval"]
@@ -643,7 +720,17 @@ def _lmms_eval_command(
     checkpoint: str,
     output_path: Path,
 ) -> tuple[list[str], dict[str, str], float | None]:
-    """Build a deterministic lmms-eval CLI invocation for one realized checkpoint."""
+    """
+    Build the LMMS-Eval command, environment, and optional timeout for a checkpoint evaluation.
+    
+    Parameters:
+    	settings (Mapping[str, Any]): Evaluation settings used to construct the invocation.
+    	checkpoint (str): Path to the checkpoint to evaluate.
+    	output_path (Path): Directory where LMMS-Eval writes its outputs.
+    
+    Returns:
+    	tuple[list[str], dict[str, str], float | None]: The command arguments, environment variables, and timeout in seconds.
+    """
 
     tasks = _join_cli_values(settings.get("tasks"), path="downstream_evaluation.config.tasks")
     argv = [
@@ -697,6 +784,15 @@ def _lmms_eval_command(
 
 
 def _metric_key(value: Any) -> str:
+    """
+    Normalize a metric name for use as a stable key.
+    
+    Parameters:
+    	value (Any): Value to convert into a normalized metric key.
+    
+    Returns:
+    	str: The stripped string representation with spaces, commas, slashes, and backslashes replaced by underscores.
+    """
     return (
         str(value)
         .strip()
@@ -708,6 +804,15 @@ def _metric_key(value: Any) -> str:
 
 
 def _flatten_lmms_eval_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
+    """
+    Flatten finite numeric LMMS-Eval task metrics into normalized metric names.
+    
+    Parameters:
+    	payload (Mapping[str, Any]): LMMS-Eval output containing task results.
+    
+    Returns:
+    	dict[str, float]: Numeric metrics keyed by normalized task and metric names.
+    """
     results = payload.get("results")
     if not isinstance(results, Mapping):
         return {}
@@ -726,6 +831,18 @@ def _flatten_lmms_eval_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
 
 
 def _lmms_eval_result_payload(output_path: Path) -> tuple[dict[str, Any], Path]:
+    """
+    Finds the newest valid LMMS-Eval results payload under a directory.
+    
+    Parameters:
+        output_path (Path): Directory containing LMMS-Eval output files.
+    
+    Returns:
+        tuple[dict[str, Any], Path]: The results payload and the path of its JSON file.
+    
+    Raises:
+        FileNotFoundError: If no JSON file containing a mapping-valued ``results`` field is found.
+    """
     candidates = []
     for path in sorted(output_path.rglob("*.json")):
         try:
@@ -746,6 +863,22 @@ def _downstream_evaluation(
     source,
     execution_identity: str,
 ) -> dict[str, Any]:
+    """
+    Run LMMS-Eval on a materialized checkpoint and collect its numeric task metrics.
+    
+    Parameters:
+    	config (dict[str, Any]): Runtime configuration used to determine output locations.
+    	node (CompiledPostMIPNode): Compiled downstream evaluation node configuration.
+    	source: Candidate source containing the checkpoint to evaluate.
+    	execution_identity (str): Identity of the current node execution.
+    
+    Returns:
+    	dict[str, Any]: Evaluation metrics and paths to the summary, raw result, and recorded command.
+    
+    Raises:
+    	ValueError: If the source does not contain a checkpoint artifact.
+    	RuntimeError: If LMMS-Eval fails or produces no numeric task metrics.
+    """
     if source.artifact_kind is not ArtifactKind.CHECKPOINT:
         raise ValueError("downstream_evaluation requires materialized checkpoint artifacts")
     settings = dict(node.config.get("config") or {})
@@ -815,7 +948,17 @@ def _post_mip_kd_settings(
     config: Mapping[str, Any],
     node_settings: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Resolve KD settings while preserving the transformer's checkpoint contract."""
+    """
+    Resolve global distillation settings with node-specific overrides.
+    
+    Parameters:
+        config (Mapping[str, Any]): Configuration containing optional global distillation settings.
+        node_settings (Mapping[str, Any]): Node-specific distillation settings that override global values.
+    
+    Returns:
+        dict[str, Any]: The merged distillation settings, with disabled string values for
+            ``save_consolidated`` normalized to ``True``.
+    """
 
     settings = copy.deepcopy(dict(config.get("global_distillation") or {}))
     settings.update(copy.deepcopy(dict(node_settings)))
@@ -863,6 +1006,22 @@ def _run_candidate(
     input_revision_id: str,
     execution_identity: str,
 ) -> dict[str, Any]:
+    """
+    Execute a candidate through the configured post-MIP node and assemble its result.
+    
+    Parameters:
+        config (dict[str, Any]): Pipeline configuration.
+        node (CompiledPostMIPNode): Compiled node defining the candidate operation.
+        ledger (CandidateLedger): Ledger containing candidate revisions.
+        input_revision_id (str): Revision identifier to process.
+        execution_identity (str): Identity of the current node execution.
+    
+    Returns:
+        dict[str, Any]: Successful result containing input, source, architecture, and operation-specific fields.
+    
+    Raises:
+        ValueError: If the node type is not a supported candidate executor.
+    """
     source = ledger.source_revision(input_revision_id, node.model_source)
     if node.node_type == "materialize":
         result = _materialize(config, node, ledger, input_revision_id, source, execution_identity)
@@ -906,6 +1065,18 @@ def _distributed_shard(config: dict[str, Any], node: CompiledPostMIPNode) -> Ite
 def run_post_mip_node_shard(
     config: dict[str, Any], stage_id: str, *, shard_index: int = 0, shard_count: int = 1
 ) -> Path:
+    """
+    Execute a shard of a compiled post-MIP node and persist its per-candidate results.
+    
+    Parameters:
+    	config (dict[str, Any]): Runtime configuration for the post-MIP execution.
+    	stage_id (str): Identifier of the compiled node to execute.
+    	shard_index (int): Zero-based index of this shard.
+    	shard_count (int): Total number of shards distributing the candidates.
+    
+    Returns:
+    	Path: Path to the shard results JSON file.
+    """
     node = _compiled_node(config, stage_id)
     ledger = _ledger(config)
     ledger.ingest_mip(_puzzle_dir(config))

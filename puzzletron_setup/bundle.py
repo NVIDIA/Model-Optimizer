@@ -329,6 +329,19 @@ def _post_mip_flows(
     global_kd_mesh: Mapping[str, Any],
     default_serving_topology: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """
+    Prepare post-MIP flow configurations for the selected execution budget.
+    
+    Parameters:
+    	state (Mapping[str, Any]): Setup state containing post-MIP flow definitions.
+    	smoke (bool): Whether to apply smoke-budget limits.
+    	common_mesh (Mapping[str, Any]): Mesh used by evaluation and materialization nodes.
+    	global_kd_mesh (Mapping[str, Any]): Mesh used by global knowledge-distillation nodes.
+    	default_serving_topology (Mapping[str, Any]): Default topology for serving-based nodes.
+    
+    Returns:
+    	dict[str, Any]: Deep-copied post-MIP flows with normalized node configurations and budget-specific limits.
+    """
     flows = deepcopy(_mapping(_answers(state, "post_mip").get("flows")))
     for flow in flows.values():
         for node in _mapping(flow.get("nodes")).values():
@@ -795,6 +808,21 @@ def _dynamic_stage_entries(
     *,
     pool_source_evaluations: bool,
 ) -> dict[str, Any]:
+    """
+    Build execution stage entries for post-MIP flow nodes.
+    
+    Parameters:
+    	experiment (Mapping[str, Any]): Experiment configuration containing post-MIP flows.
+    	workers (Mapping[str, Any]): Worker limits for pooled and sharded stages.
+    	gpus_per_node (int): Number of GPUs allocated per node.
+    	common (Mapping[str, Any]): Parallelization settings for evaluation stages.
+    	single_gpu (Mapping[str, Any]): Parallelization settings for materialization stages.
+    	cpu_partition (str | None): Optional CPU partition for selector and materialization stages.
+    	pool_source_evaluations (bool): Whether source evaluations use a persistent worker pool.
+    
+    Returns:
+    	dict[str, Any]: Mapping of post-MIP stage identifiers to their execution configurations.
+    """
     entries = {}
     candidate_limits = _post_mip_candidate_limits(experiment)
     for flow_id, flow in _mapping(_mapping(experiment.get("post_mip")).get("flows")).items():

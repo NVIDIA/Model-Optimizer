@@ -319,7 +319,16 @@ def render_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str
 
 
 def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:
-    """Render AIPerf throughput/latency observations and timeout evidence."""
+    """
+    Render an HTML report of AIPerf candidate throughput, latency, and selection results.
+    
+    Parameters:
+        section_id (str): Identifier used to generate the report's chart element ID.
+        payload (Mapping[str, Any]): Report data containing observations and status information.
+    
+    Returns:
+        str: HTML containing a status summary, throughput chart, and candidate results table.
+    """
 
     observations = list(payload.get("observations") or ())
     rows = []
@@ -368,7 +377,16 @@ def render_downstream_evaluation_report(section_id: str, payload: Mapping[str, A
 
 
 def render_global_kd_report(section_id: str, payload: Mapping[str, Any]) -> str:
-    """Render several candidate KD histories on shared, lineage-colored plots."""
+    """
+    Render a shared comparison of candidate short KD runs and their loss histories.
+    
+    Parameters:
+    	section_id (str): Identifier used to construct the chart element IDs.
+    	payload (Mapping[str, Any]): Report data containing candidate KD runs and status information.
+    
+    Returns:
+    	str: HTML containing the comparison heading, status summary, loss chart containers, and run table.
+    """
 
     runs = list(payload.get("runs") or ())
     rows = []
