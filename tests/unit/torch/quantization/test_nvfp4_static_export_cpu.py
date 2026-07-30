@@ -20,11 +20,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from modelopt.torch.export.quant_utils import (
-    QUANTIZATION_NVFP4,
-    get_lsq_weight_scaling_factors,
-    to_quantized_weight,
-)
+from modelopt.torch.export.quant_utils import QUANTIZATION_NVFP4, to_quantized_weight
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
@@ -76,11 +72,8 @@ def _export_round_trip(
     return weight_scale, weight_scale_2, dequant
 
 
-def _make_lsq_quantizer(
-    learnable_amax: list[str],
-    tied_amax: bool,
-    quantize_pre_scale: bool,
-) -> NVFP4StaticQuantizer:
+def _make_lsq_quantizer(learnable_amax: list[str], **lsq_overrides) -> NVFP4StaticQuantizer:
+    """LSQ quantizer, tied-amax (the only exportable variant) unless overridden."""
     cfg = QuantizerAttributeConfig(
         num_bits=(2, 1),
         block_sizes={-1: BLOCK_SIZE, "type": "static", "scale_bits": (4, 3)},
@@ -89,75 +82,84 @@ def _make_lsq_quantizer(
     q.amax = torch.ones(8)
     q.global_amax = torch.tensor(6.0)
     q.enable_lsq(
-        quantize_scales=True,
         learnable_amax=learnable_amax,
-        tied_amax=tied_amax,
-        quantize_pre_scale=quantize_pre_scale,
+        **{
+            "quantize_scales": True,
+            "tied_amax": True,
+            "quantize_pre_scale": True,
+            **lsq_overrides,
+        },
     )
     with torch.no_grad():
         q.amax_post.copy_(torch.full_like(q.amax_post, 3.0))
-        if not tied_amax:
-            q.amax_pre.copy_(torch.full_like(q.amax_pre, 1.5))
     return q
 
 
-@pytest.mark.parametrize(
-    ("learnable_amax", "tied_amax", "quantize_pre_scale"),
-    [
-        (["post"], False, True),
-        (["pre"], False, True),
-        (["pre", "post"], False, True),
-        (["pre", "post"], True, True),
-        ([], False, True),
-        (["post"], False, False),
-    ],
-)
-def test_lsq_nvfp4_export_uses_pre_scale_for_packing_and_post_scale_for_dequant(
-    learnable_amax, tied_amax, quantize_pre_scale
-):
+@pytest.mark.parametrize("learnable_amax", [["post"], ["pre", "post"], []])
+def test_lsq_tied_nvfp4_export_matches_training_block_scale(learnable_amax):
     weight = torch.linspace(-4.0, 4.0, 4 * 32, dtype=torch.float32).view(4, 32)
-    q = _make_lsq_quantizer(learnable_amax, tied_amax, quantize_pre_scale)
+    q = _make_lsq_quantizer(learnable_amax)
 
-    pre_scale, pre_scale_2, post_scale, post_scale_2 = get_lsq_weight_scaling_factors(
-        q, weight, BLOCK_SIZE
+    weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(q)
+    weight_scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+        q, weight, weight_scale_2
     )
-    packed = to_quantized_weight(weight, pre_scale, QUANTIZATION_NVFP4, pre_scale_2, BLOCK_SIZE)
 
+    # The exported dequantization scale must reproduce the scale used in training.
+    expected = q._block_scale_from_amax(q.amax_post.detach(), True)
+    torch.testing.assert_close(
+        (weight_scale.float() * weight_scale_2.float()).reshape(-1), expected.reshape(-1)
+    )
+
+    packed = to_quantized_weight(
+        weight, weight_scale, QUANTIZATION_NVFP4, weight_scale_2, BLOCK_SIZE
+    )
     dequant = NVFP4QTensor(weight.shape, weight.dtype, packed).dequantize(
-        scale=post_scale,
-        double_scale=post_scale_2,
+        scale=weight_scale,
+        double_scale=weight_scale_2,
         block_sizes={-1: BLOCK_SIZE},
         dtype=weight.dtype,
     )
-
     assert packed.dtype == torch.uint8
-    assert post_scale.shape == (4, 2)
+    assert weight_scale.shape == (4, 2)
     assert torch.isfinite(dequant).all()
-    if not tied_amax:
-        wrong_packed = to_quantized_weight(
-            weight, post_scale, QUANTIZATION_NVFP4, post_scale_2, BLOCK_SIZE
-        )
-        assert not torch.equal(packed, wrong_packed)
 
 
-def test_lsq_nvfp4_export_quantized_weight_registers_post_scale_and_packs_with_pre_scale():
+def test_lsq_tied_nvfp4_export_quantized_weight_registers_static_scales():
     weight = torch.linspace(-4.0, 4.0, 4 * 32, dtype=torch.float32).view(4, 32)
     module = torch.nn.Module()
     module.weight = torch.nn.Parameter(weight.clone())
-    module.weight_quantizer = _make_lsq_quantizer(["post"], False, quantize_pre_scale=False)
+    module.weight_quantizer = _make_lsq_quantizer(["post"])
 
-    pre_scale, pre_scale_2, post_scale, post_scale_2 = get_lsq_weight_scaling_factors(
-        module.weight_quantizer, weight, BLOCK_SIZE
+    expected_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(
+        module.weight_quantizer
+    )
+    expected_scale, _ = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
+        module.weight_quantizer, weight, expected_scale_2
     )
     expected_packed = to_quantized_weight(
-        weight, pre_scale, QUANTIZATION_NVFP4, pre_scale_2, BLOCK_SIZE
+        weight, expected_scale, QUANTIZATION_NVFP4, expected_scale_2, BLOCK_SIZE
     )
 
     _export_quantized_weight(module, torch.float32)
 
     torch.testing.assert_close(module.weight, expected_packed)
-    torch.testing.assert_close(module.weight_scale, post_scale)
-    torch.testing.assert_close(module.weight_scale_2, post_scale_2.squeeze())
+    torch.testing.assert_close(module.weight_scale, expected_scale)
+    torch.testing.assert_close(module.weight_scale_2, expected_scale_2.squeeze())
+
+
+@pytest.mark.parametrize(
+    "lsq_overrides",
+    [{"tied_amax": False}, {"quantize_pre_scale": False}, {"quantize_scales": False}],
+)
+def test_lsq_nvfp4_export_rejects_unsupported_variants(lsq_overrides):
+    weight = torch.linspace(-4.0, 4.0, 4 * 32, dtype=torch.float32).view(4, 32)
+    module = torch.nn.Module()
+    module.weight = torch.nn.Parameter(weight.clone())
+    module.weight_quantizer = _make_lsq_quantizer(["post"], **lsq_overrides)
+
+    with pytest.raises(NotImplementedError, match="Dual LSQ"):
+        _export_quantized_weight(module, torch.float32)
 
 
 def _layer1_routed_expert_like(
