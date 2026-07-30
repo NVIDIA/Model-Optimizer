@@ -53,7 +53,8 @@ class ExportContext:
     dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
 
     Both are ``None`` when the model's weights are not resident for the whole export
-    (FSDP2 or accelerate offload) — see :meth:`__post_init__`.
+    (FSDP2 or accelerate offload), since ``data_ptr`` keys are meaningless once weights
+    move.
     """
 
     model: nn.Module
@@ -63,14 +64,11 @@ class ExportContext:
     moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Pointer-keyed dedup needs data_ptr() to identify a tensor for the whole export.
-        # That only holds while weights stay resident: FSDP2 recycles addresses as modules
-        # are resharded, and accelerate frees a module's weights when its materialization
-        # window closes, leaving the allocator free to hand the address to an unrelated
-        # module. Disable dedup whenever weights move; tied weights are then written as
-        # duplicates rather than re-aliased, so tied-weight export (DiffusionGemma) is
-        # supported on the resident path only.
-        # TODO: replace this with stable, name-based tied-group deduplication.
+        # data_ptr() only identifies a tensor while it stays resident, so dedup is unsafe
+        # once weights move. Tied weights are then written as duplicates rather than
+        # re-aliased, making tied-weight export (DiffusionGemma) resident-path only.
+        # TODO: dedup by tied-group name instead, reusing the _tied_weights_keys
+        # resolution in _collect_canonical_tied_patterns, which survives weight moves.
         if has_non_resident_weights(self.model):
             self.tied_cache = None
             self.moe_tied_cache = None

@@ -63,6 +63,7 @@ from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
@@ -902,19 +903,6 @@ def _process_quantized_modules(
         _dispatch_export_handler(name, sub_module, ctx)
 
 
-def _has_accelerate_offload(model: nn.Module) -> bool:
-    """Return True if any module in model has a CPU- or disk-offload accelerate hook."""
-    try:
-        from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
-    except ImportError:
-        return False
-    for mod in model.modules():
-        hook = getattr(mod, "_hf_hook", None)
-        if hook is not None and _get_offload_hook(hook) is not None:
-            return True
-    return False
-
-
 class _StreamingShardWriter:
     """Write tensors to safetensors shard files without accumulating the full state dict.
 
@@ -1339,7 +1327,7 @@ def _export_transformers_checkpoint(
 
     # Offloaded models need their weights materialized layer-by-layer, which this
     # whole-state-dict path cannot do; export_hf_checkpoint() streams them instead.
-    if _has_accelerate_offload(model):
+    if has_accelerate_offload(model):
         raise NotImplementedError(
             "_export_transformers_checkpoint does not support disk/CPU-offloaded models. "
             "Use export_hf_checkpoint() which dispatches to _export_transformers_checkpoint_streaming."
@@ -1945,7 +1933,7 @@ def export_hf_checkpoint(
     )
     # Streaming path writes shard files layer-by-layer without accumulating the full
     # state dict in RAM (peak = 1 layer + 1 shard buffer vs. ~764 GiB for Ultra 550B).
-    _offloaded = _has_accelerate_offload(model)
+    _offloaded = has_accelerate_offload(model)
 
     try:
         if _offloaded:

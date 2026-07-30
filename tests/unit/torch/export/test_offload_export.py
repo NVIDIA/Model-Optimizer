@@ -32,11 +32,9 @@ except ImportError:
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
-from modelopt.torch.export.unified_export_hf import (
-    _export_quantized_weight,
-    _has_accelerate_offload,
-    _StreamingShardWriter,
-)
+from modelopt.torch.export.registry import ExportContext
+from modelopt.torch.export.unified_export_hf import _export_quantized_weight, _StreamingShardWriter
+from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,18 +52,18 @@ def _make_offloaded_linear(dim: int = 16):
 
 
 # ---------------------------------------------------------------------------
-# _has_accelerate_offload
+# has_accelerate_offload
 # ---------------------------------------------------------------------------
 
 
 def test_has_accelerate_offload_true():
     linear, _ = _make_offloaded_linear()
-    assert _has_accelerate_offload(linear) is True
+    assert has_accelerate_offload(linear) is True
 
 
 def test_has_accelerate_offload_false_no_hooks():
     linear = nn.Linear(16, 16)
-    assert _has_accelerate_offload(linear) is False
+    assert has_accelerate_offload(linear) is False
 
 
 def test_has_accelerate_offload_false_non_offload_hook():
@@ -73,7 +71,7 @@ def test_has_accelerate_offload_false_non_offload_hook():
     linear = nn.Linear(16, 16)
     hook = AlignDevicesHook(execution_device="cpu", offload=False)
     add_hook_to_module(linear, hook)
-    assert _has_accelerate_offload(linear) is False
+    assert has_accelerate_offload(linear) is False
 
 
 def test_has_accelerate_offload_detects_nested_module():
@@ -93,7 +91,7 @@ def test_has_accelerate_offload_detects_nested_module():
     add_hook_to_module(parent.child, hook)
     set_module_tensor_to_device(parent.child, "weight", "meta")
 
-    assert _has_accelerate_offload(parent) is True
+    assert has_accelerate_offload(parent) is True
 
 
 # ---------------------------------------------------------------------------
@@ -381,20 +379,18 @@ def test_streaming_shard_writer_accepts_extra_tensors():
             assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
 
 
-def test_export_context_disables_tie_dedup_when_weights_move():
-    """Offloaded models get no pointer-keyed dedup — data_ptr is not a stable identity.
+def test_export_context_dedup_follows_weight_residency():
+    """Pointer-keyed dedup is enabled only while weights stay resident.
 
     An offloaded module's weights are freed when its materialization window closes, so a
     recycled address would alias an unrelated module. Tied-weight export is therefore
     supported on the resident path only, matching what FSDP2 already does.
     """
-    from modelopt.torch.export.registry import ExportContext
+    resident_ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
+    assert resident_ctx.tied_cache == {}
+    assert resident_ctx.moe_tied_cache == {}
 
-    resident = nn.Linear(8, 8)
     offloaded, _ = _make_offloaded_linear()
-
-    assert ExportContext(model=resident, dtype=torch.float16).tied_cache == {}
-    ctx = ExportContext(model=offloaded, dtype=torch.float16)
-
-    assert ctx.tied_cache is None
-    assert ctx.moe_tied_cache is None
+    offloaded_ctx = ExportContext(model=offloaded, dtype=torch.float16)
+    assert offloaded_ctx.tied_cache is None
+    assert offloaded_ctx.moe_tied_cache is None

@@ -648,6 +648,18 @@ def requires_weight_materialization(module, root_model, name_to_module: dict | N
     return _get_offload_hook(hook) is not None
 
 
+def has_accelerate_offload(module: nn.Module) -> bool:
+    """Return True if any module in ``module`` has a CPU- or disk-offload accelerate hook."""
+    try:
+        from ..plugins.accelerate import _get_offload_hook
+    except ImportError:
+        return False
+
+    return any(
+        _get_offload_hook(getattr(m, "_hf_hook", None)) is not None for m in module.modules()
+    )
+
+
 def has_non_resident_weights(module: nn.Module) -> bool:
     """Whether any weight under ``module`` lives outside it for part of the export.
 
@@ -658,14 +670,7 @@ def has_non_resident_weights(module: nn.Module) -> bool:
     Callers use this for decisions that must hold for a whole export — notably
     pointer-keyed dedup, which needs ``data_ptr()`` to identify a tensor throughout.
     """
-    if is_fsdp2_model(module):
-        return True
-    from ..plugins.accelerate import _get_offload_hook
-
-    return any(
-        (hook := getattr(m, "_hf_hook", None)) is not None and _get_offload_hook(hook) is not None
-        for m in module.modules()
-    )
+    return has_accelerate_offload(module) or is_fsdp2_model(module)
 
 
 @contextmanager
