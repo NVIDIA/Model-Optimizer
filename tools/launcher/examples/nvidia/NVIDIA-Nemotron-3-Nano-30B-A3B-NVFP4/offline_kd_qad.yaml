@@ -18,6 +18,9 @@
 #     --dist-ckpt-strictness log_all then only tolerates benign _extra_state.
 #   - task_0 RUN_MMLU/RUN_EXPORT=false: quantize.sh's inline sub-steps drop
 #     --export-default-te-spec and would KeyError on the TE-spec ckpt (task_3 exports).
+#   - PREREQUISITE: task_1's teacher loads a BF16 MCore ckpt at MLM_MODEL_CKPT
+#     (NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore); this pipeline does not create
+#     it -- import it from HF first (e.g. common/megatron_bridge/import/import.sh).
 #   - task_1 --finetune: MLM_MODEL_CKPT is a shared path that may hold another run's
 #     completed ckpt; without it the sampler asserts "no samples left to consume".
 #   - 4-GPU nodes (OCI-HSG B100): task_4's NVFP4 TRT-LLM eval needs Blackwell (Hopper
@@ -72,7 +75,7 @@ pipeline:
       - --tokenizer-type SFTTokenizer
       - --no-create-attention-mask-in-dataloader
       - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
-      - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
+      - --data-cache-path /hf-local/modelopt/nemotron-3-super-sft/cache
       - --micro-batch-size 1
       # Must match task_2's --global-batch-size: cached logits are indexed per
       # (iteration, microbatch), so teacher and student must see the same samples
@@ -132,7 +135,7 @@ pipeline:
       - --tokenizer-type SFTTokenizer
       - --no-create-attention-mask-in-dataloader
       - --per-split-data-args-path /hf-local/modelopt/nemotron-3-super-sft/blend.json
-      - --data-cache-path /hf-local/modelopt/test-nemotron-sft/cache
+      - --data-cache-path /hf-local/modelopt/nemotron-3-super-sft/cache
       - --micro-batch-size 1
       - --global-batch-size 8
       - --attention-dropout 0.0
