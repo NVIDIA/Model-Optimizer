@@ -58,10 +58,10 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
    generated random sample for packed 32K sequences and its 1% validation
    holdout; do not download separate validation data or use mock data as
    evidence.
-5. **Run and monitor QAD.** Submit one QAD training job and fold startup
-   validation into it; do not submit separate GPU preflight jobs or split
-   training into iteration stages. Let training continue while evaluating saved
-   checkpoints, and cancel the training job when a stop condition below is met.
+5. **Run and monitor QAD.** Run one QAD training job at a time and fold startup
+   validation into it; do not submit separate GPU preflight jobs or split at
+   recovery iterations. Let training continue while evaluating saved
+   checkpoints, and cancel it when a stop condition below is met.
 
 ## Default training policy
 
@@ -82,8 +82,11 @@ commands, containers, and checkpoint formats. This skill supports Slurm only.
 
 Keep `train_iters=1000` from the first launch and do not set `exit_interval`.
 Benchmark saved checkpoints 150, 250, 350, and so on while the training job
-continues. If `exit_duration_in_mins` ends the allocation first, resume the same
-run.
+continues. After a representative allocation, estimate jobs to the next
+checkpoint as `ceil(remaining_iters / observed_iters_per_allocation)`, using
+end-to-end progress that includes startup, validation, and saves. Before then,
+treat the early seconds-per-iteration estimate as a lower bound and provision
+one additional allocation. Resume after a duration exit under the rule below.
 
 Monitor smoothed QAD/KD loss, learning rate, and gradient norm. Cancel immediately
 on non-finite loss, repeated skipped iterations, or a sustained spike; preserve
@@ -94,11 +97,12 @@ otherwise diagnose and cancel under the evidence-driven rule below.
 
 At each recovery checkpoint, first export and evaluate only the one to three
 benchmarks with the largest measured PTQ drops, using their exact BF16/PTQ
-configurations. At checkpoint 150, compare them with PTQ; at 250, 350, and later,
-compare them with the prior QAD checkpoint. If the targeted set improves beyond
-run noise, run the remaining original PTQ benchmark suite at that same
-checkpoint. Otherwise do not run the full suite. Declare the recovery target
-met only from a full-suite result at that checkpoint. Wait until a recovery
+configurations. At checkpoint 150, new recovery means QAD-150 over PTQ; later it
+means improvement over the prior evaluated QAD checkpoint. In all cases, judge
+BF16-gap recovery against the fixed BF16/PTQ baselines. When the targeted set
+shows new recovery beyond run noise, run the remaining original PTQ benchmark
+suite at that same checkpoint; otherwise do not. Declare the recovery target met
+only from a full-suite result at that checkpoint. Wait until a recovery
 checkpoint is fully committed before export; never read one still being written.
 
 For normal duration resumes, use the same Megatron output directory without
