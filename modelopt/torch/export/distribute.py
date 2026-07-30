@@ -470,7 +470,14 @@ def _distributed_save_hf_checkpoint_impl(
             return _new
         return v
 
-    sharded_sd = {k: _to_normal(v) for k, v in sharded_sd.items()}
+    # Re-materialize IN PLACE, not as `{k: _to_normal(v) for ...}`. The comprehension keeps the ENTIRE
+    # original dict alive while building a full second copy -> a transient 2x of the whole state dict.
+    # That is fine at 30B (24GB -> 48GB) but OOMs at large MoE: at 235B the write-point state dict is
+    # ~157GB/rank (fused expert weights are sharded, but the per-expert NVFP4 scale tensors are
+    # replicated on every rank), and doubling it hits ~314GB > GPU. Overwriting each key frees the old
+    # value immediately, so peak stays ~1x. (Import of ep-dp's in-place/streaming write handling.)
+    for _k in list(sharded_sd.keys()):
+        sharded_sd[_k] = _to_normal(sharded_sd[_k])
 
     prefixes = _fused_experts_prefixes(sharded_sd)
     prefix_set = set(prefixes)
@@ -513,7 +520,9 @@ def _distributed_save_hf_checkpoint_impl(
                 )
             )
         local_sd = postprocess_state_dict(local_sd, maxbound, kv_cache_format, is_modelopt_qlora)
-        local_sd = {k: v.detach().contiguous() for k, v in local_sd.items()}
+        # In place (see above): avoid a transient 2x copy of the per-expert split.
+        for _k in list(local_sd.keys()):
+            local_sd[_k] = local_sd[_k].detach().contiguous()
 
     # (2) Dense / non-expert: keep sharded -- FSDP2 leaves DTensors (dim-0 shard); EP leaves plain
     # replicated tensors. Do NOT gather to rank 0: DCP writes each DTensor's shards per-rank (parallel,
