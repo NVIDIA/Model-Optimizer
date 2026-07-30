@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Pinned to TensorRT 11.1 for a reproducible build.
+# TensorRT 11.1 from the base image builds and runs the FAR3D engines.
 FROM nvcr.io/nvidia/pytorch:26.07-py3
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
@@ -44,8 +44,11 @@ RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
         /opt/far3d/lib/python3.8/site-packages/tensorrt/tensorrt.so
 
 COPY . /opt/Model-Optimizer
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/tensorrt_libs:${LD_LIBRARY_PATH}
-RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
-        -r /tmp/far3d-requirements/requirements-modelopt-onnx.txt && \
-    cd /opt/Model-Optimizer && \
-    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --no-deps -e ".[onnx]"
+RUN cd /opt/Model-Optimizer && \
+    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
+        -e ".[onnx]" \
+        "onnxruntime-gpu[cuda,cudnn]~=1.24.2" \
+        "tensorrt-cu12-libs==10.11.0.33"
+
+# The TensorRT EP in ONNX Runtime 1.24 requires TensorRT 10 during decoder quantization.
+ENV ORT_TRT10_LIB_PATH=/usr/local/lib/python3.12/dist-packages/tensorrt_libs

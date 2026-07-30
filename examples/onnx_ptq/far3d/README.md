@@ -2,7 +2,7 @@
 
 This example quantizes the FAR3D image encoder and decoder to INT8 or FP8 with Model Optimizer and evaluates the complete pipeline on the Argoverse 2 validation set. It follows the [NVIDIA DL4AGX FAR3D workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt).
 
-FAR3D uses a legacy PyTorch/MMCV environment that is incompatible with the current Model Optimizer Python dependencies. The provided image uses `nvcr.io/nvidia/pytorch:26.07-py3` for the complete workflow and isolates the legacy FAR3D packages in a Python 3.8 virtual environment.
+FAR3D uses a legacy PyTorch/MMCV environment that is incompatible with the current Model Optimizer Python dependencies. The provided image uses `nvcr.io/nvidia/pytorch:26.07-py3` with TensorRT 11.1 for engine build and evaluation, and isolates the legacy FAR3D packages in a Python 3.8 virtual environment. The TensorRT EP in ONNX Runtime 1.24 requires CUDA 12 and TensorRT 10.11 compatibility libraries during decoder quantization; these libraries are not used to build or run the TensorRT 11.1 engines.
 
 ## 1. Prepare FAR3D and Argoverse 2
 
@@ -101,6 +101,7 @@ The calibration directory contains separate `encoder/` and `decoder/` batches. D
 Use the base Python environment for Model Optimizer:
 
 ```bash
+LD_LIBRARY_PATH="${ORT_TRT10_LIB_PATH}:${LD_LIBRARY_PATH}" \
 python /opt/Model-Optimizer/examples/onnx_ptq/far3d/quantize.py \
   --encoder-onnx far3d.encoder.onnx \
   --decoder-onnx far3d.decoder.onnx \
@@ -147,7 +148,7 @@ Use `--max-samples N` for an inference smoke test. Dataset metrics are skipped w
 
 ## Results on Argoverse 2 validation set
 
-The following results use TensorRT 10.11.0.33 on an NVIDIA RTX 6000 Ada Generation GPU. Model quantization uses PyTorch 2.8.0a0 from the 25.06 PyTorch container, while the FAR3D export and evaluation environment uses PyTorch 1.13.1. Accuracy is measured over all 23,522 validation frames after calibration with 512 batches sampled every 20 frames.
+The following historical results use TensorRT 10.11.0.33 on an NVIDIA RTX 6000 Ada Generation GPU. Model quantization uses PyTorch 2.8.0a0 from the 25.06 PyTorch container, while the FAR3D export and evaluation environment uses PyTorch 1.13.1. Accuracy is measured over all 23,522 validation frames after calibration with 512 batches sampled every 20 frames. These numbers are not directly reproducible with the current 26.07/TensorRT 11.1 image; rerun the workflow to measure the current toolchain.
 
 | Encoder precision | Decoder precision | Framework | GPU compute time (ms) | Accuracy (mAP) |
 | --- | --- | --- | ---: | ---: |
