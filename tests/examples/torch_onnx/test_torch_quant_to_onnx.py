@@ -23,6 +23,7 @@ from _test_utils.examples.run_command import extend_cmd_parts, run_example_comma
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
 _QUANT_MODES = ["fp8", "int8", "mxfp8", "nvfp4", "auto"]
+_RESNET_QUANT_MODES = {"fp8", "int8", "auto"}
 
 _MODELS = {
     "vit_tiny": ("vit_tiny_patch16_224", '{"depth": 1}'),
@@ -32,9 +33,8 @@ _MODELS = {
 }
 
 
-def _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode):
+def _assert_residual_inputs_are_quantized(onnx_save_path):
     model = onnx.load(onnx_save_path)
-    initializers = {initializer.name: initializer for initializer in model.graph.initializer}
     consumers = defaultdict(list)
     producers = {}
     for node in model.graph.node:
@@ -57,71 +57,17 @@ def _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode):
         ]
         assert any(
             node.op_type.endswith("DequantizeLinear")
+            and "/downsample/residual_quantizer/" in node.name
             and producers[node.input[0]].op_type.endswith("QuantizeLinear")
             for node in input_producers
         )
 
-    first_conv = next(node for node in model.graph.node if node.op_type == "Conv")
-    assert all(
-        producers.get(input_name) is None
-        or not producers[input_name].op_type.endswith("DequantizeLinear")
-        for input_name in first_conv.input
-    )
-
-    if quantize_mode not in ("int8", "fp8"):
-        return
-
-    activation_quantizers = [
-        node
-        for node in model.graph.node
-        if node.op_type.endswith("QuantizeLinear") and node.input[0] not in initializers
-    ]
-    assert len(activation_quantizers) == (53 if quantize_mode == "int8" else 52)
-    assert len({node.input[0] for node in activation_quantizers}) == len(activation_quantizers)
-    assert all(
-        producers.get(node.input[0]) is None or producers[node.input[0]].op_type != "Cast"
-        for node in activation_quantizers
-    )
-
-    dq_fanouts = [
-        sorted(consumer.op_type for consumer in consumers[node.output[0]])
-        for node in model.graph.node
-        if node.op_type.endswith("DequantizeLinear")
-    ]
-    assert dq_fanouts.count(["Add", "Conv"]) == 12
-    assert dq_fanouts.count(["Conv", "Conv"]) == 4
-    assert dq_fanouts.count(["Add"]) == 4
-
-    gemm = next(node for node in model.graph.node if node.op_type == "Gemm")
-    assert all(
-        producers.get(input_name) is None
-        or not producers[input_name].op_type.endswith("DequantizeLinear")
-        for input_name in gemm.input
-    )
-
-    global_pool = next(node for node in model.graph.node if node.op_type == "GlobalAveragePool")
-    pool_input_producer = producers[global_pool.input[0]]
-    if quantize_mode == "int8":
-        assert pool_input_producer.op_type.endswith("DequantizeLinear")
-        weight_quantizers = [
-            node
-            for node in model.graph.node
-            if node.op_type.endswith("QuantizeLinear") and node.input[0] in initializers
-        ]
-        assert len(weight_quantizers) == 52
-        assert all(
-            initializers[node.input[0]].data_type == onnx.TensorProto.FLOAT16
-            for node in weight_quantizers
-        )
-    else:
-        assert pool_input_producer.op_type == "Relu"
-
 
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)
 @pytest.mark.parametrize("model_key", list(_MODELS))
-def test_torch_onnx(tmp_path, model_key, quantize_mode):
+def test_torch_onnx(model_key, quantize_mode):
     timm_model_name, model_kwargs = _MODELS[model_key]
-    onnx_save_path = tmp_path / f"{model_key}.{quantize_mode}.onnx"
+    onnx_save_path = f"{model_key}.{quantize_mode}.onnx"
 
     cmd_parts = extend_cmd_parts(
         ["python", "torch_quant_to_onnx.py"],
@@ -135,5 +81,5 @@ def test_torch_onnx(tmp_path, model_key, quantize_mode):
     cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
 
-    if model_key == "resnet50":
-        _assert_residual_adds_are_quantized(onnx_save_path, quantize_mode)
+    if model_key == "resnet50" and quantize_mode in _RESNET_QUANT_MODES:
+        _assert_residual_inputs_are_quantized(onnx_save_path)

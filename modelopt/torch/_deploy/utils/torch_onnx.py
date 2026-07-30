@@ -45,7 +45,6 @@ from modelopt.onnx.export import (
 )
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
-    _convert_q_data_initializers_to_fp16,
     change_casts_to_fp16,
     check_model_uses_external_data,
     fold_dq_fp32_to_fp16_casts,
@@ -666,11 +665,9 @@ def get_onnx_bytes_and_metadata(
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
 
     # Remove Cast nodes around Q/DQ for optimal TRT fusion
-    if is_fp8_quantized(model) or (is_int8_quantized(model) and weights_dtype == "fp16"):
+    if is_fp8_quantized(model):
         onnx_opt_graph = fold_q_fp16_to_fp32_casts(onnx_opt_graph)
         onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
-    if is_int8_quantized(model) and weights_dtype == "fp16":
-        onnx_opt_graph = _convert_q_data_initializers_to_fp16(onnx_opt_graph)
 
     # TensorRT expects all scales to be postive
     onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)

@@ -84,35 +84,6 @@ STATIC_WEIGHT_DYNAMIC_ACTIVATION_CFG = {
 }
 
 
-class _LinearSubclass(torch.nn.Linear):
-    pass
-
-
-def test_parent_class_config_matches_registered_subclass():
-    model = mtq.quantize(
-        _LinearSubclass(4, 4),
-        {
-            "quant_cfg": [
-                {"quantizer_name": "*", "enable": False},
-                {
-                    "parent_class": "nn.Linear",
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": {"num_bits": 7},
-                },
-                {
-                    "parent_class": "nn.Conv2d",
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": {"num_bits": 3},
-                },
-            ],
-            "algorithm": None,
-        },
-    )
-
-    assert model.weight_quantizer.is_enabled
-    assert model.weight_quantizer.num_bits == 7
-
-
 class NewMaxCalibrator(MaxCalibrator):
     def compute_amax(self):
         return 2 * self._calib_amax

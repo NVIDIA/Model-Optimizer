@@ -1015,13 +1015,6 @@ class _DMRegistryCls:
         assert nn_cls_ is not None
         return self._key_registry[nn_cls_]
 
-    def get_registered_class(self, key: str) -> type[nn.Module]:
-        """Retrieve the registered nn.Module class for a string key."""
-        for nn_cls, registered_key in self._key_registry.items():
-            if registered_key == key:
-                return nn_cls
-        raise KeyError(f"{key} is not registered for a dynamic module!")
-
     def get_rule_class(self, nn_cls: type[nn.Module] | str) -> type[ModeloptBaseRule]:
         """Retrieve the rule config class that is registered for a given nn module class."""
         dm_cls = self.get(nn_cls)

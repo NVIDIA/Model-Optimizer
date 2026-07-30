@@ -16,15 +16,10 @@
 """Tests for the FP16 Q/DQ scale cast-folding helpers in ``modelopt.onnx.utils``."""
 
 import numpy as np
-import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.utils import (
-    _convert_q_data_initializers_to_fp16,
-    fold_dq_fp32_to_fp16_casts,
-    fold_q_fp16_to_fp32_casts,
-)
+from modelopt.onnx.utils import fold_dq_fp32_to_fp16_casts, fold_q_fp16_to_fp32_casts
 
 
 def _dq_cast_model(opset):
@@ -51,7 +46,7 @@ def _dq_cast_model(opset):
     )
 
 
-def _cast_q_model(opset, input_dtype=TensorProto.FLOAT16):
+def _cast_q_model(opset):
     """``Cast(FP16→FP32) → Q → DQ → MatMul`` with FP32 scale."""
     nodes = [
         helper.make_node("Cast", ["x"], ["c_out"], "cast", to=TensorProto.FLOAT),
@@ -68,39 +63,8 @@ def _cast_q_model(opset, input_dtype=TensorProto.FLOAT16):
         helper.make_graph(
             nodes,
             "g",
-            [helper.make_tensor_value_info("x", input_dtype, [None, 4])],
+            [helper.make_tensor_value_info("x", TensorProto.FLOAT16, [None, 4])],
             [helper.make_tensor_value_info("y", TensorProto.FLOAT, [None, 4])],
-            initializer=inits,
-        ),
-        opset_imports=[helper.make_opsetid("", opset)],
-    )
-
-
-def _initializer_q_model(opset, shared=False):
-    scale_dtype = np.float16 if opset >= 19 else np.float32
-    nodes = [
-        helper.make_node("QuantizeLinear", ["w", "scale", "zp"], ["q_out"], "q"),
-        helper.make_node("DequantizeLinear", ["q_out", "scale", "zp"], ["dq_out"], "dq"),
-        helper.make_node("MatMul", ["x", "dq_out"], ["y"], "matmul"),
-    ]
-    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT16, [None, 4])]
-    if shared:
-        nodes.append(helper.make_node("Identity", ["w"], ["w_out"], "identity"))
-        outputs.append(helper.make_tensor_value_info("w_out", TensorProto.FLOAT, [4, 4]))
-    inits = [
-        numpy_helper.from_array(np.ones((4, 4), dtype=np.float32), "w"),
-        numpy_helper.from_array(np.array(0.1, dtype=scale_dtype), "scale"),
-        numpy_helper.from_array(np.array(0, dtype=np.int8), "zp"),
-    ]
-    input_dtype = TensorProto.FLOAT16 if opset >= 19 else TensorProto.FLOAT
-    output_dtype = TensorProto.FLOAT16 if opset >= 19 else TensorProto.FLOAT
-    outputs[0].type.tensor_type.elem_type = output_dtype
-    return helper.make_model(
-        helper.make_graph(
-            nodes,
-            "g",
-            [helper.make_tensor_value_info("x", input_dtype, [None, 4])],
-            outputs,
             initializer=inits,
         ),
         opset_imports=[helper.make_opsetid("", opset)],
@@ -133,61 +97,3 @@ def test_fold_is_noop_below_min_opset(fold_fn, build_model, scale_name):
     assert "Cast" in {n.op_type for n in folded.graph.node}
     scale = next(i for i in folded.graph.initializer if i.name == scale_name)
     assert scale.data_type == TensorProto.FLOAT
-
-
-def test_fold_q_preserves_cast_with_non_fp16_source():
-    model = _cast_q_model(opset=19, input_dtype=TensorProto.FLOAT)
-    folded = fold_q_fp16_to_fp32_casts(model)
-    assert "Cast" in {node.op_type for node in folded.graph.node}
-    scale = next(
-        initializer for initializer in folded.graph.initializer if initializer.name == "scale"
-    )
-    assert scale.data_type == TensorProto.FLOAT
-    onnx.checker.check_model(folded)
-
-
-@pytest.mark.parametrize("shared", [False, True])
-def test_convert_q_data_initializers_to_fp16(shared):
-    converted = _convert_q_data_initializers_to_fp16(_initializer_q_model(opset=19, shared=shared))
-    initializers = {initializer.name: initializer for initializer in converted.graph.initializer}
-    q_node = next(node for node in converted.graph.node if node.op_type == "QuantizeLinear")
-
-    assert initializers[q_node.input[0]].data_type == TensorProto.FLOAT16
-    assert initializers[q_node.input[1]].data_type == TensorProto.FLOAT16
-    if shared:
-        identity = next(node for node in converted.graph.node if node.op_type == "Identity")
-        assert identity.input[0] == "w"
-        assert initializers["w"].data_type == TensorProto.FLOAT
-    else:
-        assert q_node.input[0] == "w"
-    onnx.checker.check_model(converted)
-
-
-def test_convert_q_data_initializers_is_noop_below_min_opset():
-    model = _initializer_q_model(opset=18)
-    converted = _convert_q_data_initializers_to_fp16(model)
-    weight = next(
-        initializer for initializer in converted.graph.initializer if initializer.name == "w"
-    )
-    assert weight.data_type == TensorProto.FLOAT
-
-
-def test_convert_q_data_initializers_requires_fp16_scale():
-    model = _initializer_q_model(opset=19)
-    scale = next(
-        initializer for initializer in model.graph.initializer if initializer.name == "scale"
-    )
-    scale.CopyFrom(numpy_helper.from_array(np.array(0.1, dtype=np.float32), "scale"))
-    with pytest.raises(ValueError, match="Q scales must be FP16"):
-        _convert_q_data_initializers_to_fp16(model)
-
-
-def test_convert_q_data_initializers_rejects_fp32_graph_input_scale():
-    model = _initializer_q_model(opset=19)
-    scale = next(
-        initializer for initializer in model.graph.initializer if initializer.name == "scale"
-    )
-    model.graph.initializer.remove(scale)
-    model.graph.input.append(helper.make_tensor_value_info("scale", TensorProto.FLOAT, []))
-    with pytest.raises(ValueError, match="Q scales must be FP16"):
-        _convert_q_data_initializers_to_fp16(model)

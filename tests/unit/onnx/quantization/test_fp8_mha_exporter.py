@@ -40,28 +40,6 @@ def _graph(nodes, inputs, outputs):
     return gs.Graph(nodes=nodes, inputs=inputs, outputs=outputs, opset=19)
 
 
-@pytest.mark.parametrize(
-    ("direct_input", "input_channels", "expected_count"),
-    [(True, 3, 0), (True, 17, 1), (False, 3, 1)],
-)
-def test_quantize_conv_weights_to_fp8_skips_unquantized_rgb_graph_input(
-    direct_input, input_channels, expected_count
-):
-    x = gs.Variable("x", dtype=np.float16, shape=[1, input_channels, 32, 32])
-    conv_input = x
-    nodes = []
-    if not direct_input:
-        conv_input = gs.Variable("conv_input", dtype=np.float16, shape=x.shape)
-        nodes.append(gs.Node(op="Identity", inputs=[x], outputs=[conv_input]))
-
-    weight = gs.Constant("weight", np.ones((64, input_channels, 3, 3), dtype=np.float16))
-    y = gs.Variable("y", dtype=np.float16)
-    nodes.append(gs.Node(op="Conv", inputs=[conv_input, weight], outputs=[y]))
-    graph = _graph(nodes, [x], [y])
-
-    assert FP8QuantExporter._quantize_conv_weights_to_fp8(graph) == expected_count
-
-
 def test_move_mul_before_qdq_rewrites_dq_mul_matmul_pattern():
     """``DQ → Mul(const) → MatMul`` collapses to ``Mul → Q → DQ → MatMul``."""
     x, k, y, mul_out = _var("x"), _var("k"), _var("y"), _var("mul_out")

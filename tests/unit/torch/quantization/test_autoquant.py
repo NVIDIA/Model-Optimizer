@@ -36,17 +36,10 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipe,
     QuantRecipeHparam,
     _AutoQuantizeBaseSearcher,
-    _get_quantizer_attrs,
     _module_search_space_signature,
-    _module_weight_compression,
     estimate_quant_compression,
 )
-from modelopt.torch.quantization.config import (
-    QuantizerAttributeConfig,
-    _base_disable_all,
-    _default_disabled_quantizer_cfg,
-)
-from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
@@ -209,40 +202,6 @@ def test_quant_recipe_hparam_zero_cost_weight():
 
     assert hparam.get_cost(QuantRecipe(quant_cfg=None)) == pytest.approx(0.0)
     assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
-
-
-def test_custom_auto_quantize_attrs_are_explicit():
-    module = torch.nn.Module()
-    module.custom_quantizer = TensorQuantizer()
-    module._auto_quantize_quantizer_attrs = ()
-    assert _get_quantizer_attrs(module) == ()
-
-    module._auto_quantize_quantizer_attrs = ("custom_quantizer",)
-    assert _get_quantizer_attrs(module) == ("custom_quantizer",)
-
-    module._auto_quantize_quantizer_attrs = ("missing_quantizer",)
-    with pytest.raises(AttributeError, match="missing_quantizer"):
-        _get_quantizer_attrs(module)
-
-
-def test_candidate_cost_rejects_mixed_weight_formats():
-    quantizers = {
-        "first_weight_quantizer": TensorQuantizer(QuantizerAttributeConfig(num_bits=8)),
-        "second_weight_quantizer": TensorQuantizer(QuantizerAttributeConfig(num_bits=4)),
-    }
-    with pytest.raises(ValueError, match="different weight formats"):
-        _module_weight_compression(quantizers)
-
-
-def test_candidate_cost_supports_sequential_weight_quantization():
-    recipe = QuantRecipe(mtq.W4A8_AWQ_BETA_CFG)
-    model = mtq.quantize(
-        torch.nn.Linear(4, 16),
-        {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": None},
-    )
-    hparam = QuantRecipeHparam([recipe], quant_modules=[model])
-
-    assert hparam.get_cost(recipe) == pytest.approx(model.weight.numel() * 0.25)
 
 
 def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():

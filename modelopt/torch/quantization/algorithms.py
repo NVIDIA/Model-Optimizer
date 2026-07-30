@@ -52,13 +52,7 @@ from ._auto_quantize_cost import (
 )
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
-from .nn import (
-    QuantLinearConvBase,
-    QuantModule,
-    QuantModuleRegistry,
-    SequentialQuantizer,
-    TensorQuantizer,
-)
+from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized_linear
 
 
@@ -107,17 +101,8 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
 
     For fused MoE experts, this returns the four plural quantizer attrs (two
     shared input quantizers + two ``ModuleList`` of per-expert weight quantizers).
-    Modules can override the canonical trio with ``_auto_quantize_quantizer_attrs``.
+    For standard Linear-derived QuantModules, returns the canonical trio.
     """
-    attr_names = getattr(module, "_auto_quantize_quantizer_attrs", None)
-    if attr_names is not None:
-        missing = [attr_name for attr_name in attr_names if not hasattr(module, attr_name)]
-        if missing:
-            raise AttributeError(
-                f"{type(module).__name__} declares missing AutoQuantize quantizer attributes: "
-                f"{missing}."
-            )
-        return tuple(attr_names)
     if _is_hf_quant_fused_experts_module(module):
         try:
             from .plugins.huggingface import _get_fused_experts_quantizer_attr_names
@@ -125,13 +110,6 @@ def _get_quantizer_attrs(module: nn.Module) -> tuple[str, ...]:
             return _FUSED_EXPERTS_QUANTIZER_ATTRS
         return _get_fused_experts_quantizer_attr_names(module)
     return _STD_QUANTIZER_ATTRS
-
-
-def _get_quant_module_parent_class(module: nn.Module) -> str | None:
-    try:
-        return QuantModuleRegistry.get_key_from_dm(module)
-    except KeyError:
-        return None
 
 
 def _make_fresh_quantizer_for_attr(module: nn.Module, attr_name: str) -> nn.Module:
@@ -183,64 +161,45 @@ def _fixed_module_format_signature(module: nn.Module) -> tuple:
     )
 
 
-def _module_weight_compression(
-    quantizer_attrs: dict[str, nn.Module],
-    effective_bits_override: float | None = None,
-) -> float:
-    def tensor_compression(quantizer):
-        if not quantizer.is_enabled:
-            return 1.0
-        effective_bits = getattr(quantizer, "_effective_bits", None)
-        num_bits = quantizer.num_bits
-        if effective_bits is not None:
-            return effective_bits / 16
-        if isinstance(num_bits, tuple):
-            return (sum(num_bits) + 1) / 16
-        if isinstance(num_bits, int):
-            return num_bits / 16
-        raise ValueError(f"Cannot infer AutoQuantize cost from num_bits={num_bits!r}.")
-
-    def weight_quantizer_compression(quantizer):
-        if isinstance(quantizer, TensorQuantizer):
-            return tensor_compression(quantizer)
-        if isinstance(quantizer, SequentialQuantizer):
-            stage_compressions = [weight_quantizer_compression(stage) for stage in quantizer]
-            return min(stage_compressions, default=1.0)
-        if isinstance(quantizer, nn.ModuleList):
-            parallel_compressions = [weight_quantizer_compression(child) for child in quantizer]
-            if any(
-                abs(value - parallel_compressions[0]) > 1e-12 for value in parallel_compressions[1:]
-            ):
-                raise ValueError(
-                    "A quantization recipe assigns different weight formats within one "
-                    "quantizable module. Use one weight format for the entire module."
-                )
-            return parallel_compressions[0] if parallel_compressions else 1.0
-        raise TypeError(f"Unsupported weight quantizer type {type(quantizer)}.")
-
-    compressions = [
-        weight_quantizer_compression(quantizer)
-        for attr_name, quantizer in quantizer_attrs.items()
-        if "weight_quantizer" in attr_name
-    ]
-    if not compressions or all(value == 1.0 for value in compressions):
-        return 1.0
-
-    if any(abs(value - compressions[0]) > 1e-12 for value in compressions[1:]):
-        raise ValueError(
-            "A quantization recipe assigns different weight formats within one quantizable "
-            "module. Use one weight format for the entire module."
-        )
-    return effective_bits_override / 16 if effective_bits_override is not None else compressions[0]
-
-
 def _fixed_module_weight_compression(
     module: nn.Module, effective_bits_override: float | None = None
 ) -> float:
-    return _module_weight_compression(
-        {attr_name: getattr(module, attr_name) for attr_name in _get_quantizer_attrs(module)},
-        effective_bits_override,
-    )
+    weight_quantizers = []
+    for attr_name in _get_quantizer_attrs(module):
+        if "weight_quantizer" not in attr_name:
+            continue
+        weight_quantizers.extend(_iter_tensor_quantizers(getattr(module, attr_name)))
+
+    if not weight_quantizers or all(not quantizer.is_enabled for quantizer in weight_quantizers):
+        return 1.0
+    if any(not quantizer.is_enabled for quantizer in weight_quantizers):
+        raise ValueError(
+            "The fixed quantize baseline enables only some weight quantizers within one "
+            "quantizable module. Move that module into an explicit AutoQuantize "
+            "module_search_spaces entry."
+        )
+    if effective_bits_override is not None:
+        return effective_bits_override / 16
+
+    compressions = []
+    for quantizer in weight_quantizers:
+        effective_bits = getattr(quantizer, "_effective_bits", None)
+        num_bits = quantizer.num_bits
+        if effective_bits is not None:
+            compressions.append(effective_bits / 16)
+        elif isinstance(num_bits, tuple):
+            compressions.append((sum(num_bits) + 1) / 16)
+        elif isinstance(num_bits, int):
+            compressions.append(num_bits / 16)
+        else:
+            raise ValueError(f"Cannot infer AutoQuantize cost from num_bits={num_bits!r}.")
+
+    if any(abs(value - compressions[0]) > 1e-12 for value in compressions[1:]):
+        raise ValueError(
+            "The fixed quantize baseline assigns different weight formats within one quantizable "
+            "module. Move that module into an explicit AutoQuantize module_search_spaces entry."
+        )
+    return compressions[0]
 
 
 def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
@@ -449,10 +408,6 @@ class QuantRecipeHparam(Hparam):
             name: tuple(_get_replay_quantizer_attr(attr) for attr in _get_quantizer_attrs(module))
             for module, name in zip(quant_modules or [], self.quant_module_names)
         }
-        self.quant_module_parent_classes = {
-            name: _get_quant_module_parent_class(module)
-            for module, name in zip(quant_modules or [], self.quant_module_names)
-        }
         assert cost_weight >= 0.0, "cost_weight must be non-negative."
         self.cost_weight = cost_weight
         self.allow_no_quant = allow_no_quant
@@ -603,23 +558,14 @@ class QuantRecipeHparam(Hparam):
         """
         cost_weight = self.cost_weight if cost_weight is None else cost_weight
         cost = 0
-        quantizer_choices = self._all_quantizer_choices.get(recipe)
         for quant_module in self.quant_modules:
             weight_size = (
                 _AutoQuantizeBaseSearcher._get_total_weight_size([quant_module]) * cost_weight
             )
-            compression = (
-                _module_weight_compression(
-                    quantizer_choices[quant_module],
-                    recipe.config.effective_bits,
-                )
-                if quantizer_choices is not None
-                else recipe.compression
-            )
             parallel_state = getattr(quant_module, "parallel_state", None)
 
             if parallel_state is None:
-                cost += weight_size * compression
+                cost += weight_size * recipe.compression
                 continue
 
             weight_size = DistributedProcessGroup.get_dist_syncd_obj(
@@ -637,7 +583,7 @@ class QuantRecipeHparam(Hparam):
                 [parallel_state.data_parallel_group],
                 lambda a: a[0],
             )
-            cost += weight_size * compression
+            cost += weight_size * recipe.compression
 
         return cost
 
@@ -768,8 +714,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     @staticmethod
     def _is_auto_quantize_module(module):
-        if getattr(module, "_auto_quantize_disabled", False):
-            return False
         if (is_quantized_linear(module) or isinstance(module, QuantLinearConvBase)) and isinstance(
             module, QuantModule
         ):
@@ -1130,7 +1074,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
-            self.candidate_stats[name]["parent_classes"] = hparam.quant_module_parent_classes
             self.candidate_stats[name]["cost_weight"] = hparam.cost_weight
             self.candidate_stats[name]["allow_no_quant"] = hparam.allow_no_quant
             self.candidate_stats[name]["is_fixed"] = hparam.is_fixed
@@ -2069,16 +2012,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         for pattern in _as_list(search_state.get("disabled_layers"))
     )
     per_module_entries: list[dict] = []
-    per_module_attrs = {
+    _per_module_attrs = (
         *_STD_QUANTIZER_ATTRS,
         *_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
         *_NON_GATED_FUSED_EXPERTS_REPLAY_QUANTIZER_ATTRS,
-    }
-    for candidate_stat in search_state["candidate_stats"].values():
-        quantizer_attrs = candidate_stat.get("quantizer_attrs")
-        if isinstance(quantizer_attrs, dict):
-            for attrs in quantizer_attrs.values():
-                per_module_attrs.update(attrs)
+    )
     # Track global (non per-module) recipe entries.  Last recipe wins for each pattern.
     global_entries: dict[str, dict] = {}
 
@@ -2089,16 +2027,10 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         if recipe == QuantRecipe(quant_cfg=None):
             continue
         module_names = candidate_stat["module_names"]
-        parent_classes = candidate_stat.get("parent_classes")
         for module_name in module_names:
-            parent_class = (
-                parent_classes.get(module_name) if isinstance(parent_classes, dict) else None
-            )
             for quantizer_attr in _get_replay_quantizer_attrs(candidate_stat, module_name):
                 matched_cfg, matched_enable = _match_quantizer_cfg(
-                    recipe.config.quant_cfg,
-                    quantizer_attr,
-                    parent_class,
+                    recipe.config.quant_cfg, quantizer_attr
                 )
                 if matched_enable is not None:
                     entry: dict[str, Any] = {
@@ -2112,7 +2044,10 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         # Collect non-per-module entries (e.g. *[kv]_bmm_quantizer) from winning recipes.
         for recipe_entry in recipe.config.quant_cfg:
             pattern = recipe_entry["quantizer_name"]
-            if pattern == "*" or any(fnmatch.fnmatch(attr, pattern) for attr in per_module_attrs):
+            if pattern == "*" or any(
+                fnmatch.fnmatch(attr, pattern) or pattern.endswith(attr)
+                for attr in _per_module_attrs
+            ):
                 continue
             cfg = recipe_entry.get("cfg")
             enable = recipe_entry.get("enable", True)
@@ -2180,29 +2115,22 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     return best_recipe
 
 
-def _match_quantizer_cfg(quant_cfg, quantizer_attr, module_parent_class=None):
+def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     # Last-match-wins to mirror set_quantizer_by_cfg behavior.
-    # AutoQuantize applies each candidate to an isolated module, so only patterns that match
-    # its bare quantizer attribute participate in the per-module candidate.
+    # Patterns may be path-scoped (e.g. "*mlp*weight_quantizer") while quantizer_attr
+    # is a bare name like "weight_quantizer".  We match if the bare name matches directly
+    # OR if the pattern ends with the bare quantizer_attr (path-scoped match).
     matched = None
     matched_enable = None
     for entry in quant_cfg:
         parent_class = entry.get("parent_class") if hasattr(entry, "get") else entry.parent_class
         if parent_class is not None:
-            if module_parent_class is None:
-                continue
-            if parent_class != module_parent_class:
-                try:
-                    module_cls = QuantModuleRegistry.get_registered_class(module_parent_class)
-                    parent_cls = QuantModuleRegistry.get_registered_class(parent_class)
-                except KeyError:
-                    continue
-                if not issubclass(module_cls, parent_cls):
-                    continue
+            continue
         pattern = entry["quantizer_name"]
         cfg = entry.get("cfg")
         enable = entry.get("enable", True)
-        if fnmatch.fnmatch(quantizer_attr, pattern):
+        # Direct match: the bare quantizer_attr matches the whole pattern (e.g. "*weight_quantizer")
+        if fnmatch.fnmatch(quantizer_attr, pattern) or pattern.endswith(quantizer_attr):
             matched = cfg
             matched_enable = enable
 

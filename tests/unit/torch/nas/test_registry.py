@@ -67,9 +67,6 @@ def test_register_unregister():
     assert DMRegistry2.get_key_from_dm(DMRegistry2[nn.Linear]) == "nn.Linear"
     assert DMRegistry2.get_key_from_dm(DMRegistry2[Linear]) == "nn.Linear"
     assert DMRegistry2.get_key_from_dm(DMRegistry2[Linear2]) == "nn.Linear"
-    assert DMRegistry2.get_registered_class("nn.Linear") is nn.Linear
-    with pytest.raises(KeyError):
-        DMRegistry2.get_registered_class("missing")
 
     # unregister nn.Linear (only works with truly registered class)
     with pytest.raises(KeyError):

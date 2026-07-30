@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  fp8: configs/numerics/fp8
+  fp8_model: configs/ptq/presets/model/fp8
+  int8_model: configs/ptq/presets/model/int8
+
+metadata:
+  recipe_type: auto_quantize
+  description: FP8 and INT8 ResNet AutoQuantize with FP8 residual connections.
+
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*residual_quantizer'
+      cfg:
+        $import: fp8
+
+auto_quantize:
+  constraints:
+    effective_bits: 8.0
+  module_search_spaces:
+    - module_name_patterns:
+        - '*'
+      candidate_formats:
+        - $import: fp8_model
+        - $import: int8_model
+      allow_no_quant: false
+  auto_quantize_method: gradient
+  score_size: 128

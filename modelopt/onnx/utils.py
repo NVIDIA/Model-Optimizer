@@ -28,7 +28,6 @@ import onnx
 import onnx_graphsurgeon as gs
 from onnx.helper import get_attribute_value
 from onnx_graphsurgeon import Constant, Node, Variable
-from onnxconverter_common.float16 import convert_np_to_float16
 
 from modelopt.onnx.logging_config import logger
 
@@ -1468,17 +1467,13 @@ def fold_q_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         for inp in node.input:
             consumer_map.setdefault(inp, []).append(node)
     initializers = {init.name: init for init in onnx_model.graph.initializer}
-    tensor_types = _build_tensor_type_map(onnx_model)
 
     to_remove = []
     for node in onnx_model.graph.node:
         if node.op_type != "Cast":
             continue
         cast_to = next((a.i for a in node.attribute if a.name == "to"), None)
-        if (
-            cast_to != onnx.TensorProto.FLOAT
-            or tensor_types.get(node.input[0]) != onnx.TensorProto.FLOAT16
-        ):
+        if cast_to != onnx.TensorProto.FLOAT:
             continue
         consumers = consumer_map.get(node.output[0], [])
         if not consumers or not all(c.op_type in _Q_OPS for c in consumers):
@@ -1494,53 +1489,6 @@ def fold_q_fp16_to_fp32_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     logger.debug(f"Folded {len(to_remove)} Cast(FP16->FP32) -> Q patterns")
     for node in to_remove:
         onnx_model.graph.node.remove(node)
-    return onnx_model
-
-
-def _convert_q_data_initializers_to_fp16(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-    """Convert FP32 initializer data inputs after Q/DQ scales have been normalized to FP16."""
-    if get_opset_version(onnx_model) < BASE_MIN_OPSET:
-        return onnx_model
-
-    consumers: dict[str, list[tuple[onnx.NodeProto, int]]] = defaultdict(list)
-    for node in onnx_model.graph.node:
-        for index, input_name in enumerate(node.input):
-            consumers[input_name].append((node, index))
-
-    initializers = {initializer.name: initializer for initializer in onnx_model.graph.initializer}
-    tensor_types = _build_tensor_type_map(onnx_model)
-
-    for name, initializer in list(initializers.items()):
-        if initializer.data_type != onnx.TensorProto.FLOAT:
-            continue
-
-        initializer_consumers = consumers.get(name, [])
-        q_consumers = [
-            node for node, index in initializer_consumers if index == 0 and node.op_type in _Q_OPS
-        ]
-        if not q_consumers:
-            continue
-
-        for q_node in q_consumers:
-            scale_type = tensor_types.get(q_node.input[1]) if len(q_node.input) >= 2 else None
-            if scale_type != onnx.TensorProto.FLOAT16:
-                raise ValueError("Q scales must be FP16 before converting Q data initializers")
-
-        fp16_initializer = onnx.numpy_helper.from_array(
-            convert_np_to_float16(onnx.numpy_helper.to_array(initializer)), initializer.name
-        )
-        if len(q_consumers) == len(initializer_consumers):
-            initializer.CopyFrom(fp16_initializer)
-            continue
-
-        fp16_initializer.name = f"{initializer.name}_fp16_q"
-        while fp16_initializer.name in initializers:
-            fp16_initializer.name += "_"
-        onnx_model.graph.initializer.append(fp16_initializer)
-        initializers[fp16_initializer.name] = fp16_initializer
-        for node in q_consumers:
-            node.input[0] = fp16_initializer.name
-
     return onnx_model
 
 

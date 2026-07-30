@@ -463,13 +463,13 @@ class TestMatchQuantizerCfg:
         assert matched is None  # enable-only entry has cfg=None
         assert enable is False
 
-    def test_path_scoped_pattern_does_not_match_bare_name(self):
+    def test_path_scoped_pattern_matches_matching_suffix(self):
+        """'*mlp*weight_quantizer' matches bare 'weight_quantizer' (suffix match)."""
         quant_cfg = normalize_quant_cfg_list(
             [{"quantizer_name": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched is None
-        assert enable is None
+        assert matched.model_dump(exclude_unset=True) == {"num_bits": 4}
 
     def test_path_scoped_pattern_does_not_match_different_suffix(self):
         """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
@@ -504,25 +504,6 @@ class TestMatchQuantizerCfg:
             ]
         )
         matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
-        assert matched.model_dump(exclude_unset=True) == {"num_bits": 8}
-        assert enable is True
-
-    def test_parent_class_scoped_entry_matches_persisted_autoquant_parent(self):
-        quant_cfg = normalize_quant_cfg_list(
-            [
-                {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}},
-                {
-                    "parent_class": "nn.Conv2d",
-                    "quantizer_name": "*weight_quantizer",
-                    "cfg": {"num_bits": 8},
-                },
-            ]
-        )
-
-        matched, enable = _match_quantizer_cfg(
-            quant_cfg, "weight_quantizer", module_parent_class="nn.Conv2d"
-        )
-
         assert matched.model_dump(exclude_unset=True) == {"num_bits": 8}
         assert enable is True
 
