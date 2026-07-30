@@ -19,6 +19,7 @@ import os
 import random
 import time
 import warnings
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -1729,13 +1730,19 @@ def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
     )
 
 
-def _start_mlflow_run(logger: MlflowRunLogger, args: argparse.Namespace) -> None:
-    """Open the run before the model loads, so a bad URI fails in seconds not hours."""
+def _mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
+    """Track this invocation for the duration of the block, or do nothing if untracked."""
+    logger = _mlflow_logger(args)
     if not logger.enabled:
         # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        return
+        return nullcontext()
     params, texts = _mlflow_run_inputs(args)
-    logger.start(params=params, tags=_mlflow_run_tags(args), texts=texts)
+    return logger.track(
+        params=params,
+        tags=_mlflow_run_tags(args),
+        texts=texts,
+        files=_mlflow_run_outputs(args),
+    )
 
 
 def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
@@ -1767,40 +1774,18 @@ def main(args: argparse.Namespace):
 
     setup_distributed_args(args)
 
-    mlflow_logger = _mlflow_logger(args)
-
-    status = "FAILED"
     try:
-        # Opened inside the try: start() is fatal by design, and skipping
+        # Entered inside the try: opening the run is fatal by design, and skipping
         # cleanup_distributed would leave the other ranks blocked on the first collective
         # until the NCCL timeout.
-        _start_mlflow_run(mlflow_logger, args)
+        with _mlflow_run(args):
+            # launch a memory monitor to read the currently used GPU memory.
+            launch_memory_monitor()
 
-        # launch a memory monitor to read the currently used GPU memory.
-        launch_memory_monitor()
+            # Force eager execution for all model types.
+            torch.compiler.set_stance("force_eager")
 
-        # Force eager execution for all model types.
-        torch.compiler.set_stance("force_eager")
-
-        (
-            full_model,
-            language_model,
-            model_type,
-            calibration_only,
-            processor,
-            tokenizer,
-            default_padding_side,
-            default_pad_token,
-            device,
-        ) = load_model(args)
-
-        if args.sparsity_fmt != "dense":
-            # Sparse
-            sparsity_main(args, full_model, tokenizer, device)
-        else:
-            # Quantize
-            quantize_main(
-                args,
+            (
                 full_model,
                 language_model,
                 model_type,
@@ -1810,15 +1795,27 @@ def main(args: argparse.Namespace):
                 default_padding_side,
                 default_pad_token,
                 device,
-            )
-        status = "FINISHED"
+            ) = load_model(args)
+
+            if args.sparsity_fmt != "dense":
+                # Sparse
+                sparsity_main(args, full_model, tokenizer, device)
+            else:
+                # Quantize
+                quantize_main(
+                    args,
+                    full_model,
+                    language_model,
+                    model_type,
+                    calibration_only,
+                    processor,
+                    tokenizer,
+                    default_padding_side,
+                    default_pad_token,
+                    device,
+                )
     finally:
-        try:
-            cleanup_distributed(args)
-        finally:
-            # Nested so a failure tearing down the process group cannot leave the run
-            # stuck in RUNNING on the server.
-            mlflow_logger.finish(status, files=_mlflow_run_outputs(args))
+        cleanup_distributed(args)
 
 
 if __name__ == "__main__":

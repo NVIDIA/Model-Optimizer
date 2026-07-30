@@ -127,10 +127,12 @@ dev-test = [
 ]
 # Compound extras via self-references
 mlflow = [ # Dependencies for modelopt.torch.utils.mlflow run tracking
-    "mlflow-skinny", # client only; the tracking server's own deps are not needed here
+    "mlflow-skinny>=2.9", # client only; the tracking server's own deps are not needed here
 ]
 
-all = ["nvidia-modelopt[onnx,hf,puzzletron,mlflow]"]
+# mlflow is deliberately not in `all`: it is opt-in tracking for the examples, and the
+# full client would land in the documented `nvidia-modelopt[all]` install path.
+all = ["nvidia-modelopt[onnx,hf,puzzletron]"]
 dev = ["nvidia-modelopt[all,mlflow,dev-docs,dev-lint,dev-test]"]
 
 [project.urls]

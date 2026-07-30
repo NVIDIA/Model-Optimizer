@@ -466,6 +466,77 @@ def test_git_sha_is_read_without_a_subprocess():
     assert "subprocess" not in dir(sys.modules["modelopt.torch.utils.mlflow"])
 
 
+@pytest.mark.parametrize("in_worktree", [False, True])
+def test_git_sha_resolves_in_a_checkout_and_a_worktree(tmp_path, monkeypatch, in_worktree):
+    """A worktree's .git is a *file* pointing at the real git dir, and its refs live in the
+    main checkout -- a directory-only reader silently reports "unknown" for every worktree."""
+    main = tmp_path / "repo" / ".git"
+    (main / "refs" / "heads").mkdir(parents=True)
+    (main / "refs" / "heads" / "main").write_text("a" * 40 + "\n")
+
+    if in_worktree:
+        checkout = tmp_path / "wt"
+        wt_git = main / "worktrees" / "wt"
+        wt_git.mkdir(parents=True)
+        (wt_git / "HEAD").write_text("ref: refs/heads/main\n")
+        (wt_git / "commondir").write_text("../..\n")
+        checkout.mkdir()
+        (checkout / ".git").write_text(f"gitdir: {wt_git}\n")
+    else:
+        checkout = main.parent
+        (main / "HEAD").write_text("ref: refs/heads/main\n")
+
+    # _git_sha locates .git relative to the module file, three parents up.
+    fake_module = checkout / "modelopt" / "torch" / "utils" / "mlflow.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.touch()
+    monkeypatch.setattr("modelopt.torch.utils.mlflow.__file__", str(fake_module))
+
+    assert _git_sha() == "a" * 9
+
+
+def test_git_sha_handles_a_detached_head(tmp_path, monkeypatch):
+    git_dir = tmp_path / "repo" / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "HEAD").write_text("b" * 40 + "\n")
+    fake_module = tmp_path / "repo" / "modelopt" / "torch" / "utils" / "mlflow.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.touch()
+    monkeypatch.setattr("modelopt.torch.utils.mlflow.__file__", str(fake_module))
+
+    assert _git_sha() == "b" * 9
+
+
+def test_track_closes_the_run_with_the_right_status(fake_mlflow, monkeypatch):
+    """Mirrors mlflow.start_run(): the block's outcome decides the status."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+
+    with _logger().track(params={"qformat": "nvfp4"}):
+        pass
+
+    assert fake_mlflow.status == "FINISHED"
+    assert fake_mlflow.params == {"qformat": "nvfp4"}
+
+
+def test_track_marks_a_raising_block_failed(fake_mlflow, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    (tmp_path / ".quant_summary.txt").write_text("706 TensorQuantizers\n")
+    stdout = sys.stdout
+
+    summary = {"summary/quant_summary.txt": tmp_path / ".quant_summary.txt"}
+    with (
+        pytest.raises(RuntimeError, match="calibration exploded"),
+        _logger().track(files=summary),
+    ):
+        raise RuntimeError("calibration exploded")
+
+    assert fake_mlflow.status == "FAILED"
+    assert sys.stdout is stdout
+    # The outputs named upfront are still uploaded, and the traceback is in the log.
+    assert ("quant_summary.txt", "summary") in fake_mlflow.artifacts
+    assert "RuntimeError: calibration exploded" in fake_mlflow.artifact_text["hf_ptq.log"]
+
+
 def test_failed_run_uploads_the_traceback(fake_mlflow, monkeypatch):
     """finish() runs from the caller's finally, before the interpreter prints the traceback,
     so without help the log stops at the last line the script printed."""

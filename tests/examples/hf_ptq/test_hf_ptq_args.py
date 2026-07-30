@@ -310,10 +310,10 @@ def test_untracked_runs_do_not_gather_mlflow_inputs(monkeypatch):
     calls = []
     monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
 
-    logger = hf_ptq._mlflow_logger(args)
-    hf_ptq._start_mlflow_run(logger, args)
+    with hf_ptq._mlflow_run(args):
+        pass
 
-    assert not logger.enabled
+    assert not hf_ptq._mlflow_logger(args).enabled
     assert calls == []
 
 
@@ -330,10 +330,10 @@ def test_non_main_ranks_do_not_open_a_run(monkeypatch):
     calls = []
     monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
 
-    logger = hf_ptq._mlflow_logger(args)
-    hf_ptq._start_mlflow_run(logger, args)
+    with hf_ptq._mlflow_run(args):
+        pass
 
-    assert not logger.enabled
+    assert not hf_ptq._mlflow_logger(args).enabled
     assert calls == []
 
 

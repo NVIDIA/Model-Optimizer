@@ -31,7 +31,8 @@ import sys
 import tempfile
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -145,22 +146,34 @@ def _git_sha() -> str:
     """Short commit of the ModelOpt source, or ``"unknown"`` outside a git checkout.
 
     Read out of ``.git`` rather than by shelling out to ``git``, which keeps the library
-    free of subprocess use.
+    free of subprocess use. Handles worktrees, where ``.git`` is a file pointing at the
+    real git directory and refs live in the main checkout alongside it.
     """
-    git_dir = Path(__file__).resolve().parents[3] / ".git"
     try:
+        git_path = Path(__file__).resolve().parents[3] / ".git"
+        if git_path.is_file():
+            git_dir = Path(git_path.read_text().split("gitdir:", 1)[1].strip())
+        else:
+            git_dir = git_path
         head = (git_dir / "HEAD").read_text().strip()
         if not head.startswith("ref: "):
             return head[:9]  # detached HEAD
         ref = head.removeprefix("ref: ")
-        loose = git_dir / ref
-        if loose.is_file():
-            return loose.read_text().strip()[:9]
-        for line in (git_dir / "packed-refs").read_text().splitlines():
-            sha, _, name = line.partition(" ")
-            if name.strip() == ref:
-                return sha[:9]
-    except OSError:
+        # A worktree keeps HEAD locally but shares refs with the checkout named by commondir.
+        bases = [git_dir]
+        commondir = git_dir / "commondir"
+        if commondir.is_file():
+            bases.append((git_dir / commondir.read_text().strip()).resolve())
+        for base in bases:
+            if (base / ref).is_file():
+                return (base / ref).read_text().strip()[:9]
+            packed = base / "packed-refs"
+            if packed.is_file():
+                for line in packed.read_text().splitlines():
+                    sha, _, name = line.partition(" ")
+                    if name.strip() == ref:
+                        return sha[:9]
+    except (OSError, IndexError):
         pass
     return "unknown"
 
@@ -273,6 +286,32 @@ class MlflowRunLogger:
             self._abort_run()
             self._stop_capture()
             raise
+
+    @contextmanager
+    def track(
+        self,
+        params: dict[str, Any] | None = None,
+        tags: dict[str, Any] | None = None,
+        texts: dict[str, str] | None = None,
+        files: Mapping[str, Path | str] | None = None,
+        metrics: dict[str, float] | None = None,
+    ) -> Iterator["MlflowRunLogger"]:
+        """Open the run for the duration of the block, closing it with the right status.
+
+        Mirrors ``mlflow.start_run()``. *files* and *metrics* are uploaded when the block
+        exits -- their paths are known upfront, and any file that does not exist is skipped.
+
+        Example:
+            >>> with logger.track(params={"model": ckpt}, files={"summary.txt": report}):
+            ...     quantize_and_export()
+        """
+        self.start(params=params, tags=tags, texts=texts)
+        status = "FAILED"
+        try:
+            yield self
+            status = "FINISHED"
+        finally:
+            self.finish(status, files=files, metrics=metrics)
 
     def _abort_run(self) -> None:
         """End a run that failed before :meth:`start` returned, so it is not left RUNNING."""
