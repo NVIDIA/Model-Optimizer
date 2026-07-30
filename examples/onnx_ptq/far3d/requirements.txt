@@ -16,5 +16,5 @@ onnxsim
 opencv-python==4.5.5.64
 refile
 setuptools<81
-tensorrt-cu12-bindings==10.11.0.33
+tensorrt-cu13-bindings==11.1.0.106
 yapf==0.32.0

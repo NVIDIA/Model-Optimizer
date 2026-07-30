@@ -2,7 +2,7 @@
 
 This example quantizes the FAR3D image encoder and decoder to INT8 or FP8 with Model Optimizer and evaluates the complete pipeline on the Argoverse 2 validation set. It follows the [NVIDIA DL4AGX FAR3D workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt).
 
-FAR3D uses a legacy PyTorch/MMCV environment that is incompatible with the current Model Optimizer Python dependencies. The provided image uses `nvcr.io/nvidia/pytorch:25.06-py3` for the complete workflow and isolates the legacy FAR3D packages in a Python 3.8 virtual environment.
+FAR3D uses a legacy PyTorch/MMCV environment that is incompatible with the current Model Optimizer Python dependencies. The provided image uses `nvcr.io/nvidia/pytorch:26.07-py3` for the complete workflow and isolates the legacy FAR3D packages in a Python 3.8 virtual environment.
 
 ## 1. Prepare FAR3D and Argoverse 2
 

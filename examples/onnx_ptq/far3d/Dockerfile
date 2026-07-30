@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Pinned to TensorRT 10.11 to match the DL4AGX reference and documented results.
-FROM nvcr.io/nvidia/pytorch:25.06-py3
+# Pinned to TensorRT 11.1 for a reproducible build.
+FROM nvcr.io/nvidia/pytorch:26.07-py3
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
@@ -44,6 +44,7 @@ RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
         /opt/far3d/lib/python3.8/site-packages/tensorrt/tensorrt.so
 
 COPY . /opt/Model-Optimizer
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/tensorrt_libs:${LD_LIBRARY_PATH}
 RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
         -r /tmp/far3d-requirements/requirements-modelopt-onnx.txt && \
     cd /opt/Model-Optimizer && \
