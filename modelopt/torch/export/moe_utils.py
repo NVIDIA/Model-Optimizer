@@ -45,6 +45,141 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
             delattr(module, attr)
 
 
+def _export_fused_experts_keep_fused(module: nn.Module, dtype: torch.dtype) -> None:
+    """Fold per-expert quantizers into the FUSED 3-D expert weights *in place*, staying sharded.
+
+    Distributed (DCP) counterpart to :func:`_export_fused_experts`. That function slices the fused
+    weight into full per-expert tensors -- under FSDP2 it must first all-gather the ``Shard(0)``
+    fused weight (via the export handler's ``unshard``) and then materializes every expert on every
+    rank, putting the whole model on each GPU (OOMs at 235B/480B). This keeps each projection a
+    single fused param: on a ``Shard(0)`` DTensor it quantizes ONLY this rank's local experts
+    (``to_local()`` + the DTensor's dim-0 global offset for the matching per-expert weight quantizer)
+    and rewraps the result ``Shard(0)``, so the model stays sharded and DCP writes per-rank shards.
+    On a plain tensor (single process) it quantizes all ``num_experts`` -- identical to the in-model
+    path. Quantizing the fused ``<proj>[i]`` slice with its per-expert quantizer is byte-identical to
+    the split-then-quantize, so ``_export_fused_experts_keep_fused`` + :func:`split_fused_experts_state_dict`
+    reproduce :func:`_export_fused_experts`'s output exactly. Registers, per projection ``P``:
+    ``module.<P>`` (quantized fused weight), ``module.<P>_weight_scale`` (stacked per-expert scales),
+    ``module.<P>_weight_scale_2`` (NVFP4 per-expert scalar), ``module.<P>_input_scale`` (shared).
+    """
+    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+
+    try:
+        from torch.distributed.tensor import DTensor, Replicate, Shard
+    except Exception:  # pragma: no cover - non-distributed install
+        DTensor = None
+    try:
+        from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+    except Exception:  # pragma: no cover - older torch: fall back to even-split offset
+        compute_local_shape_and_global_offset = None
+
+    first = getattr(module, "_first_proj_attr", "gate_up_proj")
+    n = module.num_experts
+    for proj in (first, "down_proj"):
+        weight = getattr(module, proj)
+        weight_quantizers = getattr(module, f"{proj}_weight_quantizers")
+        input_quantizer = getattr(module, f"{proj}_input_quantizer", None)
+
+        # Under FSDP2 the fused 3-D weight is a DTensor sharded on dim 0 (the expert axis). Quantize
+        # ONLY this rank's local experts and rewrap the result sharded identically -- indexing the
+        # DTensor (weight[i]) would all-gather the whole fused weight onto every rank, de-sharding
+        # the model and OOMing the GPU at scale. Plain tensor (single process): all experts.
+        wdata = weight.data
+        is_dt = DTensor is not None and isinstance(wdata, DTensor)
+        if is_dt:
+            mesh, placements = wdata.device_mesh, wdata.placements
+            local_w = wdata.to_local()
+            offset = None
+            if compute_local_shape_and_global_offset is not None:
+                try:
+                    _, global_offset = compute_local_shape_and_global_offset(
+                        tuple(wdata.shape), mesh, placements
+                    )
+                    offset = int(global_offset[0])
+                except Exception:
+                    offset = None
+            if offset is None:  # even-split fallback (dim-0 Shard on a 1-D mesh)
+                offset, nshards = 0, 1
+                for mdim, p in enumerate(placements):
+                    if isinstance(p, Shard) and p.dim == 0:
+                        nshards = mesh.size(mdim)
+                        offset = mesh.get_local_rank(mdim) * ((n + nshards - 1) // nshards)
+                        break
+            scale_placements = [
+                p if (isinstance(p, Shard) and p.dim == 0) else Replicate() for p in placements
+            ]
+            local_indices = list(range(offset, offset + local_w.shape[0]))
+        else:
+            local_w = wdata
+            local_indices = list(range(n))
+
+        fp8_weights: list[torch.Tensor] = []
+        weight_scales: list[torch.Tensor] = []
+        weight_scale_2s: list[torch.Tensor] = []
+        input_scale: torch.Tensor | None = None
+        for local_idx, global_idx in enumerate(local_indices):
+            w_quantizer = weight_quantizers[global_idx]
+            w_slice = local_w[local_idx]
+            # Uncalibrated-expert fallback: derive amax from this expert's local weight slice
+            # (matches _export_fused_experts), so a never-routed expert still exports sane scales.
+            if (
+                hasattr(w_quantizer, "is_enabled")
+                and w_quantizer.is_enabled
+                and (
+                    not hasattr(w_quantizer, "_amax")
+                    or w_quantizer._amax is None
+                    or torch.all(w_quantizer._amax == 0)
+                )
+            ):
+                w_quantizer.amax = w_slice.abs().amax().to(torch.float32)
+                warnings.warn(
+                    f"Expert {global_idx} {proj} weight quantizer was not calibrated (amax missing "
+                    f"or zero); using weight-derived amax. Increase calibration size to activate all "
+                    f"experts.",
+                    stacklevel=2,
+                )
+            wrapper = nn.Module()
+            wrapper.weight = nn.Parameter(w_slice.contiguous(), requires_grad=False)
+            wrapper.weight_quantizer = w_quantizer
+            if input_quantizer is not None:
+                wrapper.input_quantizer = input_quantizer
+            _export_quantized_weight(wrapper, dtype)
+            fp8_weights.append(wrapper.weight.data)
+            weight_scales.append(wrapper.weight_scale)
+            # NVFP4 carries a SECOND per-tensor weight scale (weight_scale_2) that dequantizes the
+            # per-block weight_scale; FP8 has none. Keep it so the fused buffer (and the per-expert
+            # split) stay dequantizable.
+            if hasattr(wrapper, "weight_scale_2"):
+                weight_scale_2s.append(wrapper.weight_scale_2)
+            if hasattr(wrapper, "input_scale"):
+                input_scale = wrapper.input_scale
+        local_fp8 = torch.stack(fp8_weights, dim=0)
+        local_ws = torch.stack(weight_scales, dim=0)
+        if is_dt:
+            local_fp8 = DTensor.from_local(local_fp8, mesh, placements, run_check=False)
+            local_ws = DTensor.from_local(local_ws, mesh, scale_placements, run_check=False)
+        setattr(module, proj, nn.Parameter(local_fp8, requires_grad=False))
+        module.register_buffer(f"{proj}_weight_scale", local_ws)
+        if weight_scale_2s:
+            # Per-expert scalar (E,) -- shards on the expert axis exactly like the weight scale.
+            local_ws2 = torch.stack(weight_scale_2s, dim=0)
+            if is_dt:
+                local_ws2 = DTensor.from_local(local_ws2, mesh, scale_placements, run_check=False)
+            module.register_buffer(f"{proj}_weight_scale_2", local_ws2)
+        if input_scale is not None:
+            module.register_buffer(f"{proj}_input_scale", input_scale)
+
+    # Drop the quantizer modules -- their info now lives in the fused weight + scale buffers.
+    for attr in (
+        f"{first}_weight_quantizers",
+        f"{first}_input_quantizer",
+        "down_proj_weight_quantizers",
+        "down_proj_input_quantizer",
+    ):
+        if hasattr(module, attr):
+            delattr(module, attr)
+
+
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,

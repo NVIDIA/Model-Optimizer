@@ -24,7 +24,7 @@ from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .model_config import QUANTIZATION_NONE
-from .moe_utils import _export_fused_experts
+from .moe_utils import _export_fused_experts, _export_fused_experts_keep_fused
 from .quant_utils import get_quantization_format
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
@@ -132,9 +132,17 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
 
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
+
+    Distributed no-gather export (``ctx.keep_fused_experts``) folds the quantizers into the fused
+    weight IN PLACE, quantizing only this rank's local experts and keeping the result ``Shard(0)`` --
+    the per-expert split happens later on the sharded weight (``split_fused_experts_state_dict``).
+    Otherwise (single process, or gather export) it splits into full per-expert submodules here.
     """
     with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-        _export_fused_experts(module, ctx.dtype)
+        if ctx.keep_fused_experts:
+            _export_fused_experts_keep_fused(module, ctx.dtype)
+        else:
+            _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
