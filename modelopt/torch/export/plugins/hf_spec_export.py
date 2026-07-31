@@ -29,6 +29,23 @@ from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_
 
 ALL_SPEC_MODES = ["eagle", "dflash"]
 
+
+def _get_rope_theta(config, default=None):
+    """Get RoPE theta from either legacy or Transformers 5 config fields."""
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
+
+    # Transformers 5 stores this under rope_parameters (and exposes the same
+    # data through rope_scaling for backwards compatibility).
+    for attr in ("rope_parameters", "rope_scaling"):
+        rope_config = getattr(config, attr, None)
+        if isinstance(rope_config, dict) and rope_config.get("rope_theta") is not None:
+            return rope_config["rope_theta"]
+
+    return default
+
+
 LLAMA_EAGLE_SINGLE_LAYER = {
     "required": {
         "layers.0.self_attn.q_proj",
@@ -376,14 +393,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "initializer_range": getattr(base_config, "initializer_range", 0.02),
             "attention_bias": getattr(draft_config, "attention_bias", False),
             "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
-            # Inherit the target's rope_theta: DFlash injects the target's KV into every
-            # draft layer, so the draft's RoPE base must match the target's. (The draft
-            # arch config carries no rope_theta of its own.)
-            "rope_theta": (
-                getattr(base_config, "rope_theta", None)
-                if getattr(base_config, "rope_theta", None) is not None
-                else getattr(draft_config, "rope_theta", 1000000.0)
-            ),
+            # Inherit the target's RoPE base: DFlash injects target KV into every draft
+            # layer, so their RoPE bases must match. Transformers 5 stores rope_theta
+            # in rope_parameters rather than a top-level config attribute.
+            "rope_theta": _get_rope_theta(base_config, _get_rope_theta(draft_config, 1000000.0)),
             # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,

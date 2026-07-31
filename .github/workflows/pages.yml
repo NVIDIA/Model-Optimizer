@@ -54,9 +54,12 @@ jobs:
               - '.github/workflows/pages.yml'
 
   deploy-preview:
+    # Fork PRs get a read-only GITHUB_TOKEN regardless of the `permissions:` block
+    # above, so pushing the preview to gh-pages would fail with a 403. Skip them.
     if: |
       always() &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action == 'closed' || needs.changes.outputs.docs == 'true')
     needs: [build-docs, changes]
     runs-on: ubuntu-latest
