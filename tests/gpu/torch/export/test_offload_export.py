@@ -37,9 +37,10 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
 
 
-def _make_cpu_offloaded_model(tmp_path, num_hidden_layers=3):
+def _make_cpu_offloaded_model(tmp_path, num_hidden_layers=3, tiny_llama_dir=None):
     """Tiny LLaMA with first decoder layer offloaded to CPU, rest on GPU."""
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_hidden_layers)
+    if tiny_llama_dir is None:
+        tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_hidden_layers)
     config = AutoConfig.from_pretrained(tiny_llama_dir)
 
     with init_empty_weights():
@@ -117,3 +118,77 @@ def test_export_hf_checkpoint_cpu_offloaded(tmp_path, quant_cfg):
                         f"All-zero weight tensor '{key}' in {st_file.name} — "
                         "possible meta tensor serialization bug"
                     )
+
+
+def _read_shards(export_dir):
+    """Map every exported tensor key to its (shape, dtype), unioned across shards."""
+    tensors = {}
+    for st_file in sorted(export_dir.glob("*.safetensors")):
+        with safe_open(str(st_file), framework="pt") as st:
+            for key in st.keys():  # noqa: SIM118
+                t = st.get_tensor(key)
+                assert key not in tensors, f"Duplicate key '{key}' across shards"
+                tensors[key] = (tuple(t.shape), t.dtype)
+
+    index_path = export_dir / "model.safetensors.index.json"
+    if index_path.exists():
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        assert set(weight_map) == set(tensors), "index weight_map disagrees with shard contents"
+        for shard_name in set(weight_map.values()):
+            assert (export_dir / shard_name).exists(), f"Indexed shard '{shard_name}' missing"
+    return tensors
+
+
+@pytest.mark.parametrize("max_shard_size", ["10GB", "5KB"])
+def test_streaming_export_matches_batch_export(tmp_path, max_shard_size):
+    """The offloaded streaming path must emit the same tensors as the resident batch path.
+
+    Every other assertion in this file iterates only the keys that were written, so none
+    of them can see a tensor going *missing* -- which is how the dropped ``mtp.*`` tensors
+    were found. The streaming exporter reimplements much of ``_export_transformers_checkpoint``
+    plus ``postprocess_state_dict`` per tensor, so the two can drift silently.
+
+    Both models load the same checkpoint, so key/shape/dtype parity is exact. Values are
+    not compared: layer 0 calibrates on CPU in the offloaded model and on GPU in the
+    resident one, and that alone can shift an amax in the last bits.
+
+    The ``5KB`` case additionally drives multi-shard index generation through the real
+    export path (``_StreamingShardWriter`` is otherwise only tested in isolation). The
+    whole tiny export is ~28KB, so anything larger stays single-shard and would silently
+    skip that coverage.
+    """
+    llama_dir = create_tiny_llama_dir(tmp_path / "src", num_hidden_layers=3)
+
+    def forward_loop(m):
+        ids = torch.randint(0, m.config.vocab_size, (1, 32)).cuda()
+        with torch.no_grad():
+            m(ids)
+
+    def _export(model, subdir):
+        model.eval()
+        mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
+        export_dir = tmp_path / subdir
+        export_dir.mkdir()
+        export_hf_checkpoint(model, export_dir=str(export_dir), max_shard_size=max_shard_size)
+        return _read_shards(export_dir)
+
+    offloaded, _cfg, _dir = _make_cpu_offloaded_model(
+        tmp_path / "offloaded", tiny_llama_dir=llama_dir
+    )
+    offloaded_tensors = _export(offloaded, "export_offloaded")
+
+    resident = AutoModelForCausalLM.from_pretrained(llama_dir).cuda()
+    resident_tensors = _export(resident, "export_resident")
+
+    missing = set(resident_tensors) - set(offloaded_tensors)
+    extra = set(offloaded_tensors) - set(resident_tensors)
+    assert not missing, f"Streaming export dropped {len(missing)} tensor(s): {sorted(missing)}"
+    assert not extra, f"Streaming export emitted {len(extra)} unexpected tensor(s): {sorted(extra)}"
+
+    mismatched = {
+        k: (resident_tensors[k], offloaded_tensors[k])
+        for k in resident_tensors
+        if resident_tensors[k] != offloaded_tensors[k]
+    }
+    assert not mismatched, f"shape/dtype drift between export paths: {mismatched}"

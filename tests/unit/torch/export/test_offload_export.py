@@ -31,9 +31,15 @@ except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.quant_utils import _postprocess_single_tensor
+from modelopt.torch.export.model_config import KV_CACHE_FP8
+from modelopt.torch.export.quant_utils import _postprocess_single_tensor, sync_tied_input_amax
 from modelopt.torch.export.registry import ExportContext
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight, _StreamingShardWriter
+from modelopt.torch.export.unified_export_hf import (
+    _export_quantized_weight,
+    _parse_shard_size,
+    _StreamingShardWriter,
+)
+from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.utils import core_utils
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 
@@ -272,8 +278,6 @@ def test_postprocess_output_quantizer_dropped():
 
 def test_postprocess_kv_scale_renamed_and_divided():
     """k_bmm_quantizer._amax is renamed to k_proj.k_scale and divided by maxbound."""
-    from modelopt.torch.export.model_config import KV_CACHE_FP8
-
     key, val = _postprocess_single_tensor(
         "model.layers.0.self_attn.k_bmm_quantizer._amax",
         torch.tensor(224.0),
@@ -294,8 +298,6 @@ def test_postprocess_scale_squeezed():
 
 def test_postprocess_real_quant_param_dropped():
     """Keys matching RealQuantLinear scale tensors are dropped."""
-    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
-
     for q_key in RealQuantLinear.list_of_scale_tensors:
         full_key = f"model.layers.0.weight_quantizer.{q_key}"
         key, val = _postprocess_single_tensor(full_key, torch.tensor(1.0), 448.0, None)
@@ -347,8 +349,6 @@ def test_sync_tied_input_amax_skips_offloaded_modules():
     Every meta tensor reports ``data_ptr() == 0``, so without the residency guard
     these two unrelated Linears land in one group and both get amax 9.0.
     """
-    from modelopt.torch.export.quant_utils import sync_tied_input_amax
-
     model = nn.Module()
     model._tied_weights_keys = {"b.weight": "a.weight"}
     model.a = _MetaLinearWithInputQuantizer(1.0)
@@ -422,3 +422,26 @@ def test_tied_weights_exported_independently_without_cache():
 
     assert first.weight.data_ptr() != second.weight.data_ptr()
     assert torch.equal(first.weight, second.weight)
+
+
+# ---------------------------------------------------------------------------
+# _parse_shard_size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        (1234, 1234),
+        ("1234", 1234),
+        # transformers' convert_file_size_to_int reads GB/MB as decimal, GiB/MiB as binary
+        ("10GB", 10 * 1000**3),
+        ("500MB", 500 * 1000**2),
+        ("100KB", 100 * 1000),
+        ("10GiB", 10 * 1024**3),
+        ("500MiB", 500 * 1024**2),
+        ("100KiB", 100 * 1024),
+    ],
+)
+def test_parse_shard_size_units(size, expected):
+    assert _parse_shard_size(size) == expected

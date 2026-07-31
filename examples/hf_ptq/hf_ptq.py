@@ -1707,6 +1707,21 @@ def parse_args() -> argparse.Namespace:
             "GPU, CPU, and disk."
         )
 
+    if args.offload_folder is not None and args.device == "cpu":
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --device cpu; "
+            "device_map=cpu makes accelerate ignore the memory budgets and offload folder, "
+            "loading the whole model into RAM."
+        )
+
+    if args.offload_folder is None and (
+        args.max_cpu_memory_gb is not None or args.max_gpu_memory_gb is not None
+    ):
+        parser.error(
+            "--max_cpu_memory_gb/--max_gpu_memory_gb only apply to disk-offload loading; "
+            "pass --offload_folder to enable it."
+        )
+
     return args
 
 

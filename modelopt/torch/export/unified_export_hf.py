@@ -991,7 +991,13 @@ class _StreamingShardWriter:
 
 
 def _parse_shard_size(size: int | str) -> int:
-    """Convert a shard-size string (e.g. ``"10GB"``, ``"500MB"``) to bytes."""
+    """Convert a shard-size string (e.g. ``"10GB"``, ``"500MB"``) to bytes.
+
+    Mirrors transformers' ``convert_file_size_to_int``, which reads ``GB``/``MB``/``KB``
+    as decimal and only ``GiB``/``MiB``/``KiB`` as binary. That helper was removed from
+    ``transformers.utils`` in transformers 5.x, so the fallback below is the live path
+    there, not a rarely-taken branch.
+    """
     try:
         from transformers.utils import convert_file_size_to_int
 
@@ -1001,15 +1007,33 @@ def _parse_shard_size(size: int | str) -> int:
     if isinstance(size, int):
         return size
     s = size.strip().upper()
-    if s.endswith("GIB"):
-        return int(float(s[:-3]) * 1024**3)
-    if s.endswith("GB"):
-        return int(float(s[:-2]) * 1024**3)
-    if s.endswith("MIB"):
-        return int(float(s[:-3]) * 1024**2)
-    if s.endswith("MB"):
-        return int(float(s[:-2]) * 1024**2)
+    for suffix, multiplier in (
+        ("GIB", 1024**3),
+        ("MIB", 1024**2),
+        ("KIB", 1024),
+        ("GB", 1000**3),
+        ("MB", 1000**2),
+        ("KB", 1000),
+    ):
+        if s.endswith(suffix):
+            return int(float(s[: -len(suffix)]) * multiplier)
     return int(s)
+
+
+def _assert_no_split_rules(model: nn.Module) -> None:
+    """Refuse to stream a model whose conversion mapping needs tensor-level splits."""
+    from .quant_aware_conversion import _build_reverse_rules
+
+    try:
+        split_rules, _, _ = _build_reverse_rules(model)
+    except Exception:
+        return  # build_reverse_name_mapper reports the failure with a warning
+    if split_rules:
+        raise NotImplementedError(
+            "Disk/CPU-offloaded export cannot reverse tensor-level split rules in this "
+            "model's transformers conversion mapping: the streaming path reverses names "
+            "per tensor, while splits need the full state dict. Export without offloading."
+        )
 
 
 def _export_transformers_checkpoint_streaming(
@@ -1109,6 +1133,11 @@ def _export_transformers_checkpoint_streaming(
 
     # --- Name mapper for per-tensor key reversal ---
     # Tensor names are applied inline; quant config names are handled by the caller.
+    # Renames are all a per-tensor pass can reverse. The batch path additionally runs
+    # revert_weight_conversion_quant_aware() for split rules, which need the whole state
+    # dict to regroup tensors, so refuse rather than emit fused tensors under unfused
+    # hub keys.
+    _assert_no_split_rules(model)
     name_mapper = None
     try:
         name_mapper = build_reverse_name_mapper(model)
