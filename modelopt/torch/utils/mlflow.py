@@ -20,6 +20,7 @@ be reproduced from its MLflow entry alone. ``mlflow`` is an optional dependency,
 only once tracking is actually enabled.
 """
 
+import contextlib
 import getpass
 import logging
 import os
@@ -55,6 +56,15 @@ _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _SECRET_NAME = re.compile(r"token|api[-_]?key|password|passwd|secret|credential", re.IGNORECASE)
 _URI_USERINFO = re.compile(r"(?<=://)[^/\s@]+(?=@)")
 _MASK = "***"
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    """Identity of a file's contents-in-time, or ``None`` when it does not exist."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _redact(value: Any) -> Any:
@@ -245,7 +255,8 @@ class MlflowRunLogger:
         self._run: Any = None
         self._log_path: Path | None = None
         self._saved_streams: tuple | None = None
-        self._redirected_handlers: list[tuple[logging.StreamHandler, Any]] = []
+        self._tees: tuple | None = None
+        self._file_stats: dict[str, tuple[int, int] | None] = {}
         self._start_time = 0.0
 
     @property
@@ -262,12 +273,15 @@ class MlflowRunLogger:
         params: dict[str, Any] | None = None,
         tags: dict[str, Any] | None = None,
         texts: dict[str, str] | None = None,
+        files: Mapping[str, Path | str] | None = None,
     ) -> None:
         """Open the run: capture output, verify the server, upload the inputs.
 
         *params* are searchable; *tags* merge over the defaults (user, hostname, ModelOpt
         version and commit); *texts* maps artifact path to content, uploaded here rather
-        than at the end so it survives a crash.
+        than at the end so it survives a crash. *files* names the outputs the run is
+        expected to produce, so :meth:`finish` can tell them from files that were already
+        there -- pass the same mapping to both.
 
         Raises:
             ImportError: If ``mlflow`` is not installed.
@@ -276,6 +290,7 @@ class MlflowRunLogger:
         if not self.enabled or self._run is not None:
             return
         self._start_time = time.time()
+        self._file_stats = {str(p): _stat_key(Path(p)) for p in (files or {}).values()}
         self._start_capture()
         try:
             self._open_run()
@@ -299,13 +314,14 @@ class MlflowRunLogger:
         """Open the run for the duration of the block, closing it with the right status.
 
         Mirrors ``mlflow.start_run()``. *files* and *metrics* are uploaded when the block
-        exits -- their paths are known upfront, and any file that does not exist is skipped.
+        exits; naming the paths upfront is fine because only files this run actually wrote
+        are uploaded (see :meth:`finish`).
 
         Example:
             >>> with logger.track(params={"model": ckpt}, files={"summary.txt": report}):
             ...     quantize_and_export()
         """
-        self.start(params=params, tags=tags, texts=texts)
+        self.start(params=params, tags=tags, texts=texts, files=files)
         status = "FAILED"
         try:
             yield self
@@ -333,8 +349,10 @@ class MlflowRunLogger:
         """Upload the run's outputs and close it with *status*, e.g. ``"FINISHED"``.
 
         *texts* and *files* both map artifact path to content, from memory and from disk
-        respectively; a *files* entry whose file is absent is skipped, so callers can list
-        optional outputs. *metrics* merges over the default ``total_time_s``.
+        respectively. A *files* entry is skipped when its file is absent, or was last
+        modified before the run started -- so callers can list optional outputs, and a run
+        that produced none of them does not upload a previous run's leftovers.
+        *metrics* merges over the default ``total_time_s``.
         """
         if not self.enabled or self._run is None:
             self._stop_capture()
@@ -429,8 +447,16 @@ class MlflowRunLogger:
         if self._log_path is not None:
             self._log_file(f"logs/{self._log_path.name}", self._log_path)
         for artifact_path, local in (files or {}).items():
-            if Path(local).is_file():
-                self._log_file(artifact_path, Path(local))
+            path = Path(local)
+            if not path.is_file():
+                continue
+            # Only what this run produced: an export directory is commonly reused across
+            # attempts, so a run that crashes early would otherwise upload the previous
+            # run's summary as its own. Compared against the stat taken when the run opened
+            # rather than against the wall clock, whose resolution outruns the filesystem's.
+            if str(path) in self._file_stats and self._file_stats[str(path)] == _stat_key(path):
+                continue
+            self._log_file(artifact_path, path)
 
     def _log_texts(self, texts) -> None:
         for artifact_path, text in (texts or {}).items():
@@ -456,33 +482,41 @@ class MlflowRunLogger:
         sink = open(self._log_path, "w", buffering=1, encoding="utf-8")
         stdout, stderr = sys.stdout, sys.stderr
         self._saved_streams = (stdout, stderr, sink)
-        sys.stdout, sys.stderr = TeeStream(stdout, sink), TeeStream(stderr, sink)
-        self._redirect_log_handlers({stdout: sys.stdout, stderr: sys.stderr})
+        self._tees = (TeeStream(stdout, sink), TeeStream(stderr, sink))
+        sys.stdout, sys.stderr = self._tees
+        self._repoint_handlers({stdout: self._tees[0], stderr: self._tees[1]})
         print(f"[mlflow] capturing this run's log to {self._log_path}")
 
-    def _redirect_log_handlers(self, replacements: dict) -> None:
-        """Point already-configured logging handlers at the tee.
+    @staticmethod
+    def _repoint_handlers(replacements: dict) -> None:
+        """Move already-configured logging handlers from one stream to another.
 
-        Libraries such as transformers and huggingface_hub bind ``sys.stderr`` into a
-        ``StreamHandler`` when they are imported, which happens long before the capture
-        starts; without this their warnings reach the console but never the log.
+        transformers and huggingface_hub bind ``sys.stderr`` into a ``StreamHandler`` when
+        they are imported, long before the capture starts; without this their warnings reach
+        the console but never the log. Scanning again on the way out -- rather than replaying
+        a list captured on the way in -- also hands back handlers a library bound *during*
+        the run, so nothing is left pointing at the tee once its file is closed.
         """
-        self._redirected_handlers = []
-        loggers = [logging.getLogger(), *logging.Logger.manager.loggerDict.values()]
+        loggers = [logging.getLogger(), *list(logging.Logger.manager.loggerDict.values())]
         for logger in loggers:
-            for handler in getattr(logger, "handlers", []):
-                if isinstance(handler, logging.StreamHandler) and handler.stream in replacements:
-                    self._redirected_handlers.append((handler, handler.stream))
+            for handler in list(getattr(logger, "handlers", [])):
+                if not isinstance(handler, logging.StreamHandler):
+                    continue
+                if handler.stream not in replacements:
+                    continue
+                # logging._StderrHandler exposes ``stream`` as a read-only property that
+                # already resolves to whatever sys.stderr currently is, so it follows the tee
+                # on its own and cannot -- and must not -- be repointed.
+                with contextlib.suppress(AttributeError):
                     handler.setStream(replacements[handler.stream])
 
     def _stop_capture(self) -> None:
-        # Only handlers seen at start are handed back; any registered since keeps writing to the
-        # tee, which is why TeeStream tolerates a closed sink rather than raising on it.
         if self._saved_streams is None:
             return
-        for handler, stream in self._redirected_handlers:
-            handler.setStream(stream)
-        self._redirected_handlers = []
+        stdout, stderr, _ = self._saved_streams
+        if self._tees is not None:
+            self._repoint_handlers({self._tees[0]: stdout, self._tees[1]: stderr})
+            self._tees = None
         sys.stdout, sys.stderr, sink = self._saved_streams
         sink.close()
         self._saved_streams = None

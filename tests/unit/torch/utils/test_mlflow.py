@@ -316,6 +316,25 @@ def test_capture_includes_preconfigured_library_logging(fake_mlflow, monkeypatch
     assert handler.stream is sys.stderr
 
 
+def test_capture_hands_back_handlers_bound_during_the_run(fake_mlflow, monkeypatch):
+    """A library imported mid-run binds sys.stderr -- which is the tee at that point. Restoring
+    only the handlers seen at start would leave it writing to a closed file forever."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    logger = _logger()
+    late = logging.getLogger("test_bound_during_run")
+
+    logger.start()
+    handler = logging.StreamHandler(sys.stderr)  # sys.stderr is the tee here
+    late.addHandler(handler)
+    try:
+        logger.finish("FINISHED")
+        assert handler.stream is sys.stderr
+        assert not isinstance(handler.stream, TeeStream)
+        late.warning("after the run")  # must not raise on a closed sink
+    finally:
+        late.removeHandler(handler)
+
+
 def test_logger_restores_streams_and_reports_failure(fake_mlflow, monkeypatch):
     """A failed run is still recorded, with its log attached."""
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
@@ -520,7 +539,6 @@ def test_track_closes_the_run_with_the_right_status(fake_mlflow, monkeypatch):
 
 def test_track_marks_a_raising_block_failed(fake_mlflow, monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
-    (tmp_path / ".quant_summary.txt").write_text("706 TensorQuantizers\n")
     stdout = sys.stdout
 
     summary = {"summary/quant_summary.txt": tmp_path / ".quant_summary.txt"}
@@ -528,6 +546,8 @@ def test_track_marks_a_raising_block_failed(fake_mlflow, monkeypatch, tmp_path):
         pytest.raises(RuntimeError, match="calibration exploded"),
         _logger().track(files=summary),
     ):
+        # post_quantize writes the summary during the run, so the test must too.
+        (tmp_path / ".quant_summary.txt").write_text("706 TensorQuantizers\n")
         raise RuntimeError("calibration exploded")
 
     assert fake_mlflow.status == "FAILED"
@@ -564,3 +584,22 @@ def test_successful_run_uploads_no_traceback(fake_mlflow, monkeypatch):
     logger.finish("FINISHED")
 
     assert "Traceback" not in fake_mlflow.artifact_text["hf_ptq.log"]
+
+
+def test_only_files_this_run_produced_are_uploaded(fake_mlflow, tmp_path, monkeypatch):
+    """An export directory is reused across attempts. A run that crashes before writing its
+    summary must not upload the previous run's file as though it were its own."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    stale = tmp_path / ".quant_summary.txt"
+    stale.write_text("from a previous run\n")
+    fresh = tmp_path / ".moe.html"
+    logger = _logger()
+
+    outputs = {"summary/quant_summary.txt": stale, "summary/moe.html": fresh}
+    logger.start(files=outputs)
+    fresh.write_text("<html>written by this run</html>")  # produced during the run
+    logger.finish("FAILED", files=outputs)
+
+    uploaded = [name for name, _ in fake_mlflow.artifacts]
+    assert "moe.html" in uploaded
+    assert "quant_summary.txt" not in uploaded
