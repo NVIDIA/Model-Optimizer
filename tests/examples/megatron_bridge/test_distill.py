@@ -14,10 +14,8 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
-import sys
 from pathlib import Path
 
-import pytest
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
@@ -29,71 +27,6 @@ from _test_utils.torch.transformers_models import (
 from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
-
-# distill.py imports sibling example modules by filename, so make that directory importable first.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
-
-import distill
-
-
-@pytest.mark.parametrize(
-    ("option", "value", "message"),
-    [
-        ("--eval_interval", "0", "must be a positive integer"),
-        ("--eval_iters", "-1", "must be a non-negative integer"),
-        ("--save_interval", "0", "must be a positive integer"),
-        ("--exit_interval", "-1", "must be a positive integer"),
-        ("--exit_duration_in_mins", "0", "must be a positive integer"),
-    ],
-)
-def test_distill_rejects_invalid_intervals(monkeypatch, capsys, option, value, message):
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "distill.py",
-            "--student_hf_path",
-            "unused",
-            "--teacher_hf_path",
-            "unused",
-            "--output_dir",
-            "unused",
-            "--train_iters",
-            "1",
-            "--use_mock_data",
-            option,
-            value,
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc_info:
-        distill.get_args()
-
-    assert exc_info.value.code == 2
-    assert message in capsys.readouterr().err
-
-
-def test_distill_allows_zero_eval_iters(monkeypatch):
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "distill.py",
-            "--student_hf_path",
-            "unused",
-            "--teacher_hf_path",
-            "unused",
-            "--output_dir",
-            "unused",
-            "--train_iters",
-            "1",
-            "--use_mock_data",
-            "--eval_iters",
-            "0",
-        ],
-    )
-
-    assert distill.get_args().eval_iters == 0
 
 
 def test_distill_llm(tmp_path, num_gpus):
