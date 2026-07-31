@@ -117,7 +117,7 @@ class WizardState:
                 "Choose a new directory or use --resume."
             )
         campaign_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "wizard_version": WIZARD_VERSION,
             "defaults_path": (
