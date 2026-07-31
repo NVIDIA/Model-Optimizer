@@ -75,8 +75,14 @@ with `localhost` for a single local host.
 
 ### Setup wizard v2
 
-The new schema-driven wizard keeps the existing entry point unchanged and adds
-local defaults-versus-customize decisions at every section:
+The schema-driven wizard now starts with a guided setup profile:
+
+- **Quick smoke** is the fastest way to verify that the campaign shape is valid.
+- **Balanced pruning** is recommended for a first real campaign.
+- **High-confidence search** spends more runtime on scoring and sanity checks.
+
+The selected profile supplies nested pruning and MIP defaults. Setup then asks
+only for the model, dataset, and other values that cannot be derived safely:
 
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py \
@@ -85,9 +91,17 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 
 The example defaults use only repository-relative values. Copy the file and add
 site-specific data, scheduler, and container settings before selecting it.
-Defaults are loaded only when passed explicitly. Selection prompts have
-a visible **← Back** action; text and numeric prompts accept `:back`. Every
-accepted answer and the exact navigation frame are saved in
+The defaults file is loaded only when passed explicitly and takes precedence
+over the selected profile. To expose every per-section and nested setting, use
+the advanced flow explicitly:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py --full
+```
+
+Press **Esc** to go back from any prompt. Selection prompts also show a visible
+**← Back** action, and text or numeric prompts continue to accept `:back`.
+Every accepted answer and the exact navigation frame are saved in
 `answers_v2.yaml`, so an interrupted session can resume with:
 
 ```bash

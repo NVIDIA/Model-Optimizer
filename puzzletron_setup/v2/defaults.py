@@ -163,13 +163,15 @@ class DefaultsResolver:
         *,
         builtins: Mapping[str, Any] | None = None,
         model_derived: Mapping[str, Any] | None = None,
+        preset_defaults: Mapping[str, Any] | None = None,
         file_defaults: Mapping[str, Any] | None = None,
         preserved: Mapping[str, Any] | None = None,
     ) -> None:
-        """Build the ordered builtin, model, file, and preserved default layers."""
+        """Build the ordered builtin, model, preset, file, and preserved layers."""
         self._default_layers = (
             ("builtin", dict(builtins or {})),
             ("model", dict(model_derived or {})),
+            ("preset", dict(preset_defaults or {})),
             ("defaults_file", dict(file_defaults or {})),
         )
         self._file_defaults = dict(file_defaults or {})

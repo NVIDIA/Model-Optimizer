@@ -20,9 +20,12 @@ class WizardSession:
         self,
         state: WizardState,
         backend: PromptBackend | None = None,
+        *,
+        guided: bool = False,
     ) -> None:
         self.state = state
         self.backend = backend or InteractiveBackend()
+        self.guided = bool(guided)
         self._section = "campaign"
         self._collection: str | None = None
         self._item_id: str | None = None

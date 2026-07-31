@@ -103,6 +103,8 @@ class WizardState:
         campaign_dir: Path,
         *,
         defaults_path: Path | None,
+        setup_mode: str = "full",
+        preset: str | None = None,
     ) -> WizardState:
         campaign_dir = Path(campaign_dir).expanduser().resolve()
         if campaign_dir.exists() and any(campaign_dir.iterdir()):
@@ -119,6 +121,10 @@ class WizardState:
                 if defaults_path is not None
                 else None
             ),
+            "setup": {
+                "mode": str(setup_mode),
+                "preset": str(preset) if preset is not None else None,
+            },
             "fields": {},
             "navigation": {"frames": [], "cursor": None},
             "collections": {},
@@ -164,6 +170,23 @@ class WizardState:
     def defaults_path(self) -> Path | None:
         value = self.payload.get("defaults_path")
         return Path(str(value)) if value else None
+
+    @property
+    def setup_mode(self) -> str:
+        """Return the persisted guided or full interaction mode."""
+        setup = self.payload.get("setup")
+        if not isinstance(setup, Mapping):
+            return "full"
+        return str(setup.get("mode", "full"))
+
+    @property
+    def preset(self) -> str | None:
+        """Return the persisted guided preset name, if any."""
+        setup = self.payload.get("setup")
+        if not isinstance(setup, Mapping):
+            return None
+        value = setup.get("preset")
+        return str(value) if value else None
 
     def field(self, path: str) -> FieldRecord:
         try:

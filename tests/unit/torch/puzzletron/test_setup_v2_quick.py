@@ -1,0 +1,266 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import questionary
+from prompt_toolkit.keys import Keys
+
+from puzzletron_setup.v2.cli import _parser
+from puzzletron_setup.v2.defaults import DefaultsResolver
+from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
+from puzzletron_setup.v2.prompts import (
+    BACK,
+    InteractiveBackend,
+    PromptChoice,
+    ScriptedBackend,
+    _bind_escape_back,
+)
+from puzzletron_setup.v2.session import WizardSession
+from puzzletron_setup.v2.state import WizardState
+from puzzletron_setup.v2.wizard import (
+    _CUSTOM_DATA_SOURCE,
+    _fresh_state,
+    _section_action,
+    data_section,
+)
+
+
+def _context():
+    return {
+        "model": SimpleNamespace(
+            inventory=SimpleNamespace(multimodal=False),
+        )
+    }
+
+
+def test_guided_profiles_explain_cost_and_supply_nested_defaults():
+    assert [preset.name for preset in QUICK_SETUP_PRESETS] == [
+        "smoke",
+        "balanced",
+        "high-confidence",
+    ]
+    assert "recommended" in get_setup_preset("balanced").choice_title.lower()
+
+    resolver = DefaultsResolver(
+        builtins={"pruning": {"bypass": {"enabled": True}}},
+        preset_defaults=get_setup_preset("smoke").resolved_defaults(),
+    )
+
+    resolved = resolver.resolve_default("pruning.bypass.enabled")
+    assert resolved.value is False
+    assert resolved.source == "preset"
+
+
+def test_explicit_defaults_override_guided_profile():
+    resolver = DefaultsResolver(
+        preset_defaults={"mip": {"num_solutions": 2}},
+        file_defaults={"mip": {"num_solutions": 5}},
+    )
+
+    resolved = resolver.resolve_default("mip.num_solutions")
+    assert resolved.value == 5
+    assert resolved.source == "defaults_file"
+
+
+def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
+    campaign = tmp_path / "campaign"
+    state = _fresh_state(
+        ScriptedBackend(["balanced", str(campaign)]),
+        None,
+        full=False,
+    )
+
+    assert state.setup_mode == "quick"
+    assert state.preset == "balanced"
+    assert _parser().parse_args([]).full is False
+    assert _parser().parse_args(["--full"]).full is True
+
+
+def test_legacy_state_without_setup_metadata_resumes_in_full_mode(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.payload.pop("setup")
+    state.save()
+
+    resumed = WizardState.resume(state.path)
+
+    assert resumed.setup_mode == "full"
+    assert resumed.preset is None
+
+
+def test_guided_data_asks_only_for_source_and_uses_nested_defaults(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    backend = ScriptedBackend([_CUSTOM_DATA_SOURCE, str(dataset)])
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.wizard.infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
+    )
+
+    assert data_section(
+        WizardSession(state, backend, guided=True),
+        DefaultsResolver(
+            preset_defaults=get_setup_preset("balanced").resolved_defaults(),
+            file_defaults={
+                "data": {
+                    "layout": "padded",
+                    "sequence_length": 2048,
+                }
+            },
+        ),
+        _context(),
+    )
+
+    assert backend.remaining == 0
+    assert state.get_field("data.source") == str(dataset.resolve())
+    assert state.get_field("data.modality") == "text"
+    assert state.get_field("data.layout") == "padded_varlen"
+    assert state.get_field("data.sequence_length") == 2048
+    assert state.field("data.layout").source == "defaults_file"
+
+
+def test_guided_section_uses_profile_without_action_prompt(tmp_path):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    backend = ScriptedBackend([])
+    session = WizardSession(state, backend, guided=True)
+
+    action = _section_action(
+        session,
+        "mip",
+        "Configure the search.",
+        {"num_solutions": 8},
+    )
+
+    assert action == "defaults"
+    assert backend.remaining == 0
+
+
+def test_full_section_keeps_the_existing_customize_prompt(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    backend = ScriptedBackend(["customize"])
+
+    action = _section_action(
+        WizardSession(state, backend),
+        "mip",
+        "Configure the search.",
+        {"num_solutions": 8},
+    )
+
+    assert action == "customize"
+    assert backend.remaining == 0
+
+
+def test_back_reasks_the_previous_prompt_with_replay_intact(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    backend = ScriptedBackend(["one", "two", BACK, "revised"])
+    session = WizardSession(state, backend)
+    session.begin("data")
+
+    assert session.text("data.one", "One:") == "one"
+    assert session.text("data.two", "Two:") == "two"
+    assert session.text("data.three", "Three:") is BACK
+    target = session.consume_back_target()
+    assert target is not None
+    assert target.prompt_id == "data.two"
+
+    session.begin("data")
+    assert session.text("data.one", "One:") == "one"
+    assert session.text("data.two", "Two:") == "revised"
+    assert backend.remaining == 0
+
+
+def test_escape_returns_back_for_text_select_and_checkbox(monkeypatch):
+    questions = []
+
+    class _Bindings:
+        def __init__(self):
+            self.handlers = {}
+
+        def add(self, key, eager=False):
+            assert eager
+
+            def register(handler):
+                self.handlers[key] = handler
+                return handler
+
+            return register
+
+    class _Application:
+        def __init__(self):
+            self.key_bindings = _Bindings()
+            self.result = None
+
+        def exit(self, *, result):
+            self.result = result
+
+    class _Question:
+        def __init__(self):
+            self.application = _Application()
+            questions.append(self)
+
+        def ask(self):
+            event = SimpleNamespace(app=self.application)
+            self.application.key_bindings.handlers["escape"](event)
+            return self.application.result
+
+    class _Questionary:
+        @staticmethod
+        def Style(value):  # noqa: N802 - mirrors questionary's public constructor
+            return value
+
+        @staticmethod
+        def Choice(**kwargs):  # noqa: N802 - mirrors questionary's public constructor
+            return kwargs
+
+        @staticmethod
+        def Separator(value):  # noqa: N802 - mirrors questionary's public constructor
+            return value
+
+        @staticmethod
+        def text(*args, **kwargs):
+            return _Question()
+
+        @staticmethod
+        def select(*args, **kwargs):
+            return _Question()
+
+        @staticmethod
+        def checkbox(*args, **kwargs):
+            return _Question()
+
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.prompts._questionary",
+        lambda: _Questionary(),
+    )
+    backend = InteractiveBackend()
+
+    assert backend.text("Text:", "") is BACK
+    assert backend.select("Select:", [PromptChoice("One", 1)], 1) is BACK
+    assert backend.checkbox("Checkbox:", [PromptChoice("One", 1)], [1]) is BACK
+    assert len(questions) == 3
+
+
+def test_escape_binding_supports_questionary_merged_text_bindings():
+    question = questionary.text("Text:")
+    assert not hasattr(question.application.key_bindings, "add")
+
+    _bind_escape_back(question)
+
+    bindings = question.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
+    assert bindings

@@ -97,8 +97,8 @@ def test_data_choices_include_first_class_sources_and_deduplicate_default():
 
     assert [choice.title for choice in choices] == [
         f"Default — {_PUZZLE_KD_DATA_SOURCE}",
-        "NVIDIA Nemotron-VLM v2 (image-text)",
-        "Custom local path or Hugging Face dataset",
+        "NVIDIA Nemotron-VLM v2: recommended image-text dataset",
+        "Custom dataset: choose a local path or Hugging Face dataset",
     ]
 
 

@@ -28,6 +28,14 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Explicit versioned defaults YAML; never discovered automatically.",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "Expose every advanced section and nested setting. "
+            "Without this flag, setup uses a guided profile."
+        ),
+    )
     return parser
 
 
@@ -39,6 +47,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         campaign = run_wizard_v2(
             resume=args.resume,
             defaults_path=args.defaults,
+            full=args.full,
         )
     except KeyboardInterrupt:
         target = args.resume or "<campaign>"
