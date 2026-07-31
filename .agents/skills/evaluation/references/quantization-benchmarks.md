@@ -3,15 +3,20 @@
 When evaluating a quantized checkpoint, prioritize benchmarks that are sensitive
 to precision loss. The Artificial Analysis (AA) Index v2 suite under
 `recipes/tasks/aa/` is the default set for quantized-checkpoint validation.
+**GDPVal** (`recipes/tasks/aa_gym/gdpval.md`) is also part of the AA suite, but a
+different harness (NeMo Gym) — it runs as a **separate standalone config**, never
+merged into the `aa/` multi-task list.
 
 **Scope rule:**
 
 - **Default quant validation** (when the user just says "evaluate this
-  quantized checkpoint"): use the AA suite plus the three always-include
-  benchmarks at `recipes/tasks/*.md` (MMLU-Pro, AIME 2025, LiveCodeBench).
+  quantized checkpoint"): use the AA suite — the `aa/` tasks **plus a standalone
+  GDPVal config** — plus the three always-include benchmarks at
+  `recipes/tasks/*.md` (MMLU-Pro, AIME 2025, LiveCodeBench).
 - **Explicit AA request** ("AA" / "Artificial Analysis" / "AA Index v2"):
-  use **only** `recipes/tasks/aa/`. Do not add the three always-include
-  tasks unless the user asks. See the callout at the bottom of this file.
+  use the `aa/` tasks **and** a companion standalone GDPVal config. Do not add
+  the three always-include tasks unless the user asks. See the callout at the
+  bottom of this file.
 
 ## Available task recipes
 
@@ -28,6 +33,7 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 | `tasks/aa/mmmu_pro.md` | MMMU-Pro | Multimodal reasoning | VLM-only; usually Low/Medium when only the LLM is quantized (vision encoder/adapter typically stay BF16) |
 | `tasks/aa/tau2_bench_telecom.md` | Tau2-Bench Telecom | Agentic tool use (user-simulator + judge) | Medium-high — tool-call JSON is brittle, but user-sim + judge variance often dominates the signal |
 | `tasks/aa/omniscience.md` | AA-Omniscience | Knowledge reliability (`ns_omniscience`, nemo-skills, `num_repeats: 10`) — correct vs hallucinate vs abstain on obscure facts, judge-scored | Medium — measures the hallucination/abstention balance; aggressive precision loss can erode factual recall and shift the omni-index |
+| `tasks/aa_gym/gdpval.md` | GDPVal (`nemo_gym` Stirrup agent, **standalone config**) | Agentic office/PDF deliverables in an Apptainer code-exec sandbox, pairwise/rubric judge | High — long-horizon agentic reasoning + code + judge; precision loss compounds across many turns. **Heaviest task**: multi-hour, often multi-node, needs the SIF sandbox + judge. Runs as its own config, never in the `aa/` list |
 
 ## Recommended sets by use case
 
@@ -35,15 +41,17 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 |----------|-----------|
 | Quick sanity check | GPQA |
 | Standard quant validation (text LLM) | GPQA, SciCode, LCR |
-| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom, AA-Omniscience |
-| AA / Artificial Analysis suite (multimodal) | AA text suite + MMMU-Pro |
+| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom, AA-Omniscience — **plus GDPVal** (`tasks/aa_gym/`, a separate standalone config) |
+| AA / Artificial Analysis suite (multimodal) | AA text suite (incl. GDPVal) + MMMU-Pro |
 | Code-focused model | LiveCodeBench, SciCode |
 | Reasoning model | AIME 2025, GPQA, HLE |
 
-> If the user asks for "AA" or "Artificial Analysis", generate **only** tasks
-> under `recipes/tasks/aa/`. Do not silently add MMLU-Pro, AIME 2025, or
-> LiveCodeBench — they live at `recipes/tasks/*.md` and are a separate
-> always-include set.
+> If the user asks for "AA" or "Artificial Analysis", generate the
+> `recipes/tasks/aa/` tasks **plus a companion standalone GDPVal config**
+> (`recipes/tasks/aa_gym/gdpval.md`) — GDPVal is part of the AA suite but a
+> different harness, so it's its own config, never in the `aa/` `tasks` list. Do
+> not silently add MMLU-Pro, AIME 2025, or LiveCodeBench — they live at
+> `recipes/tasks/*.md` and are a separate always-include set.
 
 ## Notes for quantized-checkpoint runs
 
@@ -62,6 +70,14 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
   apples-to-apples comparison.
 - **IFBench** is the least quant-sensitive in the set but still useful as a
   regression check for aggressive formats (NVFP4, INT4-AWQ).
+- **GDPVal** is part of the AA suite but the heaviest task and a separate
+  harness: it runs as its **own standalone `aa_gym` config** (never in the `aa/`
+  `tasks` list), needs the Apptainer SIF sandbox + judge, and is multi-hour /
+  often multi-node. Generate it alongside the `aa/` config; see
+  `recipes/tasks/aa_gym/gdpval.md` + `references/gym-gdpval.md`. Thinking mode is
+  mandatory (non-thinking loses ~86% of pairwise judgements). For low-variance
+  quant comparisons keep the golden `num_repeats: 2` — the example template
+  defaults to 1 to halve cost, so bump it back to 2 for quant validation.
 
 ## How to use
 

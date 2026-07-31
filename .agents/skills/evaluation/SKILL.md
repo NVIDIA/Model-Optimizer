@@ -49,6 +49,29 @@ Steps 1–9 below are the 0.2.6 path — use them for everything else.
 
 ---
 
+### GDPVal (NeMo Gym "Stirrup" agent) path — branch here too
+
+GDPVal **does** run on the 0.2.6 `nel` launcher (as a `nemo_gym` task, not
+nel-next), so Steps 1–9 apply — but it is mechanically special and **standalone**
+(one gym eval per config; never mix it with `aa/` tasks). If the user asks for
+GDPVal:
+
+1. Read **`references/gym-gdpval.md`** (Apptainer SIF sandbox, `_gym_prepare.yaml`
+   machinery, deploy sizing, rubric-vs-comparison scoring, MLflow deliverables trap,
+   failure modes) + **`recipes/tasks/aa_gym/gdpval.md`**.
+2. Start from the self-contained **`recipes/examples/gym_gdpval/`** dir — copy the
+   **whole dir** (the `_gym_prepare.yaml` include must travel next to the config).
+3. Prerequisite: set `GDPVAL_SIF_DIR` in `.env`, then ensure the SIF exists with
+   `.agents/scripts/gdpval-sif.sh` (uses `$GDPVAL_SIF_DIR`; build-if-absent,
+   reuse-if-present, no cross-cluster copy). The config bind-mounts `$GDPVAL_SIF_DIR`
+   at exactly `/gdpval/sif/python-3.12.gdpval.sif`, or the agent silently runs
+   unsandboxed. `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
+   `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR`, and `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the
+   config has a `pre_cmd`). Thinking mode is mandatory (non-thinking loses ~86%).
+4. Dry-run → canary (`limit_samples=2`, verify the SIF sandbox + judge) → full.
+
+---
+
 ### Step 1 — Prerequisites
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
@@ -62,8 +85,9 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 - AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
 - **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require nemo-evaluator-next (0.3.x); `aa/` is the 0.2.6 suite.
+- **GDPVal (NeMo Gym / agentic)** — **part of the AA suite** but a 0.2.6 `nemo_gym` task on a different harness, so it's **standalone** (see the GDPVal branch above): recipe `recipes/tasks/aa_gym/gdpval.md` + shared reference `references/gym-gdpval.md` + self-contained example `recipes/examples/gym_gdpval/`. Generated as its **own config** from the example, **never merged into the `aa/` multi-task `tasks` list**. The `aa_gym/` dir holds the NeMo Gym Stirrup-agent tasks.
 
-**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate **only** tasks under `recipes/tasks/aa/`. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked.
+**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/aa_gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
 
 **Shortcut path** (when task list is known up front, e.g. "run AA"):
 

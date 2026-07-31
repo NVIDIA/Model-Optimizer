@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Shared prepare/teardown snippets — include via: defaults: [_gym_prepare, _self_]
+#
+# Compensates for the eval image's deployment-oriented packaging when run
+# standalone. Interpolate into each benchmark's command:
+#   ${gym_prepare.prepare}  at the start (activate venv, checkout pin, repair venvs)
+#   ${gym_prepare.run}       as the last line (data prep + rollout collection run in
+#                            its own session, then process-group reaped so the run
+#                            finalizes — see the run: comment for why)
+# Remove once the eval image ships complete, ray-consistent venvs and Gym's
+# shutdown reaps server process groups.
+
+gym_prepare:
+  # Common command preamble shared by every benchmark: activate the baked Gym
+  # venv, optionally checkout the install_on_the_fly pin (only when /opt/Gym is a
+  # git repo; baked images aren't), then repair the image's incomplete per-server
+  # venvs. The repair: (1) rewrites each component requirements.txt — drops the
+  # editable "-e nemo-gym[dev]" line (it forces a ray>=2.55.1 re-resolve vs the
+  # image's pinned ray 2.49.2, breaking venv-less servers like arena_judge) and
+  # ensures ray==2.49.2 + tqdm; (2) installs the fixed requirements into each
+  # baked (skeleton) sub-venv; (3) fronts the main venv on PYTHONPATH so nemo_gym
+  # + framework deps resolve for server processes.
+  # NOTE: avoid bash ${VAR} here — OmegaConf parses ${...}; $(...) / $r / $v are fine.
+  # NOTE: every step is guarded (|| true / -q grep) so it is safe under set -e.
+  prepare: |-
+    set -ex
+    cd /opt/Gym
+    export UV_CACHE_DIR=/opt/cache/uv
+    source .venv/bin/activate
+    # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
+    # images bake Gym at a fixed version (not a git repo) — use it as-is.
+    if [ -d .git ]; then
+      git remote add oss_pin "{{config.params.extra.nemo_gym.install_on_the_fly.url}}" 2>/dev/null || true
+      git fetch oss_pin
+      git checkout "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}"
+      echo "=== NeMo Gym commit ===" && git rev-parse HEAD
+    else
+      echo "=== /opt/Gym is not a git repo; using baked-in Gym version ==="
+    fi
+    for r in /opt/Gym/responses_api_models/*/requirements.txt \
+             /opt/Gym/responses_api_agents/*/requirements.txt \
+             /opt/Gym/resources_servers/*/requirements.txt; do
+      [ -f "$r" ] || continue
+      grep -vE '^[[:space:]]*-e ' "$r" > "$r.fixed" || true
+      grep -qiE '^ray([<>=[]|$)' "$r.fixed" 2>/dev/null || echo 'ray==2.49.2' >> "$r.fixed"
+      grep -qiE '^tqdm' "$r.fixed" 2>/dev/null || echo 'tqdm' >> "$r.fixed"
+      mv "$r.fixed" "$r" 2>/dev/null || true
+    done
+    for v in /opt/Gym/responses_api_models/*/.venv \
+             /opt/Gym/responses_api_agents/*/.venv \
+             /opt/Gym/resources_servers/*/.venv; do
+      [ -d "$v" ] || continue
+      d="$(dirname "$v")"
+      [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
+    done
+    export PYTHONPATH="/opt/Gym:$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+
+  # Data prep + rollout collection. Interpolate as the LAST line of each
+  # benchmark's command via ${gym_prepare.run} (after ${gym_prepare.prepare} and
+  # any benchmark-specific prep).
+  #
+  # Rollout collection is run in its OWN session (setsid) so its entire process
+  # tree — servers + their multiprocessing pools + Ray workers — can be reaped by
+  # process group. Why: ng_e2e's own cleanup (cli.py shutdown) only SIGINTs/SIGKILLs
+  # the tracked server PIDs after a 1s grace; it does NOT reap each server's child
+  # tree, so pools/Ray workers orphan and re-parent to the launcher (which is
+  # blocked reading our stdout) — they hold stdout open and the run never finalizes.
+  # (Invisible in the deployment flow because the whole node is discarded; only bites
+  # the deployment-free inline path here.) The inner shell records the session PGID
+  # (its own $$, before exec) so we can target it; real exit code is captured from
+  # wait and propagated via exit.
+  #
+  # Ray ALSO daemonizes gcs_server/raylet into their own session, so they escape the
+  # process-group reap; if left running they keep the launcher's stdout open and the
+  # run hangs in post-eval. So after the group reap we additionally stop Ray and kill
+  # its daemons by name (safe: matches only Ray daemons, not the launcher's python).
+  # Remove once Gym's shutdown reaps server process groups + Ray.
+  run: |-
+    ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
+    setsid --wait bash -c 'echo $$ > /tmp/gym_eval_pgid; exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}' &
+    __ev=$!
+    __rc=0; wait "$__ev" || __rc=$?
+    echo "Evaluator Gym finished!"
+    __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
+    [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
+    timeout 60 ray stop --force >/dev/null 2>&1 || true
+    pkill -9 -f raylet >/dev/null 2>&1 || true
+    pkill -9 -f gcs_server >/dev/null 2>&1 || true
+    pkill -9 -f plasma_store >/dev/null 2>&1 || true
+    exit $__rc
