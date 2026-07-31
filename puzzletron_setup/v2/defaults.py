@@ -168,6 +168,7 @@ class DefaultsResolver:
         preserved: Mapping[str, Any] | None = None,
     ) -> None:
         """Build the ordered builtin, model, preset, file, and preserved layers."""
+        self._resolutions: dict[str, ResolvedDefault] = {}
         self._default_layers = (
             ("builtin", dict(builtins or {})),
             ("model", dict(model_derived or {})),
@@ -195,15 +196,25 @@ class DefaultsResolver:
 
     def resolve(self, path: str, fallback: Any = None) -> ResolvedDefault:
         """Return the suggested value, including preserved wizard answers."""
-        return self._resolve_layers(self._layers, path, fallback)
+        resolved = self._resolve_layers(self._layers, path, fallback)
+        self._resolutions[path] = deepcopy(resolved)
+        return resolved
 
     def resolve_default(self, path: str, fallback: Any = None) -> ResolvedDefault:
         """Return built-in, model-derived, or explicit-file defaults."""
-        return self._resolve_layers(self._default_layers, path, fallback)
+        resolved = self._resolve_layers(self._default_layers, path, fallback)
+        self._resolutions[path] = deepcopy(resolved)
+        return resolved
 
     def file_default(self, path: str) -> ResolvedDefault | None:
         """Return an explicitly supplied file default, if present."""
         found, value = _lookup(self._file_defaults, path)
         if not found:
             return None
-        return ResolvedDefault(deepcopy(value), "defaults_file")
+        resolved = ResolvedDefault(deepcopy(value), "defaults_file")
+        self._resolutions[path] = deepcopy(resolved)
+        return resolved
+
+    def resolutions(self) -> Mapping[str, ResolvedDefault]:
+        """Return every default decision resolved during this wizard run."""
+        return deepcopy(self._resolutions)

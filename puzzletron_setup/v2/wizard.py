@@ -327,10 +327,10 @@ def _select_hf_subsets(
             f"Hugging Face dataset {source} has no selectable subsets with "
             "known positive row counts and sizes."
         )
-    configured_defaults = resolver.resolve(
-        "data.subsets",
-        resolver.resolve("data.acquisition.subsets", None).value,
-    ).value
+    configured = resolver.resolve("data.subsets", None)
+    if configured.value is None:
+        configured = resolver.resolve("data.acquisition.subsets", None)
+    configured_defaults = configured.value
     if isinstance(configured_defaults, str):
         configured_defaults = [
             item.strip() for item in configured_defaults.split(",") if item.strip()
@@ -344,6 +344,13 @@ def _select_hf_subsets(
     else:
         preferred = [selectable[0].name]
     selectable_names = {item.name for item in selectable}
+    unavailable = [name for name in preferred if name not in selectable_names]
+    if configured_defaults and unavailable:
+        raise SetupError(
+            "Configured dataset subsets are missing or unavailable for "
+            f"{source}: {', '.join(unavailable)}. Choose from: "
+            f"{', '.join(sorted(selectable_names))}."
+        )
     defaults = [name for name in preferred if name in selectable_names]
     if not defaults:
         defaults = [selectable[0].name]
@@ -1292,6 +1299,47 @@ def _print_parallel_issues(issues) -> None:
     print("  Choose a different parallel setting.")
 
 
+def _compatible_default_profile(
+    session: WizardSession,
+    registry: ResourceProfileRegistry,
+    stage_id: str,
+    model: Any,
+    *,
+    node_type: str | None = None,
+) -> tuple[ParallelProfile | None, tuple[Any, ...]]:
+    """Reuse the first compatible profile without opening advanced prompts."""
+    last_issues: tuple[Any, ...] = ()
+    for name in registry.names():
+        profile = registry.get(name)
+        issues = tuple(
+            _profile_compatibility_issues(
+                session,
+                profile,
+                stage_id,
+                model,
+                node_type=node_type,
+            )
+        )
+        if not issues:
+            return registry.reuse(name, consumer=stage_id), ()
+        last_issues = issues
+    if not registry.names():
+        profile = ParallelProfile(stage_id)
+        issues = tuple(
+            _profile_compatibility_issues(
+                session,
+                profile,
+                stage_id,
+                model,
+                node_type=node_type,
+            )
+        )
+        if not issues:
+            return registry.create(profile, consumer=stage_id), ()
+        last_issues = issues
+    return None, last_issues
+
+
 def _profile_prompt(
     session: WizardSession,
     registry: ResourceProfileRegistry,
@@ -1441,20 +1489,21 @@ def _stage_resource_defaults(
     profile = registry.get(registry.names()[0]) if registry.names() else ParallelProfile(stage_id)
     strategy = strategy or CANONICAL_STAGE_STRATEGIES[stage_id]
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
+    resolved_instances = resolver.resolve_default(
+        f"stages.{stage_id}.instances",
+        gpus_per_node,
+    )
     instances = (
         1
         if strategy == "single"
-        else int(
-            resolver.resolve_default(
-                f"stages.{stage_id}.instances",
-                gpus_per_node,
-            ).value
-        )
+        else int(resolved_instances.value)
     )
-    requested_batch = int(resolver.resolve_default(f"stages.{stage_id}.batch", batch).value)
+    resolved_batch = resolver.resolve_default(f"stages.{stage_id}.batch", batch)
+    requested_batch = int(resolved_batch.value)
     resolution = resolve_batch(requested_batch, profile)
     return {
         "instances": instances,
+        "instances_source": resolved_instances.source,
         "parallel_profile": profile.name,
         "parallel": {
             "tp": profile.tp,
@@ -1467,6 +1516,7 @@ def _stage_resource_defaults(
         },
         "requested_batch": resolution.requested,
         "effective_batch": resolution.effective,
+        "batch_source": resolved_batch.source,
     }
 
 
@@ -1523,14 +1573,19 @@ def _configure_stage_resource(
         if requested_batch is BACK:
             return BACK
     else:
-        profile = (
-            registry.reuse(registry.names()[0], consumer=stage_id)
-            if registry.names()
-            else registry.create(ParallelProfile(stage_id), consumer=stage_id)
+        profile, issues = _compatible_default_profile(
+            session,
+            registry,
+            stage_id,
+            model,
         )
-        issues = _profile_compatibility_issues(session, profile, stage_id, model)
-        if issues:
+        if profile is None:
             _print_parallel_issues(issues)
+            if session.guided:
+                raise SetupError(
+                    f"No configured parallel profile is compatible with {stage_id}. "
+                    "Supply a compatible profile in --defaults or resume with --full."
+                )
             profile = _profile_prompt(session, registry, stage_id, model)
             if profile is BACK:
                 return BACK
@@ -1574,7 +1629,7 @@ def _configure_stage_resource(
     session.state.set_field(
         f"stages.{stage_id}.batch",
         resolution.effective,
-        source="user" if action == "customize" else "builtin",
+        source="user" if action == "customize" else str(defaults["batch_source"]),
         requested=resolution.requested,
         effective=resolution.effective,
         dependencies=(f"profiles.{profile.name}",),
@@ -4238,17 +4293,37 @@ def _configure_dynamic_resources(
                 "sequence_parallel": False,
             }
         else:
-            profile = (
-                _profile_prompt(
+            if customize:
+                profile = _profile_prompt(
                     session,
                     registry,
                     stage_id,
                     model,
                     node_type=node.node_type,
                 )
-                if customize
-                else registry.reuse(registry.names()[0], consumer=stage_id)
-            )
+            else:
+                profile, issues = _compatible_default_profile(
+                    session,
+                    registry,
+                    stage_id,
+                    model,
+                    node_type=node.node_type,
+                )
+                if profile is None:
+                    _print_parallel_issues(issues)
+                    if session.guided:
+                        raise SetupError(
+                            "No configured parallel profile is compatible with "
+                            f"{stage_id}. Supply a compatible profile in --defaults "
+                            "or resume with --full."
+                        )
+                    profile = _profile_prompt(
+                        session,
+                        registry,
+                        stage_id,
+                        model,
+                        node_type=node.node_type,
+                    )
             if profile is BACK:
                 return BACK
             issues = _profile_compatibility_issues(
@@ -4487,20 +4562,92 @@ def output_review_section(
         pruning = _mapping_copy(session.state.collection("pruning"))
         mip = _mapping_copy(session.state.collection("mip_config"))
         runs = _mapping_copy(mip.get("runs"))
+        profiles = _mapping_copy(session.state.collection("parallel_profiles"))
+        axes = {
+            axis_id: list(_mapping_copy(axis).get("values") or ())
+            for axis_id, axis in _mapping_copy(pruning.get("axes")).items()
+        }
+        mip_review = {
+            run_id: {
+                "parameter_target": _mapping_copy(
+                    _mapping_copy(run).get("constraints")
+                ).get("params"),
+                "num_solutions": _mapping_copy(
+                    _mapping_copy(run).get("solver")
+                ).get("num_solutions"),
+            }
+            for run_id, run in runs.items()
+        }
+        profile_review = {
+            name: {
+                key: _mapping_copy(profile).get(key)
+                for key in (
+                    "tp",
+                    "cp",
+                    "pp",
+                    "dp_shard",
+                    "dp_replicate",
+                    "ep",
+                    "sequence_parallel",
+                )
+            }
+            for name, profile in profiles.items()
+        }
         summary = {
             "preset": session.state.preset,
             "model": session.state.get_field("model.source"),
             "dataset": session.state.get_field("data.selected_source"),
             "sequence_length": session.state.get_field("data.sequence_length"),
-            "maximum_depth_removed": pruning.get("depth_remove"),
-            "width_axes": sorted(_mapping_copy(pruning.get("axes"))),
-            "mip_searches": sorted(runs),
+            "pruning": {
+                "maximum_depth_removed": pruning.get("depth_remove"),
+                "depth_importance_samples": pruning.get(
+                    "depth_importance_samples"
+                ),
+                "width_importance_samples": pruning.get(
+                    "width_importance_samples"
+                ),
+                "width_axes": axes,
+                "sort_sanity": pruning.get("sort_sanity"),
+                "width_sanity": pruning.get("width_sanity"),
+                "slicing_sanity": pruning.get("slicing_sanity"),
+                "bypass": _mapping_copy(pruning.get("bypass")),
+                "replacement_samples": pruning.get("replacement_samples"),
+            },
+            "mip_searches": mip_review,
+            "parallel_profiles": profile_review,
+            "execution": {
+                "repository": session.state.get_field(
+                    "infrastructure.execution_contract.repository"
+                ),
+                "venv": session.state.get_field(
+                    "infrastructure.execution_contract.venv"
+                ),
+                "container": session.state.get_field(
+                    "infrastructure.execution_contract.container"
+                ),
+                "slurm_account": session.state.get_field(
+                    "infrastructure.runner.slurm.account"
+                ),
+                "interactive_partition": session.state.get_field(
+                    "infrastructure.runner.slurm.partition_interactive"
+                ),
+                "batch_partition": session.state.get_field(
+                    "infrastructure.runner.slurm.partition_batch"
+                ),
+                "gpus_per_node": session.state.get_field(
+                    "infrastructure.gpus_per_node"
+                ),
+            },
             "results": session.state.get_field("output.result_root"),
         }
         print(yaml.safe_dump(summary, sort_keys=False))
         print(
             "  Nested values and provenance are saved in answers_v2.yaml. "
             "Use --full for per-section customization."
+        )
+        print(
+            "  Execution values target the machine or cluster running setup. "
+            "Use --defaults or --full when that environment needs different values."
         )
     else:
         print(
@@ -4599,14 +4746,7 @@ def _fresh_state(
                 )
 
     while True:
-        preset = backend.select(
-            "Setup profile:",
-            [
-                PromptChoice(item.choice_title, item.name)
-                for item in QUICK_SETUP_PRESETS
-            ],
-            "balanced",
-        )
+        preset = _select_setup_preset(backend)
         if preset is BACK:
             continue
         value = backend.text("Campaign directory:", "")
@@ -4620,6 +4760,21 @@ def _fresh_state(
                 setup_mode="quick",
                 preset=str(preset),
             )
+
+
+def _select_setup_preset(
+    backend: PromptBackend,
+    *,
+    default: str = "balanced",
+) -> Any:
+    return backend.select(
+        "Setup profile:",
+        [
+            PromptChoice(item.choice_title, item.name)
+            for item in QUICK_SETUP_PRESETS
+        ],
+        default,
+    )
 
 
 def _refresh_legacy_state(state: WizardState) -> None:
@@ -4784,24 +4939,31 @@ def run_wizard_v2(
     else:
         state = WizardState.resume(resume)
         if full and state.setup_mode != "full":
-            raise SetupError(
-                "This campaign was started in guided mode. Resume it without "
-                "--full, or start a new campaign with --full."
+            print(
+                "  Promoting this guided campaign to full setup. Existing model "
+                "and dataset answers are preserved."
             )
+            state.set_setup_mode("full")
     if state.setup_mode not in {"quick", "full"}:
         raise SetupError(f"Unsupported setup mode in {state.path}: {state.setup_mode!r}.")
     preset = None
+    if state.preset:
+        preset = get_setup_preset(state.preset)
     if state.setup_mode == "quick":
-        if not state.preset:
+        if preset is None:
             raise SetupError(
                 f"Guided setup state {state.path} does not record a setup preset."
             )
-        preset = get_setup_preset(state.preset)
         print(f"  Profile: {preset.choice_title}")
-    elif full:
+    elif preset is not None:
+        print(f"  Full setup baseline: {preset.choice_title}")
+    else:
         print("  Full setup enabled: every advanced section is customizable.")
     selected_defaults = defaults_path or state.defaults_path
     resolver = _resolver(state, selected_defaults, preset)
+    if resume is not None and defaults_path is not None:
+        state.set_defaults_path(defaults_path)
+        print(f"  Persisted replacement defaults file: {state.defaults_path}")
     session = WizardSession(
         state,
         backend,
@@ -4825,7 +4987,28 @@ def run_wizard_v2(
             index += 1
         else:
             target = session.consume_back_target()
+            if target is None and index == 0 and session.guided:
+                replacement = _select_setup_preset(
+                    backend,
+                    default=state.preset or "balanced",
+                )
+                if replacement is not BACK:
+                    state.set_preset(str(replacement))
+                    preset = get_setup_preset(str(replacement))
+                    resolver = _resolver(state, selected_defaults, preset)
+                    print(f"  Profile changed to: {preset.choice_title}")
+                continue
             index = SECTION_NAMES.index(target.section) if target is not None else index
+    state.set_collection(
+        "default_resolutions",
+        {
+            path: {
+                "value": resolved.value,
+                "source": resolved.source,
+            }
+            for path, resolved in resolver.resolutions().items()
+        },
+    )
     _refresh_legacy_state(state)
     build_bundles_v2(state.campaign_dir, state)
     return state.campaign_dir

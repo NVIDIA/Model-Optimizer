@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping  # noqa: TC003 - runtime type-hint introspection
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from typing import Any
 
 from puzzletron_setup import SetupError
 

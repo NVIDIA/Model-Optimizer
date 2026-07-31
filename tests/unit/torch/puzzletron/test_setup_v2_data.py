@@ -17,6 +17,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+from puzzletron_setup import SetupError
 from puzzletron_setup.v2.bundle import _bundle_readme
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.hf_datasets import HfSubsetCatalog, HfSubsetInfo
@@ -290,6 +293,36 @@ def test_generic_hugging_face_dataset_uses_dynamic_subset_checkbox(
         },
     ]
     assert backend.checkbox_calls[0][2] == ("small",)
+
+
+def test_guided_explicit_invalid_subset_fails_instead_of_falling_back(
+    tmp_path,
+    monkeypatch,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    backend = ScriptedBackend([_CUSTOM_DATA_SOURCE, "owner/generic"])
+    catalog = _catalog(
+        "owner/generic",
+        [("small", 10, 100, None), ("disabled", 20, 200, "media unavailable")],
+        default="small",
+    )
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.wizard.infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="test catalog"),
+    )
+
+    with pytest.raises(SetupError, match=r"typo.*Choose from: small"):
+        data_section(
+            WizardSession(state, backend, guided=True),
+            DefaultsResolver(file_defaults={"data": {"subsets": ["typo"]}}),
+            _context(multimodal=False),
+            catalog_loader=lambda source, **kwargs: catalog,
+        )
 
 
 def test_resume_reuses_the_revision_locked_subset_catalog(tmp_path):

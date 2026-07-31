@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import questionary
+import yaml
 from prompt_toolkit.keys import Keys
 
+import puzzletron_setup.v2.wizard as wizard_module
 from puzzletron_setup.v2.cli import _parser
 from puzzletron_setup.v2.defaults import DefaultsResolver
-from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
+from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, SetupPreset, get_setup_preset
 from puzzletron_setup.v2.prompts import (
     BACK,
     InteractiveBackend,
@@ -25,6 +28,7 @@ from puzzletron_setup.v2.wizard import (
     _fresh_state,
     _section_action,
     data_section,
+    depth_section,
 )
 
 
@@ -52,6 +56,7 @@ def test_guided_profiles_explain_cost_and_supply_nested_defaults():
     resolved = resolver.resolve_default("pruning.bypass.enabled")
     assert resolved.value is False
     assert resolved.source == "preset"
+    assert get_type_hints(SetupPreset)["defaults"]
 
 
 def test_explicit_defaults_override_guided_profile():
@@ -63,6 +68,7 @@ def test_explicit_defaults_override_guided_profile():
     resolved = resolver.resolve_default("mip.num_solutions")
     assert resolved.value == 5
     assert resolved.source == "defaults_file"
+    assert resolver.resolutions()["mip.num_solutions"] == resolved
 
 
 def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
@@ -77,6 +83,102 @@ def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
     assert state.preset == "balanced"
     assert _parser().parse_args([]).full is False
     assert _parser().parse_args(["--full"]).full is True
+
+
+def test_back_from_first_guided_section_can_change_profile(
+    tmp_path,
+    monkeypatch,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    attempts = 0
+
+    def model_builder(session, resolver, context):
+        nonlocal attempts
+        del resolver, context
+        attempts += 1
+        session.begin("model")
+        if attempts == 1:
+            return (
+                session.select(
+                    "model.source",
+                    "Model:",
+                    [PromptChoice("Custom", "custom"), PromptChoice("Known", "known")],
+                )
+                is not BACK
+            )
+        return True
+
+    monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (model_builder,))
+    monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
+    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
+    monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
+
+    wizard_module.run_wizard_v2(
+        resume=state.campaign_dir,
+        defaults_path=None,
+        backend=ScriptedBackend([BACK, "smoke"]),
+    )
+
+    assert WizardState.resume(state.path).preset == "smoke"
+    assert attempts == 2
+
+
+def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
+    monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
+    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
+    monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
+
+    wizard_module.run_wizard_v2(
+        resume=state.campaign_dir,
+        defaults_path=None,
+        backend=ScriptedBackend([]),
+        full=True,
+    )
+
+    resumed = WizardState.resume(state.path)
+    assert resumed.setup_mode == "full"
+    assert resumed.preset == "balanced"
+
+
+def test_resume_replacement_defaults_file_is_persisted(
+    tmp_path,
+    monkeypatch,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    replacement = tmp_path / "replacement.yaml"
+    replacement.write_text(yaml.safe_dump({"schema_version": 1}))
+    monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
+    monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
+    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
+    monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
+
+    wizard_module.run_wizard_v2(
+        resume=state.campaign_dir,
+        defaults_path=replacement,
+        backend=ScriptedBackend([]),
+    )
+
+    assert WizardState.resume(state.path).defaults_path == replacement.resolve()
 
 
 def test_legacy_state_without_setup_metadata_resumes_in_full_mode(tmp_path):
@@ -182,6 +284,33 @@ def test_back_reasks_the_previous_prompt_with_replay_intact(tmp_path):
     session.begin("data")
     assert session.text("data.one", "One:") == "one"
     assert session.text("data.two", "Two:") == "revised"
+    assert backend.remaining == 0
+
+
+def test_depth_back_replays_conditional_path_and_zero_removes_resources(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.set_collection("stage_resources", {"depth_importance": {"instances": 8}})
+    state.set_collection(
+        "stage_batches",
+        {"depth_importance.micro_batch_size": 8},
+    )
+    backend = ScriptedBackend(["customize", "subblock", 2, BACK, 0])
+    session = WizardSession(state, backend)
+    context = {
+        "model": SimpleNamespace(
+            inventory=SimpleNamespace(num_sublayers=8, num_layers=4),
+        )
+    }
+
+    assert not depth_section(session, DefaultsResolver(), context)
+    target = session.consume_back_target()
+    assert target is not None
+    assert target.prompt_id == "pruning.depth_remove"
+
+    assert depth_section(session, DefaultsResolver(), context)
+    assert state.collection("pruning")["depth_remove"] == 0
+    assert "depth_importance" not in state.collection("stage_resources")
+    assert "depth_importance.micro_batch_size" not in state.collection("stage_batches")
     assert backend.remaining == 0
 
 
