@@ -28,8 +28,20 @@ into the eval container at **exactly** `/gdpval/sif/python-3.12.gdpval.sif` (the
 numbers aren't comparable, so verify the SIF at canary.
 
 **The skill builds the SIF on the target cluster — it never copies one from
-another cluster.** Ship the SIF via the idempotent helper, which builds it if
-absent and reuses it if already present:
+another cluster.** That is the self-contained default and the right behaviour when
+you have no prebuilt sandbox.
+
+> **If your site already provides a prebuilt GDPVal SIF, prefer it over building —
+> build only when it is absent.** A self-built SIF resolves its pip stack at *your*
+> build time, so it can drift from the sandbox a published reference set was
+> generated in, which matters for comparison-mode runs. To use a provided one, mount
+> its dir at `/gdpval/sif` and point `GDPVAL_CONTAINER_PATH` at the provided
+> filename. **NVIDIA-internal users:** `modelopttools:eval-config` (Step 3c) records
+> the provided SIF's location and the check-then-fall-back procedure — if you have
+> that skill, consult it before building. Without it, building (below) is correct.
+
+Ship the SIF via the idempotent helper, which builds it if absent and reuses it if
+already present:
 
 ```bash
 # GDPVAL_SIF_DIR (.env) — persistent shared-FS dir on the TARGET cluster; the config
@@ -134,6 +146,57 @@ self-deploys single-node vLLM, which is fine for a canary or a small policy. For
      the baseline deliverables at `/gdpval/refs/test_ref`
      (`execution.mounts.evaluation`), and set `gdpval.reference_elo` to the reference
      model's ELO (golden: Kimi-K2.5-Thinking, elo=1290).
+
+### Comparison mode needs a newer Gym than the public image — override `container:`
+
+The public `nvcr.io/nvidia/eval-factory/nemo-gym:26.05` (== `latest` by digest) runs
+**rubric** mode fine, but its Gym predates the multi-reference `reference_models` map.
+In comparison mode `gdpval_resources_server` fails validation at startup with
+`reward_mode=comparison requires reference_deliverables_dir to be set`, surfacing only
+as the unhelpful `Process gdpval_resources_server finished unexpectedly!`.
+
+**You cannot fix this by bumping `install_on_the_fly.commit`.** That image bakes Gym as
+a **non-git directory**, so the pin is silently ignored — the prepare step logs
+`=== /opt/Gym is not a git repo; using baked-in Gym version ===` and you get the baked
+build regardless. Treat the pin as inert unless the log shows `=== NeMo Gym commit ===`
+followed by a SHA, and don't attribute run-to-run behaviour changes to it. (In
+particular, a head-server `address already in use` on its fixed port 11000 is a
+**transient collision** — resubmitting clears it; it is not a Gym-version symptom.)
+
+To run comparison mode you must **override the task's `container:`** with an image
+whose Gym has `reference_models`. NVIDIA-internal users: the image path, the canonical
+reference set, and the matching gym overrides are in the `modelopttools:eval-config`
+skill (Step 3c) — internal cluster paths deliberately live only there.
+
+## Preflight — what NEL validates, and what it does NOT
+
+NEL validates mount paths at **submit** time (`_collect_mount_paths` +
+`_validate_remote_paths_exist`): it ssh's to the cluster, runs `test -d` on every
+mount source, and `raise ValueError` listing the missing ones **before** any
+`sbatch` — so a missing reference dir or cache costs you nothing. Three gaps to know:
+
+| Artifact | Missing → | Loud? |
+|---|---|---|
+| mounted dirs (refs, caches, SIF **dir**, checkpoint) | `ValueError` at submit, no job queued | ✅ pre-allocation |
+| **the SIF file inside that dir** | **agent silently runs code-exec unsandboxed** | ❌ **silent** |
+| task `container:` (image / `.sqsh`) | not collected for validation → pyxis import failure | ⚠️ only after allocation |
+
+1. **`test -d` proves the directory, not the SIF.** A `$GDPVAL_SIF_DIR` that exists but
+   holds the *wrong* filename (e.g. `python-3.12…` after bumping to a 3.13 def) passes
+   validation, and the run then silently degrades. Guard with the verify-only mode:
+
+   ```bash
+   .agents/scripts/gdpval-sif.sh --check     # uses $GDPVAL_SIF_DIR; exit 1 + lists what IS there
+   ```
+
+   Keep `GDPVAL_SIF_NAME` / the helper's default in sync with the config's
+   `GDPVAL_CONTAINER_PATH`; they are the same string in two places.
+2. **`--dry-run` skips remote validation entirely** (it never opens the ssh
+   connection). A clean dry-run says nothing about whether your mounts exist — run
+   the preflight separately.
+3. **The container is never checked.** A wrong/rotated image path fails at pyxis
+   import, i.e. after the allocation is granted. Verify it with `ls -l` first
+   (comparison mode's internal image especially — see `modelopttools:eval-config`).
 
 ## Env vars
 

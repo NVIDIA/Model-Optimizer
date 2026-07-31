@@ -91,7 +91,20 @@ gym_prepare:
   # Remove once Gym's shutdown reaps server process groups + Ray.
   run: |-
     ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
-    setsid --wait bash -c 'echo $$ > /tmp/gym_eval_pgid; exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}' &
+    # The rollout command is written to a script and run from it, rather than passed
+    # to `bash -c '...'`. Gym params legitimately CONTAIN single quotes — comparison
+    # mode's ++multistage.stages='[{num_tasks: 45}, ...]' and ++...judge_panel='[{...}]'
+    # — and those would close a single-quoted `bash -c` wrapper early, so Hydra then
+    # receives the value split on spaces and dies with
+    # "no viable alternative at input '[{num_tasks:'".
+    # The heredoc delimiter is QUOTED ('GYM_RUN_EOF') so nothing expands while writing:
+    # $$ and $TAVILY_API_KEY / $INFERENCE_API_KEY land in the script literally and are
+    # expanded at run time by the shell that executes it, which is what we want.
+    cat > /tmp/gym_run.sh <<'GYM_RUN_EOF'
+    echo $$ > /tmp/gym_eval_pgid
+    exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}
+    GYM_RUN_EOF
+    setsid --wait bash /tmp/gym_run.sh &
     __ev=$!
     __rc=0; wait "$__ev" || __rc=$?
     echo "Evaluator Gym finished!"

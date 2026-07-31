@@ -22,15 +22,20 @@
 # run reuses the built SIF instantly.
 #
 # Usage:
-#   .agents/scripts/gdpval-sif.sh [<sif-dir-or-file>] [--commit <gym-sha>] [--force]
+#   .agents/scripts/gdpval-sif.sh [<sif-dir-or-file>] [--commit <sha>] [--force|--check]
 #     <sif-dir-or-file>  Persistent path on the target cluster's shared FS.
 #                        DEFAULTS to $GDPVAL_SIF_DIR (from .env) when omitted. A
-#                        directory -> <dir>/python-3.12.gdpval.sif; a *.sif path
+#                        directory -> <dir>/$GDPVAL_SIF_NAME (default python-3.13.gdpval.sif,
+#                        matching the example config); a *.sif path
 #                        is used verbatim. Bind-mount this SAME dir into the eval
 #                        container at /gdpval/sif (see recipes/examples/gym_gdpval/).
 #     --commit <sha>     NeMo Gym commit whose gdpval.def to build. Keep in sync
 #                        with the config's install_on_the_fly.commit.
 #     --force            Rebuild even if the SIF already exists.
+#     --check            Verify-only preflight: exit 0 if the expected SIF exists,
+#                        nonzero (listing what IS there) if not. Never builds.
+#                        Use before `nel run` — NEL's mount validation is `test -d`
+#                        and cannot see a missing/misnamed SIF file.
 #
 # Requires `apptainer` (or `singularity`) on PATH with unprivileged/fakeroot
 # build support, plus network egress to GitHub/base image. Run on a node that has
@@ -42,8 +47,8 @@
 set -euo pipefail
 
 # Keep GDPVAL_GYM_COMMIT in sync with install_on_the_fly.commit in the config.
-GDPVAL_GYM_COMMIT="${GDPVAL_GYM_COMMIT:-2502893977e9e9af84adc1fa8d38c9314208d3ee}"  # pragma: allowlist secret
-GDPVAL_SIF_NAME="${GDPVAL_SIF_NAME:-python-3.12.gdpval.sif}"
+GDPVAL_GYM_COMMIT="${GDPVAL_GYM_COMMIT:-dd41196f620f2af99947d776cbe5da9439d2a08d}"  # pragma: allowlist secret
+GDPVAL_SIF_NAME="${GDPVAL_SIF_NAME:-python-3.13.gdpval.sif}"
 APPTAINER_BIN="${APPTAINER_BIN:-}"
 
 _log() { printf '\033[2m  %s\033[0m\n' "$*" >&2; }
@@ -51,11 +56,12 @@ _die() { printf '\033[31mgdpval-sif: %s\033[0m\n' "$*" >&2; exit 1; }
 _usage() { sed -n '/^# gdpval-sif\.sh/,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; /^set -euo/d'; }
 
 # --- parse args ---
-target=""; force=0
+target=""; force=0; check=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --commit) GDPVAL_GYM_COMMIT="${2:?--commit needs a value}"; shift 2 ;;
     --force)  force=1; shift ;;
+    --check)  check=1; shift ;;
     -h|--help) _usage; exit 0 ;;
     -*) _die "unknown flag: $1 (see --help)" ;;
     *) [[ -z "$target" ]] || _die "unexpected extra arg: $1"; target="$1"; shift ;;
@@ -71,6 +77,23 @@ if [[ "$target" == *.sif ]]; then
 else
   sif_dir="$target"; sif="$sif_dir/$GDPVAL_SIF_NAME"
 fi
+# --- verify-only mode (preflight) ---
+# NEL's submit-time mount validation runs `test -d`, so it only proves the SIF *dir*
+# exists — a dir holding the WRONG sif name (e.g. python-3.12 after a gym bump to a
+# 3.13 def) passes validation, and the Stirrup agent then SILENTLY falls back to
+# non-sandboxed exec. Run this before submitting to fail loudly instead.
+if [[ "$check" -eq 1 ]]; then
+  if [[ -f "$sif" ]]; then
+    _log "SIF present: $sif ($(du -h "$sif" 2>/dev/null | cut -f1))"
+    echo "$sif"; exit 0
+  fi
+  printf '\033[31mgdpval-sif: MISSING expected SIF: %s\033[0m\n' "$sif" >&2
+  [[ -d "$sif_dir" ]] && { echo "  dir exists but does not contain it; found:" >&2
+    ls -1 "$sif_dir"/*.sif 2>/dev/null | sed 's/^/    /' >&2 || echo "    (no .sif files)" >&2; }
+  echo "  Build it with: $0 ${sif_dir}   (or --commit <gym-sha> for a different def)" >&2
+  exit 1
+fi
+
 mkdir -p "$sif_dir" || _die "cannot create SIF dir: $sif_dir"
 
 # --- reuse if present ---

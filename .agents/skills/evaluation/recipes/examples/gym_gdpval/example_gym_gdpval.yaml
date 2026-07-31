@@ -56,14 +56,17 @@ defaults:
   - _gym_prepare          # provides ${gym_prepare.prepare} / ${gym_prepare.run}
   - _self_
 
-# GDPVal scoring mode. Override at runtime: -o gdpval.reward_mode=comparison
-#   rubric      — standalone LLM-judge scoring; NO reference deliverables needed. (default)
-#   comparison  — pairwise scoring vs a reference model's deliverables; also
-#                 mount the ref dir at /gdpval/refs/test_ref (see mounts) and set
-#                 reference_elo. See references/gym-gdpval.md for the two-step flow.
+# GDPVal scoring mode. This template is RUBRIC-ONLY, deliberately: rubric needs no
+# reference deliverables and runs on the public gym image, so it works standalone.
+#   rubric     — standalone LLM-judge scoring, 0-1 reward per deliverable. (this template)
+#   comparison — pairwise vs anchored reference deliverables; the only mode that yields
+#                an AA-comparable ELO / win-rate. It needs a reference set, a newer gym
+#                image, and its own overrides — do NOT just flip reward_mode here.
+# To run comparison, NVIDIA-internal users should follow `modelopttools:eval-config`
+# Step 3c, which converts this config (container override + reference_models map +
+# mounts + multistage). See references/gym-gdpval.md "Scoring modes".
 gdpval:
   reward_mode: rubric
-  reference_elo: 1290     # comparison mode only — ELO of the reference model
 
 # GDPVal pairwise judge. base_url is config (from .env), not a secret, so no
 # export needed; only api_key (INFERENCE_API_KEY) is exported and read by the
@@ -104,8 +107,9 @@ execution:
       <GDPVAL_SIF_DIR>: /gdpval/sif
       # Writable shared-FS staging for ref files. Node-local /tmp breaks multi-node Ray.
       <HOST_REF_FILES>: /gdpval_ref_files
-      # comparison mode ONLY — reference deliverables dir (drop for default rubric mode):
-      # <HOST_GDPVAL_REFS>: /gdpval/refs/test_ref
+      # Comparison mode additionally mounts one dir per reference model at
+      # /gdpval/refs/<key> (both `deployment` and `evaluation`) — added by
+      # modelopttools:eval-config Step 3c, not here.
   auto_export:            # REQUIRED trigger for MLflow upload (see example_eval.yaml).
     destinations:
       - mlflow
@@ -165,13 +169,18 @@ evaluation:
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
   # Installs apptainer + squashfuse into the eval container (needs
   # NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the launching shell). See references/gym-gdpval.md.
+  # Installs the apptainer RUNTIME into the eval container (it is not baked in) so the
+  # Stirrup agent can exec the prebuilt SIF. ARCH-AWARE: Blackwell/Grace clusters are
+  # aarch64, so never hardcode an amd64 .deb — the Ubuntu PPA builds both arches.
   pre_cmd: |
     set -ex
+    export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    wget -q -O /tmp/apptainer.deb \
-      https://github.com/apptainer/apptainer/releases/download/v1.4.2/apptainer_1.4.2_amd64.deb
-    apt-get install -y -qq /tmp/apptainer.deb && rm /tmp/apptainer.deb
-    apt-get install -y -qq squashfuse fuse3 || apt-get install -y -qq squashfuse fuse || true
+    apt-get install -y -qq software-properties-common squashfuse fuse3 ca-certificates || true
+    add-apt-repository -y ppa:apptainer/ppa
+    apt-get update -qq
+    apt-get install -y -qq apptainer
+    apptainer --version
     mkdir -p /usr/local/var/apptainer/mnt/session
   nemo_evaluator_config:
     config:
@@ -208,6 +217,12 @@ evaluation:
   # STANDALONE: exactly one gym task. Do NOT add other tasks to this list.
   tasks:
     - name: nemo_gym
+      # Public image — fine for RUBRIC mode (this template's default).
+      # COMPARISON mode needs a NEWER Gym than this image ships and must OVERRIDE this
+      # line; see references/gym-gdpval.md "Scoring modes". NOTE: this image bakes Gym
+      # as a non-git directory, so `install_on_the_fly.commit` below is silently
+      # ignored here (the prepare step logs "/opt/Gym is not a git repo; using baked-in
+      # Gym version") — the pin only applies on images where /opt/Gym IS a git repo.
       container: nvcr.io/nvidia/eval-factory/nemo-gym:26.05   # pin a verified tag
       nemo_evaluator_config:
         config:
@@ -221,13 +236,14 @@ evaluation:
                   # old SIF + new gym silently degrades deliverables. Rebuild with
                   # `gdpval-sif.sh --commit <sha>` to a new name + repoint GDPVAL_CONTAINER_PATH.
                   # See references/gym-gdpval.md "Rebuild the SIF when the Gym version changes".
-                  # Current golden pin (updated GDPVal task-sampling algo — matters for
-                  # multistage stage-1 selection, so keep it aligned with the goldens).
-                  # Its gdpval.def is byte-identical to 049b1fd0…, so the python-3.13 SIF
-                  # built from either commit is valid — no rebuild when moving between them.
-                  # Do NOT go back to 2502893977… — on that commit the gym head server
-                  # fails to bind its fixed port 11000 and the run hangs forever polling
-                  # "Head server is not up yet".
+                  # Current golden pin (updated GDPVal task-sampling algo, which drives
+                  # multistage stage-1 selection). Its gdpval.def is byte-identical to
+                  # 049b1fd0…, so a python-3.13 SIF built from either commit is valid —
+                  # no rebuild when moving between them.
+                  # NOTE: this pin is INERT on the public nemo-gym image (see the
+                  # `container:` comment above) — it only takes effect on an image where
+                  # /opt/Gym is a git repo. Confirm via "=== NeMo Gym commit ===" + SHA
+                  # in the client log before crediting it with any behaviour change.
                   commit: dd41196f620f2af99947d776cbe5da9439d2a08d  # pragma: allowlist secret
                 command: |
                   ${gym_prepare.prepare}
@@ -263,6 +279,13 @@ evaluation:
                   ++upload_rollouts_to_wandb=false
                   ++responses_create_params.temperature={{config.params.temperature}}
                   ++responses_create_params.top_p={{config.params.top_p}}
+                # NOTE: no reference_* overrides below — rubric mode needs none, and the
+                # single-reference keys (reference_deliverables_dir / reference_elo)
+                # CONFLICT with comparison mode's reference_models map (added by
+                # modelopttools:eval-config Step 3c).
+                # Do NOT put '#' comments INSIDE this folded (>-) scalar: YAML keeps
+                # them as literal text, the block folds to one line, and the first '#'
+                # comments out every override after it in the shell command.
                 common_params: >-
                   ++use_absolute_ip=true
                   ++policy_base_url={{target.api_endpoint.url}}
@@ -276,8 +299,6 @@ evaluation:
                   ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.tavily_api_key=$TAVILY_API_KEY
                   ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.agent_max_turns=${oc.env:GDPVAL_MAX_TURNS,250}
                   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=${gdpval.reward_mode}
-                  ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/gdpval/refs/test_ref
-                  ++gdpval_resources_server.resources_servers.gdpval.reference_elo=${gdpval.reference_elo}
                   ++gdpval_resources_server.resources_servers.gdpval.persist_raw_judge_responses=true
                   ++gdpval_resources_server.resources_servers.gdpval.preconvert_max_concurrent=30
                   ++gdpval_resources_server.resources_servers.gdpval.preconvert_office_to_pdf=true

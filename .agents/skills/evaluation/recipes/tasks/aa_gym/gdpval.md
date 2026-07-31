@@ -59,10 +59,17 @@ recipes/examples/gym_gdpval/
 Copy the **whole `gym_gdpval/` directory** to your workspace (the `- _gym_prepare`
 default resolves relative to the config dir — copying the yaml alone breaks it).
 
-- **num_repeats:** the example defaults to **1** (halves cost); the reviewed golden
-  uses **2**. For golden-comparable / reported scores, delete the `sed` line in the
-  task `command:` to keep 2. It can **not** be set via a `++` override (OmegaConf
-  `ListConfig` merge error) — the file is patched with `sed`.
+- **num_repeats — the right value depends on the flow, so check which one you're in:**
+  - **Multistage comparison** (the current golden for AA-comparable ELO): **1**, set
+    with a top-level `++num_repeats=1`, which *does* work. Recent Gym pins already
+    ship `num_repeats: 1` in `benchmarks/gdpval/config.yaml`, so the `sed` below is a
+    no-op there.
+  - **Rubric / older single-reference comparison:** the pre-multistage golden used
+    **2** (220 tasks × 2 = 440 rollouts). On old pins the per-dataset key could not be
+    set via `++` (OmegaConf `ListConfig` merge error), hence the `sed` in the task
+    `command:`; delete that line to keep 2.
+
+  Do not carry a `=2` from an old single-reference config into a multistage run.
 - **SIF ↔ Gym version (rebuild on bump):** the SIF is built from `gdpval.def` at
   `install_on_the_fly.commit`. **If you change that commit, rebuild the SIF** with a
   matching `gdpval-sif.sh --commit <sha>` (to a new version-tagged filename, then
