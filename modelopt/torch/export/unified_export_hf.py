@@ -867,6 +867,69 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
         handler(name, sub_module, ctx)
 
 
+def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.dtype:
+    """Return the export dtype, defaulting to the model's own and warning on a mismatch."""
+    if dtype is None:
+        return model.config.torch_dtype
+    if dtype != model.config.torch_dtype:
+        warnings.warn(
+            f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
+            f"({dtype}), which may lead to numerical errors."
+        )
+    return dtype
+
+
+def _prepare_moe_inputs(model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool) -> None:
+    """Handle input quantizers of experts that are not calibrated.
+
+    Each MoE block is dispatched by its experts container to the matching preparation
+    handler.
+    """
+    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    for name, sub_module in model.named_modules():
+        if is_moe(sub_module) and hasattr(sub_module, "experts"):
+            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
+            if handler is None:
+                # Unsupported MoE model structure
+                raise NotImplementedError(
+                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
+                    f"Please file an issue or add support for this model architecture."
+                )
+            handler(name, sub_module, prepare_ctx)
+
+
+def _add_mtp_exclusions(model: nn.Module, quant_config: dict) -> None:
+    """Add MTP layer prefixes to exclude_modules if they were excluded from quantization.
+
+    This ensures they appear in ``quantization_config["ignore"]`` in ``config.json``.
+    """
+    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
+    if mtp_layer_prefixes:
+        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
+        for prefix in mtp_layer_prefixes:
+            # Add wildcard pattern to exclude all submodules under this MTP layer
+            pattern = f"{prefix}*"
+            if pattern not in exclude_modules:
+                exclude_modules.append(pattern)
+                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+
+
+def _warn_on_unsynced_moe_gate_up(model: nn.Module) -> None:
+    """Safety net for gate/up weight quantizer amaxes that resmoothing did not reach.
+
+    ``requantize_resmooth_fused_llm_layers`` can miss experts that the dummy forward
+    never activated, or that use non-standard expert naming.
+    """
+    synced = sync_moe_gate_up_amax(model)
+    if synced:
+        warnings.warn(
+            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
+            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
+            f"This typically means the dummy forward did not activate these experts. "
+            f"Taking element-wise max of amaxes for serving-engine fusion."
+        )
+
+
 def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
@@ -1092,46 +1155,16 @@ def _export_transformers_checkpoint_streaming(
     name_to_module = dict(model.named_modules())
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
-    if dtype is None:
-        dtype = model.config.torch_dtype
-    elif dtype != model.config.torch_dtype:
-        warnings.warn(
-            f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
-            f"({dtype}), which may lead to numerical errors."
-        )
-
-    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
-    for name, sub_module in model.named_modules():
-        if is_moe(sub_module) and hasattr(sub_module, "experts"):
-            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
-            if handler is None:
-                raise NotImplementedError(
-                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
-                    f"Please file an issue or add support for this model architecture."
-                )
-            handler(name, sub_module, prepare_ctx)
+    dtype = _resolve_export_dtype(model, dtype)
+    _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
 
     requantize_resmooth_fused_llm_layers(model)
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
-    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
-    if mtp_layer_prefixes:
-        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
-        for prefix in mtp_layer_prefixes:
-            pattern = f"{prefix}*"
-            if pattern not in exclude_modules:
-                exclude_modules.append(pattern)
-                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+    _add_mtp_exclusions(model, quant_config)
 
-    synced = sync_moe_gate_up_amax(model)
-    if synced:
-        warnings.warn(
-            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
-            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
-            f"This typically means the dummy forward did not activate these experts. "
-            f"Taking element-wise max of amaxes for serving-engine fusion."
-        )
+    _warn_on_unsynced_moe_gate_up(model)
 
     # --- Per-tensor constants ---
     kv_cache_max_bound = 448
@@ -1353,27 +1386,8 @@ def _export_transformers_checkpoint(
     Raises:
         NotImplementedError: if the model has accelerate offload hooks.
     """
-    if dtype is None:
-        dtype = model.config.torch_dtype
-    elif dtype != model.config.torch_dtype:
-        warnings.warn(
-            f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
-            f"({dtype}), which may lead to numerical errors."
-        )
-
-    # Handle input quantizers of experts that are not calibrated. Each MoE block is
-    # dispatched by its experts container to the matching preparation handler.
-    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
-    for name, sub_module in model.named_modules():
-        if is_moe(sub_module) and hasattr(sub_module, "experts"):
-            handler = PrepareMoEInputsRegistry.match(sub_module.experts)
-            if handler is None:
-                # Unsupported MoE model structure
-                raise NotImplementedError(
-                    f"MoE model with experts type '{type(sub_module.experts).__name__}' is not supported in export."
-                    f"Please file an issue or add support for this model architecture."
-                )
-            handler(name, sub_module, prepare_ctx)
+    dtype = _resolve_export_dtype(model, dtype)
+    _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
@@ -1397,29 +1411,9 @@ def _export_transformers_checkpoint(
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
-    # Add MTP layer prefixes to exclude_modules if they were excluded from quantization
-    # This ensures they appear in quantization_config["ignore"] in config.json
-    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
-    if mtp_layer_prefixes:
-        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
-        for prefix in mtp_layer_prefixes:
-            # Add wildcard pattern to exclude all submodules under this MTP layer
-            pattern = f"{prefix}*"
-            if pattern not in exclude_modules:
-                exclude_modules.append(pattern)
-                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+    _add_mtp_exclusions(model, quant_config)
 
-    # Safety net: sync any gate/up weight quantizer amaxes that
-    # requantize_resmooth_fused_llm_layers did not reach (e.g. experts not
-    # activated during the dummy forward, or non-standard expert naming).
-    synced = sync_moe_gate_up_amax(model)
-    if synced:
-        warnings.warn(
-            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
-            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
-            f"This typically means the dummy forward did not activate these experts. "
-            f"Taking element-wise max of amaxes for serving-engine fusion."
-        )
+    _warn_on_unsynced_moe_gate_up(model)
 
     # Merge per-side input_quantizer amaxes BEFORE _process_quantized_modules,
     # so the merged value flows into input_scale derivation downstream.
