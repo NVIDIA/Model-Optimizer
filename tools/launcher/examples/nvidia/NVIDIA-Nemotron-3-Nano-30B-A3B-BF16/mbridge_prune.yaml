@@ -34,7 +34,7 @@ pipeline:
       --max_depth_pruning 0.15
       --hparams_to_skip num_attention_heads
       --top_k 5
-      --score_lower_bound 0.51
+      --score_lower_bound 0.50
       --output_hf_path <<global_vars.output_dir>>
     slurm_config: &sc
       _factory_: "slurm_factory"

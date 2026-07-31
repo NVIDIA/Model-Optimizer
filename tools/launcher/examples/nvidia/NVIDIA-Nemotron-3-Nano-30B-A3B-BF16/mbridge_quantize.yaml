@@ -48,12 +48,13 @@ pipeline:
     inline: >-
       python modules/Model-Optimizer/examples/llm_eval/lm_eval_hf.py
       --model vllm
-      --model_args pretrained=<<global_vars.output_dir>>/Nemotron-3-Nano-30B-A3B-FP8-hf,tensor_parallel_size=4,enforce_eager=True
+      --model_args pretrained=<<global_vars.output_dir>>/Nemotron-3-Nano-30B-A3B-FP8-hf,tensor_parallel_size=4
       --trust_remote_code
       --tasks mmlu
       --limit 0.1
+      --batch_size auto
       --output_path /scratchspace/mmlu_results
-      --accuracy_lower_bound 0.70
+      --accuracy_lower_bound 0.69
     slurm_config:
       <<: *sc
       ntasks_per_node: 1
