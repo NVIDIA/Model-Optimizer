@@ -369,7 +369,7 @@ scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/n
 The recipe quantizes the less accuracy-sensitive layers with the more aggressive format (e.g. NVFP4) and
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
-`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
+`constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div` / `aumann_shapley`), `score_size`,
 `module_search_spaces` (optional per-module candidate overrides), `disabled_layers` (excluded from
 the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
 towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
@@ -437,7 +437,7 @@ The example scripts above also have an additional flag `--tasks`, where the actu
 
 > *If GPU out-of-memory error is reported running the scripts, please try editing the scripts and reducing the max batch size to save GPU memory.*
 
-> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` method. The `kl_div` method does not require backpropagation.*
+> *NOTE: AutoQuantize requires backpropagation of the model. Models without backpropagation support (e.g., Llama-4) will not work with AutoQuantize when using the `gradient` or `aumann_shapley` methods (the latter is label-free but still backpropagates a KL loss). The `kl_div` method does not require backpropagation.*
 
 ## Real Quant
 

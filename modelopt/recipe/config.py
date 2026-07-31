@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
@@ -235,10 +235,20 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         description="Optional per-module overrides for candidate formats and BF16/no-quant "
         "selectability. Matching is performed after runtime-fusion grouping.",
     )
-    auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
+    auto_quantize_method: Literal["gradient", "kl_div", "aumann_shapley"] = ModeloptField(
         default="gradient",
         title="Sensitivity scoring method",
-        description="'gradient' (Taylor + Fisher, needs labels) or 'kl_div' (no labels).",
+        description="'gradient' (Taylor + Fisher, needs labels), 'kl_div' (no labels), or "
+        "'aumann_shapley' (no labels; path-integral damage attributions with a predicted-damage "
+        "quote).",
+    )
+    method_options: dict[str, Any] | None = ModeloptField(
+        default=None,
+        title="Method-specific scoring options",
+        description="Optional settings forwarded to the selected scoring method (e.g. "
+        "'num_path_nodes', 'damage_link', 'solver', 'max_predicted_damage' for "
+        "'aumann_shapley'). Keys are validated against the chosen method, which rejects "
+        "any it does not declare.",
     )
     score_size: int = ModeloptField(
         default=128,

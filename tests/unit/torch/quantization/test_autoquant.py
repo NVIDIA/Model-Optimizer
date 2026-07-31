@@ -25,6 +25,7 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
+from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
@@ -96,6 +97,115 @@ class _AutoQuantMoeModel(torch.nn.Module):
 
     def get_input(self):
         return torch.randn(1, 4, 32)
+
+
+def test_groups_scoring_at_a_container_are_still_reduced(monkeypatch):
+    """Every group's importance is a per-rank partial sum, so every group must reduce.
+
+    A group whose score module is a plain container (MoE experts scoring at ``.mlp`` via
+    score_module_rules) has no ``parallel_state`` of its own. It used to skip the reduction
+    entirely while attention groups reduced, so under DP its attribution stayed rank-local
+    and was compared against globally-summed groups in the solver objective.
+    """
+
+    class _Expert(torch.nn.Module):
+        """Minimal expert block."""
+
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(32, 32)
+            self.up_proj = torch.nn.Linear(32, 32)
+            self.down_proj = torch.nn.Linear(32, 32)
+
+        def forward(self, x):
+            return self.down_proj(self.gate_proj(x) * self.up_proj(x))
+
+    class _MLP(torch.nn.Module):
+        """Minimal MoE MLP container."""
+
+        def __init__(self):
+            super().__init__()
+            self.experts = torch.nn.ModuleList([_Expert() for _ in range(2)])
+
+        def forward(self, x):
+            out = 0
+            for expert in self.experts:
+                out = out + expert(x)
+            return out
+
+    class _Attn(torch.nn.Module):
+        """Minimal attention block."""
+
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(32, 32)
+            self.k_proj = torch.nn.Linear(32, 32)
+            self.v_proj = torch.nn.Linear(32, 32)
+
+        def forward(self, x):
+            return self.q_proj(x) + self.k_proj(x) + self.v_proj(x)
+
+    class _Layer(torch.nn.Module):
+        """Minimal decoder layer."""
+
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _Attn()
+            self.mlp = _MLP()
+
+        def forward(self, x):
+            return self.mlp(self.self_attn(x))
+
+    class _Model(torch.nn.Module):
+        """Minimal model wrapper."""
+
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([_Layer()])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+        def get_input(self):
+            return torch.randn(1, 4, 32)
+
+    model = _Model()
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 14.0},
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda m, batch: m(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method="gradient",
+    )
+
+    real = DistributedProcessGroup.get_dist_syncd_obj
+    counts = {}
+    for name, hparam in named_hparams(model, unique=True):
+        if not isinstance(hparam, QuantRecipeHparam):
+            continue
+        calls = []
+
+        def _spy(obj, groups, func, _calls=calls):
+            """Record each reduction call."""
+            _calls.append(1)
+            return real(obj, groups, func)
+
+        monkeypatch.setattr(DistributedProcessGroup, "get_dist_syncd_obj", staticmethod(_spy))
+        for recipe in hparam.choices:
+            hparam.get_score(recipe)
+        monkeypatch.undo()
+        counts[name] = len(calls)
+
+    expert = next(v for k, v in counts.items() if "experts" in k)
+    attention = next(v for k, v in counts.items() if "self_attn" in k)
+    assert expert > 0, "group scoring at a container skipped the reduction"
+    assert attention > 0
 
 
 @pytest.mark.parametrize(
@@ -736,7 +846,7 @@ INT8_CUSTOM_QUANT_TEST_CFG = {
 )
 @pytest.mark.parametrize(
     "method",
-    ["gradient", "kl_div"],
+    ["gradient", "kl_div", "aumann_shapley"],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):
     model = model_cls()
@@ -1085,7 +1195,7 @@ def test_estimate_quant_compression_per_entry_effective_bits():
         )
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("method", ["gradient", "kl_div", "aumann_shapley"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
     model = SimpleLinear()
