@@ -595,6 +595,7 @@ class QuantRecipeHparam(Hparam):
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
 _LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_MLA_A_PROJ_RE = re.compile(r"^(.*?)\.(?:q_a_proj|kv_a_proj_with_mqa)$")
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -605,6 +606,11 @@ def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
 def _linear_attn_ba_group_key(_model, name: str) -> str | None:
     m = _LINEAR_ATTN_BA_RE.match(name)
     return f"{m.group(1)}/ba" if m else None
+
+
+def _mla_a_proj_group_key(_model, name: str) -> str | None:
+    m = _MLA_A_PROJ_RE.match(name)
+    return f"{m.group(1)}/qkv_a" if m else None
 
 
 def _module_search_space_signature(module_search_spaces) -> tuple:
@@ -647,6 +653,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
+        # MLA low-rank input projections (DeepSeek/GLM lineage): TRT-LLM fuses them into
+        # fused_qkv_a_proj_with_mqa, so the shards must share one quantization format.
+        # A callable (not a regex) because a regex rule keys on match.group(1) -- the
+        # attention path -- which is the key the q_proj/k_proj/v_proj rule above already
+        # returns. On MLA built without a q LoRA rank (q_lora_rank=None, e.g.
+        # DeepSeek-V2-Lite) ``q_proj`` and ``kv_a_proj_with_mqa`` are siblings, so a
+        # shared key would merge the unfused q_proj into this group.
+        _mla_a_proj_group_key,
         # Qwen3.5/3.6 hybrid linear_attn: vLLM fuses (in_proj_qkv, in_proj_z)
         # into ``in_proj_qkvz`` and (in_proj_a, in_proj_b) into ``in_proj_ba`` and
         # requires fused shards to share quant_algo. Two callables (not one
@@ -932,11 +946,22 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             else:
                 search_map[group_key].append((module, name, disabled, score_module))
 
+        partially_disabled: list[list[str]] = []
         for group_key, module_info_list in search_map.items():
             quant_modules = [module for module, _, _, _ in module_info_list]
             disabled = any(disabled for _, _, disabled, _ in module_info_list)
             score_modules = [score_module for _, _, _, score_module in module_info_list]
             quant_module_names = [name for _, name, _, _ in module_info_list]
+            # A runtime group shares one quantization format, so disabling any member
+            # disables the whole group. Collect the partial matches and report them once
+            # after the loop: a glob like ``*kv_a_proj_with_mqa*`` hits every decoder layer,
+            # and the per-group message embeds module names so it would never dedupe.
+            # (module_search_spaces raises on the same partial match; this path only warns,
+            # because the behavior predates the grouping rules that make it easy to hit.)
+            if disabled and not all(flag for _, _, flag, _ in module_info_list):
+                partially_disabled.append(
+                    [name for _, name, flag, _ in module_info_list if not flag]
+                )
             cost_weight = self._cost_model.module_cost_weight(
                 quant_module_names, self.config["cost"]
             )
@@ -975,6 +1000,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             for module in quant_modules:
                 module._register_hparam("quant_recipe", hparam)
+
+        if partially_disabled:
+            pulled_in = sorted(name for group in partially_disabled for name in group)
+            warnings.warn(
+                f"disabled_layers matched only part of {len(partially_disabled)} runtime-"
+                f"grouped module set(s). Modules in a group share one quantization format, so "
+                f"{len(pulled_in)} additional module(s) are disabled too and the realized "
+                f"effective bits will be above the target: {pulled_in[:8]}"
+                f"{' ...' if len(pulled_in) > 8 else ''}. "
+                "List the whole group in disabled_layers to silence this."
+            )
 
     def _get_formatted_weight_compression_constraint(self):
         effective_bits = self.constraints["effective_bits"]

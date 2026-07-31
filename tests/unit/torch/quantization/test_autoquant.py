@@ -15,6 +15,7 @@
 
 import copy
 import io
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -1536,3 +1537,147 @@ def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persis
     assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.weight_quantizer" not in quantizer_names
+
+
+def test_mla_projections_share_one_group():
+    """TRT-LLM fuses q_a_proj + kv_a_proj_with_mqa, so they must share one quant format."""
+
+    class _MLAAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_a_proj = torch.nn.Linear(32, 32)
+            self.kv_a_proj_with_mqa = torch.nn.Linear(32, 32)
+            self.o_proj = torch.nn.Linear(32, 32)
+
+        def forward(self, x):
+            return self.o_proj(self.q_a_proj(x) + self.kv_a_proj_with_mqa(x))
+
+    class _MLABlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _MLAAttention()
+
+        def forward(self, x):
+            return self.self_attn(x)
+
+        def get_input(self):
+            return torch.randn(1, 4, 32)
+
+    model = _MLABlock()
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method="gradient",
+    )
+    hparam = model.self_attn.q_a_proj.get_hparam("quant_recipe")
+    assert model.self_attn.kv_a_proj_with_mqa.get_hparam("quant_recipe") == hparam
+    assert model.self_attn.o_proj.get_hparam("quant_recipe") != hparam
+
+
+def test_mla_group_does_not_absorb_unfused_q_proj():
+    """With q_lora_rank=None there is no q_a_proj; q_proj is NOT fused with kv_a_proj."""
+
+    class _MLAAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(32, 32)
+            self.kv_a_proj_with_mqa = torch.nn.Linear(32, 32)
+            self.o_proj = torch.nn.Linear(32, 32)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.kv_a_proj_with_mqa(x))
+
+    class _MLABlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _MLAAttention()
+
+        def forward(self, x):
+            return self.self_attn(x)
+
+        def get_input(self):
+            return torch.randn(1, 4, 32)
+
+    model = _MLABlock()
+    mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method="gradient",
+    )
+    q_hparam = model.self_attn.q_proj.get_hparam("quant_recipe")
+    assert model.self_attn.kv_a_proj_with_mqa.get_hparam("quant_recipe") != q_hparam
+    assert model.self_attn.o_proj.get_hparam("quant_recipe") != q_hparam
+
+
+def test_partially_disabled_runtime_group_warns():
+    """Disabling one shard of a fused group disables all of it; say so.
+
+    A runtime group shares one quantization format, so a disabled_layers pattern matching
+    only ``kv_a_proj_with_mqa`` also forces ``q_a_proj`` to BF16 and pushes realized
+    effective bits above the target. That used to happen silently.
+    """
+
+    class _MLAAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_a_proj = torch.nn.Linear(32, 32)
+            self.kv_a_proj_with_mqa = torch.nn.Linear(32, 32)
+            self.o_proj = torch.nn.Linear(32, 32)
+
+        def forward(self, x):
+            return self.o_proj(self.q_a_proj(x) + self.kv_a_proj_with_mqa(x))
+
+    class _MLABlock(torch.nn.Module):
+        def __init__(self, layers=1):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([_MLAAttention() for _ in range(layers)])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+        def get_input(self):
+            return torch.randn(1, 4, 32)
+
+    def _run(disabled_layers, layers=1):
+        model = _MLABlock(layers)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            mtq.auto_quantize(
+                model,
+                constraints={"effective_bits": 14.0},
+                quantization_formats=[mtq.INT8_DEFAULT_CFG],
+                data_loader=[model.get_input() for _ in range(2)],
+                forward_step=lambda m, batch: m(batch),
+                loss_func=lambda output, data: output.sum(),
+                num_calib_steps=2,
+                num_score_steps=2,
+                method="gradient",
+                disabled_layers=disabled_layers,
+            )
+        return [str(w.message) for w in caught if "matched only part" in str(w.message)]
+
+    partial = _run(["*kv_a_proj_with_mqa*"])
+    assert len(partial) == 1
+    assert "q_a_proj" in partial[0]
+    # One aggregated warning, not one per group: a glob hits every decoder layer, and the
+    # message embeds module names so per-group warnings would never dedupe.
+    deep = _run(["*kv_a_proj_with_mqa*"], layers=6)
+    assert len(deep) == 1
+    assert "6 runtime-grouped module set(s)" in deep[0]
+    # Listing the whole group, or disabling nothing, must stay quiet.
+    assert _run(["*kv_a_proj_with_mqa*", "*q_a_proj*"]) == []
+    assert _run([]) == []
