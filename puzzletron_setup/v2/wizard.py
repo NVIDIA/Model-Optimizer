@@ -482,9 +482,7 @@ def _print_default_decisions(defaults: Mapping[str, Any]) -> None:
 
 def _plain_review_value(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {
-            str(key): _plain_review_value(item) for key, item in value.items()
-        }
+        return {str(key): _plain_review_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_plain_review_value(item) for item in value]
     return value
@@ -525,10 +523,7 @@ def _replacement_granularity_choices(
     def label(name: str, per_width: int, total: int) -> str:
         if width_count == 1:
             return f"{name} — {total} options"
-        return (
-            f"{name} — {per_width} options/width, "
-            f"{total} total across {width_count} widths"
-        )
+        return f"{name} — {per_width} options/width, {total} total across {width_count} widths"
 
     return [
         (
@@ -680,9 +675,7 @@ def data_section(
     catalog_loader: Callable[..., HfSubsetCatalog] = discover_hf_subset_catalog,
 ) -> bool:
     session.begin("data")
-    previous_acquisition = _mapping_copy(
-        session.state.collection("data_acquisition")
-    )
+    previous_acquisition = _mapping_copy(session.state.collection("data_acquisition"))
     explicit = resolver.file_default("data.source")
     if explicit is not None and explicit.value:
         _print_default_decisions({"source": explicit.value})
@@ -690,16 +683,12 @@ def data_section(
         resolver,
         multimodal_model=bool(context["model"].inventory.multimodal),
     )
-    default_choice_available = any(
-        choice.value == _DEFAULT_DATA_SOURCE for choice in choices
-    )
+    default_choice_available = any(choice.value == _DEFAULT_DATA_SOURCE for choice in choices)
     mode = session.select(
         "data.source_mode",
         "Dataset:",
         choices,
-        default=(
-            _DEFAULT_DATA_SOURCE if default_choice_available else _CUSTOM_DATA_SOURCE
-        ),
+        default=(_DEFAULT_DATA_SOURCE if default_choice_available else _CUSTOM_DATA_SOURCE),
     )
     if mode is BACK:
         return False
@@ -754,10 +743,7 @@ def data_section(
     modality_source = "inferred"
     if fixed_modality is None and session.guided:
         modality = suggested_modality
-        print(
-            f"  Data modality: {modality} ({finding_evidence}; "
-            "use --full to override)"
-        )
+        print(f"  Data modality: {modality} ({finding_evidence}; use --full to override)")
     elif fixed_modality is None:
         modality = session.select(
             "data.modality",
@@ -847,9 +833,7 @@ def data_section(
                 {
                     "name": name,
                     "num_rows": by_name[name].num_rows,
-                    "num_bytes_original_files": by_name[
-                        name
-                    ].num_bytes_original_files,
+                    "num_bytes_original_files": by_name[name].num_bytes_original_files,
                     "num_media_shards": by_name[name].num_media_shards,
                     "weight": weights[name],
                 }
@@ -876,20 +860,16 @@ def data_section(
             acquisition.update(
                 subsets=selected_subsets,
                 subset_rows={
-                    record["name"]: record["num_rows"]
-                    for record in subset_selection["subsets"]
+                    record["name"]: record["num_rows"] for record in subset_selection["subsets"]
                 },
                 subset_weights={
-                    record["name"]: record["weight"]
-                    for record in subset_selection["subsets"]
+                    record["name"]: record["weight"] for record in subset_selection["subsets"]
                 },
                 subset_media_shards=subset_media_shards,
                 revision=subset_selection["revision"],
             )
             if len(subset_media_shards) != len(selected_subsets):
-                previous_shard_cap = int(
-                    previous_acquisition.get("max_shards_per_subset", 0)
-                )
+                previous_shard_cap = int(previous_acquisition.get("max_shards_per_subset", 0))
                 if previous_shard_cap > 0:
                     acquisition["max_shards_per_subset"] = previous_shard_cap
             print(
@@ -1493,11 +1473,7 @@ def _stage_resource_defaults(
         f"stages.{stage_id}.instances",
         gpus_per_node,
     )
-    instances = (
-        1
-        if strategy == "single"
-        else int(resolved_instances.value)
-    )
+    instances = 1 if strategy == "single" else int(resolved_instances.value)
     resolved_batch = resolver.resolve_default(f"stages.{stage_id}.batch", batch)
     requested_batch = int(resolved_batch.value)
     resolution = resolve_batch(requested_batch, profile)
@@ -2617,9 +2593,7 @@ def serving_workloads_section(
         result = _serving_workload_prompt(
             session,
             "serving_workloads",
-            default_name=(
-                "serving-default" if not workloads else f"serving-{len(workloads) + 1}"
-            ),
+            default_name=("serving-default" if not workloads else f"serving-{len(workloads) + 1}"),
             default_workload=default_workload,
             existing_names=set(workloads),
         )
@@ -2648,9 +2622,7 @@ def _set_vllm_stage_resource(
     source: str,
 ) -> None:
     allocation_mesh = vllm_topology_to_mesh(topology)
-    gpus_per_node = int(
-        session.state.get_field("infrastructure.gpus_per_node", 8)
-    )
+    gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
     resources = _mapping_copy(session.state.collection("stage_resources"))
     resources["vllm_stats"] = {
         "strategy": "sharded",
@@ -2672,9 +2644,7 @@ def _set_vllm_stage_resource(
 
 def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     enabled_default = bool(resolver.resolve_default("vllm.enabled", False).value)
-    gpus_per_node = int(
-        session.state.get_field("infrastructure.gpus_per_node", 8)
-    )
+    gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
     resolved_instances = resolver.resolve_default(
         "stages.vllm_stats.instances",
         gpus_per_node,
@@ -2685,9 +2655,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
         sequence_length=int(session.state.get_field("data.sequence_length", 4096)),
     )
     default_topology = default_measurement_settings["runtime_stats"]["topology"]
-    workloads = OrderedDict(
-        _mapping_copy(session.state.collection("serving_workloads")).items()
-    )
+    workloads = OrderedDict(_mapping_copy(session.state.collection("serving_workloads")).items())
     if not workloads:
         workloads["serving-default"] = _default_serving_workload(
             resolver,
@@ -2704,8 +2672,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
     preview = {
         "enabled": enabled_default,
         "available_serving_workloads": [
-            _serving_workload_label(name, setting)
-            for name, setting in workloads.items()
+            _serving_workload_label(name, setting) for name, setting in workloads.items()
         ],
     }
     if enabled_default:
@@ -2793,9 +2760,7 @@ def vllm_section(session: WizardSession, resolver: DefaultsResolver, context: di
     instances: int | None = None
     while True:
         unused_workloads = OrderedDict(
-            (name, setting)
-            for name, setting in workloads.items()
-            if name not in measurements
+            (name, setting) for name, setting in workloads.items() if name not in measurements
         )
         if unused_workloads:
             workload_choice = session.select(
@@ -2921,8 +2886,7 @@ _mip_identifier_validation = _identifier_validation
 def _mip_default_search_id(metric: str, value: Any) -> str:
     suffix = str(value).replace("%", "")
     slug = "".join(
-        character if character.isalnum() or character in "_-" else "-"
-        for character in suffix
+        character if character.isalnum() or character in "_-" else "-" for character in suffix
     ).strip("-")
     return f"{metric}-{slug or 'target'}"
 
@@ -3095,9 +3059,7 @@ def _mip_constraints_prompt(
         default = _mip_constraint_default(metric, configured_goal)
         if metric not in {"memory", "runtime"}:
             prompt = (
-                _mip_maximum_prompt
-                if metric in {"params", "active_params"}
-                else _mip_bound_prompt
+                _mip_maximum_prompt if metric in {"params", "active_params"} else _mip_bound_prompt
             )
             bound = prompt(
                 session,
@@ -3141,9 +3103,7 @@ def _mip_axis_specs(inventory: Any, pruning: Mapping[str, Any]) -> list[dict[str
         if axis.axis_id == "hidden_width" or axis.axis_id not in _MIP_AXIS_ALIASES:
             continue
         setting = _mapping_copy(configured.get(axis.axis_id))
-        values = list(
-            dict.fromkeys(int(value) for value in setting.get("values") or axis.values)
-        )
+        values = list(dict.fromkeys(int(value) for value in setting.get("values") or axis.values))
         if not values or not bool(setting.get("enabled", False)):
             continue
         specs.append(
@@ -3168,11 +3128,7 @@ def _mip_scenario_domains(
     embeddings = list(dict.fromkeys(int(value) for value in hidden.get("values") or ()))
     if not embeddings:
         teacher_width = next(
-            (
-                int(axis.teacher_value)
-                for axis in inventory.axes
-                if axis.axis_id == "hidden_width"
-            ),
+            (int(axis.teacher_value) for axis in inventory.axes if axis.axis_id == "hidden_width"),
             None,
         )
         if teacher_width is None:
@@ -3260,21 +3216,17 @@ def _mip_variant_prompt(
         )
         if axes is BACK:
             return BACK
-        selected_axes = set(str(axis_id) for axis_id in axes)
+        selected_axes = {str(axis_id) for axis_id in axes}
         axis_options: OrderedDict[str, Any] = OrderedDict()
         for spec in axis_specs:
             if spec["axis_id"] not in selected_axes:
                 continue
             values = session.checkbox(
-                (
-                    f"mip.search.{search_id}.variant.{variant_id}."
-                    f"axes.{spec['axis_id']}.values"
-                ),
+                (f"mip.search.{search_id}.variant.{variant_id}.axes.{spec['axis_id']}.values"),
                 f"Allowed values for {spec['label']}:",
                 [
                     (
-                        f"{value}"
-                        + (" (teacher)" if value == spec["teacher_value"] else ""),
+                        f"{value}" + (" (teacher)" if value == spec["teacher_value"] else ""),
                         value,
                     )
                     for value in spec["values"]
@@ -3311,9 +3263,7 @@ def _mip_solution_estimate(
     else:
         homogeneous_per_solve = int(homogeneous_keep)
         homogeneous_label = str(homogeneous_per_solve)
-    candidate_upper_bound = solve_count * (
-        heterogeneous_per_solve + homogeneous_per_solve
-    )
+    candidate_upper_bound = solve_count * (heterogeneous_per_solve + homogeneous_per_solve)
     return {
         "concrete_solves": solve_count,
         "heterogeneous_per_solve": heterogeneous_per_solve,
@@ -3375,31 +3325,19 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         for name, raw in serving_workloads.items()
     )
     runtime_workloads = OrderedDict(
-        (name, workloads[name])
-        for name in measurements
-        if name in workloads
+        (name, workloads[name]) for name in measurements if name in workloads
     )
-    default_goal_metric = str(
-        resolver.resolve_default("mip.goal_metric", "params").value
-    )
+    default_goal_metric = str(resolver.resolve_default("mip.goal_metric", "params").value)
     default_goal_value = resolver.resolve_default("mip.goal_value", "75%").value
     default_objective = str(
         resolver.resolve_default(
             "mip.objective", "metrics.cosine_embedding_loss_hidden_states"
         ).value
     )
-    default_num_solutions = int(
-        resolver.resolve_default("mip.num_solutions", 8).value
-    )
-    available_depths, available_embeddings = _mip_scenario_domains(
-        inventory, pruning
-    )
+    default_num_solutions = int(resolver.resolve_default("mip.num_solutions", 8).value)
+    available_depths, available_embeddings = _mip_scenario_domains(inventory, pruning)
     teacher_embedding = next(
-        (
-            int(axis.teacher_value)
-            for axis in inventory.axes
-            if axis.axis_id == "hidden_width"
-        ),
+        (int(axis.teacher_value) for axis in inventory.axes if axis.axis_id == "hidden_width"),
         max(available_embeddings),
     )
     axis_specs = _mip_axis_specs(inventory, pruning)
@@ -3423,9 +3361,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
         default_goal_metric = "params"
     if default_objective not in {value for _, value in _MIP_RANKING_CHOICES}:
         default_objective = _MIP_RANKING_CHOICES[0][1]
-    default_search_id = _mip_default_search_id(
-        default_goal_metric, default_goal_value
-    )
+    default_search_id = _mip_default_search_id(default_goal_metric, default_goal_value)
     default_estimate = _mip_solution_estimate(
         variant_count=1,
         metric_count=1,
@@ -3451,9 +3387,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             "variants": ["baseline"],
             "heterogeneous_per_solve": default_num_solutions,
             "homogeneous_per_solve": 5,
-            "candidate_origin_upper_bound": default_estimate[
-                "candidate_origin_upper_bound"
-            ],
+            "candidate_origin_upper_bound": default_estimate["candidate_origin_upper_bound"],
         },
     )
     if action is BACK:
@@ -3462,9 +3396,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
     if action == "defaults":
         constraint: Any = {"max": _mip_parse_scalar(str(default_goal_value))}
         if default_goal_metric in {"memory", "runtime"}:
-            target_workloads = (
-                runtime_workloads if default_goal_metric == "runtime" else workloads
-            )
+            target_workloads = runtime_workloads if default_goal_metric == "runtime" else workloads
             if not target_workloads:
                 raise SetupError(
                     f"Default MIP constraint {default_goal_metric!r} requires "
@@ -3483,9 +3415,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                 "runs": {
                     default_search_id: {
                         "constraints": {default_goal_metric: constraint},
-                        "objectives": [
-                            {"metric": default_objective, "direction": "minimize"}
-                        ],
+                        "objectives": [{"metric": default_objective, "direction": "minimize"}],
                         "search_space": {
                             "depth": available_depths,
                             "embedding": available_embeddings,
@@ -3505,9 +3435,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
                 },
             },
         )
-        session.state.set_collection(
-            "mip_search_estimates", {default_search_id: default_estimate}
-        )
+        session.state.set_collection("mip_search_estimates", {default_search_id: default_estimate})
         return True
 
     runs: OrderedDict[str, Any] = OrderedDict()
@@ -3697,9 +3625,7 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
 
         run = {
             "constraints": constraints,
-            "objectives": [
-                {"metric": metric, "direction": "minimize"} for metric in objectives
-            ],
+            "objectives": [{"metric": metric, "direction": "minimize"} for metric in objectives],
             "search_space": {
                 "depth": depths,
                 "embedding": embeddings,
@@ -4400,9 +4326,7 @@ def _acquisition_sample_requirements(state: WizardState) -> tuple[int, int]:
         validation_requirements.append(int(pruning.get("depth_importance_samples", 1)))
     if bool(pruning.get("sort_sanity", False)):
         validation_requirements.append(int(pruning.get("sort_sanity_samples", 1)))
-    if bool(pruning.get("sort_sanity", False)) and bool(
-        pruning.get("width_sanity", False)
-    ):
+    if bool(pruning.get("sort_sanity", False)) and bool(pruning.get("width_sanity", False)):
         validation_requirements.append(int(pruning.get("width_sanity_samples", 1)))
 
     for raw_flow in _mapping_copy(state.collection("post_mip_flows")).values():
@@ -4429,20 +4353,13 @@ def _apportion_vlm_samples(
     subset_rows: Mapping[str, Any],
     total: int,
 ) -> dict[str, int]:
-    rows = {
-        str(name): int(value)
-        for name, value in subset_rows.items()
-    }
+    rows = {str(name): int(value) for name, value in subset_rows.items()}
     if not rows or any(value <= 0 for value in rows.values()):
         raise SetupError(
-            "Cannot infer Nemotron-VLM acquisition without positive selected-subset "
-            "row counts."
+            "Cannot infer Nemotron-VLM acquisition without positive selected-subset row counts."
         )
     source_total = sum(rows.values())
-    quotas = {
-        name: total * value // source_total
-        for name, value in rows.items()
-    }
+    quotas = {name: total * value // source_total for name, value in rows.items()}
     remaining = total - sum(quotas.values())
     ranked = sorted(
         enumerate(rows.items()),
@@ -4461,14 +4378,8 @@ def _infer_vlm_shard_cap(
     num_samples: int,
 ) -> int:
     subset_rows = _mapping_copy(acquisition.get("subset_rows"))
-    subset_media_shards = _mapping_copy(
-        acquisition.get("subset_media_shards")
-    )
-    missing = [
-        name
-        for name in subset_rows
-        if int(subset_media_shards.get(name, 0)) <= 0
-    ]
+    subset_media_shards = _mapping_copy(acquisition.get("subset_media_shards"))
+    missing = [name for name in subset_rows if int(subset_media_shards.get(name, 0)) <= 0]
     if missing:
         previous_shard_cap = int(acquisition.get("max_shards_per_subset", 0))
         if previous_shard_cap > 0:
@@ -4484,9 +4395,7 @@ def _infer_vlm_shard_cap(
     for name, source_rows in subset_rows.items():
         available_shards = int(subset_media_shards[name])
         quota = quotas[name]
-        estimated = (
-            quota * available_shards + int(source_rows) - 1
-        ) // int(source_rows)
+        estimated = (quota * available_shards + int(source_rows) - 1) // int(source_rows)
         estimates.append(min(available_shards, max(1, estimated)))
     return max(estimates)
 
@@ -4569,12 +4478,12 @@ def output_review_section(
         }
         mip_review = {
             run_id: {
-                "parameter_target": _mapping_copy(
-                    _mapping_copy(run).get("constraints")
-                ).get("params"),
-                "num_solutions": _mapping_copy(
-                    _mapping_copy(run).get("solver")
-                ).get("num_solutions"),
+                "parameter_target": _mapping_copy(_mapping_copy(run).get("constraints")).get(
+                    "params"
+                ),
+                "num_solutions": _mapping_copy(_mapping_copy(run).get("solver")).get(
+                    "num_solutions"
+                ),
             }
             for run_id, run in runs.items()
         }
@@ -4600,12 +4509,8 @@ def output_review_section(
             "sequence_length": session.state.get_field("data.sequence_length"),
             "pruning": {
                 "maximum_depth_removed": pruning.get("depth_remove"),
-                "depth_importance_samples": pruning.get(
-                    "depth_importance_samples"
-                ),
-                "width_importance_samples": pruning.get(
-                    "width_importance_samples"
-                ),
+                "depth_importance_samples": pruning.get("depth_importance_samples"),
+                "width_importance_samples": pruning.get("width_importance_samples"),
                 "width_axes": axes,
                 "sort_sanity": pruning.get("sort_sanity"),
                 "width_sanity": pruning.get("width_sanity"),
@@ -4619,24 +4524,16 @@ def output_review_section(
                 "repository": session.state.get_field(
                     "infrastructure.execution_contract.repository"
                 ),
-                "venv": session.state.get_field(
-                    "infrastructure.execution_contract.venv"
-                ),
-                "container": session.state.get_field(
-                    "infrastructure.execution_contract.container"
-                ),
-                "slurm_account": session.state.get_field(
-                    "infrastructure.runner.slurm.account"
-                ),
+                "venv": session.state.get_field("infrastructure.execution_contract.venv"),
+                "container": session.state.get_field("infrastructure.execution_contract.container"),
+                "slurm_account": session.state.get_field("infrastructure.runner.slurm.account"),
                 "interactive_partition": session.state.get_field(
                     "infrastructure.runner.slurm.partition_interactive"
                 ),
                 "batch_partition": session.state.get_field(
                     "infrastructure.runner.slurm.partition_batch"
                 ),
-                "gpus_per_node": session.state.get_field(
-                    "infrastructure.gpus_per_node"
-                ),
+                "gpus_per_node": session.state.get_field("infrastructure.gpus_per_node"),
             },
             "results": session.state.get_field("output.result_root"),
         }
@@ -4663,12 +4560,8 @@ def output_review_section(
                             for path, record in session.state.records().items()
                         },
                         "profiles": session.state.collection("parallel_profiles"),
-                        "serving_workloads": session.state.collection(
-                            "serving_workloads"
-                        ),
-                        "vllm_measurements": session.state.collection(
-                            "vllm_measurements"
-                        ),
+                        "serving_workloads": session.state.collection("serving_workloads"),
+                        "vllm_measurements": session.state.collection("vllm_measurements"),
                         "mip": session.state.collection("mip_config"),
                         "post_mip": session.state.collection("post_mip_flows"),
                     }
@@ -4769,10 +4662,7 @@ def _select_setup_preset(
 ) -> Any:
     return backend.select(
         "Setup profile:",
-        [
-            PromptChoice(item.choice_title, item.name)
-            for item in QUICK_SETUP_PRESETS
-        ],
+        [PromptChoice(item.choice_title, item.name) for item in QUICK_SETUP_PRESETS],
         default,
     )
 
@@ -4780,10 +4670,7 @@ def _select_setup_preset(
 def _refresh_legacy_state(state: WizardState) -> None:
     pruning = deepcopy(state.collection("pruning") or {})
     subset_selection = _mapping_copy(state.collection("data_subset_selection"))
-    subset_records = [
-        _mapping_copy(item)
-        for item in subset_selection.get("subsets") or ()
-    ]
+    subset_records = [_mapping_copy(item) for item in subset_selection.get("subsets") or ()]
     serving_workloads = _mapping_copy(state.collection("serving_workloads"))
     measurements = _mapping_copy(state.collection("vllm_measurements"))
     first_workload = next(
@@ -4798,9 +4685,7 @@ def _refresh_legacy_state(state: WizardState) -> None:
         "vllm_enabled": bool(measurements),
         "granularity": measurement.get("granularity", "subblock"),
         "workload_id": workload_id,
-        "isl": int(
-            workload.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))
-        ),
+        "isl": int(workload.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))),
         "osl": int(workload.get("generation_seq_len", 1024)),
         "concurrency": int(workload.get("max_num_seqs", 1)),
     }
@@ -4900,9 +4785,7 @@ def _refresh_legacy_state(state: WizardState) -> None:
                 "sequence_length": state.get_field("data.sequence_length", 4096),
                 "subsets": [record["name"] for record in subset_records],
                 "subset_revision": subset_selection.get("revision"),
-                "subset_weights": {
-                    record["name"]: record["weight"] for record in subset_records
-                },
+                "subset_weights": {record["name"]: record["weight"] for record in subset_records},
                 "acquisition": deepcopy(state.collection("data_acquisition") or {}),
             },
             "pruning": pruning,
@@ -4951,9 +4834,7 @@ def run_wizard_v2(
         preset = get_setup_preset(state.preset)
     if state.setup_mode == "quick":
         if preset is None:
-            raise SetupError(
-                f"Guided setup state {state.path} does not record a setup preset."
-            )
+            raise SetupError(f"Guided setup state {state.path} does not record a setup preset.")
         print(f"  Profile: {preset.choice_title}")
     elif preset is not None:
         print(f"  Full setup baseline: {preset.choice_title}")

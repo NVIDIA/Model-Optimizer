@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING
 
 from puzzletron_setup import SetupError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = ["main"]
 
@@ -39,7 +42,8 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the setup-v2 command-line interface."""
     args = _parser().parse_args(argv)
     from .wizard import run_wizard_v2
 

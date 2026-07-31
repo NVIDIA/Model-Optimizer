@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
 from .state import PromptFrame, WizardState
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
 __all__ = ["BACK", "WizardSession"]
+
 
 class WizardSession:
     """Bind prompt interactions to atomic answer and navigation state."""
@@ -23,6 +26,7 @@ class WizardSession:
         *,
         guided: bool = False,
     ) -> None:
+        """Bind wizard state to an interactive or scripted prompt backend."""
         self.state = state
         self.backend = backend or InteractiveBackend()
         self.guided = bool(guided)
@@ -36,10 +40,12 @@ class WizardSession:
 
     @property
     def current_frame(self) -> PromptFrame | None:
+        """Return the most recent prompt frame, if one exists."""
         frames = self.state.frames
         return frames[-1] if frames else None
 
     def begin(self, section: str) -> None:
+        """Begin or resume prompt replay for a wizard section."""
         self._section = section
         self._collection = None
         self._item_id = None
@@ -56,22 +62,26 @@ class WizardSession:
         item_id: str | None,
         cursor: int | None,
     ) -> None:
+        """Enter one item in a repeatable prompt collection."""
         self._collection = collection
         self._item_id = item_id
         self._cursor = cursor
 
     def leave_collection(self) -> None:
+        """Leave the active repeatable prompt collection."""
         self._collection = None
         self._item_id = None
         self._cursor = None
 
     def collection_cursor(self, collection: str) -> int | None:
+        """Return the saved cursor for an active collection."""
         frame = self.current_frame
         if frame is not None and frame.collection == collection:
             return frame.cursor
         return None
 
     def back(self) -> PromptFrame | None:
+        """Remove and return the current prompt frame."""
         return self.state.pop_frame()
 
     def consume_back_target(self) -> PromptFrame | None:
@@ -112,6 +122,7 @@ class WizardSession:
 
     @staticmethod
     def describe_default(value: Any, source: str) -> None:
+        """Print a resolved default and its provenance."""
         print(f"  Default: {value!r} ({source})")
 
     @staticmethod
@@ -134,6 +145,7 @@ class WizardSession:
         default: str = "",
         validate: Callable[[Any], bool | str] | None = None,
     ) -> Any:
+        """Request, validate, and persist a text answer."""
         while True:
             value = self._ask(prompt_id, lambda: self.backend.text(message, default))
             if value is BACK:
@@ -154,6 +166,8 @@ class WizardSession:
         minimum: int = 0,
         maximum: int | None = None,
     ) -> Any:
+        """Request a bounded integer answer."""
+
         def validate(value: str) -> bool | str:
             try:
                 parsed = int(value)
@@ -181,6 +195,7 @@ class WizardSession:
         *,
         default: Any = None,
     ) -> Any:
+        """Request one answer from a set of choices."""
         rendered = self._choices(choices)
         if len(rendered) == 1:
             print(f"  {message} {rendered[0].title} (only option)")
@@ -197,6 +212,7 @@ class WizardSession:
         *,
         default: bool,
     ) -> Any:
+        """Request a yes-or-no answer."""
         return self.select(
             prompt_id,
             message,
@@ -213,6 +229,7 @@ class WizardSession:
         defaults: Sequence[Any] = (),
         validate: Callable[[Any], bool | str] | None = None,
     ) -> Any:
+        """Request and validate multiple selected choices."""
         rendered_choices = self._choices(choices)
 
         def disabled_verdict(values: Sequence[Any]) -> bool | str:
@@ -232,8 +249,7 @@ class WizardSession:
                 verdict = validate(selected)
             if verdict is True:
                 print(
-                    f"  {message} {rendered_choices[0].title} "
-                    "(only option, selected automatically)"
+                    f"  {message} {rendered_choices[0].title} (only option, selected automatically)"
                 )
                 return selected
         while True:

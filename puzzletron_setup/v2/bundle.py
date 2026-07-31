@@ -257,10 +257,7 @@ def _bundle_readme(
                 acquisition_command.extend(
                     [
                         "--subset-rows",
-                        *[
-                            f"{name}={rows}"
-                            for name, rows in subset_rows.items()
-                        ],
+                        *[f"{name}={rows}" for name, rows in subset_rows.items()],
                     ]
                 )
             acquisition_command.extend(

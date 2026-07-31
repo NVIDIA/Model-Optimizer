@@ -87,8 +87,7 @@ def _nemotron_catalog():
         ("external", 400, 8192, "external media required"),
     ]
     entries.extend(
-        (f"subset_{index:02d}", index + 1, (index + 1) * 1000, None)
-        for index in range(42)
+        (f"subset_{index:02d}", index + 1, (index + 1) * 1000, None) for index in range(42)
     )
     return _catalog(_NEMOTRON_VLM_DATA_SOURCE, entries)
 
@@ -441,7 +440,7 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
             return rules
 
         @staticmethod
-        def checkbox(message, choices, instruction, style):
+        def checkbox(message, choices, *, instruction, style):
             assert message == "Subsets:"
             assert choices[:2] == rendered
             assert choices[2] == {"separator": "  ← Back (press Esc)"}
@@ -452,6 +451,10 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
     monkeypatch.setattr(
         "puzzletron_setup.v2.prompts._questionary",
         lambda: _Questionary(),
+    )
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.prompts._bind_escape_back",
+        lambda question: question,
     )
 
     selected = InteractiveBackend().checkbox(

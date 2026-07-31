@@ -48,6 +48,17 @@ python -m pip install -r examples/puzzletron/requirements-setup.txt
 python examples/puzzletron/puzzletron_setup.py
 ```
 
+For a complete development environment, create a branch-local virtual
+environment and install the Puzzletron, test, and lint extras. This includes
+the repository-pinned Ruff and the configured pytest plugins:
+
+```bash
+uv venv
+uv pip install -e ".[hf,puzzletron,dev-test,dev-lint]"
+.venv/bin/python -m pytest tests/unit/torch/puzzletron
+.venv/bin/ruff check puzzletron_setup tests/unit/torch/puzzletron
+```
+
 Normal mode asks the model, data, pruning axes, MIP objectives/runs, and cluster
 details while accepting defaults for lower-level tuning. Detailed mode also
 exposes solver controls, extra constraints, custom post-MIP nodes, and resource
