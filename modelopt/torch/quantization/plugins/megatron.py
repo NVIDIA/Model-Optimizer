@@ -141,6 +141,12 @@ def quant_module_get_extra_state(self) -> dict:
     QuantModule's extra_state with QuantModule.get_extra_state()
     which avoids the need to store the full module name.
     """
+    # Nothing quantized here -> return {} so unquantized output_layer._extra_state stays empty (Megatron asserts empty).
+    if not isinstance(self, RealQuantLinear) and not any(
+        isinstance(m, TensorQuantizer) and m.is_enabled for m in self.modules()
+    ):
+        return {}
+
     extra_state = {}
 
     quantizer_state = {}
