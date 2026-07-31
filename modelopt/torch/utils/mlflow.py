@@ -290,7 +290,9 @@ class MlflowRunLogger:
         if not self.enabled or self._run is not None:
             return
         self._start_time = time.time()
-        self._file_stats = {str(p): _stat_key(Path(p)) for p in (files or {}).values()}
+        # Keyed through Path on both sides: a caller may pass strings, and "./out/x" and
+        # "out/x" are the same file but not the same string.
+        self._file_stats = {str(p): _stat_key(p) for p in map(Path, (files or {}).values())}
         self._start_capture()
         try:
             self._open_run()

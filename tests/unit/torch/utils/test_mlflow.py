@@ -603,3 +603,20 @@ def test_only_files_this_run_produced_are_uploaded(fake_mlflow, tmp_path, monkey
     uploaded = [name for name, _ in fake_mlflow.artifacts]
     assert "moe.html" in uploaded
     assert "quant_summary.txt" not in uploaded
+
+
+def test_stale_check_survives_unnormalized_string_paths(fake_mlflow, tmp_path, monkeypatch):
+    """files accepts str as well as Path, and "./out/x" is the same file as "out/x" but not
+    the same string -- keying the snapshot on the raw value would miss and upload it anyway."""
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "out").mkdir()
+    stale = tmp_path / "out" / ".quant_summary.txt"
+    stale.write_text("from a previous run\n")
+    outputs = {"summary/quant_summary.txt": "./out/.quant_summary.txt"}
+    logger = _logger()
+
+    logger.start(files=outputs)
+    logger.finish("FAILED", files=outputs)
+
+    assert "quant_summary.txt" not in [name for name, _ in fake_mlflow.artifacts]
