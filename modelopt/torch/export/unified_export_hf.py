@@ -56,6 +56,8 @@ from torch.distributed.fsdp import FSDPModule
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
+from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
@@ -537,6 +539,30 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 expert_id += 1
 
 
+def _compressed_per_block_scale(
+    weight_quantizer: TensorQuantizer, weight: QTensorWrapper
+) -> torch.Tensor | None:
+    """Per-block scale captured at compression time, in the modelopt E4M3 layout.
+
+    ``NVFP4QTensor.quantize(..., try_tensorrt=True)`` returns a cutlass-swizzled 1-D uint8 scale
+    when TensorRT-LLM is available on an FP4-capable device, so normalize it the way
+    ``NVFP4QTensor.dequantize`` does before it is used as an exported ``weight_scale``.
+    """
+    scale = getattr(weight_quantizer, "_scale", None)
+    if scale is None or not (scale.dtype == torch.uint8 and scale.ndim == 1):
+        return scale
+    try:
+        from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
+            cutlass_fp4_scale_to_modelopt_fp4_scale,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "This weight was compressed by TensorRT-LLM, so its NVFP4 block scale is "
+            "cutlass-swizzled, but tensorrt_llm cannot be imported to convert it for export."
+        ) from e
+    return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
+
+
 def _export_quantized_weight(
     sub_module: nn.Module,
     dtype: torch.dtype,
@@ -582,6 +608,27 @@ def _export_quantized_weight(
     )
     output_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.output_quantizer, None
+    )
+
+    # Already real-quantized weights (``mtq.compress`` / ``hf_ptq --low_memory_mode``) hold packed
+    # nibbles -- half the logical last dim -- so per-block scales cannot be recomputed from them.
+    # Use the scale the quantizer captured at compression time instead.
+    uses_compressed_nvfp4_scale = isinstance(weight, QTensorWrapper) and quantization_format in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A16_NVFP4,
+    ]
+    compressed_weight_scale = (
+        _compressed_per_block_scale(weight_quantizer, weight)
+        if uses_compressed_nvfp4_scale
+        else None
+    )
+    compressed_weight_scale_2 = (
+        getattr(weight_quantizer, "_double_scale", None) if uses_compressed_nvfp4_scale else None
+    )
+    use_compressed_scale = (
+        compressed_weight_scale is not None and compressed_weight_scale_2 is not None
     )
 
     if quantization_format == QUANTIZATION_FP8:
@@ -633,7 +680,7 @@ def _export_quantized_weight(
             sub_module.register_buffer(quantizer_attrs.weight_scale, e8m0_scale)
             if hasattr(weight_quantizer, "_scale") and weight_quantizer._scale is not None:
                 del weight_quantizer._scale
-        else:
+        elif not use_compressed_scale:
             sub_module.register_buffer(
                 quantizer_attrs.weight_scale, get_weight_scaling_factor(sub_module, weight_name)
             )
@@ -692,7 +739,21 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
-        if NVFP4QTensor._is_static_quantizer(weight_quantizer):
+        if use_compressed_scale and weight_scale_2 is not None:
+            # Dequant is ``nibble * weight_scale * weight_scale_2``; the stored per-block scale is
+            # normalized against the compression-time global scale, so rescale to keep that product.
+            # The nibbles cannot be re-quantized here (the high-precision weight is gone), so once
+            # ``preprocess_linear_fusion`` unifies ``weight_scale_2`` over a fused group the ratio
+            # below is 1 only for the member owning the group max; the others take one extra E4M3
+            # rounding (<= half-ULP, 6.25%). Avoiding that needs a shared scale at compress time.
+            assert compressed_weight_scale is not None and compressed_weight_scale_2 is not None
+            device = compressed_weight_scale.device
+            weight_scale = _cast_per_block_scale_to_fp8(
+                compressed_weight_scale.float()
+                * compressed_weight_scale_2.float().to(device)
+                / weight_scale_2.float().to(device)
+            )
+        elif NVFP4QTensor._is_static_quantizer(weight_quantizer):
             weight_scale = NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
                 weight_quantizer,
                 weight,
