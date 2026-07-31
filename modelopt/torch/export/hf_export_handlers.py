@@ -134,6 +134,7 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
             module,
             ctx.dtype,
             _moe_tied_cache=ctx.moe_tied_cache,
+            _tied_cache=ctx.tied_cache,
         )
 
 

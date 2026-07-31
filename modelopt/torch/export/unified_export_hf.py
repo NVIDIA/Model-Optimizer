@@ -922,8 +922,8 @@ class _StreamingShardWriter:
         self._total_bytes: int = 0
         # Maps tensor key → part-file index (recorded at flush time)
         self._key_to_part: dict[str, int] = {}
-        # Storage identity of every buffered tensor, so aliases never reach save_file.
-        self._buffer_storage: dict[tuple[int, tuple[int, ...], torch.dtype], str] = {}
+        # data_ptr of every buffered tensor, so aliases never reach save_file.
+        self._buffer_storage: set[int] = set()
 
     def _flush(self) -> None:
         if not self._buffer:
@@ -936,25 +936,23 @@ class _StreamingShardWriter:
         self._part_files.append(part_path)
         self._total_bytes += self._buffer_bytes
         self._buffer = {}
-        self._buffer_storage = {}
+        self._buffer_storage = set()
         self._buffer_bytes = 0
 
     def add(self, key: str, tensor: torch.Tensor) -> None:
         """Buffer a tensor, flushing the current shard to disk when it is full.
 
-        ``save_file`` rejects tensors sharing storage. ``data_ptr()`` is only meaningful
-        within one buffer (entries stay alive until :meth:`_flush`), so dedup here: an
-        exact (pointer, shape, dtype) match is a real tie and is dropped; a partial match
-        is a distinct view and is copied rather than lost.
+        ``save_file`` rejects tensors sharing storage, which two keys can still do here
+        when the tensor reaches us already on CPU (so ``_stream_tensor``'s ``.cpu()`` was
+        a no-op rather than a copy). Copy on collision rather than dropping one of them:
+        offloaded export writes tied weights as separate entries, so every key must
+        survive. ``data_ptr()`` only has to hold within one buffer, whose entries stay
+        alive until :meth:`_flush`.
         """
-        storage_id = (tensor.data_ptr(), tuple(tensor.shape), tensor.dtype)
-        if storage_id in self._buffer_storage:
-            return
-        if any(ptr == tensor.data_ptr() for ptr, _, _ in self._buffer_storage):
+        if tensor.data_ptr() in self._buffer_storage:
             tensor = tensor.clone()
-            storage_id = (tensor.data_ptr(), tuple(tensor.shape), tensor.dtype)
 
-        self._buffer_storage[storage_id] = key
+        self._buffer_storage.add(tensor.data_ptr())
         self._buffer[key] = tensor
         self._buffer_bytes += tensor.nbytes
         if self._buffer_bytes >= self._max_shard_size:
@@ -1047,13 +1045,39 @@ def _export_transformers_checkpoint_streaming(
 ) -> tuple[None, dict[str, Any]]:
     """Export a disk/CPU-offloaded model by streaming tensors layer-by-layer to shard files.
 
-    Peak memory = 1 decoder layer + 1 shard buffer, rather than the full quantized state
-    dict accumulated in RAM (which reaches ~764 GiB for Ultra 550B).
+    The offloaded counterpart of :func:`_export_transformers_checkpoint`, which builds the
+    whole quantized state dict at once and so needs every weight resident. Here each
+    decoder layer is materialized, exported, and written to a shard file before the next
+    one is touched, bounding peak memory at one layer plus one shard buffer.
 
-    Returns ``(None, quant_config)``; shard files, ``config.json``, and
-    ``generation_config.json`` are written to ``export_dir`` directly.  The caller is
-    responsible for writing ``hf_quant_config.json`` and updating ``config.json`` with
-    ``quantization_config``.
+    Model-level preparation (MoE input handling, resmooth/requantize, quant config) matches
+    the resident path. The per-tensor work does not: instead of ``postprocess_state_dict``
+    over a finished dict, each tensor goes through :func:`_postprocess_single_tensor` as it
+    is produced. Two consequences follow from having no whole-dict view:
+
+    - Tied weights are dropped by *name* via HF ``_tied_weights_keys``, not by comparing
+      ``data_ptr``, which is meaningless once weights move between host and device.
+    - Conversion mappings that need tensor-level splits cannot be reversed one tensor at a
+      time, so they are rejected up front rather than exported incorrectly.
+
+    Args:
+        model: the full torch model to export, carrying accelerate offload hooks.
+        dtype: weight dtype for unquantized layers, or the model's dtype if None.
+        is_modelopt_qlora: whether the model is a ModelOpt QLoRA model.
+        export_dir: directory to write shards and config artifacts into.
+        max_shard_size: shard size limit, as bytes or a string such as ``"10GB"``.
+        extra_state_dict: tensors the model itself never holds (e.g. MTP weights, which HF
+            leaves orphaned) and which would otherwise be missing from the export.
+
+    Returns:
+        ``(None, quant_config)``. No state dict is returned because none is ever
+        assembled; shards, ``config.json``, and ``generation_config.json`` are written to
+        ``export_dir`` directly. The caller writes ``hf_quant_config.json`` and merges
+        ``quantization_config`` into ``config.json``.
+
+    Raises:
+        NotImplementedError: if the model's conversion mapping contains split rules.
+        RuntimeError: if decoder layers cannot be discovered for layer-wise materialization.
     """
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
     from modelopt.torch.quantization.utils.core_utils import (
@@ -1107,13 +1131,6 @@ def _export_transformers_checkpoint_streaming(
             f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
             f"This typically means the dummy forward did not activate these experts. "
             f"Taking element-wise max of amaxes for serving-engine fusion."
-        )
-
-    synced_input = sync_tied_input_amax(model)
-    if synced_input:
-        print(
-            f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
-            f"{synced_input} tied module group(s)"
         )
 
     # --- Per-tensor constants ---
@@ -1320,6 +1337,11 @@ def _export_transformers_checkpoint(
 
     The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
 
+    Builds the whole quantized state dict in memory, so it requires every weight to be
+    resident. Models with accelerate CPU/disk offload are rejected here and handled by
+    :func:`_export_transformers_checkpoint_streaming`, which materializes one layer at a
+    time; :func:`export_hf_checkpoint` picks between the two.
+
     Args:
         model: the full torch model to export. The actual quantized model may be a submodule.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
@@ -1327,6 +1349,9 @@ def _export_transformers_checkpoint(
     Returns:
         post_state_dict: Dict containing quantized weights
         quant_config: config information to export hf_quant_cfg.json
+
+    Raises:
+        NotImplementedError: if the model has accelerate offload hooks.
     """
     if dtype is None:
         dtype = model.config.torch_dtype
@@ -1960,8 +1985,9 @@ def export_hf_checkpoint(
         and torch.distributed.is_initialized()
         and is_fsdp2_model(model)
     )
-    # Streaming path writes shard files layer-by-layer without accumulating the full
-    # state dict in RAM (peak = 1 layer + 1 shard buffer vs. ~764 GiB for Ultra 550B).
+    # Offloaded models take the streaming path: it materializes one layer at a time and
+    # writes each straight to a shard file, so peak memory is one layer plus one shard
+    # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
     try:

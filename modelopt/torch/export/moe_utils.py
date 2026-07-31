@@ -78,6 +78,7 @@ def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
     _moe_tied_cache: dict[tuple[int, int], nn.Module] | None = None,
+    _tied_cache: dict[int, nn.Module] | None = None,
 ) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
@@ -106,18 +107,12 @@ def _export_fused_experts(
     ``(<first_proj>.data_ptr(), down_proj.data_ptr())``), the alias step
     at the end re-points the per-expert ``weight`` / ``weight_scale`` /
     ``weight_scale_2`` / ``input_scale`` buffers at a previously-processed
-    module sharing the same source memory. ``_moe_tied_cache`` is owned by
-    the caller and scoped to one export invocation; when ``None`` the alias
-    step is skipped.
-
-    ``_tied_cache`` is intentionally NOT threaded through to the inner
-    ``_export_quantized_weight`` calls. Each per-expert weight wrapper is a
-    freshly allocated ``.contiguous()`` copy whose ``data_ptr()`` is
-    ephemeral — it is freed as soon as packing replaces the tensor, so the
-    allocator can recycle that address for a completely unrelated expert in a
-    later layer. Putting ephemeral addresses into a caller-owned
-    ``_tied_cache`` causes cross-layer false-positive hits and silently
-    aliases the packed weight / scale tensors of one layer onto another.
+    module sharing the same source memory. ``_tied_cache`` (int-keyed) is
+    threaded through to the per-projection ``_export_quantized_weight``
+    calls so wrapper-level dedup uses the same scope as standalone Linears.
+    Both caches are owned by the caller (typically
+    ``_export_transformers_checkpoint``) and scoped to one export
+    invocation; when ``None`` the corresponding alias step is skipped.
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
@@ -276,7 +271,7 @@ def _export_fused_experts(
             wrapper.weight_quantizer = w_quantizer
             wrapper.input_quantizer = i_quantizer
 
-            _export_quantized_weight(wrapper, dtype)
+            _export_quantized_weight(wrapper, dtype, _tied_cache=_tied_cache)
 
             proj = nn.Module()
             proj.weight = wrapper.weight

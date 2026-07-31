@@ -693,18 +693,21 @@ class TestExportFusedExpertsTiedDedup:
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Module-level dedup cache; per-expert wrapper addresses are ephemeral
-            # so _tied_cache is intentionally not passed (see _export_fused_experts).
+            # Per-call dedup caches threaded through both export calls; int keys
+            # for per-expert wrapper dedup, tuple keys for module-level dedup.
+            tied_cache: dict = {}
             moe_tied_cache: dict = {}
             _export_fused_experts(
                 parent.encoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
             )
             _export_fused_experts(
                 parent.decoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
             )
 
             for idx in range(NUM_EXPERTS):
@@ -731,19 +734,22 @@ class TestExportFusedExpertsTiedDedup:
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Same fresh cache as the positive case — confirms that even with
-            # module-level dedup enabled, untied modules with distinct source
-            # data_ptrs do not get falsely aliased.
+            # Same fresh caches as the positive case — confirms that even with
+            # dedup enabled, untied modules with distinct source data_ptrs do
+            # not get falsely aliased.
+            tied_cache: dict = {}
             moe_tied_cache: dict = {}
             _export_fused_experts(
                 parent.encoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
             )
             _export_fused_experts(
                 parent.decoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
+                _tied_cache=tied_cache,
             )
 
             for idx in range(NUM_EXPERTS):

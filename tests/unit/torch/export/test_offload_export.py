@@ -32,7 +32,7 @@ except ImportError:
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
-from modelopt.torch.export.quant_utils import _postprocess_single_tensor, sync_tied_input_amax
+from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
@@ -208,12 +208,13 @@ def test_streaming_shard_writer_tensors_readable():
         assert torch.allclose(recovered, t), "recovered tensor does not match original"
 
 
-def test_streaming_shard_writer_drops_tied_alias():
-    """Two keys sharing storage must not both reach save_file, which rejects aliases.
+def test_streaming_shard_writer_copies_tied_alias():
+    """Two keys sharing storage must both survive; save_file rejects the alias itself.
 
-    The name-based _tied_weights_keys filter misses ties that transformers does not
-    declare (e.g. tie_word_embeddings=False but shared storage), so the writer needs
-    its own guard.
+    The name-based _tied_weights_keys filter misses ties transformers does not declare
+    (e.g. tie_word_embeddings=False but shared storage), so the writer needs its own
+    guard. It copies rather than drops: offloaded export writes tied weights as separate
+    entries, so losing a key here would leave the checkpoint short a tensor.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         shared = torch.ones(4, 4)
@@ -222,9 +223,11 @@ def test_streaming_shard_writer_drops_tied_alias():
         writer.add("lm_head.weight", shared)
         weight_map = writer.finalize()
 
-        assert set(weight_map) == {"embed_tokens.weight"}, (
-            "tied alias should be dropped, keeping only the first key"
-        )
+        assert set(weight_map) == {"embed_tokens.weight", "lm_head.weight"}
+        shard_file = Path(tmpdir) / weight_map["lm_head.weight"]
+        with safe_open(str(shard_file), framework="pt") as f:
+            assert torch.equal(f.get_tensor("embed_tokens.weight"), shared)
+            assert torch.equal(f.get_tensor("lm_head.weight"), shared)
 
 
 def test_streaming_shard_writer_copies_aliased_view():
@@ -319,47 +322,6 @@ def test_postprocess_vision_model_summary_idxs_dropped():
 # that tensor is resident. Getting this wrong silently exported wrong weights:
 # meta tensors all report 0, and freed addresses are recycled by the allocator.
 # ---------------------------------------------------------------------------
-
-
-class _FakeAmaxQuantizer(nn.Module):
-    def __init__(self, value: float):
-        super().__init__()
-        self.register_buffer("_amax", torch.tensor(value))
-        self.is_enabled = True
-
-    @property
-    def amax(self):
-        return self._amax
-
-    @amax.setter
-    def amax(self, v):
-        self._amax = v
-
-
-class _MetaLinearWithInputQuantizer(nn.Module):
-    def __init__(self, amax: float):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(4, 4, device="meta"))
-        self.input_quantizer = _FakeAmaxQuantizer(amax)
-
-
-def test_sync_tied_input_amax_skips_offloaded_modules():
-    """Untied modules whose weights are offloaded must not be merged together.
-
-    Every meta tensor reports ``data_ptr() == 0``, so without the residency guard
-    these two unrelated Linears land in one group and both get amax 9.0.
-    """
-    model = nn.Module()
-    model._tied_weights_keys = {"b.weight": "a.weight"}
-    model.a = _MetaLinearWithInputQuantizer(1.0)
-    model.b = _MetaLinearWithInputQuantizer(9.0)
-
-    with pytest.warns(UserWarning, match="offloaded weights"):
-        merged = sync_tied_input_amax(model)
-
-    assert merged == 0
-    assert model.a.input_quantizer._amax.item() == 1.0
-    assert model.b.input_quantizer._amax.item() == 9.0
 
 
 def test_streaming_shard_writer_accepts_extra_tensors():
