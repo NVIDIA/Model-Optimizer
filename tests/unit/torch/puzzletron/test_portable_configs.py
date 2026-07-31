@@ -26,21 +26,17 @@ REPOSITORY_ROOT = Path(__file__).parents[4]
 
 
 def test_runner_examples_use_repository_relative_defaults() -> None:
-    slurm_runner_paths = (
-        "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
-        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
+    slurm = load_runner_config(
+        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
     )
-
-    for relative_path in slurm_runner_paths:
-        runner = load_runner_config(REPOSITORY_ROOT / relative_path)
-        assert runner.contract.repository == "."
-        assert runner.contract.venv == ".venv"
-        assert runner.contract.container is None
-        assert runner.contract.container_mounts is None
-        assert not runner.contract.prerun_commands
-        assert runner.slurm is not None
-        assert runner.slurm.account == "REPLACE_WITH_SLURM_ACCOUNT"
-        assert runner.slurm.partition_cpu is None
+    assert slurm.contract.repository == "."
+    assert slurm.contract.venv == ".venv"
+    assert slurm.contract.container is None
+    assert slurm.contract.container_mounts is None
+    assert not slurm.contract.prerun_commands
+    assert slurm.slurm is not None
+    assert slurm.slurm.account == "REPLACE_WITH_SLURM_ACCOUNT"
+    assert slurm.slurm.partition_cpu is None
 
     baremetal = load_runner_config(
         REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
@@ -54,6 +50,29 @@ def test_runner_examples_use_repository_relative_defaults() -> None:
         "REPLACE_WITH_PRIMARY_HOST",
         "REPLACE_WITH_SECONDARY_HOST",
     ]
+
+
+def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
+    runner = load_runner_config(
+        REPOSITORY_ROOT
+        / "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml"
+    )
+
+    assert runner.contract.repository == "REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT"
+    assert runner.contract.venv == "REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV"
+    assert runner.contract.container == "REPLACE_WITH_SLURM_CONTAINER_IMAGE"
+    assert (
+        runner.contract.container_mounts
+        == "REPLACE_WITH_HOST_PATH:REPLACE_WITH_CONTAINER_PATH"
+    )
+    assert runner.contract.prerun_commands == (
+        "source REPLACE_WITH_SITE_SETUP_SCRIPT",
+        "export VLLM_ROOT=REPLACE_WITH_WORKER_VISIBLE_VLLM_CHECKOUT",
+        "export AUTOMODEL_ROOT=REPLACE_WITH_WORKER_VISIBLE_AUTOMODEL_CHECKOUT",
+    )
+    assert runner.slurm is not None
+    assert runner.slurm.account == "REPLACE_WITH_SLURM_ACCOUNT"
+    assert runner.slurm.partition_cpu is None
 
 
 def test_execution_example_is_valid_yaml() -> None:
@@ -122,7 +141,6 @@ def test_active_examples_use_portable_value_shapes() -> None:
 def test_optional_yaml_values_are_explicit() -> None:
     paths = (
         "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
-        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
         "nv-internal/puzzletron_defaults.example.yaml",
     )
 
@@ -156,7 +174,6 @@ def test_required_example_values_use_visible_placeholders() -> None:
 def test_execution_contract_examples_explain_runnable_and_optional_values() -> None:
     slurm_paths = (
         "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
-        "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
         "nv-internal/puzzletron_defaults.example.yaml",
     )
 
