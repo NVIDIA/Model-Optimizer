@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Llama-Nemotron embedding PTQ recipe: NVFP4 W4A4 plus dynamic NVFP4 output
+# quantizers on the projection Linears (q/k/v/o_proj, gate/up/down_proj) so
+# TensorRT keeps inter-layer activations in FP4 instead of FP16. [5726458]
+#
+# Output quantizers must stay scoped to GEMM outputs: a DynamicQuantize on
+# non-GEMM outputs (embeddings, pooling) fails to compile in TensorRT.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  w4a4_nvfp4_nvfp4: configs/ptq/units/w4a4_nvfp4_nvfp4
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+
+metadata:
+  recipe_type: ptq
+  description: 'Llama-Nemotron embedding PTQ recipe (nvfp4 + projection output quantizers): same numerics as the general nvfp4 preset, plus dynamic NVFP4
+    output quantizers on the projection Linears so TensorRT engines carry FP4 activations between layers.'
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: w4a4_nvfp4_nvfp4
+    - $import: default_disabled_quantizers
+    - quantizer_name: '*_proj.output_quantizer'
+      cfg:
+        $import: nvfp4
+    # Reranker (sequence-classification) score head: keep in high precision like
+    # lm_head; its [1, hidden] weight also cannot be packed by the NVFP4 exporter.
+    - quantizer_name: '*score*'
+      enable: false
