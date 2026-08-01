@@ -82,7 +82,8 @@ The schema-driven wizard now starts with a guided setup profile:
 - **High-confidence search** spends more runtime on scoring and sanity checks.
 
 The selected profile supplies nested pruning and MIP defaults. Setup then asks
-only for the model, dataset, and other values that cannot be derived safely:
+for the model and dataset, and requires explicit acceptance or customization of
+the infrastructure-specific worker and cluster defaults:
 
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py \

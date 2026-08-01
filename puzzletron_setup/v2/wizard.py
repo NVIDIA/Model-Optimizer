@@ -452,9 +452,11 @@ def _section_action(
     section: str,
     summary: str,
     defaults: Mapping[str, Any],
+    *,
+    prompt_in_guided: bool = False,
 ) -> Any:
     session.begin(section)
-    if session.guided:
+    if session.guided and not prompt_in_guided:
         return "defaults"
     print(f"\n[{section}] {summary}")
     _print_default_decisions(defaults)
@@ -965,6 +967,7 @@ def infrastructure_section(
         "infrastructure",
         "Configure the worker contract and cluster facts before stage allocations.",
         preview,
+        prompt_in_guided=True,
     )
     if action is BACK:
         return False

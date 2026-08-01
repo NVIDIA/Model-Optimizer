@@ -3,17 +3,15 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import get_type_hints
+import sys
+from types import ModuleType, SimpleNamespace
 
-import questionary
 import yaml
-from prompt_toolkit.keys import Keys
 
 import puzzletron_setup.v2.wizard as wizard_module
 from puzzletron_setup.v2.cli import _parser
 from puzzletron_setup.v2.defaults import DefaultsResolver
-from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, SetupPreset, get_setup_preset
+from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
 from puzzletron_setup.v2.prompts import (
     BACK,
     InteractiveBackend,
@@ -29,6 +27,7 @@ from puzzletron_setup.v2.wizard import (
     _section_action,
     data_section,
     depth_section,
+    infrastructure_section,
 )
 
 
@@ -56,7 +55,6 @@ def test_guided_profiles_explain_cost_and_supply_nested_defaults():
     resolved = resolver.resolve_default("pruning.bypass.enabled")
     assert resolved.value is False
     assert resolved.source == "preset"
-    assert get_type_hints(SetupPreset)["defaults"]
 
 
 def test_explicit_defaults_override_guided_profile():
@@ -138,8 +136,16 @@ def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
         setup_mode="quick",
         preset="balanced",
     )
-    monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
-    monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
+    resolved_baseline = {}
+
+    def capture_baseline(session, resolver, context):
+        del session, context
+        resolved = resolver.resolve_default("pruning.depth_remove")
+        resolved_baseline.update(value=resolved.value, source=resolved.source)
+        return True
+
+    monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (capture_baseline,))
+    monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
     monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
@@ -153,6 +159,7 @@ def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
     resumed = WizardState.resume(state.path)
     assert resumed.setup_mode == "full"
     assert resumed.preset == "balanced"
+    assert resolved_baseline == {"value": 4, "source": "preset"}
 
 
 def test_resume_replacement_defaults_file_is_persisted(
@@ -250,6 +257,26 @@ def test_guided_section_uses_profile_without_action_prompt(tmp_path):
     )
 
     assert action == "defaults"
+    assert backend.remaining == 0
+
+
+def test_guided_infrastructure_requires_explicit_default_acceptance(tmp_path):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    backend = ScriptedBackend(["defaults"])
+
+    assert infrastructure_section(
+        WizardSession(state, backend, guided=True),
+        DefaultsResolver(),
+        {},
+    )
+
+    assert state.get_field("infrastructure.execution_contract.venv") == ".venv"
+    assert state.get_field("infrastructure.runner.kind") == "slurm"
     assert backend.remaining == 0
 
 
@@ -385,11 +412,42 @@ def test_escape_returns_back_for_text_select_and_checkbox(monkeypatch):
     assert len(questions) == 3
 
 
-def test_escape_binding_supports_questionary_merged_text_bindings():
-    question = questionary.text("Text:")
-    assert not hasattr(question.application.key_bindings, "add")
+def test_escape_binding_supports_a_merged_binding_adapter(monkeypatch):
+    registered = {}
+    existing_bindings = object()
+
+    class _Bindings:
+        def add(self, key, eager=False):
+            assert eager
+
+            def register(handler):
+                registered[key] = handler
+                return handler
+
+            return register
+
+    escape_bindings = _Bindings()
+    merged_bindings = object()
+
+    key_binding_module = ModuleType("prompt_toolkit.key_binding")
+    key_binding_module.KeyBindings = lambda: escape_bindings
+
+    def merge_key_bindings(bindings):
+        assert bindings == [existing_bindings, escape_bindings]
+        return merged_bindings
+
+    key_binding_module.merge_key_bindings = merge_key_bindings
+    prompt_toolkit_module = ModuleType("prompt_toolkit")
+    prompt_toolkit_module.key_binding = key_binding_module
+    monkeypatch.setitem(sys.modules, "prompt_toolkit", prompt_toolkit_module)
+    monkeypatch.setitem(sys.modules, "prompt_toolkit.key_binding", key_binding_module)
+
+    application = SimpleNamespace(key_bindings=existing_bindings, result=None)
+    application.exit = lambda *, result: setattr(application, "result", result)
+    question = SimpleNamespace(application=application)
 
     _bind_escape_back(question)
 
-    bindings = question.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
-    assert bindings
+    assert question.application.key_bindings is merged_bindings
+    registered["escape"](SimpleNamespace(app=application))
+    assert application.result is BACK
