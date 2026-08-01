@@ -130,13 +130,6 @@ The distillation script expects pre-tokenized data in Megatron's binary format (
 See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megatron-frameworks)**
 for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
 
-If you do not already have a suitable dataset, start with
-[data/nemotron-cascade-2-blend.yaml](data/nemotron-cascade-2-blend.yaml). It defines a general-purpose
-mixture of SFT data for QAD. Copy it, set the tokenizer for the target model, and adjust the output directory,
-sources, and weights as needed before preparing data. Its default 17.3-billion-token budget covers 1000
-iterations at global batch size 512 and sequence length 32768, including a 1% validation holdout and margin.
-Recalculate the budget when changing those settings, and keep the prepared data unchanged when resuming.
-
 ### Distillation with Real Data
 
 Example usage to distill a 4B student (HF) from an 8B teacher (HF) on 8 GPUs (TP=8, PP=1):
@@ -257,7 +250,16 @@ To export selected iterations instead, use `--export_iterations 200 400 600`.
 
 ### Quantization Aware Distillation (QAD)
 
-To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model. We also use a smaller learning rate for QAD:
+To recover the accuracy lost during [Post-Training Quantization](#post-training-quantization), distill the quantized model (student) from the original, unquantized model (teacher). Pass the quantized **Megatron checkpoint** produced by `quantize.py` via `--student_megatron_path` (the ModelOpt quantizers are restored automatically, so distillation trains the fake-quantized student), while `--student_hf_path` provides the student architecture and `--teacher_hf_path` points to the original unquantized model.
+
+If you do not already have a suitable QAD dataset, start with
+[data/nemotron-cascade-2-blend.yaml](data/nemotron-cascade-2-blend.yaml). It defines a general-purpose
+mixture of SFT data for QAD. Copy it, set the tokenizer for the target model, and adjust the output directory,
+sources, and weights as needed before preparing data. Its default 17.3-billion-token budget covers 1000
+iterations at global batch size 512 and sequence length 32768, including a 1% validation holdout and margin.
+Recalculate the budget when changing those settings, and keep the prepared data unchanged when resuming.
+
+We also use a smaller learning rate for QAD:
 
 ```bash
 torchrun --nproc_per_node 8 distill.py \

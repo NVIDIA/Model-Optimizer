@@ -115,7 +115,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
         save_interval=1,
         log_interval=1,
         exit_interval=early_exit_iter,
-        exit_duration_in_mins=60,
+        exit_duration_in_mins=10,
     )
     run_example_command(distill_cmd, example_path="megatron_bridge", setup_free_port=True)
     distilled_megatron_path = distill_output_dir / "checkpoints"
