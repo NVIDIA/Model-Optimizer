@@ -133,11 +133,12 @@ def test_meta_guard_not_raised_for_real_weight():
 
 
 def test_streaming_shard_writer_single_shard():
-    """Small tensors that fit in one shard produce model.safetensors without an index."""
+    """Tensors fitting in one shard produce model.safetensors, no index, and round-trip."""
     with tempfile.TemporaryDirectory() as tmpdir:
+        a, b = torch.randn(4, 4), torch.zeros(2, 2)
         writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
-        writer.add("a", torch.ones(4, 4))
-        writer.add("b", torch.zeros(2, 2))
+        writer.add("a", a)
+        writer.add("b", b)
         weight_map = writer.finalize()
 
         single = Path(tmpdir) / "model.safetensors"
@@ -147,9 +148,19 @@ def test_streaming_shard_writer_single_shard():
         assert set(weight_map.values()) == {"model.safetensors"}
         assert set(weight_map.keys()) == {"a", "b"}
 
+        with safe_open(str(single), framework="pt") as f:
+            assert torch.equal(f.get_tensor("a"), a)
+            assert torch.equal(f.get_tensor("b"), b)
+
 
 def test_streaming_shard_writer_multi_shard():
-    """Tensors exceeding max_shard_size produce multiple shards and an index file."""
+    """Tensors exceeding max_shard_size produce an index whose shards all exist on disk.
+
+    The file-existence half is a regression guard: an earlier code path called
+    model.save_pretrained(state_dict={}) after finalize(), triggering transformers' stale-
+    shard cleanup loop which matched and deleted every model-NNNNN-of-NNNNN.safetensors
+    file because filename_to_tensors was empty.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         # One float32 4x4 tensor = 64 bytes; set limit to 64 so each tensor goes to a new shard
         writer = _StreamingShardWriter(tmpdir, max_shard_size=64)
@@ -163,28 +174,7 @@ def test_streaming_shard_writer_multi_shard():
 
         with open(index_path) as f:
             index = json.load(f)
-        assert "weight_map" in index
-        assert "metadata" in index
         assert index["metadata"]["total_size"] > 0
-
-
-def test_multi_shard_files_exist_after_finalize():
-    """All numbered shard files referenced in the index must exist on disk after finalize().
-
-    Regression guard: an earlier code path called model.save_pretrained(state_dict={}) after
-    finalize(), triggering transformers' stale-shard cleanup loop which matched and deleted
-    every model-NNNNN-of-NNNNN.safetensors file because filename_to_tensors was empty.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        writer = _StreamingShardWriter(tmpdir, max_shard_size=64)
-        writer.add("x", torch.ones(4, 4))
-        writer.add("y", torch.ones(4, 4))
-        writer.finalize()
-
-        index_path = Path(tmpdir) / "model.safetensors.index.json"
-        assert index_path.exists()
-        with open(index_path) as f:
-            index = json.load(f)
 
         for key, shard_name in index["weight_map"].items():
             shard_path = Path(tmpdir) / shard_name
@@ -192,20 +182,6 @@ def test_multi_shard_files_exist_after_finalize():
                 f"Shard '{shard_name}' (for key '{key}') missing from disk after finalize()"
             )
             assert shard_path.stat().st_size > 0, f"Shard file {shard_name} is empty"
-
-
-def test_streaming_shard_writer_tensors_readable():
-    """Tensors written by the shard writer can be read back correctly."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        t = torch.randn(8, 8)
-        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
-        writer.add("weight", t)
-        weight_map = writer.finalize()
-
-        shard_file = Path(tmpdir) / weight_map["weight"]
-        with safe_open(str(shard_file), framework="pt") as f:
-            recovered = f.get_tensor("weight")
-        assert torch.allclose(recovered, t), "recovered tensor does not match original"
 
 
 def test_streaming_shard_writer_copies_tied_alias():
@@ -247,6 +223,24 @@ def test_streaming_shard_writer_copies_aliased_view():
             assert torch.equal(f.get_tensor("base"), base)
 
 
+def test_streaming_shard_writer_accepts_extra_tensors():
+    """extra_state_dict tensors must land in the shards.
+
+    MTP weights are orphaned — HF builds only num_hidden_layers decoders, so they are
+    never in model.state_dict() and reach export only via extra_state_dict. The streaming
+    path used to drop them, silently losing 19 tensors relative to the batch export.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("model.layers.0.weight", torch.ones(4, 4))
+        writer.add("mtp.fc.weight", torch.full((2, 2), 7.0))
+        weight_map = writer.finalize()
+
+        assert "mtp.fc.weight" in weight_map
+        with safe_open(str(Path(tmpdir) / weight_map["mtp.fc.weight"]), framework="pt") as f:
+            assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
+
+
 # ---------------------------------------------------------------------------
 # _postprocess_single_tensor
 # ---------------------------------------------------------------------------
@@ -262,21 +256,20 @@ def test_postprocess_passthrough_normal_key():
     assert val.shape == (4, 4)
 
 
-def test_postprocess_amax_dropped():
-    """weight_quantizer._amax matches skip_keys but has no replacement — dropped."""
-    key, val = _postprocess_single_tensor(
-        "model.layers.0.weight_quantizer._amax", torch.tensor(1.0), 448.0, None
-    )
-    assert key is None
-    assert val is None
-
-
-def test_postprocess_output_quantizer_dropped():
-    """output_quantizer keys are always dropped."""
-    key, val = _postprocess_single_tensor(
-        "model.layers.0.output_quantizer._amax", torch.tensor(0.5), 448.0, None
-    )
-    assert key is None
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model.layers.0.weight_quantizer._amax",  # skip_keys hit, no replacement
+        "model.layers.0.output_quantizer._amax",  # output_quantizer always dropped
+        "vision_model.radio_model.summary_idxs",  # problematic VL parameter
+        *(  # RealQuantLinear scale tensors
+            f"model.layers.0.weight_quantizer.{q}" for q in RealQuantLinear.list_of_scale_tensors
+        ),
+    ],
+)
+def test_postprocess_drops_key(key):
+    """Keys with no exported counterpart are dropped rather than renamed."""
+    assert _postprocess_single_tensor(key, torch.tensor(1.0), 448.0, None) == (None, None)
 
 
 def test_postprocess_kv_scale_renamed_and_divided():
@@ -299,47 +292,13 @@ def test_postprocess_scale_squeezed():
     assert val.shape == (4, 4), f"expected (4, 4), got {val.shape}"
 
 
-def test_postprocess_real_quant_param_dropped():
-    """Keys matching RealQuantLinear scale tensors are dropped."""
-    for q_key in RealQuantLinear.list_of_scale_tensors:
-        full_key = f"model.layers.0.weight_quantizer.{q_key}"
-        key, val = _postprocess_single_tensor(full_key, torch.tensor(1.0), 448.0, None)
-        assert key is None, f"expected None for real quant key '{full_key}'"
-
-
-def test_postprocess_vision_model_summary_idxs_dropped():
-    """The vision model summary_idxs parameter is always skipped."""
-    key, val = _postprocess_single_tensor(
-        "vision_model.radio_model.summary_idxs", torch.tensor([0, 1]), 448.0, None
-    )
-    assert key is None
-
-
 # ---------------------------------------------------------------------------
 # data_ptr identity under offload
 #
-# Both guards below exist because ``data_ptr()`` only identifies a tensor while
-# that tensor is resident. Getting this wrong silently exported wrong weights:
-# meta tensors all report 0, and freed addresses are recycled by the allocator.
+# The tests below exist because ``data_ptr()`` only identifies a tensor while that
+# tensor is resident. Getting this wrong silently exported wrong weights: meta
+# tensors all report 0, and freed addresses are recycled by the allocator.
 # ---------------------------------------------------------------------------
-
-
-def test_streaming_shard_writer_accepts_extra_tensors():
-    """extra_state_dict tensors must land in the shards.
-
-    MTP weights are orphaned — HF builds only num_hidden_layers decoders, so they are
-    never in model.state_dict() and reach export only via extra_state_dict. The streaming
-    path used to drop them, silently losing 19 tensors relative to the batch export.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
-        writer.add("model.layers.0.weight", torch.ones(4, 4))
-        writer.add("mtp.fc.weight", torch.full((2, 2), 7.0))
-        weight_map = writer.finalize()
-
-        assert "mtp.fc.weight" in weight_map
-        with safe_open(str(Path(tmpdir) / weight_map["mtp.fc.weight"]), framework="pt") as f:
-            assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
 
 
 def test_export_context_dedup_follows_weight_residency():
