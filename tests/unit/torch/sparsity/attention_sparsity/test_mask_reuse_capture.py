@@ -140,7 +140,7 @@ def test_build_invocation_binds_exact_threshold_source_and_final_chunk():
     assert invocation["partition"] == "development"
     assert invocation["inner_fold"] == 0
     assert invocation["threshold_log2_hex"] == expected_log2.hex()
-    assert invocation["threshold_lambda_hex"] == math.exp2(expected_log2).hex()
+    assert invocation["threshold_lambda_hex"] == (2.0**expected_log2).hex()
     assert invocation["expected_geometry"] == {
         "q_tokens": 256,
         "kv_tokens": 8448,

@@ -77,7 +77,7 @@ def _thresholds(target_sparsity: float, sample_length: int) -> tuple[float, floa
     threshold_log2 = (
         math.log2(A) + B * target_sparsity * math.log2(math.e) - math.log2(sample_length)
     )
-    return math.exp2(threshold_log2), threshold_log2
+    return 2.0**threshold_log2, threshold_log2
 
 
 def _observations() -> list[MaskReuseObservation]:

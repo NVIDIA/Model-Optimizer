@@ -87,7 +87,7 @@ def _capture(split, prompt_id, target, checkpoint_sha256):
         "target_sparsity_hex": target.hex(),
         "sample_length": 256,
         "threshold_log2_hex": threshold_log2.hex(),
-        "threshold_lambda_hex": math.exp2(threshold_log2).hex(),
+        "threshold_lambda_hex": (2.0**threshold_log2).hex(),
         "expected_geometry": {"q_tokens": 256, "kv_tokens": 256, "q_start_tokens": 0},
     }
     return {

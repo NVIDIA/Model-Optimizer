@@ -445,7 +445,8 @@ def build_capture_invocation(
     a = float(params["a"])
     b = float(params["b"])
     threshold_log2 = math.log2(a) + b * target * math.log2(math.e) - math.log2(sample_length)
-    threshold_lambda = math.exp2(threshold_log2)  # type: ignore[attr-defined]
+    # ``math.exp2`` was added in Python 3.11; ModelOpt still supports 3.10.
+    threshold_lambda = 2.0**threshold_log2
     if not math.isfinite(threshold_log2) or not 0.0 < threshold_lambda < 1.0:
         raise CaptureContractError("vanilla fit derives a threshold outside (0, 1)")
 
@@ -537,7 +538,7 @@ def _validate_invocation(raw: object) -> dict[str, object]:
     )
     if threshold_log2 >= 0.0 or not 0.0 < threshold_lambda < 1.0:
         raise CaptureContractError("capture invocation threshold must be in (0, 1)")
-    if math.exp2(threshold_log2).hex() != threshold_lambda.hex():  # type: ignore[attr-defined]
+    if (2.0**threshold_log2).hex() != threshold_lambda.hex():
         raise CaptureContractError("capture invocation threshold hex fields disagree")
     geometry = _validate_geometry(raw["expected_geometry"], "expected_geometry")
     if geometry["kv_tokens"] != sample_length:
