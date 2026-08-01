@@ -1213,7 +1213,7 @@ def _ask_infrastructure(
     )
     repository = prompts.text(
         "Repository path on workers:",
-        default=str(Path.cwd()),
+        default=".",
         description=(
             "Use the checkout path visible on every worker and inside the container, if used."
         ),

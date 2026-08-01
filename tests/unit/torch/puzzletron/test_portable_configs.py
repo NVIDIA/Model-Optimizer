@@ -15,6 +15,7 @@
 
 """Regression tests for portable Puzzletron example configuration."""
 
+import re
 from pathlib import Path
 
 import yaml
@@ -109,3 +110,4 @@ def test_model_examples_use_public_hugging_face_identities() -> None:
 
         assert config["input_hf_model_path"] == config["model_info"]["hf_repo"]
         assert not config["input_hf_model_path"].startswith("REPLACE_WITH_")
+        assert re.fullmatch(r"[0-9a-f]{40}", config["model_info"]["hf_revision"])

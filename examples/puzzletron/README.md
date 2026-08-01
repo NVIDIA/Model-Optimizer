@@ -22,7 +22,7 @@ campaign report.
 
 The configs below are the exact current-code entry points for the completed
 campaigns. Each verified report is a self-contained HTML file that embeds all
-sanity-check outputs, stage manifests, and evaluation results, they can be
+sanity-check outputs, stage manifests, and evaluation results; they can be
 100s of MB. Download them to disk and open locally rather than previewing in a
 browser tab.
 
