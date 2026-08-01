@@ -165,12 +165,13 @@ sparsities under the exact runtime rule
 python collect_mask_reuse.py <CKPT> \
   --model-id Nemotron-3-Ultra \
   --plan nemotron3_ultra_stride2 \
-  --fa4-source /path/to/flash-attention-at-4c40766b \
+  --fa4-source /path/to/pinned-calibrated-threshold-flash-attention \
   --prompts-jsonl mask_reuse_prompts.jsonl \
   --vanilla-config <CKPT>/config.json \
   --target-sparsities 0.5 0.6 0.7 \
   --max-model-len 1000001 \
   --tensor-parallel-size 8 \
+  --validate-dense-output \
   --output mask_reuse_compact_captures.jsonl
 ```
 
@@ -193,7 +194,12 @@ dropped-mass matrix once. It does not expand or repeat the matrix as millions
 of candidate rows. Fixed-lambda version-4/version-5 captures are not valid
 inputs to this target-sparsity path. Use the printed compact-capture SHA256 as
 the `reuse_bundle_sha256` evidence value. The FA4 source must be a clean Git
-checkout; its exact commit is recorded in the capture manifest.
+checkout; its exact commit is recorded in the capture manifest. The version-3
+capture manifest also retains the canonical vLLM engine arguments, rank-major
+TP sentinel evidence, exact prefill/decode attention-call counts, and optional
+bitwise dense-shadow coverage. `--validate-dense-output` runs a second pinned
+dense FA4 call for every armed final-chunk layer and fails before publication
+if its BF16 output differs bitwise from the model-trajectory output.
 
 Once those observations have been captured, select the per-context target,
 donor-head map, and exact fallbacks and export the fail-closed candidate:

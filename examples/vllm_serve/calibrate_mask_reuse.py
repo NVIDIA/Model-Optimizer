@@ -79,6 +79,8 @@ _CAPTURE_MANIFEST_FIELDS = frozenset(
         "plan",
         "fa4_source",
         "fa4_source_commit",
+        "engine_kwargs",
+        "dense_shadow_validation_requested",
         "target_sparsity_hex",
         "vanilla_threshold_scale_factor",
         "vanilla_fit_sha256",
@@ -263,8 +265,8 @@ def _validate_capture_manifest(
             f"missing={sorted(missing)}, extra={sorted(extra)}"
         )
     expected = {
-        "capture_manifest_schema_version": 2,
-        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v2",
+        "capture_manifest_schema_version": 3,
+        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v3",
         "model": model,
         "checkpoint_manifest_sha256": checkpoint_sha256,
         "compact_capture_file_sha256": compact_capture_sha256,
@@ -273,6 +275,10 @@ def _validate_capture_manifest(
     for field, value in expected.items():
         if raw[field] != value:
             raise ValueError(f"capture manifest {field} does not match its verified input")
+    if not isinstance(raw["engine_kwargs"], Mapping):
+        raise ValueError("capture manifest engine_kwargs must be an object")
+    if not isinstance(raw["dense_shadow_validation_requested"], bool):
+        raise ValueError("capture manifest dense_shadow_validation_requested must be boolean")
     if isinstance(raw["capture_count"], bool) or not isinstance(raw["capture_count"], int):
         raise ValueError("capture manifest capture_count must be an integer")
     if raw["capture_count"] <= 0:

@@ -117,10 +117,24 @@ _RANK_CAPTURE_FIELDS = frozenset(
         "eligible_tiles",
         "anchor_stats_by_layer",
         "consumer_layers",
+        "attention_call_counts",
+        "tp_head_order_evidence",
+        "dense_shadow_evidence",
     }
 )
 _ANCHOR_STATS_FIELDS = frozenset({"retained_tiles", "dropped_mass"})
 _CONSUMER_STATS_FIELDS = frozenset({"anchor_layer", "consumer_head_start", "dropped_mass"})
+_ATTENTION_CALL_COUNT_FIELDS = frozenset({"prefill", "decode"})
+_TP_HEAD_ORDER_FIELDS = frozenset(
+    {
+        "sentinel_device_type",
+        "gather_dim",
+        "local_rank",
+        "local_num_heads",
+        "gathered_rank_local_head",
+    }
+)
+_DENSE_SHADOW_FIELDS = frozenset({"enabled", "atol_hex", "rtol_hex", "validated_layer_indices"})
 
 
 class CaptureContractError(ValueError):
@@ -684,6 +698,87 @@ def _parse_consumer_layers(
     return result
 
 
+def _parse_attention_call_counts(raw: object, *, rank: int) -> dict[str, int]:
+    if not isinstance(raw, Mapping):
+        raise CaptureContractError(f"rank {rank} attention_call_counts must be an object")
+    _exact_fields(raw, _ATTENTION_CALL_COUNT_FIELDS, f"rank {rank} attention_call_counts")
+    return {
+        name: _integer(raw[name], f"rank {rank} attention_call_counts.{name}")
+        for name in ("prefill", "decode")
+    }
+
+
+def _parse_tp_head_order_evidence(
+    raw: object,
+    *,
+    rank: int,
+    world_size: int,
+    global_num_heads: int,
+) -> dict[str, object]:
+    if not isinstance(raw, Mapping):
+        raise CaptureContractError(f"rank {rank} tp_head_order_evidence must be an object")
+    _exact_fields(raw, _TP_HEAD_ORDER_FIELDS, f"rank {rank} tp_head_order_evidence")
+    if raw["sentinel_device_type"] != "cuda":
+        raise CaptureContractError(f"rank {rank} TP sentinel was not gathered on CUDA")
+    if raw["gather_dim"] != 0:
+        raise CaptureContractError(f"rank {rank} TP sentinel must be gathered along dim 0")
+    if _integer(raw["local_rank"], f"rank {rank} TP local_rank") != rank:
+        raise CaptureContractError(f"rank {rank} TP sentinel reports a different local rank")
+    local_num_heads = _integer(raw["local_num_heads"], f"rank {rank} TP local_num_heads", minimum=1)
+    if local_num_heads * world_size != global_num_heads:
+        raise CaptureContractError(
+            f"rank {rank} local head count does not evenly cover global heads"
+        )
+    gathered = raw["gathered_rank_local_head"]
+    expected = [
+        [global_head // local_num_heads, global_head % local_num_heads]
+        for global_head in range(global_num_heads)
+    ]
+    if gathered != expected:
+        raise CaptureContractError(
+            f"rank {rank} TP all-gather is not rank-major in global-head order"
+        )
+    return {
+        "rank": rank,
+        "global_head_start": rank * local_num_heads,
+        "local_num_heads": local_num_heads,
+        "sentinel_device_type": "cuda",
+        "gather_dim": 0,
+        "gathered_rank_local_head": expected,
+    }
+
+
+def _parse_dense_shadow_evidence(raw: object, *, rank: int) -> dict[str, object]:
+    if not isinstance(raw, Mapping):
+        raise CaptureContractError(f"rank {rank} dense_shadow_evidence must be an object")
+    _exact_fields(raw, _DENSE_SHADOW_FIELDS, f"rank {rank} dense_shadow_evidence")
+    enabled = raw["enabled"]
+    if not isinstance(enabled, bool):
+        raise CaptureContractError(f"rank {rank} dense_shadow_evidence.enabled must be boolean")
+    atol = _canonical_float_hex(raw["atol_hex"], f"rank {rank} dense shadow atol")
+    rtol = _canonical_float_hex(raw["rtol_hex"], f"rank {rank} dense shadow rtol")
+    if atol != 0.0 or rtol != 0.0:
+        raise CaptureContractError("dense shadow evidence must use bitwise zero tolerances")
+    raw_layers = raw["validated_layer_indices"]
+    if not isinstance(raw_layers, list):
+        raise CaptureContractError(
+            f"rank {rank} dense_shadow_evidence.validated_layer_indices must be a list"
+        )
+    layers = [_integer(layer, f"rank {rank} dense shadow layer") for layer in raw_layers]
+    if layers != sorted(set(layers)):
+        raise CaptureContractError(f"rank {rank} dense shadow layers must be sorted and unique")
+    if not enabled and layers:
+        raise CaptureContractError(
+            f"rank {rank} disabled dense shadow cannot report validated layers"
+        )
+    return {
+        "enabled": enabled,
+        "atol_hex": atol.hex(),
+        "rtol_hex": rtol.hex(),
+        "validated_layer_indices": layers,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class MergedCapture:
     """One compact normalized capture plus auditable metadata."""
@@ -704,6 +799,9 @@ def merge_rank_captures(
     geometry_values: list[dict[str, int]] = []
     anchor_payloads: list[dict[str, dict[str, list[int] | list[float]]]] = []
     consumer_payloads: list[dict[int, tuple[int, int, list[list[float]]]]] = []
+    attention_call_counts: list[dict[str, int]] = []
+    tp_head_order_evidence: list[dict[str, object]] = []
+    dense_shadow_evidence: list[dict[str, object]] = []
     for value in ordered:
         rank = cast("int", value["rank"])
         if value["invocation"] != trusted_invocation:
@@ -729,17 +827,40 @@ def merge_rank_captures(
                 eligible_tiles=eligible_tiles,
             )
         )
-        consumer_payloads.append(
-            _parse_consumer_layers(
-                value["consumer_layers"], rank=rank, global_num_heads=global_num_heads
-            )
+        consumers = _parse_consumer_layers(
+            value["consumer_layers"], rank=rank, global_num_heads=global_num_heads
         )
+        consumer_payloads.append(consumers)
+        counts = _parse_attention_call_counts(value["attention_call_counts"], rank=rank)
+        attention_call_counts.append(counts)
+        tp_evidence = _parse_tp_head_order_evidence(
+            value["tp_head_order_evidence"],
+            rank=rank,
+            world_size=world_size,
+            global_num_heads=global_num_heads,
+        )
+        tp_head_order_evidence.append(tp_evidence)
+        dense_shadow_evidence.append(
+            _parse_dense_shadow_evidence(value["dense_shadow_evidence"], rank=rank)
+        )
+        for layer, (_, start, rows) in consumers.items():
+            if (
+                start != tp_evidence["global_head_start"]
+                or len(rows) != tp_evidence["local_num_heads"]
+            ):
+                raise CaptureContractError(
+                    f"rank {rank} consumer layer {layer} does not match its TP head shard"
+                )
     if len(global_heads) != 1 or len(eligible_values) != 1:
         raise CaptureContractError("capture ranks disagree on head count or eligible tiles")
     if any(value != geometry_values[0] for value in geometry_values[1:]):
         raise CaptureContractError("capture ranks disagree on final-chunk geometry")
     if any(value != anchor_payloads[0] for value in anchor_payloads[1:]):
         raise CaptureContractError("capture ranks disagree on global anchor statistics")
+    if any(value != attention_call_counts[0] for value in attention_call_counts[1:]):
+        raise CaptureContractError("capture ranks disagree on attention call counts")
+    if any(value != dense_shadow_evidence[0] for value in dense_shadow_evidence[1:]):
+        raise CaptureContractError("capture ranks disagree on dense shadow evidence")
     layer_sets = [set(value) for value in consumer_payloads]
     if any(value != layer_sets[0] for value in layer_sets[1:]):
         raise CaptureContractError("capture ranks disagree on consumer layer coverage")
@@ -751,6 +872,23 @@ def merge_rank_captures(
             "capture eligible_tiles does not match 128x128 bottom-right causal geometry"
         )
     anchors = anchor_payloads[0]
+    attention_layers = sorted({int(layer) for layer in anchors} | layer_sets[0])
+    expected_prefill_calls = (
+        (cast("int", trusted_invocation["sample_length"]) + MAX_QUERY_CHUNK_TOKENS - 1)
+        // MAX_QUERY_CHUNK_TOKENS
+    ) * len(attention_layers)
+    common_counts = attention_call_counts[0]
+    if common_counts["prefill"] != expected_prefill_calls:
+        raise CaptureContractError(
+            "capture prefill attention call count does not match chunks times layers"
+        )
+    if common_counts["decode"] != 0:
+        raise CaptureContractError("capture observed a decode attention call at max_tokens=1")
+    common_shadow = dense_shadow_evidence[0]
+    if common_shadow["enabled"] and common_shadow["validated_layer_indices"] != attention_layers:
+        raise CaptureContractError(
+            "dense shadow evidence does not cover every captured attention layer"
+        )
     merged_consumers: dict[str, dict[str, object]] = {}
     for layer in sorted(layer_sets[0]):
         shards = sorted(
@@ -804,6 +942,9 @@ def merge_rank_captures(
             len(cast("Sequence[object]", value["dropped_mass"])) * global_num_heads
             for value in merged_consumers.values()
         ),
+        "attention_call_counts": common_counts,
+        "tp_head_order_evidence": tp_head_order_evidence,
+        "dense_shadow_evidence": common_shadow,
         "compact_capture_sha256": canonical_json_sha256(compact_capture),
     }
     return MergedCapture(compact_capture, manifest)

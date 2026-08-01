@@ -108,6 +108,20 @@ class _LLM:
                         "dropped_mass": [[0.01, 0.02], [0.03, 0.04]],
                     }
                 },
+                "attention_call_counts": {"prefill": 2, "decode": 0},
+                "tp_head_order_evidence": {
+                    "sentinel_device_type": "cuda",
+                    "gather_dim": 0,
+                    "local_rank": 0,
+                    "local_num_heads": 2,
+                    "gathered_rank_local_head": [[0, 0], [0, 1]],
+                },
+                "dense_shadow_evidence": {
+                    "enabled": True,
+                    "atol_hex": (0.0).hex(),
+                    "rtol_hex": (0.0).hex(),
+                    "validated_layer_indices": [0, 1],
+                },
             }
         ]
 
@@ -228,6 +242,7 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
             str(manifest),
             "--max-model-len",
             "512",
+            "--validate-dense-output",
         ]
     )
 
@@ -253,6 +268,7 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
         == checkpoint_manifest.sha256
     )
     assert collect_mask_reuse_cli.os.environ["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert collect_mask_reuse_cli.os.environ["MASK_REUSE_FA4_CAPTURE_DENSE_SHADOW"] == "1"
     assert "MASK_REUSE_FA4_POLICY" not in collect_mask_reuse_cli.os.environ
     assert "MASK_REUSE_FA4_POLICY_SHA256" not in collect_mask_reuse_cli.os.environ
 
@@ -266,11 +282,14 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
     }
     assert {capture["invocation"]["target_sparsity_hex"] for capture in captures} == {(0.7).hex()}
     report = json.loads(manifest.read_text())
-    assert report["capture_protocol"] == "modelopt_vllm_mask_reuse_target_sparsity_v2"
+    assert report["capture_manifest_schema_version"] == 3
+    assert report["capture_protocol"] == "modelopt_vllm_mask_reuse_target_sparsity_v3"
     assert report["checkpoint_manifest_sha256"] == checkpoint_manifest.sha256
     assert report["prompt_plan_file_sha256"] == sha256(parsed_payloads["prompts"]).hexdigest()
     assert report["vanilla_config_file_sha256"] == sha256(parsed_payloads["vanilla"]).hexdigest()
     assert report["fa4_source_commit"] == "a" * 40
+    assert report["dense_shadow_validation_requested"] is True
+    assert report["engine_kwargs"]["tensor_parallel_size"] == 1
     assert report["capture_count"] == len(captures)
     assert "observation_count" not in report
     assert len(report["captures"]) == 2
@@ -340,5 +359,8 @@ def test_capture_environment_rejects_untracked_fa4_source(tmp_path, monkeypatch)
         match="tracked or untracked modifications",
     ):
         collect_mask_reuse_cli._configure_capture_environment(
-            "test_stride2", str(fa4_source), "0" * 64
+            "test_stride2",
+            str(fa4_source),
+            "0" * 64,
+            validate_dense_output=True,
         )

@@ -70,6 +70,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
 CAPTURE_ENV = "MASK_REUSE_FA4_CALIBRATION_CAPTURE"
 PLAN_ENV = "MASK_REUSE_FA4_PLAN"
 CHECKPOINT_ENV = "MASK_REUSE_FA4_CHECKPOINT_MANIFEST_SHA256"
+DENSE_SHADOW_ENV = "MASK_REUSE_FA4_CAPTURE_DENSE_SHADOW"
 _POLICY_ENVS = (
     "MASK_REUSE_FA4_POLICY",
     "MASK_REUSE_FA4_POLICY_SHA256",
@@ -133,6 +134,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--validate-dense-output",
+        action="store_true",
+        help="Bitwise-compare every armed capture layer with a second pinned dense FA4 call",
+    )
     parser.add_argument(
         "--engine-kwargs",
         default=None,
@@ -202,7 +208,11 @@ def _canonical_capture_line(capture: dict[str, object]) -> bytes:
 
 
 def _configure_capture_environment(
-    plan: str, fa4_source: str, checkpoint_manifest_sha256: str
+    plan: str,
+    fa4_source: str,
+    checkpoint_manifest_sha256: str,
+    *,
+    validate_dense_output: bool,
 ) -> tuple[Path, str]:
     source = Path(fa4_source).expanduser().resolve()
     required = (
@@ -246,6 +256,7 @@ def _configure_capture_environment(
     os.environ[CAPTURE_ENV] = "1"
     os.environ[PLAN_ENV] = plan
     os.environ[CHECKPOINT_ENV] = checkpoint_manifest_sha256
+    os.environ[DENSE_SHADOW_ENV] = "1" if validate_dense_output else "0"
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     sys.dont_write_bytecode = True
     os.environ["MASK_REUSE_FA4_SOURCE"] = str(source)
@@ -316,13 +327,17 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     fa4_source, fa4_source_commit = _configure_capture_environment(
-        args.plan, args.fa4_source, checkpoint.sha256
+        args.plan,
+        args.fa4_source,
+        checkpoint.sha256,
+        validate_dense_output=args.validate_dense_output,
     )
     # Import after setting the gate: worker subprocesses inherit the exact
     # capture environment and never enter policy-backed serving mode.
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**_engine_kwargs(args))
+    engine_kwargs = _engine_kwargs(args)
+    llm = LLM(**engine_kwargs)
     loaded_checkpoint = verify_checkpoint_manifest(args.model, expected_model=model_id)
     if loaded_checkpoint != checkpoint:
         raise CaptureContractError(
@@ -411,8 +426,8 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
 
     capture_sha256 = capture_digest.hexdigest()
     manifest = {
-        "capture_manifest_schema_version": 2,
-        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v2",
+        "capture_manifest_schema_version": 3,
+        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v3",
         "model": model_id,
         "checkpoint_manifest_sha256": checkpoint.sha256,
         "checkpoint_manifest_path": str(checkpoint.manifest_path),
@@ -421,6 +436,8 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         "plan": args.plan,
         "fa4_source": str(fa4_source),
         "fa4_source_commit": fa4_source_commit,
+        "engine_kwargs": engine_kwargs,
+        "dense_shadow_validation_requested": args.validate_dense_output,
         "target_sparsity_hex": [target.hex() for target in targets],
         "vanilla_threshold_scale_factor": threshold_scale_factor,
         "vanilla_fit_sha256": canonical_json_sha256(threshold_scale_factor),

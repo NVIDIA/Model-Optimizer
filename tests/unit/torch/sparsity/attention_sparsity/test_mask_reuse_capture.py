@@ -113,6 +113,20 @@ def _rank_payload(invocation, rank):
                 ],
             },
         },
+        "attention_call_counts": {"prefill": 8, "decode": 0},
+        "tp_head_order_evidence": {
+            "sentinel_device_type": "cuda",
+            "gather_dim": 0,
+            "local_rank": rank,
+            "local_num_heads": 2,
+            "gathered_rank_local_head": [[0, 0], [0, 1], [1, 0], [1, 1]],
+        },
+        "dense_shadow_evidence": {
+            "enabled": True,
+            "atol_hex": (0.0).hex(),
+            "rtol_hex": (0.0).hex(),
+            "validated_layer_indices": [0, 1, 4, 5],
+        },
     }
 
 
@@ -266,13 +280,30 @@ def test_merge_rank_captures_concatenates_consumer_shards_deterministically():
     assert merged.manifest["world_size"] == 2
     assert merged.manifest["global_num_heads"] == 4
     assert merged.manifest["candidate_cell_count"] == 2 * 4 * 4
+    assert merged.manifest["attention_call_counts"] == {"prefill": 8, "decode": 0}
+    assert [item["global_head_start"] for item in merged.manifest["tp_head_order_evidence"]] == [
+        0,
+        2,
+    ]
+    assert merged.manifest["dense_shadow_evidence"]["validated_layer_indices"] == [0, 1, 4, 5]
     consumer = merged.capture["consumer_layers"]["1"]
     assert consumer["anchor_layer"] == 0
     assert consumer["dropped_mass"][2][3] == pytest.approx(0.06)
     assert set(merged.capture["anchor_stats_by_layer"]) == {"0", "4"}
 
 
-@pytest.mark.parametrize("corruption", ["wrong_invocation", "anchor_disagreement", "head_gap"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "wrong_invocation",
+        "anchor_disagreement",
+        "head_gap",
+        "rank_permutation",
+        "decode_call",
+        "prefill_count",
+        "missing_dense_shadow",
+    ],
+)
 def test_merge_rank_captures_fails_closed_on_incomplete_or_disagreed_evidence(corruption):
     invocation = _invocation()
     rank0 = _rank_payload(invocation, 0)
@@ -281,8 +312,24 @@ def test_merge_rank_captures_fails_closed_on_incomplete_or_disagreed_evidence(co
         rank1["invocation"] = dict(invocation, prompt_id="other")
     elif corruption == "anchor_disagreement":
         rank1["anchor_stats_by_layer"]["0"]["retained_tiles"][0] = 9
-    else:
+    elif corruption == "head_gap":
         rank1["consumer_layers"]["1"]["consumer_head_start"] = 3
+    elif corruption == "rank_permutation":
+        rank1["tp_head_order_evidence"]["gathered_rank_local_head"] = [
+            [1, 0],
+            [1, 1],
+            [0, 0],
+            [0, 1],
+        ]
+    elif corruption == "decode_call":
+        rank0["attention_call_counts"]["decode"] = 1
+        rank1["attention_call_counts"]["decode"] = 1
+    elif corruption == "prefill_count":
+        rank0["attention_call_counts"]["prefill"] = 7
+        rank1["attention_call_counts"]["prefill"] = 7
+    else:
+        rank0["dense_shadow_evidence"]["validated_layer_indices"] = [0, 1, 4]
+        rank1["dense_shadow_evidence"]["validated_layer_indices"] = [0, 1, 4]
 
     with pytest.raises(CaptureContractError):
         merge_rank_captures([rank0, rank1], invocation)
