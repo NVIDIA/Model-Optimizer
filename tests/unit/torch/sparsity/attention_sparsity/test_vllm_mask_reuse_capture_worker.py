@@ -15,11 +15,34 @@
 
 """Tests for the policy-free vLLM capture worker bootstrap and RPC wrappers."""
 
-from types import SimpleNamespace
+import importlib
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from modelopt.torch.sparsity.attention_sparsity.plugins import vllm_mask_reuse_capture
+
+@pytest.fixture
+def vllm_mask_reuse_capture(monkeypatch):
+    """Import the worker against a minimal optional-vLLM boundary."""
+
+    class Worker:
+        pass
+
+    modules = {
+        "vllm": ModuleType("vllm"),
+        "vllm.v1": ModuleType("vllm.v1"),
+        "vllm.v1.worker": ModuleType("vllm.v1.worker"),
+        "vllm.v1.worker.gpu_worker": ModuleType("vllm.v1.worker.gpu_worker"),
+    }
+    modules["vllm.v1.worker.gpu_worker"].Worker = Worker
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    target = "modelopt.torch.sparsity.attention_sparsity.plugins.vllm_mask_reuse_capture"
+    sys.modules.pop(target, None)
+    module = importlib.import_module(target)
+    yield module
+    sys.modules.pop(target, None)
 
 
 def _api(calls):
@@ -37,7 +60,7 @@ def _api(calls):
     )
 
 
-def test_bootstrap_requires_gate_and_plan(monkeypatch):
+def test_bootstrap_requires_gate_and_plan(monkeypatch, vllm_mask_reuse_capture):
     monkeypatch.delenv(vllm_mask_reuse_capture.CAPTURE_ENV, raising=False)
     monkeypatch.setenv(vllm_mask_reuse_capture.PLAN_ENV, "qwen3_stride2")
     with pytest.raises(RuntimeError, match="CALIBRATION_CAPTURE=1"):
@@ -49,7 +72,7 @@ def test_bootstrap_requires_gate_and_plan(monkeypatch):
         vllm_mask_reuse_capture._configure_capture_before_model_load()
 
 
-def test_bootstrap_installs_policy_free_runtime_before_load(monkeypatch):
+def test_bootstrap_installs_policy_free_runtime_before_load(monkeypatch, vllm_mask_reuse_capture):
     calls = []
     api = _api(calls)
     monkeypatch.setenv(vllm_mask_reuse_capture.CAPTURE_ENV, "1")
@@ -60,7 +83,7 @@ def test_bootstrap_installs_policy_free_runtime_before_load(monkeypatch):
     assert calls == [("configure", "nemotron3_ultra_stride2")]
 
 
-def test_worker_rpc_methods_forward_only_to_capture_api(monkeypatch):
+def test_worker_rpc_methods_forward_only_to_capture_api(monkeypatch, vllm_mask_reuse_capture):
     calls = []
     api = _api(calls)
     monkeypatch.setattr(vllm_mask_reuse_capture, "_capture_api", lambda: api)
