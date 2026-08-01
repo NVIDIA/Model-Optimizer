@@ -233,10 +233,14 @@ def build_sparse_attention_config(
     threshold_scale_factor: dict[str, Any] = {"formula": "a * exp(b * target_sparsity)"}
     for phase in _PHASES:
         if phase in calibration_params:
-            threshold_scale_factor[phase] = {
+            phase_params = {
                 "a": float(calibration_params[phase]["a"]),
                 "b": float(calibration_params[phase]["b"]),
             }
+            for key in ("min_observed_sparsity", "max_observed_sparsity"):
+                if key in calibration_params[phase]:
+                    phase_params[key] = float(calibration_params[phase][key])
+            threshold_scale_factor[phase] = phase_params
 
     skip_group: dict[str, Any] = {
         "algorithm": "skip_softmax",

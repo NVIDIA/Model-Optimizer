@@ -166,13 +166,26 @@ class TestCalibrateFromStats:
 
 
 class TestBuildSparseAttentionConfig:
-    _PARAMS = {"prefill": {"a": 7.9, "b": 8.6}, "decode": {"a": 0.12, "b": 9.8}}
+    _PARAMS = {
+        "prefill": {
+            "a": 7.9,
+            "b": 8.6,
+            "min_observed_sparsity": 0.1,
+            "max_observed_sparsity": 0.9,
+        },
+        "decode": {"a": 0.12, "b": 9.8},
+    }
 
     def test_canonical_schema(self):
         config = build_sparse_attention_config(self._PARAMS, 0.4)
         group = config["config_groups"]["group_0"]
         assert group["algorithm"] == "skip_softmax"
-        assert group["threshold_scale_factor"]["prefill"] == {"a": 7.9, "b": 8.6}
+        assert group["threshold_scale_factor"]["prefill"] == {
+            "a": 7.9,
+            "b": 8.6,
+            "min_observed_sparsity": 0.1,
+            "max_observed_sparsity": 0.9,
+        }
         assert group["threshold_scale_factor"]["formula"] == "a * exp(b * target_sparsity)"
         assert group["target_sparsity"] == {"prefill": 0.4, "decode": 0.4}
         assert config["producer"]["name"] == "modelopt"
