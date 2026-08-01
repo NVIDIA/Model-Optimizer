@@ -692,7 +692,7 @@ def _validate_thresholds(
         expected_log2 = (
             math.log2(a) + b * target * math.log2(math.e) - math.log2(observation.sample_length)
         )
-        expected_lambda = float(getattr(math, "exp2")(expected_log2))
+        expected_lambda = 2.0**expected_log2
         if not 0.0 < expected_lambda < 1.0:
             raise MaskReuseCalibrationError(
                 "vanilla calibration derives a threshold outside (0, 1) for "

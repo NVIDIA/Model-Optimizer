@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from modelopt.torch.sparsity.attention_sparsity.calibration import source_manifest
 from modelopt.torch.sparsity.attention_sparsity.calibration.checkpoint_manifest import (
     create_checkpoint_manifest,
 )
@@ -37,6 +38,29 @@ _SPEC = importlib.util.spec_from_file_location("collect_mask_reuse_cli", _SCRIPT
 assert _SPEC is not None and _SPEC.loader is not None
 collect_mask_reuse_cli = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(collect_mask_reuse_cli)
+
+_FA4_COMMIT = "a" * 40
+_FA4_TREE = "b" * 40
+_FA4_ARCHIVE_SHA256 = "c" * 64
+
+
+def _write_source_witness(source: Path, destination: Path) -> str:
+    snapshot = source_manifest._source_tree_snapshot(source)
+    raw = {
+        "source_manifest_schema_version": 1,
+        "source_kind": "flash-attention-4",
+        "git_commit": _FA4_COMMIT,
+        "git_tree": _FA4_TREE,
+        "git_archive_sha256": _FA4_ARCHIVE_SHA256,
+        "archive_scope": "flash_attn",
+        "directories": list(snapshot.directories),
+        "files": list(snapshot.files),
+    }
+    payload = (
+        json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode()
+    destination.write_bytes(payload)
+    return sha256(payload).hexdigest()
 
 
 class _Tokenizer:
@@ -187,6 +211,8 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
     cute.mkdir(parents=True)
     (cute / "interface.py").write_text("# pinned\n", encoding="utf-8")
     (cute / "block_sparsity.py").write_text("# pinned\n", encoding="utf-8")
+    fa4_source_manifest = tmp_path / "fa4-source-manifest.json"
+    fa4_source_manifest_sha256 = _write_source_witness(fa4_source, fa4_source_manifest)
     fake_vllm = SimpleNamespace(LLM=_LLM, SamplingParams=_SamplingParams)
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
     monkeypatch.setattr(
@@ -195,13 +221,6 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
         lambda **kwargs: [
             SimpleNamespace(name="mask_reuse_fa4", value="mask_reuse_vllm.plugin:register")
         ],
-    )
-    monkeypatch.setattr(
-        collect_mask_reuse_cli.subprocess,
-        "run",
-        lambda command, **kwargs: SimpleNamespace(
-            stdout="a" * 40 + "\n" if command[-2:] == ["rev-parse", "HEAD"] else ""
-        ),
     )
     monkeypatch.setenv("MASK_REUSE_FA4_POLICY", "stale-policy.json")
     monkeypatch.setenv("MASK_REUSE_FA4_POLICY_SHA256", "stale")
@@ -226,10 +245,18 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
             str(checkpoint),
             "--model-id",
             "test-model",
+            "--checkpoint-manifest-sha256",
+            checkpoint_manifest.sha256,
             "--plan",
             "test_stride2",
             "--fa4-source",
             str(fa4_source),
+            "--fa4-source-manifest",
+            str(fa4_source_manifest),
+            "--fa4-source-manifest-sha256",
+            fa4_source_manifest_sha256,
+            "--fa4-commit",
+            _FA4_COMMIT,
             "--prompts-jsonl",
             str(prompts),
             "--vanilla-config",
@@ -282,12 +309,16 @@ def test_main_bootstraps_policy_free_backend_and_writes_normalized_evidence(tmp_
     }
     assert {capture["invocation"]["target_sparsity_hex"] for capture in captures} == {(0.7).hex()}
     report = json.loads(manifest.read_text())
-    assert report["capture_manifest_schema_version"] == 3
-    assert report["capture_protocol"] == "modelopt_vllm_mask_reuse_target_sparsity_v3"
+    assert report["capture_manifest_schema_version"] == 4
+    assert report["capture_protocol"] == "modelopt_vllm_mask_reuse_target_sparsity_v4"
     assert report["checkpoint_manifest_sha256"] == checkpoint_manifest.sha256
     assert report["prompt_plan_file_sha256"] == sha256(parsed_payloads["prompts"]).hexdigest()
     assert report["vanilla_config_file_sha256"] == sha256(parsed_payloads["vanilla"]).hexdigest()
-    assert report["fa4_source_commit"] == "a" * 40
+    assert report["fa4_source_commit"] == _FA4_COMMIT
+    assert report["fa4_source_git_tree"] == _FA4_TREE
+    assert report["fa4_source_git_archive_sha256"] == _FA4_ARCHIVE_SHA256
+    assert report["fa4_source_manifest_sha256"] == fa4_source_manifest_sha256
+    assert report["fa4_source_file_count"] == 2
     assert report["dense_shadow_validation_requested"] is True
     assert report["engine_kwargs"]["tensor_parallel_size"] == 1
     assert report["capture_count"] == len(captures)
@@ -336,31 +367,26 @@ def test_publish_no_clobber_rolls_back_capture_and_manifest_on_fsync_failure(tmp
         assert not temporary.exists()
 
 
-def test_capture_environment_rejects_untracked_fa4_source(tmp_path, monkeypatch):
+def test_capture_environment_rejects_extra_fa4_source_path(tmp_path, monkeypatch):
     fa4_source = tmp_path / "flash-attention"
     cute = fa4_source / "flash_attn/cute"
     cute.mkdir(parents=True)
     (cute / "interface.py").write_text("# pinned\n", encoding="utf-8")
     (cute / "block_sparsity.py").write_text("# pinned\n", encoding="utf-8")
-    monkeypatch.setattr(
-        collect_mask_reuse_cli.subprocess,
-        "run",
-        lambda command, **kwargs: SimpleNamespace(
-            stdout=(
-                "a" * 40 + "\n"
-                if command[-2:] == ["rev-parse", "HEAD"]
-                else "?? flash_attn/cute/local_override.py\n"
-            )
-        ),
-    )
+    manifest = tmp_path / "fa4-source-manifest.json"
+    digest = _write_source_witness(fa4_source, manifest)
+    (cute / "local_override.py").write_text("# extra\n", encoding="utf-8")
 
     with pytest.raises(
         collect_mask_reuse_cli.CaptureContractError,
-        match="tracked or untracked modifications",
+        match="does not exactly match",
     ):
         collect_mask_reuse_cli._configure_capture_environment(
             "test_stride2",
             str(fa4_source),
+            str(manifest),
+            digest,
+            _FA4_COMMIT,
             "0" * 64,
             validate_dense_output=True,
         )

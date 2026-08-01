@@ -62,8 +62,8 @@ def _base_args(tmp_path: Path):
     capture_manifest.write_bytes(
         _canonical(
             {
-                "capture_manifest_schema_version": 3,
-                "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v3",
+                "capture_manifest_schema_version": 4,
+                "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v4",
                 "model": "test-model",
                 "checkpoint_manifest_sha256": checkpoint.sha256,
                 "checkpoint_manifest_path": str(checkpoint.manifest_path),
@@ -72,6 +72,13 @@ def _base_args(tmp_path: Path):
                 "plan": "test_stride2",
                 "fa4_source": "/source",
                 "fa4_source_commit": "a" * 40,
+                "fa4_source_git_tree": "b" * 40,
+                "fa4_source_git_archive_sha256": "c" * 64,
+                "fa4_source_manifest_path": "/source-manifest.json",
+                "fa4_source_manifest_sha256": "d" * 64,
+                "fa4_source_directory_count": 4,
+                "fa4_source_file_count": 2,
+                "fa4_source_total_size_bytes": 42,
                 "engine_kwargs": {"tensor_parallel_size": 2},
                 "dense_shadow_validation_requested": True,
                 "target_sparsity_hex": [(0.7).hex()],

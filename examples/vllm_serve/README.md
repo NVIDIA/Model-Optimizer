@@ -157,6 +157,23 @@ SHA256 and size for every checkpoint file except the manifest itself. It refuses
 to overwrite an existing manifest, rejects symlinks, and verifies the complete
 file set. Keep the checkpoint root immutable after creating it.
 
+Create the runtime FA4 source from the exact Git commit outside the serving
+container. The generator emits a scoped `git archive` containing only
+`flash_attn/` and a canonical witness for every directory and regular file:
+
+```bash
+python create_fa4_source_witness.py /path/to/flash-attention \
+  --expected-commit <40-HEX-COMMIT> \
+  --archive-output fa4-runtime-source.tar \
+  --manifest-output fa4-runtime-source.manifest.json
+mkdir fa4-runtime-source
+tar -xf fa4-runtime-source.tar -C fa4-runtime-source
+```
+
+Pin the printed archive and manifest hashes independently. The runtime verifier
+does not invoke Git; it rejects missing, extra, changed, executable-mode, link,
+reparse-point, and special-file differences from the witnessed archive.
+
 Then collect dense-reference mask-reuse sufficient statistics at a menu of target
 sparsities under the exact runtime rule
 `threshold = a * exp(b * target_sparsity) / kv_tokens`:
@@ -164,8 +181,12 @@ sparsities under the exact runtime rule
 ```bash
 python collect_mask_reuse.py <CKPT> \
   --model-id Nemotron-3-Ultra \
+  --checkpoint-manifest-sha256 <64-HEX-CHECKPOINT-MANIFEST-SHA256> \
   --plan nemotron3_ultra_stride2 \
-  --fa4-source /path/to/pinned-calibrated-threshold-flash-attention \
+  --fa4-source /path/to/fa4-runtime-source \
+  --fa4-source-manifest fa4-runtime-source.manifest.json \
+  --fa4-source-manifest-sha256 <64-HEX-SOURCE-MANIFEST-SHA256> \
+  --fa4-commit <40-HEX-COMMIT> \
   --prompts-jsonl mask_reuse_prompts.jsonl \
   --vanilla-config <CKPT>/config.json \
   --target-sparsities 0.5 0.6 0.7 \
@@ -185,7 +206,8 @@ vLLM V1 execution through the installed `mask_reuse_fa4` plugin and the
 explicit pinned FA4 source. It does not load a provisional reuse policy and
 does not enable quantization. The verified checkpoint identity and group
 assignment are included in the schema-v2 invocation and its canonical RPC
-digest. The checkpoint is reverified after vLLM loads it and before capture.
+digest. The checkpoint and FA4 source are reverified after vLLM loads them and
+before capture; FA4 is verified once more before evidence publication.
 Each compact JSONL record includes the target
 sparsity, sample length, exact binary64
 `threshold_log2` and `threshold_lambda`, rectangular query/KV geometry, every
@@ -193,13 +215,15 @@ topology anchor/head's self-mask statistics, and every consumer/donor
 dropped-mass matrix once. It does not expand or repeat the matrix as millions
 of candidate rows. Fixed-lambda version-4/version-5 captures are not valid
 inputs to this target-sparsity path. Use the printed compact-capture SHA256 as
-the `reuse_bundle_sha256` evidence value. The FA4 source must be a clean Git
-checkout; its exact commit is recorded in the capture manifest. The version-3
-capture manifest also retains the canonical vLLM engine arguments, rank-major
-TP sentinel evidence, exact prefill/decode attention-call counts, and optional
-bitwise dense-shadow coverage. `--validate-dense-output` runs a second pinned
-dense FA4 call for every armed final-chunk layer and fails before publication
-if its BF16 output differs bitwise from the model-trajectory output.
+the `reuse_bundle_sha256` evidence value. The version-4 capture manifest binds
+the independently pinned checkpoint and FA4 source witnesses, Git commit/tree,
+archive digest, canonical vLLM engine arguments, rank-major TP sentinel
+evidence, exact prefill/decode attention-call counts, and optional bitwise
+dense-shadow coverage. `--validate-dense-output` runs a second pinned dense FA4
+call for every armed final-chunk layer and fails before publication if its BF16
+output differs bitwise from the model-trajectory output. Schema-version-3
+capture manifests are intentionally rejected because they lack the runtime
+source witness; recollect them rather than migrating their provenance labels.
 
 Once those observations have been captured, select the per-context target,
 donor-head map, and exact fallbacks and export the fail-closed candidate:

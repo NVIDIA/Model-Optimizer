@@ -248,7 +248,7 @@ class CompactMaskReuseCapture:
             raise MaskReuseCalibrationError("target_sparsity must be in (0, 1)")
         if threshold_log2 >= 0.0 or not 0.0 < threshold_lambda < 1.0:
             raise MaskReuseCalibrationError("threshold must be in (0, 1)")
-        if float(getattr(math, "exp2")(threshold_log2)).hex() != threshold_lambda.hex():
+        if (2.0**threshold_log2).hex() != threshold_lambda.hex():
             raise MaskReuseCalibrationError("threshold lambda and log2 fields disagree")
         expected_geometry = _geometry(invocation["expected_geometry"], "expected_geometry")
         observed_geometry = _geometry(raw["geometry"], "geometry")
@@ -454,7 +454,7 @@ def _validate_threshold(capture: CompactMaskReuseCapture, fit: Mapping[str, obje
         + float(params["b"]) * capture.target_sparsity * math.log2(math.e)
         - math.log2(capture.sample_length)
     )
-    expected_lambda = float(getattr(math, "exp2")(expected_log2))
+    expected_lambda = 2.0**expected_log2
     if capture.threshold_log2.hex() != expected_log2.hex():
         raise MaskReuseCalibrationError("compact capture threshold_log2 differs from vanilla fit")
     if capture.threshold_lambda.hex() != expected_lambda.hex():

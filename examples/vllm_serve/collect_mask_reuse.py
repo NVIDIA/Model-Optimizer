@@ -30,8 +30,12 @@ Usage::
 
     python examples/vllm_serve/collect_mask_reuse.py /path/to/checkpoint \
         --model-id Nemotron-3-Ultra \
+        --checkpoint-manifest-sha256 012345... \
         --plan nemotron3_ultra_stride2 \
-        --fa4-source /path/to/flash-attention-at-4c40766b \
+        --fa4-source /path/to/extracted-fa4-runtime-source \
+        --fa4-source-manifest /path/to/fa4-source-manifest.json \
+        --fa4-source-manifest-sha256 abcdef... \
+        --fa4-commit 4c40766b... \
         --prompts-jsonl prompts.jsonl \
         --vanilla-config /path/to/config.json \
         --target-sparsities 0.5 0.6 0.7 \
@@ -44,7 +48,7 @@ import argparse
 import importlib.metadata
 import json
 import os
-import subprocess
+import stat
 import sys
 import tempfile
 from hashlib import sha256
@@ -54,6 +58,11 @@ from typing import cast
 from modelopt.torch.sparsity.attention_sparsity.calibration.checkpoint_manifest import (
     read_stable_file_snapshot,
     verify_checkpoint_manifest,
+)
+from modelopt.torch.sparsity.attention_sparsity.calibration.source_manifest import (
+    SourceManifestError,
+    VerifiedSourceManifest,
+    verify_source_manifest,
 )
 from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture import (
     MAX_QUERY_CHUNK_TOKENS,
@@ -105,11 +114,31 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Stable model name stored in observations (default: the model argument)",
     )
+    parser.add_argument(
+        "--checkpoint-manifest-sha256",
+        required=True,
+        help="Separately pinned SHA256 of the checkpoint manifest",
+    )
     parser.add_argument("--plan", required=True, help="Explicit mask-reuse layer-plan preset")
     parser.add_argument(
         "--fa4-source",
         required=True,
-        help="Pinned FlashAttention source checkout containing flash_attn/cute",
+        help="FlashAttention source tree extracted from the exact witnessed git archive",
+    )
+    parser.add_argument(
+        "--fa4-source-manifest",
+        required=True,
+        help="Canonical full-tree witness generated with create_fa4_source_witness.py",
+    )
+    parser.add_argument(
+        "--fa4-source-manifest-sha256",
+        required=True,
+        help="Separately pinned SHA256 of --fa4-source-manifest",
+    )
+    parser.add_argument(
+        "--fa4-commit",
+        required=True,
+        help="Separately pinned 40-hex FlashAttention Git commit",
     )
     parser.add_argument("--prompts-jsonl", required=True, help="Strict prompt-plan JSONL")
     parser.add_argument(
@@ -207,43 +236,55 @@ def _canonical_capture_line(capture: dict[str, object]) -> bytes:
     ).encode()
 
 
-def _configure_capture_environment(
-    plan: str,
+def _verify_fa4_source(
     fa4_source: str,
-    checkpoint_manifest_sha256: str,
-    *,
-    validate_dense_output: bool,
-) -> tuple[Path, str]:
-    source = Path(fa4_source).expanduser().resolve()
+    fa4_source_manifest: str,
+    fa4_source_manifest_sha256: str,
+    fa4_commit: str,
+) -> VerifiedSourceManifest:
+    try:
+        verified = verify_source_manifest(
+            fa4_source,
+            fa4_source_manifest,
+            expected_manifest_sha256=fa4_source_manifest_sha256,
+            expected_commit=fa4_commit,
+            expected_source_kind="flash-attention-4",
+        )
+    except SourceManifestError as error:
+        raise CaptureContractError(f"--fa4-source verification failed: {error}") from error
     required = (
-        source / "flash_attn/cute/interface.py",
-        source / "flash_attn/cute/block_sparsity.py",
+        verified.source_root / "flash_attn/cute/interface.py",
+        verified.source_root / "flash_attn/cute/block_sparsity.py",
     )
-    if not source.is_dir() or any(not path.is_file() for path in required):
+    try:
+        required_are_regular = all(
+            stat.S_ISREG(path.stat(follow_symlinks=False).st_mode) for path in required
+        )
+    except OSError:
+        required_are_regular = False
+    if not required_are_regular:
         raise CaptureContractError(
             "--fa4-source must contain flash_attn/cute/interface.py and block_sparsity.py"
         )
-    try:
-        commit = subprocess.run(
-            ["git", "-C", str(source), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise CaptureContractError("--fa4-source must be a readable Git checkout") from error
-    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
-        raise CaptureContractError("--fa4-source HEAD is not a canonical Git commit")
-    if dirty:
-        raise CaptureContractError(
-            "--fa4-source has tracked or untracked modifications; pin a clean commit"
-        )
+    return verified
+
+
+def _configure_capture_environment(
+    plan: str,
+    fa4_source: str,
+    fa4_source_manifest: str,
+    fa4_source_manifest_sha256: str,
+    fa4_commit: str,
+    checkpoint_manifest_sha256: str,
+    *,
+    validate_dense_output: bool,
+) -> VerifiedSourceManifest:
+    verified = _verify_fa4_source(
+        fa4_source,
+        fa4_source_manifest,
+        fa4_source_manifest_sha256,
+        fa4_commit,
+    )
     plugins = [
         entry
         for entry in importlib.metadata.entry_points(group="vllm.general_plugins")
@@ -259,14 +300,14 @@ def _configure_capture_environment(
     os.environ[DENSE_SHADOW_ENV] = "1" if validate_dense_output else "0"
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     sys.dont_write_bytecode = True
-    os.environ["MASK_REUSE_FA4_SOURCE"] = str(source)
+    os.environ["MASK_REUSE_FA4_SOURCE"] = str(verified.source_root)
     os.environ["MASK_REUSE_FA4_FORCE_DENSE"] = "0"
     os.environ["VLLM_PLUGINS"] = "mask_reuse_fa4"
     # Collection is deliberately policy-free.  Remove inherited serving
     # settings so a stale deployment policy cannot become threshold authority.
     for name in _POLICY_ENVS:
         os.environ.pop(name, None)
-    return source, commit
+    return verified
 
 
 def _fsync_directory(path: Path) -> None:
@@ -325,6 +366,10 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     threshold_scale_factor = parse_vanilla_prefill_fit(vanilla_snapshot.payload)
     targets = _target_menu(args.target_sparsities)
     checkpoint = verify_checkpoint_manifest(args.model, expected_model=args.model_id)
+    if checkpoint.sha256 != args.checkpoint_manifest_sha256:
+        raise CaptureContractError(
+            "checkpoint manifest does not match --checkpoint-manifest-sha256"
+        )
     model_id = checkpoint.model
     output_path = Path(args.output)
     manifest_path = (
@@ -339,9 +384,12 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fa4_source, fa4_source_commit = _configure_capture_environment(
+    fa4_source = _configure_capture_environment(
         args.plan,
         args.fa4_source,
+        args.fa4_source_manifest,
+        args.fa4_source_manifest_sha256,
+        args.fa4_commit,
         checkpoint.sha256,
         validate_dense_output=args.validate_dense_output,
     )
@@ -355,6 +403,16 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     if loaded_checkpoint != checkpoint:
         raise CaptureContractError(
             "checkpoint identity changed while vLLM loaded the model; no capture was started"
+        )
+    loaded_fa4_source = _verify_fa4_source(
+        args.fa4_source,
+        args.fa4_source_manifest,
+        args.fa4_source_manifest_sha256,
+        args.fa4_commit,
+    )
+    if loaded_fa4_source != fa4_source:
+        raise CaptureContractError(
+            "FA4 source identity changed while vLLM loaded the model; no capture was started"
         )
     statuses = llm.collective_rpc("mask_reuse_capture_status")
     validate_capture_statuses(statuses)
@@ -428,27 +486,50 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
             temporary_path.unlink(missing_ok=True)
         raise
 
-    prompt_final = read_stable_file_snapshot(args.prompts_jsonl, label="prompt plan")
-    vanilla_final = read_stable_file_snapshot(args.vanilla_config, label="vanilla config")
-    if prompt_final.sha256 != prompt_plan_sha256 or vanilla_final.sha256 != vanilla_config_sha256:
+    try:
+        prompt_final = read_stable_file_snapshot(args.prompts_jsonl, label="prompt plan")
+        vanilla_final = read_stable_file_snapshot(args.vanilla_config, label="vanilla config")
+        final_fa4_source = _verify_fa4_source(
+            args.fa4_source,
+            args.fa4_source_manifest,
+            args.fa4_source_manifest_sha256,
+            args.fa4_commit,
+        )
+    except BaseException:
+        assert temporary_path is not None
+        temporary_path.unlink(missing_ok=True)
+        raise
+    if (
+        prompt_final.sha256 != prompt_plan_sha256
+        or vanilla_final.sha256 != vanilla_config_sha256
+        or final_fa4_source != fa4_source
+    ):
         assert temporary_path is not None
         temporary_path.unlink(missing_ok=True)
         raise CaptureContractError(
-            "prompt plan or vanilla calibration changed during capture; evidence was discarded"
+            "prompt plan, vanilla calibration, or FA4 source changed during capture; "
+            "evidence was discarded"
         )
 
     capture_sha256 = capture_digest.hexdigest()
     manifest = {
-        "capture_manifest_schema_version": 3,
-        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v3",
+        "capture_manifest_schema_version": 4,
+        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v4",
         "model": model_id,
         "checkpoint_manifest_sha256": checkpoint.sha256,
         "checkpoint_manifest_path": str(checkpoint.manifest_path),
         "checkpoint_file_count": checkpoint.file_count,
         "checkpoint_total_size_bytes": checkpoint.total_size_bytes,
         "plan": args.plan,
-        "fa4_source": str(fa4_source),
-        "fa4_source_commit": fa4_source_commit,
+        "fa4_source": str(fa4_source.source_root),
+        "fa4_source_commit": fa4_source.git_commit,
+        "fa4_source_git_tree": fa4_source.git_tree,
+        "fa4_source_git_archive_sha256": fa4_source.git_archive_sha256,
+        "fa4_source_manifest_path": str(fa4_source.manifest_path),
+        "fa4_source_manifest_sha256": fa4_source.manifest_sha256,
+        "fa4_source_directory_count": fa4_source.directory_count,
+        "fa4_source_file_count": fa4_source.file_count,
+        "fa4_source_total_size_bytes": fa4_source.total_size_bytes,
         "engine_kwargs": engine_kwargs,
         "dense_shadow_validation_requested": args.validate_dense_output,
         "target_sparsity_hex": [target.hex() for target in targets],

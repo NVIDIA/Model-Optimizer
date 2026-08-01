@@ -79,6 +79,13 @@ _CAPTURE_MANIFEST_FIELDS = frozenset(
         "plan",
         "fa4_source",
         "fa4_source_commit",
+        "fa4_source_git_tree",
+        "fa4_source_git_archive_sha256",
+        "fa4_source_manifest_path",
+        "fa4_source_manifest_sha256",
+        "fa4_source_directory_count",
+        "fa4_source_file_count",
+        "fa4_source_total_size_bytes",
         "engine_kwargs",
         "dense_shadow_validation_requested",
         "target_sparsity_hex",
@@ -255,8 +262,8 @@ def _validate_capture_manifest(
             f"missing={sorted(missing)}, extra={sorted(extra)}"
         )
     expected = {
-        "capture_manifest_schema_version": 3,
-        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v3",
+        "capture_manifest_schema_version": 4,
+        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v4",
         "model": model,
         "checkpoint_manifest_sha256": checkpoint_sha256,
         "compact_capture_file_sha256": compact_capture_sha256,
@@ -265,6 +272,32 @@ def _validate_capture_manifest(
     for field, value in expected.items():
         if raw[field] != value:
             raise ValueError(f"capture manifest {field} does not match its verified input")
+    for field, length in {
+        "fa4_source_commit": 40,
+        "fa4_source_git_tree": 40,
+        "fa4_source_git_archive_sha256": 64,
+        "fa4_source_manifest_sha256": 64,
+    }.items():
+        value = raw[field]
+        if (
+            not isinstance(value, str)
+            or len(value) != length
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"capture manifest {field} is not canonical hexadecimal evidence")
+    for field in ("fa4_source", "fa4_source_manifest_path"):
+        if not isinstance(raw[field], str) or not raw[field]:
+            raise ValueError(f"capture manifest {field} must be a non-empty path")
+    for field in (
+        "fa4_source_directory_count",
+        "fa4_source_file_count",
+        "fa4_source_total_size_bytes",
+    ):
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"capture manifest {field} must be an integer >= 0")
+    if raw["fa4_source_file_count"] == 0:
+        raise ValueError("capture manifest must bind at least one FA4 source file")
     if not isinstance(raw["engine_kwargs"], Mapping):
         raise ValueError("capture manifest engine_kwargs must be an object")
     if not isinstance(raw["dense_shadow_validation_requested"], bool):
@@ -298,7 +331,9 @@ def _validate_capture_manifest(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build a fail-closed schema-v3 candidate from compact mask-reuse captures",
+        description=(
+            "Build a fail-closed schema-v3 candidate from schema-v4 mask-reuse capture evidence"
+        ),
         allow_abbrev=False,
     )
     parser.add_argument("--checkpoint", type=Path, required=True)
