@@ -33,6 +33,7 @@ __all__ = [
     "VerifiedCheckpointManifest",
     "create_checkpoint_manifest",
     "read_stable_file_snapshot",
+    "stable_file_sha256",
     "verify_checkpoint_manifest",
 ]
 
@@ -40,6 +41,7 @@ CHECKPOINT_MANIFEST_NAME = "checkpoint_manifest.json"
 _MANIFEST_FIELDS = frozenset({"checkpoint_manifest_schema_version", "model", "files"})
 _FILE_FIELDS = frozenset({"path", "size_bytes", "sha256"})
 _WEIGHT_SUFFIXES = frozenset({".bin", ".pt", ".safetensors"})
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class CheckpointManifestError(ValueError):
@@ -93,23 +95,52 @@ def _canonical_json_bytes(value: object) -> bytes:
     ).encode()
 
 
+def _is_link_like(value: os.stat_result) -> bool:
+    """Return whether a no-follow stat identifies a symlink or Windows reparse point."""
+    return stat.S_ISLNK(value.st_mode) or bool(
+        getattr(value, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare file identities, failing closed when an inode is unavailable."""
+    return left.st_ino != 0 and right.st_ino != 0 and os.path.samestat(left, right)
+
+
 def _open_stable_regular(path: Path, label: str) -> tuple[int, os.stat_result]:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        named_before = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise CheckpointManifestError(f"could not inspect {label}") from error
+    if _is_link_like(named_before):
+        raise CheckpointManifestError(f"could not open {label} without following symlinks")
+    if not stat.S_ISREG(named_before.st_mode):
+        raise CheckpointManifestError(f"{label} must be one stable regular file, not a symlink")
+    try:
+        # Windows has no O_NOFOLLOW. The no-follow pre/post stats and handle
+        # identity checks keep that fallback fail-closed before any bytes are read.
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
     except OSError as error:
         raise CheckpointManifestError(
             f"could not open {label} without following symlinks"
         ) from error
-    opened = os.fstat(descriptor)
     try:
+        opened = os.fstat(descriptor)
         named = path.stat(follow_symlinks=False)
     except OSError:
         os.close(descriptor)
         raise
+    if _is_link_like(named):
+        os.close(descriptor)
+        raise CheckpointManifestError(f"could not open {label} without following symlinks")
     if (
         not stat.S_ISREG(opened.st_mode)
-        or stat.S_ISLNK(named.st_mode)
-        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        or not stat.S_ISREG(named.st_mode)
+        or not _same_file(named_before, opened)
+        or not _same_file(opened, named)
     ):
         os.close(descriptor)
         raise CheckpointManifestError(f"{label} must be one stable regular file, not a symlink")
@@ -124,25 +155,25 @@ def _hash_stable_regular(
     payload = bytearray() if capture_payload else None
     observed_size = 0
     try:
-        with os.fdopen(descriptor, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                observed_size += len(chunk)
-                digest.update(chunk)
-                if payload is not None:
-                    payload.extend(chunk)
-            after = os.fstat(handle.fileno())
+        for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+            observed_size += len(chunk)
+            digest.update(chunk)
+            if payload is not None:
+                payload.extend(chunk)
+        after = os.fstat(descriptor)
         named_after = path.stat(follow_symlinks=False)
     except OSError as error:
         raise CheckpointManifestError(f"could not hash stable {label}") from error
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    identity_named = (
-        named_after.st_dev,
-        named_after.st_ino,
-        named_after.st_size,
-        named_after.st_mtime_ns,
-    )
-    if identity_before != identity_after or identity_after != identity_named:
+    finally:
+        os.close(descriptor)
+    if (
+        _is_link_like(named_after)
+        or not stat.S_ISREG(named_after.st_mode)
+        or not _same_file(before, after)
+        or not _same_file(after, named_after)
+        or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+        or (after.st_size, after.st_mtime_ns) != (named_after.st_size, named_after.st_mtime_ns)
+    ):
         raise CheckpointManifestError(f"{label} changed while it was being hashed")
     return observed_size, digest.hexdigest(), None if payload is None else bytes(payload)
 
@@ -164,20 +195,54 @@ def read_stable_file_snapshot(path: str | Path, *, label: str) -> StableFileSnap
     return StableFileSnapshot(source, payload, digest)
 
 
+def stable_file_sha256(path: str | Path, *, label: str) -> str:
+    """Hash one stable regular file without retaining its contents."""
+    _, digest, _ = _hash_stable_regular(Path(path), label)
+    return digest
+
+
 def _checkpoint_files(root: Path, manifest_path: Path) -> set[str]:
     files: set[str] = set()
-    for path in root.rglob("*"):
-        if path.is_symlink():
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as error:
             raise CheckpointManifestError(
-                f"checkpoint contains forbidden symlink {path.relative_to(root).as_posix()!r}"
-            )
-        if path.is_file() and path != manifest_path:
-            files.add(path.relative_to(root).as_posix())
+                f"could not traverse checkpoint directory {directory}"
+            ) from error
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(root).as_posix()
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise CheckpointManifestError(
+                    f"could not inspect checkpoint path {relative!r}"
+                ) from error
+            if _is_link_like(observed):
+                raise CheckpointManifestError(
+                    f"checkpoint contains forbidden symlink or reparse point {relative!r}"
+                )
+            if stat.S_ISDIR(observed.st_mode):
+                pending.append(path)
+            elif stat.S_ISREG(observed.st_mode):
+                if path != manifest_path:
+                    files.add(relative)
+            else:
+                raise CheckpointManifestError(f"checkpoint contains non-regular path {relative!r}")
     return files
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        # Python on Windows cannot portably open and fsync a directory. The
+        # complete temporary file is still fsynced before its no-clobber link.
+        return
+    descriptor = os.open(path, os.O_RDONLY | directory_flag)
     try:
         os.fsync(descriptor)
     finally:
@@ -222,16 +287,29 @@ def create_checkpoint_manifest(checkpoint: str | Path, *, model: str) -> Verifie
             handle.flush()
             os.fsync(handle.fileno())
         observed = temporary.stat(follow_symlinks=False)
+        if observed.st_ino == 0:
+            raise CheckpointManifestError(
+                "checkpoint manifest temporary file has no stable identity"
+            )
         identity = observed.st_dev, observed.st_ino
         os.link(temporary, manifest_path, follow_symlinks=False)
         try:
+            published = manifest_path.stat(follow_symlinks=False)
+            if (
+                _is_link_like(published)
+                or not stat.S_ISREG(published.st_mode)
+                or not _same_file(observed, published)
+            ):
+                raise CheckpointManifestError(
+                    "checkpoint manifest destination changed during publication"
+                )
             temporary.unlink()
             temporary = None
             _fsync_directory(root)
         except BaseException:
             try:
                 published = manifest_path.stat(follow_symlinks=False)
-                if (published.st_dev, published.st_ino) == identity:
+                if published.st_ino != 0 and (published.st_dev, published.st_ino) == identity:
                     manifest_path.unlink()
                     _fsync_directory(root)
             finally:

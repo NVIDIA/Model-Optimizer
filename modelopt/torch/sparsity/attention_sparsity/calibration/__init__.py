@@ -24,6 +24,7 @@ from .checkpoint_manifest import (
     VerifiedCheckpointManifest,
     create_checkpoint_manifest,
     read_stable_file_snapshot,
+    stable_file_sha256,
     verify_checkpoint_manifest,
 )
 from .mask_reuse import (
@@ -64,5 +65,6 @@ __all__ = [
     "load_mask_reuse_observations",
     "parse_mask_reuse_observations",
     "read_stable_file_snapshot",
+    "stable_file_sha256",
     "verify_checkpoint_manifest",
 ]

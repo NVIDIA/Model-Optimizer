@@ -294,3 +294,25 @@ def test_canonicalizes_existing_sparse_attention_config():
         "formula": "a * exp(b * target_sparsity)",
         "prefill": VANILLA_FIT["prefill"],
     }
+
+
+def test_canonicalizes_legacy_modelopt_serving_calibration():
+    exported = {
+        "config_groups": {
+            "group_0": {
+                "sparse_algo": "softmax_skip",
+                "targets": ["Attention"],
+            }
+        },
+        "threshold_scale_factor": {
+            "formula": "a * exp(b * target_sparsity)",
+            "prefill": {"a": 1.6771257955393728, "b": 8.894668875002724},
+            "decode": {"a": 0.006180090552526715, "b": 10.23399476354776},
+        },
+        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
+    }
+
+    assert canonical_prefill_threshold_scale_factor(exported) == {
+        "formula": "a * exp(b * target_sparsity)",
+        "prefill": {"a": 1.6771257955393728, "b": 8.894668875002724},
+    }

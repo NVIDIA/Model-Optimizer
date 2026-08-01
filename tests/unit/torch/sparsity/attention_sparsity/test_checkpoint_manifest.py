@@ -15,14 +15,18 @@
 
 """Tests for content-addressed checkpoint identity."""
 
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from modelopt.torch.sparsity.attention_sparsity.calibration import checkpoint_manifest
 from modelopt.torch.sparsity.attention_sparsity.calibration.checkpoint_manifest import (
     CHECKPOINT_MANIFEST_NAME,
     CheckpointManifestError,
     create_checkpoint_manifest,
+    read_stable_file_snapshot,
     verify_checkpoint_manifest,
 )
 
@@ -70,3 +74,104 @@ def test_verifier_rejects_symlink_manifest(tmp_path):
 
     with pytest.raises(CheckpointManifestError, match="without following symlinks"):
         verify_checkpoint_manifest(root)
+
+
+def test_portable_open_fallback_still_rejects_symlink(tmp_path, monkeypatch):
+    target = tmp_path / "target.json"
+    target.write_text("{}\n", encoding="utf-8")
+    alias = tmp_path / "alias.json"
+    alias.symlink_to(target)
+    monkeypatch.delattr(checkpoint_manifest.os, "O_NOFOLLOW", raising=False)
+
+    with pytest.raises(CheckpointManifestError, match="without following symlinks"):
+        read_stable_file_snapshot(alias, label="fallback input")
+
+
+def test_portable_open_fallback_preserves_exact_binary_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "binary.dat"
+    payload = b"line-1\r\nline-2\x00\n"
+    path.write_bytes(payload)
+    monkeypatch.delattr(checkpoint_manifest.os, "O_NOFOLLOW", raising=False)
+
+    snapshot = read_stable_file_snapshot(path, label="binary input")
+
+    assert snapshot.payload == payload
+    assert snapshot.sha256 == sha256(payload).hexdigest()
+
+
+def test_portable_open_uses_binary_flag_when_available(tmp_path, monkeypatch):
+    path = tmp_path / "binary.dat"
+    path.write_bytes(b"payload")
+    binary_flag = 1 << 29
+    observed_flags = []
+    real_open = checkpoint_manifest.os.open
+    monkeypatch.setattr(checkpoint_manifest.os, "O_BINARY", binary_flag, raising=False)
+
+    def recording_open(source, flags, *args, **kwargs):
+        observed_flags.append(flags)
+        return real_open(source, flags & ~binary_flag, *args, **kwargs)
+
+    monkeypatch.setattr(checkpoint_manifest.os, "open", recording_open)
+
+    snapshot = read_stable_file_snapshot(path, label="binary input")
+
+    assert snapshot.payload == b"payload"
+    assert observed_flags and observed_flags[0] & binary_flag
+
+
+def test_portable_open_rejects_path_swap_before_read(tmp_path, monkeypatch):
+    path = tmp_path / "input.dat"
+    replacement = tmp_path / "replacement.dat"
+    path.write_bytes(b"expected")
+    replacement.write_bytes(b"attacker")
+    real_open = checkpoint_manifest.os.open
+    swapped = False
+    monkeypatch.delattr(checkpoint_manifest.os, "O_NOFOLLOW", raising=False)
+
+    def swapping_open(source, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(source) == path and not swapped:
+            swapped = True
+            path.unlink()
+            replacement.rename(path)
+        return real_open(source, flags, *args, **kwargs)
+
+    monkeypatch.setattr(checkpoint_manifest.os, "open", swapping_open)
+
+    with pytest.raises(CheckpointManifestError, match="stable regular file"):
+        read_stable_file_snapshot(path, label="swapped input")
+
+
+def test_windows_reparse_attribute_is_link_like():
+    observed = SimpleNamespace(
+        st_mode=0,
+        st_file_attributes=checkpoint_manifest._FILE_ATTRIBUTE_REPARSE_POINT,
+    )
+
+    assert checkpoint_manifest._is_link_like(observed)
+
+
+def test_manifest_creation_without_directory_fsync_support(tmp_path, monkeypatch):
+    root = _toy_checkpoint(tmp_path / "checkpoint")
+    monkeypatch.delattr(checkpoint_manifest.os, "O_DIRECTORY", raising=False)
+
+    created = create_checkpoint_manifest(root, model="toy-model")
+
+    assert verify_checkpoint_manifest(root, expected_model="toy-model") == created
+
+
+def test_manifest_publication_preserves_destination_created_by_racer(tmp_path, monkeypatch):
+    root = _toy_checkpoint(tmp_path / "checkpoint")
+    manifest = root / CHECKPOINT_MANIFEST_NAME
+    real_link = checkpoint_manifest.os.link
+
+    def racing_link(source, target, **kwargs):
+        Path(target).write_text("racer\n", encoding="utf-8")
+        return real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(checkpoint_manifest.os, "link", racing_link)
+
+    with pytest.raises(CheckpointManifestError, match="appeared during publication"):
+        create_checkpoint_manifest(root, model="toy-model")
+
+    assert manifest.read_text(encoding="utf-8") == "racer\n"

@@ -270,7 +270,12 @@ def _configure_capture_environment(
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        # Windows lacks portable directory fsync; no-clobber linking remains
+        # atomic, while crash durability of the directory entry is best effort.
+        return
+    descriptor = os.open(path, os.O_RDONLY | directory_flag)
     try:
         os.fsync(descriptor)
     finally:
@@ -280,9 +285,15 @@ def _fsync_directory(path: Path) -> None:
 def _publish_no_clobber(temporary: Path, destination: Path) -> tuple[int, int]:
     """Atomically link a complete temp file only when destination is absent."""
 
-    identity = (temporary.stat().st_dev, temporary.stat().st_ino)
-    os.link(temporary, destination)
+    observed = temporary.stat(follow_symlinks=False)
+    if observed.st_ino == 0:
+        raise RuntimeError("capture temporary file has no stable identity")
+    identity = observed.st_dev, observed.st_ino
+    os.link(temporary, destination, follow_symlinks=False)
     try:
+        published = destination.stat(follow_symlinks=False)
+        if published.st_ino == 0 or (published.st_dev, published.st_ino) != identity:
+            raise RuntimeError("capture destination changed during publication")
         temporary.unlink()
         _fsync_directory(destination.parent)
     except BaseException:
@@ -294,11 +305,13 @@ def _publish_no_clobber(temporary: Path, destination: Path) -> tuple[int, int]:
 def _unlink_if_identity(path: Path, identity: tuple[int, int]) -> None:
     """Rollback only a file that is still the inode published by this process."""
 
+    if identity[1] == 0:
+        return
     try:
-        stat = path.stat()
+        stat = path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return
-    if (stat.st_dev, stat.st_ino) == identity:
+    if stat.st_ino != 0 and (stat.st_dev, stat.st_ino) == identity:
         path.unlink()
         _fsync_directory(path.parent)
 

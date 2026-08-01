@@ -44,7 +44,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import stat
 import tempfile
 from collections.abc import Mapping
 from hashlib import sha256
@@ -53,6 +52,7 @@ from pathlib import Path
 from modelopt.torch.sparsity.attention_sparsity.calibration.checkpoint_manifest import (
     StableFileSnapshot,
     read_stable_file_snapshot,
+    stable_file_sha256,
     verify_checkpoint_manifest,
 )
 from modelopt.torch.sparsity.attention_sparsity.calibration.mask_reuse_compact import (
@@ -127,29 +127,7 @@ def _load_json_object(path: Path, *, label: str) -> dict[str, object]:
 
 
 def _stable_file_sha256(path: Path, *, label: str) -> str:
-    if path.is_symlink():
-        raise ValueError(f"{label} must not be a symlink")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as error:
-        raise ValueError(f"could not open {label} at {path}") from error
-    before = os.fstat(descriptor)
-    digest = sha256()
-    try:
-        with os.fdopen(descriptor, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-            after = os.fstat(handle.fileno())
-        named = path.stat(follow_symlinks=False)
-    except OSError as error:
-        raise ValueError(f"could not hash stable {label} at {path}") from error
-    identities = {
-        (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
-        for value in (before, after, named)
-    }
-    if len(identities) != 1 or not stat.S_ISREG(named.st_mode):
-        raise ValueError(f"{label} changed while it was being hashed")
-    return digest.hexdigest()
+    return stable_file_sha256(path, label=label)
 
 
 def _evidence_artifacts(
@@ -178,7 +156,12 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        # Windows lacks portable directory fsync; no-clobber linking remains
+        # atomic, while crash durability of the directory entry is best effort.
+        return
+    descriptor = os.open(path, os.O_RDONLY | directory_flag)
     try:
         os.fsync(descriptor)
     finally:
@@ -202,20 +185,27 @@ def _temporary_payload(path: Path, payload: bytes) -> Path:
 
 
 def _unlink_if_identity(path: Path, identity: tuple[int, int]) -> None:
+    if identity[1] == 0:
+        return
     try:
         observed = path.stat(follow_symlinks=False)
     except FileNotFoundError:
         return
-    if (observed.st_dev, observed.st_ino) == identity:
+    if observed.st_ino != 0 and (observed.st_dev, observed.st_ino) == identity:
         path.unlink()
         _fsync_directory(path.parent)
 
 
 def _publish_no_clobber(temporary: Path, destination: Path) -> tuple[int, int]:
     observed = temporary.stat(follow_symlinks=False)
+    if observed.st_ino == 0:
+        raise RuntimeError("candidate temporary file has no stable identity")
     identity = observed.st_dev, observed.st_ino
     os.link(temporary, destination, follow_symlinks=False)
     try:
+        published = destination.stat(follow_symlinks=False)
+        if published.st_ino == 0 or (published.st_dev, published.st_ino) != identity:
+            raise RuntimeError("candidate destination changed during publication")
         temporary.unlink()
         _fsync_directory(destination.parent)
     except BaseException:

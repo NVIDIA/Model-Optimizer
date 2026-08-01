@@ -305,9 +305,9 @@ def test_publish_no_clobber_preserves_destination_created_by_racer(tmp_path, mon
     temporary.write_text("ours", encoding="utf-8")
     real_link = os.link
 
-    def racing_link(source, target):
+    def racing_link(source, target, **kwargs):
         Path(target).write_text("racer", encoding="utf-8")
-        return real_link(source, target)
+        return real_link(source, target, **kwargs)
 
     monkeypatch.setattr(collect_mask_reuse_cli.os, "link", racing_link)
 

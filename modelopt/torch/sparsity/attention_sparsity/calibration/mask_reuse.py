@@ -446,13 +446,23 @@ def _find_skip_softmax_group(raw: Mapping[str, object]) -> Mapping[str, object]:
         matches = [
             group
             for group in groups.values()
-            if isinstance(group, Mapping) and group.get("algorithm") == "skip_softmax"
+            if isinstance(group, Mapping)
+            and (
+                group.get("algorithm") == "skip_softmax"
+                or group.get("sparse_algo") == "softmax_skip"
+            )
         ]
         if len(matches) != 1:
             raise MaskReuseCalibrationError(
                 "vanilla config must contain exactly one skip_softmax config group"
             )
-        current = matches[0]
+        selected = matches[0]
+        if selected.get("sparse_algo") == "softmax_skip" and "threshold_scale_factor" in current:
+            # Older ModelOpt serving calibration stored the fit beside a
+            # ``sparse_algo: softmax_skip`` group instead of inside it.
+            current = current["threshold_scale_factor"]
+        else:
+            current = selected
     if isinstance(current, Mapping) and "threshold_scale_factor" in current:
         current = current["threshold_scale_factor"]
     if not isinstance(current, Mapping):

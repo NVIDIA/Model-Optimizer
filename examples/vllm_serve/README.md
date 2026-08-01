@@ -235,7 +235,9 @@ the standalone report and do not silently retune the selected policy. The
 candidate has `promotion_status="candidate_only"` and
 `deployment_geometry_validated=false`; the serving backend rejects it. Candidate
 and report publication is no-clobber and report-first with rollback, so a policy
-path cannot appear without its complete report. Decode is explicitly dense.
+path cannot appear without its complete report during normal process execution.
+On platforms without portable directory `fsync`, directory-entry durability
+across power loss is best effort. Decode is explicitly dense.
 
 The reusable serving policies live in `modelopt/torch/sparsity/attention_sparsity/plugins/vllm_runtime.py`. `install_vllm_sparse_attention_from_checkpoint` installs checkpoint-driven sparse-only attention, while `install_vllm_nvfp4_attention` installs fixed NVFP4 Q/K/P/V with optional checkpoint sparsity. Both validate every selected layer before publishing any replacement implementation and return a `VllmAttentionInstallReport` with the installed layer names and backend counts.
 
