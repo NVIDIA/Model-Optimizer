@@ -1511,6 +1511,9 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
                 global_amax.data = global_amax.to(dtype=torch.float32)
             else:
                 self._global_amax = global_amax.to(dtype=torch.float32)
+        quant_amax = getattr(self, "_quant_amax", None)
+        if quant_amax is not None:
+            self._quant_amax = quant_amax.to(dtype=torch.float32)
 
     def _amax_setter_helper(self, value):
         super()._amax_setter_helper(value)
@@ -1543,6 +1546,22 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         tq._quant_max_bound = float(tq.maxbound)
         _preserve_and_set_global_amax(tq)
         return tq
+
+    def _set_lazy_amax_buffer(self, name: str, value):
+        """Set/update a lazily-registered fp32 scale buffer (``_global_amax``/``_quant_amax``)."""
+        if value is None:
+            if hasattr(self, name):
+                setattr(self, name, None)
+            return
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+
+        buffer = getattr(self, name, None)
+        if buffer is None:
+            self.register_buffer(name, value.clone().detach())
+        else:
+            buffer.data.copy_(value.clone().detach().to(buffer.device))
+        self._preserve_amax_in_fp32()
 
     @property
     def amax_pre(self):
@@ -1586,20 +1605,20 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     @global_amax.setter
     def global_amax(self, value):
-        if value is None:
-            if hasattr(self, "_global_amax"):
-                self._global_amax = None
-            return
-        if not isinstance(value, torch.Tensor):
-            value = torch.tensor(value)
+        self._set_lazy_amax_buffer("_global_amax", value)
 
-        global_amax = getattr(self, "_global_amax", None)
-        if global_amax is None:
-            self.register_buffer("_global_amax", value.clone().detach())
-            global_amax = self._global_amax
-        else:
-            global_amax.data.copy_(value.clone().detach().to(global_amax.device))
-        self._preserve_amax_in_fp32()
+    @property
+    def quant_amax(self):
+        """Per-block *quantization* amax for Decoupled Scale Search (``None`` if unset).
+
+        When present, codes are chosen with the high-precision scale ``quant_amax / 6`` while
+        the stored/dequant scale is derived from ``_amax`` (coupled behavior when unset).
+        """
+        return getattr(self, "_quant_amax", None)
+
+    @quant_amax.setter
+    def quant_amax(self, value):
+        self._set_lazy_amax_buffer("_quant_amax", value)
 
     @property
     def has_quantized_block_scale(self):
@@ -1610,6 +1629,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         """Apply module transforms without rounding static scale state."""
         amax = getattr(self, "_amax", None)
         global_amax = getattr(self, "_global_amax", None)
+        quant_amax = getattr(self, "_quant_amax", None)
 
         module = super()._apply(fn, recurse=recurse)
         self._preserve_amax_in_fp32()
@@ -1617,6 +1637,8 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             self.amax = amax
         if global_amax is not None and global_amax.device.type != "meta":
             self.global_amax = global_amax
+        if quant_amax is not None:
+            self.quant_amax = quant_amax
         return module
 
     def _short_amax(self, fmt=".4f"):
@@ -1726,6 +1748,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
                 fp8_max_for_normalization(self),
                 inputs.dtype,
                 self._pass_through_bwd,
+                self.quant_amax,  # None -> coupled; else DSS decoupled rounding
             )
         return super()._fake_quantize(inputs)
 
