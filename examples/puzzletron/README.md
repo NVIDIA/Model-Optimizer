@@ -80,7 +80,7 @@ local defaults-versus-customize decisions at every section:
 
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py \
-  --defaults nv-internal/puzzletron_defaults.example.yaml
+  --defaults examples/puzzletron/configs/setup/defaults.example.yaml
 ```
 
 The example defaults use only repository-relative values. Copy the file and add

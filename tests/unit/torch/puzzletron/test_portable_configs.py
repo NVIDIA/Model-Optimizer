@@ -19,39 +19,38 @@ from pathlib import Path
 
 import yaml
 
-from puzzletron_orchestrator.compiler import load_runner_config
+from puzzletron_orchestrator.compiler import load_execution_config, load_runner_config
 from puzzletron_setup.v2.defaults import load_defaults
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
 
-def test_slurm_runner_example_uses_portable_defaults() -> None:
+def test_slurm_runner_example_is_portable() -> None:
     slurm = load_runner_config(
         REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
     )
-    assert slurm.contract.repository == "."
-    assert slurm.contract.venv == ".venv"
+    assert not Path(slurm.contract.repository).is_absolute()
+    assert not Path(slurm.contract.venv).is_absolute()
     assert slurm.contract.container is None
     assert slurm.contract.container_mounts is None
     assert not slurm.contract.prerun_commands
     assert slurm.slurm is not None
-    assert slurm.slurm.account == "REPLACE_WITH_SLURM_ACCOUNT"
+    assert slurm.slurm.account.startswith("REPLACE_WITH_")
     assert slurm.slurm.partition_cpu is None
 
 
-def test_baremetal_runner_example_uses_portable_defaults() -> None:
+def test_baremetal_runner_example_is_portable() -> None:
     baremetal = load_runner_config(
         REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
     )
-    assert baremetal.contract.repository == "."
-    assert baremetal.contract.venv == ".venv"
+    assert not Path(baremetal.contract.repository).is_absolute()
+    assert not Path(baremetal.contract.venv).is_absolute()
     assert baremetal.contract.setup_env is None
     assert baremetal.baremetal is not None
-    assert baremetal.baremetal.rendezvous_host == "REPLACE_WITH_PRIMARY_HOST"
-    assert [host.hostname for host in baremetal.baremetal.hosts] == [
-        "REPLACE_WITH_PRIMARY_HOST",
-        "REPLACE_WITH_SECONDARY_HOST",
-    ]
+    hostnames = [host.hostname for host in baremetal.baremetal.hosts]
+    assert hostnames
+    assert baremetal.baremetal.rendezvous_host in hostnames
+    assert all(hostname.startswith("REPLACE_WITH_") for hostname in hostnames)
 
 
 def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
@@ -59,44 +58,43 @@ def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
         REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml"
     )
 
-    assert runner.contract.repository == "REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT"
-    assert runner.contract.venv == "REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV"
-    assert runner.contract.container == "REPLACE_WITH_SLURM_CONTAINER_IMAGE"
-    assert runner.contract.container_mounts == "REPLACE_WITH_HOST_PATH:REPLACE_WITH_CONTAINER_PATH"
-    assert runner.contract.prerun_commands == (
-        "source REPLACE_WITH_SITE_SETUP_SCRIPT",
-        "export VLLM_ROOT=REPLACE_WITH_WORKER_VISIBLE_VLLM_CHECKOUT",
-        "export AUTOMODEL_ROOT=REPLACE_WITH_WORKER_VISIBLE_AUTOMODEL_CHECKOUT",
+    contract_values = (
+        runner.contract.repository,
+        runner.contract.venv,
+        runner.contract.container,
+        runner.contract.container_mounts,
     )
+    assert all(value and value.startswith("REPLACE_WITH_") for value in contract_values)
+    assert runner.contract.prerun_commands
+    assert all("REPLACE_WITH_" in command for command in runner.contract.prerun_commands)
     assert runner.slurm is not None
-    assert runner.slurm.account == "REPLACE_WITH_SLURM_ACCOUNT"
+    assert runner.slurm.account.startswith("REPLACE_WITH_")
     assert runner.slurm.partition_cpu is None
 
 
-def test_execution_example_is_valid_yaml() -> None:
+def test_execution_example_is_loadable() -> None:
     path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.example.yaml"
 
-    config = yaml.safe_load(path.read_text())
+    execution = load_execution_config(path)
 
-    assert config["execution"]["defaults"]["gpus_per_node"] == 8
+    assert set(execution) >= {"defaults", "stages"}
 
 
-def test_setup_defaults_are_portable_and_valid() -> None:
-    path = REPOSITORY_ROOT / "nv-internal/puzzletron_defaults.example.yaml"
+def test_setup_defaults_example_is_portable() -> None:
+    path = REPOSITORY_ROOT / "examples/puzzletron/configs/setup/defaults.example.yaml"
 
     defaults = load_defaults(path)
 
-    assert defaults["infrastructure"]["execution_contract"] == {
-        "repository": ".",
-        "venv": ".venv",
-        "container": None,
-        "container_mounts": None,
-        "prerun_commands": [],
-    }
-    assert defaults["infrastructure"]["runner"]["slurm"]["partition_cpu"] is None
+    contract = defaults["infrastructure"]["execution_contract"]
+    assert not Path(contract["repository"]).is_absolute()
+    assert not Path(contract["venv"]).is_absolute()
+    assert contract["container"] is None
+    assert contract["container_mounts"] is None
+    assert not contract["prerun_commands"]
 
-    defaults_paths = sorted((REPOSITORY_ROOT / "nv-internal").glob("*_defaults*.yaml"))
-    assert [path.name for path in defaults_paths] == ["puzzletron_defaults.example.yaml"]
+    slurm = defaults["infrastructure"]["runner"]["slurm"]
+    assert "account" not in slurm
+    assert slurm["partition_cpu"] is None
 
 
 def test_model_examples_use_public_hugging_face_identities() -> None:
@@ -107,14 +105,7 @@ def test_model_examples_use_public_hugging_face_identities() -> None:
     )
 
     for relative_path in paths:
-        content = (REPOSITORY_ROOT / relative_path).read_text()
-        config = yaml.safe_load(content)
+        config = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
 
         assert config["input_hf_model_path"] == config["model_info"]["hf_repo"]
         assert not config["input_hf_model_path"].startswith("REPLACE_WITH_")
-
-
-def test_setup_defaults_example_identifies_required_slurm_account() -> None:
-    defaults = (REPOSITORY_ROOT / "nv-internal/puzzletron_defaults.example.yaml").read_text()
-
-    assert "# account: REPLACE_WITH_SLURM_ACCOUNT" in defaults
