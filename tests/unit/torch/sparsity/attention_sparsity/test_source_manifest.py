@@ -16,6 +16,7 @@
 """Tests for exact, Git-free source-tree witnesses."""
 
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -94,7 +95,18 @@ def test_source_witness_accepts_exact_files_and_directories(tmp_path):
     assert verified.directory_count == 3
 
 
-@pytest.mark.parametrize("change", ["mutated", "missing", "extra", "mode"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "mutated",
+        "missing",
+        "extra",
+        pytest.param(
+            "mode",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX execute bit"),
+        ),
+    ],
+)
 def test_source_witness_rejects_file_tree_changes(tmp_path, change):
     source = _toy_source(tmp_path / "source")
     manifest = tmp_path / "source-manifest.json"

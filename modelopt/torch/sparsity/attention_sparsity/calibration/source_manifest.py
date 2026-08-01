@@ -407,15 +407,18 @@ def _temporary_payload(destination: Path, payload: bytes) -> tuple[Path, tuple[i
                     identity = (opened.st_dev, opened.st_ino)
             except OSError:
                 pass
+        if os.name == "nt":
+            os.close(descriptor)
         if identity is not None:
             _unlink_if_identity(temporary, identity)
-        os.close(descriptor)
+        if os.name != "nt":
+            os.close(descriptor)
         raise
 
 
 def _publish_no_clobber(
     temporary: Path, destination: Path, identity: tuple[int, int], descriptor: int
-) -> tuple[int, int]:
+) -> None:
     observed = temporary.stat(follow_symlinks=False)
     opened = os.fstat(descriptor)
     if (
@@ -425,23 +428,16 @@ def _publish_no_clobber(
     ):
         raise SourceManifestError("source artifact temporary file changed before publication")
     os.link(temporary, destination, follow_symlinks=False)
-    try:
-        published = destination.stat(follow_symlinks=False)
-        opened_after = os.fstat(descriptor)
-        if (
-            published.st_ino == 0
-            or not stat.S_ISREG(published.st_mode)
-            or _is_reparse_point(published)
-            or (published.st_dev, published.st_ino) != identity
-            or (opened_after.st_dev, opened_after.st_ino) != identity
-        ):
-            raise SourceManifestError("source artifact destination changed during publication")
-        _unlink_if_identity(temporary, identity)
-        _fsync_directory(destination.parent)
-    except BaseException:
-        _unlink_if_identity(destination, identity)
-        raise
-    return identity
+    published = destination.stat(follow_symlinks=False)
+    opened_after = os.fstat(descriptor)
+    if (
+        published.st_ino == 0
+        or not stat.S_ISREG(published.st_mode)
+        or _is_reparse_point(published)
+        or (published.st_dev, published.st_ino) != identity
+        or (opened_after.st_dev, opened_after.st_ino) != identity
+    ):
+        raise SourceManifestError("source artifact destination changed during publication")
 
 
 def _publish_source_artifacts(
@@ -464,16 +460,28 @@ def _publish_source_artifacts(
             manifest_path, manifest
         )
         assert archive_temporary is not None
-        archive_identity = _publish_no_clobber(
+        archive_identity = archive_temporary_identity
+        _publish_no_clobber(
             archive_temporary, archive_path, archive_temporary_identity, archive_descriptor
         )
+        if os.name == "nt":
+            os.close(archive_descriptor)
+            archive_descriptor = None
+        _unlink_if_identity(archive_temporary, archive_temporary_identity)
+        _fsync_directory(archive_path.parent)
         archive_temporary = None
-        manifest_identity = _publish_no_clobber(
+        manifest_identity = manifest_temporary_identity
+        _publish_no_clobber(
             manifest_temporary,
             manifest_path,
             manifest_temporary_identity,
             manifest_descriptor,
         )
+        if os.name == "nt":
+            os.close(manifest_descriptor)
+            manifest_descriptor = None
+        _unlink_if_identity(manifest_temporary, manifest_temporary_identity)
+        _fsync_directory(manifest_path.parent)
         manifest_temporary = None
         if (
             stable_file_sha256(archive_path, label="published source archive")
@@ -483,6 +491,12 @@ def _publish_source_artifacts(
         ):
             raise SourceManifestError("published source artifacts failed stable rehash")
     except BaseException as error:
+        if os.name == "nt" and manifest_descriptor is not None:
+            os.close(manifest_descriptor)
+            manifest_descriptor = None
+        if os.name == "nt" and archive_descriptor is not None:
+            os.close(archive_descriptor)
+            archive_descriptor = None
         if manifest_identity is not None:
             _unlink_if_identity(manifest_path, manifest_identity)
         if archive_identity is not None:
@@ -501,7 +515,8 @@ def _publish_source_artifacts(
     finally:
         if manifest_descriptor is not None:
             os.close(manifest_descriptor)
-        os.close(archive_descriptor)
+        if archive_descriptor is not None:
+            os.close(archive_descriptor)
 
 
 def _manifest_from_git_archive(
