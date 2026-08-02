@@ -7,8 +7,6 @@ on:
     branches: [main, release/*, feature/*]
     paths:
       - ".github/workflows/unit_tests.yml"
-      - "docs/source/conf.py"
-      - "examples/puzzletron/**"
       - "modelopt/**"
       - "noxfile.py"
       - "pyproject.toml"
@@ -42,7 +40,7 @@ jobs:
       - id: non-pr
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: echo "any_changed=true" >> $GITHUB_OUTPUT
-      - if: github.event_name == 'pull_request' || github.event_name == 'push'
+      - if: github.event_name == 'pull_request'
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -59,15 +57,19 @@ jobs:
             tests/unit/**
             tools/launcher/**
             .agents/skills/**
-      - if: github.event_name == 'pull_request' || github.event_name == 'push'
+      - if: github.event_name == 'pull_request'
         name: Check for Puzzletron v2 changes
         id: puzzletron_changed
         uses: step-security/changed-files@v46.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
-            docs/source/conf.py
-            examples/puzzletron/**
+            examples/puzzletron/**/*.json
+            examples/puzzletron/**/*.py
+            examples/puzzletron/**/*.sh
+            examples/puzzletron/**/*.txt
+            examples/puzzletron/**/*.yaml
+            examples/puzzletron/**/*.yml
             modelopt/torch/puzzletron/**
             noxfile.py
             pyproject.toml
@@ -162,7 +164,18 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run tests against the pinned Puzzletron runtime
+        env:
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+          COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: pip install nox uv && nox -s puzzletron_v2
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: puzzletron
+          fail_ci_if_error: true
+          skip_validation: true
+          verbose: true
   launcher:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]

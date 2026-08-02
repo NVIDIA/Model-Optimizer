@@ -24,8 +24,10 @@ Usage:
 """
 
 import glob
+import json
 import os
 import shutil
+from pathlib import Path
 
 import nox
 
@@ -46,12 +48,17 @@ TRANSFORMERS_VERSIONS = {
     "tf_min": "transformers~=4.56.0",
 }
 
-PUZZLETRON_V2_AUTOMODEL_REF = "b22cd029d806197e249f2cc4a42c5de91713b772"
-PUZZLETRON_V2_AUTOMODEL = (
-    f"nemo-automodel @ git+https://github.com/Separius/Automodel.git@{PUZZLETRON_V2_AUTOMODEL_REF}"
+PUZZLETRON_V2_RUNTIME_CONTRACT = (
+    Path(__file__).resolve().parent / "examples/puzzletron/runtime_contract.json"
 )
-# Keep inherited failures explicit and node-scoped so passing and future tests still run.
-PUZZLETRON_V2_KNOWN_DEBT = "tests/unit/torch/puzzletron/known_debt.args"
+with PUZZLETRON_V2_RUNTIME_CONTRACT.open(encoding="utf-8") as contract_file:
+    PUZZLETRON_V2_RUNTIME = json.load(contract_file)
+PUZZLETRON_V2_AUTOMODEL_SOURCE = PUZZLETRON_V2_RUNTIME["nemo_automodel"]
+PUZZLETRON_V2_AUTOMODEL = (
+    "nemo-automodel @ git+"
+    f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['repository']}@"
+    f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['commit']}"
+)
 
 
 def _cov_args():
@@ -64,7 +71,7 @@ def _cov_args():
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
-    """Unit tests — parametrized over torch and transformers versions."""
+    """Non-Puzzletron unit tests across the generic dependency matrix."""
     session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
     tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pin:
@@ -80,12 +87,12 @@ def unit(session, torch_ver, tf_ver):
     )
 
 
-@nox.session(python="3.12")
+@nox.session(python=PUZZLETRON_V2_RUNTIME["python"])
 def puzzletron_v2(session):
-    """Collect Puzzletron v2 and run its CPU tests in the pinned runtime."""
+    """Run Puzzletron v2 CPU-eligible tests in its pinned Python runtime."""
     session.install(
-        "torch==2.11.0",
-        "torchvision==0.26.0",
+        f"torch=={PUZZLETRON_V2_RUNTIME['torch']}",
+        f"torchvision=={PUZZLETRON_V2_RUNTIME['torchvision']}",
         "-r",
         "examples/puzzletron/requirements.txt",
         "-e",
@@ -97,15 +104,10 @@ def puzzletron_v2(session):
         "python",
         "-m",
         "pytest",
-        "--collect-only",
         "tests/unit/torch/puzzletron",
-    )
-    session.run(
-        "python",
-        "-m",
-        "pytest",
-        "tests/unit/torch/puzzletron",
-        f"@{PUZZLETRON_V2_KNOWN_DEBT}",
+        "tests/unit/torch/test_puzzletron_import_boundary.py",
+        "--validate-puzzletron-quarantine",
+        *_cov_args(),
     )
 
 
@@ -125,6 +127,7 @@ def partial_unit(session, subset):
             "tests/unit/torch",
             "--ignore=tests/unit/torch/deploy",
             "--ignore=tests/unit/torch/puzzletron",
+            "--ignore=tests/unit/torch/test_puzzletron_import_boundary.py",
         )
     else:  # torch_deploy
         session.install(".[onnx,dev-test]")

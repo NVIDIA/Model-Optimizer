@@ -146,6 +146,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 
 Keep ModelOpt and the two Puzzletron forks as siblings:
 
+The Python and AutoModel pins used by the CPU CI lane are recorded in the
+machine-readable [runtime contract](runtime_contract.json). The full GPU setup
+below adds the CUDA-specific PyTorch packages, patched vLLM runtime, and AIPerf.
+
 ```bash
 export MODEL_OPT_ROOT=/workspace/modelopt
 export VLLM_ROOT=/workspace/vllm
