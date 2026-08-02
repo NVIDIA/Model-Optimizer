@@ -150,11 +150,13 @@ Keep ModelOpt and the two Puzzletron forks as siblings:
 export MODEL_OPT_ROOT=/workspace/modelopt
 export VLLM_ROOT=/workspace/vllm
 export AUTOMODEL_ROOT=/workspace/Automodel
+export AUTOMODEL_REF=b22cd029d806197e249f2cc4a42c5de91713b772
 
 git clone --branch feature/add_anymodel_to_vllm --single-branch \
   https://github.com/Separius/vllm.git "${VLLM_ROOT}"
 git clone --branch puzzletron --single-branch \
   https://github.com/Separius/Automodel.git "${AUTOMODEL_ROOT}"
+git -C "${AUTOMODEL_ROOT}" checkout --detach "${AUTOMODEL_REF}"
 ```
 
 ```text
@@ -219,7 +221,7 @@ test "$(git -C "${VLLM_ROOT}" branch --show-current)" = \
   "feature/add_anymodel_to_vllm"
 test "$(git -C "${AUTOMODEL_ROOT}" remote get-url origin)" = \
   "https://github.com/Separius/Automodel.git"
-test "$(git -C "${AUTOMODEL_ROOT}" branch --show-current)" = "puzzletron"
+test "$(git -C "${AUTOMODEL_ROOT}" rev-parse HEAD)" = "${AUTOMODEL_REF}"
 
 git -C "${MODEL_OPT_ROOT}" rev-parse HEAD
 git -C "${VLLM_ROOT}" rev-parse HEAD
@@ -234,6 +236,7 @@ import aiperf
 import modelopt
 import nemo_automodel
 import torch
+import transformers
 import vllm
 
 for package in ("torch", "vllm", "nemo-automodel", "aiperf", "nvidia-modelopt"):
@@ -245,6 +248,7 @@ print("modelopt", modelopt.__file__)
 print("vllm", vllm.__file__)
 
 assert torch.__version__.startswith("2.11.0")
+assert transformers.__version__ == "5.8.1"
 assert torch.version.cuda == "12.9"
 assert torch.cuda.is_available()
 PY
