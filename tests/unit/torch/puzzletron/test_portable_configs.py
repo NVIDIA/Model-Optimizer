@@ -25,6 +25,7 @@ from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOL
 from puzzletron_setup.v2.defaults import load_defaults
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+QWEN_DENSE_MODEL_CONFIG = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml"
 
 
 def test_slurm_runner_example_is_portable() -> None:
@@ -106,7 +107,7 @@ def test_setup_defaults_example_is_portable() -> None:
 def test_model_examples_use_public_hugging_face_identities() -> None:
     paths = (
         "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml",
-        "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml",
+        QWEN_DENSE_MODEL_CONFIG,
         "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/model.yaml",
     )
 
@@ -116,3 +117,12 @@ def test_model_examples_use_public_hugging_face_identities() -> None:
         assert config["input_hf_model_path"] == config["model_info"]["hf_repo"]
         assert not config["input_hf_model_path"].startswith("REPLACE_WITH_")
         assert re.fullmatch(r"[0-9a-f]{40}", config["model_info"]["hf_revision"])
+
+
+def test_qwen_dense_model_metadata_matches_public_checkpoint() -> None:
+    path = REPOSITORY_ROOT / QWEN_DENSE_MODEL_CONFIG
+
+    model_info = yaml.safe_load(path.read_text())["model_info"]
+
+    assert model_info["model_type"] == "qwen3_5"
+    assert model_info["architectures"] == ["Qwen3_5ForConditionalGeneration"]
