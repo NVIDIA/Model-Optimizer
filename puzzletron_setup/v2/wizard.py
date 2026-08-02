@@ -67,7 +67,7 @@ from .state import WizardState
 __all__ = ["SECTION_BUILDERS", "run_wizard_v2"]
 
 BUILTINS = {
-    "data": {"modality": "text", "layout": "fixed", "sequence_length": 4096},
+    "data": {"layout": "fixed", "sequence_length": 4096},
     "infrastructure": {
         "gpus_per_node": 8,
         "execution_contract": {
@@ -728,24 +728,43 @@ def data_section(
     modality_choices = [("Text", "text")]
     if context["model"].inventory.multimodal:
         modality_choices.append(("Multimodal", "multimodal"))
-    suggested_modality = str(
-        resolver.resolve(
-            "data.modality",
-            finding_modality if finding_modality != "unknown" else "text",
-        ).value
+    modality_default = resolver.resolve(
+        "data.modality",
+        finding_modality if finding_modality != "unknown" else "text",
     )
-    valid_modalities = {value for _, value in modality_choices}
-    if suggested_modality not in valid_modalities:
-        suggested_modality = "text"
+    suggested_modality = str(modality_default.value)
+    modality_source = (
+        "inferred" if modality_default.source == "fallback" else modality_default.source
+    )
     if fixed_modality == "multimodal" and not context["model"].inventory.multimodal:
         raise SetupError(
             "NVIDIA Nemotron-VLM v2 requires a multimodal model. "
             "Choose a multimodal checkpoint or a text dataset."
         )
-    modality_source = "inferred"
+    valid_modalities = {value for _, value in modality_choices}
+    if suggested_modality not in valid_modalities:
+        if modality_source != "inferred" or session.guided:
+            raise SetupError(
+                f"Resolved data modality {suggested_modality!r} ({modality_source}) "
+                "is incompatible with the selected model."
+            )
+        suggested_modality = "text"
+        modality_source = "inferred"
+    if (
+        fixed_modality is not None
+        and modality_source != "inferred"
+        and suggested_modality != fixed_modality
+    ):
+        raise SetupError(
+            f"Configured data modality {suggested_modality!r} ({modality_source}) "
+            f"conflicts with {source}, which requires {fixed_modality!r}."
+        )
     if fixed_modality is None and session.guided:
         modality = suggested_modality
-        print(f"  Data modality: {modality} ({finding_evidence}; use --full to override)")
+        print(
+            f"  Data modality: {modality} ({modality_source}; {finding_evidence}; "
+            "use --full to override)"
+        )
     elif fixed_modality is None:
         modality = session.select(
             "data.modality",
@@ -4481,9 +4500,7 @@ def output_review_section(
         }
         mip_review = {
             run_id: {
-                "parameter_target": _mapping_copy(_mapping_copy(run).get("constraints")).get(
-                    "params"
-                ),
+                "constraints": _mapping_copy(_mapping_copy(run).get("constraints")),
                 "num_solutions": _mapping_copy(_mapping_copy(run).get("solver")).get(
                     "num_solutions"
                 ),

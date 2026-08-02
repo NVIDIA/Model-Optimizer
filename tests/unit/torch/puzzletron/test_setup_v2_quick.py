@@ -6,9 +6,13 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
 import yaml
 
 import puzzletron_setup.v2.wizard as wizard_module
+from puzzletron_setup import SetupError
+from puzzletron_setup.inspection import InspectedModel
+from puzzletron_setup.profiles import AxisInventory, ModelInventory
 from puzzletron_setup.v2.cli import _parser
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
@@ -23,11 +27,13 @@ from puzzletron_setup.v2.session import WizardSession
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
     _CUSTOM_DATA_SOURCE,
+    _CUSTOM_MODEL_SOURCE,
     _fresh_state,
     _section_action,
     data_section,
     depth_section,
     infrastructure_section,
+    output_review_section,
 )
 
 
@@ -223,6 +229,7 @@ def test_guided_data_asks_only_for_source_and_uses_nested_defaults(
             preset_defaults=get_setup_preset("balanced").resolved_defaults(),
             file_defaults={
                 "data": {
+                    "modality": "text",
                     "layout": "padded",
                     "sequence_length": 2048,
                 }
@@ -236,7 +243,154 @@ def test_guided_data_asks_only_for_source_and_uses_nested_defaults(
     assert state.get_field("data.modality") == "text"
     assert state.get_field("data.layout") == "padded_varlen"
     assert state.get_field("data.sequence_length") == 2048
+    assert state.field("data.modality").source == "defaults_file"
     assert state.field("data.layout").source == "defaults_file"
+
+
+def test_guided_data_rejects_an_explicit_modality_incompatible_with_the_model(
+    tmp_path,
+    monkeypatch,
+):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.wizard.infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
+    )
+
+    with pytest.raises(SetupError, match="multimodal.*incompatible"):
+        data_section(
+            WizardSession(
+                state,
+                ScriptedBackend([_CUSTOM_DATA_SOURCE, str(dataset)]),
+                guided=True,
+            ),
+            DefaultsResolver(file_defaults={"data": {"modality": "multimodal"}}),
+            _context(),
+        )
+
+
+def test_guided_review_renders_the_actual_non_parameter_mip_constraint(
+    tmp_path,
+    capsys,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    state.set_collection(
+        "mip_config",
+        {
+            "runs": {
+                "memory-search": {
+                    "constraints": {"memory": {"at": {"serving-default": {"max": "24GiB"}}}},
+                    "solver": {"num_solutions": 4},
+                }
+            }
+        },
+    )
+
+    assert output_review_section(
+        WizardSession(state, ScriptedBackend([True]), guided=True),
+        DefaultsResolver(),
+        {},
+    )
+
+    output = capsys.readouterr().out
+    assert "constraints:" in output
+    assert "memory:" in output
+    assert "24GiB" in output
+    assert "parameter_target" not in output
+
+
+def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
+    tmp_path,
+    monkeypatch,
+):
+    campaign = tmp_path / "campaign"
+    model_path = tmp_path / "model"
+    dataset = tmp_path / "dataset"
+    model_path.mkdir()
+    dataset.mkdir()
+    inventory = ModelInventory(
+        family="qwen3_5",
+        descriptor="qwen3_5_text",
+        family_config="examples/puzzletron/configs/families/qwen3_5/family.yaml",
+        model_type="qwen3_5_text",
+        architectures=("Qwen3_5ForCausalLM",),
+        multimodal=False,
+        moe=False,
+        num_layers=4,
+        num_sublayers=8,
+        layer_counts={"full_attention": 4},
+        facts={
+            "hidden_size": 1024,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "intermediate_size": 4096,
+        },
+        axes=(
+            AxisInventory(
+                axis_id="hidden_width",
+                label="Hidden width",
+                teacher_value=1024,
+                values=(1024, 768),
+                alignment=256,
+            ),
+        ),
+    )
+    inspected = InspectedModel(
+        source=str(model_path),
+        requested_revision=None,
+        resolved_revision=None,
+        is_local=True,
+        config={
+            "model_type": "qwen3_5_text",
+            "text_config": {
+                "num_hidden_layers": 4,
+                "layer_types": ["full_attention"] * 4,
+            },
+        },
+        inventory=inventory,
+    )
+    monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
+    monkeypatch.setattr(
+        wizard_module,
+        "infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
+    )
+    backend = ScriptedBackend(
+        [
+            "smoke",
+            str(campaign),
+            _CUSTOM_MODEL_SOURCE,
+            str(model_path),
+            _CUSTOM_DATA_SOURCE,
+            str(dataset),
+            "defaults",
+            True,
+        ]
+    )
+
+    result = wizard_module.run_wizard_v2(
+        resume=None,
+        defaults_path=None,
+        backend=backend,
+    )
+
+    assert result == campaign.resolve()
+    assert backend.remaining == 0
+    assert (campaign / "smoke" / "experiment.yaml").is_file()
+    assert (campaign / "production" / "experiment.yaml").is_file()
+    assert (campaign / "resolved_defaults.yaml").is_file()
 
 
 def test_guided_section_uses_profile_without_action_prompt(tmp_path):
