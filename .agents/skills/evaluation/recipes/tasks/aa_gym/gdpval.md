@@ -10,8 +10,9 @@
 GDPVal is an **agentic** benchmark: the Stirrup agent produces office/PDF
 deliverables inside a per-task Apptainer code-exec sandbox, then a pairwise/rubric
 judge (**Gemini 3.1 Pro**) scores them. It is the most resource-intensive benchmark
-in the suite — **220 tasks**, `num_repeats=2` in the reviewed golden (= 440
-rollouts), each rollout using 4 judge trials.
+in the suite — **220 tasks**, 4 judge trials per rollout. Repeat count depends on
+the flow (multistage comparison uses 1; the pre-multistage golden used 2) — see
+the num_repeats note under Config.
 
 It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
 Steps 1–9 apply — but with the branch differences below.
@@ -23,7 +24,7 @@ Steps 1–9 apply — but with the branch differences below.
 - **Apptainer SIF sandbox (self-contained).** Set `GDPVAL_SIF_DIR` in `.env`, then
   run `.agents/scripts/gdpval-sif.sh` (uses `$GDPVAL_SIF_DIR`) — it **builds if
   absent, reuses if present**, and never copies from another cluster. The config
-  bind-mounts `$GDPVAL_SIF_DIR` at **exactly** `/gdpval/sif/python-3.12.gdpval.sif`
+  bind-mounts `$GDPVAL_SIF_DIR` at **exactly** `/gdpval/sif/python-3.13.gdpval.sif`
   (matches `GDPVAL_CONTAINER_PATH`). Missing/mispathed → the agent **silently** runs
   code-exec unsandboxed and results are not comparable. Details in `references/gym-gdpval.md`.
 - **Thinking mode is mandatory.** Non-thinking loses ~86% of pairwise judgements.
@@ -36,14 +37,17 @@ Steps 1–9 apply — but with the branch differences below.
 
 ## Scoring modes
 
-Set `gdpval.reward_mode` (override: `-o gdpval.reward_mode=comparison`):
-
-- **`rubric`** (default) — standalone LLM-judge scoring; **no reference
-  deliverables** needed. Use this unless you specifically need pairwise-vs-baseline.
-- **`comparison`** — pairwise scoring vs a reference model's deliverables. Also
-  mount the ref dir at `/gdpval/refs/test_ref` and set `gdpval.reference_elo`
-  (golden uses Kimi-K2.5-Thinking refs, elo=1290). Two-step baseline→comparison
-  flow in `references/gym-gdpval.md`.
+- **`rubric`** — the template default. Standalone LLM-judge scoring against each
+  task's rubric; **no reference deliverables**, runs on the public gym image. Gives a
+  0–1 reward, **not** an ELO (ELO is undefined without an opponent).
+- **`comparison`** — pairwise vs anchored reference deliverables; the **only** mode
+  that yields the AA-comparable `normalized_elo`. It is a conversion, not a flag
+  flip: it needs a reference set, a gym image whose Gym has the `reference_models`
+  map, ref mounts on both stages, and multistage overrides. **Do not just set
+  `reward_mode=comparison`** — the server exits at startup with
+  `reward_mode=comparison requires reference_deliverables_dir to be set`.
+  NVIDIA-internal users: `modelopttools:eval-config` Step 3c is the conversion
+  checklist. See `references/gym-gdpval.md` → "Scoring modes".
 
 ## Config
 
@@ -77,7 +81,7 @@ default resolves relative to the config dir — copying the yaml alone breaks it
   across commits, and running a new gym with an old SIF makes the agent's generated
   code fail imports in the sandbox → silently degraded deliverables. See
   `references/gym-gdpval.md` → "Rebuild the SIF when the Gym version changes".
-- **Deployment:** single-node vLLM in the template; the full 220×2 run of a large
+- **Deployment:** single-node vLLM in the template; a full 220-task run of a large
   MoE typically needs multi-node — see `references/gym-gdpval.md`.
 - Required `.env` keys: `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
   `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR` (see `recipes/env.example`).
@@ -102,24 +106,29 @@ hangs (see `references/gym-gdpval.md` → failure modes).
 > holds only `response_stats` / `reasoning` / `evaluation` (request-level telemetry).
 > Looking there and finding no ELO does not mean the run failed to score.
 
+**The reported GDPVal score is `normalized_elo`** — the AA 0–1 scale, comparable
+across models and to the published AA index. `eval_elo` is the same fit on the raw
+Elo axis (`normalized_elo = (eval_elo - 500) / 2000`); quote it as supporting
+detail, not as the score.
+
 The final numbers live in **`artifacts/results.yml`** (authoritative, local) and are
 mirrored to MLflow. Read them by metric name:
 
 | Mode | Metric (results.yml → `groups.nemo_gym.metrics.<name>.scores.<name>.value`) |
 | --- | --- |
-| comparison | `gdpval_stirrup_agent/comparison/eval_elo` ← **the headline** |
-| comparison | `gdpval_stirrup_agent/comparison/normalized_elo` (AA 0–1 scale) |
+| comparison | `gdpval_stirrup_agent/comparison/normalized_elo` ← **REPORT THIS** (AA 0–1 scale) |
+| comparison | `gdpval_stirrup_agent/comparison/eval_elo` (raw Elo; supporting detail) |
 | comparison | `gdpval_stirrup_agent/comparison/win_rate`, `/judged`, `/wins`, `/losses`, `/ties` |
 | comparison | per-reference: `gdpval_stirrup_agent/comparison/ref/<ref_key>/{win_rate,wins,losses,ties,judged}` |
 | comparison | per-stage estimate: `gdpval_stirrup_agent/comparison/stage_0/eval_elo` (stage 1, all refs) — the **final** value is the top-level one, from the last stage |
 | rubric | mean of `reward` across `artifacts/evaluator_rollouts.jsonl` (per-rollout 0–1) |
 
 ```bash
-# final ELO from the local results file (no MLflow needed)
+# final score from the local results file (no MLflow needed)
 python3 -c "
 import yaml,sys
 m=yaml.safe_load(open('results.yml'))['groups']['nemo_gym']['metrics']
-for k in ('eval_elo','normalized_elo','win_rate'):
+for k in ('normalized_elo','eval_elo','win_rate'):
     n=f'gdpval_stirrup_agent/comparison/{k}'
     print(k, '=', m[n]['scores'][n]['value'])"
 ```
@@ -130,8 +139,8 @@ comparison run logs **~200 metrics and most of them are per-reference**, so the
 headline is easy to miss:
 
 ```text
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/normalized_elo   <- report this
 nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/eval_elo
-nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/normalized_elo
 nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/win_rate
 ```
 
