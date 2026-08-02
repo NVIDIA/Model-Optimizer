@@ -98,8 +98,47 @@ hangs (see `references/gym-gdpval.md` → failure modes).
 
 ## Score Extraction
 
-GDPVal reports a **win-rate / ELO** against the reference (comparison mode) or a
-rubric score (rubric mode); the run's aggregate metric is logged under the
-`nemo_gym.gdpval` benchmark in MLflow. Read the run's
-`{output_dir}/evaluator_rollouts.jsonl` + `nemo_gym_logs/` for per-task rewards,
-and the persisted judge responses under `PERSIST_DELIVERABLES_DIR`.
+> **The GDPVal score is NOT in `artifacts/eval_factory_metrics.json`.** That file
+> holds only `response_stats` / `reasoning` / `evaluation` (request-level telemetry).
+> Looking there and finding no ELO does not mean the run failed to score.
+
+The final numbers live in **`artifacts/results.yml`** (authoritative, local) and are
+mirrored to MLflow. Read them by metric name:
+
+| Mode | Metric (results.yml → `groups.nemo_gym.metrics.<name>.scores.<name>.value`) |
+| --- | --- |
+| comparison | `gdpval_stirrup_agent/comparison/eval_elo` ← **the headline** |
+| comparison | `gdpval_stirrup_agent/comparison/normalized_elo` (AA 0–1 scale) |
+| comparison | `gdpval_stirrup_agent/comparison/win_rate`, `/judged`, `/wins`, `/losses`, `/ties` |
+| comparison | per-reference: `gdpval_stirrup_agent/comparison/ref/<ref_key>/{win_rate,wins,losses,ties,judged}` |
+| comparison | per-stage estimate: `gdpval_stirrup_agent/comparison/stage_0/eval_elo` (stage 1, all refs) — the **final** value is the top-level one, from the last stage |
+| rubric | mean of `reward` across `artifacts/evaluator_rollouts.jsonl` (per-rollout 0–1) |
+
+```bash
+# final ELO from the local results file (no MLflow needed)
+python3 -c "
+import yaml,sys
+m=yaml.safe_load(open('results.yml'))['groups']['nemo_gym']['metrics']
+for k in ('eval_elo','normalized_elo','win_rate'):
+    n=f'gdpval_stirrup_agent/comparison/{k}'
+    print(k, '=', m[n]['scores'][n]['value'])"
+```
+
+In **MLflow** the same values are prefixed `nemo_gym_` and duplicated under a
+`key_metrics/` path — query these exact keys rather than browsing the UI, because a
+comparison run logs **~200 metrics and most of them are per-reference**, so the
+headline is easy to miss:
+
+```text
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/eval_elo
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/normalized_elo
+nemo_gym_gdpval_stirrup_agent/key_metrics/comparison/win_rate
+```
+
+Sanity checks before quoting a score: `…/comparison/judged` should be large (a few
+hundred+), `num_stages`/`num_references` should match your multistage config, and the
+unique `task_id` count in `evaluator_rollouts.jsonl` should be close to 220 — a short
+count means tasks were lost (e.g. across a walltime resume) and the ELO is computed on
+fewer tasks than the references were. Per-task detail is in
+`evaluator_rollouts.jsonl` + `nemo_gym_logs/`; raw judge responses are under
+`PERSIST_DELIVERABLES_DIR`.
