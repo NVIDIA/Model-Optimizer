@@ -40,7 +40,8 @@ def test_register_rejects_non_module_classes():
     # a rejected entry must not leave the registry partially populated
     with pytest.raises(AssertionError, match=r"is not a subclass of nn\.Module"):
         registry.register({nn.Linear: "nn.Linear", not_a_class: "bad"})(DynamicModule)
-    assert nn.Linear not in registry
+    assert nn.Linear not in registry  # class registry
+    assert "nn.Linear" not in registry  # str-key registry
 
 
 def test_dm_attribute_manager():

@@ -29,6 +29,8 @@ TinyDeepseekV3 (+ MLAAttention).
 from __future__ import annotations
 
 import gc
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -56,6 +58,15 @@ from modelopt.torch.quantization.plugins.vllm import (
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
 )
+
+
+def _load_example_module(name: str):
+    """Import a module from ``examples/vllm_serve/`` by path (not an installed package)."""
+    path = Path(__file__).parents[4] / "examples/vllm_serve" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"{name}_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class _NativeAttention(torch.nn.Module):
@@ -307,6 +318,9 @@ def _quantize_and_summarize(self):
         "missing_quantizers": missing_quantizers,
         "quantizers_without_amax": quantizers_without_amax,
         "enabled_quantizer_count": enabled_quantizer_count,
+        "quantizer_names": sorted(
+            name for name, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        ),
     }
 
 
@@ -443,6 +457,19 @@ def test_tiny_qwen3_moe_quantize(tiny_qwen3_moe_llm):
     assert summary["attention_count"] >= 2, summary
 
     _assert_quantizer_amax_is_static(summary)
+
+    # The vllm_serve reload helper must map HF expert keys onto module paths that exist here:
+    # a stale mapping is dropped silently at load and serves uncalibrated experts.
+    reload_utils = _load_example_module("vllm_reload_utils")
+    for hf_key, expected_quantizer in (
+        ("model.layers.0.mlp.experts.0.gate_proj.input_quantizer._amax", "w13_input_quantizer"),
+        ("model.layers.0.mlp.experts.0.down_proj.weight_quantizer._amax", "w2_weight_quantizer"),
+    ):
+        action, vllm_key, _ = reload_utils._convert_key_for_vllm(hf_key, 1.0)
+        assert action == "group", (hf_key, action)
+        module_path = vllm_key.rsplit("._amax", 1)[0]
+        assert module_path.endswith(expected_quantizer), vllm_key
+        assert module_path in summary["quantizer_names"], (vllm_key, summary["quantizer_names"])
 
 
 def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
