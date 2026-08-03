@@ -164,7 +164,7 @@ Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
-**Image / vLLM version.** Treat default `image: vllm/vllm-openai:v0.19.1` as a floor to verify: bump to the **exact model's** `recipes.vllm.ai` minimum if higher (e.g. `v0.20.0`). Running below minimum is a trap — the server starts, then a worker dies mid-inference with `CUDA error: an illegal memory access` (MiniMax-M2.7 NVFP4 needed ≥0.20.0), easy to misread as a kernel bug. Never `:latest` (breaks reproducibility). Surface version bumps to the user.
+**Image / vLLM version.** Treat default `image: vllm/vllm-openai:v0.26.0` as a floor to verify: bump to the **exact model's** `recipes.vllm.ai` minimum if higher. Running below minimum is a trap — the server starts, then a worker dies mid-inference with `CUDA error: an illegal memory access`, easy to misread as a kernel bug. A model released after the newest vLLM release may have no numbered tag at all; take whatever image its recipe names. Never `:latest` (breaks reproducibility). Surface version bumps to the user.
 
 > **NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build** — the cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. **Verify CUDA ≥13 in the tag itself; do not blindly append a suffix — vLLM inverted its tag convention:**
 >
@@ -335,8 +335,8 @@ Default images:
 
 | Framework | Image | Registry |
 | --- | --- | --- |
-| vLLM | `vllm/vllm-openai:v0.19.1` (bump per recipe; never `:latest`) | DockerHub |
-| vLLM (NVFP4 on B300/GB300) | a **CUDA-13** build: `-cu130` on ≤v0.20.x, **unsuffixed** on ≥~v0.21 (see Step 3) | DockerHub |
+| vLLM | `vllm/vllm-openai:v0.26.0` (bump per recipe; never `:latest`) | DockerHub |
+| vLLM (NVFP4 on B300/GB300) | the default tag is already a **CUDA-13** build; if you pin an older release, re-check the tag convention (see Step 3) | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
