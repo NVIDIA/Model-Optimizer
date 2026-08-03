@@ -169,10 +169,32 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run tests against the pinned Puzzletron runtime
+        id: puzzletron_tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: pip install nox uv && nox -s puzzletron_v2
+      - name: Publish Puzzletron v2 test summary
+        if: ${{ always() }}
+        env:
+          TEST_RESULT: ${{ steps.puzzletron_tests.outcome }}
+        run: |
+          if [[ "$TEST_RESULT" == "success" ]]; then
+            heading="Puzzletron v2 CPU CI passed"
+            detail="All CPU-eligible Puzzletron v2 unit tests passed against the pinned runtime."
+          else
+            heading="Puzzletron v2 CPU CI did not pass"
+            detail="The pinned-runtime Puzzletron v2 unit-test session needs attention."
+          fi
+
+          {
+            echo "## $heading"
+            echo
+            echo "$detail"
+            echo
+            echo "The job also verifies dependency consistency and the exact versions recorded in \`examples/puzzletron/ci_environment.json\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=$heading::$detail"
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -181,6 +203,49 @@ jobs:
           fail_ci_if_error: true
           skip_validation: true
           verbose: true
+  puzzletron_v2_pr_required_check:
+    name: Puzzletron v2 CI / required check
+    if: ${{ github.event_name == 'pull_request' && always() }}
+    needs: [check-file-changes, puzzletron_v2]
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish required-check result
+        env:
+          CHANGE_DETECTION_RESULT: ${{ needs.check-file-changes.result }}
+          PUZZLETRON_CHANGED: ${{ needs.check-file-changes.outputs.puzzletron_changed }}
+          PUZZLETRON_TEST_RESULT: ${{ needs.puzzletron_v2.result }}
+        run: |
+          if [[ "$CHANGE_DETECTION_RESULT" != "success" ]]; then
+            heading="Puzzletron v2 CI could not determine applicability"
+            detail="Change detection did not succeed, so this check cannot safely pass."
+            conclusion="failure"
+          elif [[ "$PUZZLETRON_CHANGED" != "true" ]]; then
+            heading="Puzzletron v2 CPU CI was not required"
+            detail="This pull request does not change a Puzzletron v2 CI dependency path."
+            conclusion="success"
+          elif [[ "$PUZZLETRON_TEST_RESULT" == "success" ]]; then
+            heading="Puzzletron v2 CPU CI passed"
+            detail="All CPU-eligible Puzzletron v2 tests passed against the pinned runtime."
+            conclusion="success"
+          else
+            heading="Puzzletron v2 CPU CI failed"
+            detail="The dedicated pinned-runtime job concluded with: $PUZZLETRON_TEST_RESULT."
+            conclusion="failure"
+          fi
+
+          {
+            echo "## $heading"
+            echo
+            echo "$detail"
+            echo
+            echo "This stable aggregate is suitable for branch rules that require Puzzletron v2 CPU validation."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=$heading::$detail"
+
+          if [[ "$conclusion" == "failure" ]]; then
+            exit 1
+          fi
   launcher:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
@@ -218,7 +283,7 @@ jobs:
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, linux, windows, multi-version, partial-install, puzzletron_v2, launcher, skills]
+    needs: [check-file-changes, linux, windows, multi-version, partial-install, puzzletron_v2_pr_required_check, launcher, skills]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
@@ -230,6 +295,5 @@ jobs:
             needs.partial-install.result != 'success' ||
             needs.launcher.result != 'success' ||
             needs.skills.result != 'success'
-          )) || (needs.check-file-changes.outputs.puzzletron_changed == 'true' &&
-            needs.puzzletron_v2.result != 'success') }}
+          )) || needs.puzzletron_v2_pr_required_check.result != 'success' }}
         run: exit 1
