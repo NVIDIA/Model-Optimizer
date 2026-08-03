@@ -142,6 +142,106 @@ def test_kimi_mask_accepts_list_input():
     assert mask.tolist() == [0, 0, 0, 1, 1, 0]
 
 
+# ---------------------------------------------------------------------------
+# Kimi-K3 (XTML chat format)
+# ---------------------------------------------------------------------------
+
+_K3_MARKER_IDS = {"<|open|>": 10, "<|close|>": 11, "<|sep|>": 12, "<|end_of_msg|>": 13}
+# Header/content tokens are ORDINARY text tokens in K3, so the recovery decodes them.
+_K3_WORDS = {100: "message", 101: "role", 102: "assistant", 103: "user", 104: "think"}
+
+
+class FakeK3Tokenizer:
+    """K3 tokenizer: XTML structural markers, plain-text tag names."""
+
+    is_fast = False
+    unk_token_id = 999
+
+    def convert_tokens_to_ids(self, token):
+        return _K3_MARKER_IDS.get(token, self.unk_token_id)
+
+    def decode(self, ids):
+        return " ".join(_K3_WORDS.get(i, "") for i in ids)
+
+
+class FakeK3WithLegacyMarkersTokenizer(FakeK3Tokenizer):
+    """Real K3 keeps the K2 ``<|im_*|>`` markers too; K3 must still win."""
+
+    def convert_tokens_to_ids(self, token):
+        if token in _K3_MARKER_IDS:
+            return _K3_MARKER_IDS[token]
+        return _MARKER_IDS.get(token, self.unk_token_id)
+
+
+def _k3_turn(role_id, content_ids):
+    # <|open|> message role {role} <|sep|> {content} <|close|> message <|sep|>
+    return [
+        _K3_MARKER_IDS["<|open|>"],
+        100,  # "message"
+        101,  # "role"
+        role_id,
+        _K3_MARKER_IDS["<|sep|>"],
+        *content_ids,
+        _K3_MARKER_IDS["<|close|>"],
+        100,
+        _K3_MARKER_IDS["<|sep|>"],
+    ]
+
+
+def test_k3_recovery_is_registered():
+    recovery = get_loss_mask_recovery(FakeK3Tokenizer())
+    assert recovery is not None
+    assert recovery.name == "kimi_k3"
+
+
+def test_k3_tokenizer_does_not_match_the_k2_recovery():
+    """K3 defines both marker sets; the K2 recovery must defer or the mask is empty."""
+    recovery = get_loss_mask_recovery(FakeK3WithLegacyMarkersTokenizer())
+    assert recovery is not None
+    assert recovery.name == "kimi_k3"
+
+
+def test_k3_mask_marks_only_assistant_content():
+    tok = FakeK3Tokenizer()
+    ids = _k3_turn(103, [200]) + _k3_turn(102, [300, 301])  # user turn, assistant turn
+    mask = get_loss_mask_recovery(tok).compute(tok, torch.tensor(ids))
+
+    marked = {i for i, v in enumerate(mask.tolist()) if v == 1}
+    assert marked == {i for i, v in enumerate(ids) if v in (300, 301)}
+
+
+def test_k3_mask_includes_nested_tags():
+    """Assistant content nests ``think``/``response`` sub-tags; they belong to the span."""
+    tok = FakeK3Tokenizer()
+    nested = [
+        200,
+        _K3_MARKER_IDS["<|open|>"],
+        104,  # "think"
+        _K3_MARKER_IDS["<|sep|>"],
+        201,
+        _K3_MARKER_IDS["<|close|>"],
+        104,
+        _K3_MARKER_IDS["<|sep|>"],
+        202,
+    ]
+    ids = _k3_turn(102, nested)
+    mask = get_loss_mask_recovery(tok).compute(tok, torch.tensor(ids)).tolist()
+
+    # Content spans everything between the header <|sep|> and the matching <|close|>.
+    start = 5
+    end = len(ids) - 3
+    assert mask[:start] == [0] * start
+    assert mask[start:end] == [1] * (end - start)
+    assert mask[end:] == [0] * (len(ids) - end)
+
+
+def test_k3_mask_accepts_list_input():
+    tok = FakeK3Tokenizer()
+    ids = _k3_turn(102, [300, 301])
+    mask = get_loss_mask_recovery(tok).compute(tok, ids)  # plain list, not a tensor
+    assert mask.tolist() == [0, 0, 0, 0, 0, 1, 1, 0, 0, 0]
+
+
 def test_register_and_lookup_custom_recovery(restore_registry):
     sentinel = object()
 
