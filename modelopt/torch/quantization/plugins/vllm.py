@@ -148,7 +148,13 @@ except ImportError:
 _has_fused_moe_cls = UnquantizedFusedMoEMethod is not None and _is_module_cls(
     getattr(vllm_fused_moe_layer, "FusedMoE", None)
 )
-_has_routed_experts_cls = UnquantizedFusedMoEMethod is not None and _is_module_cls(RoutedExperts)
+# The forward_* check keeps a future rename surfacing here (skip + warn) rather than as an
+# AttributeError at the first expert forward, i.e. at serving time.
+_has_routed_experts_cls = (
+    UnquantizedFusedMoEMethod is not None
+    and _is_module_cls(RoutedExperts)
+    and all(hasattr(RoutedExperts, n) for n in ("forward_modular", "forward_monolithic"))
+)
 if vllm_shared_fused_moe_layer is not None and not (
     UnquantizedFusedMoEMethod is not None
     and _is_module_cls(getattr(vllm_shared_fused_moe_layer, "SharedFusedMoE", None))
@@ -633,6 +639,7 @@ class _QuantFusedMoEBase(QuantModule):
         """Route vLLM's fused-MoE kernels through this module's quantizers.
 
         They are module-level functions, so fakequant is installed by name for this forward.
+        Patching is process-wide: safe for the LIFO nesting vLLM does, but not thread-safe.
         """
         assert _FUSED_MOE_KERNEL_TARGETS, "No vLLM fused-MoE kernel entry point found to patch"
         originals = [
@@ -692,7 +699,8 @@ if _has_routed_experts_cls:
     class _QuantVLLMRoutedExperts(_QuantFusedMoEBase):
         """Expert-weight owner of the vLLM >= 0.24 ``MoERunner`` pipeline.
 
-        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``.
+        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``,
+        so the inherited ``forward`` is never used (``RoutedExperts.forward`` raises by design).
         """
 
         def forward_modular(self, *args, **kwargs):

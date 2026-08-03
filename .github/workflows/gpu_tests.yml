@@ -53,6 +53,10 @@ jobs:
           - example: gpu_vllm
             timeout: 15
             container_image: docker.io/vllm/vllm-openai:v0.24.1
+          # Keeps the pre-0.24 FusedMoE / SharedFusedMoE registration branches covered for now
+          - example: gpu_vllm
+            timeout: 15
+            container_image: docker.io/vllm/vllm-openai:v0.20.0
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: ${{ matrix.timeout }}
     container:

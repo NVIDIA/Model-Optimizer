@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
 import re
 import warnings
 from collections import defaultdict
@@ -38,15 +37,13 @@ from modelopt.torch.quantization.conversion import (
     restore_quantizer_state,
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.plugins.vllm import _has_routed_experts_cls
 from modelopt.torch.quantization.utils import is_quantized
 
 # vLLM >= 0.24 moved the fused expert weights (and their quantizers) onto a ``routed_experts``
-# submodule of the MoE layer, so merged expert keys need that extra hop.
-_EXPERTS_INFIX = (
-    ".routed_experts"
-    if importlib.util.find_spec("vllm.model_executor.layers.fused_moe.routed_experts") is not None
-    else ""
-)
+# submodule of the MoE layer, so merged expert keys need that extra hop. Follow the plugin's
+# registration flag rather than re-probing, so keys always match the modules it converted.
+_EXPERTS_INFIX = ".routed_experts" if _has_routed_experts_cls else ""
 
 
 def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[str]:
