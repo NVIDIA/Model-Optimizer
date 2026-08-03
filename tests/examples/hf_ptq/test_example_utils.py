@@ -316,3 +316,106 @@ def test_get_model_uses_expected_dtype_kwarg(
     else:
         assert "trust_remote_code" not in calls["from_config"]
     assert calls["from_pretrained"]["trust_remote_code"] is True
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architecture", "device_count", "expected_device_map"),
+    [
+        # DiffusionGemma ties encoder/decoder weights; "auto" can split a tied pair
+        # across GPUs, so multi-GPU loads must fall back to "sequential".
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        # Detection must also work off ``architectures`` alone, without ``model_type``.
+        (None, "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        # Single GPU cannot split a tied pair, so it keeps the unrestricted "auto" map.
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
+        # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
+        ("gemma3", "Gemma3ForCausalLM", 2, "auto"),
+    ],
+)
+def test_get_model_device_map_for_diffusion_gemma(
+    monkeypatch, model_type, architecture, device_count, expected_device_map
+):
+    calls = {}
+    hf_config = SimpleNamespace(
+        architectures=[architecture],
+        dtype=torch.float16,
+        model_type=model_type,
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
+
+        def parameters(self):
+            return iter(())
+
+    class FakeArchitecture:
+        @staticmethod
+        def _from_config(config, **kwargs):
+            return FakeModel()
+
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            return FakeModel()
+
+    monkeypatch.setattr(
+        example_utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: hf_config
+    )
+    # Set rather than delete: ``transformers`` lazy-imports, so a deleted real class
+    # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
+    # raising=False: DiffusionGemma may not exist in the installed transformers.
+    monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
+
+    example_utils.get_model("checkpoint", device="cuda", trust_remote_code=True)
+
+    assert calls["from_pretrained"]["device_map"] == expected_device_map
+    # Sequential caps per-GPU memory; "auto" must stay unrestricted.
+    if expected_device_map == "sequential":
+        assert calls["from_pretrained"]["max_memory"] == {0: 1024 * 0.8}
+    else:
+        assert "max_memory" not in calls["from_pretrained"]
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(model_type="diffusion_gemma", architectures=None), True),
+        (SimpleNamespace(model_type=None, architectures=["DiffusionGemmaForCausalLM"]), True),
+        (SimpleNamespace(model_type="gemma3", architectures=["Gemma3ForCausalLM"]), False),
+        # Multi-modal wrappers keep the family name on the nested ``text_config``.
+        (
+            SimpleNamespace(
+                model_type="multimodal",
+                architectures=["SomeWrapperForConditionalGeneration"],
+                text_config=SimpleNamespace(model_type="diffusion_gemma"),
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model_type="multimodal",
+                text_config=SimpleNamespace(architectures=["DiffusionGemmaForCausalLM"]),
+            ),
+            True,
+        ),
+        # A non-DiffusionGemma nested config must not match.
+        (
+            SimpleNamespace(
+                model_type="multimodal", text_config=SimpleNamespace(model_type="gemma3")
+            ),
+            False,
+        ),
+        # Stub configs may omit either attribute entirely.
+        (SimpleNamespace(), False),
+    ],
+)
+def test_is_diffusion_gemma(hf_config, expected):
+    assert example_utils.is_diffusion_gemma(hf_config) is expected
