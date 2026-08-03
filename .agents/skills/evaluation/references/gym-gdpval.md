@@ -19,87 +19,41 @@ is `recipes/examples/gym_gdpval/` and the per-task pointer is
 | Judge (pairwise/rubric) | external OpenAI-compatible endpoint (`gdpval_judge`, e.g. Gemini 3.1 Pro) |
 | Agent web search | Tavily (`TAVILY_API_KEY`) |
 
-## Apptainer SIF sandbox (self-contained: build-if-absent, reuse-if-present)
+## Apptainer SIF sandbox
 
 The Stirrup agent runs each task's generated code in an Apptainer SIF, bind-mounted
-into the eval container at **exactly** `/gdpval/sif/python-3.13.gdpval.sif` (the path
-`GDPVAL_CONTAINER_PATH` points at). If it's missing or at a different path, the agent
-**silently falls back to non-sandboxed local exec** — the run "succeeds" but the
-numbers aren't comparable, so verify the SIF at canary.
+at **exactly** the path `GDPVAL_CONTAINER_PATH` names (template:
+`/gdpval/sif/python-3.13.gdpval.sif`). Missing or misnamed → the agent **silently**
+runs code-exec unsandboxed; the run "succeeds" but the numbers aren't comparable.
 
-**The skill builds the SIF on the target cluster — it never copies one from
-another cluster.** That is the self-contained default and the right behaviour when
-you have no prebuilt sandbox.
-
-> **If your site already provides a prebuilt GDPVal SIF, prefer it over building —
-> build only when it is absent.** A self-built SIF resolves its pip stack at *your*
-> build time, so it can drift from the sandbox a published reference set was
-> generated in, which matters for comparison-mode runs. To use a provided one, mount
-> its dir at `/gdpval/sif` and point `GDPVAL_CONTAINER_PATH` at the provided
-> filename. **NVIDIA-internal users:** `modelopttools:eval-config` (Step 3c) records
-> the provided SIF's location and the check-then-fall-back procedure — if you have
-> that skill, consult it before building. Without it, building (below) is correct.
-
-Ship the SIF via the idempotent helper, which builds it if absent and reuses it if
-already present:
+**If your site provides a prebuilt SIF, use it** — a self-built one resolves its pip
+stack at *your* build time and can drift from the sandbox a published reference set
+was generated in. Mount the provided dir at `/gdpval/sif` and point
+`GDPVAL_CONTAINER_PATH` at its filename. (NVIDIA-internal: `modelopttools:eval-config`
+Step 3c has the path.) Otherwise build it on the target cluster — never copy a SIF
+between clusters:
 
 ```bash
-# GDPVAL_SIF_DIR (.env) — persistent shared-FS dir on the TARGET cluster; the config
-# bind-mounts this same dir at /gdpval/sif. Preferred: run the ~30-min build on the
-# CPU partition, not a login node. `set -a && source .env` first so it's set.
-srun -p cpu -t 01:00:00 --pty \
-  .agents/scripts/gdpval-sif.sh          # defaults to $GDPVAL_SIF_DIR (or pass a dir)
+srun -p cpu -t 01:00:00 --pty .agents/scripts/gdpval-sif.sh   # uses $GDPVAL_SIF_DIR
 ```
 
-`gdpval-sif.sh` builds from the NeMo Gym `gdpval.def` at the pinned commit (keep
-`GDPVAL_GYM_COMMIT` in sync with the config's `install_on_the_fly.commit`), writes
-the SIF into that dir, and is flock-guarded + atomic so concurrent runs never
-double-build. Re-running is a no-op once the SIF exists — that's the "reuse the
-built one" path. It needs `apptainer`/`singularity` on the build host with
-fakeroot/unprivileged build support and network egress; run it on a login or CPU
-node (outside enroot, where fakeroot works), **not** inside the eval job.
+`gdpval-sif.sh` is idempotent (flock-guarded, atomic): it builds from `gdpval.def` at
+the pinned commit if absent and is a no-op once present. It needs
+apptainer/singularity with unprivileged-build support and network egress — run it on a
+login or CPU node, **not** inside the eval job. The eval image doesn't ship apptainer,
+so the config's `pre_cmd` installs the **runtime** (arch-aware: use the Ubuntu PPA, not
+an amd64 `.deb` — most Blackwell/Grace clusters are aarch64), which needs
+`NEMO_EVALUATOR_TRUST_PRE_CMD=1`.
 
-**Build vs run are separate.** The helper *builds* the SIF (once, off-GPU). The
-eval then *runs* the prebuilt SIF inside the eval container — the golden-validated
-path. The eval image doesn't ship apptainer, so the config's `pre_cmd` installs the
-apptainer **runtime** + squashfuse (FUSE-mounts the SIF; falls back to slower
-per-call extraction if `/dev/fuse` is absent). `pre_cmd` runs arbitrary commands →
-the launching shell needs `export NEMO_EVALUATOR_TRUST_PRE_CMD=1`. The
-apptainer-under-pyxis nesting is the least-validated part of the SLURM path — check
-the canary logs for the "falling back to local exec" warning and apptainer mount
-errors. (Local/Docker executor instead needs `--privileged` + the SIF bind mount via
-`execution.extra_docker_args`; a rootless `--security-opt` + `/dev/fuse` variant is
-in the upstream README appendix.)
-
-### Rebuild the SIF when the Gym version changes (SIF ↔ commit coupling)
-
-The SIF is **versioned with the Gym repo**: it's built from `gdpval.def` at
-`install_on_the_fly.commit`, and that def changes across commits. Example — between
-`2502893977` and the golden `049b1fd0`, the base went **python-3.12 → 3.13** and the
-stack gained TeX Live, chromium/playwright, polars/duckdb, xgboost, geospatial
-(gdal/proj/geos), and audio/video libs. The newer Stirrup agent's prompt advertises
-that richer runtime, so the model's generated code reaches for those libs.
-
-**So whenever you bump `install_on_the_fly.commit`, rebuild the SIF from the matching
-commit.** Run the new gym with an old SIF and the generated code fails its imports
-*inside the sandbox* — deliverables silently degrade (missing figures/tables/docs) →
-junk scores, with no hard error in the eval. Rebuild to a **version-tagged filename**
-so the old SIF isn't clobbered (a running job keeps working), then repoint
-`GDPVAL_CONTAINER_PATH` + the `/gdpval/sif` mount at the new file:
-
-```bash
-# build the SIF for the NEW gym commit under a distinct name (old SIF stays intact)
-GDPVAL_SIF_NAME=python-3.13.gdpval.sif \
-  .agents/scripts/gdpval-sif.sh --commit <new-install_on_the_fly.commit> "$GDPVAL_SIF_DIR"
-# then set GDPVAL_CONTAINER_PATH=/gdpval/sif/python-3.13.gdpval.sif in the config
-```
-
-Rule of thumb: **`install_on_the_fly.commit` and the SIF move together.** Any bump
-that alters `gdpval.def` (base image or the apt/pip stack) needs a rebuild; a bump
-that leaves `gdpval.def` byte-identical does not — diff the def at the two commits
-(`raw.githubusercontent.com/NVIDIA-NeMo/Gym/<sha>/responses_api_agents/stirrup_agent/containers/gdpval.def`)
-to be sure. Note the def already disables apt's sandbox internally as of `049b1fd0`,
-so it builds cleanly under the helper's unprivileged path.
+**The SIF is versioned with the Gym repo.** `gdpval.def` changes across commits (e.g.
+`2502893977` → `049b1fd0` moved python 3.12 → 3.13 and added TeX Live, playwright,
+polars, geospatial), and the newer agent's prompt advertises that richer runtime. So
+when you bump `install_on_the_fly.commit`, **diff the def at the two commits**
+(`raw.githubusercontent.com/NVIDIA-NeMo/Gym/<sha>/responses_api_agents/stirrup_agent/containers/gdpval.def`);
+if it changed, rebuild to a **new version-tagged filename** (`GDPVAL_SIF_NAME=… gdpval-sif.sh --commit <sha>`)
+and repoint `GDPVAL_CONTAINER_PATH`. Running a new gym on an old SIF makes the
+generated code fail its imports *inside the sandbox* — deliverables silently degrade
+with no error in the eval.
 
 ## The `_gym_prepare.yaml` include (why it exists)
 
@@ -146,38 +100,16 @@ self-deploys single-node vLLM, which is fine for a canary or a small policy. For
 
 ## Scoring modes — rubric vs comparison
 
-+ **`rubric`** (template default) — the judge scores each deliverable standalone
-  against a rubric; **no reference deliverables** needed.
-+ **`comparison`** — pairwise: the judge compares the policy's deliverable to a
-  **reference model's** deliverable and the result is an ELO-anchored win-rate.
-  Two-step flow:
-  1. **Baseline:** run your reference model with `-o gdpval.reward_mode=rubric` to
-     generate baseline deliverables (they land under `PERSIST_DELIVERABLES_DIR`).
-  2. **Comparison:** run the candidate with `-o gdpval.reward_mode=comparison`, mount
-     the baseline deliverables at `/gdpval/refs/test_ref`
-     (`execution.mounts.evaluation`), and set `gdpval.reference_elo` to the reference
-     model's ELO (golden: Kimi-K2.5-Thinking, elo=1290).
-
-### Comparison mode needs a newer Gym than the public image — override `container:`
-
-The public `nvcr.io/nvidia/eval-factory/nemo-gym:26.05` (== `latest` by digest) runs
-**rubric** mode fine, but its Gym predates the multi-reference `reference_models` map.
-In comparison mode `gdpval_resources_server` fails validation at startup with
-`reward_mode=comparison requires reference_deliverables_dir to be set`, surfacing only
-as the unhelpful `Process gdpval_resources_server finished unexpectedly!`.
-
-**You cannot fix this by bumping `install_on_the_fly.commit`.** That image bakes Gym as
-a **non-git directory**, so the pin is silently ignored — the prepare step logs
-`=== /opt/Gym is not a git repo; using baked-in Gym version ===` and you get the baked
-build regardless. Treat the pin as inert unless the log shows `=== NeMo Gym commit ===`
-followed by a SHA, and don't attribute run-to-run behaviour changes to it. (In
-particular, a head-server `address already in use` on its fixed port 11000 is a
-**transient collision** — resubmitting clears it; it is not a Gym-version symptom.)
-
-To run comparison mode you must **override the task's `container:`** with an image
-whose Gym has `reference_models`. NVIDIA-internal users: the image path, the canonical
-reference set, and the matching gym overrides are in the `modelopttools:eval-config`
-skill (Step 3c) — internal cluster paths deliberately live only there.
++ **`rubric`** (template default) — judge scores each deliverable against its rubric.
+  0–1 reward, **no ELO** (undefined without an opponent). Runs on the public gym image.
++ **`comparison`** — pairwise vs anchored reference deliverables; the **only** mode
+  yielding the AA-comparable `normalized_elo`. It is a conversion, not a flag flip:
+  it needs a reference set, a gym image whose Gym has the `reference_models` map, ref
+  mounts on **both** deployment and evaluation, and multistage overrides. Setting
+  `reward_mode=comparison` alone exits at startup with
+  `reward_mode=comparison requires reference_deliverables_dir to be set`, surfaced
+  only as `Process gdpval_resources_server finished unexpectedly!`.
+  NVIDIA-internal: `modelopttools:eval-config` Step 3c is the conversion checklist.
 
 ## Judge
 

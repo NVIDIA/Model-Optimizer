@@ -15,67 +15,40 @@ in the suite — **220 tasks**, `num_repeats=1`, 4 judge trials per rollout.
 It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
 Steps 1–9 apply — but with the branch differences below.
 
-## What makes GDPVal different (do NOT treat it as a normal `aa/` task)
+## What makes GDPVal different (not a normal `aa/` task)
 
-- **Standalone — one gym eval per config.** Never add GDPVal to a multi-task
+- **Standalone** — one gym eval per config. Never add GDPVal to a multi-task
   `evaluation.tasks` list, and never add other tasks to a GDPVal config.
-- **Apptainer SIF sandbox (self-contained).** Set `GDPVAL_SIF_DIR` in `.env`, then
-  run `.agents/scripts/gdpval-sif.sh` (uses `$GDPVAL_SIF_DIR`) — it **builds if
-  absent, reuses if present**, and never copies from another cluster. The config
-  bind-mounts `$GDPVAL_SIF_DIR` at **exactly** `/gdpval/sif/python-3.13.gdpval.sif`
-  (matches `GDPVAL_CONTAINER_PATH`). Missing/mispathed → the agent **silently** runs
-  code-exec unsandboxed and results are not comparable. Details in `references/gym-gdpval.md`.
-- **Thinking mode is mandatory.** Non-thinking loses ~86% of pairwise judgements.
-  Serve the policy with its `--reasoning-parser` and force thinking on via the
-  adapter `chat_template_kwargs` (see the example).
-- **Judge + web search + gym plumbing.** Needs `INFERENCE_API_KEY` (judge auth),
-  `TAVILY_API_KEY` (agent web search), `INFERENCE_JUDGE_URL` (judge host, from
-  `.env`), a `pre_cmd` that installs apptainer/squashfuse, and the co-located
-  `_gym_prepare.yaml` include.
+- **Apptainer SIF sandbox** — prefer a site-provided SIF; otherwise
+  `.agents/scripts/gdpval-sif.sh` builds one into `$GDPVAL_SIF_DIR` (build-if-absent,
+  never copied between clusters). Missing/misnamed → **silent** unsandboxed exec.
+- **Thinking mode is mandatory** — non-thinking loses ~86% of pairwise judgements.
+  Serve with the model's `--reasoning-parser` and force it on via the adapter's
+  `chat_template_kwargs`.
+- **Scoring:** `rubric` (template default, no references, no ELO) vs `comparison`
+  (the AA-comparable `normalized_elo`; a conversion, not a flag flip).
+- Needs `INFERENCE_API_KEY`, `TAVILY_API_KEY`, `INFERENCE_JUDGE_URL`,
+  `GDPVAL_SIF_DIR` in `.env`, plus `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a
+  `pre_cmd`).
 
-## Scoring modes
-
-- **`rubric`** — the template default. Standalone LLM-judge scoring against each
-  task's rubric; **no reference deliverables**, runs on the public gym image. Gives a
-  0–1 reward, **not** an ELO (ELO is undefined without an opponent).
-- **`comparison`** — pairwise vs anchored reference deliverables; the **only** mode
-  that yields the AA-comparable `normalized_elo`. It is a conversion, not a flag
-  flip: it needs a reference set, a gym image whose Gym has the `reference_models`
-  map, ref mounts on both stages, and multistage overrides. **Do not just set
-  `reward_mode=comparison`** — the server exits at startup with
-  `reward_mode=comparison requires reference_deliverables_dir to be set`.
-  NVIDIA-internal users: `modelopttools:eval-config` Step 3c is the conversion
-  checklist. See `references/gym-gdpval.md` → "Scoring modes".
+All of the above — SIF handling, the SIF↔Gym-commit coupling, scoring modes, judge
+panel, preflight and failure modes — is detailed in **`references/gym-gdpval.md`**.
+Read it before editing a GDPVal config.
 
 ## Config
 
-**Do not copy a fragment into another config.** GDPVal is standalone — start from
-the self-contained example and edit it:
+Start from the self-contained example and edit it — **do not** copy a fragment into
+another config:
 
 ```text
 recipes/examples/gym_gdpval/
-  example_gym_gdpval.yaml   # SLURM + single-node vLLM self-deploy template
-  _gym_prepare.yaml         # co-located Hydra include (${gym_prepare.*}); travels with the yaml
+  example_gym_gdpval.yaml   # SLURM + single-node vLLM self-deploy template (rubric)
+  _gym_prepare.yaml         # co-located Hydra include; MUST travel with the yaml
 ```
 
-Copy the **whole `gym_gdpval/` directory** to your workspace (the `- _gym_prepare`
-default resolves relative to the config dir — copying the yaml alone breaks it).
-
-- **num_repeats: 1.** Both current goldens use it, set with a top-level
-  `++num_repeats=1` (which works — no `sed` needed; recent Gym pins already ship 1).
-  Pre-multistage single-reference configs used 2; do not carry that over.
-- **SIF ↔ Gym version (rebuild on bump):** the SIF is built from `gdpval.def` at
-  `install_on_the_fly.commit`. **If you change that commit, rebuild the SIF** with a
-  matching `gdpval-sif.sh --commit <sha>` (to a new version-tagged filename, then
-  repoint `GDPVAL_CONTAINER_PATH`) — the def's base image + package stack change
-  across commits, and running a new gym with an old SIF makes the agent's generated
-  code fail imports in the sandbox → silently degraded deliverables. See
-  `references/gym-gdpval.md` → "Rebuild the SIF when the Gym version changes".
-- **Deployment:** single-node vLLM in the template; a full 220-task run of a large
-  MoE typically needs multi-node — see `references/gym-gdpval.md`.
-- Required `.env` keys: `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
-  `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR` (see `recipes/env.example`).
-  `NEMO_EVALUATOR_TRUST_PRE_CMD=1` is needed because the config has a `pre_cmd`.
+Copy the **whole dir** (the `- _gym_prepare` default resolves relative to the config
+dir). `num_repeats=1` — already set by the template via `++num_repeats=1`; both
+current goldens use it. A full 220-task run of a large MoE typically needs multi-node.
 
 ## Canary
 
