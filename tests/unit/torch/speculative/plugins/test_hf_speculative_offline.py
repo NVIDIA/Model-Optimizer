@@ -194,6 +194,11 @@ def test_vlm_collator_applies_image_limits_to_video_processor():
         ("VLM_MIN_PIXELS", "not-an-integer", "VLM_MIN_PIXELS must be an integer"),
         ("VLM_MAX_PROMPT_TOKENS", "0", "VLM_MAX_PROMPT_TOKENS must be a positive integer"),
         (
+            "VLM_MAX_PROMPT_TOKENS",
+            "not-an-integer",
+            "VLM_MAX_PROMPT_TOKENS must be a positive integer",
+        ),
+        (
             "VLM_MAX_ASSISTANT_TOKENS",
             "not-an-integer",
             "VLM_MAX_ASSISTANT_TOKENS must be a positive integer",
@@ -215,6 +220,16 @@ def test_vlm_collator_rejects_invalid_environment_limits(monkeypatch, env_name, 
         transformers_dataset.VisionLanguageDataCollator(
             processor="dummy-vlm-processor", chat_template="{{ messages }}"
         )
+
+
+def test_vlm_collator_rejects_non_integer_video_limit(monkeypatch):
+    """Video bounds must be integer pixel counts."""
+
+    monkeypatch.setenv("VLM_VIDEO_MIN_PIXELS", "not-an-integer")
+    processor = types.SimpleNamespace(video_processor=types.SimpleNamespace(size={}))
+
+    with pytest.raises(ValueError, match="VLM_VIDEO_MIN_PIXELS must be an integer"):
+        transformers_dataset.VisionLanguageDataCollator._configure_video_processor(processor, {})
 
 
 def test_vlm_collator_pads_template_output_and_builds_unshifted_labels():
@@ -261,6 +276,81 @@ def test_vlm_collator_pads_template_output_and_builds_unshifted_labels():
         add_generation_prompt=False,
         return_assistant_tokens_mask=True,
     )
+
+
+def test_vlm_collator_preserves_processor_length_when_it_matches_training_length():
+    """No padding is added when the processor already returns train_len tokens."""
+
+    collator = _bare_vlm_collator()
+    collator.train_len = 3
+    tokenized = {"input_ids": torch.tensor([[1, 2, 3]])}
+
+    assert collator._pad_sequence_tensors(tokenized) is tokenized
+
+
+@pytest.mark.parametrize(
+    ("shift_labels", "assistant_mask", "expected_labels"),
+    [
+        (
+            True,
+            torch.tensor([[0, 1, 0]]),
+            [[2, transformers_dataset.IGNORE_TOKEN_ID, transformers_dataset.IGNORE_TOKEN_ID]],
+        ),
+        (
+            False,
+            torch.zeros((1, 3), dtype=torch.long),
+            [
+                [
+                    transformers_dataset.IGNORE_TOKEN_ID,
+                    transformers_dataset.IGNORE_TOKEN_ID,
+                    transformers_dataset.IGNORE_TOKEN_ID,
+                ]
+            ],
+        ),
+    ],
+)
+def test_vlm_collator_masks_shifted_and_empty_assistant_labels(
+    shift_labels, assistant_mask, expected_labels
+):
+    """Assistant masks align shifted labels and mask empty assistant spans."""
+
+    collator = _bare_vlm_collator()
+    collator.train_len = None
+    collator.answer_only_loss = True
+    collator.return_labels = True
+    collator.shift_labels = shift_labels
+    collator.add_generation_prompt = False
+    collator._assistant_marker_specs = list
+    collator.processor = types.SimpleNamespace(
+        apply_chat_template=MagicMock(
+            return_value={
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "assistant_masks": assistant_mask,
+            }
+        )
+    )
+
+    output = collator._process_multimodal_sample([[{"role": "assistant", "content": "answer"}]])
+
+    assert output["labels"].tolist() == expected_labels
+
+
+def test_vlm_collator_requires_assistant_masks_for_answer_only_loss():
+    """A processor without assistant masks cannot support answer-only loss."""
+
+    collator = _bare_vlm_collator()
+    collator.train_len = None
+    collator.answer_only_loss = True
+    collator.return_labels = True
+    collator.shift_labels = True
+    collator.add_generation_prompt = False
+    collator._assistant_marker_specs = list
+    collator.processor = types.SimpleNamespace(
+        apply_chat_template=MagicMock(return_value={"input_ids": torch.tensor([[1, 2, 3]])})
+    )
+
+    with pytest.raises(ValueError, match="requires assistant_masks"):
+        collator._process_multimodal_sample([[{"role": "assistant", "content": "answer"}]])
 
 
 def test_vlm_collator_derives_masks_from_chatml_markers():
@@ -362,6 +452,31 @@ def test_vlm_collator_recognizes_chatml_markers_without_generation_tags():
     collator._verify_generation_tags()
 
     assert collator._assistant_marker_specs() == [([10, 11], [[99], [99]])]
+
+
+def test_vlm_collator_rejects_templates_without_generation_or_chatml_markers():
+    """Answer-only loss still rejects templates with no supported boundaries."""
+
+    collator = _bare_vlm_collator()
+    collator.tokenizer.chat_template = "{{ messages }}"
+
+    with pytest.raises(ValueError, match=r"requires \{\% generation \%\}"):
+        collator._verify_generation_tags()
+
+
+def test_vlm_collator_skips_unlimited_and_non_text_content_truncation():
+    """Disabled limits and media parts are left unchanged."""
+
+    collator = _bare_vlm_collator()
+    messages = [{"role": "assistant", "content": [{"type": "image", "image": "image.png"}]}]
+
+    collator._truncate_assistant_content(messages)
+    collator._truncate_prompt_content(messages)
+
+    collator.max_assistant_tokens = 1
+    collator._truncate_assistant_content(messages)
+
+    assert messages == [{"role": "assistant", "content": [{"type": "image", "image": "image.png"}]}]
 
 
 def test_vlm_collator_rejects_processor_output_above_training_length():
