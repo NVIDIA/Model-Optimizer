@@ -312,7 +312,7 @@ class ResolvedModelConfig:
     def _semantic_payload(self) -> dict[str, Any]:
         return {
             "source": self.source,
-            "resolved_revision": self.resolved_revision,
+            "resolved_revision": self.resolved_revision or self.requested_revision,
             "is_local": self.is_local,
             "config": _plain(self.config),
             "family": self.family,

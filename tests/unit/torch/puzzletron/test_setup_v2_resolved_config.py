@@ -634,6 +634,24 @@ def test_model_identity_separates_requested_alias_from_resolved_facts(tmp_path: 
     assert facts_config.model.facts_digest != config.model.facts_digest
 
 
+def test_requested_revision_changes_unresolved_model_semantics(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.payload["model"]["resolved_revision"] = None
+    state.save()
+    config = resolve_campaign_config(state)
+
+    changed_state = _state(tmp_path / "changed")
+    changed_state.payload["model"]["requested_revision"] = "latest"
+    changed_state.payload["model"]["resolved_revision"] = None
+    changed_state.save()
+    changed = resolve_campaign_config(changed_state)
+
+    assert _render_experiment_v2(config, "production")["model"]["revision"] == "main"
+    assert _render_experiment_v2(changed, "production")["model"]["revision"] == "latest"
+    assert changed.semantic_digest != config.semantic_digest
+    assert changed.model.facts_digest != config.model.facts_digest
+
+
 def test_compatibility_projection_preserves_reordered_mapping_rendering(
     tmp_path: Path,
 ) -> None:
