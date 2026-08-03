@@ -46,33 +46,38 @@ from modelopt.torch.puzzletron.stage_runner import (
     ("model_type", "architecture", "expected", "expected_descriptor"),
     [
         (
-            "qwen3_5_text",
+            "qwen3_5",
             "Qwen3_5ForConditionalGeneration",
             "qwen3_5",
             Qwen3P5VLModelDescriptor,
         ),
         (
-            "qwen3_5",
+            "qwen3_5_text",
             "Qwen3_5ForCausalLM",
             "qwen3_5_text",
             Qwen3P5TextModelDescriptor,
         ),
         (
-            "qwen3_6_text",
+            "qwen3_6",
             "Qwen3_6ForConditionalGeneration",
             "qwen3_6",
             Qwen3P5VLModelDescriptor,
         ),
         (
-            "qwen3_6",
+            "qwen3_6_text",
             "Qwen3_6ForCausalLM",
             "qwen3_6_text",
             Qwen3P5TextModelDescriptor,
         ),
     ],
-    ids=["qwen3.5-vlm", "qwen3.5-text", "qwen3.6-vlm", "qwen3.6-text"],
+    ids=[
+        "qwen3.5-vlm",
+        "qwen3.5-text",
+        "qwen3.6-vlm-alias",
+        "qwen3.6-text-alias",
+    ],
 )
-def test_qwen_dense_architecture_wins_over_conflicting_model_type(
+def test_qwen_dense_architecture_matches_model_type(
     model_type, architecture, expected, expected_descriptor
 ) -> None:
     config = SimpleNamespace(model_type=model_type, architectures=[architecture])
