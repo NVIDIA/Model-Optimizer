@@ -205,8 +205,8 @@ def _command_text() -> str:
 class MlflowRunLogger:
     """Record one script invocation as an MLflow run.
 
-    :meth:`start` verifies the server and opens the run *before* the expensive work begins,
-    so a bad URI or a missing token fails in seconds rather than after hours; it also
+    :meth:`start` opens the run *before* the expensive work begins, so a bad URI, a missing
+    token or an unreachable server fails there rather than after hours; it also
     uploads the invocation and any configuration passed to it, which keeps a crashed run
     useful. :meth:`finish` uploads the captured log plus any outputs and closes the run.
     Everything is a no-op when ``enabled`` is false, so callers need no branching.
@@ -288,9 +288,13 @@ class MlflowRunLogger:
         expected to produce, so :meth:`finish` can tell them from files that were already
         there -- pass the same mapping to both.
 
+        Opening the run is the readiness check: it is MLflow's own first request, so it
+        honours the client's TLS and retry configuration rather than second-guessing it.
+        Set ``MLFLOW_HTTP_REQUEST_MAX_RETRIES`` to shorten the wait on a dead host.
+
         Raises:
             ImportError: If ``mlflow`` is not installed and ``required``.
-            ConnectionError: If the tracking server is unreachable and ``required``.
+            Exception: Whatever MLflow raises for an unusable server, if ``required``.
         """
         if not self.enabled or self._run is not None:
             return
@@ -402,7 +406,6 @@ class MlflowRunLogger:
                 "MLflow tracking requires the 'mlflow' package: pip install nvidia-modelopt[mlflow]"
             ) from e
 
-        self._check_reachable()
         self._mlflow = mlflow
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
@@ -410,20 +413,6 @@ class MlflowRunLogger:
             run_name=self.run_name or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         )
         print(f"[mlflow] experiment: {self.experiment_name}\n[mlflow] run: {self.run_url}")
-
-    def _check_reachable(self) -> None:
-        """Fail fast on an unreachable host.
-
-        Any HTTP response -- including 401 -- means the host is up, so authorization is
-        left to the first real API call, which reports it precisely.
-        """
-        # Optional dependency, like mlflow itself: requests arrives with it, not with modelopt.
-        import requests
-
-        try:
-            requests.get(f"{self.tracking_uri}/health", timeout=10)
-        except requests.RequestException as e:
-            raise ConnectionError(f"MLflow server {self.tracking_uri} is unreachable: {e}") from e
 
     def _log_inputs(self, params, tags, texts) -> None:
         if params:

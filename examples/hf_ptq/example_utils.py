@@ -1179,8 +1179,18 @@ def mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
 
 def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
     """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
-    checkpoint it produced can be found together on one tracking server."""
-    return {"model": Path(args.pyt_ckpt_path).name, "checkpoint_path": args.pyt_ckpt_path}
+    checkpoint it produced can be found together on one tracking server.
+
+    ``checkpoint_path`` is the checkpoint this run *writes*, because that is what an
+    evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``); the input is
+    kept separately. It is resolved because ``--export_path`` defaults to a relative path,
+    which is useless as a join key.
+    """
+    return {
+        "model": Path(args.pyt_ckpt_path).name,
+        "checkpoint_path": str(Path(args.export_path).resolve()),
+        "source_checkpoint_path": args.pyt_ckpt_path,
+    }
 
 
 def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:

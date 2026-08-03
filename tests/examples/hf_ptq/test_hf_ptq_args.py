@@ -409,12 +409,25 @@ def test_mlflow_params_track_every_cli_argument(monkeypatch, example_utils):
     assert example_utils._mlflow_run_inputs(args)[0]["some_future_flag"] == "future"
 
 
-def test_mlflow_tags_identify_the_checkpoint(monkeypatch, example_utils):
-    """model/checkpoint_path match the evaluation side's convention, so a PTQ run and the
-    evaluations of the checkpoint it produced can be correlated on one server."""
-    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+def test_mlflow_tags_identify_the_produced_checkpoint(monkeypatch, example_utils, tmp_path):
+    """checkpoint_path must name what the run *writes*: an evaluation is pointed at the
+    exported checkpoint, so tagging the input would never join the two."""
+    export = tmp_path / "exports" / "Qwen3-0.6B-nvfp4"
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", str(export)
+    )
 
     assert example_utils._mlflow_run_tags(args) == {
         "model": "Qwen3-0.6B",
-        "checkpoint_path": "/models/Qwen3-0.6B",
+        "checkpoint_path": str(export),
+        "source_checkpoint_path": "/models/Qwen3-0.6B",
     }
+
+
+def test_mlflow_checkpoint_tag_is_absolute(monkeypatch, example_utils):
+    """--export_path defaults to a relative path, which is useless as a join key."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", "exported_model"
+    )
+
+    assert Path(example_utils._mlflow_run_tags(args)["checkpoint_path"]).is_absolute()

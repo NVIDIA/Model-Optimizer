@@ -21,7 +21,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import requests
 
 import modelopt
 from modelopt.torch.utils.logging import TeeStream
@@ -85,7 +84,16 @@ class FakeMlflow:
 def fake_mlflow(monkeypatch):
     fake = FakeMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", fake)
-    monkeypatch.setattr(requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
+    return fake
+
+
+def _unreachable(fake):
+    """Make MLflow's own first request fail, the way a dead server does."""
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake.set_experiment = explode
     return fake
 
 
@@ -379,16 +387,13 @@ def test_start_is_idempotent(fake_mlflow):
 
 
 def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
-    monkeypatch.setattr(
-        requests,
-        "get",
-        lambda *a, **kw: (_ for _ in ()).throw(requests.ConnectionError("no route to host")),
-    )
+    """Opening the run is the readiness check -- MLflow's own request, so it honours the
+    client's TLS and retry configuration instead of a parallel probe that would not."""
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
     logger = _logger()
     stdout = sys.stdout
 
-    with pytest.raises(ConnectionError, match="unreachable"):
+    with pytest.raises(ConnectionError, match="no route to host"):
         logger.start()
 
     # The capture must be torn down so the failure is readable on the console.
@@ -438,7 +443,6 @@ def test_params_and_run_url_mask_credentials(monkeypatch):
     """A credential-bearing tracking URI is usable, but must not be echoed or uploaded."""
     fake = FakeMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", fake)
-    monkeypatch.setattr(requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
     monkeypatch.setattr(sys, "argv", ["run.py"])
     logger = MlflowRunLogger(
         "https://user:tok@mlflow.example.com", "tester/hf_ptq/m-nvfp4", run_name="masked"
@@ -458,7 +462,6 @@ def test_failure_after_start_run_does_not_orphan_the_run(monkeypatch):
     """If logging the inputs fails, the run would otherwise sit in RUNNING forever."""
     fake = FakeMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", fake)
-    monkeypatch.setattr(requests, "get", lambda *a, **kw: SimpleNamespace(status_code=200))
 
     def explode(*args, **kwargs):
         raise RuntimeError("network blip")
@@ -624,12 +627,7 @@ def test_stale_check_survives_unnormalized_string_paths(fake_mlflow, tmp_path, m
 
 def test_optional_tracking_warns_and_continues_when_the_server_is_unreachable(monkeypatch, capsys):
     """A URI inferred from the environment must not be able to fail the job it is watching."""
-    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
-    monkeypatch.setattr(
-        requests,
-        "get",
-        lambda *a, **kw: (_ for _ in ()).throw(requests.ConnectionError("no route to host")),
-    )
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
     logger = _logger(required=False)
     stdout = sys.stdout
 
@@ -643,12 +641,7 @@ def test_optional_tracking_warns_and_continues_when_the_server_is_unreachable(mo
 
 def test_required_tracking_still_raises(monkeypatch):
     """An explicit request is different: a broken server should fail loudly."""
-    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
-    monkeypatch.setattr(
-        requests,
-        "get",
-        lambda *a, **kw: (_ for _ in ()).throw(requests.ConnectionError("no route to host")),
-    )
+    monkeypatch.setitem(sys.modules, "mlflow", _unreachable(FakeMlflow()))
 
-    with pytest.raises(ConnectionError, match="unreachable"):
+    with pytest.raises(ConnectionError, match="no route to host"):
         _logger(required=True).start()
