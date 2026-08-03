@@ -251,13 +251,6 @@ evaluation:
                   # Writable staging dir for ref files (bind-mounted, see execution).
                   mkdir -p /gdpval_ref_files
 
-                  # num_repeats: this template defaults to 1 (halves cost). The
-                  # reviewed GOLDEN uses num_repeats=2 (220 tasks x 2 = 440 rollouts);
-                  # for golden-comparable / REPORTED scores, DELETE the sed line below
-                  # to keep the checked-in default of 2. num_repeats can NOT be set via
-                  # a ++ override (OmegaConf ListConfig merge error) — patch the file.
-                  sed -i 's/num_repeats: 2$/num_repeats: 1/' benchmarks/gdpval/config.yaml
-
                   ${gym_prepare.run}
                 data_prep_params: >-
                   "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]"
@@ -279,6 +272,8 @@ evaluation:
                   ++upload_rollouts_to_wandb=false
                   ++responses_create_params.temperature={{config.params.temperature}}
                   ++responses_create_params.top_p={{config.params.top_p}}
+                # num_repeats=1 — the value both current goldens use. The pinned Gym
+                # already ships 1, so this override is belt-and-braces, not a change.
                 # NOTE: no reference_* overrides below — rubric mode needs none, and the
                 # single-reference keys (reference_deliverables_dir / reference_elo)
                 # CONFLICT with comparison mode's reference_models map (added by
@@ -298,6 +293,7 @@ evaluation:
                   ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.concurrency=220
                   ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.tavily_api_key=$TAVILY_API_KEY
                   ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.agent_max_turns=${oc.env:GDPVAL_MAX_TURNS,250}
+                  ++num_repeats=1
                   ++gdpval_resources_server.resources_servers.gdpval.reward_mode=${gdpval.reward_mode}
                   ++gdpval_resources_server.resources_servers.gdpval.persist_raw_judge_responses=true
                   ++gdpval_resources_server.resources_servers.gdpval.preconvert_max_concurrent=30

@@ -248,19 +248,15 @@ standard (SKILL Step 1 shortcut #4): `auto_export.destinations: [mlflow]` +
 `cpu_partition` + a literal-valued `export.mlflow` block (tag `benchmark:
 nemo_gym.gdpval`).
 
-## num_repeats — depends on the flow
+## num_repeats
 
-+ **Multistage comparison** (the current golden, and the only path to an
-  AA-comparable score): **1**, set with a top-level `++num_repeats=1`, which *does*
-  work. Recent Gym pins already ship `num_repeats: 1` in
-  `benchmarks/gdpval/config.yaml`, so the `sed` below is a no-op there.
-+ **Rubric / pre-multistage single-reference:** the old golden used **2** (220 × 2 =
-  440 rollouts). On those pins the per-dataset key could not be set via `++` (an
-  OmegaConf `ListConfig` merge error), so the count was patched in the task
-  `command:` with `sed -i 's/num_repeats: 2$/num_repeats: 1/' benchmarks/gdpval/config.yaml`
-  — delete that line to keep 2.
+**Use 1.** Both current goldens do, set with a top-level `++num_repeats=1` — it
+works, and recent Gym pins already ship `num_repeats: 1` in
+`benchmarks/gdpval/config.yaml`, so no `sed` patching is needed.
 
-Do **not** carry a `=2` from an old single-reference config into a multistage run.
+Historical only: pre-multistage single-reference configs used 2 (220 × 2 = 440
+rollouts) and patched it with `sed` because the per-dataset key could not be set
+via `++` on those pins. Do not carry a `=2` into a current run.
 
 ## Failure modes to check at canary
 

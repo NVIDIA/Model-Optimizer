@@ -10,9 +10,7 @@
 GDPVal is an **agentic** benchmark: the Stirrup agent produces office/PDF
 deliverables inside a per-task Apptainer code-exec sandbox, then a pairwise/rubric
 judge (**Gemini 3.1 Pro**) scores them. It is the most resource-intensive benchmark
-in the suite — **220 tasks**, 4 judge trials per rollout. Repeat count depends on
-the flow (multistage comparison uses 1; the pre-multistage golden used 2) — see
-the num_repeats note under Config.
+in the suite — **220 tasks**, `num_repeats=1`, 4 judge trials per rollout.
 
 It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
 Steps 1–9 apply — but with the branch differences below.
@@ -63,17 +61,9 @@ recipes/examples/gym_gdpval/
 Copy the **whole `gym_gdpval/` directory** to your workspace (the `- _gym_prepare`
 default resolves relative to the config dir — copying the yaml alone breaks it).
 
-- **num_repeats — the right value depends on the flow, so check which one you're in:**
-  - **Multistage comparison** (the current golden for AA-comparable ELO): **1**, set
-    with a top-level `++num_repeats=1`, which *does* work. Recent Gym pins already
-    ship `num_repeats: 1` in `benchmarks/gdpval/config.yaml`, so the `sed` below is a
-    no-op there.
-  - **Rubric / older single-reference comparison:** the pre-multistage golden used
-    **2** (220 tasks × 2 = 440 rollouts). On old pins the per-dataset key could not be
-    set via `++` (OmegaConf `ListConfig` merge error), hence the `sed` in the task
-    `command:`; delete that line to keep 2.
-
-  Do not carry a `=2` from an old single-reference config into a multistage run.
+- **num_repeats: 1.** Both current goldens use it, set with a top-level
+  `++num_repeats=1` (which works — no `sed` needed; recent Gym pins already ship 1).
+  Pre-multistage single-reference configs used 2; do not carry that over.
 - **SIF ↔ Gym version (rebuild on bump):** the SIF is built from `gdpval.def` at
   `install_on_the_fly.commit`. **If you change that commit, rebuild the SIF** with a
   matching `gdpval-sif.sh --commit <sha>` (to a new version-tagged filename, then
