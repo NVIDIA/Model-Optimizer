@@ -642,6 +642,8 @@ class _QuantFusedMoEBase(QuantModule):
         Patching is process-wide: safe for the LIFO nesting vLLM does, but not thread-safe.
         """
         assert _FUSED_MOE_KERNEL_TARGETS, "No vLLM fused-MoE kernel entry point found to patch"
+        # Patch by hand rather than with ``replace_function``: that context manager conflicts
+        # with torch.compile (same reason ``_VLLMParallelLinear.forward`` swaps quant_method).
         originals = [
             (module, name, getattr(module, name)) for module, name in _FUSED_MOE_KERNEL_TARGETS
         ]

@@ -52,7 +52,7 @@ jobs:
             container_image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
           - example: gpu_vllm
             timeout: 15
-            container_image: docker.io/vllm/vllm-openai:v0.24.0
+            container_image: docker.io/vllm/vllm-openai:v0.26.0
           # Keeps the pre-0.24 FusedMoE / SharedFusedMoE registration branches covered for now
           - example: gpu_vllm
             timeout: 15
