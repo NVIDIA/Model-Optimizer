@@ -354,8 +354,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                 self.max_prompt_tokens = int(max_prompt_tokens)
             except ValueError as exc:
                 raise ValueError(
-                    "VLM_MAX_PROMPT_TOKENS must be a positive integer, got "
-                    f"{max_prompt_tokens!r}"
+                    f"VLM_MAX_PROMPT_TOKENS must be a positive integer, got {max_prompt_tokens!r}"
                 ) from exc
             if self.max_prompt_tokens <= 0:
                 raise ValueError("VLM_MAX_PROMPT_TOKENS must be a positive integer.")
@@ -721,8 +720,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                         ]
                         if len(inferred_types) != 1:
                             raise ValueError(
-                                "Unable to infer a multimodal content type from "
-                                f"{ctn!r}."
+                                f"Unable to infer a multimodal content type from {ctn!r}."
                             )
                         content_type = inferred_types[0]
                         ctn["type"] = content_type

@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Create synthetic-generation shards from supported benchmark layouts.
 
 Supported adapters:
@@ -21,7 +33,10 @@ import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 THINKING_SUFFIX = (
@@ -30,8 +45,18 @@ THINKING_SUFFIX = (
 )
 
 VQA_SPLITS = {
-    "train": ("train2014", "COCO_train2014", "v2_OpenEnded_mscoco_train2014_questions.json", "v2_mscoco_train2014_annotations.json"),
-    "val": ("val2014", "COCO_val2014", "v2_OpenEnded_mscoco_val2014_questions.json", "v2_mscoco_val2014_annotations.json"),
+    "train": (
+        "train2014",
+        "COCO_train2014",
+        "v2_OpenEnded_mscoco_train2014_questions.json",
+        "v2_mscoco_train2014_annotations.json",
+    ),
+    "val": (
+        "val2014",
+        "COCO_val2014",
+        "v2_OpenEnded_mscoco_val2014_questions.json",
+        "v2_mscoco_val2014_annotations.json",
+    ),
     "test": ("test2015", "COCO_test2015", "v2_OpenEnded_mscoco_test2015_questions.json", None),
 }
 
@@ -64,7 +89,9 @@ def find_json(root: Path, filename: str) -> Path:
     raise FileNotFoundError(f"Could not find {filename} below {root}")
 
 
-def image_path(image_root: Path, data_subtype: str, prefix: str, image_id: int) -> tuple[Path, str] | None:
+def image_path(
+    image_root: Path, data_subtype: str, prefix: str, image_id: int
+) -> tuple[Path, str] | None:
     filename = f"{prefix}_{image_id:012d}.jpg"
     for candidate in (image_root / data_subtype / filename, image_root / filename):
         if candidate.is_file():
@@ -75,7 +102,11 @@ def image_path(image_root: Path, data_subtype: str, prefix: str, image_id: int) 
 def normalize_options(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
-    return {str(key): str(answer) for key, answer in value.items() if answer is not None and str(answer).strip()}
+    return {
+        str(key): str(answer)
+        for key, answer in value.items()
+        if answer is not None and str(answer).strip()
+    }
 
 
 def make_mosaic(video: Path, output_dir: Path, num_frames: int) -> str | None:
@@ -95,9 +126,20 @@ def make_mosaic(video: Path, output_dir: Path, num_frames: int) -> str | None:
     for frame in frame_dir.glob("frame_*.png"):
         frame.unlink()
     subprocess.run(
-        ["ffmpeg", "-y", "-i", str(video), "-vf", f"fps={max(1, min(num_frames, 32))}",
-         "-frames:v", str(num_frames), str(frame_dir / "frame_%05d.png")],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video),
+            "-vf",
+            f"fps={max(1, min(num_frames, 32))}",
+            "-frames:v",
+            str(num_frames),
+            str(frame_dir / "frame_%05d.png"),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
     )
     frames = sorted(frame_dir.glob("frame_*.png"))[:num_frames]
     if not frames:
@@ -118,7 +160,9 @@ def download_pai_bench(dataset_dir: Path, repo_id: str, force_download: bool) ->
     try:
         from huggingface_hub import snapshot_download
     except ImportError as exc:
-        raise ImportError("--download requires huggingface_hub. Install it in the preparation environment.") from exc
+        raise ImportError(
+            "--download requires huggingface_hub. Install it in the preparation environment."
+        ) from exc
     dataset_dir.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=repo_id,
@@ -142,13 +186,19 @@ def pai_records(args: argparse.Namespace, output_dir: Path) -> Iterator[dict[str
     parquet_files = sorted((dataset_dir / "data").glob("test-*.parquet"))
     if not parquet_files:
         raise FileNotFoundError(f"No data/test-*.parquet found below {dataset_dir}")
-    rows = load_dataset("parquet", data_files={"test": [str(path) for path in parquet_files]}, split="test")
+    rows = load_dataset(
+        "parquet", data_files={"test": [str(path) for path in parquet_files]}, split="test"
+    )
     for row_index, row in enumerate(rows):
         category = row.get("category") or ""
         if args.category and category != args.category:
             continue
         question, relative_video = row.get("question"), row.get("video_path")
-        if not isinstance(question, str) or not isinstance(relative_video, str) or not relative_video.strip():
+        if (
+            not isinstance(question, str)
+            or not isinstance(relative_video, str)
+            or not relative_video.strip()
+        ):
             continue
         relative_video = relative_video.strip()
         video = media_root / relative_video
@@ -156,7 +206,9 @@ def pai_records(args: argparse.Namespace, output_dir: Path) -> Iterator[dict[str
             yield {"_missing_media": str(video)}
             continue
         options = normalize_options(row.get("index2ans"))
-        user_content: list[dict[str, Any]] = [{"type": "text", "text": prompt(question, args.prompt_style, options)}]
+        user_content: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt(question, args.prompt_style, options)}
+        ]
         media: dict[str, str] = {"video_path": relative_video}
         if args.media_mode == "image_mosaic":
             image = make_mosaic(video, output_dir, args.num_frames)
@@ -198,14 +250,28 @@ def vqa_records(args: argparse.Namespace) -> Iterator[dict[str, Any]]:
             annotation_rows = load_json(find_json(vqa_root, annotation_name)).get("annotations")
             if not isinstance(annotation_rows, list):
                 raise ValueError(f"annotations is not a list for split={split}")
-            annotations = {item["question_id"]: item for item in annotation_rows if isinstance(item, dict) and isinstance(item.get("question_id"), int)}
+            annotations = {
+                item["question_id"]: item
+                for item in annotation_rows
+                if isinstance(item, dict) and isinstance(item.get("question_id"), int)
+            }
         elif not args.include_unannotated_vqa:
-            raise ValueError(f"VQA split={split} has no public annotations; pass --include_unannotated_vqa to use it.")
+            raise ValueError(
+                f"VQA split={split} has no public annotations; pass --include_unannotated_vqa to use it."
+            )
         for question_row in questions:
             if not isinstance(question_row, dict):
                 continue
-            question_id, image_id, question = question_row.get("question_id"), question_row.get("image_id"), question_row.get("question")
-            if not isinstance(question_id, int) or not isinstance(image_id, int) or not isinstance(question, str):
+            question_id, image_id, question = (
+                question_row.get("question_id"),
+                question_row.get("image_id"),
+                question_row.get("question"),
+            )
+            if (
+                not isinstance(question_id, int)
+                or not isinstance(image_id, int)
+                or not isinstance(question, str)
+            ):
                 continue
             resolved = image_path(image_root, subtype, prefix, image_id)
             if not resolved:
@@ -213,11 +279,25 @@ def vqa_records(args: argparse.Namespace) -> Iterator[dict[str, Any]]:
                 continue
             _, relative_image = resolved
             annotation = annotations.get(question_id, {})
-            counts = Counter(item.get("answer", "").strip() for item in (annotation.get("answers") or []) if isinstance(item, dict) and isinstance(item.get("answer"), str) and item["answer"].strip())
+            counts = Counter(
+                item.get("answer", "").strip()
+                for item in (annotation.get("answers") or [])
+                if isinstance(item, dict)
+                and isinstance(item.get("answer"), str)
+                and item["answer"].strip()
+            )
             record: dict[str, Any] = {
                 "id": f"vqa_v2_{question_id}",
                 "dataset": "vqa_v2",
-                "messages": [{"role": "user", "content": [{"type": "text", "text": prompt(question, args.prompt_style)}, {"type": "image", "image": relative_image}]}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt(question, args.prompt_style)},
+                            {"type": "image", "image": relative_image},
+                        ],
+                    }
+                ],
                 "prompt": prompt(question, args.prompt_style),
                 "question": question,
                 "image_path": relative_image,
@@ -226,12 +306,14 @@ def vqa_records(args: argparse.Namespace) -> Iterator[dict[str, Any]]:
                 "source_split": split,
             }
             if annotation:
-                record.update({
-                    "reference_answer": annotation.get("multiple_choice_answer"),
-                    "question_type": annotation.get("question_type"),
-                    "answer_type": annotation.get("answer_type"),
-                    "answer_counts": dict(counts),
-                })
+                record.update(
+                    {
+                        "reference_answer": annotation.get("multiple_choice_answer"),
+                        "question_type": annotation.get("question_type"),
+                        "answer_type": annotation.get("answer_type"),
+                        "answer_counts": dict(counts),
+                    }
+                )
                 if args.include_all_answers:
                     record["answers"] = annotation.get("answers")
             yield record
@@ -345,7 +427,9 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     if args.max_lines_per_shard <= 0 or args.num_frames <= 0 or args.start_index < 0:
-        raise ValueError("max_lines_per_shard/num_frames must be positive and start_index must be non-negative")
+        raise ValueError(
+            "max_lines_per_shard/num_frames must be positive and start_index must be non-negative"
+        )
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -355,7 +439,9 @@ def main() -> None:
             f"Output already contains generated shards: {output_dir} (pass --overwrite to replace them)."
         )
 
-    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent)
+    )
     output = None
     written = missing = source_index = shard_index = lines = 0
     try:
@@ -401,7 +487,8 @@ def main() -> None:
             output = None
         if missing and args.missing_media == "error":
             raise FileNotFoundError(
-                f"{missing} referenced media files were missing; rerun with --missing_media skip for an explicit partial dataset."
+                f"{missing} referenced media files were missing; rerun with --missing_media skip "
+                "for an explicit partial dataset."
             )
         if not written:
             raise RuntimeError("No usable records were written")
@@ -411,9 +498,7 @@ def main() -> None:
             output.close()
         shutil.rmtree(staging_dir, ignore_errors=True)
 
-    print(
-        f"Wrote {written} {args.dataset} records to {shard_index + 1} shard(s) at {output_dir}"
-    )
+    print(f"Wrote {written} {args.dataset} records to {shard_index + 1} shard(s) at {output_dir}")
 
 
 if __name__ == "__main__":
