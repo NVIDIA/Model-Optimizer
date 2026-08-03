@@ -51,6 +51,7 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
@@ -60,6 +61,7 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
+from modelopt.torch.utils.distributed import is_fsdp2_model
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -901,7 +903,6 @@ def _export_transformers_checkpoint(
     Args:
         model: the full torch model to export. The actual quantized model may be a submodule.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
-        accelerator: the accelerator instance in case of distributed export setup.
 
     Returns:
         post_state_dict: Dict containing quantized weights
@@ -914,8 +915,6 @@ def _export_transformers_checkpoint(
             f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
             f"({dtype}), which may lead to numerical errors."
         )
-
-    accelerator = kwargs.get("accelerator")
 
     # Handle input quantizers of experts that are not calibrated. Each MoE block is
     # dispatched by its experts container to the matching preparation handler.
@@ -986,10 +985,14 @@ def _export_transformers_checkpoint(
 
     _reconstruct_fused_moe_linear(model)
 
-    if accelerator is not None:
-        # Gather state_dict from all ranks
-        quantized_state_dict = accelerator.get_state_dict(model)
+    if is_fsdp2_model(model):
+        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
+        quantized_state_dict = get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
     else:
+        # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
         quantized_state_dict = model.state_dict()
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
@@ -1458,6 +1461,10 @@ def export_hf_checkpoint(
     This function automatically detects whether the model is from transformers
     or diffusers and applies the appropriate export logic.
 
+    Under ``torch.distributed`` (e.g. FSDP2), all ranks participate in the
+    collective state-dict gather inside ``_export_transformers_checkpoint``;
+    only rank 0 writes files. A final barrier syncs the other ranks.
+
     Args:
         model: The full torch model to export. The actual quantized model may be a submodule.
             Supports both transformers models (e.g., LlamaForCausalLM) and diffusers
@@ -1491,6 +1498,11 @@ def export_hf_checkpoint(
         )
         return
 
+    is_distributed = (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and is_fsdp2_model(model)
+    )
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
@@ -1522,6 +1534,10 @@ def export_hf_checkpoint(
                 "names may not match the original HF hub checkpoint."
             )
 
+        # Under torch.distributed only rank 0 writes; others sync at the finally barrier.
+        if is_distributed and torch.distributed.get_rank() != 0:
+            return
+
         # Only treat the export as quantized when at least one quant_algo field is set.
         # get_quant_config always returns a dict (even for sparsity-only or unmodified models),
         # so emitting hf_quant_config.json unconditionally produces a file with
@@ -1550,6 +1566,7 @@ def export_hf_checkpoint(
 
         _sanitize_generation_config_for_save(model)
 
+        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
         try:
             model.save_pretrained(
                 export_dir,
@@ -1586,3 +1603,6 @@ def export_hf_checkpoint(
             " can be saved with torch.save for further inspection."
         )
         raise e
+    finally:
+        if is_distributed:
+            torch.distributed.barrier()

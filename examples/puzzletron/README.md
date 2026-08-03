@@ -31,6 +31,7 @@ Once inside the container with the repo available, install dependencies from the
 python -m pip uninstall nvidia-lm-eval -y 2>/dev/null
 python -m pip install -e ".[hf,puzzletron,dev-test]"
 python -m pip install -r examples/puzzletron/requirements.txt
+python -m pip install -r examples/llm_eval/requirements.txt
 ```
 
 To verify the install, you can run the GPU tests as a smoke check:

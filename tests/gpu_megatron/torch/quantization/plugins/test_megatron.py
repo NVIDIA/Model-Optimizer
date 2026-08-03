@@ -267,7 +267,7 @@ def _gpt_model_provider(
     transformer_impl="local",
     # Hybrid mamba MOE parameters
     is_hybrid=False,
-    hybrid_override_pattern=None,
+    hybrid_layer_pattern=None,
     mamba_head_dim=16,
 ):
     device_ctx = torch.device("meta") if meta_device else nullcontext()
@@ -275,7 +275,7 @@ def _gpt_model_provider(
     with device_ctx:
         if is_hybrid:
             # Derive num_layers from pattern length, default to 4
-            num_layers = len(hybrid_override_pattern) if hybrid_override_pattern else 4
+            num_layers = len(hybrid_layer_pattern) if hybrid_layer_pattern else 4
             model = get_mcore_mamba_hybrid_model(
                 tensor_model_parallel_size=tp_size,
                 num_layers=num_layers,
@@ -283,7 +283,7 @@ def _gpt_model_provider(
                 vocab_size=vocab_size,
                 num_attention_heads=8,
                 ffn_hidden_size=None,
-                hybrid_override_pattern=hybrid_override_pattern,
+                hybrid_layer_pattern=hybrid_layer_pattern,
                 mamba_head_dim=mamba_head_dim,
                 mamba_num_groups=tp_size,  # Must be divisible by tp_size
                 num_moe_experts=num_moe_experts,
@@ -333,7 +333,7 @@ def _test_sharded_state_dict(
     transformer_impl = model_config.get("transformer_impl", "local")
     # Hybrid mamba MOE parameters
     is_hybrid = model_config.get("is_hybrid", False)
-    hybrid_override_pattern = model_config.get("hybrid_override_pattern", None)
+    hybrid_layer_pattern = model_config.get("hybrid_layer_pattern", None)
 
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
@@ -352,7 +352,7 @@ def _test_sharded_state_dict(
         etp_size=etp_size,
         transformer_impl=transformer_impl,
         is_hybrid=is_hybrid,
-        hybrid_override_pattern=hybrid_override_pattern,
+        hybrid_layer_pattern=hybrid_layer_pattern,
     )
     model_test = _gpt_model_provider(
         tp_size,
@@ -365,7 +365,7 @@ def _test_sharded_state_dict(
         etp_size=etp_size,
         transformer_impl=transformer_impl,
         is_hybrid=is_hybrid,
-        hybrid_override_pattern=hybrid_override_pattern,
+        hybrid_layer_pattern=hybrid_layer_pattern,
     )
 
     forward = get_forward(model_ref)
@@ -534,7 +534,7 @@ def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
         pytest.skip("Test needs to be fixed for more than 4 GPUs")
     model_config = {
         "is_hybrid": True,
-        "hybrid_override_pattern": "MEM*E",  # 5 layers: Mamba → MoE → Mamba → Attention → MoE
+        "hybrid_layer_pattern": "MEM*E",  # 5 layers: Mamba → MoE → Mamba → Attention → MoE
         "num_moe_experts": 8,
         "tp_size": num_gpus,
         "ep_size": 1,
