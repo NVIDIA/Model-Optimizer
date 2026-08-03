@@ -35,6 +35,13 @@ def _import_hf_ptq(monkeypatch):
     return importlib.import_module("hf_ptq")
 
 
+@pytest.fixture
+def example_utils(monkeypatch):
+    """The MLflow wiring lives beside the other hf_ptq helpers."""
+    monkeypatch.syspath_prepend(str(_EXAMPLES_DIR))
+    return importlib.import_module("example_utils")
+
+
 def _parse_hf_ptq_args(monkeypatch, *args):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py", *args])
@@ -248,11 +255,11 @@ def test_mlflow_rejects_a_bad_tracking_uri(monkeypatch):
         )
 
 
-def test_mlflow_flag_falls_back_to_the_environment(monkeypatch):
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com/")
-    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--mlflow")
-
-    assert args.mlflow == "https://mlflow.example.com"
+def test_mlflow_requires_a_value(monkeypatch):
+    """The bare form meant "use $MLFLOW_TRACKING_URI", which is now what happens with no flag
+    at all, so it is gone and argparse asks for the value."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--mlflow")
 
 
 def test_the_environment_alone_enables_tracking(monkeypatch):
@@ -262,7 +269,7 @@ def test_the_environment_alone_enables_tracking(monkeypatch):
     _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
 
     assert args.mlflow == "https://mlflow.example.com"
-    assert args.mlflow_from_env is True
+    assert args.mlflow_required is False
     assert args.mlflow_experiment == "tester/hf_ptq/Qwen3-0.6B-fp8"
 
 
@@ -273,7 +280,7 @@ def test_an_explicit_flag_beats_the_environment(monkeypatch):
     )
 
     assert args.mlflow == "https://from-flag.example.com"
-    assert args.mlflow_from_env is False
+    assert args.mlflow_required is True
 
 
 def test_an_unusable_environment_uri_warns_instead_of_failing(monkeypatch):
@@ -292,18 +299,18 @@ def test_an_unusable_environment_uri_warns_instead_of_failing(monkeypatch):
         )
 
 
-def test_mlflow_provenance_is_not_logged_as_a_param(monkeypatch):
-    """mlflow_from_env describes the tracking setup, not the quantization."""
+def test_mlflow_provenance_is_not_logged_as_a_param(monkeypatch, example_utils):
+    """mlflow_required describes the tracking setup, not the quantization."""
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com/")
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
     args.dist_state = SimpleNamespace(is_main=True, world_size=1)
 
-    params, _ = hf_ptq._mlflow_run_inputs(args)
+    params, _ = example_utils._mlflow_run_inputs(args)
 
-    assert "mlflow_from_env" not in params
+    assert "mlflow_required" not in params
 
 
-def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch):
+def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch, example_utils):
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,
         "--pyt_ckpt_path",
@@ -313,7 +320,7 @@ def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch):
     )
     args.dist_state = SimpleNamespace(is_main=True, world_size=1)
 
-    params, texts = hf_ptq._mlflow_run_inputs(args)
+    params, texts = example_utils._mlflow_run_inputs(args)
 
     assert params["pyt_ckpt_path"] == "/models/Qwen3-0.6B"
     assert params["recipe"] == "general/ptq/nvfp4_default-kv_fp8_cast"
@@ -323,28 +330,28 @@ def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch):
     assert recipe["quantize"]["quant_cfg"]
 
 
-def test_mlflow_run_inputs_omit_the_recipe_when_unused(monkeypatch):
+def test_mlflow_run_inputs_omit_the_recipe_when_unused(monkeypatch, example_utils):
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
     args.dist_state = SimpleNamespace(is_main=True, world_size=1)
 
-    params, texts = hf_ptq._mlflow_run_inputs(args)
+    params, texts = example_utils._mlflow_run_inputs(args)
 
     assert texts == {}
     assert params["recipe"] is None
 
 
-def test_mlflow_run_outputs_name_the_summaries(monkeypatch):
+def test_mlflow_run_outputs_name_the_summaries(monkeypatch, example_utils):
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--export_path", "/tmp/out"
     )
 
-    files = hf_ptq._mlflow_run_outputs(args)
+    files = example_utils._mlflow_run_outputs(args)
 
     assert files["summary/quant_summary.txt"] == Path("/tmp/out/.quant_summary.txt")
     assert files["summary/moe.html"] == Path("/tmp/out/.moe.html")
 
 
-def test_untracked_runs_do_not_gather_mlflow_inputs(monkeypatch):
+def test_untracked_runs_do_not_gather_mlflow_inputs(monkeypatch, example_utils):
     """Without --mlflow the recipe must not be re-read: it is parsed again in quantize_main,
     and the extra load prints a second '[load_recipe] loading:' line on every default run."""
     hf_ptq, args = _parse_hf_ptq_args(
@@ -356,16 +363,16 @@ def test_untracked_runs_do_not_gather_mlflow_inputs(monkeypatch):
     )
     args.dist_state = SimpleNamespace(is_main=True, world_size=1)
     calls = []
-    monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
+    monkeypatch.setattr(example_utils, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
 
-    with hf_ptq._mlflow_run(args):
+    with example_utils.mlflow_run(args):
         pass
 
-    assert not hf_ptq._mlflow_logger(args).enabled
+    assert not example_utils._mlflow_logger(args).enabled
     assert calls == []
 
 
-def test_non_main_ranks_do_not_open_a_run(monkeypatch):
+def test_non_main_ranks_do_not_open_a_run(monkeypatch, example_utils):
     """Under torchrun only rank 0 uploads, so the other ranks must not touch the server."""
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,
@@ -376,38 +383,38 @@ def test_non_main_ranks_do_not_open_a_run(monkeypatch):
     )
     args.dist_state = SimpleNamespace(is_main=False, world_size=8)
     calls = []
-    monkeypatch.setattr(hf_ptq, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
+    monkeypatch.setattr(example_utils, "_mlflow_run_inputs", lambda a: calls.append(a) or ({}, {}))
 
-    with hf_ptq._mlflow_run(args):
+    with example_utils.mlflow_run(args):
         pass
 
-    assert not hf_ptq._mlflow_logger(args).enabled
+    assert not example_utils._mlflow_logger(args).enabled
     assert calls == []
 
 
-def test_mlflow_params_track_every_cli_argument(monkeypatch):
+def test_mlflow_params_track_every_cli_argument(monkeypatch, example_utils):
     """Params are derived from the parsed args, so a new flag needs no bookkeeping here."""
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
     args.dist_state = SimpleNamespace(is_main=True, world_size=4)
 
-    params, _ = hf_ptq._mlflow_run_inputs(args)
+    params, _ = example_utils._mlflow_run_inputs(args)
 
-    tracked = set(vars(args)) - hf_ptq._MLFLOW_NON_PARAM_ARGS
+    tracked = set(vars(args)) - example_utils._MLFLOW_NON_PARAM_ARGS
     assert tracked <= set(params)
     # The tracking settings describe the destination, not the run, and dist_state is an object.
     assert not {"mlflow", "mlflow_experiment", "mlflow_run_name", "dist_state"} & set(params)
     assert params["world_size"] == 4
     # A flag added to the parser later is picked up without editing _mlflow_run_inputs.
     args.some_future_flag = "future"
-    assert hf_ptq._mlflow_run_inputs(args)[0]["some_future_flag"] == "future"
+    assert example_utils._mlflow_run_inputs(args)[0]["some_future_flag"] == "future"
 
 
-def test_mlflow_tags_identify_the_checkpoint(monkeypatch):
+def test_mlflow_tags_identify_the_checkpoint(monkeypatch, example_utils):
     """model/checkpoint_path match the evaluation side's convention, so a PTQ run and the
     evaluations of the checkpoint it produced can be correlated on one server."""
     hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
 
-    assert hf_ptq._mlflow_run_tags(args) == {
+    assert example_utils._mlflow_run_tags(args) == {
         "model": "Qwen3-0.6B",
         "checkpoint_path": "/models/Qwen3-0.6B",
     }

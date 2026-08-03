@@ -19,18 +19,17 @@ import os
 import random
 import time
 import warnings
-from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-import yaml
 from accelerate.hooks import remove_hook_from_module
 from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     _resolve_model_path,
+    add_mlflow_args,
     build_quant_cfg,
     cleanup_distributed,
     copy_custom_model_files,
@@ -41,9 +40,11 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    mlflow_run,
     mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
     resolve_checkpoint_dir,
+    resolve_mlflow_args,
     run_nemotron_vl_preview,
     setup_distributed_args,
     validate_fsdp2_supported,
@@ -90,11 +91,6 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
-from modelopt.torch.utils.mlflow import (
-    MlflowRunLogger,
-    default_experiment_name,
-    validate_tracking_uri,
-)
 from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
@@ -1629,55 +1625,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    parser.add_argument(
-        "--mlflow",
-        nargs="?",
-        const=os.environ.get("MLFLOW_TRACKING_URI", ""),
-        default=None,
-        help=(
-            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
-            "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries. Tracking is also enabled by MLflow's own $MLFLOW_TRACKING_URI, "
-            "without this flag; an explicit value here wins. A URI taken from the "
-            "environment is best-effort -- if it is unusable the run continues untracked."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow_experiment",
-        default=None,
-        help=(
-            "MLflow experiment name. Default: "
-            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
-        ),
-    )
-    parser.add_argument(
-        "--mlflow_run_name",
-        default=None,
-        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
-    )
+    add_mlflow_args(parser)
 
     args = parser.parse_args()
-    # MLFLOW_TRACKING_URI is MLflow's own variable, so a shell that exports it opts in
-    # without changing the command; an explicit --mlflow still wins. The distinction is
-    # kept because an ambient URI must not be able to fail a quantization run: it is
-    # commonly exported for unrelated tooling, so a bad value only warns.
-    args.mlflow_from_env = args.mlflow is None and bool(os.environ.get("MLFLOW_TRACKING_URI"))
-    if args.mlflow is None:
-        args.mlflow = os.environ.get("MLFLOW_TRACKING_URI") or None
-    if args.mlflow is not None:
-        try:
-            args.mlflow = validate_tracking_uri(args.mlflow)
-        except ValueError as e:
-            if not args.mlflow_from_env:
-                parser.error(f"--mlflow: {e}")
-            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
-            args.mlflow = None
-    if args.mlflow is not None:
-        args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
-            "hf_ptq",
-            args.pyt_ckpt_path,
-            Path(args.recipe).stem if args.recipe else args.qformat,
-        )
+    resolve_mlflow_args(args, parser)
 
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
@@ -1716,72 +1667,6 @@ def parse_args() -> argparse.Namespace:
 
 # Derived state and the tracking settings themselves; everything else argparse parsed is a
 # parameter of the run. Deriving the list means a new flag is tracked without touching this.
-_MLFLOW_NON_PARAM_ARGS = frozenset(
-    {"dist_state", "mlflow", "mlflow_experiment", "mlflow_from_env", "mlflow_run_name"}
-)
-
-
-def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
-    """Params and start-time artifacts describing this PTQ run."""
-    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
-    # dist_state is an object, so record the one field worth searching on.
-    params["world_size"] = args.dist_state.world_size
-    texts = {}
-    if args.recipe:
-        # The resolved recipe, not the source file: a recipe may be a directory or use
-        # $imports, and only the resolved form is self-contained.
-        resolved = load_recipe(args.recipe).model_dump(mode="json")
-        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
-    return params, texts
-
-
-def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
-    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
-    return MlflowRunLogger(
-        args.mlflow,
-        args.mlflow_experiment,
-        run_name=args.mlflow_run_name,
-        enabled=bool(args.mlflow) and args.dist_state.is_main,
-        # Inferred from the environment rather than asked for: warn and carry on.
-        required=not args.mlflow_from_env,
-    )
-
-
-def _mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
-    """Track this invocation for the duration of the block, or do nothing if untracked."""
-    logger = _mlflow_logger(args)
-    if not logger.enabled:
-        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
-        return nullcontext()
-    params, texts = _mlflow_run_inputs(args)
-    return logger.track(
-        params=params,
-        tags=_mlflow_run_tags(args),
-        texts=texts,
-        files=_mlflow_run_outputs(args),
-    )
-
-
-def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
-    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
-    checkpoint it produced can be found together on one tracking server."""
-    return {"model": Path(args.pyt_ckpt_path).name, "checkpoint_path": args.pyt_ckpt_path}
-
-
-def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
-    """Summaries written by post_quantize, keyed by artifact path.
-
-    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
-    entries are skipped: the MoE table only exists for MoE models, and neither file is
-    written under ``--no-verbose``.
-    """
-    export_path = Path(args.export_path)
-    return {
-        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
-        "summary/moe.html": export_path / ".moe.html",
-    }
-
-
 def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
@@ -1795,7 +1680,7 @@ def main(args: argparse.Namespace):
         # Entered inside the try: opening the run is fatal by design, and skipping
         # cleanup_distributed would leave the other ranks blocked on the first collective
         # until the NCCL timeout.
-        with _mlflow_run(args):
+        with mlflow_run(args):
             # launch a memory monitor to read the currently used GPU memory.
             launch_memory_monitor()
 
