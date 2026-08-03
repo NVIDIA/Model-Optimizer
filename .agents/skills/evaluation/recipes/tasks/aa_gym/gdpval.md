@@ -48,18 +48,26 @@ recipes/examples/gym_gdpval/example_gym_gdpval.yaml   # SLURM + single-node vLLM
 `num_repeats=1` — already set by the template via `++num_repeats=1`; both
 current goldens use it. A full 220-task run of a large MoE typically needs multi-node.
 
-## Canary
+## Canary — `limit_samples` does NOT work here
 
-Validate the SIF sandbox + judge + gym plumbing on a couple of tasks before the
-full run:
+**`++…params.limit_samples=N` is inert on the gym path.** The gym does its own data
+prep and rollout collection, so the launcher-level limiter is ignored: you get the
+full 220-task run. Do not use it believing you launched a two-task smoke test — this
+is the heaviest benchmark in the suite.
+
+There is no cheap sample-limited canary. Instead, **launch the real run and treat its
+first ~20–30 minutes as the canary**, cancelling if any of these is wrong:
 
 ```bash
-nel run --config example_gym_gdpval.yaml --env-file .env \
-  -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
+RD=<output_dir>/<run>/nemo_gym.0
+grep -c "Using Apptainer container"  $RD/logs/client-*.log          # sandbox actually used
+grep -c "falling back\|not a git repo" $RD/logs/client-*.log        # unsandboxed / inert pin
+grep -ciE " 401 | 403 |Internal Server Error" $RD/artifacts/nemo_gym_logs/gdpval_judge_model.log
+wc -l $RD/artifacts/evaluator_rollouts.jsonl                        # rollouts flowing
 ```
 
-Inspect logs for the SIF fallback warning, judge auth/429s, and Ray/gym shutdown
-hangs (see `references/gym-gdpval.md` → failure modes).
+In comparison mode stage 1 (45 tasks) is a natural early checkpoint — an ELO estimate
+appears before the full 220-task stage 2 starts.
 
 ## Score Extraction
 

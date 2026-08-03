@@ -39,9 +39,11 @@
 #      search), INFERENCE_JUDGE_URL (judge host), and GDPVAL_SIF_DIR (item 1). See
 #      recipes/env.example.
 #
-# Canary (validates SIF sandbox + judge + gym plumbing on a couple of tasks):
-#   nel run --config example_gym_gdpval.yaml --env-file .env \
-#     -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=2
+# NOTE: `limit_samples` is INERT on the gym path — the gym runs all 220 tasks no
+# matter what, so there is no cheap smoke test. Launch the real run and watch its
+# first ~20-30 min (SIF-sandbox line, judge auth, rollouts appearing); see the
+# recipe's Canary section.
+#   nel run --config example_gym_gdpval.yaml --env-file .env
 # =============================================================================
 defaults:
   # slurm/default works anywhere; if your install ships a predefined
@@ -283,7 +285,15 @@ evaluation:
                   # Writable staging dir for ref files (bind-mounted, see execution).
                   mkdir -p /gdpval_ref_files
 
+                  # SECRETS: `set -x` traces commands AFTER expansion, and these param blobs
+                  # carry $HF_TOKEN / $INFERENCE_API_KEY / $TAVILY_API_KEY. Without this the
+                  # trace line writes all three in plaintext into the eval log — which lives on
+                  # shared FS and is uploaded to MLflow when export.mlflow.log_logs is true.
+                  # (The rollout call below is already safe: it goes through the quoted heredoc,
+                  # so its secrets stay literal until a shell that never sets -x expands them.)
+                  set +x
                   ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
+                  set -x
                   # The rollout command is written to a script and run from it, rather than passed
                   # to `bash -c '...'`. Gym params legitimately CONTAIN single quotes — comparison
                   # mode's ++multistage.stages='[{num_tasks: 45}, ...]' and ++...judge_panel='[{...}]'

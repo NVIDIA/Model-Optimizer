@@ -70,7 +70,10 @@ GDPVal:
    unsandboxed. Verify with `gdpval-sif.sh --check`. `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
    `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR`, and `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the
    config has a `pre_cmd`). Thinking mode is mandatory (non-thinking loses ~86%).
-4. Dry-run → canary (`limit_samples=2`, verify the SIF sandbox + judge) → full.
+4. Dry-run → launch. **`limit_samples` is inert on the gym path** (the gym runs all
+   220 tasks regardless), so there is no cheap canary: watch the real run's first
+   ~20–30 min for the SIF-sandbox line and judge auth, and cancel if wrong. See the
+   recipe's Canary section.
 
 ---
 
