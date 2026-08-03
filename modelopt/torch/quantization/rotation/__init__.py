@@ -16,3 +16,4 @@
 """Rotation folding + learning (SpinQuant/QuaRot R1 + R2) as pre-quantization transforms."""
 
 from .fold import *
+from .learn import *
