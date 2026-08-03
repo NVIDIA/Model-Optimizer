@@ -1301,6 +1301,81 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
 
 
+class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
+    """Config for the ``nvfp4_act_headroom`` calibration algorithm.
+
+    Calibrates the per-tensor global scale of NVFP4 *activation* (input) quantizers so that
+    the calibrated range sits in the lower part of the FP8 block-scale range, leaving headroom
+    above it for activations larger than any seen during calibration. Weight quantizers and
+    all non-NVFP4 quantizers are calibrated with plain ``max``.
+
+    The top of the calibrated range is ``upper_percentile`` (default 99.99) rather than the
+    literal maximum, so rare blocks far above the rest are clipped instead of dragging the
+    global scale up until every other block flushes to zero.
+
+    See :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
+    """
+
+    _mutates_weights: ClassVar[bool] = False
+
+    method: Literal["nvfp4_act_headroom"] = ModeloptField("nvfp4_act_headroom")
+
+    anchor_percentile: float = ModeloptField(
+        default=1.0,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the anchor.",
+        description=(
+            "The global scale is anchored to this percentile of the per-block amax "
+            "distribution. Lower values anchor further into the low tail, which yields a "
+            "smaller global scale and less headroom."
+        ),
+    )
+
+    upper_percentile: float = ModeloptField(
+        default=99.99,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the top of the range.",
+        description=(
+            "The global scale is floored at this percentile, so per-block amaxes above it are "
+            "clipped. The default excludes the rarest blocks on purpose: chasing a lone outlier "
+            "pushes every other block's FP8 block scale below subnormal. Set to 100 to use the "
+            "literal observed max, which guarantees no calibration data is clipped."
+        ),
+    )
+
+    rho: float = ModeloptField(
+        default=16384.0,
+        gt=0.0,
+        lt=28672.0,
+        title="Headroom factor applied to the anchor (amax = rho * anchor).",
+        description=(
+            "Larger rho leaves more headroom above the calibrated range and less room below "
+            "it. Must stay below 28672, the FP8-E4M3 normal dynamic range."
+        ),
+    )
+
+    weight_scale_algorithm: _ScaleCalibConfig = ModeloptField(
+        default={"method": "max"},
+        title="Algorithm used to calibrate the weight scales.",
+        description=(
+            "Weight scales are set by an independent algorithm -- ``max`` (default), ``mse`` or "
+            "``local_hessian`` -- because this algorithm only decides the NVFP4 *activation* "
+            "global scale. Give the chosen algorithm's own options alongside ``method`` (for "
+            "example ``{'method': 'mse', 'fp8_scale_sweep': true}``); ``distributed_sync`` and "
+            "``shared_states`` belong to that weight calibration pass and are set there."
+        ),
+        validate_default=True,
+    )
+
+    @field_serializer("weight_scale_algorithm")
+    def _serialize_weight_scale_algorithm(self, value: _ScaleCalibConfig):
+        """Preserve the sparse public dict shape accepted by this field."""
+        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
+
+
 class LSQConfig(QuantizeAlgorithmConfig):
     """Config for LSQ (Learnt Scale Quantization) and Dual-LSQ algorithms.
 

@@ -68,6 +68,7 @@ class TRTLLM(TemplateAPI):
             # logits only for the recomputed suffix on shared-prefix requests (e.g. hellaswag),
             # truncating context_logits and breaking parse_logprobs. Disable it.
             enable_kv_cache_reuse=False,
+            trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
         )
         self.max_length = max_length - 1
         logger.info("Loaded TRT-LLM")

@@ -312,6 +312,14 @@ def main(args):
     if args.layers_8bit:
         args.enable_mixed_quant = True
 
+    cuda_path = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME") or "N/A"
+    print(
+        f"\n--Quantize-Script-- torch={torch.__version__}, "
+        f"torch.version.cuda={torch.version.cuda}, "
+        f"torch.cuda.is_available={torch.cuda.is_available()}, "
+        f"CUDA_PATH={cuda_path}\n"
+    )
+
     print(
         f"\n--Quantize-Script-- algo={args.algo}, dataset={args.dataset}, calib_size={args.calib_size}, "
         f"batch_size={args.batch_size}, block_size={args.block_size}, add-position-ids={args.add_position_ids}, "

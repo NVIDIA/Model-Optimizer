@@ -159,6 +159,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/fp8_default-kv_fp8",
     "general/ptq/fp8_default-kv_fp8_cast",
     "general/ptq/int4_blockwise_weight_only",
+    "general/ptq/nvfp4_act_headroom-kv_fp8_cast",
     "general/ptq/nvfp4_default-kv_fp8",
     "general/ptq/nvfp4_default-kv_fp8_cast",
     "general/ptq/nvfp4_default-kv_nvfp4_cast",
