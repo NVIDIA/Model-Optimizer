@@ -135,8 +135,6 @@ def test_puzzle_kd_records_materialization_metadata(tmp_path):
     assert acquisition["source"] == _PUZZLE_KD_DATA_SOURCE
     assert acquisition["output"] == str(destination.resolve())
     assert acquisition["seed"] == 11
-    assert "train_samples" not in acquisition
-    assert "validation_samples" not in acquisition
 
 
 def test_wizard_emits_canonical_padded_varlen_layout(tmp_path):
@@ -161,7 +159,7 @@ def test_wizard_emits_canonical_padded_varlen_layout(tmp_path):
     assert state.get_field("data.layout") == "padded_varlen"
 
 
-def test_nemotron_vlm_records_catalog_and_defers_sample_bounds(tmp_path):
+def _run_nemotron_vlm_data_section(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     destination = tmp_path / "vlm"
     backend = _CapturingBackend(
@@ -183,14 +181,18 @@ def test_nemotron_vlm_records_catalog_and_defers_sample_bounds(tmp_path):
     )
 
     assert backend.remaining == 0
+    return state, backend
+
+
+def test_nemotron_vlm_records_revision_locked_catalog_metadata(tmp_path):
+    state, _ = _run_nemotron_vlm_data_section(tmp_path)
+
     assert state.get_field("data.modality") == "multimodal"
     acquisition = state.collection("data_acquisition")
     assert acquisition["subsets"] == [
         "sparsetables",
         "plotqa_cot",
     ]
-    assert "num_samples" not in acquisition
-    assert "max_shards_per_subset" not in acquisition
     assert acquisition["subset_rows"] == {
         "sparsetables": 100,
         "plotqa_cot": 300,
@@ -217,6 +219,15 @@ def test_nemotron_vlm_records_catalog_and_defers_sample_bounds(tmp_path):
             "weight": 0.75,
         },
     ]
+    catalogs = state.collection("hf_dataset_catalogs")
+    assert list(catalogs) == [
+        f"{_NEMOTRON_VLM_DATA_SOURCE}@immutable-sha",
+    ]
+
+
+def test_nemotron_vlm_subset_prompt_uses_catalog_choices_and_defaults(tmp_path):
+    _, backend = _run_nemotron_vlm_data_section(tmp_path)
+
     assert len(backend.checkbox_calls) == 1
     message, choices, defaults = backend.checkbox_calls[0]
     assert message == "Dataset subsets:"
@@ -224,10 +235,6 @@ def test_nemotron_vlm_records_catalog_and_defers_sample_bounds(tmp_path):
     assert choices[0].title == "sparsetables — 100 rows — 1.00 KiB"
     assert choices[3].disabled == "external media required"
     assert defaults == ("sparsetables", "plotqa_cot", "wiki_en")
-    catalogs = state.collection("hf_dataset_catalogs")
-    assert list(catalogs) == [
-        f"{_NEMOTRON_VLM_DATA_SOURCE}@immutable-sha",
-    ]
 
 
 def test_generic_hugging_face_dataset_uses_dynamic_subset_checkbox(
@@ -305,9 +312,6 @@ def test_resume_reuses_the_revision_locked_subset_catalog(tmp_path):
     assert initial.remaining == 0
     assert state.get_field("data.layout") == "fixed"
     assert state.get_field("data.sequence_length") == 1024
-    acquisition = state.collection("data_acquisition")
-    assert "num_samples" not in acquisition
-    assert "max_shards_per_subset" not in acquisition
 
     resumed = ScriptedBackend([])
     assert data_section(

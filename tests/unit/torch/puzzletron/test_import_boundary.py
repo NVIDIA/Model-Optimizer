@@ -41,7 +41,7 @@ def test_lightweight_puzzletron_import_does_not_require_automodel() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_automodel_backed_width_slice_use_reports_missing_dependency() -> None:
+def test_automodel_recipe_loader_reports_missing_dependency() -> None:
     result = _run_without_automodel(
         "from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence "
         "import _replace_block_scoring_recipe; "

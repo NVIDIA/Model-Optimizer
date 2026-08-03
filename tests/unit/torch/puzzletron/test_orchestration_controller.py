@@ -116,24 +116,28 @@ def test_dry_run_plan_uses_heterogeneous_vllm_measurement_topologies(tmp_path: P
         },
     }
     experiment.write_text(yaml.safe_dump(experiment_config))
-    execution = load_execution_config(execution_path)
-    execution["stages"]["vllm_stats"]["parallel"] = {"tp": 2}
-
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
-        execution=execution,
+        execution=load_execution_config(execution_path),
     )
     submissions = dry_run_plan(plan)
-    vllm = [item for item in submissions if item.stage_id == "vllm_stats"]
+    vllm = sorted(
+        (
+            item.work_id,
+            item.nodes,
+            item.gpus,
+            item.task_count,
+            item.gpus_per_task,
+        )
+        for item in submissions
+        if item.stage_id == "vllm_stats"
+    )
 
-    assert [item.work_id for item in vllm] == [
-        "vllm_stats:primary:gang",
-        "vllm_stats:secondary:gang",
+    assert vllm == [
+        ("vllm_stats:primary:gang", 1, 8, 4, 2),
+        ("vllm_stats:secondary:gang", 2, 16, 4, 4),
     ]
-    assert [(item.nodes, item.gpus) for item in vllm] == [(1, 8), (2, 16)]
-    assert [item.task_count for item in vllm] == [4, 4]
-    assert [item.gpus_per_task for item in vllm] == [2, 4]
 
 
 def test_gpu_lease_manager_allocates_disjoint_gpus(tmp_path: Path):
@@ -188,7 +192,7 @@ def test_vllm_stats_rejects_conflicting_execution_mesh(tmp_path: Path):
 
     with pytest.raises(
         ValueError,
-        match="conflicts with primary vLLM measurement topology 'latency'",
+        match="vllm_stats execution parallel override conflicts",
     ):
         compile_campaign_plan(
             experiment_config_path=experiment,
