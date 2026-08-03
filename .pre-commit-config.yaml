@@ -102,6 +102,7 @@ repos:
         # Instead, we should manually add the license header to those files *after* the original header.
         exclude: >
           (?x)^(
+              modelopt/torch/quantization/rotation/sgdg.py|
               modelopt/torch/quantization/utils/calib_utils.py|
               modelopt/onnx/quantization/operators.py|
               modelopt/onnx/quantization/ort_patching.py|
