@@ -23,6 +23,7 @@ Experimental
 - Consolidated ``examples/vlm_ptq`` into ``examples/hf_ptq``. Vision-language model PTQ now shares the ``hf_ptq.py`` entry point and ``scripts/huggingface_example.sh``; pass ``--vlm`` to run the TensorRT-LLM multimodal quickstart smoke test. The ``examples/vlm_ptq/scripts/huggingface_example.sh`` entry point is deprecated: it now prints a warning and forwards to the ``hf_ptq`` script with ``--vlm``, and will be removed in a future release. See `examples/hf_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#vlm-quantization>`__.
 - Dropped VILA / NVILA vision-language model support in ``examples/hf_ptq``. VILA's modeling code requires ``transformers<=4.50.0``, which conflicts with ModelOpt's minimum supported ``transformers`` version. The VILA-specific bootstrap (repo clone, ``requirements-vila.txt``) and loading paths in ``example_utils.py`` have been removed.
 - Bump minimum nemo container requirement to ``nemo:26.04`` (recommended ``nemo:26.06``) for Megatron-Bridge / Megatron-LM optimization features.
+- Bump minimum transformers version to ``4.57`` instead of ``4.56``. Transformers 4.x support will be dropped in a future release.
 - Python 3.10 support will be dropped in the next release as it is reaching EOL.
 
 **New Features**
