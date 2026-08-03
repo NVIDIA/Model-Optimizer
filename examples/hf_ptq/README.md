@@ -295,8 +295,8 @@ This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Ne
 
 ### Tracking runs with MLflow
 
-Pass `--mlflow <tracking-uri>` to record a PTQ run on an MLflow server, so the run can be
-reproduced later from its MLflow entry alone:
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ
+run on an MLflow server so it can be reproduced later from its MLflow entry alone:
 
 ```bash
 python hf_ptq.py \
@@ -332,7 +332,10 @@ Other flags:
 - `--mlflow_experiment` — defaults to `$USER/hf_ptq/<checkpoint basename>-<recipe name>`,
   falling back to `--qformat` when no `--recipe` is used.
 - `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
-- Passing `--mlflow` with no value uses `$MLFLOW_TRACKING_URI`.
+- `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
+  from the environment is best-effort — if the client is missing or the server is
+  unreachable the run warns and continues untracked, since the variable is often exported
+  for other tooling. An explicit `--mlflow` fails loudly instead.
 
 Authentication uses MLflow's own environment variables (`MLFLOW_TRACKING_TOKEN`, or
 `MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`).

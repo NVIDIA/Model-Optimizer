@@ -255,6 +255,54 @@ def test_mlflow_flag_falls_back_to_the_environment(monkeypatch):
     assert args.mlflow == "https://mlflow.example.com"
 
 
+def test_the_environment_alone_enables_tracking(monkeypatch):
+    """MLFLOW_TRACKING_URI is MLflow's own variable, so exporting it opts in on its own."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com/")
+    monkeypatch.setattr(getpass, "getuser", lambda: "tester")
+    _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+
+    assert args.mlflow == "https://mlflow.example.com"
+    assert args.mlflow_from_env is True
+    assert args.mlflow_experiment == "tester/hf_ptq/Qwen3-0.6B-fp8"
+
+
+def test_an_explicit_flag_beats_the_environment(monkeypatch):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://from-env.example.com/")
+    _, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "/m/x", "--mlflow", "https://from-flag.example.com"
+    )
+
+    assert args.mlflow == "https://from-flag.example.com"
+    assert args.mlflow_from_env is False
+
+
+def test_an_unusable_environment_uri_warns_instead_of_failing(monkeypatch):
+    """The variable is commonly exported for other tooling, so it must not fail a run --
+    unlike an explicit --mlflow, which is an unambiguous request."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:///local/mlruns")
+
+    with pytest.warns(UserWarning, match="Ignoring MLFLOW_TRACKING_URI"):
+        _, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+
+    assert args.mlflow is None
+
+    with pytest.raises(SystemExit):  # the same value passed explicitly still fails
+        _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B", "--mlflow", "file:///local/mlruns"
+        )
+
+
+def test_mlflow_provenance_is_not_logged_as_a_param(monkeypatch):
+    """mlflow_from_env describes the tracking setup, not the quantization."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://mlflow.example.com/")
+    hf_ptq, args = _parse_hf_ptq_args(monkeypatch, "--pyt_ckpt_path", "/models/Qwen3-0.6B")
+    args.dist_state = SimpleNamespace(is_main=True, world_size=1)
+
+    params, _ = hf_ptq._mlflow_run_inputs(args)
+
+    assert "mlflow_from_env" not in params
+
+
 def test_mlflow_run_inputs_carry_the_resolved_recipe(monkeypatch):
     hf_ptq, args = _parse_hf_ptq_args(
         monkeypatch,

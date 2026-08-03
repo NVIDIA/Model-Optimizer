@@ -620,3 +620,35 @@ def test_stale_check_survives_unnormalized_string_paths(fake_mlflow, tmp_path, m
     logger.finish("FAILED", files=outputs)
 
     assert "quant_summary.txt" not in [name for name, _ in fake_mlflow.artifacts]
+
+
+def test_optional_tracking_warns_and_continues_when_the_server_is_unreachable(monkeypatch, capsys):
+    """A URI inferred from the environment must not be able to fail the job it is watching."""
+    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **kw: (_ for _ in ()).throw(requests.ConnectionError("no route to host")),
+    )
+    logger = _logger(required=False)
+    stdout = sys.stdout
+
+    logger.start(params={"model": "x"})  # must not raise
+    logger.finish("FINISHED")
+
+    assert logger.enabled is False
+    assert sys.stdout is stdout
+    assert "tracking disabled" in capsys.readouterr().out
+
+
+def test_required_tracking_still_raises(monkeypatch):
+    """An explicit request is different: a broken server should fail loudly."""
+    monkeypatch.setitem(sys.modules, "mlflow", FakeMlflow())
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **kw: (_ for _ in ()).throw(requests.ConnectionError("no route to host")),
+    )
+
+    with pytest.raises(ConnectionError, match="unreachable"):
+        _logger(required=True).start()

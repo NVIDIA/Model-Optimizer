@@ -1637,7 +1637,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
             "uploading the command, the resolved recipe, the run log and the quantization "
-            "summaries. Pass the flag without a value to use $MLFLOW_TRACKING_URI."
+            "summaries. Tracking is also enabled by MLflow's own $MLFLOW_TRACKING_URI, "
+            "without this flag; an explicit value here wins. A URI taken from the "
+            "environment is best-effort -- if it is unusable the run continues untracked."
         ),
     )
     parser.add_argument(
@@ -1655,11 +1657,22 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+    # MLFLOW_TRACKING_URI is MLflow's own variable, so a shell that exports it opts in
+    # without changing the command; an explicit --mlflow still wins. The distinction is
+    # kept because an ambient URI must not be able to fail a quantization run: it is
+    # commonly exported for unrelated tooling, so a bad value only warns.
+    args.mlflow_from_env = args.mlflow is None and bool(os.environ.get("MLFLOW_TRACKING_URI"))
+    if args.mlflow is None:
+        args.mlflow = os.environ.get("MLFLOW_TRACKING_URI") or None
     if args.mlflow is not None:
         try:
             args.mlflow = validate_tracking_uri(args.mlflow)
         except ValueError as e:
-            parser.error(f"--mlflow: {e}")
+            if not args.mlflow_from_env:
+                parser.error(f"--mlflow: {e}")
+            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
+            args.mlflow = None
+    if args.mlflow is not None:
         args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
             "hf_ptq",
             args.pyt_ckpt_path,
@@ -1703,7 +1716,9 @@ def parse_args() -> argparse.Namespace:
 
 # Derived state and the tracking settings themselves; everything else argparse parsed is a
 # parameter of the run. Deriving the list means a new flag is tracked without touching this.
-_MLFLOW_NON_PARAM_ARGS = frozenset({"dist_state", "mlflow", "mlflow_experiment", "mlflow_run_name"})
+_MLFLOW_NON_PARAM_ARGS = frozenset(
+    {"dist_state", "mlflow", "mlflow_experiment", "mlflow_from_env", "mlflow_run_name"}
+)
 
 
 def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
@@ -1727,6 +1742,8 @@ def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
         args.mlflow_experiment,
         run_name=args.mlflow_run_name,
         enabled=bool(args.mlflow) and args.dist_state.is_main,
+        # Inferred from the environment rather than asked for: warn and carry on.
+        required=not args.mlflow_from_env,
     )
 
 

@@ -226,7 +226,10 @@ class MlflowRunLogger:
     *tracking_uri* must already be validated (see :func:`validate_tracking_uri`),
     *experiment_name* is created if absent, *run_name* defaults to the UTC start time
     ``YYYYmmdd-HHMMSS``, and ``enabled=False`` makes every method a no-op -- which is how
-    callers skip non-main ranks or an absent flag.
+    callers skip non-main ranks or an absent flag. ``required=False`` additionally downgrades
+    a failure to open the run into a warning: use it when tracking was inferred from the
+    environment rather than asked for, so an uninstalled client or an unreachable server
+    cannot take the job down with it.
 
     Example:
         >>> logger = MlflowRunLogger(uri, "alice/hf_ptq/Qwen3-0.6B-nvfp4")
@@ -245,12 +248,14 @@ class MlflowRunLogger:
         experiment_name: str,
         run_name: str | None = None,
         enabled: bool = True,
+        required: bool = True,
     ):
         """Configure the run without contacting the server; see the class docstring."""
         self.tracking_uri = tracking_uri
         self.experiment_name = experiment_name
         self.run_name = run_name
         self.enabled = enabled
+        self.required = required
         self._mlflow: Any = None
         self._run: Any = None
         self._log_path: Path | None = None
@@ -284,8 +289,8 @@ class MlflowRunLogger:
         there -- pass the same mapping to both.
 
         Raises:
-            ImportError: If ``mlflow`` is not installed.
-            ConnectionError: If the tracking server is unreachable.
+            ImportError: If ``mlflow`` is not installed and ``required``.
+            ConnectionError: If the tracking server is unreachable and ``required``.
         """
         if not self.enabled or self._run is not None:
             return
@@ -297,12 +302,15 @@ class MlflowRunLogger:
         try:
             self._open_run()
             self._log_inputs(params, tags, texts)
-        except Exception:
+        except Exception as e:
             # start_run() may already have succeeded, and the caller gets an exception
             # rather than a logger to call finish() on, so close the run here.
             self._abort_run()
             self._stop_capture()
-            raise
+            if self.required:
+                raise
+            self.enabled = False
+            print(f"[mlflow] WARNING: tracking disabled, continuing without it ({e})")
 
     @contextmanager
     def track(
