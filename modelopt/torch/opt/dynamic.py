@@ -1044,6 +1044,10 @@ class _DMRegistryCls:
         def decorator(dm_class: type[_DMRegistryCls.T]) -> type[_DMRegistryCls.T]:
             """Register dnn_class with appropriate nn_class."""
             for nn_cls_, key in cls_to_key.items():
+                # Fail here instead of during a much later issubclass() lookup
+                assert inspect.isclass(nn_cls_) and issubclass(nn_cls_, nn.Module), (
+                    f"Cannot register {key}: {nn_cls_} is not a subclass of nn.Module!"
+                )
                 assert nn_cls_ not in self._registry, f"{nn_cls_} already registered!"
                 self._registry[nn_cls_] = dm_class
                 self._key_registry[nn_cls_] = key

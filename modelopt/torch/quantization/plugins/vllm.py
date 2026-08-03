@@ -112,6 +112,20 @@ for module_path in [
     except ImportError:
         continue
 
+
+def _is_module_cls(obj) -> bool:
+    """Whether obj is an nn.Module class we can register a dynamic module for."""
+    return isinstance(obj, type) and issubclass(obj, torch.nn.Module)
+
+
+# vLLM >= 0.24 turned ``FusedMoE`` into a factory function returning a ``MoERunner`` pipeline and
+# dropped ``UnquantizedFusedMoEMethod``, so the fakequant MoE module below no longer applies there.
+_has_fused_moe_module = _is_module_cls(getattr(vllm_fused_moe_layer, "FusedMoE", None))
+if vllm_shared_fused_moe_layer is not None and not _is_module_cls(
+    getattr(vllm_shared_fused_moe_layer, "SharedFusedMoE", None)
+):
+    vllm_shared_fused_moe_layer = None
+
 try:
     _has_attention_layers = importlib.util.find_spec("vllm.attention.layers") is not None
 except (ModuleNotFoundError, ValueError):
@@ -604,9 +618,11 @@ class _QuantFusedMoEBase(QuantModule):
             torch.cuda.empty_cache()
 
 
-@QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
-class _QuantVLLMFusedMoE(_QuantFusedMoEBase):
-    pass
+if _has_fused_moe_module:
+
+    @QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
+    class _QuantVLLMFusedMoE(_QuantFusedMoEBase):
+        pass
 
 
 if vllm_shared_fused_moe_layer is not None:
