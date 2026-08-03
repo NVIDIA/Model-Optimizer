@@ -206,7 +206,13 @@ def isolated_flashinfer_builder_patch():
 def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
     monkeypatch, isolated_flashinfer_builder_patch
 ):
-    """The real builder result must retain the common metadata contract."""
+    """The real builder result must retain the common metadata contract.
+
+    ``causal=True`` plus the TRTLLM decode overrides below keep vLLM's real ``build``
+    on its all-TRTLLM path, which needs no workspace buffers or FlashInfer wrapper
+    planning. The native (non-causal) path reaches deep into builder internals that
+    churn between vLLM releases; the stashed fields are path-independent.
+    """
     monkeypatch.setattr(flashinfer_backend, "use_trtllm_attention", lambda *_args, **_kwargs: True)
     assert patch_flashinfer_metadata_builder() is True
     builder = object.__new__(FlashInferMetadataBuilder)
@@ -233,7 +239,7 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         max_seq_len=16,
         block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
         slot_mapping=torch.tensor([0], dtype=torch.int64),
-        causal=False,
+        causal=True,
     )
 
     metadata = builder.build(0, common, fast_build=False)

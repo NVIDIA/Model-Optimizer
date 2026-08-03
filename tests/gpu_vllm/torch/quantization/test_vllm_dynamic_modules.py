@@ -339,9 +339,17 @@ def _shutdown_llm(llm):
 @pytest.fixture(scope="module")
 def tiny_llama_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_llama")
-    # Helper default ``max_position_embeddings=32`` would clash with vLLM's
-    # ``max_model_len=64`` set in ``_boot_llm``.
-    model_dir = create_tiny_llama_dir(tmp, max_position_embeddings=64)
+    # Helper default ``max_position_embeddings=32`` would clash with vLLM's ``max_model_len=64`` set in ``_boot_llm``.
+    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
+    model_dir = create_tiny_llama_dir(
+        tmp,
+        hidden_size=128,
+        intermediate_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=64,
+        head_dim=64,
+    )
     llm = _boot_llm(model_dir)
     try:
         yield llm
@@ -352,7 +360,7 @@ def tiny_llama_llm(tmp_path_factory):
 @pytest.fixture(scope="module")
 def tiny_qwen3_moe_llm(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("tiny_qwen3_moe")
-    # head_dim=64 with num_heads=2 is broadly supported by vLLM's attention backends.
+    # head_dim=64 with num_attention_heads=2 is broadly supported by vLLM's attention backends.
     model_dir = create_tiny_qwen3_moe_dir(
         tmp,
         hidden_size=128,

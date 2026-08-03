@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import re
 import warnings
 from collections import defaultdict
@@ -38,6 +39,14 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
+
+# vLLM >= 0.24 moved the fused expert weights (and hence their quantizers) from the MoE layer
+# itself onto a ``routed_experts`` submodule, so merged expert keys need that extra hop.
+_EXPERTS_INFIX = (
+    ".routed_experts"
+    if importlib.util.find_spec("vllm.model_executor.layers.fused_moe.routed_experts") is not None
+    else ""
+)
 
 
 def _union_quantizer_keys_across_ranks(local_quantizer_keys: list[str]) -> set[str]:
@@ -106,7 +115,13 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     )
     if expert_gate_up_match:
         suffix = expert_gate_up_match.group(4) or ""
-        group_key = expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3) + suffix
+        group_key = (
+            expert_gate_up_match.group(1)
+            + _EXPERTS_INFIX
+            + ".w13_"
+            + expert_gate_up_match.group(3)
+            + suffix
+        )
         return ("group", group_key, value)
 
     # Check if this is a non-expert gate/up projection that needs merging
@@ -120,7 +135,13 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     expert_down_match = re.search(r"(.*\.experts)\.\d+\.down_proj\.([^.]+_quantizer)(\..+)?$", key)
     if expert_down_match:
         suffix = expert_down_match.group(3) or ""
-        group_key = expert_down_match.group(1) + ".w2_" + expert_down_match.group(2) + suffix
+        group_key = (
+            expert_down_match.group(1)
+            + _EXPERTS_INFIX
+            + ".w2_"
+            + expert_down_match.group(2)
+            + suffix
+        )
         return ("group", group_key, value)
 
     # Transform bmm_quantizer keys: self_attn.q/k/v_bmm_quantizer -> self_attn.attn.q/k/v_bmm_quantizer
