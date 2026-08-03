@@ -221,7 +221,10 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         num_kv_heads=2,
         dcp_world_size=1,
         cache_dtype=torch.float16,
+        # vLLM >= 0.26 split q_data_type into per-phase attributes; set both spellings.
         q_data_type=torch.float16,
+        q_data_type_prefill=torch.float16,
+        q_data_type_decode=torch.float16,
         attention_config=SimpleNamespace(use_trtllm_attention=True),
         has_sinks=False,
         use_trtllm_decode_attention=True,
