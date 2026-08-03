@@ -166,14 +166,14 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 
 **Image / vLLM version.** Treat default `image: vllm/vllm-openai:v0.26.0` as a floor to verify: bump to the **exact model's** `recipes.vllm.ai` minimum if higher. Running below minimum is a trap — the server starts, then a worker dies mid-inference with `CUDA error: an illegal memory access`, easy to misread as a kernel bug. A model released after the newest vLLM release may have no numbered tag at all; take whatever image its recipe names. Never `:latest` (breaks reproducibility). Surface version bumps to the user.
 
-> **NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build** — the cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. **Verify CUDA ≥13 in the tag itself; do not blindly append a suffix — vLLM inverted its tag convention:**
+> **NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build** — the cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. **Pick the tag by the CUDA version it reports, not by its name — vLLM inverted its tag convention at v0.20.0:**
 >
 > | vLLM version | CUDA-13 tag | CUDA-12 tag |
 > | --- | --- | --- |
-> | ≤ v0.20.x | **suffixed** `-cu130` (e.g. `v0.20.0-cu130`) | unsuffixed |
-> | ≥ ~v0.21 | **unsuffixed** (e.g. `v0.24.0-ubuntu2404`, `v0.26.0`) | suffixed `-cu129` |
+> | ≤ v0.19.x | **suffixed** `-cu130` | unsuffixed |
+> | ≥ v0.20.0 | **unsuffixed** | suffixed `-cu129` |
 >
-> So `-cu130` does **not exist** for recent releases — asking for it yields a missing tag. Confirm by reading `CUDA_VERSION` from the tag's **arm64** config blob (registry API) rather than trusting the name, and check the arch you need is in `TORCH_CUDA_ARCH_LIST`. Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
+> v0.20.0 straddles the switch: it publishes `-cu130` *and* `-cu129`, and its unsuffixed tag is already CUDA 13. From v0.20.1 on, `-cu130` does **not exist** — asking for it yields a missing tag. So **select any tag whose arm64 config blob reports `CUDA_VERSION` ≥ 13** (registry API) instead of trusting the name, and check the arch you need is in `TORCH_CUDA_ARCH_LIST`. Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 

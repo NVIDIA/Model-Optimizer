@@ -85,11 +85,12 @@ deployment:
   image: vllm/vllm-openai:v0.26.0
   # NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build — a cu12 build
   # has no sm_103 FP4 kernel, so the deploy dies at engine init with CUDA
-  # "no kernel image is available". Current release tags are CUDA-13 unsuffixed
-  # (the tag above), with `-cu129` as the CUDA-12 opt-out; older releases spelled
-  # it the other way round (`-cu130` suffix = CUDA 13), so `-cu130` does not
-  # exist on current tags. Don't trust the tag name — read CUDA_VERSION from the
-  # tag's arm64 config blob, and check your arch is in TORCH_CUDA_ARCH_LIST.
+  # "no kernel image is available". From v0.20.0 on, release tags are CUDA-13
+  # unsuffixed (the tag above) with `-cu129` as the CUDA-12 opt-out; v0.19.x and
+  # earlier spelled it the other way round (`-cu130` = CUDA 13). v0.20.0 ships
+  # both suffixes; after it, `-cu130` does not exist. Don't trust the tag name —
+  # pick a tag whose arm64 config blob reports CUDA_VERSION >= 13, and check your
+  # arch is in TORCH_CUDA_ARCH_LIST.
   # Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`
   # (ViT flash-attn workaround; drop if the encoder loads without it).
   #
