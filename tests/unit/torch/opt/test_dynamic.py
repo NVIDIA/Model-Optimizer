@@ -17,11 +17,30 @@ import pytest
 import torch.nn as nn
 
 from modelopt.torch.opt.dynamic import (
+    DynamicModule,
     Hparam,
     _DMAttributeManager,
+    _DMRegistryCls,
     _FoldedCallback,
     _pytorch_managed,
 )
+
+
+def test_register_rejects_non_module_classes():
+    """Registering a non-class (e.g. a factory function) must fail at the registration site."""
+    registry = _DMRegistryCls(prefix="Test")
+
+    def not_a_class(*args, **kwargs):
+        return nn.Linear(1, 1)
+
+    for target in (not_a_class, int):
+        with pytest.raises(AssertionError, match=r"is not a subclass of nn\.Module"):
+            registry.register({target: "bad"})(DynamicModule)
+
+    # a rejected entry must not leave the registry partially populated
+    with pytest.raises(AssertionError, match=r"is not a subclass of nn\.Module"):
+        registry.register({nn.Linear: "nn.Linear", not_a_class: "bad"})(DynamicModule)
+    assert nn.Linear not in registry
 
 
 def test_dm_attribute_manager():

@@ -40,8 +40,8 @@ from modelopt.torch.quantization.conversion import (
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import is_quantized
 
-# vLLM >= 0.24 moved the fused expert weights (and hence their quantizers) from the MoE layer
-# itself onto a ``routed_experts`` submodule, so merged expert keys need that extra hop.
+# vLLM >= 0.24 moved the fused expert weights (and their quantizers) onto a ``routed_experts``
+# submodule of the MoE layer, so merged expert keys need that extra hop.
 _EXPERTS_INFIX = (
     ".routed_experts"
     if importlib.util.find_spec("vllm.model_executor.layers.fused_moe.routed_experts") is not None

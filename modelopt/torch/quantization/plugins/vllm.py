@@ -17,6 +17,7 @@
 
 import contextvars
 import importlib
+import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from functools import partial
@@ -119,21 +120,6 @@ def _is_module_cls(obj) -> bool:
     return isinstance(obj, type) and issubclass(obj, torch.nn.Module)
 
 
-# vLLM >= 0.24 turned ``FusedMoE`` into a factory function returning a ``MoERunner`` pipeline whose
-# expert weights live on a ``RoutedExperts`` submodule; older releases exposed a single ``FusedMoE``
-# module. Register whichever of the two this release provides.
-_has_fused_moe_module = _is_module_cls(getattr(vllm_fused_moe_layer, "FusedMoE", None))
-if vllm_shared_fused_moe_layer is not None and not _is_module_cls(
-    getattr(vllm_shared_fused_moe_layer, "SharedFusedMoE", None)
-):
-    vllm_shared_fused_moe_layer = None
-
-try:
-    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-except ImportError:
-    RoutedExperts = None
-
-
 def _import_unquantized_fused_moe_method() -> type | None:
     """Return vLLM's unquantized fused-MoE method class across module layouts."""
     for module_path in (
@@ -151,6 +137,30 @@ def _import_unquantized_fused_moe_method() -> type | None:
 
 
 UnquantizedFusedMoEMethod = _import_unquantized_fused_moe_method()
+
+try:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+except ImportError:
+    RoutedExperts = None
+
+# vLLM >= 0.24 turned ``FusedMoE`` into a factory function and moved the expert weights onto a
+# ``RoutedExperts`` submodule; register whichever module class this release provides.
+_has_fused_moe_cls = UnquantizedFusedMoEMethod is not None and _is_module_cls(
+    getattr(vllm_fused_moe_layer, "FusedMoE", None)
+)
+_has_routed_experts_cls = UnquantizedFusedMoEMethod is not None and _is_module_cls(RoutedExperts)
+if vllm_shared_fused_moe_layer is not None and not (
+    UnquantizedFusedMoEMethod is not None
+    and _is_module_cls(getattr(vllm_shared_fused_moe_layer, "SharedFusedMoE", None))
+):
+    vllm_shared_fused_moe_layer = None
+
+if not (_has_fused_moe_cls or _has_routed_experts_cls):
+    # Without a registration target, mtq.quantize() silently leaves experts in full precision.
+    warnings.warn(
+        "This vLLM release exposes no supported fused-MoE module; MoE layers will NOT be "
+        "quantized. Linear and attention quantization are unaffected."
+    )
 
 try:
     _has_attention_layers = importlib.util.find_spec("vllm.attention.layers") is not None
@@ -620,10 +630,9 @@ class _QuantFusedMoEBase(QuantModule):
 
     @contextmanager
     def _fakequant_moe_kernels(self):
-        """Route vLLM's fused-MoE kernel entry points through this module's quantizers.
+        """Route vLLM's fused-MoE kernels through this module's quantizers.
 
-        vLLM calls the kernels as module-level functions rather than through the module tree,
-        so fakequant has to be installed by name for the duration of the expert forward.
+        They are module-level functions, so fakequant is installed by name for this forward.
         """
         assert _FUSED_MOE_KERNEL_TARGETS, "No vLLM fused-MoE kernel entry point found to patch"
         originals = [
@@ -661,7 +670,7 @@ class _QuantFusedMoEBase(QuantModule):
             torch.cuda.empty_cache()
 
 
-if _has_fused_moe_module:
+if _has_fused_moe_cls:
 
     @QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
     class _QuantVLLMFusedMoE(_QuantFusedMoEBase):
@@ -677,14 +686,13 @@ if vllm_shared_fused_moe_layer is not None:
         pass
 
 
-if RoutedExperts is not None:
+if _has_routed_experts_cls:
 
     @QuantModuleRegistry.register({RoutedExperts: "vllm_RoutedExperts"})
     class _QuantVLLMRoutedExperts(_QuantFusedMoEBase):
         """Expert-weight owner of the vLLM >= 0.24 ``MoERunner`` pipeline.
 
-        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` directly instead of
-        ``__call__``, so both are wrapped rather than ``forward`` (which vLLM raises from).
+        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``.
         """
 
         def forward_modular(self, *args, **kwargs):
