@@ -70,6 +70,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
     build_capture_invocation,
     canonical_json_sha256,
     merge_rank_captures,
+    merge_rank_topology_discovery_captures,
     parse_prompt_specs_jsonl,
     parse_vanilla_prefill_fit,
     validate_begin_acks,
@@ -80,6 +81,7 @@ CAPTURE_ENV = "MASK_REUSE_FA4_CALIBRATION_CAPTURE"
 PLAN_ENV = "MASK_REUSE_FA4_PLAN"
 CHECKPOINT_ENV = "MASK_REUSE_FA4_CHECKPOINT_MANIFEST_SHA256"
 DENSE_SHADOW_ENV = "MASK_REUSE_FA4_CAPTURE_DENSE_SHADOW"
+TOPOLOGY_MAX_REUSE_SPAN_ENV = "MASK_REUSE_FA4_TOPOLOGY_MAX_REUSE_SPAN"
 _POLICY_ENVS = (
     "MASK_REUSE_FA4_POLICY",
     "MASK_REUSE_FA4_POLICY_SHA256",
@@ -120,6 +122,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Separately pinned SHA256 of the checkpoint manifest",
     )
     parser.add_argument("--plan", required=True, help="Explicit mask-reuse layer-plan preset")
+    parser.add_argument(
+        "--max-reuse-span",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of intervening attention-layer positions considered by a "
+            "*_topology_discovery plan"
+        ),
+    )
     parser.add_argument(
         "--fa4-source",
         required=True,
@@ -278,6 +289,7 @@ def _configure_capture_environment(
     checkpoint_manifest_sha256: str,
     *,
     validate_dense_output: bool,
+    max_reuse_span: int | None = None,
 ) -> VerifiedSourceManifest:
     verified = _verify_fa4_source(
         fa4_source,
@@ -298,6 +310,17 @@ def _configure_capture_environment(
     os.environ[PLAN_ENV] = plan
     os.environ[CHECKPOINT_ENV] = checkpoint_manifest_sha256
     os.environ[DENSE_SHADOW_ENV] = "1" if validate_dense_output else "0"
+    topology_discovery = plan.endswith("_topology_discovery")
+    if topology_discovery:
+        if max_reuse_span is None or max_reuse_span <= 0:
+            raise CaptureContractError("a *_topology_discovery plan requires --max-reuse-span > 0")
+        os.environ[TOPOLOGY_MAX_REUSE_SPAN_ENV] = str(max_reuse_span)
+    elif max_reuse_span is not None:
+        raise CaptureContractError(
+            "--max-reuse-span is valid only with a *_topology_discovery plan"
+        )
+    else:
+        os.environ.pop(TOPOLOGY_MAX_REUSE_SPAN_ENV, None)
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
     sys.dont_write_bytecode = True
     os.environ["MASK_REUSE_FA4_SOURCE"] = str(verified.source_root)
@@ -392,6 +415,7 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         args.fa4_commit,
         checkpoint.sha256,
         validate_dense_output=args.validate_dense_output,
+        max_reuse_span=args.max_reuse_span,
     )
     # Import after setting the gate: worker subprocesses inherit the exact
     # capture environment and never enter policy-backed serving mode.
@@ -470,9 +494,13 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
                     # Passing token IDs makes sample_length and source_capture_sha256
                     # identical to the request that reaches the vLLM scheduler.
                     llm.generate(token_ids, sampling, use_tqdm=False)
-                    merged = merge_rank_captures(
-                        llm.collective_rpc("mask_reuse_capture_drain"), invocation
+                    rank_captures = llm.collective_rpc("mask_reuse_capture_drain")
+                    merge = (
+                        merge_rank_topology_discovery_captures
+                        if args.plan.endswith("_topology_discovery")
+                        else merge_rank_captures
                     )
+                    merged = merge(rank_captures, invocation)
                     line = _canonical_capture_line(merged.capture)
                     temporary.write(line)
                     capture_digest.update(line)
@@ -512,9 +540,14 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         )
 
     capture_sha256 = capture_digest.hexdigest()
+    topology_discovery = args.plan.endswith("_topology_discovery")
     manifest = {
-        "capture_manifest_schema_version": 4,
-        "capture_protocol": "modelopt_vllm_mask_reuse_target_sparsity_v4",
+        "capture_manifest_schema_version": 5 if topology_discovery else 4,
+        "capture_protocol": (
+            "modelopt_vllm_mask_reuse_topology_discovery_v1"
+            if topology_discovery
+            else "modelopt_vllm_mask_reuse_target_sparsity_v4"
+        ),
         "model": model_id,
         "checkpoint_manifest_sha256": checkpoint.sha256,
         "checkpoint_manifest_path": str(checkpoint.manifest_path),
@@ -537,11 +570,16 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         "vanilla_fit_sha256": canonical_json_sha256(threshold_scale_factor),
         "vanilla_config_file_sha256": vanilla_config_sha256,
         "prompt_plan_file_sha256": prompt_plan_sha256,
-        "compact_capture_file_sha256": capture_sha256,
         "capture_count": capture_count,
         "candidate_cell_count": candidate_cell_count,
         "captures": capture_manifests,
     }
+    if topology_discovery:
+        manifest["capture_mode"] = "topology_discovery"
+        manifest["max_reuse_span"] = args.max_reuse_span
+        manifest["topology_discovery_capture_file_sha256"] = capture_sha256
+    else:
+        manifest["compact_capture_file_sha256"] = capture_sha256
     manifest_bytes = (
         json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
     ).encode()

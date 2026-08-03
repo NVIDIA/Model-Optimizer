@@ -29,6 +29,7 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.mask_reuse_capture impor
     canonical_json_sha256,
     load_prompt_specs,
     merge_rank_captures,
+    merge_rank_topology_discovery_captures,
     source_capture_sha256,
     validate_begin_acks,
     validate_capture_statuses,
@@ -128,6 +129,49 @@ def _rank_payload(invocation, rank):
             "validated_layer_indices": [0, 1, 4, 5],
         },
     }
+
+
+def _topology_rank_payload(invocation, rank):
+    payload = _rank_payload(invocation, rank)
+    start = rank * 2
+    payload.pop("consumer_layers")
+    payload.update(
+        {
+            "capture_mode": "topology_discovery",
+            "attention_layers": [0, 1, 2, 3],
+            "max_reuse_span": 2,
+            "anchor_stats_by_layer": {
+                str(layer): {
+                    "retained_tiles": [10 + layer] * 4,
+                    "dropped_mass": [0.01 * (layer + 1)] * 4,
+                }
+                for layer in range(4)
+            },
+            "consumer_candidates_by_layer": {
+                str(consumer): {
+                    str(anchor): {
+                        "consumer_head_start": start,
+                        "dropped_mass": [
+                            [
+                                0.01 * (anchor + consumer + start + local + donor + 1)
+                                for donor in range(4)
+                            ]
+                            for local in range(2)
+                        ],
+                    }
+                    for anchor in range(max(0, consumer - 2), consumer)
+                }
+                for consumer in range(1, 4)
+            },
+            "dense_shadow_evidence": {
+                "enabled": True,
+                "atol_hex": (0.0).hex(),
+                "rtol_hex": (0.0).hex(),
+                "validated_layer_indices": [0, 1, 2, 3],
+            },
+        }
+    )
+    return payload
 
 
 def test_build_invocation_binds_exact_threshold_source_and_final_chunk():
@@ -290,6 +334,27 @@ def test_merge_rank_captures_concatenates_consumer_shards_deterministically():
     assert consumer["anchor_layer"] == 0
     assert consumer["dropped_mass"][2][3] == pytest.approx(0.06)
     assert set(merged.capture["anchor_stats_by_layer"]) == {"0", "4"}
+
+
+def test_merge_topology_discovery_captures_concatenates_every_candidate_edge():
+    invocation = _invocation()
+    merged = merge_rank_topology_discovery_captures(
+        [
+            _topology_rank_payload(invocation, 1),
+            _topology_rank_payload(invocation, 0),
+        ],
+        invocation,
+    )
+
+    assert merged.capture["attention_layers"] == [0, 1, 2, 3]
+    assert merged.capture["max_reuse_span"] == 2
+    assert set(merged.capture["anchor_stats_by_layer"]) == {"0", "1", "2", "3"}
+    assert set(merged.capture["consumer_candidates_by_layer"]["3"]) == {"1", "2"}
+    assert merged.capture["consumer_candidates_by_layer"]["3"]["1"]["dropped_mass"][2][
+        3
+    ] == pytest.approx(0.1)
+    assert merged.manifest["candidate_edge_count"] == 5
+    assert merged.manifest["candidate_cell_count"] == 5 * 4 * 4
 
 
 @pytest.mark.parametrize(

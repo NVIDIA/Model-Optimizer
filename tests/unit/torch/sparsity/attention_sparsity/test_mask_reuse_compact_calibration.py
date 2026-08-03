@@ -195,8 +195,8 @@ def test_streaming_compact_selector_matches_legacy_row_policy(tmp_path):
         "checkpoint_manifest": checkpoint,
         "evidence": _evidence(digest),
         "max_anchor_dropped_mass": 0.03,
-        "max_reuse_dropped_mass": 0.025,
-        "max_reuse_selection_dropped_mass": 0.02,
+        "reuse_dropped_mass_report_threshold": 0.025,
+        "target_bmm1_skip_ratio": 0.25,
     }
 
     compact = calibrate_compact_mask_reuse_policy(load_compact_mask_reuse_captures(path), **kwargs)
@@ -209,7 +209,8 @@ def test_streaming_compact_selector_matches_legacy_row_policy(tmp_path):
     legacy_report = dict(legacy["calibration_report"])
     compact_report.pop("promotion")
     legacy_report.pop("promotion")
-    assert compact_report == legacy_report
+    assert compact_report["constraints"] == legacy_report["constraints"]
+    assert compact_report["overall"] == legacy_report["overall"]
     assert compact["provenance"]["input_capture_count"] == 4
     assert compact["provenance"]["candidate_cell_count"] == 16
     assert compact["provenance"]["streaming_passes"] == [
@@ -219,6 +220,13 @@ def test_streaming_compact_selector_matches_legacy_row_policy(tmp_path):
     ]
     assert compact["promotion_status"] == "candidate_only"
     assert compact["deployment_geometry_validated"] is False
+
+
+def test_compact_public_interface_has_no_hard_reuse_risk_gate():
+    parameters = inspect.signature(calibrate_compact_mask_reuse_policy).parameters
+
+    assert parameters["target_bmm1_skip_ratio"].default is inspect.Parameter.empty
+    assert "max_reuse_selection_dropped_mass" not in parameters
 
 
 def test_compact_selector_binds_reuse_bundle_sha(tmp_path):
@@ -236,7 +244,8 @@ def test_compact_selector_binds_reuse_bundle_sha(tmp_path):
             checkpoint_manifest=checkpoint,
             evidence=evidence,
             max_anchor_dropped_mass=0.03,
-            max_reuse_dropped_mass=0.025,
+            reuse_dropped_mass_report_threshold=0.025,
+            target_bmm1_skip_ratio=0.25,
         )
 
 
@@ -258,7 +267,8 @@ def test_compact_selector_binds_verified_checkpoint_and_disjoint_groups(tmp_path
             checkpoint_manifest=checkpoint,
             evidence=_evidence(digest),
             max_anchor_dropped_mass=0.03,
-            max_reuse_dropped_mass=0.025,
+            reuse_dropped_mass_report_threshold=0.025,
+            target_bmm1_skip_ratio=0.25,
         )
 
     shared_group = captures[1]["invocation"]["source_group_sha256"]
@@ -274,7 +284,8 @@ def test_compact_selector_binds_verified_checkpoint_and_disjoint_groups(tmp_path
             checkpoint_manifest=checkpoint,
             evidence=_evidence(digest),
             max_anchor_dropped_mass=0.03,
-            max_reuse_dropped_mass=0.025,
+            reuse_dropped_mass_report_threshold=0.025,
+            target_bmm1_skip_ratio=0.25,
         )
 
 
@@ -300,11 +311,12 @@ def test_compact_selector_rejects_file_changed_during_evaluation(tmp_path, monke
             checkpoint_manifest=checkpoint,
             evidence=_evidence(digest),
             max_anchor_dropped_mass=0.03,
-            max_reuse_dropped_mass=0.025,
+            reuse_dropped_mass_report_threshold=0.025,
+            target_bmm1_skip_ratio=0.25,
         )
 
 
-def test_selector_minimizes_declared_equal_bmm_combined_cost(tmp_path):
+def test_selector_meets_bmm1_target_before_minimizing_reuse_risk(tmp_path):
     path = tmp_path / "compact.jsonl"
     checkpoint = _checkpoint(tmp_path)
     captures = [
@@ -349,13 +361,14 @@ def test_selector_minimizes_declared_equal_bmm_combined_cost(tmp_path):
         checkpoint_manifest=checkpoint,
         evidence=_evidence(digest),
         max_anchor_dropped_mass=0.03,
-        max_reuse_dropped_mass=0.025,
-        max_reuse_selection_dropped_mass=0.02,
+        reuse_dropped_mass_report_threshold=0.025,
+        target_bmm1_skip_ratio=0.25,
     )
 
     assert candidate["context_policies"][0]["target_sparsity"] == 0.7
     frontier = candidate["calibration_report"]["by_bucket"][0]["target_sparsity_frontier"]
-    assert [row["combined_tile_cost"] for row in frontier] == [14, 10]
+    assert [row["target_bmm1_skip_ratio_feasible"] for row in frontier] == [False, True]
+    assert frontier[1]["combined_tile_cost"] == 2
 
 
 def test_validation_pass_does_not_retain_capture_objects():
@@ -390,5 +403,6 @@ def test_compact_validation_rejects_impossible_geometry_or_sparsity_trend(tmp_pa
             checkpoint_manifest=checkpoint,
             evidence=_evidence(digest),
             max_anchor_dropped_mass=0.03,
-            max_reuse_dropped_mass=0.025,
+            reuse_dropped_mass_report_threshold=0.025,
+            target_bmm1_skip_ratio=0.25,
         )

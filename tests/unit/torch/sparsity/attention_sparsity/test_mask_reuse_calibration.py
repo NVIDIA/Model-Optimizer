@@ -148,8 +148,8 @@ def _calibrate(rows):
         checkpoint_manifest=VERIFIED_CHECKPOINT,
         evidence=EVIDENCE,
         max_anchor_dropped_mass=0.1,
-        max_reuse_dropped_mass=0.1,
-        max_reuse_selection_dropped_mass=0.05,
+        reuse_dropped_mass_report_threshold=0.1,
+        target_bmm1_skip_ratio=0.1,
     )
 
 
@@ -171,7 +171,7 @@ def test_selects_target_sparsity_and_exports_backend_v3():
             "min_kv_tokens": 65_536,
             "max_kv_tokens": 131_072,
             "target_sparsity": 0.7,
-            "headmaps": {"1": [1, 0]},
+            "headmaps": {"1": [0, 0]},
             "fallback_heads": {"1": [1]},
         }
     ]
@@ -180,7 +180,9 @@ def test_selects_target_sparsity_and_exports_backend_v3():
     assert artifact["deployment_geometry"]["contract"]["kv_page_tokens"] == 16
     assert len(artifact["deployment_geometry"]["observations"]) == 4
     assert (
-        artifact["calibration_report"]["overall"]["reuse_heldout"]["constraint_violation_rate"]
+        artifact["calibration_report"]["overall"]["reuse_heldout"][
+            "report_threshold_exceedance_rate"
+        ]
         == 0.0
     )
     json.dumps(artifact)
@@ -193,7 +195,7 @@ def test_heldout_values_evaluate_but_cannot_change_selection():
         if row.split == "heldout"
         and row.target_sparsity == 0.7
         and row.consumer_head == 0
-        and row.donor_head == 1
+        and row.donor_head == 0
         else row
         for row in _observations()
     ]
@@ -202,7 +204,9 @@ def test_heldout_values_evaluate_but_cannot_change_selection():
 
     assert hostile["context_policies"] == baseline["context_policies"]
     assert (
-        hostile["calibration_report"]["overall"]["reuse_heldout"]["constraint_violation_rate"]
+        hostile["calibration_report"]["overall"]["reuse_heldout"][
+            "report_threshold_exceedance_rate"
+        ]
         == 1.0
     )
     assert hostile["calibration_report"]["overall"]["reuse_heldout"]["worst_dropped_mass"] == 0.9

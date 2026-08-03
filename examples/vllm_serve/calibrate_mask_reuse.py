@@ -33,8 +33,8 @@ Example::
         --grouped-fit grouped-fit.json \
         --outer-report outer-report.json \
         --max-anchor-dropped-mass 0.02 \
-        --max-reuse-dropped-mass 0.02 \
-        --max-reuse-selection-dropped-mass 0.005
+        --reuse-dropped-mass-report-threshold 0.02 \
+        --target-bmm1-skip-ratio 0.10
 
 The final output is candidate-only and must be rejected by serving.
 """
@@ -367,16 +367,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum allowed anchor dropped mass",
     )
     parser.add_argument(
-        "--max-reuse-dropped-mass",
+        "--reuse-dropped-mass-report-threshold",
         type=float,
         required=True,
-        help="Maximum allowed held-out reuse dropped mass",
+        help="Diagnostic reuse threshold; does not affect selection",
     )
     parser.add_argument(
-        "--max-reuse-selection-dropped-mass",
+        "--target-bmm1-skip-ratio",
         type=float,
-        default=None,
-        help="Optional stricter calibration-time reuse bound",
+        required=True,
+        help="Minimum model-wide BMM1 tile skip ratio required in every context bucket",
     )
     parser.add_argument(
         "--output-policy",
@@ -427,8 +427,8 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_manifest=checkpoint,
             evidence=evidence,
             max_anchor_dropped_mass=args.max_anchor_dropped_mass,
-            max_reuse_dropped_mass=args.max_reuse_dropped_mass,
-            max_reuse_selection_dropped_mass=args.max_reuse_selection_dropped_mass,
+            reuse_dropped_mass_report_threshold=(args.reuse_dropped_mass_report_threshold),
+            target_bmm1_skip_ratio=args.target_bmm1_skip_ratio,
             source_provenance={
                 "capture_manifest_sha256": capture_manifest_sha256,
                 "topology_file_sha256": topology_sha256,

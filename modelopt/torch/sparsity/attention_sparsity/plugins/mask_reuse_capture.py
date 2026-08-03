@@ -48,6 +48,7 @@ __all__ = [
     "load_prompt_specs",
     "load_vanilla_prefill_fit",
     "merge_rank_captures",
+    "merge_rank_topology_discovery_captures",
     "parse_prompt_specs_jsonl",
     "parse_vanilla_prefill_fit",
     "source_capture_sha256",
@@ -122,8 +123,29 @@ _RANK_CAPTURE_FIELDS = frozenset(
         "dense_shadow_evidence",
     }
 )
+_RANK_TOPOLOGY_CAPTURE_FIELDS = frozenset(
+    {
+        "capture_schema_version",
+        "capture_mode",
+        "rank",
+        "world_size",
+        "invocation",
+        "invocation_sha256",
+        "geometry",
+        "global_num_heads",
+        "eligible_tiles",
+        "attention_layers",
+        "max_reuse_span",
+        "anchor_stats_by_layer",
+        "consumer_candidates_by_layer",
+        "attention_call_counts",
+        "tp_head_order_evidence",
+        "dense_shadow_evidence",
+    }
+)
 _ANCHOR_STATS_FIELDS = frozenset({"retained_tiles", "dropped_mass"})
 _CONSUMER_STATS_FIELDS = frozenset({"anchor_layer", "consumer_head_start", "dropped_mass"})
+_CANDIDATE_STATS_FIELDS = frozenset({"consumer_head_start", "dropped_mass"})
 _ATTENTION_CALL_COUNT_FIELDS = frozenset({"prefill", "decode"})
 _TP_HEAD_ORDER_FIELDS = frozenset(
     {
@@ -780,6 +802,92 @@ def _parse_dense_shadow_evidence(raw: object, *, rank: int) -> dict[str, object]
     }
 
 
+def _parse_topology_candidates(
+    raw: object,
+    *,
+    rank: int,
+    global_num_heads: int,
+    attention_layers: Sequence[int],
+    max_reuse_span: int,
+) -> dict[int, dict[int, tuple[int, list[list[float]]]]]:
+    if not isinstance(raw, Mapping):
+        raise CaptureContractError(f"rank {rank} consumer_candidates_by_layer must be an object")
+    expected: dict[int, set[int]] = {}
+    for position, consumer in enumerate(attention_layers[1:], start=1):
+        first = max(0, position - max_reuse_span)
+        expected[consumer] = set(attention_layers[first:position])
+    result: dict[int, dict[int, tuple[int, list[list[float]]]]] = {}
+    for raw_consumer, raw_by_anchor in raw.items():
+        if (
+            not isinstance(raw_consumer, str)
+            or not raw_consumer.isdigit()
+            or raw_consumer != str(int(raw_consumer))
+        ):
+            raise CaptureContractError("topology consumer keys must be canonical integer strings")
+        consumer = int(raw_consumer)
+        if not isinstance(raw_by_anchor, Mapping):
+            raise CaptureContractError(
+                f"consumer_candidates_by_layer[{consumer}] must be an object"
+            )
+        by_anchor: dict[int, tuple[int, list[list[float]]]] = {}
+        for raw_anchor, raw_stats in raw_by_anchor.items():
+            if (
+                not isinstance(raw_anchor, str)
+                or not raw_anchor.isdigit()
+                or raw_anchor != str(int(raw_anchor))
+            ):
+                raise CaptureContractError("topology anchor keys must be canonical integer strings")
+            anchor = int(raw_anchor)
+            if not isinstance(raw_stats, Mapping):
+                raise CaptureContractError(
+                    f"topology candidate {anchor}->{consumer} must be an object"
+                )
+            _exact_fields(
+                raw_stats,
+                _CANDIDATE_STATS_FIELDS,
+                f"topology candidate {anchor}->{consumer}",
+            )
+            start = _integer(
+                raw_stats["consumer_head_start"],
+                f"topology candidate {anchor}->{consumer}.consumer_head_start",
+            )
+            matrix = raw_stats["dropped_mass"]
+            if not isinstance(matrix, list) or not matrix:
+                raise CaptureContractError(
+                    f"topology candidate {anchor}->{consumer}.dropped_mass must be non-empty"
+                )
+            rows: list[list[float]] = []
+            for local_head, raw_row in enumerate(matrix):
+                if not isinstance(raw_row, list) or len(raw_row) != global_num_heads:
+                    raise CaptureContractError(
+                        f"topology candidate {anchor}->{consumer} local head "
+                        f"{local_head} must cover every donor"
+                    )
+                rows.append(
+                    [
+                        _finite_number(
+                            value,
+                            f"topology candidate {anchor}->{consumer}[{local_head}][{donor}]",
+                            minimum=0.0,
+                            maximum=1.0,
+                        )
+                        for donor, value in enumerate(raw_row)
+                    ]
+                )
+            if start + len(rows) > global_num_heads:
+                raise CaptureContractError(
+                    f"rank {rank} topology candidate {anchor}->{consumer} shard exceeds head count"
+                )
+            by_anchor[anchor] = (start, rows)
+        result[consumer] = by_anchor
+    observed = {consumer: set(by_anchor) for consumer, by_anchor in result.items()}
+    if observed != expected:
+        raise CaptureContractError(
+            f"rank {rank} does not contain the exact topology candidate window"
+        )
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class MergedCapture:
     """One compact normalized capture plus auditable metadata."""
@@ -949,3 +1057,218 @@ def merge_rank_captures(
         "compact_capture_sha256": canonical_json_sha256(compact_capture),
     }
     return MergedCapture(compact_capture, manifest)
+
+
+def merge_rank_topology_discovery_captures(
+    values: Sequence[Mapping[str, object]], invocation: Mapping[str, object]
+) -> MergedCapture:
+    """Merge bounded all-candidate topology-discovery shards."""
+    trusted_invocation = _validate_invocation(invocation)
+    expected_digest = canonical_json_sha256(trusted_invocation)
+    world_size, ordered = _validate_rank_envelope(
+        values, _RANK_TOPOLOGY_CAPTURE_FIELDS, "topology capture drain"
+    )
+    global_heads: set[int] = set()
+    eligible_values: set[int] = set()
+    geometry_values: list[dict[str, int]] = []
+    attention_layer_values: list[list[int]] = []
+    max_span_values: set[int] = set()
+    anchor_payloads: list[dict[str, dict[str, list[int] | list[float]]]] = []
+    candidate_payloads: list[dict[int, dict[int, tuple[int, list[list[float]]]]]] = []
+    attention_call_counts: list[dict[str, int]] = []
+    tp_head_order_evidence: list[dict[str, object]] = []
+    dense_shadow_evidence: list[dict[str, object]] = []
+    for value in ordered:
+        rank = cast("int", value["rank"])
+        if value["capture_mode"] != "topology_discovery":
+            raise CaptureContractError(
+                f"topology capture drain rank {rank} has the wrong capture_mode"
+            )
+        if value["invocation"] != trusted_invocation:
+            raise CaptureContractError(
+                f"topology capture drain rank {rank} echoed the wrong invocation"
+            )
+        if value["invocation_sha256"] != expected_digest:
+            raise CaptureContractError(
+                f"topology capture drain rank {rank} has the wrong invocation digest"
+            )
+        geometry = _validate_geometry(
+            value["geometry"], f"topology capture drain rank {rank} geometry"
+        )
+        if geometry != trusted_invocation["expected_geometry"]:
+            raise CaptureContractError(
+                f"topology capture drain rank {rank} measured the wrong final chunk"
+            )
+        geometry_values.append(geometry)
+        global_num_heads = _integer(
+            value["global_num_heads"],
+            f"topology capture drain rank {rank} global_num_heads",
+            minimum=1,
+        )
+        eligible_tiles = _integer(
+            value["eligible_tiles"],
+            f"topology capture drain rank {rank} eligible_tiles",
+            minimum=1,
+        )
+        raw_layers = value["attention_layers"]
+        if not isinstance(raw_layers, list):
+            raise CaptureContractError(
+                f"topology capture drain rank {rank} attention_layers must be a list"
+            )
+        attention_layers = [_integer(layer, f"rank {rank} attention layer") for layer in raw_layers]
+        if len(attention_layers) < 2 or attention_layers != sorted(set(attention_layers)):
+            raise CaptureContractError(
+                f"topology capture drain rank {rank} attention_layers must be sorted and unique"
+            )
+        max_reuse_span = _integer(
+            value["max_reuse_span"],
+            f"topology capture drain rank {rank} max_reuse_span",
+            minimum=1,
+        )
+        if max_reuse_span >= len(attention_layers):
+            raise CaptureContractError(
+                "topology max_reuse_span must be smaller than the attention-layer count"
+            )
+        global_heads.add(global_num_heads)
+        eligible_values.add(eligible_tiles)
+        attention_layer_values.append(attention_layers)
+        max_span_values.add(max_reuse_span)
+        anchors = _parse_anchor_stats(
+            value["anchor_stats_by_layer"],
+            global_num_heads=global_num_heads,
+            eligible_tiles=eligible_tiles,
+        )
+        if {int(layer) for layer in anchors} != set(attention_layers):
+            raise CaptureContractError(
+                f"rank {rank} anchor statistics do not cover every attention layer"
+            )
+        anchor_payloads.append(anchors)
+        candidates = _parse_topology_candidates(
+            value["consumer_candidates_by_layer"],
+            rank=rank,
+            global_num_heads=global_num_heads,
+            attention_layers=attention_layers,
+            max_reuse_span=max_reuse_span,
+        )
+        candidate_payloads.append(candidates)
+        attention_call_counts.append(
+            _parse_attention_call_counts(value["attention_call_counts"], rank=rank)
+        )
+        tp_evidence = _parse_tp_head_order_evidence(
+            value["tp_head_order_evidence"],
+            rank=rank,
+            world_size=world_size,
+            global_num_heads=global_num_heads,
+        )
+        tp_head_order_evidence.append(tp_evidence)
+        dense_shadow_evidence.append(
+            _parse_dense_shadow_evidence(value["dense_shadow_evidence"], rank=rank)
+        )
+        for consumer, by_anchor in candidates.items():
+            for anchor, (start, rows) in by_anchor.items():
+                if (
+                    start != tp_evidence["global_head_start"]
+                    or len(rows) != tp_evidence["local_num_heads"]
+                ):
+                    raise CaptureContractError(
+                        f"rank {rank} topology candidate {anchor}->{consumer} "
+                        "does not match its TP head shard"
+                    )
+
+    if len(global_heads) != 1 or len(eligible_values) != 1 or len(max_span_values) != 1:
+        raise CaptureContractError(
+            "topology capture ranks disagree on heads, eligible tiles, or reuse span"
+        )
+    if any(value != geometry_values[0] for value in geometry_values[1:]):
+        raise CaptureContractError("topology capture ranks disagree on final-chunk geometry")
+    if any(value != attention_layer_values[0] for value in attention_layer_values[1:]):
+        raise CaptureContractError("topology capture ranks disagree on attention layers")
+    if any(value != anchor_payloads[0] for value in anchor_payloads[1:]):
+        raise CaptureContractError("topology capture ranks disagree on anchor statistics")
+    if any(value != attention_call_counts[0] for value in attention_call_counts[1:]):
+        raise CaptureContractError("topology capture ranks disagree on attention call counts")
+    if any(value != dense_shadow_evidence[0] for value in dense_shadow_evidence[1:]):
+        raise CaptureContractError("topology capture ranks disagree on dense shadow evidence")
+
+    global_num_heads = next(iter(global_heads))
+    eligible_tiles = next(iter(eligible_values))
+    attention_layers = attention_layer_values[0]
+    max_reuse_span = next(iter(max_span_values))
+    if eligible_tiles != _eligible_tiles(geometry_values[0]):
+        raise CaptureContractError("topology capture eligible_tiles does not match causal geometry")
+    expected_prefill_calls = (
+        (cast("int", trusted_invocation["sample_length"]) + MAX_QUERY_CHUNK_TOKENS - 1)
+        // MAX_QUERY_CHUNK_TOKENS
+    ) * len(attention_layers)
+    common_counts = attention_call_counts[0]
+    if common_counts["prefill"] != expected_prefill_calls:
+        raise CaptureContractError(
+            "topology capture prefill attention call count does not match chunks times layers"
+        )
+    if common_counts["decode"] != 0:
+        raise CaptureContractError(
+            "topology capture observed a decode attention call at max_tokens=1"
+        )
+    common_shadow = dense_shadow_evidence[0]
+    if common_shadow["enabled"] and common_shadow["validated_layer_indices"] != attention_layers:
+        raise CaptureContractError(
+            "topology dense shadow evidence does not cover every attention layer"
+        )
+
+    expected_edges = {
+        (anchor, consumer)
+        for position, consumer in enumerate(attention_layers[1:], start=1)
+        for anchor in attention_layers[max(0, position - max_reuse_span) : position]
+    }
+    merged_candidates: dict[str, dict[str, dict[str, object]]] = {}
+    for anchor, consumer in sorted(expected_edges):
+        shards = sorted(
+            (payload[consumer][anchor] for payload in candidate_payloads),
+            key=lambda value: value[0],
+        )
+        cursor = 0
+        global_rows: list[list[float]] = []
+        for start, local_rows in shards:
+            if start != cursor:
+                raise CaptureContractError(
+                    f"topology candidate {anchor}->{consumer} shards are "
+                    f"overlapping or incomplete at {cursor}"
+                )
+            global_rows.extend(local_rows)
+            cursor += len(local_rows)
+        if cursor != global_num_heads:
+            raise CaptureContractError(
+                f"topology candidate {anchor}->{consumer} shards cover {cursor}, "
+                f"expected {global_num_heads}"
+            )
+        merged_candidates.setdefault(str(consumer), {})[str(anchor)] = {"dropped_mass": global_rows}
+
+    capture = {
+        "topology_discovery_capture_schema_version": 1,
+        "invocation": trusted_invocation,
+        "geometry": geometry_values[0],
+        "global_num_heads": global_num_heads,
+        "eligible_tiles": eligible_tiles,
+        "attention_layers": attention_layers,
+        "max_reuse_span": max_reuse_span,
+        "anchor_stats_by_layer": anchor_payloads[0],
+        "consumer_candidates_by_layer": merged_candidates,
+    }
+    manifest = {
+        "capture_schema_version": CAPTURE_SCHEMA_VERSION,
+        "capture_mode": "topology_discovery",
+        "invocation": trusted_invocation,
+        "invocation_sha256": expected_digest,
+        "world_size": world_size,
+        "global_num_heads": global_num_heads,
+        "eligible_tiles": eligible_tiles,
+        "attention_layers": attention_layers,
+        "max_reuse_span": max_reuse_span,
+        "candidate_edge_count": len(expected_edges),
+        "candidate_cell_count": len(expected_edges) * global_num_heads * global_num_heads,
+        "attention_call_counts": common_counts,
+        "tp_head_order_evidence": tp_head_order_evidence,
+        "dense_shadow_evidence": common_shadow,
+        "topology_discovery_capture_sha256": canonical_json_sha256(capture),
+    }
+    return MergedCapture(capture, manifest)

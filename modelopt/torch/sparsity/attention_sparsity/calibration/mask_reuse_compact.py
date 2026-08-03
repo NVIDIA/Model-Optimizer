@@ -19,9 +19,9 @@ One compact record stores the anchor vectors and consumer ``[H, H]`` risk
 matrices for a single prompt and target sparsity.  The selector makes three
 semantic passes (validation, calibration selection, frozen-policy evaluation)
 and hashes the exact file bytes before and after selection/evaluation to detect
-concurrent mutation. Memory scales with the current and immediately prior
-capture plus ``O(targets * consumers * H^2)`` aggregate arrays rather than with
-every prompt-level candidate cell.
+concurrent mutation. Selection retains development risk matrices long enough to
+optimize the worst prompt under the requested BMM1 target; held-out captures
+remain evaluation-only.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
+import pulp
 
 import modelopt
 
@@ -44,6 +45,7 @@ from .checkpoint_manifest import VerifiedCheckpointManifest
 from .mask_reuse import (
     _CALIBRATION_PROTOCOL,
     _DEPLOYMENT_GEOMETRY_CONTRACT,
+    _SOLVER_LEXICOGRAPHIC_ATOL,
     AnchorLayerStats,
     Bucket,
     ConsumerHead,
@@ -713,10 +715,17 @@ def _validate_dataset(
 
 @dataclass(slots=True)
 class _SelectionAccumulator:
-    max_mass: Mapping[float, np.ndarray]
+    prompt_mass: Mapping[float, dict[str, np.ndarray]]
     retained_by_anchor: Mapping[float, np.ndarray]
     eligible_sum: dict[float, int]
     anchor_evaluation: Mapping[float, _AnchorEvaluation]
+
+
+@dataclass(frozen=True, slots=True)
+class _DonorOption:
+    choice: _Choice
+    bmm1_skipped_tiles: int
+    risk_by_prompt: tuple[float, ...]
 
 
 def _selection_pass(
@@ -724,7 +733,7 @@ def _selection_pass(
     dataset: _Dataset,
     *,
     max_anchor_dropped_mass: float,
-    max_reuse_selection_dropped_mass: float,
+    target_bmm1_skip_ratio: float,
 ) -> dict[Bucket, _Selection]:
     consumer_index = {layer: index for index, layer in enumerate(dataset.consumer_layers)}
     anchor_index = {layer: index for index, layer in enumerate(dataset.anchors)}
@@ -732,18 +741,7 @@ def _selection_pass(
     for bucket in dataset.buckets:
         menus = dataset.menus[bucket]
         accumulators[bucket] = _SelectionAccumulator(
-            max_mass={
-                target: np.full(
-                    (
-                        len(dataset.consumer_layers),
-                        dataset.global_num_heads,
-                        dataset.global_num_heads,
-                    ),
-                    -np.inf,
-                    dtype=np.float64,
-                )
-                for target in menus
-            },
+            prompt_mass={target: {} for target in menus},
             retained_by_anchor={
                 target: np.zeros((len(dataset.anchors), dataset.global_num_heads), dtype=np.int64)
                 for target in menus
@@ -779,67 +777,347 @@ def _selection_pass(
         evaluation.worst_prompt_mean = max(evaluation.worst_prompt_mean, prompt_mean)
         evaluation.violations += int(prompt_mean > max_anchor_dropped_mass)
         for layer, stats in capture.consumer_layers.items():
-            matrix = np.asarray(stats.dropped_mass, dtype=np.float64)
-            np.maximum(
-                accumulator.max_mass[target][consumer_index[layer]],
-                matrix,
-                out=accumulator.max_mass[target][consumer_index[layer]],
+            if capture.prompt_id not in accumulator.prompt_mass[target]:
+                accumulator.prompt_mass[target][capture.prompt_id] = np.empty(
+                    (
+                        len(dataset.consumer_layers),
+                        dataset.global_num_heads,
+                        dataset.global_num_heads,
+                    ),
+                    dtype=np.float64,
+                )
+            accumulator.prompt_mass[target][capture.prompt_id][consumer_index[layer]] = np.asarray(
+                stats.dropped_mass, dtype=np.float64
             )
+
+    def donor_options(
+        accumulator: _SelectionAccumulator,
+        *,
+        target: float,
+        layer: int,
+        head: int,
+        retained: np.ndarray,
+        prompts: tuple[str, ...],
+    ) -> tuple[_DonorOption, ...]:
+        options = [
+            _DonorOption(
+                _Choice(0, True, accumulator.eligible_sum[target]),
+                0,
+                tuple(0.0 for _ in prompts),
+            )
+        ]
+        layer_row = consumer_index[layer]
+        for donor in range(dataset.global_num_heads):
+            retained_tiles = int(retained[donor])
+            options.append(
+                _DonorOption(
+                    _Choice(donor, False, retained_tiles),
+                    accumulator.eligible_sum[target] - retained_tiles,
+                    tuple(
+                        float(accumulator.prompt_mass[target][prompt][layer_row, head, donor])
+                        for prompt in prompts
+                    ),
+                )
+            )
+        pareto = []
+        for candidate_index, candidate in enumerate(options):
+            dominated = False
+            for other_index, other in enumerate(options):
+                if candidate_index == other_index:
+                    continue
+                no_worse = other.bmm1_skipped_tiles >= candidate.bmm1_skipped_tiles and all(
+                    other_risk <= candidate_risk
+                    for other_risk, candidate_risk in zip(
+                        other.risk_by_prompt,
+                        candidate.risk_by_prompt,
+                        strict=True,
+                    )
+                )
+                strictly_better = other.bmm1_skipped_tiles > candidate.bmm1_skipped_tiles or any(
+                    other_risk < candidate_risk
+                    for other_risk, candidate_risk in zip(
+                        other.risk_by_prompt,
+                        candidate.risk_by_prompt,
+                        strict=True,
+                    )
+                )
+                canonical_tie = not strictly_better and (
+                    (other.choice.fallback and not candidate.choice.fallback)
+                    or (
+                        other.choice.fallback == candidate.choice.fallback
+                        and other.choice.donor_head < candidate.choice.donor_head
+                    )
+                )
+                if no_worse and (strictly_better or canonical_tie):
+                    dominated = True
+                    break
+            if not dominated:
+                pareto.append(candidate)
+        return tuple(pareto)
+
+    def solve_target(
+        bucket: Bucket,
+        target: float,
+        *,
+        minimum_bmm1_skipped_tiles: int | None,
+        maximize_bmm1_skipped_tiles: bool,
+        target_met: bool,
+    ) -> _Selection | None:
+        accumulator = accumulators[bucket]
+        prompts = dataset.prompts[(bucket, "calibration")]
+        problem = pulp.LpProblem("compact_mask_reuse", pulp.LpMinimize)
+        variables: dict[tuple[int, int, int], pulp.LpVariable] = {}
+        options: dict[tuple[int, int, int], _DonorOption] = {}
+        prompt_risk_terms: dict[str, list[object]] = defaultdict(list)
+        for layer in dataset.consumer_layers:
+            anchor = dataset.nearest[layer]
+            retained = accumulator.retained_by_anchor[target][anchor_index[anchor]]
+            for head in range(dataset.global_num_heads):
+                menu = donor_options(
+                    accumulator,
+                    target=target,
+                    layer=layer,
+                    head=head,
+                    retained=retained,
+                    prompts=prompts,
+                )
+                choice_variables = []
+                for option_index, option in enumerate(menu):
+                    key = (layer, head, option_index)
+                    variable = pulp.LpVariable(
+                        f"choice_{layer}_{head}_{option_index}",
+                        lowBound=0,
+                        upBound=1,
+                        cat="Binary",
+                    )
+                    variables[key] = variable
+                    options[key] = option
+                    choice_variables.append(variable)
+                    for prompt, risk in zip(prompts, option.risk_by_prompt, strict=True):
+                        prompt_risk_terms[prompt].append(risk * variable)
+                problem += pulp.lpSum(choice_variables) == 1, f"choose_{layer}_{head}"
+
+        bmm1_skipped = pulp.lpSum(
+            options[key].bmm1_skipped_tiles * variable for key, variable in variables.items()
+        )
+        retained_reuse = pulp.lpSum(
+            options[key].choice.retained_tiles * variable for key, variable in variables.items()
+        )
+        reuse_count = pulp.lpSum(
+            int(not options[key].choice.fallback) * variable for key, variable in variables.items()
+        )
+        normalizer = len(dataset.nearest) * dataset.global_num_heads
+        worst_prompt_risk = pulp.LpVariable("worst_prompt_reuse_dropped_mass", lowBound=0.0)
+        for prompt_index, prompt in enumerate(prompts):
+            problem += (
+                pulp.lpSum(prompt_risk_terms[prompt]) <= normalizer * worst_prompt_risk,
+                f"reuse_risk_{prompt_index}",
+            )
+        if minimum_bmm1_skipped_tiles is not None:
+            problem += bmm1_skipped >= minimum_bmm1_skipped_tiles, "minimum_bmm1_skips"
+        solver = pulp.PULP_CBC_CMD(msg=False, threads=1, options=["randomSeed 0"])
+        warm_solver = pulp.PULP_CBC_CMD(
+            msg=False,
+            threads=1,
+            options=["randomSeed 0"],
+            warmStart=True,
+        )
+        has_incumbent = False
+
+        def minimize(expression: object) -> bool:
+            nonlocal has_incumbent
+            problem.setObjective(expression)
+            status = problem.solve(warm_solver if has_incumbent else solver)
+            has_incumbent = status == pulp.LpStatusOptimal
+            return has_incumbent
+
+        def minimize_and_fix(expression: object, name: str, *, integral: bool) -> bool:
+            nonlocal problem
+            if not minimize(expression):
+                return False
+            raw_value = pulp.value(expression)
+            value = 0.0 if raw_value is None else float(raw_value)
+            if integral:
+                problem += expression == round(value), name
+            else:
+                problem += expression <= value + _SOLVER_LEXICOGRAPHIC_ATOL, name
+            return True
+
+        if maximize_bmm1_skipped_tiles and not minimize_and_fix(
+            -bmm1_skipped, "fix_maximum_bmm1_skips", integral=True
+        ):
+            return None
+        if not minimize_and_fix(worst_prompt_risk, "fix_worst_prompt_risk", integral=False):
+            return None
+        if not minimize_and_fix(retained_reuse, "fix_retained_reuse", integral=True):
+            raise MaskReuseCalibrationError(
+                "compact selector lost feasibility after fixing worst-prompt reuse risk"
+            )
+        donor_signature = pulp.lpSum(
+            (options[key].choice.donor_head + 1) * variable
+            for key, variable in variables.items()
+            if not options[key].choice.fallback
+        )
+        donor_base = dataset.global_num_heads * len(dataset.targets) + 1
+        if not minimize(reuse_count * donor_base + donor_signature):
+            raise MaskReuseCalibrationError(
+                "compact selector lost deterministic tie-break feasibility"
+            )
+
+        choices: dict[ConsumerHead, _Choice] = {}
+        prompt_totals = dict.fromkeys(prompts, 0.0)
+        worst_individual = 0.0
+        skipped_tiles = 0
+        retained_tiles = 0
+        for key, variable in variables.items():
+            if variable.value() <= 0.5:
+                continue
+            layer, head, _ = key
+            option = options[key]
+            choices[(layer, head)] = option.choice
+            skipped_tiles += option.bmm1_skipped_tiles
+            retained_tiles += option.choice.retained_tiles
+            if not option.choice.fallback:
+                for prompt, risk in zip(prompts, option.risk_by_prompt, strict=True):
+                    prompt_totals[prompt] += risk
+                    worst_individual = max(worst_individual, risk)
+        prompt_risks = [prompt_totals[prompt] / normalizer for prompt in prompts]
+        eligible_tiles = (
+            accumulator.eligible_sum[target] * dataset.global_num_heads * len(dataset.nearest)
+        )
+        return _Selection(
+            target,
+            choices,
+            (),
+            bmm1_eligible_tiles=eligible_tiles,
+            bmm1_skipped_tiles=skipped_tiles,
+            target_bmm1_skip_ratio_met=target_met,
+            worst_prompt_reuse_dropped_mass=max(prompt_risks, default=0.0),
+            mean_prompt_reuse_dropped_mass=(
+                sum(prompt_risks) / len(prompt_risks) if prompt_risks else 0.0
+            ),
+            worst_individual_reuse_dropped_mass=worst_individual,
+        )
 
     selections: dict[Bucket, _Selection] = {}
     for bucket in dataset.buckets:
         accumulator = accumulators[bucket]
-        frontier: list[Mapping[str, object]] = []
+        frontier: list[dict[str, object]] = []
         candidates: list[tuple[tuple[object, ...], _Selection]] = []
+        maximum_candidates: list[tuple[tuple[object, ...], _Selection]] = []
         for target in dataset.menus[bucket]:
             anchor_evaluation = accumulator.anchor_evaluation[target]
-            choices: dict[ConsumerHead, _Choice] = {}
-            total_retained = 0
-            fallback_count = 0
-            for layer in dataset.consumer_layers:
-                layer_index = consumer_index[layer]
-                anchor = dataset.nearest[layer]
-                retained = accumulator.retained_by_anchor[target][anchor_index[anchor]]
-                for head in range(dataset.global_num_heads):
-                    feasible = np.flatnonzero(
-                        accumulator.max_mass[target][layer_index, head]
-                        <= max_reuse_selection_dropped_mass
-                    )
-                    if feasible.size:
-                        donor = min((int(retained[item]), int(item)) for item in feasible)[1]
-                        choice = _Choice(donor, False, int(retained[donor]))
-                    else:
-                        fallback_count += 1
-                        choice = _Choice(0, True, accumulator.eligible_sum[target])
-                    choices[(layer, head)] = choice
-                    total_retained += choice.retained_tiles
-            signature = tuple(choices[item].donor_head for item in dataset.targets)
-            combined_tile_cost = 2 * total_retained + anchor_evaluation.retained_tiles
+            eligible_tiles = (
+                accumulator.eligible_sum[target] * dataset.global_num_heads * len(dataset.nearest)
+            )
+            required_tiles = math.ceil(target_bmm1_skip_ratio * eligible_tiles)
+            selected = None
+            if anchor_evaluation.violations == 0:
+                selected = solve_target(
+                    bucket,
+                    target,
+                    minimum_bmm1_skipped_tiles=required_tiles,
+                    maximize_bmm1_skipped_tiles=False,
+                    target_met=True,
+                )
+            fallback_count = (
+                None
+                if selected is None
+                else sum(choice.fallback for choice in selected.choices.values())
+            )
+            retained_reuse = (
+                None
+                if selected is None
+                else sum(choice.retained_tiles for choice in selected.choices.values())
+            )
+            combined_tile_cost = (
+                None
+                if retained_reuse is None
+                else 2 * retained_reuse + anchor_evaluation.retained_tiles
+            )
             frontier.append(
                 {
                     "target_sparsity": target,
                     "anchor_safe": anchor_evaluation.violations == 0,
-                    "retained_reuse_tiles": total_retained,
+                    "target_bmm1_skip_ratio": target_bmm1_skip_ratio,
+                    "target_bmm1_skip_ratio_feasible": selected is not None,
+                    "retained_reuse_tiles": retained_reuse,
                     "retained_anchor_tiles": anchor_evaluation.retained_tiles,
                     "combined_tile_cost": combined_tile_cost,
                     "fallback_head_count": fallback_count,
                     "anchor_calibration": anchor_evaluation.to_mapping(),
                 }
             )
-            if anchor_evaluation.violations == 0:
+            if selected is not None:
                 rank = (
+                    selected.worst_prompt_reuse_dropped_mass,
                     combined_tile_cost,
-                    fallback_count,
                     target,
-                    signature,
                 )
-                candidates.append((rank, _Selection(target, choices, ())))
+                candidates.append((rank, selected))
+                frontier[-1].update(
+                    {
+                        "bmm1_skipped_tiles": selected.bmm1_skipped_tiles,
+                        "achieved_bmm1_skip_ratio": (
+                            selected.bmm1_skipped_tiles / selected.bmm1_eligible_tiles
+                        ),
+                        "worst_prompt_model_wide_reuse_dropped_mass": (
+                            selected.worst_prompt_reuse_dropped_mass
+                        ),
+                    }
+                )
+            elif anchor_evaluation.violations == 0:
+                maximum = solve_target(
+                    bucket,
+                    target,
+                    minimum_bmm1_skipped_tiles=None,
+                    maximize_bmm1_skipped_tiles=True,
+                    target_met=False,
+                )
+                if maximum is not None:
+                    maximum_candidates.append(
+                        (
+                            (
+                                -maximum.bmm1_skipped_tiles,
+                                maximum.worst_prompt_reuse_dropped_mass,
+                                target,
+                            ),
+                            maximum,
+                        )
+                    )
+                    frontier[-1].update(
+                        {
+                            "maximum_feasible_bmm1_skipped_tiles": (maximum.bmm1_skipped_tiles),
+                            "maximum_feasible_bmm1_skip_ratio": (
+                                maximum.bmm1_skipped_tiles / maximum.bmm1_eligible_tiles
+                            ),
+                        }
+                    )
         if candidates:
             _, selected = min(candidates, key=lambda item: item[0])
             selections[bucket] = _Selection(
                 selected.target_sparsity,
                 selected.choices,
                 tuple(frontier),
+                bmm1_eligible_tiles=selected.bmm1_eligible_tiles,
+                bmm1_skipped_tiles=selected.bmm1_skipped_tiles,
+                target_bmm1_skip_ratio_met=True,
+                worst_prompt_reuse_dropped_mass=selected.worst_prompt_reuse_dropped_mass,
+                mean_prompt_reuse_dropped_mass=selected.mean_prompt_reuse_dropped_mass,
+                worst_individual_reuse_dropped_mass=(selected.worst_individual_reuse_dropped_mass),
+            )
+        elif maximum_candidates:
+            _, selected = min(maximum_candidates, key=lambda item: item[0])
+            selections[bucket] = _Selection(
+                selected.target_sparsity,
+                selected.choices,
+                tuple(frontier),
+                bmm1_eligible_tiles=selected.bmm1_eligible_tiles,
+                bmm1_skipped_tiles=selected.bmm1_skipped_tiles,
+                target_bmm1_skip_ratio_met=False,
+                worst_prompt_reuse_dropped_mass=selected.worst_prompt_reuse_dropped_mass,
+                mean_prompt_reuse_dropped_mass=selected.mean_prompt_reuse_dropped_mass,
+                worst_individual_reuse_dropped_mass=(selected.worst_individual_reuse_dropped_mass),
             )
         else:
             target = dataset.menus[bucket][0]
@@ -852,6 +1130,11 @@ def _selection_pass(
                 dense_choices,
                 tuple(frontier),
                 "no_target_sparsity_satisfied_anchor_calibration_constraint",
+                bmm1_eligible_tiles=(
+                    accumulator.eligible_sum[target]
+                    * dataset.global_num_heads
+                    * len(dataset.nearest)
+                ),
             )
     return selections
 
@@ -862,7 +1145,7 @@ def _evaluation_pass(
     selections: Mapping[Bucket, _Selection],
     *,
     max_anchor_dropped_mass: float,
-    max_reuse_dropped_mass: float,
+    reuse_dropped_mass_report_threshold: float,
 ) -> tuple[
     dict[tuple[Bucket, str], _ReuseEvaluation],
     dict[tuple[Bucket, str], _AnchorEvaluation],
@@ -895,7 +1178,7 @@ def _evaluation_pass(
                 reuse_result.sparse_observations += 1
                 reuse_result.dropped_mass_sum += dropped
                 reuse_result.worst_dropped_mass = max(reuse_result.worst_dropped_mass, dropped)
-                reuse_result.violations += int(dropped > max_reuse_dropped_mass)
+                reuse_result.violations += int(dropped > reuse_dropped_mass_report_threshold)
 
         anchor_result = anchor[(capture.bucket, capture.split)]
         dropped_values: list[float] = []
@@ -934,11 +1217,11 @@ def calibrate_compact_mask_reuse_policy(
     checkpoint_manifest: VerifiedCheckpointManifest,
     evidence: Mapping[str, object],
     max_anchor_dropped_mass: float,
-    max_reuse_dropped_mass: float,
-    max_reuse_selection_dropped_mass: float | None = None,
+    reuse_dropped_mass_report_threshold: float,
+    target_bmm1_skip_ratio: float,
     source_provenance: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Select and evaluate a fail-closed schema-v3 candidate from compact captures."""
+    """Select a minimum-risk schema-v3 candidate under a per-bucket BMM1 target."""
     if not isinstance(checkpoint_manifest, VerifiedCheckpointManifest):
         raise MaskReuseCalibrationError(
             "checkpoint_manifest must be returned by verify_checkpoint_manifest"
@@ -978,35 +1261,30 @@ def calibrate_compact_mask_reuse_policy(
     anchor_bound = _number(
         max_anchor_dropped_mass, "max_anchor_dropped_mass", minimum=0.0, maximum=1.0
     )
-    reuse_bound = _number(
-        max_reuse_dropped_mass, "max_reuse_dropped_mass", minimum=0.0, maximum=1.0
+    reuse_report_threshold = _number(
+        reuse_dropped_mass_report_threshold,
+        "reuse_dropped_mass_report_threshold",
+        minimum=0.0,
+        maximum=1.0,
     )
-    selection_bound = (
-        reuse_bound
-        if max_reuse_selection_dropped_mass is None
-        else _number(
-            max_reuse_selection_dropped_mass,
-            "max_reuse_selection_dropped_mass",
-            minimum=0.0,
-            maximum=1.0,
-        )
+    bmm1_target = _number(
+        target_bmm1_skip_ratio,
+        "target_bmm1_skip_ratio",
+        minimum=0.0,
+        maximum=1.0,
     )
-    if selection_bound > reuse_bound:
-        raise MaskReuseCalibrationError(
-            "max_reuse_selection_dropped_mass must not exceed max_reuse_dropped_mass"
-        )
     selections = _selection_pass(
         source,
         dataset,
         max_anchor_dropped_mass=anchor_bound,
-        max_reuse_selection_dropped_mass=selection_bound,
+        target_bmm1_skip_ratio=bmm1_target,
     )
     reuse_evaluations, anchor_evaluations = _evaluation_pass(
         source,
         dataset,
         selections,
         max_anchor_dropped_mass=anchor_bound,
-        max_reuse_dropped_mass=reuse_bound,
+        reuse_dropped_mass_report_threshold=reuse_report_threshold,
     )
     if source.sha256() != input_sha256:
         raise MaskReuseCalibrationError(
@@ -1021,6 +1299,8 @@ def calibrate_compact_mask_reuse_policy(
     overall_anchor_calibration = _AnchorEvaluation()
     overall_anchor_heldout = _AnchorEvaluation()
     total_fallback = 0
+    total_bmm1_eligible = 0
+    total_bmm1_skipped = 0
     for bucket in dataset.buckets:
         selection = selections[bucket]
         if selection.target_sparsity is not None and bucket[1] is None:
@@ -1066,6 +1346,8 @@ def calibrate_compact_mask_reuse_policy(
         context_policies.append(policy)
         fallback_count = sum(len(heads) for heads in fallback_heads.values())
         total_fallback += fallback_count
+        total_bmm1_eligible += selection.bmm1_eligible_tiles
+        total_bmm1_skipped += selection.bmm1_skipped_tiles
         target_menus.append(
             {
                 "min_kv_tokens": bucket[0],
@@ -1079,10 +1361,40 @@ def calibrate_compact_mask_reuse_policy(
                 "max_kv_tokens": bucket[1],
                 "selected_target_sparsity": selection.target_sparsity,
                 "selection_status": (
-                    "sparse" if selection.target_sparsity is not None else selection.exact_reason
+                    "target_bmm1_skip_ratio_met"
+                    if selection.target_sparsity is not None
+                    and selection.target_bmm1_skip_ratio_met
+                    else (
+                        "target_bmm1_skip_ratio_unmet_maximum_feasible"
+                        if selection.target_sparsity is not None
+                        else selection.exact_reason
+                    )
                 ),
                 "target_sparsity_frontier": list(selection.frontier),
                 "fallback_head_count": fallback_count,
+                "bmm1_skip_objective": {
+                    "target": bmm1_target,
+                    "target_met": selection.target_bmm1_skip_ratio_met,
+                    "eligible_tiles": selection.bmm1_eligible_tiles,
+                    "skipped_tiles": selection.bmm1_skipped_tiles,
+                    "achieved": (
+                        selection.bmm1_skipped_tiles / selection.bmm1_eligible_tiles
+                        if selection.bmm1_eligible_tiles
+                        else 0.0
+                    ),
+                },
+                "reuse_selection_objective": {
+                    "hard_maximum": None,
+                    "worst_development_prompt_model_wide_dropped_mass": (
+                        selection.worst_prompt_reuse_dropped_mass
+                    ),
+                    "mean_development_prompt_model_wide_dropped_mass": (
+                        selection.mean_prompt_reuse_dropped_mass
+                    ),
+                    "worst_individual_dropped_mass": (
+                        selection.worst_individual_reuse_dropped_mass
+                    ),
+                },
                 "reuse_calibration": reuse_calibration.to_mapping(),
                 "reuse_heldout": reuse_heldout.to_mapping(),
                 "anchor_calibration": anchor_calibration.to_mapping(
@@ -1107,10 +1419,18 @@ def calibrate_compact_mask_reuse_policy(
             "maximum": anchor_bound,
         },
         "reuse": {
-            "metric": "per_prompt_candidate_reuse_dropped_mass",
-            "comparison": "<=",
-            "selection_maximum": selection_bound,
-            "evaluation_maximum": reuse_bound,
+            "selection_metric": (
+                "per_prompt_mean_across_all_attention_layers_and_heads_reuse_dropped_mass"
+            ),
+            "selection_hard_maximum": None,
+            "report_metric": "per_prompt_candidate_reuse_dropped_mass",
+            "report_threshold": reuse_report_threshold,
+            "report_threshold_affects_selection": False,
+        },
+        "bmm1_skip_ratio": {
+            "metric": "per_context_bucket_model_wide_eligible_bmm1_tile_skip_ratio",
+            "comparison": ">=",
+            "target": bmm1_target,
         },
     }
     provenance: dict[str, object] = {
@@ -1150,8 +1470,10 @@ def calibrate_compact_mask_reuse_policy(
         "constraints": constraints,
         "tie_breaks": [
             "reject target sparsities exceeding the calibration anchor bound",
+            "meet the requested BMM1 skip ratio in every context bucket",
+            "minimum worst-prompt model-wide reuse dropped mass",
             "minimum equal-BMM combined tile cost 2*A_R + A_A",
-            "fewest exact-fallback consumer heads",
+            "fewest reused consumer heads",
             "smallest target sparsity",
             "lexicographically smallest donor-head map",
         ],
@@ -1174,6 +1496,17 @@ def calibrate_compact_mask_reuse_policy(
             "consumer_head_bucket_count": denominator,
             "fallback_head_bucket_count": total_fallback,
             "fallback_fraction": total_fallback / denominator,
+            "bmm1_skip_objective": {
+                "target_per_context_bucket": bmm1_target,
+                "all_context_buckets_met": all(
+                    selection.target_bmm1_skip_ratio_met for selection in selections.values()
+                ),
+                "eligible_tiles": total_bmm1_eligible,
+                "skipped_tiles": total_bmm1_skipped,
+                "achieved_model_wide": (
+                    total_bmm1_skipped / total_bmm1_eligible if total_bmm1_eligible else 0.0
+                ),
+            },
             "reuse_calibration": overall_reuse_calibration.to_mapping(),
             "reuse_heldout": overall_reuse_heldout.to_mapping(),
             "anchor_calibration": overall_anchor_calibration.to_mapping(),
@@ -1201,6 +1534,7 @@ def calibrate_compact_mask_reuse_policy(
         "model": dataset.model,
         "checkpoint_manifest_sha256": checkpoint_identity,
         "global_num_heads": dataset.global_num_heads,
+        "target_bmm1_skip_ratio": bmm1_target,
         "anchors": list(dataset.anchors),
         "nearest": {str(layer): anchor for layer, anchor in dataset.nearest.items()},
         "deployment_geometry_validated": False,

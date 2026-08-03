@@ -116,10 +116,10 @@ def _base_args(tmp_path: Path):
         str(artifacts["outer_report"]),
         "--max-anchor-dropped-mass",
         "0.02",
-        "--max-reuse-dropped-mass",
+        "--reuse-dropped-mass-report-threshold",
         "0.03",
-        "--max-reuse-selection-dropped-mass",
-        "0.01",
+        "--target-bmm1-skip-ratio",
+        "0.10",
         "--output-policy",
         str(policy),
         "--output-report",
@@ -166,6 +166,8 @@ def test_main_verifies_artifacts_and_atomically_writes_candidate(tmp_path, monke
         "vanilla_fit_sha256": sha256(vanilla.read_bytes()).hexdigest(),
         "reuse_bundle_sha256": sha256(captures.read_bytes()).hexdigest(),
     }
+    assert captured["reuse_dropped_mass_report_threshold"] == 0.03
+    assert captured["target_bmm1_skip_ratio"] == 0.10
     assert "MASK_REUSE_FA4_CANDIDATE_SHA256=" in capsys.readouterr().out
 
 

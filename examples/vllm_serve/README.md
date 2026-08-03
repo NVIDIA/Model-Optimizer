@@ -240,8 +240,8 @@ python calibrate_mask_reuse.py \
   --grouped-fit mask_reuse_grouped_fit.json \
   --outer-report mask_reuse_outer_report.json \
   --max-anchor-dropped-mass 0.02 \
-  --max-reuse-selection-dropped-mass 0.01 \
-  --max-reuse-dropped-mass 0.02 \
+  --reuse-dropped-mass-report-threshold 0.02 \
+  --target-bmm1-skip-ratio 0.10 \
   --output-policy mask_reuse_candidate.json \
   --output-report mask_reuse_calibration_report.json
 ```
@@ -251,7 +251,17 @@ free-form digest claims are not accepted. The compact selector streams three
 semantic passes over the captures and hashes
 the exact file bytes before and after selection/evaluation. It aborts if the
 capture bundle or another evidence artifact changes while calibration is
-running. It minimizes the declared equal-BMM tile cost `2 * A_R + A_A`.
+running. For every context bucket, it first meets the requested model-wide
+BMM1 skip ratio, then minimizes worst-prompt model-wide reuse dropped mass.
+Mean and worst-individual reuse risks are reported diagnostics. Exact attention
+is the zero-risk fallback. The reuse dropped-mass
+threshold is diagnostic only and cannot change the selected policy. The hard
+anchor dropped-mass gate remains part of vanilla BLASST calibration.
+Treat the requested BMM1 skip ratio as a performance target, not an accuracy
+certificate: choose it with a preregistered end-to-end quality sweep on a
+selection split, then confirm once on an independent held-out split. An
+aggressive target can force even its minimum-risk policy to retain unacceptable
+reuse error.
 
 Selection uses only records labeled `calibration`; the frozen policy is then
 evaluated on records labeled `heldout`. Held-out violations are preserved in
