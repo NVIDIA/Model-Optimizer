@@ -179,6 +179,25 @@ whose Gym has `reference_models`. NVIDIA-internal users: the image path, the can
 reference set, and the matching gym overrides are in the `modelopttools:eval-config`
 skill (Step 3c) — internal cluster paths deliberately live only there.
 
+## Judge
+
+Rubric mode uses a single judge. **Comparison mode uses a 3-member panel** —
+`openai/gpt-5.5`, `gcp/google/gemini-3.1-pro-preview`,
+`aws/anthropic/bedrock-claude-opus-4-8` — one **sampled per trial**, all routed
+through the single `gdpval_judge_model` proxy (`<INFERENCE_JUDGE_URL>` from `.env`).
+`++...judge_sampling_seed=42` makes that sampling reproducible.
+
++ **Inject the key's VALUE, not its name:** `openai_api_key=$INFERENCE_API_KEY`.
+  Passing an env-var *name* (e.g. via a `${...api_key}` interpolation that resolves to
+  the literal string `INFERENCE_API_KEY`) makes the proxy reply `LiteLLM Virtual Key
+  expected`, which the gym wraps as an opaque **500** — it looks like a judge outage,
+  not a config error. One key covers all three panel members.
++ **Do not set `judge_responses_create_params_overrides.model`.** Pinning a model
+  collapses the panel to a single judge, silently changing the scoring methodology.
++ **Throttles:** judge `max_concurrent_requests=10` and Stirrup `concurrency=220` are
+  the golden values — the judge rate-limits long before the served model does, so raise
+  these only after the judge logs are clean of 429s.
+
 ## Preflight — what NEL validates, and what it does NOT
 
 NEL validates mount paths at **submit** time (`_collect_mount_paths` +
