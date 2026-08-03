@@ -32,6 +32,7 @@ from .sparse_attn_config import load_from_checkpoint_metadata, match_sparse_conf
 __all__ = [
     "VllmAttentionInstallReport",
     "install_vllm_nvfp4_attention",
+    "install_vllm_skip_softmax_calibration",
     "install_vllm_sparse_attention_from_checkpoint",
 ]
 
@@ -248,6 +249,13 @@ def _device_capability_error(device) -> str | None:
     return None
 
 
+def _skip_softmax_active(sparse_kw: dict[str, Any]) -> bool:
+    """Return whether a layer's sparse config contains skip-softmax work."""
+    return bool(sparse_kw) and (
+        "skip_softmax_threshold" in sparse_kw or "threshold_scale_factor" in sparse_kw
+    )
+
+
 def _sparse_graph_error(sparse_kw: dict[str, Any], mode) -> str | None:
     from vllm.config.compilation import CUDAGraphMode
 
@@ -348,11 +356,29 @@ def _plan_vllm_attention(
 
     _require_supported_vllm()
     errors = _global_errors(model_runner) if quantize else []
-    mode = _cudagraph_mode(model_runner) if quantize else None
+    mode = _cudagraph_mode(model_runner)
     quant_plugin: Any = _load_quant_plugin() if quantize else None
     plans = []
     for name, module, sparse_kw in candidates:
         reasons = _layer_errors(module)
+        if _skip_softmax_active(sparse_kw):
+            # Quantized Q/K/P change the attention-score distribution the skip
+            # thresholds were calibrated on, so the calibrated sparsity contract
+            # no longer holds. This guards both installation directions: quantized
+            # installs adding skip, and sparse-only installs onto layers that
+            # already carry active attention quantizers. N:M sparse softmax has
+            # no calibrated threshold and composes with quantization.
+            active = (
+                "attention quantization is being installed"
+                if quantize
+                else _active_attention_quantization(module)
+            )
+            if active:
+                reasons.append(
+                    f"skip-softmax cannot be combined with attention quantization ({active}); "
+                    "serve skip-softmax unquantized or drop the skip_softmax group "
+                    "(N:M sparse softmax composes with quantization)"
+                )
         device = dtype = None
         if quantize:
             device, dtype = quant_plugin._get_device_dtype(module)
@@ -365,9 +391,12 @@ def _plan_vllm_attention(
                 reasons.append(f"resolved dtype {dtype} must be fp16 or bf16")
             if capability_error := _device_capability_error(device):
                 reasons.append(capability_error)
-        if quantize:
-            if graph_error := _sparse_graph_error(sparse_kw, mode):
-                reasons.append(graph_error)
+        # Calibrated decode skip-softmax replays through the decode kernel path,
+        # which a FULL decode CUDA graph would capture with a stale threshold.
+        # This holds for sparse-only installs exactly as for quantized ones, so
+        # the guard is not gated on ``quantize``.
+        if graph_error := _sparse_graph_error(sparse_kw, mode):
+            reasons.append(graph_error)
         new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
         if backend_error:
             reasons.append(backend_error)
@@ -490,6 +519,87 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                         setattr(layer.module, name, value)
             raise
     return _build_report(plan)
+
+
+def _active_attention_quantization(module) -> str | None:
+    """Describe any active attention Q/K/P/V quantization on a layer, or None."""
+    for attr in ("q_bmm_quantizer", "k_bmm_quantizer", "p_bmm_quantizer", "v_bmm_quantizer"):
+        if getattr(getattr(module, attr, None), "is_enabled", False):
+            return f"{attr} is enabled"
+    if getattr(module, "_query_quant_in_kernel", False) or getattr(
+        module, "_value_quant_in_kernel", False
+    ):
+        return "in-kernel attention quantization flags are set"
+    return None
+
+
+def _attention_quant_error(module) -> str | None:
+    """Reject calibration on layers with any active attention Q/K/P/V fakequant."""
+    if active := _active_attention_quantization(module):
+        return f"{active}; skip-softmax calibration requires unquantized attention"
+    return None
+
+
+def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallReport:
+    """Install skip-softmax calibration adapters into a loaded vLLM model.
+
+    Swaps the backend-matched ModelOpt adapter onto every attention layer and
+    disables cascade attention, following validation-before-mutation: every
+    known compatibility error — across all layers — is collected and raised
+    before any module is changed. Calibration itself starts separately via
+    :func:`~.vllm.enable_calibration` (typically over a worker RPC), so engine
+    warmup/profiling launches after install are served natively and never
+    pollute the measurement; until then the adapters delegate every forward to
+    the backend's native implementation.
+
+    Requirements validated here: eager execution (``enforce_eager=True`` —
+    the per-request calibration loop cannot be CUDA-graph captured), fp16/bf16
+    model and KV-cache dtypes, no active attention Q/K/P/V fakequant, and a
+    FlashAttention or FlashInfer backend per layer.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    model = _unwrapped_model(model_runner)
+    candidates = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, _VLLM_ATTENTION)
+    ]
+
+    _require_supported_vllm()
+    errors = _global_errors(model_runner)
+    if _cudagraph_mode(model_runner) != CUDAGraphMode.NONE:
+        errors.append(
+            "skip-softmax calibration requires eager execution (enforce_eager=True); "
+            "the per-request calibration loop cannot be CUDA-graph captured"
+        )
+    if not candidates:
+        errors.append("no attention layers were found")
+
+    plans = []
+    for name, module in candidates:
+        reasons = _layer_errors(module)
+        if quant_error := _attention_quant_error(module):
+            reasons.append(quant_error)
+        new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
+        if backend_error:
+            reasons.append(backend_error)
+        if reasons:
+            errors.extend(f"{name or '<root>'}: {reason}" for reason in reasons)
+            continue
+        plans.append(
+            _AttentionPlan(name, module, new_impl, {}, None, None, requires_flashinfer_patch)
+        )
+    if any(plan.requires_flashinfer_patch for plan in plans):
+        layout = attention_plugin._flashinfer_kv_cache_layout()
+        if layout is not None and layout.upper() != "NHD":
+            errors.append(
+                f"FlashInfer KV-cache layout {layout!r} is unsupported for calibration (NHD only)"
+            )
+    _raise_unsupported(errors, "skip-softmax calibration")
+
+    plan = _InstallPlan(model_runner, tuple(plans), False, "SKIP_SOFTMAX_CALIBRATION")
+    return _apply_vllm_attention_plans(plan)
 
 
 def install_vllm_sparse_attention_from_checkpoint(

@@ -80,7 +80,11 @@ def test_shared_worker_import_does_not_resolve_quant_only_apis(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", guarded_import)
     worker_module = _load_worker_module("sparse_attn_worker_import_test")
 
-    assert worker_module.__all__ == ["SparseAttnWorker", "QuantSparseAttnWorker"]
+    assert worker_module.__all__ == [
+        "SparseAttnWorker",
+        "QuantSparseAttnWorker",
+        "SkipSoftmaxCalibWorker",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1024,40 +1028,6 @@ def test_quantized_decode_finalizes_v_then_calls_split_k_kernel(monkeypatch):
     torch.testing.assert_close(q_inputs[0][:2], q[:2].float())
     assert torch.all(q_inputs[0][2:] == 0)
     assert calls["query"].dtype == torch.float32
-
-
-def test_quantized_skip_softmax_decode_stays_on_shared_kernel(monkeypatch):
-    """Split-local maxima must not change calibrated skip-softmax semantics."""
-    impl = _clone_sparse_impl(_make_old_impl())
-    impl.quant_kw = {
-        "p_qdq": "nvfp4",
-        "p_qdq_amax": 1.0,
-        "v_qdq": "nvfp4",
-        "v_qdq_amax": 6.0 * 448.0,
-    }
-    impl.sparse_kw = {"skip_softmax_threshold": 0.001}
-    q = torch.zeros(1, impl.num_heads, impl.head_size, dtype=torch.float16)
-    kv_cache = torch.zeros(2, 1, 16, impl.num_kv_heads, impl.head_size, dtype=torch.float16)
-    metadata = _flash_attention_metadata(1, 16)
-    captured = {}
-
-    monkeypatch.setattr(vllm_plugin, "fake_quant_v_onwrite", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        vllm_plugin,
-        "triton_decode_attention",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("split-K kernel")),
-    )
-
-    def fake_attention(query, **kwargs):
-        captured.update(kwargs)
-        return torch.zeros_like(query)
-
-    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
-    output = torch.empty_like(q)
-    assert impl.forward(None, q, q, q, kv_cache, metadata, output=output) is output
-    assert captured["skip_softmax_threshold"] == pytest.approx(0.001)
-    assert captured["p_qdq"] == "nvfp4"
-    assert captured["v_qdq"] == "nvfp4"
 
 
 def test_resolve_calibrated_skip_softmax_threshold_for_decode():

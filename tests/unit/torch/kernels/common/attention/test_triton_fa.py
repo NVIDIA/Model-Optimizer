@@ -139,21 +139,7 @@ def test_forward_routes_every_mode_to_single_autotuner(
     assert kernel.kwargs["V_QDQ"] == expected_v_qdq
 
 
-@pytest.mark.parametrize(
-    ("attention_kwargs", "expected_block_m"),
-    [
-        ({"skip_softmax_threshold": 0.1, "measure_sparsity": True}, 128),
-        (
-            {
-                "p_qdq": "nvfp4",
-                "skip_softmax_threshold": 0.1,
-                "measure_sparsity": True,
-            },
-            16,
-        ),
-    ],
-)
-def test_forward_measurement_uses_one_fixed_launch(monkeypatch, attention_kwargs, expected_block_m):
+def test_forward_measurement_uses_one_fixed_launch(monkeypatch):
     """Counter measurement bypasses autotuning to avoid repeated atomic updates."""
     pytest.importorskip("triton")
 
@@ -173,10 +159,49 @@ def test_forward_measurement_uses_one_fixed_launch(monkeypatch, attention_kwargs
     starts = torch.tensor([0], dtype=torch.int32)
     lengths = torch.tensor([seq_len], dtype=torch.int32)
 
-    triton_fa.attention(q, k, v, starts, lengths, seq_len, **attention_kwargs)
+    triton_fa.attention(
+        q,
+        k,
+        v,
+        starts,
+        lengths,
+        seq_len,
+        skip_softmax_threshold=0.1,
+        measure_sparsity=True,
+    )
 
     assert kernel.fn.launch_count == 1
-    assert kernel.fn.kwargs["BLOCK_M"] == expected_block_m
+    assert kernel.fn.kwargs["BLOCK_M"] == 128
     assert kernel.fn.kwargs["BLOCK_N"] == 128
     assert kernel.fn.kwargs["num_stages"] == 1
     assert kernel.fn.kwargs["num_warps"] == 4
+
+
+@pytest.mark.parametrize("qdq_kwargs", [{"p_qdq": "nvfp4"}, {"v_qdq": "nvfp4"}])
+def test_forward_rejects_skip_softmax_with_attention_quantization(monkeypatch, qdq_kwargs):
+    pytest.importorskip("triton")
+
+    from modelopt.torch.kernels.common.attention import triton_fa
+
+    monkeypatch.setattr(triton_fa, "_load_sparsity_helpers", lambda: None)
+    monkeypatch.setattr(triton_fa, "_load_qdq_helpers", lambda: None)
+
+    seq_len = 129
+    q = torch.empty(seq_len, 2, 16)
+    k = torch.empty(seq_len, 1, 16)
+    v = torch.empty_like(k)
+    starts = torch.tensor([0], dtype=torch.int32)
+    lengths = torch.tensor([seq_len], dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="skip-softmax cannot be combined"):
+        triton_fa.attention(
+            q,
+            k,
+            v,
+            starts,
+            lengths,
+            seq_len,
+            skip_softmax_threshold=0.1,
+            measure_sparsity=True,
+            **qdq_kwargs,
+        )

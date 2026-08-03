@@ -117,6 +117,162 @@ Workflow:
 
 If the checkpoint has no `sparse_attention_config`, the sparse-only installer passes through and vLLM runs unchanged. Whole-model fakequant flows remain handled by `vllm_serve_fakequant.py`; the compact attention-only path is below.
 
+### Calibrate skip-softmax thresholds through vLLM
+
+Instead of the HF path in step 1, thresholds can be calibrated directly through vLLM — over the paged KV cache, for both prefill and decode, with tensor parallelism:
+
+```bash
+# One-time: fetch the RULER essay haystack
+bash ../llm_sparsity/attention_sparsity/download_ruler_data.sh
+
+python calibrate_sparse_attn.py <CKPT> \
+  --calib_data_dir ../llm_sparsity/attention_sparsity/data \
+  --target_sparse_ratio 0.5 \
+  --decode_tokens 32 --tensor_parallel_size 8 --update_checkpoint_config
+```
+
+Calibration prompts default to the **RULER dataset** via the same `RulerDatasetBuilder` the HF calibration path uses (`--calib_samples` / `--calib_max_seqlen` mirror the HF defaults of 24 / 32768), so vLLM- and PyTorch-calibrated thresholds are fit on identical data. `--prompts_file` (one prompt per line) substitutes custom calibration data.
+
+`install_vllm_skip_softmax_calibration` (called by `sparse_attn_worker.SkipSoftmaxCalibWorker` at model load) swaps calibration adapters onto every attention layer after validating all of them — eager execution is required, model and KV-cache dtypes must be fp16/bf16, and no attention Q/K/P/V fakequant may be active. During `llm.generate`, the paged Triton calibration kernel computes full dense attention — no sparsification is applied to generation, though the dense kernel's numerics differ slightly from the native backend's — while counting, per candidate threshold, how many KV tiles the skip criterion would drop. The driver then collects **raw tile counts from every TP rank** (each rank only measures its head shard), merges them, fits `scale_factor = a * exp(b * sparsity)` once per phase, and writes the same canonical `sparse_attention_config` block the HF export produces — preserving any exported N:M sparse-softmax groups — so the serving workflow above picks it up unchanged.
+
+Calibration and serving measure skipping at the same fixed 128x128 tile geometry (active skip-softmax launches bypass the autotuner), so the sparsity realized at serve time matches the calibrated `(a, b)` model.
+
+### Build a cross-layer mask-reuse calibration candidate
+
+Mask-reuse calibration is a second, offline ModelOpt stage. The current exporter
+produces a **candidate only**: it deliberately cannot promote a serving policy
+until grouped inner-fold stability, the preregistered 99-outer-group gate, and
+the deployment-geometry gate are implemented and pass.
+
+First run `calibrate_sparse_attn.py` to fit the vanilla skip-softmax transfer
+function and finalize the checkpoint/config. Then create the content-addressed
+identity inside the exact local checkpoint that vLLM will load:
+
+```bash
+python create_checkpoint_manifest.py <CKPT> --model-id Nemotron-3-Ultra
+```
+
+This deterministic command writes `<CKPT>/checkpoint_manifest.json` with
+SHA256 and size for every checkpoint file except the manifest itself. It refuses
+to overwrite an existing manifest, rejects symlinks, and verifies the complete
+file set. Keep the checkpoint root immutable after creating it.
+
+Create the runtime FA4 source from the exact Git commit outside the serving
+container. The generator emits a scoped `git archive` containing only
+`flash_attn/` and a canonical witness for every directory and regular file:
+
+```bash
+python create_fa4_source_witness.py /path/to/flash-attention \
+  --expected-commit <40-HEX-COMMIT> \
+  --archive-output fa4-runtime-source.tar \
+  --manifest-output fa4-runtime-source.manifest.json
+mkdir fa4-runtime-source
+tar -xf fa4-runtime-source.tar -C fa4-runtime-source
+```
+
+Pin the printed archive and manifest hashes independently. The runtime verifier
+does not invoke Git; it rejects missing, extra, changed, executable-mode, link,
+reparse-point, and special-file differences from the witnessed archive.
+
+Then collect dense-reference mask-reuse sufficient statistics at a menu of target
+sparsities under the exact runtime rule
+`threshold = a * exp(b * target_sparsity) / kv_tokens`:
+
+```bash
+python collect_mask_reuse.py <CKPT> \
+  --model-id Nemotron-3-Ultra \
+  --checkpoint-manifest-sha256 <64-HEX-CHECKPOINT-MANIFEST-SHA256> \
+  --plan nemotron3_ultra_stride2 \
+  --fa4-source /path/to/fa4-runtime-source \
+  --fa4-source-manifest fa4-runtime-source.manifest.json \
+  --fa4-source-manifest-sha256 <64-HEX-SOURCE-MANIFEST-SHA256> \
+  --fa4-commit <40-HEX-COMMIT> \
+  --prompts-jsonl mask_reuse_prompts.jsonl \
+  --vanilla-config <CKPT>/config.json \
+  --target-sparsities 0.5 0.6 0.7 \
+  --max-model-len 1000001 \
+  --tensor-parallel-size 8 \
+  --validate-dense-output \
+  --output mask_reuse_compact_captures.jsonl
+```
+
+The prompt file has one strict JSON object per capture unit with `split`,
+`partition`, `inner_fold`, globally split-unique `prompt_id`, `source`,
+`source_group_sha256`, `prompt`, `min_kv_tokens`, and `max_kv_tokens`.
+`calibration` maps to `development` with a nonnegative fold; `heldout` maps to
+`outer_test` with a null fold. One source group cannot cross partitions or
+folds. The collector forces eager, batch-one, BF16, chunked-prefill
+vLLM V1 execution through the installed `mask_reuse_fa4` plugin and the
+explicit pinned FA4 source. It does not load a provisional reuse policy and
+does not enable quantization. The verified checkpoint identity and group
+assignment are included in the schema-v2 invocation and its canonical RPC
+digest. The checkpoint and FA4 source are reverified after vLLM loads them and
+before capture; FA4 is verified once more before evidence publication.
+Each compact JSONL record includes the target
+sparsity, sample length, exact binary64
+`threshold_log2` and `threshold_lambda`, rectangular query/KV geometry, every
+topology anchor/head's self-mask statistics, and every consumer/donor
+dropped-mass matrix once. It does not expand or repeat the matrix as millions
+of candidate rows. Fixed-lambda version-4/version-5 captures are not valid
+inputs to this target-sparsity path. Use the printed compact-capture SHA256 as
+the `reuse_bundle_sha256` evidence value. The version-4 capture manifest binds
+the independently pinned checkpoint and FA4 source witnesses, Git commit/tree,
+archive digest, canonical vLLM engine arguments, rank-major TP sentinel
+evidence, exact prefill/decode attention-call counts, and optional bitwise
+dense-shadow coverage. `--validate-dense-output` runs a second pinned dense FA4
+call for every armed final-chunk layer and fails before publication if its BF16
+output differs bitwise from the model-trajectory output. Schema-version-3
+capture manifests are intentionally rejected because they lack the runtime
+source witness; recollect them rather than migrating their provenance labels.
+
+Once those observations have been captured, select the per-context target,
+donor-head map, and exact fallbacks and export the fail-closed candidate:
+
+```bash
+python calibrate_mask_reuse.py \
+  --checkpoint <CKPT> \
+  --compact-captures mask_reuse_compact_captures.jsonl \
+  --capture-manifest mask_reuse_compact_captures.jsonl.manifest.json \
+  --vanilla-config <CKPT>/config.json \
+  --topology mask_reuse_topology.json \
+  --calibration-plan mask_reuse_calibration_plan.json \
+  --family-registry mask_reuse_family_registry.json \
+  --grouped-fit mask_reuse_grouped_fit.json \
+  --outer-report mask_reuse_outer_report.json \
+  --max-anchor-dropped-mass 0.02 \
+  --reuse-dropped-mass-report-threshold 0.02 \
+  --target-bmm1-skip-ratio 0.10 \
+  --output-policy mask_reuse_candidate.json \
+  --output-report mask_reuse_calibration_report.json
+```
+
+All six evidence hashes are computed from the exact supplied artifact files;
+free-form digest claims are not accepted. The compact selector streams three
+semantic passes over the captures and hashes
+the exact file bytes before and after selection/evaluation. It aborts if the
+capture bundle or another evidence artifact changes while calibration is
+running. For every context bucket, it first meets the requested model-wide
+BMM1 skip ratio, then minimizes worst-prompt model-wide reuse dropped mass.
+Mean and worst-individual reuse risks are reported diagnostics. Exact attention
+is the zero-risk fallback. The reuse dropped-mass
+threshold is diagnostic only and cannot change the selected policy. The hard
+anchor dropped-mass gate remains part of vanilla BLASST calibration.
+Treat the requested BMM1 skip ratio as a performance target, not an accuracy
+certificate: choose it with a preregistered end-to-end quality sweep on a
+selection split, then confirm once on an independent held-out split. An
+aggressive target can force even its minimum-risk policy to retain unacceptable
+reuse error.
+
+Selection uses only records labeled `calibration`; the frozen policy is then
+evaluated on records labeled `heldout`. Held-out violations are preserved in
+the standalone report and do not silently retune the selected policy. The
+candidate has `promotion_status="candidate_only"` and
+`deployment_geometry_validated=false`; the serving backend rejects it. Candidate
+and report publication is no-clobber and report-first with rollback, so a policy
+path cannot appear without its complete report during normal process execution.
+On platforms without portable directory `fsync`, directory-entry durability
+across power loss is best effort. Decode is explicitly dense.
+
 The reusable serving policies live in `modelopt/torch/sparsity/attention_sparsity/plugins/vllm_runtime.py`. `install_vllm_sparse_attention_from_checkpoint` installs checkpoint-driven sparse-only attention, while `install_vllm_nvfp4_attention` installs fixed NVFP4 Q/K/P/V with optional checkpoint sparsity. Both validate every selected layer before publishing any replacement implementation and return a `VllmAttentionInstallReport` with the installed layer names and backend counts.
 
 `sparse_attn_worker.py` only invokes these APIs after vLLM loads the model. It retains `SparseAttnWorker` as the launcher's default and provides `QuantSparseAttnWorker` for the compact NVFP4 policy. Other vLLM integrations can invoke the same library APIs directly:
@@ -131,7 +287,7 @@ report = install_vllm_nvfp4_attention(model_runner, sparse_cfg="checkpoint")
 
 Limitations:
 
-- vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span.
+- vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span. This applies to sparse-only serving; quantized attention installs and skip-softmax calibration reject `enable_prefix_caching` (quantize-on-write and per-request measurement both require uncached prefills).
 - `SparseAttnWorker` CUDA graph capture is not validated yet — use `--enforce-eager`.
 
 ### Compact NVFP4 attention worker
@@ -148,7 +304,7 @@ python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
 
 The installer supports both FlashInfer and FlashAttention, and the worker prints the installed adapter counts. Pass `--attention-backend FLASHINFER` or `--attention-backend FLASH_ATTN` only when an explicit override is needed.
 
-This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant format to Q/K/P/V. Q is dynamic; missing K/V scales default to global scale 1.0, and P defaults to amax 1.0. Existing scalar attention amax values are preserved, but this path does not calibrate or restore them itself. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored.
+This attention-only path applies a fixed dynamic block-16 NVFP4 fakequant format to Q/K/P/V. Q is dynamic; missing K/V scales default to global scale 1.0, and P defaults to amax 1.0. Existing scalar attention amax values are preserved, but this path does not calibrate or restore them itself. It does not re-quantize realquant Linear or MoE weights. An optional checkpoint `sparse_attention_config` is still honored for N:M sparse softmax; calibrated skip-softmax groups are rejected in combination with attention quantization, because quantized Q/K/P change the score distribution the skip thresholds were calibrated on.
 
 Decode uses a fixed 32-split, 128-key-tile schedule. P QDQ consumes split-local,
 unnormalized online-softmax probabilities, so changing that schedule can change
