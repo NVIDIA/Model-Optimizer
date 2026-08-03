@@ -16,6 +16,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOLDER
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.validation import validate_state
 
@@ -66,6 +67,7 @@ def _state(tmp_path):
         ("data.source", "/data"),
         ("data.sequence_length", 1024),
         ("infrastructure.execution_contract.repository", "/repo"),
+        ("infrastructure.execution_contract.venv", "/venv"),
         ("output.result_root", "/results"),
     ):
         state.set_field(path, value)
@@ -76,6 +78,30 @@ def _state(tmp_path):
 
 def _messages(state):
     return "\n".join(issue.message for issue in validate_state(state))
+
+
+def test_worker_path_placeholders_must_be_replaced(tmp_path):
+    state = _state(tmp_path)
+    state.set_field(
+        "infrastructure.execution_contract.repository",
+        WORKER_REPOSITORY_PLACEHOLDER,
+    )
+    state.set_field("infrastructure.execution_contract.venv", WORKER_VENV_PLACEHOLDER)
+
+    issues = {
+        issue.path: issue.message
+        for issue in validate_state(state)
+        if issue.path.startswith("infrastructure.execution_contract")
+    }
+
+    assert issues == {
+        "infrastructure.execution_contract.repository": (
+            "Replace the placeholder with a path visible on every worker."
+        ),
+        "infrastructure.execution_contract.venv": (
+            "Replace the placeholder with a path visible on every worker."
+        ),
+    }
 
 
 def test_persisted_static_resources_use_teacher_or_candidate_geometry(tmp_path):

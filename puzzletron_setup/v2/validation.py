@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from puzzletron_setup import validate_worker_path
+
 from .parallel_validation import (
     ParallelCompatibilityIssue,
     validate_automodel_parallelism,
@@ -192,6 +194,7 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
         "model.source",
         "data.source",
         "infrastructure.execution_contract.repository",
+        "infrastructure.execution_contract.venv",
         "output.result_root",
     )
     issues.extend(
@@ -199,6 +202,16 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
         for path in required
         if not state.get_field(path)
     )
+    for path in (
+        "infrastructure.execution_contract.repository",
+        "infrastructure.execution_contract.venv",
+    ):
+        value = state.get_field(path)
+        if not value:
+            continue
+        verdict = validate_worker_path(str(value))
+        if verdict is not True:
+            issues.append(ValidationIssue(path, str(verdict)))
     for path, record in state.records().items():
         if record.stale:
             issues.append(ValidationIssue(path, record.error or "This answer must be revalidated."))

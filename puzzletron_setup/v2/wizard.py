@@ -29,7 +29,12 @@ from typing import Any
 import yaml
 
 from puzzletron_orchestrator.mesh import vllm_topology_to_mesh
-from puzzletron_setup import SetupError
+from puzzletron_setup import (
+    WORKER_REPOSITORY_PLACEHOLDER,
+    WORKER_VENV_PLACEHOLDER,
+    SetupError,
+    validate_worker_path,
+)
 from puzzletron_setup.inspection import (
     infer_dataset_modality,
     inspect_model,
@@ -66,8 +71,8 @@ BUILTINS = {
     "infrastructure": {
         "gpus_per_node": 8,
         "execution_contract": {
-            "repository": str(Path.cwd()),
-            "venv": ".venv",
+            "repository": WORKER_REPOSITORY_PLACEHOLDER,
+            "venv": WORKER_VENV_PLACEHOLDER,
             "container": None,
             "container_mounts": None,
             "prerun_commands": [],
@@ -531,9 +536,16 @@ def _text_field(
     path: str,
     label: str,
     fallback: str = "",
+    *,
+    validate: Callable[[Any], bool | str] | None = None,
 ) -> Any:
     resolved = _resolved(session.state, resolver, path, fallback)
-    value = session.text(path, label, default=str(resolved.value or ""))
+    value = session.text(
+        path,
+        label,
+        default=str(resolved.value or ""),
+        validate=validate,
+    )
     if value is not BACK:
         session.state.set_field(path, value, source="user")
     return value
@@ -865,8 +877,8 @@ def infrastructure_section(
 ) -> bool:
     del context
     paths = (
-        ("infrastructure.execution_contract.repository", str(Path.cwd())),
-        ("infrastructure.execution_contract.venv", ".venv"),
+        ("infrastructure.execution_contract.repository", WORKER_REPOSITORY_PLACEHOLDER),
+        ("infrastructure.execution_contract.venv", WORKER_VENV_PLACEHOLDER),
         ("infrastructure.execution_contract.container", None),
         ("infrastructure.execution_contract.container_mounts", None),
         ("infrastructure.runner.kind", "slurm"),
@@ -914,13 +926,21 @@ def infrastructure_section(
         )
         return True
 
+    worker_path_fields = {
+        "infrastructure.execution_contract.repository",
+        "infrastructure.execution_contract.venv",
+    }
     for path, label, fallback in (
         (
             "infrastructure.execution_contract.repository",
             "Repository path on workers:",
-            str(Path.cwd()),
+            WORKER_REPOSITORY_PLACEHOLDER,
         ),
-        ("infrastructure.execution_contract.venv", "Python environment:", ".venv"),
+        (
+            "infrastructure.execution_contract.venv",
+            "Python environment:",
+            WORKER_VENV_PLACEHOLDER,
+        ),
         ("infrastructure.execution_contract.container", "Container image (blank for none):", ""),
         (
             "infrastructure.execution_contract.container_mounts",
@@ -937,7 +957,14 @@ def infrastructure_section(
         ("infrastructure.runner.slurm.partition_cpu", "CPU partition:", ""),
         ("infrastructure.runner.slurm.time_limit", "Default time limit:", "4:00:00"),
     ):
-        value = _text_field(session, resolver, path, label, fallback)
+        value = _text_field(
+            session,
+            resolver,
+            path,
+            label,
+            fallback,
+            validate=validate_worker_path if path in worker_path_fields else None,
+        )
         if value is BACK:
             return False
         if value == "":
@@ -4515,9 +4542,11 @@ def _refresh_legacy_state(state: WizardState) -> None:
         },
         "execution_contract": {
             "repository": state.get_field(
-                "infrastructure.execution_contract.repository", str(Path.cwd())
+                "infrastructure.execution_contract.repository", WORKER_REPOSITORY_PLACEHOLDER
             ),
-            "venv": state.get_field("infrastructure.execution_contract.venv", ".venv"),
+            "venv": state.get_field(
+                "infrastructure.execution_contract.venv", WORKER_VENV_PLACEHOLDER
+            ),
             "container": state.get_field("infrastructure.execution_contract.container", None),
             "container_mounts": state.get_field(
                 "infrastructure.execution_contract.container_mounts", None

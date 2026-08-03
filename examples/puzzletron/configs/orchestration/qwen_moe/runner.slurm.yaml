@@ -4,21 +4,31 @@
 runner:
   kind: slurm
   slurm:
-    account: coreai_dlalgo_llm
+    # Required placeholder. Replace with the Slurm account for your site.
+    account: REPLACE_WITH_SLURM_ACCOUNT
+    # Replace these generic partition names if your site uses different names.
     partition: batch
     partition_interactive: interactive
     partition_batch: batch
+    # Optional. CPU/IO stages use the regular one-node partition when unset.
+    partition_cpu: null
     interactive_max_nodes: 2
     max_nodes: 20
     time_limit: "4:00:00"
-    log_dir: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/puzzle_runs/qwen-moe/logs
+    log_dir: puzzle_runs/qwen-moe/logs
   execution_contract:
-    repository: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen
-    venv: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/modelopt_qwen/.venv_new
-    container: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/enroot/pytorch_25p05.sqsh
-    container_mounts: /lustre:/lustre
+    # Replace with the ModelOpt checkout path visible on every worker and in the container.
+    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
+    # Replace with the virtual environment path to source on every worker.
+    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
+    # Replace with an image or path accepted by the site's srun container plugin.
+    container: REPLACE_WITH_SLURM_CONTAINER_IMAGE
+    # Replace with the host and container paths required by the campaign.
+    container_mounts: "REPLACE_WITH_HOST_PATH:REPLACE_WITH_CONTAINER_PATH"
+    # Replace these values with the site's setup script and source checkout paths.
     prerun_commands:
-      - source /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/setup-envs.sh
-      - export VLLM_ROOT=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/vllm_new
-      - export AUTOMODEL_ROOT=/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/engineering/Automodel_new
+      - source REPLACE_WITH_SITE_SETUP_SCRIPT
+      - export VLLM_ROOT=REPLACE_WITH_WORKER_VISIBLE_VLLM_CHECKOUT
+      - export AUTOMODEL_ROOT=REPLACE_WITH_WORKER_VISIBLE_AUTOMODEL_CHECKOUT
+    # Optional shell commands run when the stage payload exits.
     postrun_commands: []

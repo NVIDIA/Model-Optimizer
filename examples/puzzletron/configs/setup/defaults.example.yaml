@@ -1,22 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# Example Slurm runner config for the v2 orchestrator.
-
-runner:
-  kind: slurm
-  slurm:
-    # Required placeholder. Replace with the Slurm account for your site.
-    account: REPLACE_WITH_SLURM_ACCOUNT
-    # Replace these generic partition names if your site uses different names.
-    partition: batch
-    partition_interactive: interactive
-    partition_batch: batch
-    # Optional. CPU/IO stages use the regular one-node partition when unset.
-    partition_cpu: null
-    interactive_max_nodes: 2
-    time_limit: "4:00:00"
-    log_dir: puzzle_runs/logs
+schema_version: 1
+infrastructure:
   execution_contract:
     # Required. Use the checkout path visible on every worker and in the container, if used.
     repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
@@ -31,5 +14,10 @@ runner:
     # Optional shell commands run in order before virtualenv activation.
     # Example: ["module load cuda", "export HF_HOME=/data/huggingface"]
     prerun_commands: []
-    # Optional shell commands run when the stage payload exits.
-    postrun_commands: []
+  runner:
+    kind: slurm
+    slurm:
+      # Add the required Slurm account for your site before using this file.
+      # account: REPLACE_WITH_SLURM_ACCOUNT
+      # Optional. CPU/IO stages use the regular partition when unset.
+      partition_cpu: null
