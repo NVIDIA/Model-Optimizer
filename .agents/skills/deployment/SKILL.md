@@ -126,18 +126,16 @@ python -m vllm.entrypoints.openai.api_server \
 For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 
 > **NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 image.** From v0.20.0
-> on, vLLM release tags are CUDA-13 unsuffixed (e.g. `vllm/vllm-openai:v0.26.0` —
-> release tags are multi-arch), with `-cu129` as the CUDA-12 opt-out; v0.19.x and
-> earlier spelled it the other way round (`-cu130` suffix = CUDA 13). v0.20.0
-> ships both suffixes; after it, `-cu130` does not exist. Don't trust the tag
-> name — select a tag whose config blob reports `CUDA_VERSION` >= 13, resolving
-> the child manifest for the platform you deploy on (arm64 for Grace/GB300,
-> amd64 for x86 hosts); `TORCH_CUDA_ARCH_LIST` differs between the two. A
-> cu12 build has **no sm_103 FP4 kernel**, so vLLM
-> loads the checkpoint then dies at engine init with `CUDA error: no kernel image
-> is available for execution on the device` (affects the `flashinfer` and
-> `cutlass` NVFP4 backends; `marlin` separately fails on non-64-divisible layer
-> dims).
+> on, release tags are CUDA-13 unsuffixed (e.g. `vllm/vllm-openai:v0.26.0`) with
+> `-cu129` the CUDA-12 opt-out; v0.19.x and earlier were the other way round
+> (`-cu130` = CUDA 13), and `-cu130` no longer exists after v0.20.0. Don't trust
+> the tag name — select a tag reporting `CUDA_VERSION` >= 13 in the config blob
+> of your platform's child manifest (arm64 Grace/GB300, amd64 x86);
+> `TORCH_CUDA_ARCH_LIST` differs between the two. A cu12 build has **no sm_103
+> FP4 kernel**, so vLLM loads the checkpoint then dies at engine init with `CUDA
+> error: no kernel image is available for execution on the device` (affects the
+> `flashinfer` and `cutlass` NVFP4 backends; `marlin` separately fails on
+> non-64-divisible layer dims).
 > Cross-check via
 > `recipes.vllm.ai/<org>/<model>?hardware=b300` (JS-rendered — fetch the raw
 > markdown at `github.com/vllm-project/recipes/blob/main/<org>/<model>.md`). For

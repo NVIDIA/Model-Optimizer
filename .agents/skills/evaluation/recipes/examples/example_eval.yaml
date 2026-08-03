@@ -86,13 +86,12 @@ deployment:
   # NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build — a cu12 build
   # has no sm_103 FP4 kernel, so the deploy dies at engine init with CUDA
   # "no kernel image is available". From v0.20.0 on, release tags are CUDA-13
-  # unsuffixed (the tag above) with `-cu129` as the CUDA-12 opt-out; v0.19.x and
-  # earlier spelled it the other way round (`-cu130` = CUDA 13). v0.20.0 ships
-  # both suffixes; after it, `-cu130` does not exist. Don't trust the tag name —
-  # pick a tag whose config blob reports CUDA_VERSION >= 13, resolving the child
-  # manifest for the platform you deploy on (arm64 for Grace/GB300, amd64 for x86
-  # hosts), and check your arch is in that child's TORCH_CUDA_ARCH_LIST — the
-  # list differs per platform.
+  # unsuffixed (the tag above) with `-cu129` the CUDA-12 opt-out; v0.19.x and
+  # earlier were the other way round (`-cu130` = CUDA 13), and `-cu130` no longer
+  # exists after v0.20.0. Don't trust the tag name — pick a tag reporting
+  # CUDA_VERSION >= 13 in the config blob of your platform's child manifest
+  # (arm64 Grace/GB300, amd64 x86); TORCH_CUDA_ARCH_LIST differs between the two,
+  # so check your arch against the child you'll actually run.
   # Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`
   # (ViT flash-attn workaround; drop if the encoder loads without it).
   #

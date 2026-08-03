@@ -164,7 +164,7 @@ Conventions: always start `vllm serve /checkpoint` (NEL mounts here); always `--
 
 For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipeline-parallel-size` (and EP) from the model size and your GPU count, read `references/parallelism.md` — cross-check the layout against `recipes.vllm.ai`, then adapt to the GPUs you actually have via the fit math there.
 
-**Image / vLLM version.** Treat default `image: vllm/vllm-openai:v0.26.0` as a floor to verify: bump to the **exact model's** `recipes.vllm.ai` minimum if higher. Running below minimum is a trap — the server starts, then a worker dies mid-inference with `CUDA error: an illegal memory access`, easy to misread as a kernel bug. A model released after the newest vLLM release may have no numbered tag at all; take whatever image its recipe names. Never `:latest` (breaks reproducibility). Surface version bumps to the user.
+**Image / vLLM version.** Treat default `image: vllm/vllm-openai:v0.26.0` as a floor to verify: bump to the **exact model's** `recipes.vllm.ai` minimum if higher. Running below minimum is a trap — the server starts, then a worker dies mid-inference with `CUDA error: an illegal memory access`, easy to misread as a kernel bug. A model newer than the latest release may have no numbered tag — use the image its recipe names. Never `:latest` (breaks reproducibility). Surface version bumps to the user.
 
 > **NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build** — the cu12 build has no sm_103 FP4 kernel, so engine init dies with `CUDA error: no kernel image is available`. **Pick the tag by the CUDA version it reports, not by its name — vLLM inverted its tag convention at v0.20.0:**
 >
@@ -173,7 +173,7 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 > | ≤ v0.19.x | **suffixed** `-cu130` | unsuffixed |
 > | ≥ v0.20.0 | **unsuffixed** | suffixed `-cu129` |
 >
-> v0.20.0 straddles the switch: it publishes `-cu130` *and* `-cu129`, and its unsuffixed tag is already CUDA 13. From v0.20.1 on, `-cu130` does **not exist** — asking for it yields a missing tag. So **select any tag whose config blob reports `CUDA_VERSION` ≥ 13** (registry API) instead of trusting the name. Resolve the child manifest **for the platform you deploy on** — arm64 for Grace/GB300, amd64 for x86 hosts — and check the arch you need is in *that child's* `TORCH_CUDA_ARCH_LIST`: the list differs per platform (v0.26.0 publishes `7.5 8.0 8.6 8.9 9.0 10.0 12.0` on amd64 vs `8.0 8.7 8.9 9.0 10.0 11.0 12.0` on arm64). Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
+> v0.20.0 ships both suffixes; after it `-cu130` doesn't exist, so asking for it yields a missing tag. **Select a tag whose config blob reports `CUDA_VERSION` ≥ 13** (registry API), reading the child manifest for **the platform you deploy on** (arm64 Grace/GB300, amd64 x86) — `TORCH_CUDA_ARCH_LIST` differs per platform, so check your arch against that child. Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -336,12 +336,12 @@ Default images:
 | Framework | Image | Registry |
 | --- | --- | --- |
 | vLLM | `vllm/vllm-openai:v0.26.0` (bump per recipe; never `:latest`) | DockerHub |
-| vLLM (NVFP4 on B300/GB300) | the default tag is already a **CUDA-13** build; if you pin an older release, re-check the tag convention (see Step 3) | DockerHub |
+| vLLM (NVFP4 on B300/GB300) | default is already **CUDA-13**; for older pins see Step 3 | DockerHub |
 | SGLang | `lmsysorg/sglang:latest` | DockerHub |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
 
-> NVFP4 checkpoints on B300/GB300 (sm_103) need a **CUDA-13** image — CUDA-12 builds lack sm_103 FP4 kernels. Which tag spelling that is depends on the vLLM version (see the "NVFP4 on Blackwell" table in Step 3); verify `CUDA_VERSION` in the config blob of the child manifest for the platform you deploy on.
+> NVFP4 checkpoints on B300/GB300 (sm_103) need a **CUDA-13** image — CUDA-12 builds lack sm_103 FP4 kernels. The tag spelling depends on the vLLM version (Step 3 table); verify `CUDA_VERSION` in your platform's child manifest.
 
 Public images → submit without preflight. Private/restricted → check credentials:
 
