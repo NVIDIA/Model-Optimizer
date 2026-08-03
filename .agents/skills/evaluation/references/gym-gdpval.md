@@ -55,6 +55,13 @@ and repoint `GDPVAL_CONTAINER_PATH`. Running a new gym on an old SIF makes the
 generated code fail its imports *inside the sandbox* — deliverables silently degrade
 with no error in the eval.
 
+**Exception — a site-provided SIF paired with a site-provided gym image.** Those
+images typically bake Gym as a non-git dir, so `install_on_the_fly.commit` is inert
+and the two provided artifacts are already matched to each other; that pairing is the
+coherent one even when the SIF filename encodes a different SHA than your pin. You
+cannot check the image's baked Gym from the config — confirm from the client log
+(`=== NeMo Gym commit ===` + a SHA, or the "not a git repo" line).
+
 ## Gym prepare / reap (why the task `command:` is long)
 
 The task `command:` carries two workaround blocks, inlined in the template:

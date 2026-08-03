@@ -243,7 +243,10 @@ evaluation:
                 command: |
                   set -ex
                   cd /opt/Gym
-                  export UV_CACHE_DIR=/opt/cache/uv
+                  # Honour a mounted uv cache if one was injected (UV_CACHE_DIR env var +
+                  # /cache/uv mount); fall back to the image-local dir. No bash ${VAR}
+                  # braces here — OmegaConf parses ${...}.
+                  [ -n "$UV_CACHE_DIR" ] || export UV_CACHE_DIR=/opt/cache/uv
                   source .venv/bin/activate
                   # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
                   # images bake Gym at a fixed version (not a git repo) — use it as-is.
