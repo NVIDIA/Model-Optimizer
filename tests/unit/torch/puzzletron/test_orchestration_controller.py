@@ -95,6 +95,47 @@ def test_dry_run_plan_packs_vllm_shards_into_one_allocation(tmp_path: Path):
     assert vllm[0].gpus_per_task == 1
 
 
+def test_dry_run_plan_uses_heterogeneous_vllm_measurement_topologies(tmp_path: Path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    experiment_config = yaml.safe_load(experiment.read_text())
+    experiment_config["vllm_stats"]["runtime_stats"]["topology"].update(
+        {
+            "tensor_parallel_size": 2,
+            "gpu_group_size": 2,
+        }
+    )
+    experiment_config["vllm_stats"]["measurements"] = {
+        "primary": {},
+        "secondary": {
+            "runtime_stats": {
+                "topology": {
+                    "tensor_parallel_size": 4,
+                    "gpu_group_size": 4,
+                }
+            }
+        },
+    }
+    experiment.write_text(yaml.safe_dump(experiment_config))
+    execution = load_execution_config(execution_path)
+    execution["stages"]["vllm_stats"]["parallel"] = {"tp": 2}
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=execution,
+    )
+    submissions = dry_run_plan(plan)
+    vllm = [item for item in submissions if item.stage_id == "vllm_stats"]
+
+    assert [item.work_id for item in vllm] == [
+        "vllm_stats:primary:gang",
+        "vllm_stats:secondary:gang",
+    ]
+    assert [(item.nodes, item.gpus) for item in vllm] == [(1, 8), (2, 16)]
+    assert [item.task_count for item in vllm] == [4, 4]
+    assert [item.gpus_per_task for item in vllm] == [2, 4]
+
+
 def test_gpu_lease_manager_allocates_disjoint_gpus(tmp_path: Path):
     manager = GpuLeaseManager(
         (BareMetalHost("node-a", 4), BareMetalHost("node-b", 4)),
@@ -134,26 +175,23 @@ def test_adapter_registry_selects_sharded_adapter(tmp_path: Path):
     assert [item.work_id for item in work_plan.items] == ["vllm_stats:default:gang"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason=(
-        "Known defect: a conflicting vLLM execution mesh is accepted and then silently "
-        "replaced by the named measurement topology."
-    ),
-)
 def test_vllm_stats_rejects_conflicting_execution_mesh(tmp_path: Path):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
+    experiment_config = yaml.safe_load(experiment.read_text())
+    experiment_config["vllm_stats"]["measurements"] = {"latency": {}}
+    experiment.write_text(yaml.safe_dump(experiment_config))
     execution = load_execution_config(execution_path)
     execution["stages"]["vllm_stats"]["parallel"] = {
         "ep": 2,
         "dp_shard": 2,
     }
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=execution,
-    )
 
-    with pytest.raises(ValueError, match="conflicts with named measurement topology"):
-        dry_run_plan(plan)
+    with pytest.raises(
+        ValueError,
+        match="conflicts with primary vLLM measurement topology 'latency'",
+    ):
+        compile_campaign_plan(
+            experiment_config_path=experiment,
+            runner=load_runner_config(runner_path),
+            execution=execution,
+        )

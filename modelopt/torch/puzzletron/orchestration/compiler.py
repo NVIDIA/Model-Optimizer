@@ -39,6 +39,7 @@ from .stages import (
     distributed_stage_ids,
     topological_mapping_items,
 )
+from .vllm_measurements import normalize_vllm_measurements
 
 __all__ = [
     "compile_campaign_plan",
@@ -360,6 +361,26 @@ def _parse_mesh_override(payload: Mapping[str, Any] | None) -> ParallelMeshOverr
     )
 
 
+def _vllm_stage_mesh(
+    config: Mapping[str, Any], override: Mapping[str, Any] | None
+) -> ParallelMesh:
+    """Resolve the primary measurement mesh and reject a conflicting duplicate."""
+
+    measurement_id, measurement = next(
+        iter(normalize_vllm_measurements(config).items())
+    )
+    topology_mesh = vllm_topology_to_mesh(measurement.topology)
+    if override:
+        overridden = topology_mesh.as_dict()
+        overridden.update(override)
+        if ParallelMesh.from_mapping(overridden) != topology_mesh:
+            raise ValueError(
+                "vllm_stats execution parallel override conflicts with primary "
+                f"vLLM measurement topology {measurement_id!r}"
+            )
+    return topology_mesh
+
+
 def resolve_stage_execution_specs(
     execution: Mapping[str, Any],
     enabled_stages: tuple[str, ...],
@@ -478,7 +499,10 @@ def compile_campaign_plan(
             }
         dynamic = post_mip_by_stage.get(stage_id)
         if dynamic is None:
-            mesh = extract_stage_mesh(experiment_config, stage_id, override)
+            if stage_id == "vllm_stats":
+                mesh = _vllm_stage_mesh(experiment_config, override)
+            else:
+                mesh = extract_stage_mesh(experiment_config, stage_id, override)
         else:
             node_config = _mapping(dynamic.get("config"))
             parallel = _mapping(node_config.get("parallel"))
