@@ -419,7 +419,6 @@ def test_back_from_first_guided_section_can_change_profile(
 
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (model_builder,))
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
-    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
     wizard_module.run_wizard_v2(
@@ -458,7 +457,6 @@ def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (capture_baseline,))
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
     monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
-    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
     wizard_module.run_wizard_v2(
@@ -488,7 +486,6 @@ def test_resume_replacement_defaults_file_is_persisted(
     replacement.write_text(yaml.safe_dump({"schema_version": 1}))
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
-    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
     wizard_module.run_wizard_v2(
