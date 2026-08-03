@@ -33,7 +33,11 @@
 #                        with the config's install_on_the_fly.commit.
 #     --force            Rebuild even if the SIF already exists.
 #     --check            Verify-only preflight: exit 0 if the expected SIF exists,
-#                        nonzero (listing what IS there) if not. Never builds.
+#                        is non-trivial in size, and is a readable SIF. NOTE: it
+#                        inspects the filesystem it RUNS ON — run it on the cluster
+#                        (srun/ssh), not the submitting box, or you validate the
+#                        wrong filesystem.
+#                        Never builds.
 #                        Use before `nel run` — NEL's mount validation is `test -d`
 #                        and cannot see a missing/misnamed SIF file.
 #
@@ -84,6 +88,18 @@ fi
 # non-sandboxed exec. Run this before submitting to fail loudly instead.
 if [[ "$check" -eq 1 ]]; then
   if [[ -f "$sif" ]]; then
+    # -f alone would pass on a truncated or 0-byte file (e.g. an interrupted copy).
+    # A real GDPVal SIF is ~1-4 GB; anything under 100 MB is not one.
+    _sz=$(stat -c %s "$sif" 2>/dev/null || echo 0)
+    if [[ "$_sz" -lt 104857600 ]]; then
+      printf '\033[31mgdpval-sif: %s exists but is only %s bytes — truncated/incomplete\033[0m\n' "$sif" "$_sz" >&2
+      echo "  Rebuild with: $0 --force ${sif_dir}" >&2
+      exit 1
+    fi
+    if command -v apptainer >/dev/null 2>&1 && ! apptainer inspect "$sif" >/dev/null 2>&1; then
+      printf '\033[31mgdpval-sif: %s is not a readable SIF (apptainer inspect failed)\033[0m\n' "$sif" >&2
+      exit 1
+    fi
     _log "SIF present: $sif ($(du -h "$sif" 2>/dev/null | cut -f1))"
     echo "$sif"; exit 0
   fi
@@ -131,6 +147,9 @@ _log "building GDPVal SIF (this can take ~20-40 min)"
 _log "  gym commit: ${GDPVAL_GYM_COMMIT}"
 _log "  def:        ${def_url}"
 _log "  dest:       ${sif}"
+# Leave no temp artefacts if we are killed or exit early. $tmp is renamed on success,
+# so this only ever removes leftovers.
+trap 'rm -f "$tmp" "$def_local"' EXIT
 rm -f "$tmp" "$def_local"
 # apptainer build cannot take a remote def URL as its source — fetch the def to a
 # local file first, then build from it.

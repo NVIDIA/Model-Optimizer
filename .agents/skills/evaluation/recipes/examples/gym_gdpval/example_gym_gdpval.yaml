@@ -176,6 +176,9 @@ evaluation:
     apt-get install -y -qq software-properties-common squashfuse fuse3 ca-certificates || true
     add-apt-repository -y ppa:apptainer/ppa
     apt-get update -qq
+    # Deliberately unpinned: the PPA is the only source with current arm64 builds, and
+    # pinning risks the version being unavailable there. The resolved version is echoed
+    # below so the run log records exactly what was installed.
     apt-get install -y -qq apptainer
     apptainer --version
     mkdir -p /usr/local/var/apptainer/mnt/session
@@ -314,9 +317,11 @@ evaluation:
                   __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
                   [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
                   timeout 60 ray stop --force >/dev/null 2>&1 || true
-                  pkill -9 -f raylet >/dev/null 2>&1 || true
-                  pkill -9 -f gcs_server >/dev/null 2>&1 || true
-                  pkill -9 -f plasma_store >/dev/null 2>&1 || true
+                  # Scope to OUR uid — an unscoped pkill would take down Ray daemons
+                  # belonging to other users/jobs sharing the node.
+                  pkill -9 -u "$(id -u)" -f raylet >/dev/null 2>&1 || true
+                  pkill -9 -u "$(id -u)" -f gcs_server >/dev/null 2>&1 || true
+                  pkill -9 -u "$(id -u)" -f plasma_store >/dev/null 2>&1 || true
                   exit $__rc
                 data_prep_params: >-
                   "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]"
