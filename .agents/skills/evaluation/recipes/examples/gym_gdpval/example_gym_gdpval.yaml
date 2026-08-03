@@ -14,36 +14,21 @@
 # limitations under the License.
 #
 # =============================================================================
-# Example: GDPVal (NeMo Gym "Stirrup" agent) — single-task gym eval template.
+# GDPVal (NeMo Gym "Stirrup" agent) — STANDALONE gym eval, RUBRIC mode.
+# Self-deploys a checkpoint via vLLM on one SLURM node. One gym eval per config.
 #
-# GDPVal is an AGENTIC benchmark: the Stirrup agent produces office/PDF
-# deliverables inside a per-task Apptainer code-exec sandbox, then a pairwise/
-# rubric judge (Gemini 3.1 Pro) scores them. It runs on the 0.2.6 `nel` launcher
-# as a `nemo_gym` task (NOT nel-next), but it is STANDALONE — one gym eval per
-# config, no other tasks. Read recipes/tasks/aa_gym/gdpval.md and
-# references/gym-gdpval.md before editing this file.
+# Read recipes/tasks/aa_gym/gdpval.md + references/gym-gdpval.md first — they
+# cover the SIF sandbox, scoring modes, judge panel, preflight and failure modes.
 #
-# This template SELF-DEPLOYS a (quantized) checkpoint via vLLM on ONE SLURM node
-# and runs GDPVal against it. For the full 220-task run of a large MoE you will
-# likely need multi-node — see references/gym-gdpval.md (deployment sizing).
+# Before running: `.env` needs HF_TOKEN, INFERENCE_API_KEY, TAVILY_API_KEY,
+# INFERENCE_JUDGE_URL, GDPVAL_SIF_DIR, NEMO_EVALUATOR_TRUST_PRE_CMD=1; and the
+# SIF must exist (prefer a site-provided one, else
+# `srun -p cpu -t 01:00:00 --pty .agents/scripts/gdpval-sif.sh`).
 #
-# PREREQUISITES (see references/gym-gdpval.md):
-#   1. Set GDPVAL_SIF_DIR in .env (persistent SIF cache dir on this cluster), then
-#      ensure the SIF exists (build-if-absent, reuse-if-present — never copied from
-#      another cluster):
-#        srun -p cpu -t 01:00:00 --pty .agents/scripts/gdpval-sif.sh   # uses $GDPVAL_SIF_DIR
-#      The mount below binds $GDPVAL_SIF_DIR at /gdpval/sif so the SIF lands at EXACTLY
-#      /gdpval/sif/python-3.13.gdpval.sif (matches GDPVAL_CONTAINER_PATH below).
-#      Without it, the agent SILENTLY falls back to non-sandboxed local exec.
-#   2. .env has HF_TOKEN, INFERENCE_API_KEY (judge auth), TAVILY_API_KEY (agent web
-#      search), INFERENCE_JUDGE_URL (judge host), and GDPVAL_SIF_DIR (item 1). See
-#      recipes/env.example.
-#
-# NOTE: `limit_samples` is INERT on the gym path — the gym runs all 220 tasks no
-# matter what, so there is no cheap smoke test. Launch the real run and watch its
-# first ~20-30 min (SIF-sandbox line, judge auth, rollouts appearing); see the
-# recipe's Canary section.
 #   nel run --config example_gym_gdpval.yaml --env-file .env
+#
+# `limit_samples` is INERT here — the gym always runs all 220 tasks. There is no
+# cheap smoke test; see the recipe's Canary section.
 # =============================================================================
 defaults:
   # slurm/default works anywhere; if your install ships a predefined
@@ -71,9 +56,8 @@ gdpval:
 gdpval_judge:
   base_url: <INFERENCE_JUDGE_URL>              # from .env (/v1 base); shared inference host
   model: gcp/google/gemini-3.1-pro-preview     # Gemini 3.1 Pro; use an equivalent on your endpoint if needed
-  api_key: INFERENCE_API_KEY                   # doc only — the gym injects the VALUE as $INFERENCE_API_KEY
-                                               # in common_params (NOT ${gdpval_judge.api_key}, which passes
-                                               # the literal NAME "INFERENCE_API_KEY" → judge 500).
+  api_key: INFERENCE_API_KEY   # doc only; common_params injects the VALUE ($INFERENCE_API_KEY).
+                               # An env-var NAME reaches the proxy as a literal -> opaque judge 500.
 
 cluster:
   sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"Eval benchmark low GPU utilization"}}'
@@ -96,11 +80,8 @@ execution:
     evaluation:
       <HOST_HF_CACHE>: /hf-cache
       <HOST_UV_CACHE>: /cache/uv
-      # GDPVal Stirrup SIF dir — substitute the literal $GDPVAL_SIF_DIR value (.env),
-      # the persistent shared-FS dir gdpval-sif.sh builds python-3.13.gdpval.sif into
-      # (build-if-absent/reuse). Use the literal path here, NOT ${oc.env:...}: mount
-      # KEYS are not interpolated (same rule as the judge URLs). Mounting the DIR lands
-      # the SIF at /gdpval/sif/python-3.13.gdpval.sif == GDPVAL_CONTAINER_PATH.
+      # SIF dir -> /gdpval/sif, so the file lands at GDPVAL_CONTAINER_PATH below.
+      # Literal path only: mount KEYS are never interpolated.
       <GDPVAL_SIF_DIR>: /gdpval/sif
       # Writable shared-FS staging for ref files. Node-local /tmp breaks multi-node Ray.
       <HOST_REF_FILES>: /gdpval_ref_files
@@ -176,9 +157,8 @@ evaluation:
     apt-get install -y -qq software-properties-common squashfuse fuse3 ca-certificates || true
     add-apt-repository -y ppa:apptainer/ppa
     apt-get update -qq
-    # Deliberately unpinned: the PPA is the only source with current arm64 builds, and
-    # pinning risks the version being unavailable there. The resolved version is echoed
-    # below so the run log records exactly what was installed.
+    # Unpinned on purpose: the PPA is the only source with current arm64 builds. The
+    # resolved version is echoed below for the record.
     apt-get install -y -qq apptainer
     apptainer --version
     mkdir -p /usr/local/var/apptainer/mnt/session
@@ -248,9 +228,7 @@ evaluation:
                 command: |
                   set -ex
                   cd /opt/Gym
-                  # Honour a mounted uv cache if one was injected (UV_CACHE_DIR env var +
-                  # /cache/uv mount); fall back to the image-local dir. No bash ${VAR}
-                  # braces here — OmegaConf parses ${...}.
+                  # Honour a mounted uv cache if injected, else image-local. No ${VAR} braces.
                   [ -n "$UV_CACHE_DIR" ] || export UV_CACHE_DIR=/opt/cache/uv
                   source .venv/bin/activate
                   # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
@@ -279,8 +257,7 @@ evaluation:
                     d="$(dirname "$v")"
                     [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
                   done
-                  # Preserve any inherited PYTHONPATH. Plain $VAR only — OmegaConf parses ${...},
-                  # so the usual "${PYTHONPATH:+:$PYTHONPATH}" idiom cannot be used here.
+                  # Preserve inherited PYTHONPATH. Plain $VAR only (OmegaConf parses ${...}).
                   _gym_sp="$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
                   if [ -n "$PYTHONPATH" ]; then export PYTHONPATH="/opt/Gym:$_gym_sp:$PYTHONPATH"
                   else export PYTHONPATH="/opt/Gym:$_gym_sp"; fi
@@ -288,12 +265,9 @@ evaluation:
                   # Writable staging dir for ref files (bind-mounted, see execution).
                   mkdir -p /gdpval_ref_files
 
-                  # SECRETS: `set -x` traces commands AFTER expansion, and these param blobs
-                  # carry $HF_TOKEN / $INFERENCE_API_KEY / $TAVILY_API_KEY. Without this the
-                  # trace line writes all three in plaintext into the eval log — which lives on
-                  # shared FS and is uploaded to MLflow when export.mlflow.log_logs is true.
-                  # (The rollout call below is already safe: it goes through the quoted heredoc,
-                  # so its secrets stay literal until a shell that never sets -x expands them.)
+                  # SECRETS: `set -x` traces AFTER expansion, so without this the params'
+                  # $HF_TOKEN / $INFERENCE_API_KEY / $TAVILY_API_KEY land in the log (and in
+                  # MLflow via log_logs). The rollout call below is already safe via the heredoc.
                   set +x
                   ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
                   set -x
@@ -317,8 +291,7 @@ evaluation:
                   __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
                   [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
                   timeout 60 ray stop --force >/dev/null 2>&1 || true
-                  # Scope to OUR uid — an unscoped pkill would take down Ray daemons
-                  # belonging to other users/jobs sharing the node.
+                  # uid-scoped: an unscoped pkill would kill other jobs' Ray daemons.
                   pkill -9 -u "$(id -u)" -f raylet >/dev/null 2>&1 || true
                   pkill -9 -u "$(id -u)" -f gcs_server >/dev/null 2>&1 || true
                   pkill -9 -u "$(id -u)" -f plasma_store >/dev/null 2>&1 || true
@@ -346,15 +319,11 @@ evaluation:
                 # No judge_responses_create_params_overrides.model here: the judge model is
                 # already set by openai_model=${gdpval_judge.model}, and pinning it a second
                 # way silently collapses comparison mode's 3-member judge panel to one judge.
-                # num_repeats=1 — the value both current goldens use. The pinned Gym
-                # already ships 1, so this override is belt-and-braces, not a change.
-                # NOTE: no reference_* overrides below — rubric mode needs none, and the
-                # single-reference keys (reference_deliverables_dir / reference_elo)
-                # CONFLICT with comparison mode's reference_models map (added by
-                # modelopttools:eval-config Step 3c).
-                # Do NOT put '#' comments INSIDE this folded (>-) scalar: YAML keeps
-                # them as literal text, the block folds to one line, and the first '#'
-                # comments out every override after it in the shell command.
+                # num_repeats=1 — both current goldens. No reference_* overrides here:
+                # the single-reference keys conflict with comparison mode's reference_models
+                # map (added by modelopttools:eval-config Step 3c).
+                # NEVER put '#' inside this folded (>-) scalar — it folds to one line and
+                # comments out every override after it.
                 common_params: >-
                   ++use_absolute_ip=true
                   ++policy_base_url={{target.api_endpoint.url}}
