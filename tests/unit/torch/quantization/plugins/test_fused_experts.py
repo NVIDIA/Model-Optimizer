@@ -899,7 +899,8 @@ class TestFusedExpertsCalibration:
 
         self._cleanup_registry(expert_type)
 
-    def test_local_hessian_refines_per_expert_weights(self):
+    @pytest.mark.parametrize("activation_error_coupling", [False, True])
+    def test_local_hessian_refines_per_expert_weights(self, activation_error_coupling):
         """local_hessian captures each expert's routed activations and refines its weight amax."""
         model = _TinyMoEModel()
         expert_type = type(model.moe.experts)
@@ -911,6 +912,10 @@ class TestFusedExpertsCalibration:
                 {"quantizer_name": "*", "enable": False},
                 {"quantizer_name": "*gate_up_proj_weight_quantizer", "cfg": weight_quant},
                 {"quantizer_name": "*down_proj_weight_quantizer", "cfg": weight_quant},
+                {
+                    "quantizer_name": "*input_quantizer",
+                    "cfg": {"num_bits": 8, "axis": None},
+                },
             ],
             "algorithm": "max",
         }
@@ -936,7 +941,13 @@ class TestFusedExpertsCalibration:
             for i, q in enumerate(quantizers):
                 expected_shape[id(q)] = (weight[i].shape[0], weight[i].shape[1])
 
-        local_hessian_calibrate(model, forward_loop, fp8_scale_sweep=False, debug=True)
+        local_hessian_calibrate(
+            model,
+            forward_loop,
+            fp8_scale_sweep=False,
+            activation_error_coupling=activation_error_coupling,
+            debug=True,
+        )
 
         # Each captured Hessian is keyed to a real per-expert quantizer with the matching weight
         # shape, spans multiple distinct experts, and the refinement moved at least one amax.
@@ -944,6 +955,7 @@ class TestFusedExpertsCalibration:
         assert len(routed) >= 2, "expected multiple distinct experts to capture Hessians"
         for qid, acc in routed.items():
             assert (acc.cout, acc.cin) == expected_shape[qid]
+            assert (acc.coupling_per_block is not None) is activation_error_coupling
         assert all(q.amax is not None and torch.isfinite(q.amax).all() for q in expert_quantizers)
         assert any(
             id(q) in max_amax and not torch.allclose(q.amax, max_amax[id(q)])

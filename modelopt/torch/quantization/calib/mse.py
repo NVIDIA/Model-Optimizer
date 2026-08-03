@@ -180,7 +180,8 @@ class NVFP4MSECalibrator(MseCalibrator):
     ``[n_blocks, block_size]`` layout with Triton + the kernel package importable:
 
     - **Hessian-weighted** (local_hessian): taken when ``hessian is not None`` — minimizes
-      ``dwᵀ H dw``. Wins over the plain path, so it fires even when ``error_func`` is also set.
+      ``Δwᵀ H Δw`` plus the optional activation error coupling term. Wins over the plain path,
+      so it fires even when ``error_func`` is also set.
     - **plain squared-error**: taken when ``hessian is None and error_func is None``.
 
     Otherwise (CPU, non-blocked layout, Triton unavailable, or an ``error_func`` with no
@@ -196,6 +197,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         quant_func: Callable | None = None,
         error_func: Callable | None = None,
         hessian: torch.Tensor | None = None,
+        coupling: torch.Tensor | None = None,
     ):
         """Initialize NVFP4 MSE calibrator with per-block and global amax.
 
@@ -206,6 +208,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
         self._global_amax = global_amax.to(dtype=torch.float32)
         self._hessian = hessian
+        self._coupling = coupling
         # Set by collect() after either sweep path; consumed by compute_amax.
         self._best_amax: torch.Tensor | None = None
 
@@ -264,8 +267,23 @@ class NVFP4MSECalibrator(MseCalibrator):
         if self._can_use_hessian_fast_path(x):
             from modelopt.torch.kernels.quantization.gemm import nvfp4_fp8_scale_sweep_hessian
 
+            hessian = self._hessian
+            assert hessian is not None
+            coupling_bias = None
+            if self._coupling is not None:
+                # Local import avoids model_calib -> calib.mse -> model_calib initialization cycle.
+                from modelopt.torch.quantization.model_calib import _activation_error_coupling_bias
+
+                cout = x.numel() // (hessian.shape[0] * x.shape[-1])
+                coupling_bias = _activation_error_coupling_bias(
+                    x, self._coupling, cout, x.shape[-1]
+                ).reshape(-1)
             best_flat = nvfp4_fp8_scale_sweep_hessian(
-                x.detach(), self._global_amax, self._hessian, block_size=x.shape[-1]
+                x.detach(),
+                self._global_amax,
+                hessian,
+                block_size=x.shape[-1],
+                coupling_bias=coupling_bias,
             )
             self._best_amax = best_flat.reshape(self._initial_amax.shape).to(dtype=torch.float32)
             return

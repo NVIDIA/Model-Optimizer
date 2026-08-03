@@ -120,6 +120,12 @@ class TestLSQConfig:
         with pytest.raises(ValueError):
             LSQConfig(scale_algorithm={"method": "smoothquant"})
 
+    def test_local_hessian_activation_error_coupling(self):
+        cfg = LSQConfig(
+            scale_algorithm={"method": "local_hessian", "activation_error_coupling": True}
+        )
+        assert cfg.model_dump()["scale_algorithm"]["activation_error_coupling"] is True
+
     def test_scale_algorithm_preserves_sparse_dict(self, monkeypatch):
         cfg = LSQConfig(scale_algorithm={"method": "mse", "fp8_scale_sweep": True})
         assert cfg.model_dump()["scale_algorithm"] == {

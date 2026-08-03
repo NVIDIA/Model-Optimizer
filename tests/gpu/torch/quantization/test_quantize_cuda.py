@@ -97,6 +97,7 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         mtq.NVFP4_AWQ_CLIP_CFG,
         mtq.NVFP4_AWQ_FULL_CFG,
         mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG,
         mtq.MXFP8_DEFAULT_CFG,
         mtq.MXFP6_DEFAULT_CFG,
         mtq.MXFP4_DEFAULT_CFG,
@@ -124,6 +125,7 @@ def test_quantize(model_cls, config):
         NVFP4_WEIGHT_ACT_MSE_CFG,
         NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG,
         mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG,
     ]:
         if get_cuda_ext_mx() is None:
             pytest.skip("cuda_ext_mx is not available")

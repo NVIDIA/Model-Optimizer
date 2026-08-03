@@ -174,6 +174,7 @@ _HESSIAN_NUM_WARPS = 4
 def _fp8_scale_sweep_hessian_kernel(
     x_ptr,  # [COUT * N_CIN_BLOCKS * BLOCK_SIZE], any float dtype (loaded as fp32)
     hessian_ptr,  # [N_CIN_BLOCKS * BLOCK_SIZE * BLOCK_SIZE] fp32
+    coupling_bias_ptr,  # same flat layout as x, fp32 when HAS_COUPLING
     candidate_scales_ptr,  # [NUM_CANDIDATES] fp32: per-candidate FP8-quantized block scale
     candidate_amaxes_ptr,  # [NUM_CANDIDATES] fp32: per-candidate block amax (kernel output value)
     best_amax_ptr,  # [COUT * N_CIN_BLOCKS] fp32 output
@@ -182,6 +183,7 @@ def _fp8_scale_sweep_hessian_kernel(
     BLOCK_SIZE: tl.constexpr,
     NUM_CANDIDATES: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
+    HAS_COUPLING: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     cin_block = pid % N_CIN_BLOCKS
@@ -197,6 +199,12 @@ def _fp8_scale_sweep_hessian_kernel(
     ).to(tl.float32)  # [ROWS, BS]
     w_abs = tl.abs(w)
     w_sign = tl.where(w >= 0, 1.0, -1.0)
+    if HAS_COUPLING:
+        coupling_bias = tl.load(
+            coupling_bias_ptr + block_idx[:, None] * BLOCK_SIZE + elem[None, :],
+            mask=row_mask[:, None],
+            other=0.0,
+        ).to(tl.float32)
 
     idx = tl.arange(0, BLOCK_SIZE)
     hessian = tl.load(
@@ -214,10 +222,12 @@ def _fp8_scale_sweep_hessian_kernel(
         scale = tl.load(candidate_scales_ptr + k).to(tl.float32)
         scale_safe = tl.where(scale == 0.0, 1.0, scale)  # scale == 0 only if global_amax == 0
         q_mag = fp4_round_magnitude(w_abs / scale_safe)
-        dw = w_sign * (w_abs - q_mag * scale_safe)  # = w - quant(w), [ROWS, BS]
+        dw = w_sign * (q_mag * scale_safe - w_abs)  # = quant(w) - w, [ROWS, BS]
         # dwᵀ H dw per row (H symmetric); allow_tf32=False keeps it true fp32 vs the reference.
         hdw = tl.dot(dw, hessian, allow_tf32=False)  # [ROWS, BS]
         loss = tl.sum(hdw * dw, axis=1)  # [ROWS]
+        if HAS_COUPLING:
+            loss += 2.0 * tl.sum(dw * coupling_bias, axis=1)
         is_better = loss < best_loss
         best_loss = tl.where(is_better, loss, best_loss)
         best_idx = tl.where(is_better, k, best_idx)
@@ -231,13 +241,16 @@ def nvfp4_fp8_scale_sweep_hessian(
     global_amax: torch.Tensor,
     hessian: torch.Tensor,
     block_size: int = 16,
+    coupling_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Find the per-block FP8 scale minimizing the Hessian-weighted NVFP4 quant error.
 
     Hessian-weighted counterpart of :func:`nvfp4_fp8_scale_sweep`: for each NVFP4 block
-    it minimizes ``dwᵀ H dw`` (``dw = w - quant(w)``) over the 126 FP8 E4M3 candidates,
+    it minimizes ``Δwᵀ H Δw`` (``Δw = quant(w) - w``) over the 126 FP8 E4M3 candidates,
     where ``H`` is the per-cin-block local Hessian shared across all output rows. Used by
-    :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration.
+    :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration. When ``coupling_bias`` is
+    supplied, it adds the activation error coupling ``2 Δwᵀ(PW0)``. The scale-independent
+    activation-error constant is omitted, so candidate losses may be negative.
 
     Args:
         x: Weight tensor on CUDA in the blocked ``[N_BLOCKS, block_size]`` layout, row-major
@@ -247,6 +260,8 @@ def nvfp4_fp8_scale_sweep_hessian(
         hessian: Per-cin-block Hessian of shape ``[cin // block_size, block_size, block_size]``,
             fp32 (typically normalized by sample count).
         block_size: NVFP4 block size (typically 16).
+        coupling_bias: Optional fp32-compatible CUDA tensor with ``x.numel()`` values in the
+            same flat layout as ``x``, containing ``P W0`` for each block.
 
     Returns:
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
@@ -262,6 +277,13 @@ def nvfp4_fp8_scale_sweep_hessian(
         raise ValueError(
             f"n_blocks ({n_blocks}) is not divisible by n_cin_blocks ({n_cin_blocks})."
         )
+    if coupling_bias is not None:
+        if not coupling_bias.is_cuda:
+            raise ValueError("coupling_bias must be a CUDA tensor.")
+        if coupling_bias.numel() != x.numel():
+            raise ValueError(
+                f"coupling_bias must have {x.numel()} elements, got {coupling_bias.numel()}."
+            )
 
     cout = n_blocks // n_cin_blocks
     grid = (triton.cdiv(cout, _HESSIAN_ROWS_PER_PROGRAM) * n_cin_blocks,)
@@ -274,9 +296,15 @@ def nvfp4_fp8_scale_sweep_hessian(
             candidate_amaxes, global_amax_f32, quantize_block_scales=True
         ).to(dtype=torch.float32)
         hessian_flat = hessian.contiguous().to(device=x.device, dtype=torch.float32).view(-1)
+        coupling_bias_flat = (
+            coupling_bias.contiguous().to(device=x.device, dtype=torch.float32).view(-1)
+            if coupling_bias is not None
+            else x_flat
+        )
         _fp8_scale_sweep_hessian_kernel[grid](
             x_flat,
             hessian_flat,
+            coupling_bias_flat,
             candidate_scales,
             candidate_amaxes,
             best_amax,
@@ -285,6 +313,7 @@ def nvfp4_fp8_scale_sweep_hessian(
             BLOCK_SIZE=block_size,
             NUM_CANDIDATES=int(candidate_amaxes.numel()),
             ROWS_PER_PROGRAM=_HESSIAN_ROWS_PER_PROGRAM,
+            HAS_COUPLING=coupling_bias is not None,
             num_warps=_HESSIAN_NUM_WARPS,
         )
     return best_amax

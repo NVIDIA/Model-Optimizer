@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# QuantizeConfig preset for NVFP4 W4A4 local-Hessian calibration with activation error coupling.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizeConfig
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+
+algorithm:
+  method: local_hessian
+  fp8_scale_sweep: true
+  activation_error_coupling: true
+  layerwise:
+    enable: true
+quant_cfg:
+  - $import: base_disable_all
+  - quantizer_name: '*weight_quantizer'
+    cfg:
+      $import: nvfp4_static
+  - quantizer_name: '*input_quantizer'
+    cfg:
+      $import: nvfp4
+  - $import: default_disabled_quantizers
