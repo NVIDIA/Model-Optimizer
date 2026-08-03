@@ -38,10 +38,6 @@
 #   2. .env has HF_TOKEN, INFERENCE_API_KEY (judge auth), TAVILY_API_KEY (agent web
 #      search), INFERENCE_JUDGE_URL (judge host), and GDPVAL_SIF_DIR (item 1). See
 #      recipes/env.example.
-#   3. This file's `defaults` include `_gym_prepare` — the _gym_prepare.yaml in
-#      THIS directory MUST travel next to this config (Hydra resolves it
-#      relative to the config dir). Copy the whole gym_gdpval/ dir to your
-#      workspace, don't copy the yaml alone.
 #
 # Canary (validates SIF sandbox + judge + gym plumbing on a couple of tasks):
 #   nel run --config example_gym_gdpval.yaml --env-file .env \
@@ -53,7 +49,6 @@ defaults:
   # gres — see SKILL.md Step 4).
   - execution: slurm/default
   - deployment: vllm
-  - _gym_prepare          # provides ${gym_prepare.prepare} / ${gym_prepare.run}
   - _self_
 
 # GDPVal scoring mode. This template is RUBRIC-ONLY, deliberately: rubric needs no
@@ -246,12 +241,66 @@ evaluation:
                   # in the client log before crediting it with any behaviour change.
                   commit: dd41196f620f2af99947d776cbe5da9439d2a08d  # pragma: allowlist secret
                 command: |
-                  ${gym_prepare.prepare}
+                  set -ex
+                  cd /opt/Gym
+                  export UV_CACHE_DIR=/opt/cache/uv
+                  source .venv/bin/activate
+                  # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
+                  # images bake Gym at a fixed version (not a git repo) — use it as-is.
+                  if [ -d .git ]; then
+                    git remote add oss_pin "{{config.params.extra.nemo_gym.install_on_the_fly.url}}" 2>/dev/null || true
+                    git fetch oss_pin
+                    git checkout "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}"
+                    echo "=== NeMo Gym commit ===" && git rev-parse HEAD
+                  else
+                    echo "=== /opt/Gym is not a git repo; using baked-in Gym version ==="
+                  fi
+                  for r in /opt/Gym/responses_api_models/*/requirements.txt \
+                           /opt/Gym/responses_api_agents/*/requirements.txt \
+                           /opt/Gym/resources_servers/*/requirements.txt; do
+                    [ -f "$r" ] || continue
+                    grep -vE '^[[:space:]]*-e ' "$r" > "$r.fixed" || true
+                    grep -qiE '^ray([<>=[]|$)' "$r.fixed" 2>/dev/null || echo 'ray==2.49.2' >> "$r.fixed"
+                    grep -qiE '^tqdm' "$r.fixed" 2>/dev/null || echo 'tqdm' >> "$r.fixed"
+                    mv "$r.fixed" "$r" 2>/dev/null || true
+                  done
+                  for v in /opt/Gym/responses_api_models/*/.venv \
+                           /opt/Gym/responses_api_agents/*/.venv \
+                           /opt/Gym/resources_servers/*/.venv; do
+                    [ -d "$v" ] || continue
+                    d="$(dirname "$v")"
+                    [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
+                  done
+                  export PYTHONPATH="/opt/Gym:$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
 
                   # Writable staging dir for ref files (bind-mounted, see execution).
                   mkdir -p /gdpval_ref_files
 
-                  ${gym_prepare.run}
+                  ng_prepare_benchmark {{config.params.extra.nemo_gym.data_prep_params}} {{config.params.extra.nemo_gym.common_params}}
+                  # The rollout command is written to a script and run from it, rather than passed
+                  # to `bash -c '...'`. Gym params legitimately CONTAIN single quotes — comparison
+                  # mode's ++multistage.stages='[{num_tasks: 45}, ...]' and ++...judge_panel='[{...}]'
+                  # — and those would close a single-quoted `bash -c` wrapper early, so Hydra then
+                  # receives the value split on spaces and dies with
+                  # "no viable alternative at input '[{num_tasks:'".
+                  # The heredoc delimiter is QUOTED ('GYM_RUN_EOF') so nothing expands while writing:
+                  # $$ and $TAVILY_API_KEY / $INFERENCE_API_KEY land in the script literally and are
+                  # expanded at run time by the shell that executes it, which is what we want.
+                  cat > /tmp/gym_run.sh <<'GYM_RUN_EOF'
+                  echo $$ > /tmp/gym_eval_pgid
+                  exec ng_e2e_collect_rollouts {{config.params.extra.nemo_gym.collect_rollout_params}} {{config.params.extra.nemo_gym.common_params}}
+                  GYM_RUN_EOF
+                  setsid --wait bash /tmp/gym_run.sh &
+                  __ev=$!
+                  __rc=0; wait "$__ev" || __rc=$?
+                  echo "Evaluator Gym finished!"
+                  __pg=$(cat /tmp/gym_eval_pgid 2>/dev/null || echo)
+                  [ -n "$__pg" ] && kill -9 -"$__pg" 2>/dev/null || true
+                  timeout 60 ray stop --force >/dev/null 2>&1 || true
+                  pkill -9 -f raylet >/dev/null 2>&1 || true
+                  pkill -9 -f gcs_server >/dev/null 2>&1 || true
+                  pkill -9 -f plasma_store >/dev/null 2>&1 || true
+                  exit $__rc
                 data_prep_params: >-
                   "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/gdpval/config.yaml]"
                   +hf_token=$HF_TOKEN

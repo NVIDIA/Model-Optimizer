@@ -41,13 +41,11 @@ Start from the self-contained example and edit it — **do not** copy a fragment
 another config:
 
 ```text
-recipes/examples/gym_gdpval/
-  example_gym_gdpval.yaml   # SLURM + single-node vLLM self-deploy template (rubric)
-  _gym_prepare.yaml         # co-located Hydra include; MUST travel with the yaml
+recipes/examples/gym_gdpval/example_gym_gdpval.yaml   # SLURM + single-node vLLM,
+                                                    # rubric mode, self-contained
 ```
 
-Copy the **whole dir** (the `- _gym_prepare` default resolves relative to the config
-dir). `num_repeats=1` — already set by the template via `++num_repeats=1`; both
+`num_repeats=1` — already set by the template via `++num_repeats=1`; both
 current goldens use it. A full 220-task run of a large MoE typically needs multi-node.
 
 ## Canary

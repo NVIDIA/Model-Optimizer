@@ -56,11 +56,11 @@ nel-next), so Steps 1–9 apply — but it is mechanically special and **standal
 (one gym eval per config; never mix it with `aa/` tasks). If the user asks for
 GDPVal:
 
-1. Read **`references/gym-gdpval.md`** (Apptainer SIF sandbox, `_gym_prepare.yaml`
+1. Read **`references/gym-gdpval.md`** (Apptainer SIF sandbox, gym prepare/reap
    machinery, deploy sizing, rubric-vs-comparison scoring, MLflow deliverables trap,
    failure modes) + **`recipes/tasks/aa_gym/gdpval.md`**.
-2. Start from the self-contained **`recipes/examples/gym_gdpval/`** dir — copy the
-   **whole dir** (the `_gym_prepare.yaml` include must travel next to the config).
+2. Start from **`recipes/examples/gym_gdpval/example_gym_gdpval.yaml`** — a single
+   self-contained file.
 3. Prerequisite — the Apptainer SIF. **If your site provides one, use it**
    (NVIDIA-internal: `modelopttools:eval-config` Step 3c); otherwise set
    `GDPVAL_SIF_DIR` in `.env` and build with `.agents/scripts/gdpval-sif.sh`

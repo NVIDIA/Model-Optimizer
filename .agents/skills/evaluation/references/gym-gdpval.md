@@ -55,21 +55,26 @@ and repoint `GDPVAL_CONTAINER_PATH`. Running a new gym on an old SIF makes the
 generated code fail its imports *inside the sandbox* — deliverables silently degrade
 with no error in the eval.
 
-## The `_gym_prepare.yaml` include (why it exists)
+## Gym prepare / reap (why the task `command:` is long)
 
-`nemo_gym` tasks interpolate two shared snippets into the task `command:`:
-`${gym_prepare.prepare}` (activate the baked Gym venv, checkout the
-`install_on_the_fly` pin, repair the image's incomplete per-server venvs, front the
-main venv on `PYTHONPATH`) and `${gym_prepare.run}` (data prep +
-`ng_e2e_collect_rollouts`, run in its own `setsid` session so the whole server/Ray
-process tree can be reaped by process group — otherwise orphaned Ray workers hold
-the launcher's stdout open and the run **hangs in post-eval**). Both compensate for
-the eval image's deployment-oriented packaging and Gym's incomplete shutdown; remove
-once the image ships complete ray-consistent venvs.
+The task `command:` carries two workaround blocks, inlined in the template:
 
-**The include is co-located, not central.** Hydra resolves `- _gym_prepare` relative
-to the run config's directory, so `_gym_prepare.yaml` must sit next to your config —
-copy the whole `recipes/examples/gym_gdpval/` dir, not the yaml alone.
+1. **prepare** — activate the baked Gym venv, checkout the `install_on_the_fly` pin
+   (only if `/opt/Gym` is a git repo), repair the image's incomplete per-server venvs
+   (drop the editable `-e nemo-gym[dev]` line, which forces a ray re-resolve that
+   breaks venv-less servers; pin `ray==2.49.2` + `tqdm`), and front the main venv on
+   `PYTHONPATH`.
+2. **run** — data prep, then `ng_e2e_collect_rollouts` executed from a script written
+   via a **quoted heredoc** and launched under `setsid`, so the whole server/Ray
+   process tree can be reaped by process group. Without that reap, orphaned Ray
+   workers hold the launcher's stdout open and the run **hangs in post-eval**; the
+   quoted heredoc keeps `$$` and `$*_API_KEY` unexpanded until run time and survives
+   params that contain single quotes (comparison mode's `stages='[{...}]'`).
+
+Both compensate for the eval image's deployment-oriented packaging and Gym's
+incomplete shutdown — remove them once the image ships complete ray-consistent venvs
+and Gym reaps its own process groups. Avoid bash `${VAR}` inside these blocks:
+OmegaConf parses `${...}`. `$(...)`, `$$` and `$VAR` are fine.
 
 ## Deployment sizing
 
@@ -219,7 +224,6 @@ via `++` on those pins. Do not carry a `=2` into a current run.
   `chat_template_kwargs.enable_thinking: true` (right toggle key for the family) +
   the policy's `--reasoning-parser`.
 + **Run hangs in post-eval** — orphaned Ray/gym processes holding stdout; that's what
-  the `${gym_prepare.run}` setsid + process-group reap prevents. If it still hangs,
-  the `_gym_prepare.yaml` include didn't travel with the config.
+  the setsid + process-group reap in the task `command:` prevents.
 + **Multi-node ref-file errors** — `GDPVAL_REF_FILES_DIR` on node-local storage;
   point it at a shared-FS staging dir.
