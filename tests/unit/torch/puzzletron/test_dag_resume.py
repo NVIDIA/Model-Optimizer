@@ -111,7 +111,7 @@ def _write_stage_output(root: Path, stage: str, stage_config: dict) -> None:
     write_stage_manifest(root / "manifests" / f"{stage}.json", manifest)
 
 
-def test_resume_records_every_selected_mip_parent(tmp_path: Path) -> None:
+def test_resume_contracts_disabled_vllm_parent_to_convert(tmp_path: Path) -> None:
     config = _config(
         tmp_path,
         depth_importance={"enabled": True},
@@ -121,7 +121,7 @@ def test_resume_records_every_selected_mip_parent(tmp_path: Path) -> None:
     kwargs = _resume_kwargs(config, tmp_path / "config.yaml", "mip")
 
     assert tuple(kwargs["upstream_markers"]) == (
-        "vllm_stats",
+        "convert",
         "depth_importance",
         "replacement_scoring",
     )

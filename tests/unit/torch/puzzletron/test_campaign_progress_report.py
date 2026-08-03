@@ -70,7 +70,7 @@ def test_pipeline_state_uses_artifacts_and_completed_takes_precedence(tmp_path: 
     assert _pipeline_state(tmp_path, bypass, {"bypass": {"enabled": False}}) == "completed"
 
 
-def test_report_has_clean_header_and_only_artifact_backed_sections(tmp_path: Path):
+def _disabled_bypass_report(tmp_path: Path) -> str:
     config = {
         "display_name": "Example Experiment",
         "bypass": {"enabled": False, "granularity": "subblock"},
@@ -81,7 +81,11 @@ def test_report_has_clean_header_and_only_artifact_backed_sections(tmp_path: Pat
     _write(tmp_path / "artifacts/bypass/dp_observations.jsonl", {"observations": []})
 
     result = generate_campaign_progress_report(tmp_path, model_name="Example Experiment")
-    document = Path(result["html"]).read_text(encoding="utf-8")
+    return Path(result["html"]).read_text(encoding="utf-8")
+
+
+def test_report_has_clean_header_and_completed_required_artifacts(tmp_path: Path):
+    document = _disabled_bypass_report(tmp_path)
 
     assert "<h1>Example Experiment</h1>" in document
     assert '<p class="subtitle">Incremental Puzzletron campaign report</p>' in document
@@ -92,22 +96,12 @@ def test_report_has_clean_header_and_only_artifact_backed_sections(tmp_path: Pat
     assert "Merged experiment config" not in document
     assert ">Pipeline<" in document
     assert 'data-stage="convert" data-status="completed"' in document
-    assert 'data-stage="bypass" data-status="completed"' in document
+    assert 'data-stage="bypass"' not in document
     assert 'class="dag-node required completed" data-stage="convert"' in document
-    assert 'class="dag-node optional completed" data-stage="bypass"' in document
     assert "<span class='required-node'>Required</span>" in document
     assert "<span class='optional-node'>Optional</span>" in document
     assert "dagre.min.js" in document
     assert 'data-source="convert" data-target="tokenize_data"' in document
-    assert 'data-source="sort" data-target="sort_sanity"' in document
-    assert 'data-source="sort_sanity" data-target="width_sanity"' in document
-    assert 'data-source="width_sanity" data-target="slicing_sanity"' in document
-    assert 'data-source="sort" data-target="bypass_sanity"' in document
-    assert "<tspan x='26' dy='0'>Global Distillation</tspan>" in document
-    assert "<tspan x='26' dy='15'>Sanity Check</tspan>" in document
-    assert "Subblock Bypass" in document
-    assert "Nested bypass" not in document
-    assert "MIP solutions" not in document
 
 
 def test_pipeline_dag_only_contains_configured_stages(tmp_path: Path):
@@ -131,6 +125,7 @@ def test_progress_report_renders_canonical_sort_sanity_metrics(tmp_path: Path):
     merged_config = {
         "data": {"modality": "text", "layout": "fixed"},
         "parallel": {"tp": 2, "cp": 2, "pp": 2, "dp": 2},
+        "sort_sanity": {"enabled": True},
     }
     for stage in ("convert", "width_importance", "sort"):
         _write(
@@ -194,6 +189,10 @@ def test_progress_report_renders_canonical_sort_sanity_metrics(tmp_path: Path):
 def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: Path):
     message = "sorted teacher loss drift exceeded tolerance"
     _write(
+        tmp_path / "manifests/sort_sanity.json",
+        {"config": {"sort_sanity": {"enabled": True}}},
+    )
+    _write(
         tmp_path / "artifacts/sort_sanity/summary.json",
         {
             "passed": False,
@@ -238,6 +237,16 @@ def test_progress_report_uses_pending_instead_of_transient_running_state(tmp_pat
 
 
 def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/slicing_sanity.json",
+        {
+            "config": {
+                "sort_sanity": {"enabled": True},
+                "width_sanity": {"enabled": True},
+                "slicing_sanity": {"enabled": True},
+            }
+        },
+    )
     common = {
         "axis": "arbitrary_axis",
         "layer_idx": 3,
@@ -552,16 +561,6 @@ def test_campaign_options_mark_parameter_selection_not_latency_verified(tmp_path
     assert data["latency_verified"] is False
 
 
-def test_progress_report_marks_disabled_vllm_stage_as_disabled(tmp_path: Path):
-    _write(tmp_path / "manifests/convert.json", {"config": {"vllm_stats": {"enabled": False}}})
-
-    result = generate_campaign_progress_report(tmp_path)
-    document = Path(result["html"]).read_text(encoding="utf-8")
-
-    assert 'data-stage="vllm_stats" data-status="disabled"' in document
-    assert "Parameter-constrained" not in document
-
-
 def test_sort_diagnosis_collects_accuracy_and_consistency_metrics():
     assert "token_accuracy_top_1" in _PRIMARY_METRICS
     assert "token_accuracy_top_1_consistency" in _PRIMARY_METRICS
@@ -579,6 +578,15 @@ def test_sort_diagnosis_collects_accuracy_and_consistency_metrics():
 
 
 def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/width_sanity.json",
+        {
+            "config": {
+                "sort_sanity": {"enabled": True},
+                "width_sanity": {"enabled": True},
+            }
+        },
+    )
     rows = []
     metric_values = {
         "token_accuracy_top_1": 0.40,
@@ -639,6 +647,10 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
 
 def test_progress_report_recovers_sort_table_from_compact_reuse_summary(tmp_path: Path):
     _write(
+        tmp_path / "manifests/sort_sanity.json",
+        {"config": {"sort_sanity": {"enabled": True}}},
+    )
+    _write(
         tmp_path / "artifacts/sort_sanity/summary.json",
         {
             "passed": True,
@@ -680,6 +692,10 @@ def test_progress_report_recovers_sort_table_from_compact_reuse_summary(tmp_path
 
 def test_progress_report_renders_single_layer_selectable_bypass_overfit_plot(tmp_path: Path):
     _write(
+        tmp_path / "manifests/bypass_sanity.json",
+        {"config": {"bypass_sanity": {"enabled": True}}},
+    )
+    _write(
         tmp_path / "artifacts/bypass_sanity/summary.json",
         {"status": "complete"},
     )
@@ -713,6 +729,10 @@ def test_progress_report_renders_single_layer_selectable_bypass_overfit_plot(tmp
 
 
 def test_progress_report_uses_subblock_losses_for_subblock_bypass_overfit(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/bypass_sanity.json",
+        {"config": {"bypass_sanity": {"enabled": True}}},
+    )
     _write(
         tmp_path / "artifacts/bypass_sanity/summary.json",
         {"status": "complete"},
@@ -762,6 +782,15 @@ def test_nested_bypass_report_exposes_ema_and_display_only_outlier_controls(tmp_
 
 
 def test_progress_report_renders_profile_evaluation_and_aiperf_explorers(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/aiperf.json",
+        {
+            "config": {
+                "zero_shot_evaluation": {"enabled": True},
+                "aiperf": {"enabled": True},
+            }
+        },
+    )
     registry = {
         "profile_id": "params-080",
         "solutions": [
@@ -841,6 +870,10 @@ def test_progress_report_renders_profile_evaluation_and_aiperf_explorers(tmp_pat
 
 
 def test_progress_report_renders_partial_aiperf_leaf_results(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/aiperf.json",
+        {"config": {"aiperf": {"enabled": True}}},
+    )
     registry = {
         "profile_id": "params-080",
         "solutions": [
@@ -900,6 +933,10 @@ def test_progress_report_renders_partial_aiperf_leaf_results(tmp_path: Path):
 
 
 def test_evaluation_report_adds_teacher_styles_solution_kinds_and_pareto_front(tmp_path: Path):
+    _write(
+        tmp_path / "manifests/zero_shot_evaluation.json",
+        {"config": {"zero_shot_evaluation": {"enabled": True}}},
+    )
     _write(
         tmp_path
         / "artifacts/zero_shot_evaluation/profiles/params-075/text-s128-l8192/evaluation_summary.json",
@@ -966,6 +1003,15 @@ def test_progress_report_renders_proper_distillation_terms_and_before_after_eval
         _proper_distillation_data,
     )
 
+    _write(
+        tmp_path / "manifests/post_distillation_evaluation.json",
+        {
+            "config": {
+                "global_distillation": {"enabled": True},
+                "post_distillation_evaluation": {"enabled": True},
+            }
+        },
+    )
     run = (
         tmp_path
         / "artifacts/distillation/profiles/params-080"

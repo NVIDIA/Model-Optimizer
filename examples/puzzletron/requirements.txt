@@ -1,5 +1,5 @@
 aiohttp>=3.9,<4
 math-verify
 ray
-# Match the pinned Puzzletron AutoModel runtime.
-transformers==5.8.1
+# Transformers comes from nvidia-modelopt[hf]; CPU CI overlays the exact
+# known-good version recorded in ci_environment.json.

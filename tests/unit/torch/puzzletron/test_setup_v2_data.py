@@ -102,7 +102,7 @@ def test_data_choices_include_first_class_sources_and_deduplicate_default():
     ]
 
 
-def test_puzzle_kd_always_asks_bounded_acquisition_questions(tmp_path):
+def _run_puzzle_kd_data_section(tmp_path):
     destination = tmp_path / "already-downloaded"
     destination.mkdir()
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
@@ -111,8 +111,6 @@ def test_puzzle_kd_always_asks_bounded_acquisition_questions(tmp_path):
             _PUZZLE_KD_DATA_SOURCE,
             str(destination),
             11,
-            100,
-            20,
             "fixed",
             2048,
         ]
@@ -124,17 +122,21 @@ def test_puzzle_kd_always_asks_bounded_acquisition_questions(tmp_path):
         _context(multimodal=False),
         catalog_loader=lambda source, **kwargs: _puzzle_kd_catalog(),
     )
+    return state, backend, destination
+
+
+def test_puzzle_kd_records_materialization_metadata(tmp_path):
+    state, backend, destination = _run_puzzle_kd_data_section(tmp_path)
 
     assert backend.remaining == 0
     assert state.get_field("data.source") == str(destination.resolve())
-    assert state.collection("data_acquisition") == {
-        "adapter": "puzzle_kd_v2",
-        "source": _PUZZLE_KD_DATA_SOURCE,
-        "output": str(destination.resolve()),
-        "seed": 11,
-        "train_samples": 100,
-        "validation_samples": 20,
-    }
+    acquisition = state.collection("data_acquisition")
+    assert acquisition["adapter"] == "puzzle_kd_v2"
+    assert acquisition["source"] == _PUZZLE_KD_DATA_SOURCE
+    assert acquisition["output"] == str(destination.resolve())
+    assert acquisition["seed"] == 11
+    assert "train_samples" not in acquisition
+    assert "validation_samples" not in acquisition
 
 
 def test_wizard_emits_canonical_padded_varlen_layout(tmp_path):
@@ -144,8 +146,6 @@ def test_wizard_emits_canonical_padded_varlen_layout(tmp_path):
             _PUZZLE_KD_DATA_SOURCE,
             str(tmp_path / "text"),
             11,
-            100,
-            20,
             "padded_varlen",
             2048,
         ]
@@ -161,7 +161,7 @@ def test_wizard_emits_canonical_padded_varlen_layout(tmp_path):
     assert state.get_field("data.layout") == "padded_varlen"
 
 
-def test_nemotron_vlm_records_subsets_size_seed_and_shard_bound(tmp_path):
+def test_nemotron_vlm_records_catalog_and_defers_sample_bounds(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     destination = tmp_path / "vlm"
     backend = _CapturingBackend(
@@ -170,8 +170,6 @@ def test_nemotron_vlm_records_subsets_size_seed_and_shard_bound(tmp_path):
             str(destination),
             19,
             ["sparsetables", "plotqa_cot"],
-            64,
-            2,
             "packed_varlen",
             4096,
         ]
@@ -184,18 +182,20 @@ def test_nemotron_vlm_records_subsets_size_seed_and_shard_bound(tmp_path):
         catalog_loader=lambda source, **kwargs: _nemotron_catalog(),
     )
 
+    assert backend.remaining == 0
     assert state.get_field("data.modality") == "multimodal"
-    assert state.collection("data_acquisition")["subsets"] == [
+    acquisition = state.collection("data_acquisition")
+    assert acquisition["subsets"] == [
         "sparsetables",
         "plotqa_cot",
     ]
-    assert state.collection("data_acquisition")["num_samples"] == 64
-    assert state.collection("data_acquisition")["max_shards_per_subset"] == 2
-    assert state.collection("data_acquisition")["subset_rows"] == {
+    assert "num_samples" not in acquisition
+    assert "max_shards_per_subset" not in acquisition
+    assert acquisition["subset_rows"] == {
         "sparsetables": 100,
         "plotqa_cot": 300,
     }
-    assert state.collection("data_acquisition")["subset_weights"] == {
+    assert acquisition["subset_weights"] == {
         "sparsetables": 0.25,
         "plotqa_cot": 0.75,
     }
@@ -206,12 +206,14 @@ def test_nemotron_vlm_records_subsets_size_seed_and_shard_bound(tmp_path):
             "name": "sparsetables",
             "num_rows": 100,
             "num_bytes_original_files": 1024,
+            "num_media_shards": None,
             "weight": 0.25,
         },
         {
             "name": "plotqa_cot",
             "num_rows": 300,
             "num_bytes_original_files": 2048,
+            "num_media_shards": None,
             "weight": 0.75,
         },
     ]
@@ -269,12 +271,14 @@ def test_generic_hugging_face_dataset_uses_dynamic_subset_checkbox(
             "name": "small",
             "num_rows": 10,
             "num_bytes_original_files": 100,
+            "num_media_shards": None,
             "weight": 0.1,
         },
         {
             "name": "large",
             "num_rows": 90,
             "num_bytes_original_files": 900,
+            "num_media_shards": None,
             "weight": 0.9,
         },
     ]
@@ -288,17 +292,22 @@ def test_resume_reuses_the_revision_locked_subset_catalog(tmp_path):
         str(tmp_path / "vlm"),
         42,
         ["sparsetables"],
-        8,
-        1,
         "fixed",
         1024,
     ]
+    initial = ScriptedBackend(answers)
     assert data_section(
-        WizardSession(state, ScriptedBackend(answers)),
+        WizardSession(state, initial),
         DefaultsResolver(),
         _context(multimodal=True),
         catalog_loader=lambda source, **kwargs: _nemotron_catalog(),
     )
+    assert initial.remaining == 0
+    assert state.get_field("data.layout") == "fixed"
+    assert state.get_field("data.sequence_length") == 1024
+    acquisition = state.collection("data_acquisition")
+    assert "num_samples" not in acquisition
+    assert "max_shards_per_subset" not in acquisition
 
     resumed = ScriptedBackend([])
     assert data_section(
@@ -362,7 +371,20 @@ def test_checkbox_rejects_a_disabled_scripted_selection(tmp_path):
 def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch):
     rendered = []
 
+    class _KeyBindings:
+        @staticmethod
+        def add(*args, **kwargs):
+            def decorator(callback):
+                return callback
+
+            return decorator
+
+    class _Application:
+        key_bindings = _KeyBindings()
+
     class _Question:
+        application = _Application()
+
         @staticmethod
         def ask():
             return ["hosted"]
@@ -374,9 +396,20 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
             return kwargs
 
         @staticmethod
-        def checkbox(message, choices):
+        def Separator(title):  # noqa: N802 - mirrors questionary's public constructor
+            return {"separator": title}
+
+        @staticmethod
+        def Style(rules):  # noqa: N802 - mirrors questionary's public constructor
+            return rules
+
+        @staticmethod
+        def checkbox(message, choices, instruction, style):
             assert message == "Subsets:"
-            assert choices == rendered
+            assert choices[:2] == rendered
+            assert choices[2] == {"separator": "  ← Back (press Esc)"}
+            assert "<esc> to go back" in instruction
+            assert style
             return _Question()
 
     monkeypatch.setattr(

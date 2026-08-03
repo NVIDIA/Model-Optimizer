@@ -70,9 +70,11 @@ jobs:
             examples/puzzletron/**/*.txt
             examples/puzzletron/**/*.yaml
             examples/puzzletron/**/*.yml
-            modelopt/torch/puzzletron/**
+            modelopt/torch/**
             noxfile.py
             pyproject.toml
+            puzzletron_orchestrator/**
+            puzzletron_setup/**
             tests/unit/torch/puzzletron/**
   linux:
     needs: [check-dco]
