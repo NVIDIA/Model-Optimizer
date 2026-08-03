@@ -6,6 +6,11 @@ license: Apache-2.0
 
 # Day-0 Release
 
+If the user asks to run the release and no reviewed `PROGRAM.md` exists, use the
+`preflight` skill first to resolve inputs, validate the environment, and write
+the program. When an active goal requested preflight first, resume after it
+returns; otherwise resume after the user submits the suggested `/goal` prompt.
+
 Drive a model from a pretrained checkpoint to a publish decision for a quantized
 checkpoint, in a fixed sequence with a gate after every stage. This skill is a
 **conductor**: it sequences the existing domain skills and enforces the gates —
@@ -145,9 +150,13 @@ external baseline check. Combined decision:
 
 ### Step 6 — Closeout
 
-Report the decision with: source vs output size + ratio, per-task baseline /
-candidate / delta / within-threshold, external source and sanity status, MLflow
-run IDs, and a publish recommendation (publish / do-not-publish).
+Write `DAY0_REPORT.md` in the workspace using
+`references/day0-report-template.md`. Replace every angle-bracket placeholder;
+use `none` or `Not requested` where instructed. Include the decision, publish
+recommendation, source/output size and ratio, checkpoint validation, per-task
+baseline/candidate comparison, external sanity status, run IDs, optional
+performance results, and absolute artifact locations.
+
 Archive artifacts to the workspace.
 
 ## Triage (gate failure → decision)
@@ -176,7 +185,7 @@ Return a decision, not a raw artifact:
 - `ACCEPT` + report + publish recommendation
 - `REGRESSION` + which tasks failed the threshold and by how much
 - `ANOMALOUS` / `INFEASIBLE` + reason and next automated action
-- Always: workspace path + MLflow run IDs for traceability
+- Always: workspace path, `DAY0_REPORT.md`, and MLflow run IDs for traceability
 
 ## Scope (v1)
 
