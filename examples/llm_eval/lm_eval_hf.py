@@ -337,7 +337,8 @@ if __name__ == "__main__":
     if lower_bound is not None:  # fail fast before the (expensive) eval
         if not output_path:
             raise ValueError("--accuracy_lower_bound requires --output_path.")
-        tasks = args.tasks if isinstance(args.tasks, list) else str(args.tasks or "").split(",")
+        raw = args.tasks if isinstance(args.tasks, list) else str(args.tasks or "").split(",")
+        tasks = [t.strip() for t in raw if t and t.strip()]
         if len(tasks) != 1:
             raise ValueError(
                 f"--accuracy_lower_bound needs exactly one --tasks (got {tasks or 'none'})."

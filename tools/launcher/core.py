@@ -842,15 +842,20 @@ def run_jobs(
                     pkgs += [shlex.quote(tok) for tok in shlex.split(task.reqs or "")]
                     install = "python -m pip install " + " ".join(pkgs)
                     # On Slurm, srun runs this inline on every rank (ntasks_per_node), so install
-                    # once on local rank 0 behind a filesystem barrier — concurrent pip on one node
-                    # corrupts the env. The marker is relative to the per-task working dir
-                    # (/nemo_run/code, fresh per task and shared across the node's ranks), so it is
-                    # run-unique (no stale-marker reuse); rank 0 clears it first, and other ranks
-                    # fail if it never appears (rank-0 install error). Local single-process runs
-                    # just install as rank 0 and never wait.
-                    marker = ".modelopt_launcher_reqs_done"
+                    # once per node on local rank 0 behind a filesystem barrier — concurrent pip on
+                    # one node corrupts the env. The marker lives in the working dir (/nemo_run/code,
+                    # the shared job dir), so its name folds in job/step/node IDs: per-step avoids
+                    # reusing a stale marker from an earlier task in the same experiment, and
+                    # per-node stops another node's rank 0 from satisfying this node's barrier. Local
+                    # rank 0 installs and touches the marker; the other local ranks wait for it and
+                    # fail (final `[ -f ]`) if it never appears (rank-0 install error). Local
+                    # single-process runs just install as rank 0 and never wait.
+                    marker = (
+                        ".modelopt_launcher_reqs_done_"
+                        "${SLURM_JOB_ID:-0}_${SLURM_STEP_ID:-0}_${SLURM_NODEID:-0}"
+                    )
                     reqs_prefix = (
-                        f'if [ "${{SLURM_LOCALID:-0}}" -eq 0 ]; then rm -f {marker}; '
+                        f'if [ "${{SLURM_LOCALID:-0}}" -eq 0 ]; then '
                         f"{install} && touch {marker}; "
                         f"else for _ in $(seq 600); do [ -f {marker} ] && break; sleep 1; done; "
                         f"[ -f {marker} ]; fi && "

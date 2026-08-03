@@ -122,6 +122,10 @@ A task may pip-install **in the container before the command**
 
 Both work with `inline` and `script` tasks and resolve `<<global_vars.X>>`.
 
+On Slurm the install runs once per node (on local rank 0 behind a filesystem
+barrier keyed on job/step/node IDs), so multi-node tasks are supported and
+concurrent pip on a node is avoided.
+
 ### Multi-task Pipeline
 
 Tasks run sequentially — `task_1` starts only after `task_0` completes.
