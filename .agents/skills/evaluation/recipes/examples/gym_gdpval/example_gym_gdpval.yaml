@@ -274,7 +274,11 @@ evaluation:
                     d="$(dirname "$v")"
                     [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
                   done
-                  export PYTHONPATH="/opt/Gym:$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+                  # Preserve any inherited PYTHONPATH. Plain $VAR only — OmegaConf parses ${...},
+                  # so the usual "${PYTHONPATH:+:$PYTHONPATH}" idiom cannot be used here.
+                  _gym_sp="$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+                  if [ -n "$PYTHONPATH" ]; then export PYTHONPATH="/opt/Gym:$_gym_sp:$PYTHONPATH"
+                  else export PYTHONPATH="/opt/Gym:$_gym_sp"; fi
 
                   # Writable staging dir for ref files (bind-mounted, see execution).
                   mkdir -p /gdpval_ref_files
