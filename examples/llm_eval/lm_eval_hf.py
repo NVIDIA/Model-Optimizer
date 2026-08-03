@@ -258,9 +258,8 @@ def _inject_modelopt_args_into_model_args(args):
 
     args.model_args is a dict (parsed by lm-eval's MergeDictAction). The ModelOpt
     keys must be removed from the namespace so EvaluatorConfig.from_cli doesn't
-    reject them as unknown kwargs. They only apply to the HF backend, so for other
-    backends (e.g. `--model vllm` on an already-quantized ckpt) they are dropped,
-    not passed into model_args (which would break the backend's constructor).
+    reject them as unknown kwargs. They only apply to the HF backend; passing a
+    quantization/sparsity arg with a non-HF backend raises an error.
     """
     model_args = dict(args.model_args) if args.model_args else {}
     # HFLM and its subclasses (registered as hf / hf-auto / huggingface / hf-multimodal).
@@ -272,48 +271,30 @@ def _inject_modelopt_args_into_model_args(args):
         model_args["trust_remote_code"] = True
         args.trust_remote_code = None
 
-    # Args that actually request quantization/sparsity. The other _MODELOPT_ARG_KEYS are inert
-    # tuning knobs (calib_*, auto_quantize_* params) with non-None argparse defaults, so keying
-    # off "truthy" would false-positive on them — only the request args imply the wrong backend.
-    quant_request_keys = {"quant_cfg", "auto_quantize_bits", "compress", "sparse_cfg"}
+    if not is_hf:
+        requested = [
+            k
+            for k in ("quant_cfg", "auto_quantize_bits", "compress", "sparse_cfg")
+            if getattr(args, k, None)
+        ]
+        if requested:
+            raise ValueError(
+                f"{', '.join('--' + k for k in requested)} request quantization/sparsity, which "
+                f"only applies to the HF backend; with --model {args.model!r} the checkpoint must "
+                "already be quantized/sparsified (drop the ModelOpt args)."
+            )
+
     for key in _MODELOPT_ARG_KEYS:
-        if hasattr(args, key):
-            value = getattr(args, key)
-            if is_hf:
-                model_args[key] = value
-            elif value and key in quant_request_keys:
-                # Don't silently drop a quantization/sparsity request on a non-HF backend, which
-                # would evaluate the wrong (unquantized) checkpoint and still report PASS.
-                raise ValueError(
-                    f"--{key} requests quantization/sparsity, which only applies to the HF "
-                    f"backend; with --model {getattr(args, 'model', '?')!r} the checkpoint must "
-                    "already be quantized/sparsified (drop the ModelOpt args)."
-                )
-            delattr(args, key)
+        value = vars(args).pop(key, None)
+        if is_hf:
+            model_args[key] = value
 
     args.model_args = model_args
 
 
-def _pop_gate_bound(args):
-    """Pop --accuracy_lower_bound off the namespace; return it (None disables the gate)."""
-    bound = getattr(args, "accuracy_lower_bound", None)
-    if hasattr(args, "accuracy_lower_bound"):
-        delattr(args, "accuracy_lower_bound")
-    return bound
-
-
-def _requested_tasks(args):
-    """Task names from lm-eval's --tasks (string or list)."""
-    tasks = getattr(args, "tasks", None) or []
-    if isinstance(tasks, str):
-        tasks = [tasks]
-    return [p.strip() for item in tasks for p in str(item).split(",") if p.strip()]
-
-
 def _enforce_accuracy_gate(output_path, task, lower_bound):
     """Read lm-eval results at output_path; exit non-zero if <task>/acc < lower_bound."""
-    if not output_path:
-        raise ValueError("--accuracy_lower_bound requires --output_path.")
+    # HarnessCLI.execute() returns None, so we recover the result dict from disk.
     files = glob.glob(os.path.join(output_path, "**", "results*.json"), recursive=True)
     if not files:
         raise FileNotFoundError(f"No results*.json under {output_path}")
@@ -350,13 +331,13 @@ if __name__ == "__main__":
     _add_modelopt_args(run_parser)
     args = cli.parse_args()
     _inject_modelopt_args_into_model_args(args)
-    lower_bound = _pop_gate_bound(args)
+    lower_bound = vars(args).pop("accuracy_lower_bound", None)
     output_path = getattr(args, "output_path", None)
     gate_task = None
     if lower_bound is not None:  # fail fast before the (expensive) eval
         if not output_path:
             raise ValueError("--accuracy_lower_bound requires --output_path.")
-        tasks = _requested_tasks(args)
+        tasks = args.tasks if isinstance(args.tasks, list) else str(args.tasks or "").split(",")
         if len(tasks) != 1:
             raise ValueError(
                 f"--accuracy_lower_bound needs exactly one --tasks (got {tasks or 'none'})."
