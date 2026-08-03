@@ -21,7 +21,7 @@ services:
     tensor_parallel_size: 8          # STRUCTURED fields — don't repeat parallelism in extra_args
     data_parallel_size: 1
     num_nodes: 1
-    image: vllm/vllm-openai:v0.19.1  # vLLM SERVING image (≠ eval_image); bump to recipes.vllm.ai min (MiniMax-M2.7 NVFP4 ≥ 0.20.0)
+    image: vllm/vllm-openai:v0.26.0  # vLLM SERVING image (≠ eval_image); bump to the model's recipes.vllm.ai min
     startup_timeout: 3600.0
     extra_args:                      # raw vllm flags (cross-check model card + recipes.vllm.ai)
       - "--trust-remote-code"
