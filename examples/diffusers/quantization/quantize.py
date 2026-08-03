@@ -563,7 +563,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
     calib_group = parser.add_argument_group("Calibration Configuration")
     calib_group.add_argument("--batch-size", type=int, default=2, help="Batch size for calibration")
     calib_group.add_argument(
-        "--calib-size", type=int, default=128, help="Total number of calibration samples"
+        "--calib-size",
+        type=int,
+        default=128,
+        help=(
+            "Number of calibration samples/prompts to run (not denoising steps). "
+            "Total prompts used ≈ ceil(calib_size / batch_size) * batch_size. "
+            "For denoising steps, use --n-steps."
+        ),
     )
     calib_group.add_argument("--n-steps", type=int, default=30, help="Number of denoising steps")
     calib_group.add_argument(
