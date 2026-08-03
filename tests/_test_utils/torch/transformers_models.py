@@ -39,6 +39,7 @@ from transformers import (
     PreTrainedModel,
     Qwen3Config,
     Qwen3MoeConfig,
+    Qwen3VLConfig,
     T5Config,
     T5ForConditionalGeneration,
     ViTConfig,
@@ -203,9 +204,6 @@ create_tiny_qwen3_moe_dir = partial(_create_tiny_qwen3_dir, moe=True)
 
 ##### Qwen3-VL #####
 def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
-    # Lazy imports — Qwen3VL requires transformers>=4.57
-    from transformers import Qwen3VLConfig
-
     set_seed(SEED)
 
     # Defaults: hidden_size=num_attention_heads*head_dim (e.g. 4*8=32).
