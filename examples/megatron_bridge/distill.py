@@ -25,15 +25,18 @@ import contextlib
 import os
 
 import torch
-from _distillation_provider import convert_to_distillation_provider
-from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
 from megatron.bridge import AutoBridge
+from megatron.bridge.models.distillation_provider import (
+    DistillationProvider,
+    convert_to_distillation_provider,
+)
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
+    FinetuningDatasetConfig,
     GPTDatasetConfig,
     LoggerConfig,
     MockGPTDatasetConfig,
@@ -46,16 +49,81 @@ from megatron.bridge.training.post_training.checkpointing import has_modelopt_st
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
-from megatron.core.utils import unwrap_model
 from transformers import AutoConfig
 
 import modelopt.torch.distill as mtd
+import modelopt.torch.distill.plugins.megatron as mtd_mcore
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
+from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
+
+
+# TODO: Megatron-Bridge does not (yet) expose a hook to initialize the student before the
+# knowledge-distillation conversion, so we patch ``DistillationProvider.provide`` to do it. Replace
+# this block once a first-class mechanism is available upstream.
+#
+# Maps id(distill_provider) -> megatron_checkpoint_path for providers whose student should be
+# initialized from a Megatron checkpoint. A registry is used (instead of an instance attribute)
+# because a DistillationProvider proxies attribute assignment to its teacher once the teacher is
+# set, so anything stored on the instance would leak onto the teacher.
+_MEGATRON_STUDENT_CKPT_PATHS: dict[int, str] = {}
+
+_original_distill_provide = DistillationProvider.provide
+
+
+def _distill_provide_with_megatron_student(
+    self, pre_process=None, post_process=None, vp_stage=None
+):
+    """Replacement for ``DistillationProvider.provide`` that can initialize the student from a ckpt.
+
+    For providers registered in ``_MEGATRON_STUDENT_CKPT_PATHS``, the student is built and its weights
+    (plus, for a quantized checkpoint, the ModelOpt quantize mode) are restored from the Megatron
+    checkpoint *before* the knowledge-distillation conversion -- otherwise the quantize mode is lost,
+    since ``restore_sharded_modelopt_state`` is a no-op once a model is already converted. The rest
+    mirrors the upstream implementation. Patched at the class level (not the instance) to avoid the
+    teacher-proxying issue described on ``_MEGATRON_STUDENT_CKPT_PATHS``.
+    """
+    if vp_stage is not None:
+        raise ValueError("ModelOpt KD currently does not support virtual-pipeline parallel.")
+
+    megatron_path = _MEGATRON_STUDENT_CKPT_PATHS.get(id(self))
+    if megatron_path is None:
+        # If a path was registered (for some provider) but this provide() call doesn't match,
+        # the provider was likely copied/wrapped between convert_to_distillation_provider() and now,
+        # so the id()-keyed lookup silently misses. Fail loudly rather than train an uninitialized
+        # student (this script only ever builds one DistillationProvider).
+        if _MEGATRON_STUDENT_CKPT_PATHS:
+            raise RuntimeError(
+                "DistillationProvider.provide() found no registered Megatron-student checkpoint path "
+                "for this provider, but one was registered for a different provider id -- the provider "
+                "was likely copied/wrapped. Update this workaround."
+            )
+        return _original_distill_provide(self, pre_process, post_process, vp_stage)
+
+    student_model = self._super_class.provide(self, pre_process, post_process, vp_stage)
+    print_rank_0(f"Loading student weights from Megatron checkpoint {megatron_path}")
+    load_modelopt_megatron_checkpoint([student_model], megatron_path)
+    # Hack to get teacher's pre-wrap hooks called to potentially load HF weights
+    teacher_model = self.teacher.provide_distributed_model(
+        wrap_with_ddp=False, mixed_precision_wrapper=None
+    )[0]
+    kd_cfg = mtd_mcore.setup_distillation_config(
+        self.kd_config, student_model.config, teacher_model.config
+    )
+    modelopt_cfg = {
+        "teacher_model": teacher_model,
+        "criterion": kd_cfg.criterion,
+        "loss_balancer": kd_cfg.loss_balancer,
+    }
+    kd_model = mtd.convert(student_model, mode=[("kd_loss", modelopt_cfg)])
+    mtd_mcore.adjust_distillation_model_for_mcore(kd_model, kd_cfg)
+    return kd_model
+
+
+DistillationProvider.provide = _distill_provide_with_megatron_student
 
 
 def get_args():
@@ -75,6 +143,16 @@ def get_args():
         help="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument(
+        "--student_nongrouped_experts",
+        action="store_true",
+        help=(
+            "Build the quantized student with non-grouped MoE experts. Required for STATIC-BLOCK "
+            "NVFP4 recipes (e.g. four_over_six): TEGroupedLinear only supports per-tensor scales, "
+            "not per-block. Leave OFF (default) for dynamic NVFP4 / grouped-expert checkpoints "
+            "(e.g. Nemotron-3-Nano). Never applied to the BF16 teacher."
+        ),
+    )
     parser.add_argument(
         "--student_megatron_path",
         type=str,
@@ -109,6 +187,20 @@ def get_args():
     )
     parser.add_argument(
         "--use_mock_data", action="store_true", help="Use mock data instead of --data_paths"
+    )
+    parser.add_argument(
+        "--sft",
+        action="store_true",
+        help="SFT-masked distillation: read raw prompt-completion jsonl from --sft_dataset_root and "
+        "mask the loss to the completion (assistant response) tokens. Uses GPTSFTDatasetConfig + the "
+        "real (HuggingFace) tokenizer instead of the pretraining GPTDataset + NullTokenizer.",
+    )
+    parser.add_argument(
+        "--sft_dataset_root",
+        type=str,
+        default=None,
+        help="Directory containing training.jsonl / validation.jsonl with prompt-completion "
+        '{"input": <prompt>, "output": <response>} records (used with --sft).',
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -188,18 +280,20 @@ def get_args():
         type=str,
         required=False,
         default=None,
-        help="Reference HF model with a homogeneous architecture, used as the export template for a "
-        "heterogeneous (Puzzletron/NAS) student's weights. Defaults to --student_hf_path, which is "
-        "correct for homogeneous students; unused for VLMs.",
+        help="HuggingFace model ID to use as template for export (e.g., Qwen/Qwen3-0.6B). "
+        "Should match the base architecture of the student model if --hf_export_path is provided.",
     )
     args = parser.parse_args()
 
     # Sanity checks
-    if not args.use_mock_data and not args.data_paths:
+    if args.sft:
+        if not args.sft_dataset_root:
+            raise ValueError("--sft requires --sft_dataset_root (dir with training.jsonl/validation.jsonl).")
+    elif not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
 
-    if args.student_hf_model is None:
-        args.student_hf_model = args.student_hf_path
+    if args.hf_export_path and not args.student_hf_model:
+        raise ValueError("Must provide --student_hf_model if --hf_export_path is provided.")
 
     print_args(args)
 
@@ -211,7 +305,7 @@ def main(args: argparse.Namespace):
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     # Build student and teacher model providers
-    def _build_model_provider(hf_path, load_weights=True):
+    def _build_model_provider(hf_path, load_weights=True, quantized=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=load_weights)
 
@@ -224,6 +318,32 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        # Match the PTQ/quantize.py setup: MTP is not supported during QAD, and NVFP4 per-block
+        # quantization requires non-grouped experts (TEGroupedLinear only supports per-tensor).
+        # For a hybrid Mamba provider the layer SPEC must be rebuilt with moe_grouped_gemm=False --
+        # setting the flag alone does not propagate. Mirror modelopt's load_mbridge_model_from_hf.
+        provider.mtp_num_layers = 0
+        from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
+
+        if quantized and args.student_nongrouped_experts:
+            # Static-block NVFP4 students need non-grouped experts (TEGroupedLinear can't do per-block
+            # scales). OFF by default = grouped = committed behavior (works for dynamic NVFP4 like
+            # Nano-3). NEVER applied to the BF16 teacher (would misplace its MoE experts).
+            if hasattr(provider, "mamba_stack_spec"):
+                provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=False)
+            elif (getattr(provider, "num_moe_experts", 0) or 0) > 0:
+                provider.moe_grouped_gemm = False
+        # Regularize the MoE router during QAD so it does not degenerate. Jenny's working Megatron-LM
+        # QAD uses `--moe-aux-loss-coeff 1e-4 --moe-router-load-balancing-type seq_aux_loss`; without
+        # it our router weights drifted the most (~8% vs ~1% elsewhere) and the MoE broke. Applies to
+        # both providers, but only the (trained) student's aux loss affects optimization.
+        if (getattr(provider, "num_moe_experts", 0) or 0) > 0:
+            provider.moe_router_load_balancing_type = "seq_aux_loss"
+            provider.moe_aux_loss_coeff = 1e-4
+        if args.sft:
+            # Finetuning (SFT) with context parallel (CP>1) requires per-token loss so the
+            # response loss-mask reduces correctly across the CP ranks.
+            provider.calculate_per_token_loss = os.environ.get("FORCE_NO_PER_TOKEN_LOSS", "0") != "1"
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
             provider.recompute_method = args.recompute_method
@@ -245,52 +365,25 @@ def main(args: argparse.Namespace):
         # Gradient accumulation fusion is not supported with ModelOpt quantized models. Disable it
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
-    teacher_provider = _build_model_provider(args.teacher_hf_path)
+    teacher_provider = _build_model_provider(args.teacher_hf_path, quantized=False)
 
+    # Wrap into DistillationProvider
     kd_config = ModelOptDistillConfig(
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
     )
-
-    # VLM detection convention: HF VLM configs expose a ``vision_config``, and Megatron-Bridge nests
-    # the text model under the ``language_model`` submodule (used as ``distill_submodule`` below). If a
-    # future model breaks either convention, the ``getattr(model, "language_model")`` in the provider
-    # will error loudly rather than silently distilling the wrong module.
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
-    )
-
-    if is_vlm:
-        warn_rank_0(
-            "VLM detected: distilling model.language_model only (vision tower / projector untouched). "
-            "To export megatron non-quantized checkpoint, use export_distilled_megatron_to_hf.py"
-        )
     distill_provider = convert_to_distillation_provider(
-        student_provider,
-        teacher_provider,
-        kd_config,
-        distill_submodule="language_model" if is_vlm else None,
+        student_provider, teacher_provider, kd_config
     )
 
     if args.student_megatron_path:
-        # QAD: restore the quantized student weights + ModelOpt state before the KD conversion (a no-op
-        # once converted). Prepend so this runs before the provider's KD-conversion pre-wrap hook.
         if student_has_modelopt_state:
             print_rank_0(
                 f"Detected ModelOpt state in {args.student_megatron_path}; "
                 "restoring quantizers for Quantization Aware Distillation (QAD)."
             )
-
-        def _restore_student_hook(model_chunks):
-            print_rank_0(
-                f"Loading student weights from Megatron checkpoint {args.student_megatron_path}"
-            )
-            load_modelopt_megatron_checkpoint(
-                [unwrap_model(model_chunks[0])], args.student_megatron_path
-            )
-            return model_chunks
-
-        distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)
+        # Register so the patched DistillationProvider.provide initializes this provider's student
+        # from the Megatron checkpoint (see _distill_provide_with_megatron_student).
+        _MEGATRON_STUDENT_CKPT_PATHS[id(distill_provider)] = args.student_megatron_path
 
     # Build optimizer and scheduler
     optimizer_config, scheduler_config = distributed_fused_adam_with_cosine_annealing(
@@ -301,24 +394,48 @@ def main(args: argparse.Namespace):
     )
 
     # Build dataset config
-    dataset_kwargs = {
-        "seq_length": args.seq_length,
-        "path_to_cache": args.data_path_to_cache,
-        "random_seed": args.seed,
-        "reset_attention_mask": False,
-        "reset_position_ids": False,
-        "eod_mask_loss": False,
-        "num_dataset_builder_threads": 1,
-        "data_sharding": True,
-        "dataloader_type": "single",
-        "skip_getting_attention_mask_from_dataset": True,
-    }
-    if args.use_mock_data:
-        dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
+    if args.sft:
+        # SFT-masked (Quantization-Aware) distillation via the container's Bridge FinetuningDatasetConfig
+        # -> NeMo-style GPTSFTDataset. `dataset_root` holds training.jsonl / validation.jsonl with
+        # {"input": <prompt>, "output": <response>} records. prompt_template="{input}{output}" tokenizes
+        # input+output verbatim (adjacent placeholders, no separator) matching the identity-formatted
+        # source; label_key="output" + answer_only_loss=True mask the loss to the assistant response only
+        # (answer_start_idx == len(context_ids)); truncation_field="input" truncates the context if needed.
+        dataset_config = FinetuningDatasetConfig(
+            seq_length=args.seq_length,
+            dataset_root=args.sft_dataset_root,
+            seed=args.seed,
+            dataloader_type="batch",
+            do_validation=True,
+            do_test=False,
+            dataset_kwargs={
+                "prompt_template": "{input}{output}",
+                "label_key": "output",
+                "truncation_field": "input",
+                "answer_only_loss": True,
+                "add_bos": False,
+                "add_eos": True,
+            },
+        )
     else:
-        # Convert flat CLI list (e.g. ["1.0", "/path/data"]) to Megatron blend format
-        blend = get_blend_from_list(args.data_paths)
-        dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
+        dataset_kwargs = {
+            "seq_length": args.seq_length,
+            "path_to_cache": args.data_path_to_cache,
+            "random_seed": args.seed,
+            "reset_attention_mask": False,
+            "reset_position_ids": False,
+            "eod_mask_loss": False,
+            "num_dataset_builder_threads": 1,
+            "data_sharding": True,
+            "dataloader_type": "single",
+            "skip_getting_attention_mask_from_dataset": True,
+        }
+        if args.use_mock_data:
+            dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
+        else:
+            # Convert flat CLI list (e.g. ["1.0", "/path/data"]) to Megatron blend format
+            blend = get_blend_from_list(args.data_paths)
+            dataset_config = GPTDatasetConfig(blend=blend, split="99,1,0", **dataset_kwargs)
 
     # Assemble ConfigContainer and run distillation
     config = ConfigContainer(
@@ -341,7 +458,9 @@ def main(args: argparse.Namespace):
             grad_reduce_in_fp32=True,
             overlap_grad_reduce=True,
             overlap_param_gather=True,
-            average_in_collective=True,
+            # Finetuning (SFT) with CP>1 requires per-token loss (set on the provider) and
+            # average_in_collective=False (the per-token loss is summed, not averaged, in the collective).
+            average_in_collective=(not args.sft) or os.environ.get("FORCE_NO_PER_TOKEN_LOSS", "0") == "1",
             use_distributed_optimizer=True,
         ),
         dataset=dataset_config,
@@ -354,21 +473,35 @@ def main(args: argparse.Namespace):
             wandb_entity=args.wandb_entity,  # optional
             wandb_exp_name=args.wandb_exp_name,
         ),
-        tokenizer=TokenizerConfig(
-            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+        tokenizer=(
+            TokenizerConfig(
+                tokenizer_type="HuggingFaceTokenizer",
+                tokenizer_model=args.student_hf_path,
+                hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+            )
+            if args.sft
+            else TokenizerConfig(
+                tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+            )
         ),
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
             save=checkpoint_dir,
             load=checkpoint_dir,  # Resume from this directory (if exists)
-            most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
+            most_recent_k=2,  # Keeps 2 most recent checkpoints (each ~413GB here; fs1 near quota)
             ckpt_format="torch_dist",
-            async_save=True,
+            async_save=False,  # sync save: async writer repeatedly corrupted iter-400 ckpt (inline_container)
             fully_parallel_save=True,
         ),
         rng=RNGConfig(seed=args.seed),
         mixed_precision="bf16_mixed",
     )
+
+    # QAD with NVFP4 fake-quant makes the first optimizer step (many grad-accum microbatches)
+    # very slow; raise the NCCL process-group timeout above the default (~10 min) so the initial
+    # step does not trip the collective watchdog. Guarded in case the config field is renamed.
+    if hasattr(config, "dist") and hasattr(config.dist, "distributed_timeout_minutes"):
+        config.dist.distributed_timeout_minutes = 60
 
     print_rank_0("\nStarting distillation...")
     distill(config)
@@ -377,22 +510,7 @@ def main(args: argparse.Namespace):
         " in megatron distributed checkpoint format.\n"
     )
 
-    if args.hf_export_path and is_vlm:
-        # Only the language model was distilled; export it back into the full VLM.
-        print_rank_0(f"Exporting distilled VLM to HF format to {args.hf_export_path}")
-        # ``distill`` tore down the model-parallel groups on exit, so rebuild them.
-        distill_provider.initialize_model_parallel(seed=args.seed)
-        full_student = distill_provider.full_model
-        # Strip the distillation wrapper -> plain trained language model (in place; reassign to be safe).
-        full_student.language_model = mtd.export(full_student.language_model)
-        save_vlm_to_hf(
-            full_student,
-            args.hf_export_path,
-            args.student_hf_path,
-            trust_remote_code=args.trust_remote_code,
-        )
-        print_rank_0(f"Saved distilled VLM to {args.hf_export_path} in HF format")
-    elif args.hf_export_path:
+    if args.hf_export_path:
         print_rank_0(f"Exporting final distilled ckpt to HF format to {args.hf_export_path}")
         # Save rank before destroying process group (dist.rank() won't work after destruction)
         is_rank_0 = dist.rank() == 0
@@ -402,13 +520,20 @@ def main(args: argparse.Namespace):
         dist.cleanup()
 
         if is_rank_0:
-            export_llm_to_hf(
-                megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
-                hf_export_path=args.hf_export_path,
-                student_hf_path=args.student_hf_path,
-                template_hf=args.student_hf_model,
-                trust_remote_code=args.trust_remote_code,
+            export_bridge = AutoBridge.from_hf_pretrained(
+                args.student_hf_model, trust_remote_code=args.trust_remote_code
             )
+            # Copy weights and remote code
+            export_bridge.export_ckpt(
+                megatron_path=f"{checkpoint_dir}/iter_{args.train_iters:07d}",
+                hf_path=args.hf_export_path,
+                show_progress=True,
+                strict=True,
+            )
+            # Copy config.json from student_hf_path (handles both local paths and HF model IDs)
+            AutoConfig.from_pretrained(
+                args.student_hf_path, trust_remote_code=args.trust_remote_code
+            ).save_pretrained(args.hf_export_path)
 
 
 if __name__ == "__main__":

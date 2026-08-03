@@ -36,6 +36,9 @@ See `README.md` in this directory for more details.
 """
 
 import argparse
+import yaml
+import pathlib
+import os
 
 import torch
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
@@ -44,6 +47,10 @@ from megatron.core.utils import unwrap_model
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.utils.plugins.mbridge import (
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
@@ -52,6 +59,13 @@ from modelopt.torch.utils.plugins.mbridge import (
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        "--grouped_experts",
+        action="store_true",
+        help="Build MoE experts grouped (GroupedMLP). Default is non-grouped, which per-block "
+        "NVFP4 checkpoints require. Set this only when the checkpoint was saved with grouped "
+        "experts; the layout must match or the weights will not load.",
+    )
     parser.add_argument(
         "--hf_model_name_or_path",
         type=str,
@@ -99,7 +113,39 @@ def get_args() -> argparse.Namespace:
     return args
 
 
+def _provider_overrides_from_checkpoint(megatron_path: str) -> dict:
+    """Read ``mtp_num_layers`` from the checkpoint so the exporter matches how it was saved.
+
+    Only ``mtp_num_layers`` is taken from here. ``moe_grouped_gemm`` is deliberately NOT derived:
+    for a ``MambaModelProvider`` the expert layout is set by ``mamba_stack_spec``, so a checkpoint
+    saved with non-grouped experts still records ``moe_grouped_gemm: true`` and trusting it would
+    build a mismatched model.
+    """
+    defaults = {"mtp_num_layers": 0}
+    run_config = next(iter(sorted(pathlib.Path(megatron_path).glob("*/run_config.yaml"))), None)
+    if run_config is None:
+        run_config = pathlib.Path(megatron_path) / "run_config.yaml"
+    if not run_config.exists():
+        print_rank_0(f"No run_config.yaml under {megatron_path}; using defaults {defaults}.")
+        return defaults
+    try:
+        cfg = yaml.safe_load(run_config.read_text()) or {}
+    except Exception as exc:
+        print_rank_0(f"Could not parse {run_config} ({exc}); using defaults {defaults}.")
+        return defaults
+    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else cfg
+    resolved = {
+        key: model_cfg.get(key, default)
+        for key, default in defaults.items()
+        if isinstance(model_cfg, dict)
+    }
+    resolved = {**defaults, **resolved}
+    print_rank_0(f"Model shape from {run_config.name}: {resolved}")
+    return resolved
+
+
 def main(args: argparse.Namespace):
+    _ckpt_shape = _provider_overrides_from_checkpoint(args.megatron_path)
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )
@@ -116,8 +162,11 @@ def main(args: argparse.Namespace):
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
+            "mtp_num_layers": _ckpt_shape["mtp_num_layers"],
         },
         init_model_parallel=True,
+        # Default non-grouped, matching quantize.py; the layout must match the checkpoint.
+        moe_grouped_gemm=args.grouped_experts,
         load_weights=False,  # The weights come from the Megatron checkpoint, so HF weights are not loaded
     )
 
@@ -126,6 +175,59 @@ def main(args: argparse.Namespace):
     print_rank_0(f"Loading quantized Megatron checkpoint from {args.megatron_path}...")
     load_modelopt_megatron_checkpoint(model, args.megatron_path)
     unwrapped_model = unwrap_model(model[0])
+
+    # Static-NVFP4 export guard.
+    #
+    # An *enabled* NVFP4 weight quantizer that reaches the exporter without its calibrated scales
+    # means the values stored in the checkpoint were not restored. Exporting such a weight silently
+    # falls back to BF16: the result is larger than the recipe specifies and no longer matches it,
+    # with nothing in the logs to say so. Fail loudly instead.
+    #
+    # Static-block NVFP4 needs BOTH ``_amax`` (per block) and ``_global_amax`` (per tensor). A
+    # missing ``_global_amax`` slips past an ``_amax``-only check and then fails much later inside
+    # ``NVFP4QTensor.quantize``, where ``scale * scale_2`` broadcasts [N, 1] against [N] into an
+    # N x N allocation. Naming the attribute here turns that into an actionable message.
+    #
+    # Set MODELOPT_ALLOW_UNCALIBRATED_NVFP4=1 to keep the previous behavior (disable the quantizer
+    # and emit BF16), which is then reported rather than silent.
+    uncalibrated: list[tuple[str, str]] = []
+    for name, module in unwrapped_model.named_modules():
+        # StaticBlockScaleQuantizer must be INCLUDED: `_global_amax` is defined on it, so excluding
+        # it would skip exactly the case this guard exists to catch. Only report enabled quantizers,
+        # matching the message.
+        if not isinstance(module, TensorQuantizer) or not getattr(module, "is_enabled", False):
+            continue
+        block_sizes = getattr(module, "_block_sizes", None)
+        is_nvfp4 = getattr(module, "_num_bits", None) == (2, 1) and (
+            isinstance(block_sizes, dict) and block_sizes.get("scale_bits") == (4, 3)
+        )
+        if not is_nvfp4:
+            continue
+        if getattr(module, "_amax", None) is None:
+            uncalibrated.append((name, "_amax"))
+        elif (
+            isinstance(module, StaticBlockScaleQuantizer)
+            or block_sizes.get("type") == "static"
+        ) and getattr(module, "_global_amax", None) is None:
+            uncalibrated.append((name, "_global_amax"))
+
+    if uncalibrated:
+        detail = ", ".join(f"{name}.{attr}" for name, attr in uncalibrated[:8])
+        if len(uncalibrated) > 8:
+            detail += ", ..."
+        message = (
+            f"{len(uncalibrated)} enabled NVFP4 weight quantizer(s) are missing calibrated scales "
+            f"after loading {args.megatron_path}: {detail}. These weights would be exported as "
+            "BF16 instead of NVFP4. Re-run PTQ with a ModelOpt that saves and restores this "
+            "quantizer state, or set MODELOPT_ALLOW_UNCALIBRATED_NVFP4=1 to export them as BF16."
+        )
+        if os.environ.get("MODELOPT_ALLOW_UNCALIBRATED_NVFP4") != "1":
+            raise RuntimeError(message)
+        print_rank_0(f"WARNING (MODELOPT_ALLOW_UNCALIBRATED_NVFP4=1): {message}")
+        for name, _ in uncalibrated:
+            unwrapped_model.get_submodule(name).disable()
+    else:
+        print_rank_0("All enabled NVFP4 weight quantizers have calibrated scales.")
 
     # Extra modules (Medusa / EAGLE / MTP) only exist on the last pipeline stage. Use an all-reduce
     # MAX over all ranks (rather than a broadcast from a hard-coded source rank) so the decision is

@@ -174,6 +174,19 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
     )
+    parser.add_argument(
+        "--grouped_experts",
+        action="store_true",
+        help="Build MoE experts grouped (GroupedMLP). Default is non-grouped (SequentialMLP), "
+        "which per-block NVFP4 requires because TEGroupedLinear can only represent per-tensor "
+        "scales. Set this for per-tensor recipes on MoE models, where grouped GEMM is faster. "
+        "The export must use the matching layout.",
+    )
+    parser.add_argument(
+        "--calib_random_offset",
+        action="store_true",
+        help="Drop a random leading-token offset before packing calib windows (Megatron-LM --calib-use-random-offset).",
+    )
     parser.add_argument("--calib_batch_size", type=int, default=1, help="Calibration batch size")
     parser.add_argument(
         "--seq_length",
@@ -275,6 +288,18 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     return mtq_config
 
 
+_MTP_HF_CONFIG_FIELDS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "mtp_num_layers")
+
+
+def _hf_config_has_mtp(hf_cfg) -> bool:
+    """Whether an HF config declares MTP heads (checked top-level and under ``text_config``)."""
+    return any(
+        cfg is not None and getattr(cfg, field, 0)
+        for cfg in (getattr(hf_cfg, "text_config", None), hf_cfg)
+        for field in _MTP_HF_CONFIG_FIELDS
+    )
+
+
 def main(args: argparse.Namespace):
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
@@ -284,13 +309,26 @@ def main(args: argparse.Namespace):
             "pipeline_model_parallel_size": args.pp_size,
             "expert_model_parallel_size": args.ep_size,
             "context_parallel_size": args.cp_size,
+            "mtp_num_layers": 0,  # MTP not supported during calibration
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
             "gradient_accumulation_fusion": False,  # not supported
         },
         init_model_parallel=True,
+        # Default non-grouped: per-block NVFP4 needs it (TEGroupedLinear is per-tensor only).
+        # Opt into grouped for per-tensor recipes, where grouped GEMM is faster.
+        moe_grouped_gemm=args.grouped_experts,
     )
+
+    # `mtp_num_layers=0` above drops MTP heads: calibration does not support them. Say so rather
+    # than silently shipping a checkpoint without a head the model declares.
+    if _hf_config_has_mtp(bridge.hf_pretrained.config):
+        warn_rank_0(
+            "Dropping Multi-Token Prediction (MTP): calibration does not support it. The exported "
+            "checkpoint will not contain MTP weights and standard autoregressive inference is "
+            "unaffected. To use MTP speculative decoding, run a separate phase with mtp_num_layers>0."
+        )
 
     # Only the language model is quantized (vision tower + projector stay full precision)
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
@@ -367,6 +405,7 @@ def main(args: argparse.Namespace):
             seq_length=args.seq_length,
             batch_size=args.calib_batch_size,
             pack=True,  # Megatron pretraining-style global-stream document packing
+            random_offset=args.calib_random_offset,
         )
 
         # Run text prefill on the language model: we quantize the root (a VLM root forward expects

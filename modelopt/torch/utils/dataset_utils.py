@@ -679,7 +679,11 @@ class _CustomDataset(torch.utils.data.Dataset):
 
 
 def _pack_documents_into_rows(
-    samples: list[str], tokenizer: "PreTrainedTokenizerBase", seq_length: int, num_rows: int
+    samples: list[str],
+    tokenizer: "PreTrainedTokenizerBase",
+    seq_length: int,
+    num_rows: int,
+    random_offset: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Global-stream document packing (Megatron-LM pretraining style).
 
@@ -696,13 +700,22 @@ def _pack_documents_into_rows(
     eos_id = tokenizer.eos_token_id
     pad_id = tokenizer.pad_token_id
     has_eos_sep = eos_id is not None
+    # With random_offset (Megatron-LM --calib-use-random-offset), build one extra window
+    # of headroom, then drop a random number of leading tokens so the window grid shifts and
+    # calibration samples mid-document positions differently (relevant for long-context KV stats).
+    target_len = num_rows * seq_length + (seq_length if random_offset else 0)
     token_stream: list[int] = []
     for s in samples:
         token_stream.extend(tokenizer.encode(s, add_special_tokens=False))
         if has_eos_sep:
             token_stream.append(eos_id)
-        if len(token_stream) >= num_rows * seq_length:
+        if len(token_stream) >= target_len:
             break
+
+    if random_offset:
+        max_off = min(seq_length, max(0, len(token_stream) - num_rows * seq_length))
+        if max_off > 0:
+            token_stream = token_stream[random.randint(0, max_off):]
 
     n_full = min(num_rows, len(token_stream) // seq_length)
     rows_ids: list[list[int]] = [
@@ -749,6 +762,7 @@ def get_dataset_dataloader(
     include_labels: bool = False,
     apply_chat_template: bool = False,
     pack: bool = False,
+    random_offset: bool = False,
     distributed: bool = False,
     sampler_kwargs: dict | None = None,
 ) -> DataLoader:
@@ -858,7 +872,7 @@ def get_dataset_dataloader(
     if pack:
         total_rows = sum(num_samples)
         input_ids, attention_mask = _pack_documents_into_rows(
-            all_samples, tokenizer, max_sample_length, total_rows
+            all_samples, tokenizer, max_sample_length, total_rows, random_offset=random_offset
         )
         if input_ids.shape[0] < total_rows:
             warn_rank_0(
