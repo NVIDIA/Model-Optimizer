@@ -22,7 +22,7 @@ is `recipes/examples/gym_gdpval/` and the per-task pointer is
 ## Apptainer SIF sandbox (self-contained: build-if-absent, reuse-if-present)
 
 The Stirrup agent runs each task's generated code in an Apptainer SIF, bind-mounted
-into the eval container at **exactly** `/gdpval/sif/python-3.12.gdpval.sif` (the path
+into the eval container at **exactly** `/gdpval/sif/python-3.13.gdpval.sif` (the path
 `GDPVAL_CONTAINER_PATH` points at). If it's missing or at a different path, the agent
 **silently falls back to non-sandboxed local exec** — the run "succeeds" but the
 numbers aren't comparable, so verify the SIF at canary.
@@ -130,6 +130,17 @@ self-deploys single-node vLLM, which is fine for a canary or a small policy. For
 + `parallelism` (`16384`) is **gym-internal concurrency**, not a server cap. The
   real throttles are the agent's `stirrup_agent.concurrency` and the judge's
   `max_concurrent_requests` — raise those only after the judge logs are clean of 429s.
++ **`--max-num-seqs`: derive it from `stirrup_agent.concurrency`, NOT `parallelism`.**
+  SKILL Step 3/4's `ceil(parallelism / DP)` rule assumes `parallelism` is the in-flight
+  request count; on the gym path it is not, and applying it literally gives an absurd
+  cap. Use `ceil(stirrup_agent.concurrency / DP)` — e.g. 220 / DP 4 → 55, round to 64.
++ **`max_new_tokens` does not apply here.** Step 3 mandates it (with a model-card
+  lookup) for the six-field params template, but the GDPVal adapter puts `max_tokens` /
+  `max_completion_tokens` in `params_to_remove`, so this config has five params and no
+  `max_new_tokens`. That is correct, not an omission — skip that Step 3 subsection.
++ **Match `temperature` / `top_p` to whatever the reference deliverables were generated
+  with.** A pairwise ELO compares your deliverables against theirs, so a sampling
+  difference lands in the score as if it were a quality difference.
 + Long runs exceed 4h; rely on NEL's walltime dependency-chain resume
   (`resume_from_cache=true` is already set). See SKILL Step 4 + `run-validation.md`.
 
@@ -237,13 +248,19 @@ standard (SKILL Step 1 shortcut #4): `auto_export.destinations: [mlflow]` +
 `cpu_partition` + a literal-valued `export.mlflow` block (tag `benchmark:
 nemo_gym.gdpval`).
 
-## num_repeats workaround (OmegaConf)
+## num_repeats — depends on the flow
 
-`++gdpval.*.num_repeats=N` hits an OmegaConf `ListConfig` merge error, so the count
-is patched by editing the checked-out file inside the task `command:`:
-`sed -i 's/num_repeats: 2$/num_repeats: 1/' benchmarks/gdpval/config.yaml`. The Gym
-default is 2 (the golden). The template seds it to **1** to halve cost; **remove the
-sed line to keep 2 for golden-comparable / reported scores.**
++ **Multistage comparison** (the current golden, and the only path to an
+  AA-comparable score): **1**, set with a top-level `++num_repeats=1`, which *does*
+  work. Recent Gym pins already ship `num_repeats: 1` in
+  `benchmarks/gdpval/config.yaml`, so the `sed` below is a no-op there.
++ **Rubric / pre-multistage single-reference:** the old golden used **2** (220 × 2 =
+  440 rollouts). On those pins the per-dataset key could not be set via `++` (an
+  OmegaConf `ListConfig` merge error), so the count was patched in the task
+  `command:` with `sed -i 's/num_repeats: 2$/num_repeats: 1/' benchmarks/gdpval/config.yaml`
+  — delete that line to keep 2.
+
+Do **not** carry a `=2` from an old single-reference config into a multistage run.
 
 ## Failure modes to check at canary
 
