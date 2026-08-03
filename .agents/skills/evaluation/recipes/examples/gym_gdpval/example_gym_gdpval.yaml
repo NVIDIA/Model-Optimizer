@@ -166,8 +166,6 @@ evaluation:
     # deliverables are NOT auto-uploaded — they stay on disk for inspection.
     # Drop "_cache" if you WANT them uploaded as artifacts.
     PERSIST_DELIVERABLES_DIR: lit:/results/gdpval/deliverables_cache
-    # Stirrup agent turn cap (optional; default 100).
-    # GDPVAL_MAX_TURNS: lit:100
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
   # Installs apptainer + squashfuse into the eval container (needs
   # NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the launching shell). See references/gym-gdpval.md.

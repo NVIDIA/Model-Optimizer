@@ -88,8 +88,11 @@ if [[ "$check" -eq 1 ]]; then
     echo "$sif"; exit 0
   fi
   printf '\033[31mgdpval-sif: MISSING expected SIF: %s\033[0m\n' "$sif" >&2
-  [[ -d "$sif_dir" ]] && { echo "  dir exists but does not contain it; found:" >&2
-    ls -1 "$sif_dir"/*.sif 2>/dev/null | sed 's/^/    /' >&2 || echo "    (no .sif files)" >&2; }
+  if [[ -d "$sif_dir" ]]; then
+    echo "  dir exists but does not contain it; found:" >&2
+    if ls -1 "$sif_dir"/*.sif >/dev/null 2>&1; then ls -1 "$sif_dir"/*.sif | sed 's/^/    /' >&2
+    else echo "    (no .sif files)" >&2; fi
+  fi
   echo "  Build it with: $0 ${sif_dir}   (or --commit <gym-sha> for a different def)" >&2
   exit 1
 fi
@@ -138,7 +141,9 @@ else wget -qO "$def_local" "$def_url"; fi
 # unprivileged build where fakeroot is unavailable.
 if "$APPTAINER_BIN" build --fakeroot "$tmp" "$def_local"; then
   :
-elif "$APPTAINER_BIN" build "$tmp" "$def_local"; then
+# A failed --fakeroot attempt can leave a partial $tmp behind, and apptainer refuses an
+# existing destination — clear it or the unprivileged fallback can never succeed.
+elif rm -f "$tmp" && "$APPTAINER_BIN" build "$tmp" "$def_local"; then
   _log "built without --fakeroot (unprivileged mode)"
 else
   rm -f "$tmp" "$def_local"

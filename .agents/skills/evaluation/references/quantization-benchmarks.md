@@ -75,9 +75,8 @@ merged into the `aa/` multi-task list.
   `tasks` list), needs the Apptainer SIF sandbox + judge, and is multi-hour /
   often multi-node. Generate it alongside the `aa/` config; see
   `recipes/tasks/aa_gym/gdpval.md` + `references/gym-gdpval.md`. Thinking mode is
-  mandatory (non-thinking loses ~86% of pairwise judgements). For low-variance
-  quant comparisons keep the golden `num_repeats: 2` — the example template
-  defaults to 1 to halve cost, so bump it back to 2 for quant validation.
+  mandatory (non-thinking loses ~86% of pairwise judgements). `num_repeats` is **1** —
+  the value both current goldens use, already set by the template; do not raise it.
 
 ## How to use
 

@@ -87,13 +87,20 @@ mirrored to MLflow. Read them by metric name:
 | rubric | mean of `reward` across `artifacts/evaluator_rollouts.jsonl` (per-rollout 0–1) |
 
 ```bash
-# final score from the local results file (no MLflow needed)
+# COMPARISON mode — final score from the local results file (no MLflow needed)
 python3 -c "
-import yaml,sys
+import yaml
 m=yaml.safe_load(open('<output_dir>/<run>/nemo_gym.0/artifacts/results.yml'))['groups']['nemo_gym']['metrics']
 for k in ('normalized_elo','eval_elo','win_rate'):
     n=f'gdpval_stirrup_agent/comparison/{k}'
     print(k, '=', m[n]['scores'][n]['value'])"
+
+# RUBRIC mode (the template default) — there is no ELO; average the per-rollout reward
+python3 -c "
+import json
+r=[json.loads(l).get('reward') for l in open('<output_dir>/<run>/nemo_gym.0/artifacts/evaluator_rollouts.jsonl')]
+r=[x for x in r if isinstance(x,(int,float))]
+print('mean reward =', sum(r)/len(r), 'over', len(r), 'rollouts')"
 ```
 
 In **MLflow** the same values are prefixed `nemo_gym_` and duplicated under a
