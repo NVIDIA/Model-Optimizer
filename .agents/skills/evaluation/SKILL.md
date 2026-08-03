@@ -61,11 +61,13 @@ GDPVal:
    failure modes) + **`recipes/tasks/aa_gym/gdpval.md`**.
 2. Start from the self-contained **`recipes/examples/gym_gdpval/`** dir — copy the
    **whole dir** (the `_gym_prepare.yaml` include must travel next to the config).
-3. Prerequisite: set `GDPVAL_SIF_DIR` in `.env`, then ensure the SIF exists with
-   `.agents/scripts/gdpval-sif.sh` (uses `$GDPVAL_SIF_DIR`; build-if-absent,
-   reuse-if-present, no cross-cluster copy). The config bind-mounts `$GDPVAL_SIF_DIR`
-   at exactly `/gdpval/sif/python-3.12.gdpval.sif`, or the agent silently runs
-   unsandboxed. `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
+3. Prerequisite — the Apptainer SIF. **If your site provides one, use it**
+   (NVIDIA-internal: `modelopttools:eval-config` Step 3c); otherwise set
+   `GDPVAL_SIF_DIR` in `.env` and build with `.agents/scripts/gdpval-sif.sh`
+   (build-if-absent, no cross-cluster copy). Either way the mounted dir must contain
+   the file `GDPVAL_CONTAINER_PATH` names (template: `python-3.13.gdpval.sif`) — a
+   name mismatch passes NEL's `test -d` check and the agent then silently runs
+   unsandboxed. Verify with `gdpval-sif.sh --check`. `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
    `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR`, and `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the
    config has a `pre_cmd`). Thinking mode is mandatory (non-thinking loses ~86%).
 4. Dry-run → canary (`limit_samples=2`, verify the SIF sandbox + judge) → full.

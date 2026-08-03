@@ -133,7 +133,9 @@ deployment:
   # a separate reasoning channel; thinking is forced on via the adapter_config
   # chat_template_kwargs below. Add --enable-expert-parallel for MoE, and
   # --trust-remote-code for custom-code models.
-  # After filling `parallelism`, append --max-num-seqs N (N = ceil(parallelism / data_parallel_size)).
+  # --max-num-seqs: on the GYM path derive it from the agent's concurrency, NOT from
+  # `parallelism` (which is gym-internal, not an in-flight request count — the generic
+  # SKILL rule would give an absurd cap). N = ceil(stirrup_agent.concurrency / DP).
   command: >-
     vllm serve /checkpoint
     --served-model-name ${deployment.served_model_name}
@@ -272,6 +274,9 @@ evaluation:
                   ++upload_rollouts_to_wandb=false
                   ++responses_create_params.temperature={{config.params.temperature}}
                   ++responses_create_params.top_p={{config.params.top_p}}
+                # No judge_responses_create_params_overrides.model here: the judge model is
+                # already set by openai_model=${gdpval_judge.model}, and pinning it a second
+                # way silently collapses comparison mode's 3-member judge panel to one judge.
                 # num_repeats=1 — the value both current goldens use. The pinned Gym
                 # already ships 1, so this override is belt-and-braces, not a change.
                 # NOTE: no reference_* overrides below — rubric mode needs none, and the
@@ -298,7 +303,6 @@ evaluation:
                   ++gdpval_resources_server.resources_servers.gdpval.persist_raw_judge_responses=true
                   ++gdpval_resources_server.resources_servers.gdpval.preconvert_max_concurrent=30
                   ++gdpval_resources_server.resources_servers.gdpval.preconvert_office_to_pdf=true
-                  ++gdpval_resources_server.resources_servers.gdpval.judge_responses_create_params_overrides.model=${gdpval_judge.model}
 
 export:
   # LITERAL values only (auto_export resolves this block at submit time in a scope

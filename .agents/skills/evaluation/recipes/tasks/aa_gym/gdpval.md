@@ -90,7 +90,7 @@ mirrored to MLflow. Read them by metric name:
 # final score from the local results file (no MLflow needed)
 python3 -c "
 import yaml,sys
-m=yaml.safe_load(open('results.yml'))['groups']['nemo_gym']['metrics']
+m=yaml.safe_load(open('<output_dir>/<run>/nemo_gym.0/artifacts/results.yml'))['groups']['nemo_gym']['metrics']
 for k in ('normalized_elo','eval_elo','win_rate'):
     n=f'gdpval_stirrup_agent/comparison/{k}'
     print(k, '=', m[n]['scores'][n]['value'])"
