@@ -32,6 +32,9 @@ jobs:
     with:
       match_pattern: "^DCO$"
   check-file-changes:
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     outputs:
       any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
