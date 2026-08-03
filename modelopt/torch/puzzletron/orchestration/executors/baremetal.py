@@ -149,9 +149,9 @@ class BareMetalSSHExecutor(Executor):
                     "-o",
                     "BatchMode=yes",
                     host.hostname,
-                    f"hostname; test -d {shlex.quote(repository)}; "
-                    f"cd {shlex.quote(repository)}; "
-                    f"test -f {shlex.quote(venv)}/bin/activate; nvidia-smi -L",
+                    f"hostname && test -d {shlex.quote(repository)} && "
+                    f"cd {shlex.quote(repository)} && "
+                    f"test -f {shlex.quote(venv)}/bin/activate && nvidia-smi -L",
                 ]
             )
             if result.returncode != 0:

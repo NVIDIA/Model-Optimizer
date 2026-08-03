@@ -80,8 +80,8 @@ def test_baremetal_preflight_checks_repository_and_venv_on_every_host(
             "-o",
             "BatchMode=yes",
             hostname,
-            "hostname; test -d /shared/modelopt; cd /shared/modelopt; "
-            "test -f /shared/puzzletron-venv/bin/activate; nvidia-smi -L",
+            "hostname && test -d /shared/modelopt && cd /shared/modelopt && "
+            "test -f /shared/puzzletron-venv/bin/activate && nvidia-smi -L",
         ]
         for hostname in ("node-a", "node-b")
     ]
