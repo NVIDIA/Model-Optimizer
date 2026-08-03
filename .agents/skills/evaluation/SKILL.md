@@ -173,7 +173,7 @@ For how to choose `--tensor-parallel-size` / `--data-parallel-size` / `--pipelin
 > | ≤ v0.19.x | **suffixed** `-cu130` | unsuffixed |
 > | ≥ v0.20.0 | **unsuffixed** | suffixed `-cu129` |
 >
-> v0.20.0 straddles the switch: it publishes `-cu130` *and* `-cu129`, and its unsuffixed tag is already CUDA 13. From v0.20.1 on, `-cu130` does **not exist** — asking for it yields a missing tag. So **select any tag whose arm64 config blob reports `CUDA_VERSION` ≥ 13** (registry API) instead of trusting the name, and check the arch you need is in `TORCH_CUDA_ARCH_LIST`. Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
+> v0.20.0 straddles the switch: it publishes `-cu130` *and* `-cu129`, and its unsuffixed tag is already CUDA 13. From v0.20.1 on, `-cu130` does **not exist** — asking for it yields a missing tag. So **select any tag whose config blob reports `CUDA_VERSION` ≥ 13** (registry API) instead of trusting the name. Resolve the child manifest **for the platform you deploy on** — arm64 for Grace/GB300, amd64 for x86 hosts — and check the arch you need is in *that child's* `TORCH_CUDA_ARCH_LIST`: the list differs per platform (v0.26.0 publishes `7.5 8.0 8.6 8.9 9.0 10.0 12.0` on amd64 vs `8.0 8.7 8.9 9.0 10.0 11.0 12.0` on arm64). Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`. Full note in `recipes/examples/example_eval.yaml`.
 
 #### vLLM-backend defaults — always include unless the recipe *contradicts*
 
@@ -341,7 +341,7 @@ Default images:
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:...` | NGC |
 | Eval tasks | `nvcr.io/nvidia/eval-factory/*:26.03` | NGC |
 
-> NVFP4 checkpoints on B300/GB300 (sm_103) need a **CUDA-13** image — CUDA-12 builds lack sm_103 FP4 kernels. Which tag spelling that is depends on the vLLM version (see the "NVFP4 on Blackwell" table in Step 3); verify `CUDA_VERSION` in the tag's arm64 config blob.
+> NVFP4 checkpoints on B300/GB300 (sm_103) need a **CUDA-13** image — CUDA-12 builds lack sm_103 FP4 kernels. Which tag spelling that is depends on the vLLM version (see the "NVFP4 on Blackwell" table in Step 3); verify `CUDA_VERSION` in the config blob of the child manifest for the platform you deploy on.
 
 Public images → submit without preflight. Private/restricted → check credentials:
 

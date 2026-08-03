@@ -130,7 +130,9 @@ For NVFP4 checkpoints, use `--quantization modelopt_fp4`.
 > release tags are multi-arch), with `-cu129` as the CUDA-12 opt-out; v0.19.x and
 > earlier spelled it the other way round (`-cu130` suffix = CUDA 13). v0.20.0
 > ships both suffixes; after it, `-cu130` does not exist. Don't trust the tag
-> name — select a tag whose arm64 config blob reports `CUDA_VERSION` >= 13. A
+> name — select a tag whose config blob reports `CUDA_VERSION` >= 13, resolving
+> the child manifest for the platform you deploy on (arm64 for Grace/GB300,
+> amd64 for x86 hosts); `TORCH_CUDA_ARCH_LIST` differs between the two. A
 > cu12 build has **no sm_103 FP4 kernel**, so vLLM
 > loads the checkpoint then dies at engine init with `CUDA error: no kernel image
 > is available for execution on the device` (affects the `flashinfer` and
