@@ -871,6 +871,19 @@ class TestLocalDatasetDirRoundTrips:
         train_samples = get_dataset_samples(dataset, num_samples=4, split="train")
         assert default_samples == train_samples
 
+    def test_zero_quota_split_is_not_loaded(self, monkeypatch, make_toy_hf_dataset):
+        """1 sample over 2 splits → quotas [0, 1]: the zero-quota split is never opened."""
+        datasets = pytest.importorskip("datasets")
+        loaded, real_load_dataset = [], datasets.load_dataset
+
+        def _spy(*args, **kwargs):
+            loaded.append(kwargs.get("split"))
+            return real_load_dataset(*args, **kwargs)
+
+        monkeypatch.setattr(datasets, "load_dataset", _spy)
+        get_dataset_samples(make_toy_hf_dataset(), num_samples=1, split=["train", "test"])
+        assert loaded == ["test"]
+
     def test_download_to_jsonl_then_load(self, tmp_path, make_toy_hf_dataset):
         """Dump the dataset to JSONL, then reload it via the local-jsonl path."""
         dataset = make_toy_hf_dataset()
