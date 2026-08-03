@@ -13,6 +13,7 @@ on:
       - "tests/unit/**"
       - "tools/launcher/**"
       - "tools/mcp/**"
+      - "tools/resource_monitor.py"
       - ".agents/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
@@ -57,6 +58,7 @@ jobs:
             tests/unit/**
             tools/launcher/**
             tools/mcp/**
+            tools/resource_monitor.py
             .agents/skills/**
   linux:
     needs: [check-dco]

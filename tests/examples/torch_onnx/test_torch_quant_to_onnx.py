@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+import onnx
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
@@ -46,3 +47,31 @@ def test_torch_onnx(model_key, quantize_mode):
     )
     cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
+
+
+def test_torch_onnx_recipe_flag(tmp_path):
+    timm_model_name, model_kwargs = _MODELS["vit_tiny"]
+    onnx_save_path = tmp_path / "vit_tiny.recipe.onnx"
+    recipe_path = tmp_path / "disable_all.yaml"
+    recipe_path.write_text("quant_cfg:\n  - quantizer_name: '*'\n    enable: false\n")
+
+    cmd_parts = extend_cmd_parts(
+        ["python", "torch_quant_to_onnx.py"],
+        timm_model_name=timm_model_name,
+        model_kwargs=model_kwargs,
+        quantize_mode="int8",
+        recipe=str(recipe_path),
+        onnx_save_path=str(onnx_save_path),
+        calibration_data_size="1",
+        num_score_steps="1",
+    )
+    cmd_parts.append("--no_pretrained")
+    run_example_command(cmd_parts, "torch_onnx")
+
+    quantize_ops = {
+        "QuantizeLinear",
+        "DequantizeLinear",
+        "TRT_FP4DynamicQuantize",
+        "TRT_FP8QuantizeLinear",
+    }
+    assert not quantize_ops & {node.op_type for node in onnx.load(onnx_save_path).graph.node}

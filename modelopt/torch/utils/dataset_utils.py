@@ -1013,7 +1013,9 @@ def get_max_batch_size(
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
+    # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+    infer_method = model.generate if is_enc_dec else model
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -1163,7 +1165,9 @@ def _forward_loop(
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
+        # how FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+        infer_method = model.generate if is_enc_dec else model
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):

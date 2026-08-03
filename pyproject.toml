@@ -120,6 +120,7 @@ dev-test = [
     "pytest-timeout~=2.4.0",
     "uv",
     # test-specific dependencies
+    "psutil", # tools/resource_monitor.py sidecar (tests/unit/tools)
     "timm",
     "torchprofile==0.0.4", # optional dependency for modelopt.torch
     "torchvision",

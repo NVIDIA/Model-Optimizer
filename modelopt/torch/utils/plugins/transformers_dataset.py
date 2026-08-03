@@ -325,6 +325,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
         chat_template: str | None = None,
         add_generation_prompt: bool = False,
         answer_only_loss: bool = False,
+        shift_labels: bool = True,
         local_image_path: str = "",
         return_labels: bool = False,
     ):
@@ -340,10 +341,97 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt,
             answer_only_loss=answer_only_loss,
+            shift_labels=shift_labels,
             return_labels=return_labels,
         )
 
+    def _verify_generation_tags(self):
+        """Accept VLM templates whose assistant spans have stable chat markers.
+
+        Cosmos/Qwen ChatML templates do not necessarily use Hugging Face's
+        ``{% generation %}`` tags.  For those templates we derive the same
+        assistant-only loss mask from the tokenized assistant boundaries.
+        """
+        if self._assistant_marker_specs():
+            return
+        super()._verify_generation_tags()
+
+    def _assistant_marker_specs(self):
+        """Return tokenized assistant start/end boundaries for supported templates."""
+        if hasattr(self, "_cached_assistant_marker_specs"):
+            return self._cached_assistant_marker_specs
+
+        template = self.tokenizer.chat_template or ""
+        specs = []
+        if "<|im_start|>" in template and "<|im_end|>" in template:
+            specs.append(
+                (
+                    self.tokenizer("<|im_start|>assistant\n", add_special_tokens=False)[
+                        "input_ids"
+                    ],
+                    [
+                        self.tokenizer("<|im_end|>\n", add_special_tokens=False)["input_ids"],
+                        self.tokenizer("<|im_end|>", add_special_tokens=False)["input_ids"],
+                    ],
+                )
+            )
+        self._cached_assistant_marker_specs = [
+            (start, [end for end in ends if end]) for start, ends in specs if start and any(ends)
+        ]
+        return self._cached_assistant_marker_specs
+
+    @staticmethod
+    def _find_subsequence(values, pattern, start=0, stop=None):
+        stop = len(values) if stop is None else stop
+        if not pattern or start >= stop:
+            return -1
+        for index in range(start, stop - len(pattern) + 1):
+            if values[index : index + len(pattern)] == pattern:
+                return index
+        return -1
+
+    def _build_assistant_masks(self, tokenized_messages):
+        """Build assistant-content masks from ChatML boundaries."""
+        input_ids = tokenized_messages["input_ids"]
+        attention_mask = tokenized_messages.get("attention_mask")
+        assistant_masks = torch.zeros_like(input_ids)
+
+        for row_index, row in enumerate(input_ids):
+            tokens = row.tolist()
+            if isinstance(attention_mask, torch.Tensor):
+                active = attention_mask[row_index].nonzero(as_tuple=False).flatten()
+                if active.numel() == 0:
+                    continue
+                sequence_start, sequence_end = int(active[0]), int(active[-1]) + 1
+            else:
+                sequence_start, sequence_end = 0, len(tokens)
+
+            for start_marker, end_markers in self._assistant_marker_specs():
+                search_from = sequence_start
+                while search_from < sequence_end:
+                    start = self._find_subsequence(tokens, start_marker, search_from, sequence_end)
+                    if start == -1:
+                        break
+                    content_start = start + len(start_marker)
+                    end_positions = [
+                        position
+                        for marker in end_markers
+                        if (
+                            position := self._find_subsequence(
+                                tokens, marker, content_start, sequence_end
+                            )
+                        )
+                        != -1
+                    ]
+                    content_end = min(end_positions) if end_positions else sequence_end
+                    if content_start < content_end:
+                        assistant_masks[row_index, content_start:content_end] = 1
+                    search_from = max(content_start + 1, content_end + 1)
+
+        return assistant_masks
+
     def _process_multimodal_sample(self, examples):
+        derive_masks_from_markers = self.answer_only_loss and bool(self._assistant_marker_specs())
         tokenized_messages = self.processor.apply_chat_template(
             examples,
             tokenize=True,
@@ -353,8 +441,35 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             truncation=True,
             max_length=self.train_len,
             add_generation_prompt=self.add_generation_prompt,
-            return_assistant_tokens_mask=self.answer_only_loss,
+            return_assistant_tokens_mask=self.answer_only_loss and not derive_masks_from_markers,
         )
+
+        if derive_masks_from_markers:
+            tokenized_messages["assistant_masks"] = self._build_assistant_masks(tokenized_messages)
+
+        if self.return_labels:
+            input_ids = tokenized_messages["input_ids"]
+            labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
+            if self.shift_labels:
+                labels[..., :-1] = input_ids[..., 1:]
+            else:
+                # DFlash predicts the token at the current position rather
+                # than the next autoregressive token.
+                labels[:] = input_ids
+
+            if self.answer_only_loss:
+                if "assistant_masks" not in tokenized_messages:
+                    raise ValueError(
+                        "answer_only_loss requires assistant_masks from the VLM chat template."
+                    )
+                assistant_mask = tokenized_messages["assistant_masks"]
+                if not isinstance(assistant_mask, torch.Tensor) or not assistant_mask.any():
+                    labels[:] = IGNORE_TOKEN_ID
+                elif self.shift_labels:
+                    labels[..., :-1][assistant_mask[..., 1:] == 0] = IGNORE_TOKEN_ID
+                else:
+                    labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+            tokenized_messages["labels"] = labels
 
         return tokenized_messages
 
@@ -385,6 +500,21 @@ class VisionLanguageDataCollator(LanguageDataCollator):
                     msg["content"] = [{"type": "text", "text": msg["content"]}]
 
                 for ctn in msg["content"]:
+                    # Some JSONL producers use a fixed multimodal-part schema
+                    # (text/image/video/fps on every part) so Arrow can load
+                    # heterogeneous image and video datasets together.  Drop
+                    # the inactive placeholders before handing a part to the
+                    # processor, which expects only fields relevant to its type.
+                    content_type = ctn.get("type")
+                    if content_type != "text" and ctn.get("text") == "":
+                        del ctn["text"]
+                    if content_type != "image" and ctn.get("image") == "":
+                        del ctn["image"]
+                    if content_type != "video":
+                        if ctn.get("video") == "":
+                            del ctn["video"]
+                        if ctn.get("fps") == 0:
+                            del ctn["fps"]
                     if ctn["type"] == "image" and "image" in ctn:
                         ctn["image"] = os.path.abspath(
                             os.path.join(self.local_image_path, ctn["image"])
