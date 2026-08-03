@@ -74,7 +74,7 @@ squeue -u $USER -o "%j %N %S"  # Get the node name
 
 | Framework | Image | Source |
 |-----------|-------|--------|
-| vLLM | `vllm/vllm-openai:v0.26.0` | <https://hub.docker.com/r/vllm/vllm-openai> |
+| vLLM | `vllm/vllm-openai:latest` | <https://hub.docker.com/r/vllm/vllm-openai> |
 | SGLang | `lmsysorg/sglang:latest` | <https://hub.docker.com/r/lmsysorg/sglang> |
 | TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:latest` | <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release/> |
 
@@ -83,7 +83,7 @@ Example with the official vLLM image:
 ```bash
 docker run --gpus all -p 8000:8000 \
     -v /path/to/checkpoint:/model \
-    vllm/vllm-openai:v0.26.0 \
+    vllm/vllm-openai:latest \
     --model /model \
     --quantization modelopt \
     --host 0.0.0.0 --port 8000
