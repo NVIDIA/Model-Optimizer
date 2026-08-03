@@ -428,7 +428,8 @@ Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall
 KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
 `candidate_formats` are complete K/V cache configs with exact config-level `effective_bits`;
 BF16 is used only as the isolated-KL reference, not as a solver choice. The shipped canary recipe
-searches cast-mode FP8 (8.0 bits/scalar) and packed NVFP4 (4.5 bits/scalar) at 5.4 bits/scalar:
+searches cast-mode FP8 K/V (8.0 bits/scalar), FP8-K/NVFP4-V (6.25 bits/scalar),
+and packed NVFP4 K/V (4.5 bits/scalar) at 5.4 bits/scalar:
 
 ```bash
 python hf_ptq.py \

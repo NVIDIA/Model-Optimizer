@@ -28,6 +28,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import get_quantization_format
 from modelopt.torch.export.model_config import (
     KV_CACHE_FP8,
+    KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_NVFP4,
@@ -76,6 +77,7 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
     model = torch.nn.Module()
     model.attn0 = FakeAttention()
     model.attn1 = FakeAttention()
+    model.attn2 = FakeAttention()
     mtq.set_quantizer_by_cfg(
         model.attn0,
         [
@@ -98,6 +100,23 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
             }
         ],
     )
+    mtq.set_quantizer_by_cfg(
+        model.attn2,
+        [
+            {
+                "quantizer_name": "*k_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+            },
+            {
+                "quantizer_name": "*v_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "use_constant_amax": True,
+                },
+            },
+        ],
+    )
 
     quantization = get_quant_config(model)["quantization"]
     assert quantization["quant_algo"] == "MIXED_PRECISION"
@@ -106,6 +125,7 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
     assert quantization["kv_cache_quantized_layers"] == {
         "attn0": {"quant_algo": "FP8"},
         "attn1": {"quant_algo": "NVFP4"},
+        "attn2": {"quant_algo": "FP8_K_NVFP4_V"},
     }
 
 
@@ -119,7 +139,14 @@ def test_mixed_kv_cache_postprocess_uses_each_layers_format():
     layer_formats = {
         "attn0": {"quant_algo": KV_CACHE_FP8},
         "attn1": {"quant_algo": KV_CACHE_NVFP4},
+        "attn2": {"quant_algo": KV_CACHE_FP8_K_NVFP4_V},
     }
+    state_dict.update(
+        {
+            "attn2.k_bmm_quantizer._amax": torch.tensor([448.0]),
+            "attn2.v_bmm_quantizer._amax": torch.tensor([112.0]),
+        }
+    )
 
     processed = postprocess_state_dict(state_dict, 448.0, layer_formats)
 
@@ -128,6 +155,8 @@ def test_mixed_kv_cache_postprocess_uses_each_layers_format():
         "attn0.v_proj.v_scale": torch.tensor([0.5]),
         "attn1.k_proj.k_scale": torch.tensor([0.25]),
         "attn1.v_proj.v_scale": torch.tensor([0.125]),
+        "attn2.k_proj.k_scale": torch.tensor([1.0]),
+        "attn2.v_proj.v_scale": torch.tensor([0.25]),
     }
 
 

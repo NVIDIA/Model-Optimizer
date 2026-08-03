@@ -95,6 +95,7 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
     assert inputs["method"] == "kl_div"
     assert [config["effective_bits"] for config, _ in inputs["quantization_formats"]] == [
         8.0,
+        6.25,
         4.5,
     ]
     assert "kv_cache_quant_cfg" not in inputs

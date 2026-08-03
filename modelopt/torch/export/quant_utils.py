@@ -50,6 +50,7 @@ from modelopt.torch.utils import clear_cuda_cache
 from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_config import (
     KV_CACHE_FP8,
+    KV_CACHE_FP8_K_NVFP4_V,
     KV_CACHE_INT8,
     KV_CACHE_NVFP4,
     KV_CACHE_NVFP4_AFFINE,
@@ -389,27 +390,36 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
 
-    # For FP8, we recommend default kv cache scaling factor to be 1.
-    if get_kv_cache_dtype(self_attention_module) == KV_CACHE_FP8:
-        for i, factor in enumerate(scaling_factors):
-            if factor is None:
-                continue
-            if factor.item() > 0.5:
-                warn(
-                    f"Warning: Large KV activation detected: {factor.item()}, "
-                    "Quantized KV cache may lead to higher accuracy drop."
-                )
-            scaling_factors[i] = torch.max(
-                factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+    # For FP8, we recommend default KV-cache scaling factor to be 1. The
+    # asymmetric format applies this only to K; V remains NVFP4.
+    kv_cache_dtype = get_kv_cache_dtype(self_attention_module)
+    if kv_cache_dtype == KV_CACHE_FP8:
+        fp8_indices = range(len(scaling_factors))
+    elif kv_cache_dtype == KV_CACHE_FP8_K_NVFP4_V:
+        fp8_indices = (0,)
+    else:
+        fp8_indices = ()
+    for i in fp8_indices:
+        factor = scaling_factors[i]
+        if factor is None:
+            continue
+        if factor.item() > 0.5:
+            warn(
+                f"Warning: Large KV activation detected: {factor.item()}, "
+                "Quantized KV cache may lead to higher accuracy drop."
             )
+        scaling_factors[i] = torch.max(
+            factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+        )
     return scaling_factors
 
 
 def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
     """Returns the kv_cache dtype.
 
-    If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
-    otherwise returns None.
+    K/V quantizers are inspected as a pair so FP8 K with NVFP4 V remains
+    distinguishable from uniform FP8 or NVFP4. The output quantizer is retained
+    as a fallback for the unified Megatron export path.
 
     Args:
         modules: The module or list of modules to inspect.
@@ -424,6 +434,25 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
         modules = [modules]
 
     for module in modules:
+        k_quantizer = getattr(module, "k_bmm_quantizer", None)
+        v_quantizer = getattr(module, "v_bmm_quantizer", None)
+        if (
+            k_quantizer is not None
+            and v_quantizer is not None
+            and k_quantizer.is_enabled
+            and v_quantizer.is_enabled
+        ):
+            k_dtype = _compute_kv_cache_dtype(
+                [k_quantizer.num_bits], hasattr(k_quantizer, "_bias_value")
+            )
+            v_dtype = _compute_kv_cache_dtype(
+                [v_quantizer.num_bits], hasattr(v_quantizer, "_bias_value")
+            )
+            if k_dtype == KV_CACHE_FP8 and v_dtype == KV_CACHE_NVFP4:
+                return KV_CACHE_FP8_K_NVFP4_V
+            if k_dtype == v_dtype:
+                return k_dtype
+
         # Case where the module has both k_bmm_quantizer and v_bmm_quantizer
         # Still check for output quantizer for the unified_megatron_export path
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer", "output_quantizer"):
@@ -1117,6 +1146,7 @@ def postprocess_state_dict(
                     layer_quantization = _kv_quantization_for_key(key)
                     assert layer_quantization in [
                         KV_CACHE_FP8,
+                        KV_CACHE_FP8_K_NVFP4_V,
                         KV_CACHE_NVFP4,
                         KV_CACHE_NVFP4_AFFINE,
                     ], "Invalid KV cache quantization format."
@@ -1125,7 +1155,11 @@ def postprocess_state_dict(
                     value = value.float() / maxbound
 
                     # Warn if scale exceeds threshold
-                    if layer_quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                    is_fp8_scale = layer_quantization == KV_CACHE_FP8 or (
+                        layer_quantization == KV_CACHE_FP8_K_NVFP4_V
+                        and key.endswith("k_bmm_quantizer._amax")
+                    )
+                    if is_fp8_scale and value.item() > 0.5:
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
