@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from . import SetupError
+from . import (
+    WORKER_REPOSITORY_PLACEHOLDER,
+    WORKER_VENV_PLACEHOLDER,
+    SetupError,
+    validate_worker_path,
+)
 from .inspection import (
     InspectedModel,
     infer_dataset_modality,
@@ -1213,18 +1218,19 @@ def _ask_infrastructure(
     )
     repository = prompts.text(
         "Repository path on workers:",
-        default=".",
+        default=WORKER_REPOSITORY_PLACEHOLDER,
         description=(
-            "Use the checkout path visible on every worker and inside the container, if used."
+            "Replace the default with the checkout path visible on every worker and inside "
+            "the container, if used."
         ),
+        validate=validate_worker_path,
     )
     venv = prompts.text(
         "Python virtual environment on workers:",
-        default=".venv",
-        description=(
-            "Use a repository-relative path or an absolute worker-visible path containing "
-            "bin/activate."
-        ),
+        default=WORKER_VENV_PLACEHOLDER,
+        description="Replace the default with a worker-visible environment path containing "
+        "bin/activate.",
+        validate=validate_worker_path,
     )
     container = prompts.text(
         "Container image/path (blank for none):",

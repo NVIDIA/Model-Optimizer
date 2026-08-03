@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from puzzletron_orchestrator.compiler import load_execution_config, load_runner_config
+from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOLDER
 from puzzletron_setup.v2.defaults import load_defaults
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -30,8 +31,8 @@ def test_slurm_runner_example_is_portable() -> None:
     slurm = load_runner_config(
         REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
     )
-    assert not Path(slurm.contract.repository).is_absolute()
-    assert not Path(slurm.contract.venv).is_absolute()
+    assert slurm.contract.repository == WORKER_REPOSITORY_PLACEHOLDER
+    assert slurm.contract.venv == WORKER_VENV_PLACEHOLDER
     assert slurm.contract.container is None
     assert slurm.contract.container_mounts is None
     assert not slurm.contract.prerun_commands
@@ -44,8 +45,8 @@ def test_baremetal_runner_example_is_portable() -> None:
     baremetal = load_runner_config(
         REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.baremetal.example.yaml"
     )
-    assert not Path(baremetal.contract.repository).is_absolute()
-    assert not Path(baremetal.contract.venv).is_absolute()
+    assert baremetal.contract.repository == WORKER_REPOSITORY_PLACEHOLDER
+    assert baremetal.contract.venv == WORKER_VENV_PLACEHOLDER
     assert baremetal.contract.setup_env is None
     assert baremetal.baremetal is not None
     hostnames = [host.hostname for host in baremetal.baremetal.hosts]
@@ -65,7 +66,11 @@ def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
         runner.contract.container,
         runner.contract.container_mounts,
     )
-    assert all(value and value.startswith("REPLACE_WITH_") for value in contract_values)
+    assert contract_values[:2] == (
+        WORKER_REPOSITORY_PLACEHOLDER,
+        WORKER_VENV_PLACEHOLDER,
+    )
+    assert all(value and value.startswith("REPLACE_WITH_") for value in contract_values[2:])
     assert runner.contract.prerun_commands
     assert all("REPLACE_WITH_" in command for command in runner.contract.prerun_commands)
     assert runner.slurm is not None
@@ -87,8 +92,8 @@ def test_setup_defaults_example_is_portable() -> None:
     defaults = load_defaults(path)
 
     contract = defaults["infrastructure"]["execution_contract"]
-    assert not Path(contract["repository"]).is_absolute()
-    assert not Path(contract["venv"]).is_absolute()
+    assert contract["repository"] == WORKER_REPOSITORY_PLACEHOLDER
+    assert contract["venv"] == WORKER_VENV_PLACEHOLDER
     assert contract["container"] is None
     assert contract["container_mounts"] is None
     assert not contract["prerun_commands"]

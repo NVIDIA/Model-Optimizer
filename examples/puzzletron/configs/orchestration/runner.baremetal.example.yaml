@@ -16,12 +16,10 @@ runner:
       - hostname: REPLACE_WITH_SECONDARY_HOST
         gpus: 8
   execution_contract:
-    # Runnable when the same checkout is visible on every SSH host.
-    # Otherwise, replace "." with the repository path shared by those hosts.
-    repository: .
-    # Sourced as <venv>/bin/activate after changing into the repository.
-    # Use a repository-relative path or an absolute path visible on every host.
-    venv: .venv
+    # Required. Use the same checkout path visible on every SSH host.
+    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
+    # Required. Sourced as <venv>/bin/activate on every SSH host.
+    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
     # Optional script sourced before virtualenv activation on every host.
     # Leave null when the worker login environment needs no additional setup.
     setup_env: null

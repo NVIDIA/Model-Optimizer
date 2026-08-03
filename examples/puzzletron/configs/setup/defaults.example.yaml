@@ -1,12 +1,10 @@
 schema_version: 1
 infrastructure:
   execution_contract:
-    # Runnable when setup and orchestration start from a checkout visible on every worker.
-    # Otherwise, replace "." with the worker-visible repository path.
-    repository: .
-    # Sourced as <venv>/bin/activate after changing into the repository.
-    # Use a repository-relative path or an absolute path visible on every worker.
-    venv: .venv
+    # Required. Use the checkout path visible on every worker and in the container, if used.
+    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
+    # Required. Sourced as <venv>/bin/activate on every worker.
+    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
     # Optional. Set to an image/path accepted by the cluster's srun container plugin.
     # Leave null to execute directly in the worker environment.
     container: null
