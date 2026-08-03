@@ -214,6 +214,8 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
     monkeypatch.setattr(flashinfer_backend, "use_trtllm_attention", lambda *_args, **_kwargs: True)
     assert patch_flashinfer_metadata_builder() is True
     builder = object.__new__(FlashInferMetadataBuilder)
+    # vLLM >= 0.26 splits ``q_data_type`` per phase and carries the resolved decode kernel on the builder
+    decode_kernel_enum = getattr(flashinfer_backend, "FlashInferDecodeKernel", None)
     builder.__dict__.update(
         reorder_batch_threshold=1,
         page_size=16,
@@ -221,10 +223,12 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         num_kv_heads=2,
         dcp_world_size=1,
         cache_dtype=torch.float16,
-        # vLLM >= 0.26 split q_data_type into per-phase attributes; set both spellings.
         q_data_type=torch.float16,
         q_data_type_prefill=torch.float16,
         q_data_type_decode=torch.float16,
+        flashinfer_trtllm_api_decode_kernel=(
+            next(iter(decode_kernel_enum)) if decode_kernel_enum is not None else None
+        ),
         attention_config=SimpleNamespace(use_trtllm_attention=True),
         has_sinks=False,
         use_trtllm_decode_attention=True,
