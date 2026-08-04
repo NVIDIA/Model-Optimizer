@@ -1,0 +1,66 @@
+# Two-iteration Nemotron 3 Nano QAD smoke test.
+#
+# Run megatron_lm_qad.yaml tasks 0 and 1 first to create the BF16 teacher and
+# NVFP4 student checkpoints. This task uses a tiny local OpenAI-chat JSONL file
+# to validate teacher/student loading, chat-template tokenization, backward,
+# and checkpoint saving without downloading the post-training dataset.
+#
+# Prepare the checkpoints from tools/launcher:
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_lm_qad.yaml pipeline.task_2.skip=true pipeline.task_3.skip=true --yes
+# Then launch this file:
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_lm_qad_smoke.yaml --yes
+
+job_name: Nemotron-3-Nano-30B-A3B_QAD_smoke
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note: "Two-iteration teacher-student QAD smoke test on local chat data"
+
+  task_0:
+    script: common/megatron_lm/train/sft.sh
+    args:
+      - --seq-length 256 --max-position-embeddings 8192
+      - --micro-batch-size 1 --global-batch-size 8
+      - --train-samples 16
+      - --lr-decay-samples 16
+      - --lr-warmup-samples 0
+      - --split 99,1,0
+      - --finetune-data-split train
+      - --finetune-data-files train.jsonl
+      - --modelopt-enabled
+      - --export-kd-teacher-load /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
+      - --attention-dropout 0.0 --hidden-dropout 0.0
+      - --no-check-for-nan-in-loss-and-grad
+      - --recompute-granularity selective
+      - --recompute-modules layernorm moe
+      - --sequence-parallel
+      - --ckpt-fully-parallel-load --ckpt-fully-parallel-save
+      - --lr 1.0e-5 --min-lr 1.0e-6
+      - --lr-decay-style cosine
+      - --clip-grad 1.0 --weight-decay 0.0
+      - --adam-beta1 0.9 --adam-beta2 0.95
+      - --init-method-std 0.010
+      - --use-distributed-optimizer
+      - --eval-iters 1 --eval-interval 25
+      - --save-interval 1 --log-interval 1
+      - --dist-ckpt-strictness log_all
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_CKPT: /cicd/megatron-lm/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_SAVE: /cicd/megatron-lm-qad-smoke/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_TRAIN_SCRIPT: finetune
+      - DATASET: examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/qad_smoke_data
+      - DP: "1"
+      - CP: "1"
+      - TP: "1"
+      - PP: "1"
+      - EP: "8"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06.00
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
