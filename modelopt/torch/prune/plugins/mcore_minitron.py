@@ -28,7 +28,7 @@ import io
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from itertools import product
 from typing import Any
@@ -294,6 +294,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "layer_scores": {},
             "sorted_layers": None,
             "all_candidates_per_constraint": {},
+            "best": {},
         }
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
@@ -641,6 +642,7 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         dist.barrier()
         best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
+        self.best = asdict(best)
         best_grid = Table.grid(padding=(0, 2))
         best_grid.add_column(style="bold green", no_wrap=True)
         best_grid.add_column()
