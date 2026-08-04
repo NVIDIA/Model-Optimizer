@@ -36,14 +36,21 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _CheckpointState,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
-from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from .utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -208,7 +215,7 @@ def _has_expert_parallelism(module: nn.Module) -> bool:
 
 
 def _iter_leaf_quantizers(quantizer):
-    if isinstance(quantizer, SequentialQuantizer):
+    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
         for _q in quantizer:
             yield from _iter_leaf_quantizers(_q)
         return
@@ -376,12 +383,12 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
         """Sync amax across DP (always) and EP (filtered — see _should_sync_amax_across_ep)."""
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_dp_ep(_q, parallel_state, parent_name, child_name)
             return
@@ -395,7 +402,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
@@ -417,7 +424,7 @@ def max_calibrate(
         parallel_state: ParallelState,
     ):
         # Syncing amax across TP for sequential quantizer
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_tp(
                     _q, linear_name, quantizer_type, axes_for_sync, parallel_state
@@ -1926,6 +1933,7 @@ def layerwise_calibrate(
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
+    calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
 
     if forward_loop is None:
         raise ValueError(
@@ -1947,15 +1955,27 @@ def layerwise_calibrate(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
+        calib_mutates_weights=calib_mutates_weights,
     )
     start_layer = ckpt.start_layer if ckpt else 0
 
-    input_getter = LayerActivationCollector(model)
-    input_getter._patch_all_layers(decoder_layers=transformer_layers)
+    layer_pbar = tqdm(
+        total=num_layers,
+        initial=start_layer,
+        desc="Layerwise calibration",
+        disable=not is_master(),
+        dynamic_ncols=True,
+    )
 
-    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+    def _set_layer_status(status: str):
+        layer_pbar.set_postfix_str(status, refresh=True)
+
+    input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
 
     try:
+        input_getter._patch_all_layers(decoder_layers=transformer_layers)
+        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+
         # Bootstrap: get first layer's inputs (or use resumed inputs).
         layer_inputs = input_getter.get_first_layer_inputs(
             start_layer, resumed_inputs, forward_loop
@@ -1985,7 +2005,7 @@ def layerwise_calibrate(
 
             is_last = layer_idx + 1 >= num_layers
 
-            with persistent_materialization(layer):
+            with persistent_materialization(layer, writeback=calib_mutates_weights):
                 # qdq_from_prev=False: capture before calib_func so the forward
                 # replay uses the original FP weights. Disable quantizers too in
                 # case any pre-calibration observer behavior would perturb the
@@ -2015,11 +2035,13 @@ def layerwise_calibrate(
                 if ckpt:
                     ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
+            layer_pbar.update(1)
             del layer_inputs
             torch.cuda.empty_cache()
             layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
         input_getter._unpatch_all_layers()
+        layer_pbar.close()
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)

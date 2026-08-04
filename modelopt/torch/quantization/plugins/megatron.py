@@ -15,6 +15,7 @@
 
 """Support quantization for megatron linear layers."""
 
+import re
 import types
 from contextlib import contextmanager
 from typing import Any
@@ -24,12 +25,13 @@ import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import torch
+from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
-from megatron.core.utils import get_tensor_model_parallel_group_if_none
+from megatron.core.utils import get_pg_rank, get_pg_size, get_tensor_model_parallel_group_if_none
 
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.megatron import (
@@ -42,7 +44,13 @@ from modelopt.torch.utils.distributed import ParallelState
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import maybe_promote_nvfp4_static_quantizer
-from ..nn import QuantModule, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
+from ..nn import (
+    GroupedQuantizer,
+    QuantModule,
+    QuantModuleRegistry,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
 from ..utils import sync_moe_expert_amax
@@ -90,7 +98,7 @@ def _check_nvfp4_static_tp_supported(model: torch.nn.Module) -> None:
             continue
         leaves = (
             list(weight_quantizer)
-            if isinstance(weight_quantizer, SequentialQuantizer)
+            if isinstance(weight_quantizer, (SequentialQuantizer, GroupedQuantizer))
             else [weight_quantizer]
         )
         if any(leaf.is_nvfp4_static for leaf in leaves):
@@ -133,6 +141,12 @@ def quant_module_get_extra_state(self) -> dict:
     QuantModule's extra_state with QuantModule.get_extra_state()
     which avoids the need to store the full module name.
     """
+    # Nothing quantized here -> return {} so unquantized output_layer._extra_state stays empty (Megatron asserts empty).
+    if not isinstance(self, RealQuantLinear) and not any(
+        isinstance(m, TensorQuantizer) and m.is_enabled for m in self.modules()
+    ):
+        return {}
+
     extra_state = {}
 
     quantizer_state = {}
@@ -224,7 +238,19 @@ def quant_module_set_extra_state(self, state: Any):
     if quantizer_state is not None:
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):
-                quantizer_substate = quantizer_state[name]
+                quantizer_substate = quantizer_state.get(name)
+                if quantizer_substate is None:
+                    # Per-expert quantizers ("weight_quantizer.<i>") are saved per EP rank, so a
+                    # module loaded at smaller EP (e.g. EP1 export from an EP16 ckpt) has more
+                    # experts than the saved state. Per-expert properties are uniform across
+                    # experts (amax rides separately as globally-indexed sharded tensors), so
+                    # fall back to expert 0's state. Rewrite only the expert index right after
+                    # weight_quantizer, preserving deeper suffixes (e.g. a SequentialQuantizer level
+                    # weight_quantizer.<i>.<lvl>); non-expert names are left unchanged.
+                    fallback = re.sub(r"(weight_quantizer)\.\d+", r"\1.0", name)
+                    quantizer_substate = quantizer_state.get(fallback)
+                if quantizer_substate is None:
+                    continue
                 maybe_promote_nvfp4_static_quantizer(module, quantizer_substate)
                 module.set_from_modelopt_state(quantizer_substate, properties_only=False)
         self.modelopt_post_restore()
@@ -305,19 +331,8 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
             if type(module) in QuantModuleRegistry:
-                # Skip output_layer w/o enabled weight_quantizer. This hook also runs BEFORE
-                # QuantModule replacement (e.g. on restore), when ``weight_quantizer`` does not
-                # exist yet -- the old check then always skipped, so output_layer never received
-                # ModelOpt extra-state callbacks and its quantizer state (promotion to
-                # StaticBlockScaleQuantizer, ``_amax``, ``_global_amax``) was never restored.
-                # Fall back to the tying flag: an untied output_layer is quantizable.
-                if name.endswith("output_layer"):
-                    _wq = getattr(module, "weight_quantizer", None)
-                    _skip = (
-                        not getattr(_wq, "is_enabled", False) if _wq is not None else not untied
-                    )
-                    if _skip:
-                        continue
+                # Register for EVERY QuantModule incl. output_layer: the old is_enabled gate ran
+                # pre-replacement (weight_quantizer None) so it skipped output_layer -> static amax dropped on save.
                 register_modelopt_extra_state_callbacks(
                     module,
                     quant_module_get_extra_state,
@@ -513,7 +528,8 @@ class _MegatronColumnParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
-            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            # _global_amax needs no channel shard axis (replicated scalar; for grouped experts it
+            # rides with the global expert identity assigned in the grouped sharded_state_dict).
             if k.endswith("_global_amax"):
                 continue
             if "weight_quantizer." in k:
@@ -544,7 +560,8 @@ class _MegatronRowParallelLinear(_MegatronParallelLinear):
         """
         shard_axis_dict = {}
         for k in state_dict:
-            # Static NVFP4 _global_amax is a replicated scalar; only per-block _amax shards.
+            # _global_amax needs no channel shard axis (replicated scalar; for grouped experts it
+            # rides with the global expert identity assigned in the grouped sharded_state_dict).
             if k.endswith("_global_amax"):
                 continue
             if "weight_quantizer." in k:
@@ -772,8 +789,121 @@ if HAS_TE:
             return super()._load_from_state_dict(filtered_state_dict, prefix, *args, **kwargs)
 
         def _process_quantizer_amax(self, k, v, quantizer_state_dict):
-            assert v.numel() == 1, "TEGroupedLinear only supports per-tensor quantization"
-            quantizer_state_dict[k] = v.view(-1)
+            # Per-expert quantizers have independent checkpoint keys. Preserve their native
+            # scalar, channel, or block shape instead of flattening them through the legacy
+            # single-quantizer path.
+            if re.match(r"weight_quantizer\.\d+\..+_amax$", k):
+                quantizer_state_dict[k] = v
+            else:
+                quantizer_state_dict[k] = v.view(-1) if v.numel() == 1 else v
+
+        def _expert_parallel_groups(self):
+            """Return the (ep, expt_dp) process groups used to place fused experts globally."""
+            pg_collection = getattr(self, "_pg_collection", None)
+            if pg_collection is not None:
+                return pg_collection.ep, pg_collection.expt_dp
+            return (
+                mcore_parallel.get_expert_model_parallel_group(),
+                mcore_parallel.get_expert_data_parallel_group(),
+            )
+
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            """Emit per-expert quantizer amax with the same global expert identity as the weights.
+
+            The base linear emits ``weight_quantizer.{local_i}._amax`` with the local index and no
+            expert offset, so every EP rank writes identical keys and ``torch_dist`` dedup keeps only
+            one rank's experts. Here we mirror Megatron ``TEGroupedLinear._sharded_state_dict_grouped``:
+            each fused expert comes with its ``global_expert_idx`` (baked into the key prefix under
+            ``singleton_local_shards``, otherwise an EP sharded-offset) so all ``num_global_experts``
+            persist and reshard to any EP. Shared, whole-linear quantizer buffers (e.g.
+            ``input_quantizer``) keep the plain replicated path.
+            """
+            metadata = ensure_metadata_has_dp_cp_group(metadata)
+            singleton_local_shards = bool((metadata or {}).get("singleton_local_shards", False))
+
+            # Weights/bias/_extra_state come from the wrapped TE grouped linear, which already
+            # assigns each expert its global identity. Skip _MegatronParallelLinear's local-index
+            # amax emission by starting from the base MCore module's sharded_state_dict.
+            sharded_state_dict = super(_MegatronParallelLinear, self).sharded_state_dict(
+                prefix, sharded_offsets, metadata
+            )
+
+            # Collect the quantizer buffers exactly like _MegatronParallelLinear.sharded_state_dict.
+            quantizer_state_dict = {}
+            for k, v in self.state_dict(prefix="", keep_vars=True).items():
+                if "_quantizer" in k and "_amax" in k:
+                    self._process_quantizer_amax(k, v, quantizer_state_dict)
+                elif k == "input_quantizer._pre_quant_scale":
+                    self._process_activation_quantizer_pre_quant_scale(k, v, quantizer_state_dict)
+                elif self._parameter_to_keep_in_quantizer_state_dict(k):
+                    quantizer_state_dict[k] = v
+                elif "quantizer" in k:
+                    warn_rank_0(
+                        f"Quantizer state {k} is not supported for sharded_state_dict. "
+                        "Please use regular state_dict."
+                    )
+
+            # Channel shard axes (per real key); _global_amax stays un-sharded along channels but
+            # still rides with the expert identity below.
+            shard_axis_dict = self._get_shard_axis_dict(quantizer_state_dict)
+
+            # Split per-expert weight_quantizer.{i}.* from shared (input/output) quantizer buffers.
+            expert_re = re.compile(r"^weight_quantizer\.(\d+)\.(.+)$")
+            per_expert_subs = [[] for _ in range(self.num_gemms)]
+            shared_state = {}
+            for k, v in quantizer_state_dict.items():
+                m = expert_re.match(k)
+                if m:
+                    per_expert_subs[int(m.group(1))].append((m.group(2), v, shard_axis_dict.get(k)))
+                else:
+                    shared_state[k] = v
+
+            # Shared quantizer buffers: replicated across experts, plain base offsets.
+            shared_axis_dict = {k: shard_axis_dict[k] for k in shared_state if k in shard_axis_dict}
+            sharded_state_dict.update(
+                make_sharded_tensors_for_checkpoint(
+                    shared_state, prefix, shared_axis_dict, sharded_offsets
+                )
+            )
+
+            # Per-expert amax: assign the same global expert identity the weights use.
+            ep_group, expt_dp_group = self._expert_parallel_groups()
+            num_global_experts = get_pg_size(ep_group) * self.num_gemms
+            local_expert_indices_offset = get_pg_rank(ep_group) * self.num_gemms
+            edp_replica_id = get_pg_rank(expt_dp_group)
+            ep_axis = len(sharded_offsets)
+            for gemm_idx, subs in enumerate(per_expert_subs):
+                if not subs:
+                    continue
+                global_expert_idx = local_expert_indices_offset + gemm_idx
+                if singleton_local_shards:
+                    expert_prefix = f"{global_expert_idx}.{prefix}"
+                    new_sharded_offsets = sharded_offsets
+                else:
+                    expert_prefix = prefix
+                    new_sharded_offsets = (
+                        *sharded_offsets,
+                        (ep_axis, global_expert_idx, num_global_experts),
+                    )
+                expert_state = {f"{gemm_idx}.weight_quantizer.{sub}": v for sub, v, _ in subs}
+                expert_axis = {
+                    f"{gemm_idx}.weight_quantizer.{sub}": axis
+                    for sub, _, axis in subs
+                    if axis is not None
+                }
+                sub_sd = make_sharded_tensors_for_checkpoint(
+                    expert_state, "", expert_axis, new_sharded_offsets
+                )
+                # Rewrite each ShardedTensor.key to carry the global expert identity (dict keys,
+                # which map to the local buffers on restore, are left untouched).
+                replace_prefix_for_sharding(sub_sd, f"{gemm_idx}.", expert_prefix)
+                for sub, _, _ in subs:
+                    sh_ten = sub_sd[f"{gemm_idx}.weight_quantizer.{sub}"]
+                    replica_id = sh_ten.replica_id
+                    if len(replica_id) == 3:
+                        sh_ten.replica_id = (*replica_id[:2], edp_replica_id)
+                    sharded_state_dict[f"{prefix}weight_quantizer.{gemm_idx}.{sub}"] = sh_ten
+            return sharded_state_dict
 
     @QuantModuleRegistry.register(
         {TEColumnParallelGroupedLinear: "megatron_TEColumnParallelGroupedLinear"}

@@ -230,7 +230,7 @@ that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
-| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit` |
+| **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `phi4mm`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/nvidia/Mistral-Medium-3.5-128B-NVFP4` |
@@ -239,7 +239,7 @@ The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
 folder carries a `README.md` spelling out that delta.
 
-### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`
+### Architecture-aware `quant_cfg` — `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama`
 
 **`minimax_m3_vl/ptq/mxfp8_nvfp4_experts`** applies MXFP8 to the language-model
 linear layers and MSE-calibrated NVFP4 to routed experts, with expert
@@ -275,6 +275,18 @@ FP8 W8A8 on every linear, like `fp8_default`, but it additionally enables the
 and disables the output quantizers. *Why special:* the general LLM recipes never
 quantize the attention BMM inputs; for ViT the whole attention block runs in FP8
 so Torch-TRT can compile it end-to-end.
+
+**`nemotron_llama/ptq/{nvfp4,fp8}_output_quant_proj`** covers the Llama-Nemotron
+embedding/reranking encoders (e.g. `llama-nemotron-embed-1b-v2`): same numerics
+as the general `nvfp4`/`fp8` presets, plus **output quantizers on the projection
+Linears** (`*_proj.output_quantizer`) so TensorRT engines carry inter-layer
+activations in the low-precision format instead of FP16 — roughly half the
+engine activation memory on these models. The sequence-classification `score`
+head stays unquantized, like `lm_head`. In the NVFP4 recipe, its `[1, hidden]`
+weight cannot be packed by the NVFP4 exporter. *Why special:* the
+general recipes never enable output quantizers, and the pattern must stay scoped
+to GEMM outputs — a `DynamicQuantize` on non-GEMM outputs (embedding lookup,
+pooling) fails to compile in TensorRT.
 
 A lighter case: **`step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only`** is close to
 `general/ptq/nvfp4_mlp_only` (NVFP4 on MoE/MLP weights+inputs, FP8 KV) but pinned

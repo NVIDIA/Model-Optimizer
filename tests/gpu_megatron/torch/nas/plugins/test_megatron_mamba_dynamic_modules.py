@@ -51,7 +51,7 @@ def _test_mamba_search_space(rank, size):
     mamba_head_dim_divisor = 4
 
     num_layers = size
-    hybrid_override_pattern = "M" * size  # all layers are Mamba layers
+    hybrid_layer_pattern = "M" * size  # all layers are Mamba layers
     hidden_size = channel_divisor * 4
     mamba_state_dim = channel_divisor
     mamba_head_dim = mamba_head_dim_divisor * 2
@@ -65,7 +65,7 @@ def _test_mamba_search_space(rank, size):
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
         num_layers=num_layers,
-        hybrid_override_pattern=hybrid_override_pattern,
+        hybrid_layer_pattern=hybrid_layer_pattern,
         hidden_size=hidden_size,
         mamba_state_dim=mamba_state_dim,
         mamba_head_dim=mamba_head_dim,
@@ -100,7 +100,8 @@ def _test_mamba_search_space(rank, size):
         assert isinstance(layer.mixer, _DynamicMambaMixer)
         assert isinstance(layer.mixer.in_proj, _DynamicTELayerNormColumnParallelLinear)
         assert isinstance(layer.mixer.out_proj, _DynamicTERowParallelLinear)
-        assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
+        if hasattr(layer.mixer, "conv1d"):  # nemo:26.06 and earlier
+            assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
         if layer.mixer.rmsnorm:
             assert isinstance(layer.mixer.norm, _DynamicExtendedRMSNorm)
     if is_pipeline_last_stage():

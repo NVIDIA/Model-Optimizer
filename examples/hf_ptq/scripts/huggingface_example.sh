@@ -173,7 +173,26 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         else
             QUANT_SPEC_ARGS="--qformat=${QFORMAT// /,}"
         fi
-        python hf_ptq.py \
+        # Opt-in memory/utilization sidecar: wraps the run and writes a CSV trace + peak
+        # summary to a sibling dir (kept out of the checkpoint $SAVE_PATH, which is uploaded
+        # and consumed downstream). Off by default (no behavior change).
+        MEM_MON_PREFIX=()
+        MEM_MON_SCRIPT="$script_dir/../../../tools/resource_monitor.py"
+        if [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" && ! -f "$MEM_MON_SCRIPT" ]]; then
+            echo "resource_monitor: $MEM_MON_SCRIPT not found (repo-root tools/ absent in this" \
+                 "distribution); continuing without the sidecar." >&2
+        elif [[ "${MODELOPT_MEM_MONITOR:-0}" == "1" ]]; then
+            if [[ -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_DEVICE_ORDER:-}" != "PCI_BUS_ID" ]]; then
+                echo "resource_monitor: CUDA_VISIBLE_DEVICES set without CUDA_DEVICE_ORDER=PCI_BUS_ID;" \
+                     "GPU columns may reflect different physical devices than the workload uses." >&2
+            fi
+            MEM_MON_DIR="${SAVE_PATH}_mem_monitor"
+            MEM_MON_PREFIX=(python "$MEM_MON_SCRIPT" \
+                --gpus "${CUDA_VISIBLE_DEVICES:-all}" \
+                --out "$MEM_MON_DIR/mem_trace.csv" \
+                --summary "$MEM_MON_DIR/mem_peak.txt" --)
+        fi
+        "${MEM_MON_PREFIX[@]}" python hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
             --sparsity_fmt=$SPARSITY_FMT \

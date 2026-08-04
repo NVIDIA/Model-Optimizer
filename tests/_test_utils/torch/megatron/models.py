@@ -36,7 +36,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import MLATransformerConfig, TransformerConfig
 
 from modelopt.torch.export.unified_export_megatron import import_mcore_gpt_from_hf
-from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
+from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec, get_te_mamba_stack_spec
 
 try:
     from megatron.core.extensions.transformer_engine import TENorm
@@ -56,6 +56,16 @@ try:
 except ImportError as e:
     warn(f"Mamba not installed: {e}")
     HAS_MAMBA = False
+
+try:  # nemo:26.08+ (MambaModel is now a deprecated HybridModel subclass)
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+    from megatron.core.post_training.modelopt.hybrid.model_specs import (
+        get_hybrid_stack_modelopt_spec,
+    )
+
+    HAS_HYBRID = True
+except ImportError:
+    HAS_HYBRID = False
 
 try:
     import apex  # noqa: F401
@@ -360,7 +370,7 @@ def get_mcore_mamba_hybrid_model(
     num_layers: int = 3,
     num_layers_in_first_pipeline_stage: int | None = None,
     num_layers_in_last_pipeline_stage: int | None = None,
-    hybrid_override_pattern: str | None = None,
+    hybrid_layer_pattern: str | None = None,
     hidden_size: int = 64,
     num_attention_heads: int = 8,
     num_query_groups: int | None = None,
@@ -386,7 +396,7 @@ def get_mcore_mamba_hybrid_model(
     """Builds a Mamba model with hybrid layer allocation (Mamba, MoE, Attention, MLP blocks).
 
     Notable Args:
-        hybrid_override_pattern: The hybrid layer pattern to override with.
+        hybrid_layer_pattern: The hybrid layer pattern to use.
             If None, a default pattern will be generated.
         skip_moe: Whether to skip MoE blocks in default hybrid pattern.
     """
@@ -422,49 +432,45 @@ def get_mcore_mamba_hybrid_model(
         **config_kwargs,
     )
 
-    # TODO: hybrid_override_pattern is deprecated in MCore 0.17+, use hybrid_layer_pattern instead
-    if hybrid_override_pattern is None:
+    if hybrid_layer_pattern is None:
         # Generate pattern by repeating base_pattern and trimming to match num_layers
         #   E.g. for num_layers=3, return "MEM" (Mamba -> MoE -> Mamba)
         #   E.g. for num_layers=6, return "MEM*M-" (Mamba -> MoE -> Attention -> MoE -> MLP)
         base_pattern = "M*M-" if skip_moe else "MEM*M-"
-        hybrid_override_pattern = (base_pattern * num_layers)[:num_layers]
+        hybrid_layer_pattern = (base_pattern * num_layers)[:num_layers]
 
-    # TODO: enable this when MCore 0.17+ is released (has fall-back so without this is still fine for sometime)
-    # Add | symbols for Pipeline parallelism (supported from MCore 0.17+, auto-added if not provided)
-    # E.g. MEM* with PP2 becomes ME|M* and MEM*M-ME with PP2 becomes MEM*|M-ME
-    # if pipeline_model_parallel_size > 1:
-    #     if "|" not in hybrid_override_pattern:
-    #         assert (
-    #             num_layers_in_first_pipeline_stage is None
-    #             and num_layers_in_last_pipeline_stage is None
-    #         ), "hybrid_override_pattern with `|` must be provided for uneven PP"
-    #         hybrid_override_pattern = "|".join(
-    #             textwrap.wrap(
-    #                 hybrid_override_pattern,
-    #                 width=num_layers // pipeline_model_parallel_size,
-    #                 break_long_words=True,
-    #                 break_on_hyphens=False,
-    #             )
-    #         )
-    #     assert hybrid_override_pattern.count("|") == pipeline_model_parallel_size - 1
-    assert len(hybrid_override_pattern.replace("|", "")) == num_layers
-    print(f"Using `{hybrid_override_pattern=}` for building MambaModel")
+    # NOTE: We intentionally keep hybrid_layer_pattern pipe-free even under PP>1 (MCore warns and
+    # runtime-slices). This matches how bridge-loaded models are pruned; ModelOpt's depth-pruning
+    # slicer is not `|`-aware, so pipe stage separators would break pattern slicing -- reject them.
+    assert "|" not in hybrid_layer_pattern, "Pipeline separators (`|`) are not supported"
+    assert len(hybrid_layer_pattern) == num_layers
 
-    if transformer_impl == "transformer_engine":
-        mamba_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+    # nemo:26.08+ uses HybridModel + hybrid_layer_pattern; older uses deprecated MambaModel.
+    common_kwargs = {
+        "config": config,
+        "vocab_size": vocab_size,
+        "max_sequence_length": max_sequence_length,
+        "pre_process": is_pipeline_first_stage(),
+        "post_process": is_pipeline_last_stage(),
+        "share_embeddings_and_output_weights": False,
+        "position_embedding_type": "none",
+    }
+    if HAS_HYBRID:
+        spec = (
+            get_te_hybrid_stack_spec(moe_grouped_gemm)
+            if transformer_impl == "transformer_engine"
+            else get_hybrid_stack_modelopt_spec(remap_te_layernorm=True)
+        )
+        model = HybridModel(
+            hybrid_stack_spec=spec, hybrid_layer_pattern=hybrid_layer_pattern, **common_kwargs
+        )
     else:
-        mamba_spec = get_mamba_stack_modelopt_spec(remap_te_layernorm=True)
-
-    model = MambaModel(
-        config=config,
-        mamba_stack_spec=mamba_spec,
-        vocab_size=vocab_size,
-        max_sequence_length=max_sequence_length,
-        hybrid_override_pattern=hybrid_override_pattern,
-        pre_process=is_pipeline_first_stage(),
-        post_process=is_pipeline_last_stage(),
-        share_embeddings_and_output_weights=False,
-        position_embedding_type="none",
-    )
+        spec = (
+            get_te_mamba_stack_spec(moe_grouped_gemm)
+            if transformer_impl == "transformer_engine"
+            else get_mamba_stack_modelopt_spec(remap_te_layernorm=True)
+        )
+        model = MambaModel(
+            mamba_stack_spec=spec, hybrid_override_pattern=hybrid_layer_pattern, **common_kwargs
+        )
     return model.to(torch.bfloat16) if bf16 else model

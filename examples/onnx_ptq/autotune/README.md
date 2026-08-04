@@ -2,6 +2,8 @@
 
 This example demonstrates automated Q/DQ (Quantize/Dequantize) node placement optimization for ONNX models using TensorRT performance measurements.
 
+> **Warning:** This example uses the direct Autotune entry point for lower-level Q/DQ placement experiments. If you are starting from an unquantized ONNX model and care about **accuracy**, please use the ONNX PTQ workflow with `--autotune` enabled and with representative calibration data. See [../README#optimize-qdq-node-placement-with-autotune](../README#optimize-qdq-node-placement-with-autotune).
+
 ## Table of Contents
 
 <div align="center">
