@@ -15,6 +15,7 @@
 
 import argparse
 import json
+import os
 import warnings
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import modelopt.torch.opt as mto
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
-from modelopt.torch.opt.conversion import restore_from_modelopt_state
+from modelopt.torch.opt.conversion import ModeloptStateManager, restore_from_modelopt_state
 from modelopt.torch.quantization.utils import set_quantizer_state_dict
 from modelopt.torch.utils import print_rank_0
 
@@ -48,17 +49,24 @@ def get_model(
     # Load model
     model = AutoModelForCausalLM.from_pretrained(ckpt_path, device_map=device_map)
 
-    # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this
-    if hasattr(model, "peft_config"):
-        modelopt_state = mto.load_modelopt_state(f"{ckpt_path}/modelopt_state_train.pth")
-        restore_from_modelopt_state(model, modelopt_state)
-        print_rank_0("Restored modelopt state")
-
-        # Restore modelopt quantizer state dict
+    # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this.
+    # For QLoRA the base model checkpoint is itself quantized, so `from_pretrained` has already
+    # restored the modelopt state (and the quantizer buffers) via `enable_huggingface_checkpointing`.
+    # Restoring a second time would raise `Model already has modelopt state!`, so only restore the
+    # state here if the loaded model does not have it yet.
+    modelopt_state_path = os.path.join(ckpt_path, "modelopt_state_train.pth")
+    if hasattr(model, "peft_config") and os.path.isfile(modelopt_state_path):
+        modelopt_state = mto.load_modelopt_state(modelopt_state_path)
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
-        if modelopt_weights is not None:
-            set_quantizer_state_dict(model, modelopt_weights)
-            print_rank_0("Restored modelopt quantizer state dict")
+
+        if not ModeloptStateManager.is_converted(model):
+            restore_from_modelopt_state(model, modelopt_state)
+            print_rank_0("Restored modelopt state")
+
+            # Restore modelopt quantizer state dict
+            if modelopt_weights is not None:
+                set_quantizer_state_dict(model, modelopt_weights)
+                print_rank_0("Restored modelopt quantizer state dict")
 
     return model
 

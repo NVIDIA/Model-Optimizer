@@ -14,8 +14,12 @@
 # limitations under the License.
 
 
+import json
+
 import pytest
+import torch
 from _test_utils.examples.run_command import run_example_command
+from safetensors.torch import load_file
 
 # Mapping from backend name to accelerate config file
 BACKEND_CONFIGS = {
@@ -85,6 +89,18 @@ def _run_train(config: str, extra_cmd_args: list[str], backend: str = "fsdp2", c
         "llm_qat",
         setup_free_port=True,
     )
+
+
+def _run_export(ckpt_dir: str, export_dir: str):
+    run_example_command(
+        [
+            "python", "export.py",
+            "--pyt_ckpt_path", ckpt_dir,
+            "--export_path", export_dir,
+        ],
+        "llm_qat",
+    )
+
 
 def test_dataset_utils_pretokenize(tiny_qwen3_path, tmp_path):
     """Test dataset_utils.py standalone CLI pre-tokenization."""
@@ -219,14 +235,37 @@ def test_qwen3_qlora_nvfp4(tiny_qwen3_path, tmp_path):
     )
 
     # Step 2: QLoRA training
+    qlora_output_dir = tmp_path / "qlora"
     _run_train(
         "configs/train/qlora_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",
             "--lora", "True",
-            "--output_dir", str(tmp_path / "qlora"),
+            "--output_dir", str(qlora_output_dir),
         ],
         backend="ddp",
         cache_dir=cache_dir,
     )
+
+    # Step 3: Export the QLoRA checkpoint for deployment
+    export_dir = tmp_path / "qlora_export"
+    _run_export(str(qlora_output_dir), str(export_dir))
+
+    # The base model is exported compressed; the adapters stay at the top level.
+    base_model_dir = export_dir / "base_model"
+    assert (export_dir / "adapter_model.safetensors").is_file()
+    assert (base_model_dir / "hf_quant_config.json").is_file()
+
+    with open(base_model_dir / "hf_quant_config.json") as f:
+        assert json.load(f)["quantization"]["quant_algo"] == "NVFP4"
+
+    # NVFP4 needs the packed weight and *both* scales to be dequantizable downstream.
+    base_weights = load_file(base_model_dir / "model.safetensors")
+    packed_weights = [k for k, v in base_weights.items() if k.endswith(".weight") and v.dtype == torch.uint8]
+    assert packed_weights, "no NVFP4-packed weights found in the exported base model"
+    for key in packed_weights:
+        prefix = key.removesuffix(".weight")
+        assert f"{prefix}.weight_scale" in base_weights
+        assert f"{prefix}.weight_scale_2" in base_weights
+    assert not any("base_layer" in k or "lora" in k for k in base_weights)
