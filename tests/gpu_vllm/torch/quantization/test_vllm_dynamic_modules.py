@@ -488,6 +488,15 @@ def test_tiny_deepseek_mla_quantize(tiny_deepseek_llm):
 
     _assert_quantizer_amax_is_static(summary)
 
+    # ``n_shared_experts=1``: vLLM merges the shared expert's gate/up into ``gate_up_proj``, so
+    # the reload helper must merge those HF keys too rather than copying them through.
+    reload_utils = _load_example_module("vllm_reload_utils")
+    action, vllm_key, _ = reload_utils._convert_key_for_vllm(
+        "model.layers.0.mlp.shared_experts.gate_proj.input_quantizer._amax", 1.0
+    )
+    assert action == "group", (action, vllm_key)
+    assert vllm_key.rsplit("._amax", 1)[0] in summary["quantizer_names"], vllm_key
+
 
 def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
     monkeypatch.setattr(

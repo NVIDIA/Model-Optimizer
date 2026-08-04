@@ -145,15 +145,20 @@ except ImportError:
 
 # vLLM >= 0.24 turned ``FusedMoE`` into a factory function and moved the expert weights onto a
 # ``RoutedExperts`` submodule; register whichever module class this release provides.
-_has_fused_moe_cls = UnquantizedFusedMoEMethod is not None and _is_module_cls(
-    getattr(vllm_fused_moe_layer, "FusedMoE", None)
-)
 # The forward_* check keeps a future rename surfacing here (skip + warn) rather than as an
 # AttributeError at the first expert forward, i.e. at serving time.
 _has_routed_experts_cls = (
     UnquantizedFusedMoEMethod is not None
     and _is_module_cls(RoutedExperts)
     and all(hasattr(RoutedExperts, n) for n in ("forward_modular", "forward_monolithic"))
+)
+# The two layouts are mutually exclusive on every release. Prefer RoutedExperts if a future one
+# ships both: it owns the expert weights, and registering its parent too would convert both and
+# leave the parent's fakequant unable to tell w13 from w2.
+_has_fused_moe_cls = (
+    not _has_routed_experts_cls
+    and UnquantizedFusedMoEMethod is not None
+    and _is_module_cls(getattr(vllm_fused_moe_layer, "FusedMoE", None))
 )
 if vllm_shared_fused_moe_layer is not None and not (
     UnquantizedFusedMoEMethod is not None
@@ -701,9 +706,13 @@ if _has_routed_experts_cls:
     class _QuantVLLMRoutedExperts(_QuantFusedMoEBase):
         """Expert-weight owner of the vLLM >= 0.24 ``MoERunner`` pipeline.
 
-        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``,
-        so the inherited ``forward`` is never used (``RoutedExperts.forward`` raises by design).
+        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``.
         """
+
+        def forward(self, *args, **kwargs):
+            # Keep vLLM's own "call forward_modular/forward_monolithic instead" error rather
+            # than the inherited (hidden_states, router_logits) signature.
+            return RoutedExperts.forward(self, *args, **kwargs)
 
         def forward_modular(self, *args, **kwargs):
             with self._fakequant_moe_kernels():
