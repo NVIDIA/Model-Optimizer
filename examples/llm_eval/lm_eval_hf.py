@@ -39,6 +39,7 @@
 import contextlib
 import glob
 import json
+import logging
 import os
 import sys
 import warnings
@@ -48,8 +49,10 @@ import datasets
 from lm_eval import utils
 from packaging.version import Version
 
-if Version(version("lm_eval")) < Version("0.4.10"):
-    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.10; found {version('lm_eval')}.")
+if Version(version("lm_eval")) < Version("0.4.12"):
+    # 0.4.12 is the first release shipping lm_eval.models.trtllm_causallms (the `trtllm`
+    # backend), which replaced this example's own TensorRT-LLM model wrapper.
+    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.12; found {version('lm_eval')}.")
 
 from lm_eval._cli import HarnessCLI
 from lm_eval.api.model import T
@@ -68,6 +71,8 @@ try:
     _ANYMODEL_AVAILABLE = True
 except ImportError:
     _ANYMODEL_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 def _anymodel_patcher_context(pretrained, trust_remote_code=False):
@@ -292,6 +297,39 @@ def _inject_modelopt_args_into_model_args(args):
     args.model_args = model_args
 
 
+def _patch_trtllm_parse_logprobs():
+    """Fix the prompt_logprobs off-by-one in lm-eval's `trtllm` backend.
+
+    TensorRT-LLM aligns `prompt_logprobs` to the *next* token: its worker computes them
+    from `prompt_token_ids[1:] + first_generated_token`, so entry ``i`` is the
+    distribution that predicted ``tokens[i + 1]`` and contains that token's id.
+    lm-eval 0.4.12's ``TRTLLM._parse_logprobs`` instead reads ``prompt_logprobs[i]
+    [tokens[i]]`` and applies its own shift on top, which raises ``KeyError`` on the
+    first request of every loglikelihood task (hellaswag, mmlu, arc, ...).
+
+    Drop this once the upstream backend indexes the entries correctly.
+    """
+    from lm_eval.models.trtllm_causallms import TRTLLM
+
+    def _parse_logprobs(tokens, outputs, ctxlen):
+        prompt_logprobs = outputs.outputs[0].prompt_logprobs
+        continuation_logprobs = 0.0
+        is_greedy = True
+        # Token 0 has no preceding distribution, so it can never be scored.
+        for i in range(max(ctxlen, 1), len(tokens)):
+            logprob = prompt_logprobs[i - 1].get(tokens[i])
+            if logprob is None:
+                # TRT-LLM always appends the actual token to the top-k dict.
+                logger.warning(f"Token {tokens[i]} missing from prompt_logprobs[{i - 1}]")
+                continue
+            continuation_logprobs += logprob.logprob
+            if logprob.rank != 1:
+                is_greedy = False
+        return continuation_logprobs, is_greedy
+
+    TRTLLM._parse_logprobs = staticmethod(_parse_logprobs)
+
+
 def _enforce_accuracy_gate(output_path, task, lower_bound):
     """Read lm-eval results at output_path; exit non-zero if <task>/acc < lower_bound."""
     # HarnessCLI.execute() returns None, so we recover the result dict from disk.
@@ -331,6 +369,9 @@ if __name__ == "__main__":
     _add_modelopt_args(run_parser)
     args = cli.parse_args()
     _inject_modelopt_args_into_model_args(args)
+    if getattr(args, "model", None) == "trtllm":
+        # Patch lazily: importing the backend pulls in tensorrt_llm.
+        _patch_trtllm_parse_logprobs()
     lower_bound = vars(args).pop("accuracy_lower_bound", None)
     output_path = getattr(args, "output_path", None)
     gate_task = None

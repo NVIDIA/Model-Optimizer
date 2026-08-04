@@ -69,13 +69,19 @@ If you encounter a legacy checkpoint (no `hf_quant_config.json`, has `rank*.safe
 
 ## Evaluation with TRT-LLM
 
-```python
-# examples/llm_eval/lm_eval_tensorrt_llm.py
-# Runs lm_evaluation_harness benchmarks with TRT-LLM
-python examples/llm_eval/lm_eval_tensorrt_llm.py \
-    --model_path <checkpoint_path> \
-    --tasks gsm8k,mmlu
+Runs lm-evaluation-harness benchmarks through lm-eval's built-in `trtllm` backend
+(requires `lm_eval>=0.4.12`; ModelOpt's own `lm_eval_tensorrt_llm.py` is deprecated).
+
+```bash
+python examples/llm_eval/lm_eval_hf.py \
+    --model trtllm \
+    --model_args model=<checkpoint_path>,tokenizer=<checkpoint_path>,tensor_parallel_size=<tp>,max_batch_size=<bs>,max_input_len=4096,max_output_len=512 \
+    --tasks gsm8k,mmlu \
+    --batch_size <bs>
 ```
+
+`max_input_len` defaults to 2048 and longer prompts are silently truncated, so set it
+explicitly for few-shot tasks.
 
 ## Common Issues
 

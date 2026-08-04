@@ -13,201 +13,114 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
-import gc
-import logging
+"""[Deprecated] ModelOpt's TensorRT-LLM backend for lm-evaluation-harness.
+
+lm-eval >= 0.4.12 ships its own TensorRT-LLM backend
+(``lm_eval.models.trtllm_causallms``, registered as ``trtllm``), so this example no
+longer maintains one. Migrate to:
+
+    python lm_eval_hf.py --model trtllm \
+        --model_args model=<quantized checkpoint dir>,tokenizer=<HF model folder>,\
+tensor_parallel_size=<tp>,max_batch_size=<max batch size> \
+        --tasks <comma separated tasks> --batch_size <max batch size>
+
+This shim keeps legacy ``--model trt-llm`` commands working by translating them to the
+upstream backend and forwarding to ``lm_eval_hf.py``. It will be removed in a future
+release.
+"""
+
 import os
-import signal
-import threading
-import time
-from collections.abc import Iterable
-from typing import Any
+import sys
+from pathlib import Path
 
-import torch
-import torch.nn.functional as F
-from lm_eval.__main__ import cli_evaluate
-from lm_eval.api.registry import register_model
-from lm_eval.models.api_models import TemplateAPI
-from transformers import BatchEncoding
+# Legacy --model_args key -> upstream `trtllm` key. `tokenizer` and `trust_remote_code`
+# carry over unchanged.
+_RENAMED_ARGS = {"checkpoint_dir": "model"}
 
-from modelopt.deploy.llm import LLM
-
-logger = logging.getLogger(__name__)
-
-TokenSequence = list[int] | torch.LongTensor | torch.Tensor | BatchEncoding
+# The old wrapper sized the TensorRT-LLM engine from `max_length` (total sequence
+# length), defaulting to max_gen_toks + 4096. Upstream splits that into an input and an
+# output budget: max_seq_len = max_input_len + max_output_len.
+_DEFAULT_MAX_GEN_TOKS = 256
+_DEFAULT_MAX_INPUT_LEN = 4096
 
 
-@register_model("trt-llm")
-class TRTLLM(TemplateAPI):
-    def __init__(
-        self,
-        tokenizer: str,
-        checkpoint_dir: str,
-        batch_size: int = 1,
-        **kwargs,
-    ):
-        assert isinstance(tokenizer, str)
-        super().__init__(
-            tokenizer=tokenizer,
-            batch_size=int(batch_size),
-            **kwargs,
-        )
+def _parse_model_args(raw: str) -> dict[str, str]:
+    """Parse lm-eval's comma-separated ``key=value`` --model_args string."""
+    args = {}
+    for field in raw.split(","):
+        if not field:
+            continue
+        key, _, value = field.partition("=")
+        args[key.strip()] = value.strip()
+    return args
 
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        assert isinstance(checkpoint_dir, str)
+def _translate_model_args(raw: str, batch_size: str | None) -> str:
+    """Rewrite legacy `trt-llm` --model_args into upstream `trtllm` --model_args."""
+    args = _parse_model_args(raw)
+    args = {_RENAMED_ARGS.get(k, k): v for k, v in args.items()}
 
-        max_length = kwargs.get("max_length", self._max_gen_toks + 4096)
-        self.llm = LLM(
-            checkpoint_dir=checkpoint_dir,
-            tokenizer=self.tokenizer,
-            max_batch_size=int(batch_size),
-            max_seq_len=max_length,
-            # Loglikelihood tasks request context logits. KV cache prefix reuse would return
-            # logits only for the recomputed suffix on shared-prefix requests (e.g. hellaswag),
-            # truncating context_logits and breaking parse_logprobs. Disable it.
-            enable_kv_cache_reuse=False,
-            trust_remote_code=bool(kwargs.get("trust_remote_code", False)),
-        )
-        self.max_length = max_length - 1
-        logger.info("Loaded TRT-LLM")
+    max_gen_toks = int(args.get("max_gen_toks", _DEFAULT_MAX_GEN_TOKS))
+    # Upstream defaults to max_input_len=2048, short enough to silently left-truncate
+    # 5-shot prompts, so always derive it from the legacy sizing instead.
+    args.setdefault("max_output_len", str(max_gen_toks))
+    max_length = args.pop("max_length", None)
+    args.setdefault(
+        "max_input_len",
+        str(int(max_length) - max_gen_toks) if max_length else str(_DEFAULT_MAX_INPUT_LEN),
+    )
 
-    def model_call(
-        self,
-        messages: Iterable[list[int]],
-        *,
-        generate: bool = True,
-        gen_kwargs: dict | None = None,
-        **kwargs,
-    ):
-        # !!! Copy: shared dict for each request, need new object !!!
-        gen_kwargs = copy.deepcopy(gen_kwargs)
+    # The old wrapper built the engine for --batch_size and used every visible GPU.
+    if batch_size and batch_size.isdigit():
+        args.setdefault("max_batch_size", batch_size)
+    if "tensor_parallel_size" not in args:
+        import torch
 
-        assert isinstance(messages, Iterable), "Expect the messages to be Iterable[list[int]]"
-        first_element = next(iter(messages))
-        assert isinstance(first_element, list) and isinstance(first_element[0], int), (
-            "Expect the messages to be Iterable[list[int]]"
-        )
+        args.setdefault("tensor_parallel_size", str(max(torch.cuda.device_count(), 1)))
 
-        if not generate:
-            return self.llm.generate_context_logits(prompts=messages)
+    return ",".join(f"{k}={v}" for k, v in args.items())
 
-        llm_kwargs = {}
-        max_new_tokens = self._max_gen_toks
-        stop_words = []
-        if gen_kwargs:
-            if "until" in gen_kwargs:
-                stop_words = gen_kwargs.pop("until")
-                llm_kwargs["stop_words"] = stop_words
-            if "temperature" in gen_kwargs:
-                llm_kwargs["temperature"] = gen_kwargs.pop("temperature")
-            if "top_p" in gen_kwargs:
-                llm_kwargs["top_p"] = gen_kwargs.pop("top_p")
-            if "max_gen_toks" in gen_kwargs:
-                max_new_tokens = gen_kwargs.pop("max_gen_toks")
 
-        output_texts: list[str] = self.llm.generate_text(
-            prompts=messages,
-            max_new_tokens=max_new_tokens,
-            **llm_kwargs,
-        )
+def _find_option(argv: list[str], name: str) -> tuple[int, str] | None:
+    """Locate ``--name <value>`` or ``--name=<value>``; return (index, value)."""
+    for i, arg in enumerate(argv):
+        if arg == name and i + 1 < len(argv):
+            return i + 1, argv[i + 1]
+        if arg.startswith(f"{name}="):
+            return i, arg[len(name) + 1 :]
+    return None
 
-        # Manually filter out keyword if not supported by llm.
-        for i, text in enumerate(output_texts):
-            for word in stop_words:
-                word_index = text.find(word)
-                if word_index >= 0:
-                    text = text[:word_index]
-            output_texts[i] = text
 
-        return output_texts
+def _set_option(argv: list[str], name: str, index: int, value: str) -> None:
+    """Write *value* back at *index*, preserving the ``--name=<value>`` form."""
+    argv[index] = f"{name}={value}" if argv[index].startswith(f"{name}=") else value
 
-    async def amodel_call(
-        self,
-        session,
-        messages: Iterable[list[int]],
-        *,
-        generate: bool = True,
-        cache_keys: list | None = None,
-        ctxlens: list[int] | None = None,
-        gen_kwargs: dict | None = None,
-        **kwargs,
-    ):
-        raise NotImplementedError
 
-    def loglikelihood_rolling(self, requests):
-        raise NotImplementedError
+def _translate(argv: list[str]) -> list[str]:
+    """Rewrite a legacy argv so it targets the upstream `trtllm` backend."""
+    out = list(argv)
+    # --batch_size sized the engine in the old wrapper; read it before rewriting.
+    found = _find_option(out, "--batch_size")
+    batch_size = found[1] if found else None
 
-    def _create_payload(
-        self,
-        messages: list[list[int]] | list[dict] | list[str] | str,
-        *,
-        generate: bool = True,
-        gen_kwargs: dict | None = None,
-        seed: int = 1234,
-        **kwargs,
-    ) -> dict:
-        """This method is responsible for creating the json payload that will be sent to the API."""
-        raise NotImplementedError
+    found = _find_option(out, "--model")
+    if found and found[1] in ("trt-llm", "trt_llm"):
+        _set_option(out, "--model", found[0], "trtllm")
 
-    @staticmethod
-    def parse_generations(outputs: Any | list[Any], **kwargs) -> list[str]:
-        """Method used to parse the generations from the (batched) API response."""
-        return outputs
-
-    @staticmethod
-    def parse_logprobs(
-        outputs: Any | list[Any],
-        tokens: list[list[int]] | None = None,
-        ctxlens: list[int] | None = None,
-        **kwargs,
-    ) -> list[tuple[float, bool]]:
-        """Method used to parse the logprobs from the (batched) API response.
-
-        The provided tokens have two parts: The context tokens (length as ctxlens) and the continuation tokens.
-        The logprobs returned is computed from the continuation tokens.
-        We return the sum of the logprob of the continuation tokens
-            [assuming the continuation tokens are the golden output].
-        """
-        res = []
-
-        for logits_single_batch, tokens_single_batch, ctxlen_single_batch in zip(
-            outputs,
-            tokens,  # type: ignore[arg-type]
-            ctxlens,  # type: ignore[arg-type]
-        ):
-            logits_single_batch = logits_single_batch.to("cuda")
-            continuation_logprob = F.log_softmax(
-                logits_single_batch[(ctxlen_single_batch - 1) : -1], dim=-1
-            )
-            continuation_tokens = torch.tensor(tokens_single_batch[ctxlen_single_batch:])
-            top_tokens = continuation_logprob.argmax(dim=-1).cpu()
-
-            is_greedy = torch.equal(top_tokens, continuation_tokens)
-
-            logprob_sum = (
-                continuation_logprob[
-                    torch.arange(continuation_logprob.size(0)), continuation_tokens
-                ]
-                .sum()
-                .cpu()
-            )
-
-            res.append((logprob_sum, is_greedy))
-
-        return res
+    found = _find_option(out, "--model_args")
+    if found:
+        _set_option(out, "--model_args", found[0], _translate_model_args(found[1], batch_size))
+    return out
 
 
 if __name__ == "__main__":
-    cli_evaluate()
-    # Force clean up the LLM instance and void hanging.
-    gc.collect()
-
-    # Force terminate in case gc.collect() is not enough.
-    def _terminate():
-        time.sleep(10)
-        os.kill(os.getpid(), signal.SIGTERM)
-
-    termination_thread = threading.Thread(target=_terminate, daemon=True)
-    termination_thread.start()
+    forwarded = _translate(sys.argv[1:])
+    target = Path(__file__).resolve().parent / "lm_eval_hf.py"
+    print(
+        "WARNING: examples/llm_eval/lm_eval_tensorrt_llm.py is deprecated and will be "
+        "removed in a future release.\n"
+        "         lm-eval >= 0.4.12 provides the `trtllm` backend; forwarding to:\n"
+        f"         python {target.name} {' '.join(forwarded)}",
+        file=sys.stderr,
+    )
+    os.execv(sys.executable, [sys.executable, str(target), *forwarded])

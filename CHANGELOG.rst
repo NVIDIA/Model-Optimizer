@@ -19,6 +19,8 @@ Changelog
 
 **Deprecations**
 
+- Deprecate ``examples/llm_eval/lm_eval_tensorrt_llm.py`` (the ``trt-llm`` model). lm-evaluation-harness 0.4.12 ships its own TensorRT-LLM backend (``lm_eval.models.trtllm_causallms``, registered as ``trtllm``), which also implements ``loglikelihood_rolling`` and pipeline parallelism, so the example uses that instead and pins ``lm_eval>=0.4.12,<0.5``. The old entry point still runs: it warns, translates the legacy arguments (``checkpoint_dir`` → ``model``, ``max_length`` → ``max_input_len``/``max_output_len``, ``--batch_size`` → ``max_batch_size``, tensor parallelism over all visible GPUs) and forwards to ``lm_eval_hf.py --model trtllm``. When calling the new backend directly, set ``tensor_parallel_size`` and ``max_input_len`` explicitly — they default to 1 and 2048, and longer prompts are silently truncated. ``lm_eval_hf.py`` also patches that backend's ``_parse_logprobs``, which is off by one against TensorRT-LLM's next-token-aligned ``prompt_logprobs`` and otherwise raises ``KeyError`` on every loglikelihood task; run TensorRT-LLM evaluations through ``lm_eval_hf.py`` rather than the plain ``lm_eval`` CLI until that is fixed upstream.
+
 **Bug Fixes**
 
 0.46 (2026-08-xx)

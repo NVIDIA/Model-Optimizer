@@ -109,9 +109,32 @@ If `trust_remote_code` needs to be true, please append the command with the `--t
 
 ### TensorRT-LLM
 
+Uses the `trtllm` backend built into lm-eval (>= 0.4.12), which loads the quantized
+checkpoint directly with the TensorRT-LLM LLM API.
+
 ```sh
-python lm_eval_tensorrt_llm.py --model trt-llm --model_args tokenizer=<HF model folder>,checkpoint_dir=<Quantized checkpoint dir> --tasks <comma separated tasks> --batch_size <max batch size>
+python lm_eval_hf.py --model trtllm \
+    --model_args model=<Quantized checkpoint dir>,tokenizer=<HF model folder>,tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,max_output_len=512 \
+    --tasks <comma separated tasks> \
+    --batch_size <max batch size>
 ```
+
+> **_NOTE:_** Set `max_input_len` and `max_output_len` explicitly. They default to 2048 and
+> 512, and prompts longer than `max_input_len` are silently truncated — 5-shot MMLU or
+> gsm8k prompts exceed 2048 tokens. `max_seq_len` of the engine is their sum.
+
+> **_NOTE:_** `tensor_parallel_size` defaults to 1; set it to the number of GPUs the
+> checkpoint needs. `pipeline_parallel_size` is also supported.
+
+> **_NOTE:_** Run this through `lm_eval_hf.py`, not the plain `lm_eval` CLI. lm-eval
+> 0.4.12's `trtllm` backend misaligns TensorRT-LLM's `prompt_logprobs` by one position, so
+> every loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
+> `lm_eval_hf.py` patches the alignment before the model is built. The patch is removed
+> once the fix lands upstream.
+
+The previous `lm_eval_tensorrt_llm.py` entry point (`--model trt-llm`) is deprecated. It
+still works — it prints a warning and forwards the translated command to the above — but it
+will be removed in a future release.
 
 ## MMLU
 
