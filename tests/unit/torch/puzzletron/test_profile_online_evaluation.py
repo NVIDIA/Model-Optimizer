@@ -67,6 +67,7 @@ def test_online_plan_deduplicates_architectures_across_profile_aliases(tmp_path)
                     "removed_sublayers": 0,
                     "depth_selection": {"total": 0},
                     "solution_path": str(solution_path),
+                    "solutions": [{"rank": 0}],
                     "homogeneous_solution_path": str(homogeneous_path),
                     "homogeneous_solutions": [{"rank": 0}],
                 }
@@ -114,12 +115,21 @@ def test_online_merge_fans_unique_metrics_back_to_every_profile_alias(tmp_path):
                         "hidden_width": 8,
                         "removed_sublayers": 0,
                         "solution_path": str(solution_path),
+                        "solutions": [{"rank": 0}],
                         "homogeneous_solution_path": str(homogeneous_path),
                         "homogeneous_solutions": [{"rank": 0}],
                     }
                 ],
             },
         )
+    scenario = puzzle_dir / "scenarios" / "width-0008" / "depth-00"
+    _write(
+        scenario / "scenario_manifest.json",
+        {
+            "parent_checkpoint": str(scenario / "ckpts" / "sorted_teacher"),
+            "bypass_checkpoint": str(scenario / "ckpts" / "bypass_overlay"),
+        },
+    )
     plan = build_online_evaluation_plan(puzzle_dir, ("params", "runtime"))
     write_online_evaluation_plan(puzzle_dir, plan)
     written_plan = json.loads(
@@ -199,10 +209,17 @@ def test_online_solution_shards_are_disjoint_and_cover_the_plan():
 
 def test_online_execution_contract_uses_resident_sorted_teacher_and_nested_bypass(tmp_path):
     puzzle_dir = tmp_path / "run"
+    scenario = puzzle_dir / "scenarios" / "width-2688" / "depth-00"
+    _write(
+        scenario / "scenario_manifest.json",
+        {
+            "parent_checkpoint": str(scenario / "ckpts" / "sorted_teacher"),
+            "bypass_checkpoint": str(scenario / "ckpts" / "bypass_overlay"),
+        },
+    )
 
     contract = online_execution_contract(puzzle_dir, 2688)
 
-    scenario = puzzle_dir / "scenarios" / "width-2688" / "depth-00"
     assert contract == {
         "mode": "resident_sorted_teacher_online",
         "materialized_solution_checkpoints": False,

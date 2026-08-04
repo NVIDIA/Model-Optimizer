@@ -22,9 +22,10 @@ def test_named_workloads_and_repeated_workload_constraints_are_normalized():
                 "osl-heavy": {"isl": 1024, "osl": 8192, "batch_size": 4},
                 "serving": {"isl": 8192, "osl": 1024, "concurrency": 4},
             },
-            "profiles": {
+            "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
+            "runs": {
                 "multi-workload": {
-                    "num_homogeneous_solutions": 3,
+                    "homogeneous": {"enabled": True, "keep": 3},
                     "constraints": {
                         "params": "75%",
                         "active_params": {"min": "70%", "max": "90%"},
@@ -89,7 +90,8 @@ def test_percentage_and_absolute_constraints_compile_against_correct_teachers():
                 "isl": {"isl": 8192, "osl": 128, "batch_size": 4},
                 "osl": {"isl": 128, "osl": 8192, "batch_size": 4},
             },
-            "profiles": {
+            "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
+            "runs": {
                 "budgets": {
                     "constraints": {
                         "params": 22.5e9,
@@ -125,14 +127,19 @@ def test_percentage_and_absolute_constraints_compile_against_correct_teachers():
     }
 
 
-def test_values_expand_profiles_but_search_lists_do_not():
+def test_matrix_expands_profiles_but_search_lists_do_not():
     profiles = normalize_mip_profiles(
         {
-            "profiles": {
+            "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
+            "runs": {
                 "grid": {
-                    "constraints": {
-                        "params": {"values": ["70%", "75%"]},
-                        "kv_heads": {"values": [64, 32]},
+                    "variants": {
+                        "constraint-grid": {
+                            "matrix": {
+                                "constraints.params": ["70%", "75%"],
+                                "constraints.kv_heads": [64, 32],
+                            }
+                        }
                     },
                     "search_space": {"depth": [0, 1, 4], "embedding": [2688, 2560]},
                 }
@@ -146,13 +153,32 @@ def test_values_expand_profiles_but_search_lists_do_not():
     assert len({profile.profile_id for profile in profiles}) == 4
     assert all(profile.depths == (0, 1, 4) for profile in profiles)
     assert all(profile.embedding_widths == (2688, 2560) for profile in profiles)
+    compiled = [
+        compile_profile_constraints(
+            profile,
+            teacher_totals={None: {"num_params": 100, "num_kv_heads": 128}},
+        )
+        for profile in profiles
+    ]
+    assert {
+        (constraints["stats.num_params"], constraints["stats.num_kv_heads"])
+        for constraints in compiled
+    } == {
+        (70.0, 64.0),
+        (70.0, 32.0),
+        (75.0, 64.0),
+        (75.0, 32.0),
+    }
 
 
-def test_explicit_total_depth_selector_matches_legacy_depth_selector():
+def test_explicit_total_depth_selector_matches_list_depth_selector():
     def normalize(depth):
         (profile,) = normalize_mip_profiles(
             {
-                "profiles": {
+                "defaults": {
+                    "objectives": "metrics.cosine_embedding_loss_hidden_states"
+                },
+                "runs": {
                     "depth": {
                         "constraints": {"params": "75%"},
                         "search_space": {"depth": depth},
@@ -164,10 +190,10 @@ def test_explicit_total_depth_selector_matches_legacy_depth_selector():
         )
         return profile
 
-    legacy = normalize([2, 3])
+    listed = normalize([2, 3])
     explicit = normalize({"total": [2, 3]})
 
-    assert explicit.depths == legacy.depths == (2, 3)
+    assert explicit.depths == listed.depths == (2, 3)
     assert [selection.as_dict() for selection in explicit.depth_selections] == [
         {"total": 2},
         {"total": 3},
@@ -181,7 +207,8 @@ def test_explicit_total_depth_selector_matches_legacy_depth_selector():
 def test_typed_depth_selectors_form_a_cartesian_product_with_distinct_identities():
     (profile,) = normalize_mip_profiles(
         {
-            "profiles": {
+            "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
+            "runs": {
                 "typed": {
                     "constraints": {"params": "75%"},
                     "search_space": {
@@ -208,7 +235,8 @@ def test_typed_depth_selectors_form_a_cartesian_product_with_distinct_identities
 
 def test_typed_depth_selector_validation_is_eager():
     base = {
-        "profiles": {
+        "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
+        "runs": {
             "typed": {
                 "constraints": {"params": "75%"},
                 "search_space": {"depth": {"attention": 1}},
@@ -224,15 +252,15 @@ def test_typed_depth_selector_validation_is_eager():
     with pytest.raises(ValueError, match="subblock"):
         normalize_mip_profiles(base, depth_granularity="block", **kwargs)
 
-    base["profiles"]["typed"]["search_space"]["depth"] = {"ffn": 1}
+    base["runs"]["typed"]["search_space"]["depth"] = {"ffn": 1}
     with pytest.raises(ValueError, match="unknown.*ffn"):
         normalize_mip_profiles(base, depth_granularity="subblock", **kwargs)
 
-    base["profiles"]["typed"]["search_space"]["depth"] = {"attention": 3}
+    base["runs"]["typed"]["search_space"]["depth"] = {"attention": 3}
     with pytest.raises(ValueError, match="unavailable.*3"):
         normalize_mip_profiles(base, depth_granularity="subblock", **kwargs)
 
-    base["profiles"]["typed"]["search_space"]["depth"] = {
+    base["runs"]["typed"]["search_space"]["depth"] = {
         "total": 2,
         "attention": 1,
     }
@@ -240,14 +268,17 @@ def test_typed_depth_selector_validation_is_eager():
         normalize_mip_profiles(base, depth_granularity="subblock", **kwargs)
 
 
-@pytest.mark.parametrize("value", [-2, -1.5, "all", True])
-def test_invalid_homogeneous_solution_count_is_rejected(value):
-    with pytest.raises(ValueError, match="num_homogeneous_solutions"):
+@pytest.mark.parametrize("value", [-2, -1.5, True])
+def test_invalid_homogeneous_keep_is_rejected(value):
+    with pytest.raises(ValueError, match="homogeneous"):
         normalize_mip_profiles(
             {
-                "profiles": {
+                "defaults": {
+                    "objectives": "metrics.cosine_embedding_loss_hidden_states"
+                },
+                "runs": {
                     "bad": {
-                        "num_homogeneous_solutions": value,
+                        "homogeneous": {"enabled": True, "keep": value},
                         "constraints": {"params": "75%"},
                     }
                 }
@@ -262,7 +293,10 @@ def test_workload_constraint_requires_declared_workload():
         normalize_mip_profiles(
             {
                 "workloads": {},
-                "profiles": {
+                "defaults": {
+                    "objectives": "metrics.cosine_embedding_loss_hidden_states"
+                },
+                "runs": {
                     "bad": {"constraints": {"runtime": {"at": {"missing": "75%"}}}}
                 },
             },

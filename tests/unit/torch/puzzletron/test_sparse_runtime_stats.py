@@ -994,7 +994,9 @@ def test_vllm_stage_rejects_missing_runtime_aggregate(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("explicit_vllm", (False, True))
-def test_build_library_uses_selected_vllm_producer(tmp_path, monkeypatch, explicit_vllm):
+def test_build_library_refreshes_static_stats_for_each_vllm_mode(
+    tmp_path, monkeypatch, explicit_vllm
+):
     teacher_dir = tmp_path / "teacher"
     teacher_dir.mkdir()
     stats_path = tmp_path / "subblock_stats.json"
@@ -1013,13 +1015,21 @@ def test_build_library_uses_selected_vllm_producer(tmp_path, monkeypatch, explic
             "calc_subblock_stats": {
                 "runtime_stats": {"enabled": True, "execution": "inline"},
                 "subblock_stats_filename": "subblock_stats.json",
+                "batch_sizes": [2],
+                "prefill_seq_len": 32,
+                "generation_seq_len": 8,
             },
         }
     )
     calls = []
 
-    def assert_runtime_enabled(cfg):
-        assert cfg.calc_subblock_stats.runtime_stats.enabled is True
+    def record_static_stats(cfg):
+        assert cfg.calc_subblock_stats.runtime_stats.enabled is False
+        assert cfg.calc_subblock_stats.merge_with_existing_stats is True
+        assert cfg.calc_subblock_stats.batch_sizes == [2]
+        assert cfg.calc_subblock_stats.prefill_seq_len == 32
+        assert cfg.calc_subblock_stats.generation_seq_len == 8
+        calls.append("static")
 
     class ScoringParent:
         path = teacher_dir
@@ -1041,8 +1051,8 @@ def test_build_library_uses_selected_vllm_producer(tmp_path, monkeypatch, explic
         lambda _: calls.append("library"),
     )
     monkeypatch.setattr(
-        "modelopt.torch.puzzletron.build_library_and_stats.launch_build_library_and_stats",
-        lambda cfg: (assert_runtime_enabled(cfg), calls.append("inline")),
+        "modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.launch_calc_subblock_stats",
+        record_static_stats,
     )
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.candidates.build_candidate_library_from_checkpoint",
@@ -1051,7 +1061,7 @@ def test_build_library_uses_selected_vllm_producer(tmp_path, monkeypatch, explic
 
     build_library_stage(config, StageManifest(stage="build_library", config=config))
 
-    assert calls == (["library", "candidates"] if explicit_vllm else ["inline", "candidates"])
+    assert calls == ["library", "static", "candidates"]
 
 
 def test_sparse_runtime_selection_is_unique_and_layer_independent():

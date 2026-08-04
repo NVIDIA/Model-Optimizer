@@ -25,7 +25,6 @@ from ..candidates import _AXIS_TO_TARGET, _apply_axis_edits, _axis_base_value
 from ..dataset import DataLayout, PuzzletronBatch, batch_from_automodel
 from ..identity import canonicalize, stable_hash
 from ..plugins.automodel.batch_adapter import canonicalize_position_ids, validated_forward_kwargs
-from ..plugins.automodel.solution_recipe import ReplaceBlockScoringRecipe
 from ..pruning.materialize import materialize_hidden_width_checkpoint, materialize_model_from_sorted
 from ..pruning.runtime_hidden_width import hidden_width_layer_context
 from ..pruning.runtime_ple import ple_layer_context
@@ -75,6 +74,22 @@ _REQUIRED_CASE_FIELDS = {
     "passed",
     "record_hash",
 }
+
+
+def _replace_block_scoring_recipe():
+    """Load the AutoModel-backed recipe only when width-slice execution needs it."""
+
+    try:
+        from ..plugins.automodel.solution_recipe import ReplaceBlockScoringRecipe
+    except ImportError as error:
+        missing_name = getattr(error, "name", "") or ""
+        if missing_name == "nemo_automodel" or missing_name.startswith("nemo_automodel."):
+            raise ImportError(
+                "Puzzletron width-slice equivalence requires a compatible NeMo AutoModel "
+                "installation; follow examples/puzzletron/README.md."
+            ) from error
+        raise
+    return ReplaceBlockScoringRecipe
 
 
 @dataclass(frozen=True)
@@ -168,6 +183,7 @@ def _callable_source(fn: Any) -> dict[str, str]:
 
 
 def _implementation_provenance(axis: Any, descriptor: Any) -> dict[str, Any]:
+    recipe = _replace_block_scoring_recipe()
     functions = (
         build_width_slice_cases,
         _case_identity_payload,
@@ -180,8 +196,8 @@ def _implementation_provenance(axis: Any, descriptor: Any) -> dict[str, Any]:
         init_model_from_config,
         _child_config,
         _prune_target,
-        ReplaceBlockScoringRecipe.prune_block_context,
-        ReplaceBlockScoringRecipe.architecture_context,
+        recipe.prune_block_context,
+        recipe.architecture_context,
         hidden_width_layer_context,
         ple_layer_context,
         _runtime_context,
@@ -608,9 +624,15 @@ def _layer(model: torch.nn.Module, descriptor: Any, layer_idx: int) -> torch.nn.
 
 
 class _RuntimeRecipeAdapter:
-    prune_block_context = ReplaceBlockScoringRecipe.prune_block_context
-    architecture_context = ReplaceBlockScoringRecipe.architecture_context
-    _maybe_submodule = staticmethod(ReplaceBlockScoringRecipe._maybe_submodule)
+    def prune_block_context(self, *args, **kwargs):
+        return _replace_block_scoring_recipe().prune_block_context(self, *args, **kwargs)
+
+    def architecture_context(self, *args, **kwargs):
+        return _replace_block_scoring_recipe().architecture_context(self, *args, **kwargs)
+
+    @staticmethod
+    def _maybe_submodule(*args, **kwargs):
+        return _replace_block_scoring_recipe()._maybe_submodule(*args, **kwargs)
 
     def __init__(self, model: torch.nn.Module, descriptor: Any):
         self.model_parts = [model]
