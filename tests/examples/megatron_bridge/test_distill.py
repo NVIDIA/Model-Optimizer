@@ -16,6 +16,7 @@
 
 from pathlib import Path
 
+import pytest
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
@@ -94,6 +95,7 @@ def test_distill_validate_only(tmp_path, num_gpus):
 
 
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
+@pytest.mark.timeout(360)  # sometimes times out in CI env with default 300s timeout
 def test_distill_vlm(tmp_path, num_gpus):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
