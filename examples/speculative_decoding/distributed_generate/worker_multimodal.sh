@@ -215,32 +215,36 @@ if [ "$mpi_rank" -eq 0 ]; then
                 "/output_data/output-%05d-%05d-temp-%s.jsonl" \
                 "$i" "$server_id" "$temperature")
 
-            cmd="python3 /scripts/distributed_generate/server_generate_vlm_sglang.py \
-                --data_path $shard \
-                --output_path $output \
-                --input_root /input_data \
-                --media_root /media_data \
-                --num_threads $NUM_THREADS \
-                --max_tokens $MAX_TOKENS \
-                --num_frames $NUM_FRAMES \
-                --temperature $temperature \
-                --api_mode $API_MODE \
-                --model_name $MODEL_NAME \
-                --media_url_base $MEDIA_URL_BASE \
-                --vision_token_format $VISION_TOKEN_FORMAT \
-                --log_empty_conversations \
-                --url http://localhost:$port"
+            cmd=(
+                python3 /scripts/distributed_generate/server_generate_vlm_sglang.py
+                --data_path "$shard"
+                --output_path "$output"
+                --input_root /input_data
+                --media_root /media_data
+                --num_threads "$NUM_THREADS"
+                --max_tokens "$MAX_TOKENS"
+                --num_frames "$NUM_FRAMES"
+                --temperature "$temperature"
+                --api_mode "$API_MODE"
+                --model_name "$MODEL_NAME"
+                --media_url_base "$MEDIA_URL_BASE"
+                --vision_token_format "$VISION_TOKEN_FORMAT"
+                --log_empty_conversations
+                --url "http://localhost:$port"
+            )
 
             if [ "${OVERWRITE_OUTPUT:-0}" = "1" ]; then
-                cmd+=" --overwrite"
+                cmd+=(--overwrite)
             fi
 
             if [ -n "$SYSTEM_PROMPT" ]; then
                 echo "WARNING: SYSTEM_PROMPT is ignored for multimodal generation; include it in the shard prompts instead."
             fi
 
-            echo "Running: $cmd"
-            eval "$cmd"
+            printf 'Running:'
+            printf ' %q' "${cmd[@]}"
+            printf '\n'
+            "${cmd[@]}"
         done
     }
 
