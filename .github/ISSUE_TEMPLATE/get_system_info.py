@@ -26,8 +26,7 @@ def get_nvidia_gpu_info():
     try:
         nvidia_smi = (
             subprocess.check_output(
-                "nvidia-smi --query-gpu=name,memory.total,count --format=csv,noheader,nounits",
-                shell=True,
+                ["nvidia-smi", "--query-gpu=name,memory.total,count", "--format=csv,noheader,nounits"],
             )
             .decode("utf-8")
             .strip()
@@ -39,18 +38,20 @@ def get_nvidia_gpu_info():
             gpu_count = len(nvidia_smi)
             return gpu_name, f"{gpu_memory} GB", gpu_count
     except Exception:
-        return "?", "?", "?"
+        pass
+    return "?", "?", "?"
 
 
 def get_cuda_version():
     """Get CUDA Version."""
     try:
-        nvcc_output = subprocess.check_output("nvcc --version", shell=True).decode("utf-8")
+        nvcc_output = subprocess.check_output(["nvcc", "--version"]).decode("utf-8")
         match = re.search(r"release (\d+\.\d+)", nvcc_output)
         if match:
             return match.group(1)
     except Exception:
-        return "?"
+        pass
+    return "?"
 
 
 def get_package_version(package):
@@ -65,14 +66,11 @@ def get_package_version(package):
 os_info = f"{platform.system()} {platform.release()}"
 if platform.system() == "Linux":
     with contextlib.suppress(Exception):
-        os_info = (
-            subprocess.check_output(
-                "cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2", shell=True
-            )
-            .decode("utf-8")
-            .strip()
-            .strip('"')
-        )
+        with open("/etc/os-release", "r") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    os_info = line.split("=", 1)[1].strip().strip('"')
+                    break
 elif platform.system() == "Windows":
     print("Please add the `windows` label to the issue.")
 
