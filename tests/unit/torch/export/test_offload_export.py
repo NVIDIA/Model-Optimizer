@@ -34,8 +34,8 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.registry import ExportContext
-from modelopt.torch.export.unified_export_hf import (
-    _export_quantized_weight,
+from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
     _StreamingShardWriter,
 )
