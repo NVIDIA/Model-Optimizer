@@ -262,8 +262,7 @@ def test_postprocess_state_dict(state_dict, quantization, maxbound, expected_sta
 def test_postprocess_state_dict_qlora_strips_base_layer():
     """QLoRA base weights live under `base_layer.*` and must all survive the rename.
 
-    `weight_scale_2` is the NVFP4 per-tensor global scale; dropping it makes the exported
-    base model impossible to dequantize.
+    Dropping `weight_scale_2` makes the exported base model impossible to dequantize.
     """
     state_dict = {
         "layer1.base_layer.weight": torch.ones(4, 2, dtype=torch.uint8),

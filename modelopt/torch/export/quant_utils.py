@@ -998,8 +998,7 @@ def postprocess_state_dict(
                 "base_layer.weight": "weight",
                 "base_layer.input_scale": "input_scale",
                 "base_layer.weight_scale": "weight_scale",
-                # NVFP4 double quantization keeps a per-tensor global scale; without it the
-                # exported base model cannot be dequantized.
+                # NVFP4 global scale; the exported model cannot be dequantized without it.
                 "base_layer.weight_scale_2": "weight_scale_2",
             }
         )
