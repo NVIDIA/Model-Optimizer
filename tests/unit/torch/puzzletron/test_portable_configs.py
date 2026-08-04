@@ -25,7 +25,13 @@ from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOL
 from puzzletron_setup.v2.defaults import load_defaults
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-QWEN_DENSE_MODEL_CONFIG = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml"
+NEMOTRON3_NANO_30B_MODEL_CONFIG = (
+    "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml"
+)
+QWEN3P5_9B_MODEL_CONFIG = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml"
+QWEN3P6_35B_A3B_MODEL_CONFIG = (
+    "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/model.yaml"
+)
 
 
 def test_slurm_runner_example_is_portable() -> None:
@@ -106,9 +112,9 @@ def test_setup_defaults_example_is_portable() -> None:
 
 def test_model_examples_use_public_hugging_face_identities() -> None:
     paths = (
-        "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml",
-        QWEN_DENSE_MODEL_CONFIG,
-        "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/model.yaml",
+        NEMOTRON3_NANO_30B_MODEL_CONFIG,
+        QWEN3P5_9B_MODEL_CONFIG,
+        QWEN3P6_35B_A3B_MODEL_CONFIG,
     )
 
     for relative_path in paths:
@@ -120,7 +126,7 @@ def test_model_examples_use_public_hugging_face_identities() -> None:
 
 
 def test_qwen_dense_model_metadata_matches_public_checkpoint() -> None:
-    path = REPOSITORY_ROOT / QWEN_DENSE_MODEL_CONFIG
+    path = REPOSITORY_ROOT / QWEN3P5_9B_MODEL_CONFIG
 
     model_info = yaml.safe_load(path.read_text())["model_info"]
 

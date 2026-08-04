@@ -73,8 +73,8 @@ from modelopt.torch.puzzletron.stage_runner import (
     ids=[
         "qwen3.5-vlm",
         "qwen3.5-text",
-        "qwen3.6-vlm-alias",
-        "qwen3.6-text-alias",
+        "qwen3.6-vlm",
+        "qwen3.6-text",
     ],
 )
 def test_qwen_dense_architecture_matches_model_type(
