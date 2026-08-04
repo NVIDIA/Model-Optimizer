@@ -50,10 +50,7 @@ def get_model(
     model = AutoModelForCausalLM.from_pretrained(ckpt_path, device_map=device_map)
 
     # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this.
-    # For QLoRA the base model checkpoint is itself quantized, so `from_pretrained` has already
-    # restored the modelopt state (and the quantizer buffers) via `enable_huggingface_checkpointing`.
-    # Restoring a second time would raise `Model already has modelopt state!`, so only restore the
-    # state here if the loaded model does not have it yet.
+    # For QLoRA the base checkpoint is quantized, so from_pretrained already restored the state.
     modelopt_state_path = os.path.join(ckpt_path, "modelopt_state_train.pth")
     if hasattr(model, "peft_config") and os.path.isfile(modelopt_state_path):
         modelopt_state = mto.load_modelopt_state(modelopt_state_path)
