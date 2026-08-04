@@ -50,6 +50,9 @@ def get_model(
 
     # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this.
     # For QLoRA the base checkpoint is quantized, so from_pretrained already restored the state.
+    # Skipping the restore below is only safe because QATTrainer writes modelopt_state_train.pth at
+    # trainer init from that same base state, so it carries no quantizer values from_pretrained did
+    # not already load. Revisit this if the trainer ever snapshots state later in training.
     if hasattr(model, "peft_config") and not ModeloptStateManager.is_converted(model):
         modelopt_state = mto.load_modelopt_state(f"{ckpt_path}/modelopt_state_train.pth")
         restore_from_modelopt_state(model, modelopt_state)

@@ -291,7 +291,8 @@ def test_postprocess_state_dict_qlora_strips_base_layer():
         "layer1.bias",
         "layer1.pre_quant_scale",
     }
-    assert processed_state_dict["layer1.weight_scale_2"] == torch.tensor([0.5])
+    assert torch.equal(processed_state_dict["layer1.weight_scale_2"], torch.tensor([0.5]))
+    assert torch.equal(processed_state_dict["layer1.bias"], torch.arange(4.0))
 
 
 @pytest.mark.parametrize(

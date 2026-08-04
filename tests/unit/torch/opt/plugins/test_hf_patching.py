@@ -70,14 +70,22 @@ class _LoraLike(nn.Module):
         self.base_layer = base_layer
 
 
-def _compressed_model_and_state_dir(tmp_path):
+def _compressed_model_and_state_dir(tmp_path, state_keyed_with_base_layer=False):
     model = nn.Sequential()
     model.fc = nn.Linear(64, 32)
     mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(2, 64)))
     mtq.compress(model)
     assert isinstance(model.fc.weight, QTensorWrapper)
 
-    torch.save(mto.modelopt_state(model), tmp_path / "modelopt_state.pth")
+    state = mto.modelopt_state(model)
+    if state_keyed_with_base_layer:
+        # Compressing after the adapters are attached (QATTrainer._quantize_model) saves the
+        # keys with the peft suffix already in them.
+        for _, mode_config in state["modelopt_state_dict"]:
+            q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
+            for key in list(q_tensor_state):
+                q_tensor_state[f"{key}.base_layer"] = q_tensor_state.pop(key)
+    torch.save(state, tmp_path / "modelopt_state.pth")
 
     # transformers>=5 loads weights by assigning a plain Parameter holding the already-packed
     # data, which leaves the module without its QTensorWrapper.
@@ -89,9 +97,10 @@ def _compressed_model_and_state_dir(tmp_path):
 
 
 @pytest.mark.parametrize("wrap_in_lora", [False, True])
-def test_restore_qtensor_wrappers(tmp_path, wrap_in_lora):
-    """`q_tensor_state` is keyed by the pre-peft name, so `<name>.base_layer` must still match."""
-    model = _compressed_model_and_state_dir(tmp_path)
+@pytest.mark.parametrize("state_keyed_with_base_layer", [False, True])
+def test_restore_qtensor_wrappers(tmp_path, wrap_in_lora, state_keyed_with_base_layer):
+    """Either side may carry the `.base_layer` suffix, so the lookup must work in both directions."""
+    model = _compressed_model_and_state_dir(tmp_path, state_keyed_with_base_layer)
     if wrap_in_lora:
         model.fc = _LoraLike(model.fc)
 
@@ -100,3 +109,14 @@ def test_restore_qtensor_wrappers(tmp_path, wrap_in_lora):
     linear = model.fc.base_layer if wrap_in_lora else model.fc
     assert isinstance(linear.weight, QTensorWrapper)
     assert linear.weight.metadata["shape"] == torch.Size([32, 64])
+
+
+def test_restore_qtensor_wrappers_warns_when_nothing_matches(tmp_path):
+    """A total miss must be loud -- it otherwise surfaces as an opaque shape error at dequant."""
+    model = _compressed_model_and_state_dir(tmp_path)
+    model.fc = _LoraLike(_LoraLike(model.fc))  # a nesting the lookup does not know about
+
+    with pytest.warns(UserWarning, match="re-wrapped none"):
+        _restore_qtensor_wrappers(model, str(tmp_path))
+
+    assert not isinstance(model.fc.base_layer.base_layer.weight, QTensorWrapper)

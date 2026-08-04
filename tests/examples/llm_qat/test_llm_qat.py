@@ -190,16 +190,21 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
     with open(base_model_dir / "hf_quant_config.json") as f:
         assert json.load(f)["quantization"]["quant_algo"] == "NVFP4"
 
-    # Scales are derived from the calibrated amaxes; missing ones mean the export silently
-    # fell back to uncalibrated quantizers.
     base_weights = load_file(base_model_dir / "model.safetensors")
-    weight_scales = [k for k in base_weights if k.endswith(".weight_scale")]
-    assert weight_scales, "no NVFP4 weight scales in the exported base model"
-    for key in weight_scales:
-        prefix = key.removesuffix(".weight_scale")
-        assert f"{prefix}.weight_scale_2" in base_weights
-        assert f"{prefix}.input_scale" in base_weights
     assert not any("base_layer" in k or k.endswith("_amax") for k in base_weights)
+
+    # LoRA freezes the base model, so exporting the PTQ checkpoint directly is a trusted oracle
+    # for every calibrated value. Comparing against it catches scales that survive as keys but
+    # were silently reset to defaults, which key-presence assertions alone would miss.
+    ptq_export_dir = tmp_path / "ptq_export"
+    _run_export(str(ptq_output_dir), str(ptq_export_dir))
+    reference = load_file(ptq_export_dir / "model.safetensors")
+
+    scales = [k for k in reference if k.endswith(("_scale", "_scale_2"))]
+    assert scales, "no NVFP4 scales in the reference PTQ export"
+    for key in scales:
+        assert key in base_weights, f"{key} missing from the LoRA-QAT export"
+        assert torch.equal(base_weights[key], reference[key]), f"{key} does not match PTQ export"
 
 
 @pytest.mark.parametrize("backend", [
