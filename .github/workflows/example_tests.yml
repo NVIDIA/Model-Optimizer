@@ -22,16 +22,18 @@ jobs:
     secrets: inherit
     with:
       files: |
+        .github/workflows/_pr_gate.yml
         .github/workflows/example_tests.yml
         examples/**
         modelopt/**
         pyproject.toml
         tests/examples/**
+      skip_puzzletron_only: true
 
   ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
   torch:
     needs: [pr-gate]
-    if: needs.pr-gate.outputs.any_changed == 'true'
+    if: needs.pr-gate.outputs.run_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +53,7 @@ jobs:
   ##### TensorRT-LLM Example Tests (pr/non-pr split: non-pr runs extra autodeploy+eval examples) #####
   trtllm-pr:
     needs: [pr-gate]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.any_changed == 'true'
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.pr-gate.outputs.run_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -81,7 +83,7 @@ jobs:
   ##### Megatron Example Tests #####
   megatron:
     needs: [pr-gate]
-    if: needs.pr-gate.outputs.any_changed == 'true'
+    if: needs.pr-gate.outputs.run_tests == 'true'
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
@@ -94,7 +96,7 @@ jobs:
   ##### ONNX/TensorRT Example Tests #####
   onnx:
     needs: [pr-gate]
-    if: needs.pr-gate.outputs.any_changed == 'true'
+    if: needs.pr-gate.outputs.run_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -115,10 +117,17 @@ jobs:
     needs: [pr-gate, torch, trtllm-pr, megatron, onnx]
     runs-on: ubuntu-latest
     steps:
+      - name: Report intentionally scoped example tests
+        if: needs.pr-gate.outputs.puzzletron_only == 'true'
+        run: |
+          echo "## Generic example tests were not required" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "This pull request targets \`feature/puzzletron_v2\`, and its test-relevant changes are limited to Puzzletron-scoped paths." >> "$GITHUB_STEP_SUMMARY"
+          echo "The standalone Puzzletron v2 CPU check remains required." >> "$GITHUB_STEP_SUMMARY"
       - name: Required example tests did not succeed
         if: |
           needs.pr-gate.result != 'success' ||
-          (needs.pr-gate.outputs.any_changed == 'true' && (
+          (needs.pr-gate.outputs.run_tests == 'true' && (
             needs.torch.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
             needs.megatron.result != 'success' ||

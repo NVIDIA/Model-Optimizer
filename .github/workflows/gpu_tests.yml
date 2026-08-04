@@ -22,6 +22,7 @@ jobs:
     secrets: inherit
     with:
       files: |
+        .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
         noxfile.py
@@ -30,10 +31,11 @@ jobs:
         tests/gpu_megatron/**
         tests/gpu_trtllm/**
         tests/gpu_vllm/**
+      skip_puzzletron_only: true
 
   gpu-tests:
     needs: [pr-gate]
-    if: needs.pr-gate.outputs.any_changed == 'true'
+    if: needs.pr-gate.outputs.run_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +96,13 @@ jobs:
     needs: [pr-gate, gpu-tests]
     runs-on: ubuntu-latest
     steps:
+      - name: Report intentionally scoped GPU tests
+        if: needs.pr-gate.outputs.puzzletron_only == 'true'
+        run: |
+          echo "## Generic GPU tests were not required" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "This pull request targets \`feature/puzzletron_v2\`, and its test-relevant changes are limited to Puzzletron-scoped paths." >> "$GITHUB_STEP_SUMMARY"
+          echo "Dedicated Puzzletron GPU coverage is tracked separately." >> "$GITHUB_STEP_SUMMARY"
       - name: Required GPU tests did not succeed
-        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.any_changed == 'true' && needs.gpu-tests.result != 'success') }}
+        if: ${{ needs.pr-gate.result != 'success' || (needs.pr-gate.outputs.run_tests == 'true' && needs.gpu-tests.result != 'success') }}
         run: exit 1
