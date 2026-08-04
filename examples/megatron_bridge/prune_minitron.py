@@ -659,10 +659,10 @@ def main(args: argparse.Namespace):
                     "training/distillation instead of LM-only to recover vision quality."
                 )
         if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
-            hf_cfg, "hybrid_override_pattern"
+            text_cfg, "hybrid_override_pattern"
         ):
             # MCore's pattern can carry an MTP suffix (``/...``) and PP boundaries (``|``) which we need to remove
-            hf_cfg.hybrid_override_pattern = "".join(
+            text_cfg.hybrid_override_pattern = "".join(
                 parse_main_layer_chars(getattr(unwrapped_model, hybrid_key), mcore_cfg.num_layers)
             )
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
