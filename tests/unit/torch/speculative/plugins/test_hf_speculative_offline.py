@@ -419,6 +419,42 @@ def test_vlm_collator_normalizes_and_truncates_structured_messages(tmp_path):
     assert messages[3]["content"] == [{"type": "text", "text": "token-0 token-1 token-3"}]
 
 
+def test_vlm_collator_normalizes_conversations_and_malformed_content():
+    """Deprecated conversations and malformed content remain processor-compatible."""
+
+    collator = _bare_vlm_collator()
+    captured = {}
+    collator._process_multimodal_sample = lambda batch: captured.setdefault("batch", batch)
+
+    result = collator(
+        [
+            {
+                "conversations": [
+                    {"role": "system", "content": {"type": "text", "text": "declared"}},
+                    {
+                        "role": "user",
+                        "content": [
+                            7,
+                            {"unrecognized": "data"},
+                            {"type": "text", "text": "kept", "image": "", "video": None},
+                        ],
+                    },
+                ]
+            }
+        ]
+    )
+
+    assert result == captured["batch"]
+    messages = captured["batch"][0]
+    assert collator._conversations_warned is True
+    assert messages[0]["content"] == [{"type": "text", "text": "declared"}]
+    assert messages[1]["content"] == [
+        {"type": "text", "text": "7"},
+        {"type": "text", "text": '{"unrecognized": "data"}'},
+        {"type": "text", "text": "kept"},
+    ]
+
+
 def test_vlm_collator_builds_assistant_masks_from_markers():
     """ChatML boundaries provide assistant-only masks without generation tags."""
 
