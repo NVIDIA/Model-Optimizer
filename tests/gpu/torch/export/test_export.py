@@ -260,18 +260,23 @@ def test_postprocess_state_dict(state_dict, quantization, maxbound, expected_sta
 
 
 def test_postprocess_state_dict_qlora_strips_base_layer():
-    """QLoRA base weights live under `base_layer.*` and must all survive the rename.
+    """Every QLoRA `base_layer.*` tensor needed for deployment must survive the rename.
 
-    Dropping `weight_scale_2` makes the exported base model impossible to dequantize.
+    `weight_scale_2` is the NVFP4 global scale and `bias` matters for architectures such as
+    Qwen2; dropping either yields an undeployable checkpoint.
     """
     state_dict = {
         "layer1.base_layer.weight": torch.ones(4, 2, dtype=torch.uint8),
         "layer1.base_layer.weight_scale": torch.ones(4, 1),
         "layer1.base_layer.weight_scale_2": torch.tensor([0.5]),
         "layer1.base_layer.input_scale": torch.tensor([0.25]),
+        "layer1.base_layer.bias": torch.arange(4.0),
+        "layer1.base_layer.input_quantizer._pre_quant_scale": torch.ones(2),
         # Quantizer internals must still be dropped.
         "layer1.base_layer.weight_quantizer._amax": torch.tensor([1.0]),
         "layer1.base_layer.input_quantizer._amax": torch.tensor([1.0]),
+        "layer1.base_layer.weight_quantizer._scale": torch.ones(4, 1),
+        "layer1.base_layer.weight_quantizer._double_scale": torch.tensor([0.5]),
     }
 
     processed_state_dict = postprocess_state_dict(
@@ -283,6 +288,8 @@ def test_postprocess_state_dict_qlora_strips_base_layer():
         "layer1.weight_scale",
         "layer1.weight_scale_2",
         "layer1.input_scale",
+        "layer1.bias",
+        "layer1.pre_quant_scale",
     }
     assert processed_state_dict["layer1.weight_scale_2"] == torch.tensor([0.5])
 
