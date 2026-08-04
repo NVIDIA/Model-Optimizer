@@ -21,6 +21,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix QLoRA export in ``examples/llm_qat/export.py`` failing with ``AssertionError: Model already has modelopt state!`` (NVBug 6542481). The QLoRA training output is an adapter-only checkpoint, so ``from_pretrained`` resolves the quantized base model from ``adapter_config.json`` and ``enable_huggingface_checkpointing`` already restores its ModelOpt state; the export then restored a second time. It now restores only when the loaded model is not already converted. Two further breakages on the same path are also fixed: ``_restore_qtensor_wrappers`` matched no modules because PEFT re-parents the quantized linear as ``<name>.base_layer`` while ``q_tensor_state`` is keyed by the name it was saved with (the packed NVFP4 weight then reached ``F.linear`` and raised a shape error), and ``postprocess_state_dict`` silently dropped every ``base_layer.*`` key missing from a hand-maintained rename map — losing the NVFP4 ``weight_scale_2`` global scale and any linear ``bias`` (Qwen2-style q/k/v biases), and leaving ``base_layer`` in the exported AWQ ``pre_quant_scale`` key. The rename is now a generic ``.base_layer.`` strip.
+
 0.46 (2026-08-xx)
 ^^^^^^^^^^^^^^^^^
 
