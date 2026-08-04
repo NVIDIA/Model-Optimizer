@@ -99,6 +99,18 @@ def image_path(
     return None
 
 
+def media_path_within_root(media_root: Path, relative_path: str) -> Path | None:
+    """Resolve a media reference only when it remains below its declared root."""
+
+    media_root = media_root.resolve()
+    candidate = (media_root / relative_path).resolve()
+    try:
+        candidate.relative_to(media_root)
+    except ValueError:
+        return None
+    return candidate
+
+
 def normalize_options(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
@@ -201,7 +213,10 @@ def pai_records(args: argparse.Namespace, output_dir: Path) -> Iterator[dict[str
         ):
             continue
         relative_video = relative_video.strip()
-        video = media_root / relative_video
+        video = media_path_within_root(media_root, relative_video)
+        if video is None:
+            yield {"_missing_media": f"outside media root: {relative_video}"}
+            continue
         if not video.is_file():
             yield {"_missing_media": str(video)}
             continue

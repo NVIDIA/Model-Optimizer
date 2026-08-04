@@ -519,6 +519,7 @@ def merge_in_parallel(sources: list[Source], args: argparse.Namespace) -> None:
     ]
 
     processes = []
+    merged = False
     try:
         for worker, command in commands:
             print(f"Starting worker {worker:02d}", flush=True)
@@ -529,6 +530,7 @@ def merge_in_parallel(sources: list[Source], args: argparse.Namespace) -> None:
         if failed_workers:
             raise RuntimeError(f"Merge workers failed: {failed_workers}")
         concatenate_parts(parts_dir, args.output, args.overwrite)
+        merged = True
     except BaseException:
         for process in processes:
             if process.poll() is None:
@@ -537,7 +539,7 @@ def merge_in_parallel(sources: list[Source], args: argparse.Namespace) -> None:
             process.wait()
         raise
     finally:
-        if args.output.exists() and not args.keep_work_dir:
+        if merged and not args.keep_work_dir:
             shutil.rmtree(work_dir)
 
     print(f"Wrote parallel merge to {args.output}")

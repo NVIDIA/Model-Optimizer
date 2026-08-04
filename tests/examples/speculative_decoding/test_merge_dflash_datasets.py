@@ -91,3 +91,34 @@ def test_merge_keeps_synthetic_variants_together(tmp_path):
         records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
         assert {record["id"] for record in records} == expected_ids
         assert not list(tmp_path.glob(f".{output.name}.parallel-*"))
+
+
+def test_parallel_merge_failure_preserves_work_dir_with_stale_output(tmp_path):
+    """A failed overwrite retains worker artifacts even when prior output exists."""
+
+    invalid_source = tmp_path / "invalid.jsonl"
+    invalid_source.write_text("not valid JSON\n", encoding="utf-8")
+    output = tmp_path / "merged.jsonl"
+    output.write_text("stale output\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MERGER),
+            "--source",
+            f"invalid={invalid_source}",
+            "--output",
+            str(output),
+            "--jobs",
+            "2",
+            "--overwrite",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert output.read_text(encoding="utf-8") == "stale output\n"
+    work_dirs = list(tmp_path.glob(f".{output.name}.parallel-*"))
+    assert len(work_dirs) == 1
+    assert list((work_dirs[0] / "manifests").glob("*.txt"))
