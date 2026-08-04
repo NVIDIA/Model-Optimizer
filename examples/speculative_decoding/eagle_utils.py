@@ -25,7 +25,6 @@ import torch
 import transformers
 from datasets import load_dataset
 from packaging.version import Version
-from scripts.ar_validate import validate_ar
 from transformers import Trainer, TrainerCallback
 
 import modelopt
@@ -41,6 +40,7 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
     ShardedDataset,
     VisionLanguageDataCollator,
 )
+from scripts.ar_validate import validate_ar
 
 try:
     import wandb
