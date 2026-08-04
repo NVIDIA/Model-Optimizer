@@ -143,45 +143,22 @@ def _get_consumers(model: onnx.ModelProto, tensor_name: str) -> list[onnx.NodePr
     return [node for node in model.graph.node if tensor_name in node.input]
 
 
-def transpose_dequantize_linear_weights(
-    model_path: str,
-    output_path: str,
-    use_external_data: bool = True,
-    external_data_name: str | None = None,
+def _transform_dq_transpose(
+    model: onnx.ModelProto,
     verbose: bool = True,
 ) -> onnx.ModelProto:
-    """Transpose weights in DequantizeLinear nodes for column-major storage.
+    """Pure in-memory DequantizeLinear weight transpose. No file I/O.
 
-    This function transforms a quantized ONNX model by:
-    1. Finding all DequantizeLinear nodes that feed into MatMul/Gemm
-    2. Transposing the quantized weights, scales, and zero points
-    3. Updating the axis attribute (0 -> 1)
-    4. Adding Transpose nodes after DequantizeLinear to recover original shape
-
-    This optimization is useful for backends that prefer column-major weight
-    storage, such as NvTensorRtRtx.
+    Takes an already-loaded ONNX model, transposes weights in DequantizeLinear
+    nodes, and returns the modified model without saving.
 
     Args:
-        model_path: Path to input quantized ONNX model.
-        output_path: Path to save modified model.
-        use_external_data: Whether to save weights as external data.
-        external_data_name: Name for external data file.
+        model: Already-loaded ONNX ModelProto.
         verbose: Whether to print progress messages.
 
     Returns:
-        Modified ONNX model.
-
-    Example:
-        >>> from modelopt.onnx.graph_surgery import transpose_dequantize_linear_weights
-        >>> model = transpose_dequantize_linear_weights(
-        ...     model_path="model_quantized.onnx",
-        ...     output_path="model_quantized_transposed.onnx",
-        ... )
+        Modified ONNX model (same object, mutated in place).
     """
-    if verbose:
-        logger.info(f"Loading model from: {model_path}")
-
-    model = onnx.load(model_path, load_external_data=True)
     graph = model.graph
 
     # Statistics
@@ -354,6 +331,51 @@ def transpose_dequantize_linear_weights(
         logger.info(f"  Weights transposed: {stats['weights_transposed']}")
         logger.info(f"  Scales transposed: {stats['scales_transposed']}")
         logger.info(f"  Zero points transposed: {stats['zero_points_transposed']}")
+
+    return model
+
+
+def transpose_dequantize_linear_weights(
+    model_path: str,
+    output_path: str,
+    use_external_data: bool = True,
+    external_data_name: str | None = None,
+    verbose: bool = True,
+) -> onnx.ModelProto:
+    """Transpose weights in DequantizeLinear nodes for column-major storage.
+
+    This function transforms a quantized ONNX model by:
+    1. Finding all DequantizeLinear nodes that feed into MatMul/Gemm
+    2. Transposing the quantized weights, scales, and zero points
+    3. Updating the axis attribute (0 -> 1)
+    4. Adding Transpose nodes after DequantizeLinear to recover original shape
+
+    This optimization is useful for backends that prefer column-major weight
+    storage, such as NvTensorRtRtx.
+
+    Args:
+        model_path: Path to input quantized ONNX model.
+        output_path: Path to save modified model.
+        use_external_data: Whether to save weights as external data.
+        external_data_name: Name for external data file.
+        verbose: Whether to print progress messages.
+
+    Returns:
+        Modified ONNX model.
+
+    Example:
+        >>> from modelopt.onnx.graph_surgery import transpose_dequantize_linear_weights
+        >>> model = transpose_dequantize_linear_weights(
+        ...     model_path="model_quantized.onnx",
+        ...     output_path="model_quantized_transposed.onnx",
+        ... )
+    """
+    if verbose:
+        logger.info(f"Loading model from: {model_path}")
+
+    model = onnx.load(model_path, load_external_data=True)
+
+    model = _transform_dq_transpose(model, verbose=verbose)
 
     # Save model
     if verbose:
