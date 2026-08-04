@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+datasets>=2.14.4
+timm
+torch==2.8
+torchvision==0.23.0
+transformers
