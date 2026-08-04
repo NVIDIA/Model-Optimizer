@@ -31,6 +31,7 @@ from urllib.parse import quote
 import tqdm
 
 QWEN_IMAGE_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
+_UNRESOLVED_MEDIA_PATHS: set[str] = set()
 
 
 def _load_json_or_jsonl(path: str) -> list[dict[str, Any]]:
@@ -101,6 +102,8 @@ def _resolve_media_path(
 ) -> str | None:
     if not path:
         return None
+    if path.startswith(("http://", "https://", "data:")):
+        return path
     candidate = Path(path)
     if candidate.is_absolute() and candidate.exists():
         return str(candidate)
@@ -121,7 +124,10 @@ def _resolve_media_path(
                 return str(rooted)
     if candidate.exists():
         return str(candidate)
-    return path
+    if path not in _UNRESOLVED_MEDIA_PATHS:
+        print(f"WARNING: could not resolve media path: {path}")
+        _UNRESOLVED_MEDIA_PATHS.add(path)
+    return None
 
 
 def _as_openai_media_value(
@@ -132,9 +138,16 @@ def _as_openai_media_value(
     if media_url_base:
         candidate = Path(path)
         if candidate.is_absolute():
-            return f"{media_url_base.rstrip('/')}{quote(str(candidate), safe='/')}"
-        if not candidate.is_absolute():
-            return f"{media_url_base.rstrip('/')}/{quote(path, safe='/')}"
+            if media_root:
+                try:
+                    path = str(candidate.relative_to(media_root))
+                except ValueError:
+                    # The local HTTP server deliberately exposes only media_root.
+                    # Leave paths outside it local for SGLang to resolve directly.
+                    return path
+            else:
+                return f"{media_url_base.rstrip('/')}{quote(path, safe='/')}"
+        return f"{media_url_base.rstrip('/')}/{quote(path, safe='/')}"
     # Do not convert local paths to file://. This SGLang build falls through to
     # the base64 loader for file:// videos and raises "Incorrect padding".
     return path

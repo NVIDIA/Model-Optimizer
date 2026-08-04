@@ -63,7 +63,9 @@ fi
 
 mkdir -p "$OUTPUT_PATH"
 
-CONTAINER_IMAGE=${CONTAINER_IMAGE:-/lustre/fs1/portfolios/coreai/users/skierat/lmsysorg+sglang+v0.5.3-cu129.sqsh}
+# Set CONTAINER_IMAGE to a local .sqsh image to avoid pulling from the registry.
+DEFAULT_CONTAINER_IMAGE="lmsysorg/sglang:v0.5.3-cu129"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-$DEFAULT_CONTAINER_IMAGE}"
 
 counter=$START_SHARD
 worker_pids=()

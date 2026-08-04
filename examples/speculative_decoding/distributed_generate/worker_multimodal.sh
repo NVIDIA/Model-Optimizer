@@ -91,19 +91,19 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ "$API_MODE" = "openai" ]; then
-    python3 -m http.server "$MEDIA_HTTP_PORT" --bind 127.0.0.1 --directory / \
+    python3 -m http.server "$MEDIA_HTTP_PORT" --bind 127.0.0.1 --directory /media_data \
         >/tmp/multimodal_media_http_${MEDIA_HTTP_PORT}.log 2>&1 &
     MEDIA_HTTP_PID=$!
 
     echo "Waiting for media HTTP server at $MEDIA_URL_BASE..."
     for _ in $(seq 1 30); do
-        if curl -fsS "$MEDIA_URL_BASE/media_data/" >/dev/null 2>&1; then
+        if curl -fsS "$MEDIA_URL_BASE/" >/dev/null 2>&1; then
             echo "Media HTTP server is up."
             break
         fi
         sleep 1
     done
-    if ! curl -fsS "$MEDIA_URL_BASE/media_data/" >/dev/null 2>&1; then
+    if ! curl -fsS "$MEDIA_URL_BASE/" >/dev/null 2>&1; then
         echo "ERROR: media HTTP server did not start. See /tmp/multimodal_media_http_${MEDIA_HTTP_PORT}.log" >&2
         exit 1
     fi
