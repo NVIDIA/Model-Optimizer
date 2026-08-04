@@ -19,7 +19,7 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 | `solver` | `timeout_strategy: max`, `run_timeout: 10800` (3h), `agent_kwargs.llm_kwargs.timeout: 3600` |
 | `sandbox.region` | `us-east-2` |
 | `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (dedicated `harbor-swebench` repo, **us-west-2**, regardless of sandbox region) |
-| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` (needs **≥ `0.3.1.1-harbor`** — FEP-1085 reasoning fix) |
+| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` — golden pin **`0.5.0.1-harbor`** (same single source as TB2.1: `configs/shared/nel_next_containers.yaml`). `0.3.1.1-harbor` is the bare minimum (FEP-1085 reasoning fix) but is two minors behind |
 | `cluster.container_env.AWS_DEFAULT_REGION` | `us-east-2` (match `sandbox.region`) |
 | `instruction_template` | **must be MOUNTED** — the harbor image doesn't bundle the built-in (gotcha below) |
 

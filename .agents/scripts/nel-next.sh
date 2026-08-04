@@ -32,21 +32,37 @@
 #     using the config's export_config.mlflow (resolves ${MLFLOW_TRACKING_URI}, forces
 #     emit_traces=false to avoid the per-sample hang). Run after `source .env`.
 #
-# Install source (env overrides): NEL_NEXT_SPEC (PyPI default, "nemo-evaluator[harbor,export]==0.3.*"
-# — [export] pulls mlflow for mlflow-push; pin an exact 0.3.x here for reproducibility), or
-# NEL_NEXT_ORIGIN [+ NEL_NEXT_REF] for the internal git build. uv caches the resolved env and
-# refreshes it when the spec changes.
+# Install source (env overrides): NEL_NEXT_ORIGIN [+ NEL_NEXT_REF] selects a git build
+# (the DEFAULT — see below); NEL_NEXT_SPEC forces a plain PyPI release instead.
+# uv caches the resolved env and refreshes it when the spec changes.
+#
+# Default is the PUBLIC upstream repo (github.com/NVIDIA-NeMo/Evaluator — the `Repository`
+# URL in nemo-evaluator's own pyproject). No auth, nothing internal. Its default branch is
+# version 0.4.0 and ships the vendored `harbor_datasets/registry_overrides` (the TB 2.1
+# task-set pin), which is what the golden TB2.1/SWE-bench toolchain runs on.
+#
+# Why not plain PyPI: `nemo-evaluator` on PyPI tops out at **0.3.0**, so a version pin
+# cannot reach 0.4.x. Set NEL_NEXT_SPEC (e.g. "nemo-evaluator[harbor,export]==0.3.*") to
+# fall back to it deliberately — older toolchain, not golden-comparable.
+#
+# NEL_NEXT_REF: there is no v0.4.0 tag (public tags stop at v0.3.0); 0.4.0 is an untagged
+# default-branch build. Leave REF empty to track the branch, or pin a commit SHA for
+# reproducibility (9dcca2ae33362b4236ed4027f1516628d24c2cc2 was HEAD at 2026-08-04).
+#
+# To build from an internal mirror instead, set NEL_NEXT_ORIGIN in `.env` — internal URLs
+# stay out of this repo, same convention as ${NEL_NEXT_EVAL_IMAGE}.
 set -euo pipefail
 
 # [harbor] = agentic/sandbox deps; [export] pulls mlflow for `mlflow-push`.
-NEL_NEXT_SPEC="${NEL_NEXT_SPEC:-nemo-evaluator[harbor,export]==0.3.*}"
-NEL_NEXT_ORIGIN="${NEL_NEXT_ORIGIN:-}"
+NEL_NEXT_SPEC="${NEL_NEXT_SPEC:-}"
+NEL_NEXT_ORIGIN="${NEL_NEXT_ORIGIN:-git+https://github.com/NVIDIA-NeMo/Evaluator.git}"
 NEL_NEXT_REF="${NEL_NEXT_REF:-}"
 
-if [[ -n "$NEL_NEXT_ORIGIN" ]]; then
-  INSTALL_SPEC="nemo-evaluator[harbor,export] @ ${NEL_NEXT_ORIGIN}${NEL_NEXT_REF:+@${NEL_NEXT_REF}}"
-else
+# NEL_NEXT_SPEC wins when explicitly set (PyPI escape hatch); otherwise use the git origin.
+if [[ -n "$NEL_NEXT_SPEC" ]]; then
   INSTALL_SPEC="$NEL_NEXT_SPEC"
+else
+  INSTALL_SPEC="nemo-evaluator[harbor,export] @ ${NEL_NEXT_ORIGIN}${NEL_NEXT_REF:+@${NEL_NEXT_REF}}"
 fi
 
 _log() { printf '\033[2m  %s\033[0m\n' "$*" >&2; }
