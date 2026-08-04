@@ -543,6 +543,10 @@ class _QuantVLLMAttention(QuantModule):
             )
 
         forward_context = _get_forward_context()
+        if forward_context.attn_metadata is None:
+            # vLLM deliberately omits request metadata during profiling and
+            # kernel warmup because those calls do not read or write KV cache.
+            return None
         if isinstance(forward_context.attn_metadata, list):
             raise RuntimeError("K/V boundary skipping does not support vLLM DBO.")
         cudagraph_mode = getattr(forward_context, "cudagraph_runtime_mode", None)
@@ -678,31 +682,35 @@ class _QuantVLLMAttention(QuantModule):
             value = self.v_bmm_quantizer(value)
         else:
             metadata = self._get_boundary_skip_metadata()
-            positions, request_ids, valid_tokens = self._token_positions(metadata, key.shape[0])
-            if self.kv_quant_skip_last_n:
-                self._quantize_aged_kv_cache(
-                    self.kv_cache,
-                    metadata,
+            if metadata is None:
+                key = self.k_bmm_quantizer(key)
+                value = self.v_bmm_quantizer(value)
+            else:
+                positions, request_ids, valid_tokens = self._token_positions(metadata, key.shape[0])
+                if self.kv_quant_skip_last_n:
+                    self._quantize_aged_kv_cache(
+                        self.kv_cache,
+                        metadata,
+                        positions,
+                        request_ids,
+                        valid_tokens,
+                    )
+                key = self._quantize_new_kv(
+                    key,
+                    self.k_bmm_quantizer,
                     positions,
                     request_ids,
                     valid_tokens,
+                    metadata.seq_lens,
                 )
-            key = self._quantize_new_kv(
-                key,
-                self.k_bmm_quantizer,
-                positions,
-                request_ids,
-                valid_tokens,
-                metadata.seq_lens,
-            )
-            value = self._quantize_new_kv(
-                value,
-                self.v_bmm_quantizer,
-                positions,
-                request_ids,
-                valid_tokens,
-                metadata.seq_lens,
-            )
+                value = self._quantize_new_kv(
+                    value,
+                    self.v_bmm_quantizer,
+                    positions,
+                    request_ids,
+                    valid_tokens,
+                    metadata.seq_lens,
+                )
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:

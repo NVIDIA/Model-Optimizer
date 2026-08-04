@@ -267,6 +267,39 @@ def test_first_token_skip_rejects_cuda_graph_runtime(monkeypatch):
         _QuantVLLMAttention._get_boundary_skip_metadata(attention)
 
 
+def test_boundary_skip_allows_vllm_profiling_without_attention_metadata(monkeypatch):
+    class RecordingAttention(torch.nn.Module):
+        def forward(self, query, key, value, *args, **kwargs):
+            return query, key, value
+
+    class QuantRecordingAttention(_QuantVLLMAttention, RecordingAttention):
+        pass
+
+    attention = object.__new__(QuantRecordingAttention)
+    torch.nn.Module.__init__(attention)
+    attention.kv_cache_dtype = "auto"
+    attention.attn_type = "decoder"
+    attention.kv_sharing_target_layer_name = None
+    attention.sliding_window = None
+    attention.attn_backend = SimpleNamespace(get_name=lambda: "FLASH_ATTN")
+    attention.kv_quant_skip_first_n = 1
+    attention.kv_quant_skip_last_n = 1
+    attention.q_bmm_quantizer = lambda tensor: tensor + 10
+    attention.k_bmm_quantizer = lambda tensor: tensor + 20
+    attention.v_bmm_quantizer = lambda tensor: tensor + 30
+    attention._token_positions = lambda *_args: pytest.fail("profiling used token metadata")
+    attention._quantize_aged_kv_cache = lambda *_args: pytest.fail("profiling aged KV cache")
+    forward_context = SimpleNamespace(attn_metadata=None)
+    monkeypatch.setattr(vllm_plugin, "_get_forward_context", lambda: forward_context)
+
+    inputs = tuple(torch.zeros(1) for _ in range(3))
+    query, key, value = attention(*inputs)
+
+    torch.testing.assert_close(query, torch.full((1,), 10.0))
+    torch.testing.assert_close(key, torch.full((1,), 20.0))
+    torch.testing.assert_close(value, torch.full((1,), 30.0))
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     [
