@@ -15,7 +15,6 @@
 
 """Support quantization for Transformer Engine layers."""
 
-import copy
 import inspect
 import os
 import warnings
@@ -29,7 +28,7 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
-from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer
+from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from .custom import _ParallelLinear
 
 _TE_VERSION = Version(te.__version__)
@@ -153,7 +152,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # fused-experts name normalizer maps them to ``*weight_quantizer`` and the stock configs
         # apply. This replaces the single shared weight quantizer ``super()._setup()`` installed.
         self.weight_quantizer = GroupedQuantizer(
-            *(copy.deepcopy(self.weight_quantizer) for _ in range(self.num_gemms))
+            *(TensorQuantizer(self.default_quant_desc_weight) for _ in range(self.num_gemms))
         )
 
         # Compile only the per-expert quantizer loop. The surrounding TE grouped GEMM remains
