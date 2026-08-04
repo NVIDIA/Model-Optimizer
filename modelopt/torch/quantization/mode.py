@@ -42,6 +42,7 @@ from .config import (
     LSQConfig,
     MaxCalibConfig,
     MseCalibConfig,
+    NVFP4ActHeadroomCalibConfig,
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
@@ -66,6 +67,7 @@ from .model_calib import (
     lsq,
     max_calibrate,
     mse_calibrate,
+    nvfp4_act_headroom_calibrate,
     smoothquant,
     svdquant,
 )
@@ -230,6 +232,7 @@ def wrapped_calib_func(
     checkpoint_dir = layerwise_cfg.get("checkpoint_dir")
     qdq_from_prev = layerwise_cfg.get("get_qdq_activations_from_prev_layer", False)
     save_every = layerwise_cfg.get("save_every", 1)
+    calib_mutates_weights = layerwise_cfg.get("calib_mutates_weights", True)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -264,6 +267,7 @@ def wrapped_calib_func(
                 checkpoint_dir=checkpoint_dir,
                 get_qdq_activations_from_prev_layer=qdq_from_prev,
                 save_every=save_every,
+                calib_mutates_weights=calib_mutates_weights,
                 **kwargs,
             )
         else:
@@ -425,6 +429,23 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class NVFP4ActHeadroomCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for the ``nvfp4_act_headroom`` calibration algorithm.
+
+    Headroom-aware global scales for NVFP4 activation quantizers; plain max for everything
+    else (see :class:`NVFP4ActHeadroomCalibConfig
+    <modelopt.torch.quantization.config.NVFP4ActHeadroomCalibConfig>`).
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return NVFP4ActHeadroomCalibConfig
+
+    _calib_func = nvfp4_act_headroom_calibrate
 
 
 @CalibrateModeRegistry.register_mode

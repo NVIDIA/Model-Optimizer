@@ -264,6 +264,58 @@ def test_build_reverse_rules_orders_prefix_reorder_after_container():
     assert not any(".mlp.experts." in k for k in out)
 
 
+def test_nested_text_prefix_reverse_does_not_capture_vlm_siblings():
+    """A nested text-model conversion must not rewrite the full VLM namespace."""
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.visual = torch.nn.Module()
+    model.model.visual.patch_embed = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model._weight_conversions = [
+        WeightRenaming(
+            source_patterns=r"^model.language_model.",
+            target_patterns=r"^model.(?!language_model.)",
+        )
+    ]
+
+    state_dict = {
+        "model.visual.patch_embed.weight": torch.randn(2, 2),
+        "model.language_model.layers.0.weight": torch.randn(2, 2),
+    }
+    reverted = revert_weight_conversion_quant_aware(model, state_dict)
+
+    assert set(reverted) == set(state_dict)
+    assert build_reverse_name_mapper(model) is None
+
+
+def test_nested_text_prefix_reverse_still_applies_to_text_model():
+    """The same conversion remains valid when the nested VLM namespace is absent."""
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model._weight_conversions = [
+        WeightRenaming(
+            source_patterns=r"^model.language_model.",
+            target_patterns=r"^model.(?!language_model.)",
+        )
+    ]
+
+    state_dict = {"model.layers.0.weight": torch.randn(2, 2)}
+    reverted = revert_weight_conversion_quant_aware(model, state_dict)
+
+    assert set(reverted) == {"model.language_model.layers.0.weight"}
+    mapper = build_reverse_name_mapper(model)
+    assert mapper is not None
+    assert mapper("model.layers.0") == "model.language_model.layers.0"
+
+
 def test_split_collision_raises():
     """A split whose target key already exists must fail instead of overwriting."""
     sd = _nvfp4_linear("m.gate_up_proj", 8, 16)

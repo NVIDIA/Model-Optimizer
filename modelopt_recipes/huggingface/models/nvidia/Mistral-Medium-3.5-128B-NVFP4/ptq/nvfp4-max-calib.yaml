@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  fp8: configs/numerics/fp8
+  kv_fp8: configs/ptq/units/kv_fp8
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    NVFP4 W4A4 on interior MLP layers, FP8 W8A8 on edge MLP and attention
+    layers, and an FP8 KV cache; uses max calibration.
+quantize:
+  algorithm:
+    method: max
+    layerwise: false
+  quant_cfg:
+    - $import: base_disable_all
+    # NVFP4 on MLP and expert weight matrices.
+    - quantizer_name: '*mlp.experts*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp.experts*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*mlp*input_quantizer'
+      cfg:
+        $import: nvfp4
+    # FP8 on language-model attention projections.
+    - quantizer_name: '*self_attn.q_proj*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.q_proj*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.k_proj*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.k_proj*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.v_proj*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.v_proj*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.o_proj*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*self_attn.o_proj*input_quantizer'
+      cfg:
+        $import: fp8
+    # Keep the first four and final decoder MLP layers in FP8.
+    - quantizer_name: '*layers.0.mlp*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.0.mlp*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.1.mlp*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.1.mlp*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.2.mlp*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.2.mlp*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.3.mlp*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.3.mlp*input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.87.mlp*weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*layers.87.mlp*input_quantizer'
+      cfg:
+        $import: fp8
+    - $import: kv_fp8
+    - $import: default_disabled_quantizers

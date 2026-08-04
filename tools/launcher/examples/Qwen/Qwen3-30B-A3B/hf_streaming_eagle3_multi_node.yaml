@@ -44,7 +44,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20
 
   # Step 2: Streaming EAGLE3 training — 2 serve replicas (TP=2) + 2 trainer nodes (2 GPU each).
   # Capture ids: default_eagle_aux_layer_ids(48)=[1,23,44] +1, plus final layer 48.

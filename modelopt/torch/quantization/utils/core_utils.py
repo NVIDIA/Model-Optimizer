@@ -29,6 +29,7 @@ from torch.distributed.tensor import Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
+from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -426,11 +427,14 @@ def _get_fsdp2_mesh(module: nn.Module):
         return None
 
     fsdp_state = _get_module_state(module)
-    if (
-        fsdp_state._fsdp_param_group
-        and fsdp_state._fsdp_param_group.post_forward_mesh_info is not None
-    ):
-        return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
+    pg = fsdp_state._fsdp_param_group
+    if pg is None:
+        return None
+    # A root FSDP module has reshard_after_forward=False by default, so its
+    # post_forward_mesh_info is None; fall back to the sharding mesh (mesh_info),
+    # which is the same FSDP shard mesh (post_forward_mesh_info is only the reshard target).
+    mesh_info = pg.post_forward_mesh_info or pg.mesh_info
+    return mesh_info.mesh if mesh_info is not None else None
 
 
 def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
@@ -486,7 +490,24 @@ def _set_parameter(module: nn.Module, name: str, value: nn.Parameter):
 
 
 @contextmanager
-def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.Module):
+def _fsdp2_unshard_context(fsdp_module: FSDPModule):
+    """Unshard an FSDP2 module without replacing individual DTensor parameters."""
+    fsdp_param_group = fully_shard.state(fsdp_module)._fsdp_param_group
+    was_sharded = fsdp_param_group.is_sharded
+    if was_sharded:
+        fsdp_module.unshard()
+    try:
+        with _disable_fsdp_unshard_reshard(fsdp_module):
+            yield
+    finally:
+        if was_sharded:
+            fsdp_module.reshard()
+
+
+@contextmanager
+def fsdp2_weight_access_and_writeback_context(
+    module: nn.Module, root_model: nn.Module, writeback: bool = True
+):
     """Context manager for FSDP2 weight access and writeback.
 
     Gathers sharded DTensor parameters across FSDP/HSDP shards so they can be
@@ -496,11 +517,14 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context.
     """
-    assert isinstance(root_model, torch.distributed.fsdp.FSDPModule), "We only support FSDP2"
-
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
+    if not writeback:
+        with _fsdp2_unshard_context(fsdp_module):
+            yield
+        return
+
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
 
@@ -515,32 +539,54 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
             assert (
                 fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
             ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        collected = param.redistribute(
+        unsharded_dtensor = param.redistribute(
             placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
             device_mesh=original_device_mesh,
         )
-        originals[name] = (param, collected, original_placements, original_device_mesh)
-        _set_parameter(module, name, nn.Parameter(collected.to_local()))
-
-    yield
-
-    # Write back and restore original DTensor parameters.
-    for name, (
-        original_param,
-        collected,
-        original_placements,
-        original_device_mesh,
-    ) in originals.items():
-        original_param.to_local().data.copy_(
-            collected.redistribute(
-                placements=original_placements, device_mesh=original_device_mesh
-            ).to_local()
+        unsharded_tensor = unsharded_dtensor.to_local()
+        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
+        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+        gpu_tensor = (
+            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
         )
-        _set_parameter(module, name, original_param)
+        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
+        originals[name] = (
+            param,
+            unsharded_dtensor,
+            original_placements,
+            original_device_mesh,
+            cpu_writeback_tensor,
+            gpu_tensor,
+        )
+        _set_parameter(module, name, nn.Parameter(gpu_tensor))
+
+    try:
+        yield
+    finally:
+        # Write back and restore original DTensor parameters. Runs on both success
+        # and exception so the module never lingers with the temporary local params.
+        for name, (
+            original_param,
+            unsharded_dtensor,
+            original_placements,
+            original_device_mesh,
+            cpu_writeback_tensor,
+            gpu_tensor,
+        ) in originals.items():
+            if cpu_writeback_tensor is not None:
+                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
+            original_param.to_local().data.copy_(
+                unsharded_dtensor.redistribute(
+                    placements=original_placements, device_mesh=original_device_mesh
+                ).to_local()
+            )
+            _set_parameter(module, name, original_param)
 
 
 @contextmanager
-def enable_weight_access_and_writeback(module, root_model, name_to_module: dict | None = None):
+def enable_weight_access_and_writeback(
+    module, root_model, name_to_module: dict | None = None, writeback: bool = True
+):
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
@@ -554,16 +600,18 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
             total cost when called in a loop. This causes significant CPU overhead on large
             models, particularly Sparse MoE architectures where each expert is typically
             implemented as its own module.
+        writeback: Whether modified weights must be written back to the owning sharded/offload
+            representation when exiting the context.
     """
     if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
-        context = fsdp2_weight_access_and_writeback_context(module, root_model)
+        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback)
     elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
-        context = weight_access_and_writeback_context(module)
+        context = weight_access_and_writeback_context(module, writeback)
     else:
         context = nullcontext()
 
@@ -572,18 +620,23 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
 
 
 @contextmanager
-def persistent_materialization(layer):
+def persistent_materialization(layer, writeback: bool = True):
     """Keep all layer weights materialized on GPU for the duration.
 
     Suppresses per-forward weight transfers so that N calibration batches
     pay the cost of one load/unload instead of N.
 
-    - **FSDP2**: patches ``FSDPParamGroup.unshard/reshard`` to no-ops, then
-      gathers weights once via ``enable_weight_access_and_writeback``.
-    - **Accelerate**: materializes weights and sets ``hook.offload = False``
-      so per-forward hooks skip materialization/offloading.
+    - **FSDP2**: gathers weights once via ``enable_weight_access_and_writeback``,
+      then patches ``FSDPParamGroup.unshard/reshard`` to no-ops.
+    - **Accelerate**: materializes weights, sets ``hook.offload = False``,
+      and bypasses the layer's top-level accelerate hook while the weights are
+      materialized.
     """
-    with _disable_fsdp_unshard_reshard(layer), enable_weight_access_and_writeback(layer, layer):
+    with (
+        enable_weight_access_and_writeback(layer, layer, writeback=writeback),
+        _disable_fsdp_unshard_reshard(layer),
+        temporarily_remove_accelerate_hook(layer),
+    ):
         yield
 
 
@@ -647,7 +700,10 @@ def sync_moe_expert_amax(experts, sync_weight_amax=False):
             if name.endswith("weight_quantizer") and module.is_enabled and module.amax is None:
                 weight = expert.state_dict().get(name.replace("weight_quantizer", "weight"))
                 if weight is not None:
-                    max_calibrate(module, lambda m, w=weight: m(w), distributed_sync=False)
+                    # max_calibrate invokes the forward_loop synchronously, so capturing
+                    # ``weight`` by closure (rather than a default arg) is safe and lets mypy
+                    # infer the lambda type.
+                    max_calibrate(module, lambda m: m(weight), distributed_sync=False)
 
 
 @contextmanager
