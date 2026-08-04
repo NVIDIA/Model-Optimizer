@@ -1,0 +1,73 @@
+# EAGLE3 offline speculative decoding pipeline for Qwen3-8B.
+#
+# 4-step pipeline:
+#   task_0: Data synthesis — query TRT-LLM server to generate prompt samples
+#   task_1: Dump hidden states — run target model to capture hidden states
+#   task_2: Offline training — train the EAGLE3 draft head
+#   task_3: Benchmark — evaluate speculative decoding speedup via VLLM
+#
+# All tasks share /scratchspace to pass artifacts between steps.
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+
+job_name: Qwen3-8B_EAGLE3_online
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_1:
+    script: common/eagle3/train_eagle.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/eagle3.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/scratchspace/data/train.jsonl
+      - training.output_dir=/scratchspace/eagle3
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=500000
+      - training.num_train_epochs=1
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_2:
+    script: common/specdec_bench/quick_check.sh
+    args:
+      - --draft_model_dir /scratchspace/export
+      - --draft_length 3
+      - --output_length 4096
+      - --engine VLLM
+      - --tp_size 1
+      - --ep_size 1
+      - --speculative_algorithm EAGLE3
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --concurrency 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: vllm/vllm-openai:latest

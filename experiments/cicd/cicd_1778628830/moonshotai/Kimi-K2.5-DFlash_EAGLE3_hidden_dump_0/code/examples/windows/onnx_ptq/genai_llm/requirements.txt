@@ -1,0 +1,3 @@
+datasets>=2.14.5
+torch
+transformers<5.0.0

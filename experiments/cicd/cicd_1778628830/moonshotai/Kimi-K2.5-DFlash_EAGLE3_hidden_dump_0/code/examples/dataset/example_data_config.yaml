@@ -1,0 +1,33 @@
+outputs:
+  - filename: "input_conversations/train.jsonl"
+    global_limit: 50000
+    sources:
+      - name: "sharegpt"
+        splits:
+          all: 0
+      - name: "ultrachat"
+        splits:
+          train_gen: 25000
+          train_sft: 25000
+      - name: "mtbench"
+        splits:
+          all: 0
+      - name: "daring-anteater"
+        splits:
+          all: 0
+      - name: "magpie"
+        splits:
+          300k: 0
+          500k: 0
+          1M: 0
+      - name: "nemotron-post-training-v2"
+        splits:
+          chat: 0
+          stem: 0
+          math: 0
+          code: 0
+          multilingual_ja: 0
+          multilingual_it: 0
+          multilingual_de: 0
+          multilingual_es: 0
+          multilingual_fr: 0
