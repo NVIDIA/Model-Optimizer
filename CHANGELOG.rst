@@ -1,17 +1,6 @@
 Changelog
 =========
 
-0.47 (2026-xx-xx)
-^^^^^^^^^^^^^^^^^
-
-**New Features**
-
-**Backward Breaking Changes**
-
-**Deprecations**
-
-**Bug Fixes**
-
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
 
