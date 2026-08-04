@@ -7,9 +7,12 @@ on:
     branches: [main, release/*, feature/*]
     paths:
       - ".github/workflows/unit_tests.yml"
+      - "examples/puzzletron/**"
       - "modelopt/**"
       - "noxfile.py"
       - "pyproject.toml"
+      - "puzzletron_orchestrator/**"
+      - "puzzletron_setup/**"
       - "tests/unit/**"
       - "tools/launcher/**"
       - ".agents/skills/**"
@@ -38,11 +41,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
-      puzzletron_changed: ${{ steps.puzzletron_changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
+      puzzletron_changed: >-
+        ${{ steps.puzzletron_base.outputs.any_changed ||
+          steps.puzzletron_changed.outputs.any_changed ||
+          steps.puzzletron_non_pr.outputs.any_changed }}
     steps:
       - id: non-pr
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: echo "any_changed=true" >> $GITHUB_OUTPUT
+        if: github.event_name != 'pull_request'
+        run: echo "any_changed=true" >> "$GITHUB_OUTPUT"
+      - id: puzzletron_non_pr
+        if: >-
+          github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/feature/puzzletron_v2')
+        run: echo "any_changed=true" >> "$GITHUB_OUTPUT"
+      - id: puzzletron_base
+        if: github.event_name == 'pull_request' && github.base_ref == 'feature/puzzletron_v2'
+        run: echo "any_changed=true" >> "$GITHUB_OUTPUT"
       - if: github.event_name == 'pull_request'
         uses: actions/checkout@v6
         with:
@@ -79,6 +93,103 @@ jobs:
             puzzletron_orchestrator/**
             puzzletron_setup/**
             tests/unit/torch/puzzletron/**
+  puzzletron_v2:
+    name: Puzzletron v2 CPU tests
+    if: needs.check-file-changes.outputs.puzzletron_changed == 'true'
+    needs: [check-dco, check-file-changes]
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/ubuntu-setup
+        with:
+          python-version: "3.12"
+      - name: Run the dedicated Puzzletron v2 CPU suite
+        id: puzzletron_tests
+        env:
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+          COVERAGE_FILE: ${{ github.workspace }}/.coverage
+        run: pip install nox uv && nox -s puzzletron_v2
+      - name: Publish Puzzletron v2 test summary
+        if: ${{ always() }}
+        env:
+          TEST_RESULT: ${{ steps.puzzletron_tests.outcome }}
+        run: |
+          if [[ "$TEST_RESULT" == "success" ]]; then
+            heading="Puzzletron v2 CPU CI passed"
+            detail="The dedicated tests/unit/torch/puzzletron suite passed against the pinned runtime."
+          else
+            heading="Puzzletron v2 CPU CI did not pass"
+            detail="The dedicated tests/unit/torch/puzzletron session needs attention."
+          fi
+
+          {
+            echo "## $heading"
+            echo
+            echo "$detail"
+            echo
+            echo "This lane runs only \`tests/unit/torch/puzzletron\`; the regular unit matrix continues to run all other \`tests/unit\` tests."
+            echo
+            echo "The job also verifies dependency consistency and the exact versions recorded in \`examples/puzzletron/ci_environment.json\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=$heading::$detail"
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: puzzletron
+          fail_ci_if_error: true
+          skip_validation: true
+          verbose: true
+  puzzletron_v2_pr_required_check:
+    name: Puzzletron v2 CI / required check
+    if: ${{ github.event_name == 'pull_request' && always() }}
+    needs: [check-file-changes, puzzletron_v2]
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish required-check result
+        env:
+          CHANGE_DETECTION_RESULT: ${{ needs.check-file-changes.result }}
+          PUZZLETRON_CHANGED: ${{ needs.check-file-changes.outputs.puzzletron_changed }}
+          PUZZLETRON_TEST_RESULT: ${{ needs.puzzletron_v2.result }}
+        run: |
+          if [[ "$CHANGE_DETECTION_RESULT" != "success" ]]; then
+            heading="Puzzletron v2 CI could not determine applicability"
+            detail="Change detection did not succeed, so this check cannot safely pass."
+            conclusion="failure"
+          elif [[ "$PUZZLETRON_CHANGED" != "true" ]]; then
+            heading="Puzzletron v2 CPU CI was not required"
+            detail="This pull request neither targets feature/puzzletron_v2 nor changes a Puzzletron v2 CI dependency path."
+            conclusion="success"
+          elif [[ "$PUZZLETRON_TEST_RESULT" == "success" ]]; then
+            heading="Puzzletron v2 CPU CI passed"
+            detail="The dedicated tests/unit/torch/puzzletron suite passed against the pinned runtime."
+            conclusion="success"
+          else
+            heading="Puzzletron v2 CPU CI failed"
+            detail="The dedicated tests/unit/torch/puzzletron job concluded with: $PUZZLETRON_TEST_RESULT."
+            conclusion="failure"
+          fi
+
+          {
+            echo "## $heading"
+            echo
+            echo "$detail"
+            echo
+            echo "This stable check runs the dedicated Puzzletron v2 suite for every pull request into \`feature/puzzletron_v2\`; other branches retain path-aware applicability."
+            echo "The regular unit matrix continues to cover all other unit tests."
+            echo "The existing unit aggregate also observes this lane until branch protection explicitly adopts this standalone check."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=$heading::$detail"
+
+          if [[ "$conclusion" == "failure" ]]; then
+            exit 1
+          fi
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
@@ -153,99 +264,6 @@ jobs:
       - uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
         run: pip install nox uv && nox -s "partial_unit(subset='${{ matrix.test-env }}')"
-  puzzletron_v2:
-    name: Puzzletron v2 CPU tests
-    if: needs.check-file-changes.outputs.puzzletron_changed == 'true'
-    needs: [check-dco, check-file-changes]
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/ubuntu-setup
-        with:
-          python-version: "3.12"
-      - name: Run tests against the pinned Puzzletron runtime
-        id: puzzletron_tests
-        env:
-          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-          COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: pip install nox uv && nox -s puzzletron_v2
-      - name: Publish Puzzletron v2 test summary
-        if: ${{ always() }}
-        env:
-          TEST_RESULT: ${{ steps.puzzletron_tests.outcome }}
-        run: |
-          if [[ "$TEST_RESULT" == "success" ]]; then
-            heading="Puzzletron v2 CPU CI passed"
-            detail="All CPU-eligible Puzzletron v2 unit tests passed against the pinned runtime."
-          else
-            heading="Puzzletron v2 CPU CI did not pass"
-            detail="The pinned-runtime Puzzletron v2 unit-test session needs attention."
-          fi
-
-          {
-            echo "## $heading"
-            echo
-            echo "$detail"
-            echo
-            echo "The job also verifies dependency consistency and the exact versions recorded in \`examples/puzzletron/ci_environment.json\`."
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice title=$heading::$detail"
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          flags: puzzletron
-          fail_ci_if_error: true
-          skip_validation: true
-          verbose: true
-  puzzletron_v2_pr_required_check:
-    name: Puzzletron v2 CI / required check
-    if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, puzzletron_v2]
-    permissions: {}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish required-check result
-        env:
-          CHANGE_DETECTION_RESULT: ${{ needs.check-file-changes.result }}
-          PUZZLETRON_CHANGED: ${{ needs.check-file-changes.outputs.puzzletron_changed }}
-          PUZZLETRON_TEST_RESULT: ${{ needs.puzzletron_v2.result }}
-        run: |
-          if [[ "$CHANGE_DETECTION_RESULT" != "success" ]]; then
-            heading="Puzzletron v2 CI could not determine applicability"
-            detail="Change detection did not succeed, so this check cannot safely pass."
-            conclusion="failure"
-          elif [[ "$PUZZLETRON_CHANGED" != "true" ]]; then
-            heading="Puzzletron v2 CPU CI was not required"
-            detail="This pull request does not change a Puzzletron v2 CI dependency path."
-            conclusion="success"
-          elif [[ "$PUZZLETRON_TEST_RESULT" == "success" ]]; then
-            heading="Puzzletron v2 CPU CI passed"
-            detail="All CPU-eligible Puzzletron v2 tests passed against the pinned runtime."
-            conclusion="success"
-          else
-            heading="Puzzletron v2 CPU CI failed"
-            detail="The dedicated pinned-runtime job concluded with: $PUZZLETRON_TEST_RESULT."
-            conclusion="failure"
-          fi
-
-          {
-            echo "## $heading"
-            echo
-            echo "$detail"
-            echo
-            echo "This stable aggregate is suitable for branch rules that require Puzzletron v2 CPU validation."
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice title=$heading::$detail"
-
-          if [[ "$conclusion" == "failure" ]]; then
-            exit 1
-          fi
   launcher:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
@@ -283,7 +301,7 @@ jobs:
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [check-file-changes, linux, windows, multi-version, partial-install, puzzletron_v2_pr_required_check, launcher, skills]
+    needs: [check-file-changes, linux, windows, multi-version, partial-install, puzzletron_v2, launcher, skills]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
@@ -295,5 +313,6 @@ jobs:
             needs.partial-install.result != 'success' ||
             needs.launcher.result != 'success' ||
             needs.skills.result != 'success'
-          )) || needs.puzzletron_v2_pr_required_check.result != 'success' }}
+          )) || (needs.check-file-changes.outputs.puzzletron_changed == 'true' &&
+            needs.puzzletron_v2.result != 'success') }}
         run: exit 1
