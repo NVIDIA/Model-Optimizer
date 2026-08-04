@@ -817,7 +817,9 @@ def export_quantized(
     default_padding_side,
     default_pad_token,
 ):
-    with torch.inference_mode():
+    # Not inference_mode: the FSDP2 path gathers full params in this context and
+    # inference tensors break the subsequent state_dict() -> param.detach().
+    with torch.no_grad():
         if model_type is None:
             print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
             model_type = f"unknown:{type(language_model).__name__}"
