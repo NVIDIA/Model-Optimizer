@@ -111,15 +111,18 @@ def _restore_qtensor_wrappers(model, model_path):
         if not q_tensor_state:
             continue
         for name, module in model.named_modules():
-            if (
-                isinstance(module, RealQuantLinear)
-                and name in q_tensor_state
-                and not isinstance(module.weight, QTensorWrapper)
-            ):
-                module._parameters["weight"] = QTensorWrapper(
-                    qtensor=module.weight.data,
-                    metadata=q_tensor_state[name]["metadata"],
-                )
+            if not isinstance(module, RealQuantLinear) or isinstance(module.weight, QTensorWrapper):
+                continue
+            # QLoRA: adapters are loaded on top of the compressed base checkpoint, so PEFT has
+            # re-parented the quantized linear as `<name>.base_layer` while `q_tensor_state` is
+            # still keyed by the unwrapped name it was saved with.
+            key = name if name in q_tensor_state else name.removesuffix(".base_layer")
+            if key not in q_tensor_state:
+                continue
+            module._parameters["weight"] = QTensorWrapper(
+                qtensor=module.weight.data,
+                metadata=q_tensor_state[key]["metadata"],
+            )
 
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
