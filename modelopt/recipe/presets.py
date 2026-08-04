@@ -15,8 +15,8 @@
 
 """PTQ quant-config preset discovery shared by the PTQ example scripts.
 
-The example PTQ entry points (``examples/llm_ptq/hf_ptq.py``,
-``examples/llm_ptq/multinode_ptq.py``, ``examples/megatron_bridge/quantize.py``)
+The example PTQ entry points (``examples/hf_ptq/hf_ptq.py``,
+``examples/hf_ptq/multinode_ptq.py``, ``examples/megatron_bridge/quantize.py``)
 expose a ``--qformat`` / ``--kv_cache_qformat`` (``--quant_cfg`` /
 ``--kv_cache_quant`` for Megatron-Bridge) CLI vocabulary. Rather than hardcoding a
 name → config table in each script, the vocabulary is discovered by listing the

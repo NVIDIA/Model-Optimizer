@@ -20,6 +20,7 @@ TODO: Consider moving this a separate module dedicated for scoring
 
 # mypy: ignore-errors
 
+import gc
 import json
 import warnings
 from functools import partial

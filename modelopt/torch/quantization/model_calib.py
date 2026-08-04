@@ -15,6 +15,7 @@
 
 """Calibration utilities."""
 
+import fnmatch
 import math
 import time
 import warnings
@@ -28,20 +29,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
-from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -53,23 +55,16 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     persistent_materialization,
-    promote_nvfp4_static_quantizers,
+    promote_static_block_weight_quantizers,
 )
 from .utils.calib_utils import _GPTQ_HELPER_REGISTRY, GPTQHelper
-
-try:
-    from .plugins.megatron import _check_nvfp4_static_tp_supported
-except ImportError:
-
-    def _check_nvfp4_static_tp_supported(model: nn.Module) -> None:  # no-op without megatron
-        return
-
 
 __all__ = [
     "CalibratorFactory",
     "awq",
     "layerwise_calibrate",
     "local_hessian_calibrate",
+    "lsq",
     "max_calibrate",
     "smoothquant",
     "svdquant",
@@ -83,7 +78,7 @@ def _collect_weight_stats(quantizer: nn.Module, weight: torch.Tensor) -> None:
 def _is_calibrated_nvfp4_static(q) -> bool:
     """True iff ``q`` is an enabled NVFP4-static weight quantizer with ``_amax`` set."""
     return (
-        isinstance(q, NVFP4StaticQuantizer)
+        isinstance(q, StaticBlockScaleQuantizer)
         and not q._disabled
         and q.is_nvfp4_static
         and getattr(q, "_amax", None) is not None
@@ -138,15 +133,16 @@ def _check_grouped_weight_global_amax_synced(model: nn.Module) -> None:
 
 
 def _finalize_with_shared_state(model: nn.Module, weight_patterns: list[str]) -> None:
-    """Finalize quantization from the attached shared state: aggregate, promote, verify.
+    """Finalize calibrated static quantizers and attached shared state.
 
     Aggregates each fusible group's shared weight ``global_amax`` and promotes it onto the
     member NVFP4-static quantizers, so siblings read the unified value instead of their own
-    ``_amax``; under the default patterns, verifies the name groups were actually synced.
-    Call once ``_amax`` is final: single-process, or after the distributed amax sync.
+    ``_amax``. Promotes static-block weight quantizers after their ``_amax`` is final. Under
+    the default patterns, verifies the name groups were actually synced. Call once ``_amax``
+    is final: single-process, or after the distributed amax sync.
     """
     SharedWeightGlobalAmaxState.populate(model)
-    promote_nvfp4_static_quantizers(model)
+    promote_static_block_weight_quantizers(model)
     # Under the default patterns, verify the fusible name groups were actually synced.
     if weight_patterns == list(SHARED_PATTERNS):
         _check_grouped_weight_global_amax_synced(model)
@@ -258,6 +254,51 @@ def _should_sync_amax_across_ep(
     return True
 
 
+def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
+    """Return True if any enabled quantizer still needs a calibration forward pass.
+
+    Weight quantizers are calibrated directly on the weight tensors by
+    :func:`weight_only_quantize`, so they never need the data forward. An activation-side
+    quantizer (input/output/BMM) needs it when it collects data-driven statistics during the
+    forward, which :func:`finish_stats_collection` does in two ways:
+
+    - **amax**: loaded for a quantizer that has a calibrator and is not dynamic (top-level
+      ``type: dynamic``), MX (MXFP4/MXFP8, whose E8M0 per-block scales are dynamic and which
+      carry no per-tensor amax), or pinned to a constant amax
+      (``use_constant_amax`` / ``constant_amax``);
+    - **static bias**: loaded for a quantizer with a static ``bias_calibrator``. Constant-amax
+      quantizers are exempted from calibration entirely (they ``continue`` before the bias
+      block), so only non-constant quantizers with a static bias need the forward for it.
+
+    When this returns False (e.g. an experts-only recipe whose activation quantizers all use
+    ``constant_amax``), the calibration forward can be skipped entirely and only weight
+    calibration is performed.
+    """
+    for name, module in model.named_modules():
+        if not isinstance(module, TensorQuantizer) or module._disabled:
+            continue
+        # Weight quantizers (incl. SequentialQuantizer stages named ``weight_quantizer.<i>``)
+        # are calibrated on the weight tensor directly, not via the data forward.
+        if any(part.endswith("weight_quantizer") for part in name.split(".")):
+            continue
+
+        is_constant = (
+            module._use_constant_amax or getattr(module, "_constant_amax", None) is not None
+        )
+
+        # A static bias calibrator collects data during the forward. Constant-amax quantizers
+        # skip bias calibration, so only non-constant quantizers with a static bias need it.
+        if not is_constant and module.bias_calibrator is not None and module.bias_type == "static":
+            return True
+
+        # amax is data-driven only for a calibrated, non-dynamic, non-MX, non-constant quantizer.
+        if is_constant or module._dynamic or module.is_mx_format:
+            continue
+        if getattr(module, "_calibrator", None) is not None:
+            return True
+    return False
+
+
 @torch.no_grad()
 def max_calibrate(
     model: nn.Module,
@@ -265,6 +306,7 @@ def max_calibrate(
     distributed_sync=True,
     sync_expert_weight_amax=False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    skip_forward_without_activation_calib: bool = False,
 ):
     """Calibrate the model using max.
 
@@ -278,6 +320,11 @@ def max_calibrate(
         shared_states: Optional dict keyed by shared-state name. ``"weight_global_amax"`` is
             implemented today and accepts ``{"patterns": [...]}``; omitted patterns use
             ``SHARED_PATTERNS``, while an empty list disables the state.
+        skip_forward_without_activation_calib: If True, skip the (potentially expensive)
+            ``forward_loop`` when no enabled quantizer needs data-driven activation statistics
+            (see :func:`_needs_activation_forward_for_max_calib`). Weight calibration still runs.
+            Only opt-in for the top-level ``max`` path; algorithms that always need activations
+            (MSE, local Hessian, SmoothQuant, SVDQuant, GPTQ) call this with the default False.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -296,7 +343,15 @@ def max_calibrate(
     enable_stats_collection(model)
     weight_only_quantize(model)
     if forward_loop is not None:
-        forward_loop(model)
+        if skip_forward_without_activation_calib and not _needs_activation_forward_for_max_calib(
+            model
+        ):
+            print_rank_0(
+                "max_calibrate: all enabled activation quantizers use constant/dynamic amax; "
+                "skipping the calibration forward pass (weight-only calibration)."
+            )
+        else:
+            forward_loop(model)
     finish_stats_collection(model)
 
     # Sync quantizer amax across local experts within each rank (for SequentialMLP)
@@ -305,7 +360,12 @@ def max_calibrate(
             module.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_expert_weight_amax)
 
     # Fail fast on NVFP4 static-block with TP>1 (sharded_state_dict treats _amax as replicated).
-    _check_nvfp4_static_tp_supported(model)
+    try:
+        from .plugins.megatron import _check_nvfp4_static_tp_supported
+    except ImportError:
+        pass
+    else:
+        _check_nvfp4_static_tp_supported(model)
 
     if not distributed_sync:
         # Single-process: _amax is final.
@@ -316,7 +376,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                if isinstance(child, TensorQuantizer | SequentialQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
@@ -335,7 +395,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                if isinstance(child, TensorQuantizer | SequentialQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
@@ -463,16 +523,19 @@ def _make_weight_mse_calibrator(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+    hessian: torch.Tensor | None = None,
 ) -> _Calibrator | None:
     """Create the MSE calibrator for one eligible weight quantizer (``None`` if ineligible).
 
-    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting);
-    when set, NVFP4's Triton fast path is bypassed for the reference sweep.
+    ``error_func`` overrides the squared-error metric (local-Hessian's per-block weighting).
+    ``hessian`` (the same per-cin-block metric as a raw tensor) enables NVFP4's Hessian-weighted
+    Triton fast path; ``error_func`` then serves only as the reference fallback.
     """
     if (
         not isinstance(weight_quantizer, TensorQuantizer)
         or not weight_quantizer.is_enabled
         or weight_quantizer._dynamic
+        or weight_quantizer.is_mx_format  # MX formats do not use a global scale
         or weight_quantizer._calibrator is None
         or getattr(weight_quantizer, "_amax", None) is None
     ):
@@ -503,6 +566,7 @@ def _make_weight_mse_calibrator(
                 global_amax=weight_quantizer.global_amax,
                 quant_func=quant_func,
                 error_func=error_func,
+                hessian=hessian,
             )
         # fp8_scale_sweep applies only to registered backends and static NVFP4; skip others.
         return None
@@ -575,11 +639,14 @@ def _mse_calibrate_weights(
     stop_multiplier: float,
     fp8_scale_sweep: bool,
     error_func_for: Callable[[TensorQuantizer], Callable | None] | None = None,
+    hessian_for: Callable[[TensorQuantizer], torch.Tensor | None] | None = None,
 ):
     """Run MSE weight calibration over all eligible quantizers (shared by mse / local-Hessian).
 
     ``error_func_for`` maps a weight quantizer to an optional per-weight error function
-    (local-Hessian's Hessian metric); ``None`` means plain squared error.
+    (local-Hessian's Hessian metric); ``None`` means plain squared error. ``hessian_for``
+    maps a weight quantizer to the same metric as a raw per-cin-block Hessian tensor,
+    enabling the Hessian-weighted Triton fast path.
     """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
@@ -590,6 +657,7 @@ def _mse_calibrate_weights(
         with enable_weight_access_and_writeback(parent_module, model, name_to_module):
             for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
                 error_func = error_func_for(weight_quantizer) if error_func_for else None
+                hessian = hessian_for(weight_quantizer) if hessian_for else None
                 cal = _make_weight_mse_calibrator(
                     weight_quantizer,
                     step_size,
@@ -597,6 +665,7 @@ def _mse_calibrate_weights(
                     stop_multiplier,
                     fp8_scale_sweep,
                     error_func=error_func,
+                    hessian=hessian,
                 )
                 if cal is None:
                     continue
@@ -626,6 +695,7 @@ class _LocalHessianAccumulator:
         # Not block-divisible -> no Hessian (falls back to plain MSE).
         self.is_enabled = cin % block_size == 0
         self.hessian_per_block: torch.Tensor | None = None
+        self._normalized_hessian: torch.Tensor | None = None
         self.num_samples = 0
 
     @torch.no_grad()
@@ -643,6 +713,20 @@ class _LocalHessianAccumulator:
             self.hessian_per_block += hessian_batch
         self.num_samples += input_tensor.numel() // self.cin
 
+    def normalized_hessian(self) -> torch.Tensor | None:
+        """Per-cin-block Hessian ``H / num_samples`` (``None`` if no samples).
+
+        Shared by both the Triton fast path and the reference ``error_func`` so the two
+        consume one tensor; cached because the accumulated buffer may be freed afterwards.
+        """
+        if (
+            self._normalized_hessian is None
+            and self.hessian_per_block is not None
+            and self.num_samples
+        ):
+            self._normalized_hessian = self.hessian_per_block / self.num_samples
+        return self._normalized_hessian
+
     def build_error_func(
         self, keep_buffer: bool = False
     ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None:
@@ -650,11 +734,11 @@ class _LocalHessianAccumulator:
 
         Frees the raw Hessian buffer unless ``keep_buffer`` (kept for debug inspection).
         """
-        if self.hessian_per_block is None or self.num_samples == 0:
+        hessian = self.normalized_hessian()
+        if hessian is None:
             return None
         cout = self.cout
         bs = self.block_size
-        hessian = self.hessian_per_block / self.num_samples
         if not keep_buffer:
             self.hessian_per_block = None
 
@@ -697,8 +781,9 @@ def _warn_local_hessian_fallback(name, weight, weight_quantizer, block_size, war
 
 def _is_quant_fused_experts(module: nn.Module) -> bool:
     """Whether ``module`` is a converted HF fused-MoE-experts wrapper with per-expert quantizers."""
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
     return hasattr(module, "_current_expert_idx") and hasattr(
-        module, "gate_up_proj_weight_quantizers"
+        module, f"{first_proj_attr}_weight_quantizers"
     )
 
 
@@ -742,11 +827,12 @@ def _register_local_hessian_input_hooks(model, name_to_module, capture, block_si
             handles.append(module.register_forward_pre_hook(_dense_hook))
         elif _is_quant_fused_experts(module):
             with enable_weight_access_and_writeback(module, model, name_to_module):
+                first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
                 for weight_name, quantizers_name, input_q_name in (
                     (
-                        "gate_up_proj",
-                        "gate_up_proj_weight_quantizers",
-                        "gate_up_proj_input_quantizer",
+                        first_proj_attr,
+                        f"{first_proj_attr}_weight_quantizers",
+                        f"{first_proj_attr}_input_quantizer",
                     ),
                     ("down_proj", "down_proj_weight_quantizers", "down_proj_input_quantizer"),
                 ):
@@ -855,10 +941,13 @@ def local_hessian_calibrate(
             "diverge under tensor/data parallelism. Treat local_hessian as single-rank for now."
         )
 
-    # Phase 3: build error funcs and run the shared MSE weight loop.
+    # Phase 3: weight search. Build error_funcs first so build_error_func caches the normalized
+    # Hessian (freeing the raw buffer) before normalized_hessian() reuses it; the fast path
+    # (tensor) and reference fallback (error_func) then share that one tensor.
     error_funcs = {
         qid: acc.build_error_func(keep_buffer=debug) for qid, acc in accumulators.items()
     }
+    hessians = {qid: acc.normalized_hessian() for qid, acc in accumulators.items()}
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     _mse_calibrate_weights(
         model,
@@ -868,19 +957,24 @@ def local_hessian_calibrate(
         stop_multiplier=stop_multiplier,
         fp8_scale_sweep=fp8_scale_sweep,
         error_func_for=lambda q: error_funcs.get(id(q)),
+        hessian_for=lambda q: hessians.get(id(q)),
     )
 
-    # Free the per-block Hessians (pinned by error_func closures) and the sweep's cached
-    # allocations so export starts from a defragmented allocator.
+    # Release the per-block Hessians (held by the error_func closures, calibrators, and the
+    # accumulators' cache) before empty_cache so export starts defragmented; keep only for debug.
     error_funcs.clear()
+    hessians.clear()
     for module in name_to_module.values():
         if isinstance(module, TensorQuantizer) and isinstance(module._calibrator, MseCalibrator):
             module._calibrator._error_func = None
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+            if isinstance(module._calibrator, NVFP4MSECalibrator):
+                module._calibrator._hessian = None
     if debug:
         model._local_hessian_accumulators = accumulators
+    else:
+        accumulators.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     print_rank_0("local_hessian: Calibration complete.")
 
@@ -889,8 +983,8 @@ def enable_stats_collection(model: nn.Module):
     """Enable stats collection for all quantizers in the model."""
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._use_constant_amax:
-                # use_constant_amax quantizers use a fixed amax and don't need calibration.
+            if module._use_constant_amax or module._constant_amax is not None:
+                # Quantizers with a constant amax use a fixed amax and don't need calibration.
                 # Disable quantization during calibration so it doesn't affect other quantizers.
                 module.disable_quant()
                 continue
@@ -907,8 +1001,8 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
         if not isinstance(module, TensorQuantizer) or module._disabled:
             continue
 
-        if module._use_constant_amax:
-            # Re-enable quantization for use_constant_amax quantizers disabled in enable_stats_collection.
+        if module._use_constant_amax or module._constant_amax is not None:
+            # Re-enable quantization for constant-amax quantizers disabled in enable_stats_collection.
             module.enable_quant()
             continue
 
@@ -1741,6 +1835,7 @@ def svdquant(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     lowrank: int = 32,
+    skip_layers: list[str] | None = None,
     **kwargs,
 ):
     """Lite version of SVDQuant.
@@ -1753,6 +1848,9 @@ def svdquant(
     See :class:`SVDQuantConfig <modelopt.torch.quantization.config.SVDQuantConfig>` for
     details on the remaining arguments.
     """
+
+    def is_skipped(name):
+        return any(fnmatch.fnmatch(name, pattern) for pattern in skip_layers or [])
 
     def postprocess(module, name):
         print_rank_0(f"SVD {name}")
@@ -1767,11 +1865,37 @@ def svdquant(
         module.input_quantizer.reset_amax()
 
     create_and_replace_svdquant_linear_on_the_fly(model=model)
+
+    # Modules matching `skip_layers` opt out of the SVDQuant algorithm but stay
+    # quantized: temporarily disable their quantizers so awq_lite neither smooths
+    # their weights nor attaches a pre_quant_scale, then re-enable them so the
+    # final max calibration collects their amax like a plain max recipe.
+    skipped_quantizers = []
+    if skip_layers:
+        for name, module in model.named_modules():
+            if (
+                is_quantized_linear(module)
+                and module.weight_quantizer.is_enabled
+                and is_skipped(name)
+            ):
+                print_rank_0(f"SVDQuant skips {name}; quantizing with max calibration.")
+                for quantizer in (module.weight_quantizer, module.input_quantizer):
+                    if quantizer.is_enabled:
+                        quantizer.disable()
+                        skipped_quantizers.append(quantizer)
+
     awq(model, forward_loop, "awq_lite", **kwargs)
+
+    for quantizer in skipped_quantizers:
+        quantizer.enable()
 
     name_to_module = dict(model.named_modules())
     for name, module in name_to_module.items():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+        if (
+            is_quantized_linear(module)
+            and module.weight_quantizer.is_enabled
+            and not is_skipped(name)
+        ):
             with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
@@ -1793,8 +1917,16 @@ def layerwise_calibrate(
     If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
+
+    ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
+    whether the cached inputs handed to layer N+1 come from a forward through
+    the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
+    temporarily disabled (False; matches non-layerwise max-calib semantics).
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
+    save_every = calib_kwargs.pop("save_every", 1)
+    calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
 
     if forward_loop is None:
         raise ValueError(
@@ -1812,15 +1944,31 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
-    ckpt = _CheckpointState.from_folder(checkpoint_dir, num_layers)
+    ckpt = _CheckpointState.from_folder(
+        checkpoint_dir,
+        num_layers,
+        save_every=save_every,
+        calib_mutates_weights=calib_mutates_weights,
+    )
     start_layer = ckpt.start_layer if ckpt else 0
 
-    input_getter = LayerActivationCollector(model)
-    input_getter._patch_all_layers(decoder_layers=transformer_layers)
+    layer_pbar = tqdm(
+        total=num_layers,
+        initial=start_layer,
+        desc="Layerwise calibration",
+        disable=not is_master(),
+        dynamic_ncols=True,
+    )
 
-    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+    def _set_layer_status(status: str):
+        layer_pbar.set_postfix_str(status, refresh=True)
+
+    input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
 
     try:
+        input_getter._patch_all_layers(decoder_layers=transformer_layers)
+        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+
         # Bootstrap: get first layer's inputs (or use resumed inputs).
         layer_inputs = input_getter.get_first_layer_inputs(
             start_layer, resumed_inputs, forward_loop
@@ -1848,25 +1996,45 @@ def layerwise_calibrate(
                             kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
-            with persistent_materialization(layer):
+            is_last = layer_idx + 1 >= num_layers
+
+            with persistent_materialization(layer, writeback=calib_mutates_weights):
+                # qdq_from_prev=False: capture before calib_func so the forward
+                # replay uses the original FP weights. Disable quantizers too in
+                # case any pre-calibration observer behavior would perturb the
+                # captured activations.
+                if not is_last and not qdq_from_prev:
+                    with set_quantizer_by_cfg_context(
+                        layer, [{"quantizer_name": "*", "enable": False}]
+                    ):
+                        next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                            layer, forward_loop
+                        )
+                    # cache_outputs left this layer in "run" mode with an empty
+                    # deque; reset so calib_func's replay hits the real forward.
+                    layer._layerwise_calib.mode = "original"
+
                 calib_func(layer, _layer_forward_loop, **calib_kwargs)
 
-            # Run one more forward to get next layer's inputs and set
-            # output_meta on the just-calibrated layer (via "run" mode).
-            is_last = layer_idx + 1 >= num_layers
-            if not is_last:
-                next_inputs = input_getter.cache_outputs_for_next_layer_calib(layer, forward_loop)
-            else:
-                next_inputs = None
+                # qdq_from_prev=True: capture after calib_func so the next layer
+                # sees QDQ error and any in-place weight updates from this layer.
+                if not is_last and qdq_from_prev:
+                    next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                        layer, forward_loop
+                    )
+                elif is_last:
+                    next_inputs = None
 
-            if ckpt:
-                ckpt.save(layer_idx, layer, model, transformer_layers, next_inputs)
+                if ckpt:
+                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
+            layer_pbar.update(1)
             del layer_inputs
             torch.cuda.empty_cache()
             layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
         input_getter._unpatch_all_layers()
+        layer_pbar.close()
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
@@ -1884,18 +2052,18 @@ def gptq(
 ):
     """GPTQ quantization.
 
-    Works in two modes depending on ``layerwise`` in the config:
+    Works in two modes depending on ``layerwise.enable`` in the config:
 
-    * **Layerwise** (``layerwise=True``): ``layerwise_calibrate`` calls this
-      function once per decoder layer with updated activations, producing more
-      accurate Hessian estimates.
-    * **Non-layerwise** (``layerwise=False``): called once on the full model.
-      All layers are quantized in parallel from the original activations.
+    * **Layerwise** (``layerwise.enable=True``): ``layerwise_calibrate`` calls
+      this function once per decoder layer with updated activations, producing
+      more accurate Hessian estimates.
+    * **Non-layerwise** (``layerwise.enable=False``): called once on the full
+      model. All layers are quantized in parallel from the original activations.
 
     Per-module steps:
 
     1. ``max_calibrate`` to set amax values from the current activations.
-    2. Promote eligible quantizers to ``NVFP4StaticQuantizer`` (two-level scaling).
+    2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
     3. Collect per-linear-layer Hessian matrices via forward hooks.
     4. Blockwise weight updates using the inverse Hessian to compensate for
        rounding error (the core GPTQ column-wise update).
@@ -1955,3 +2123,73 @@ def gptq(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
+
+
+def _run_scale_calibration(model, forward_loop, scale_algorithm):
+    """Run scale calibration."""
+    if scale_algorithm is None:
+        scale_algorithm = {"method": "mse"}
+
+    if isinstance(scale_algorithm, ModeloptBaseConfig):
+        scale_algorithm = scale_algorithm.model_dump(exclude_unset=True)
+
+    method = scale_algorithm.get("method")
+    algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
+    calib_funcs = {
+        "mse": mse_calibrate,
+        "local_hessian": local_hessian_calibrate,
+        "max": max_calibrate,
+    }
+    calib_funcs[method](model, forward_loop=forward_loop, **algo_kwargs)
+
+
+@torch.no_grad()
+def lsq(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    learnable_amax: list | str = ("post",),
+    tied_amax: bool = False,
+    quantize_pre_scale: bool = True,
+    **kwargs,
+):
+    """Run scale calibration then convert to LSQ mode.
+
+    Uses separate pre (quant) and post (dequant) amax values.
+    Forward: ``w_q = Q_STE(w / s_pre) * s_post`` where ``s = amax / Q_max``.
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first.
+            Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
+            Defaults to {'method': 'mse'} if None.
+        learnable_amax: Which amax params are learnable: 'pre', 'post',
+            ['pre', 'post'], or [].
+        tied_amax: If True, pre and post share a single tensor.
+        quantize_pre_scale: If False, skip FP8 quantization for the LSQ pre scale.
+    """
+    _run_scale_calibration(model, forward_loop, scale_algorithm)
+
+    name_to_module = dict(model.named_modules())
+    seen_modules: set[int] = set()
+    seen_quantizers: set[int] = set()
+    for module in name_to_module.values():
+        if id(module) in seen_modules or not isinstance(module, QuantModule):
+            continue
+        seen_modules.add(id(module))
+        with enable_weight_access_and_writeback(module, model, name_to_module):
+            for weight, quantizer in module.iter_weights_for_calibration():
+                if id(quantizer) in seen_quantizers:
+                    continue
+                seen_quantizers.add(id(quantizer))
+                if not isinstance(quantizer, StaticBlockScaleQuantizer) or not hasattr(
+                    quantizer, "_amax"
+                ):
+                    continue
+                quantizer.enable_lsq(
+                    learnable_amax=learnable_amax,
+                    tied_amax=tied_amax,
+                    quantize_pre_scale=quantize_pre_scale,
+                    dtype=weight.dtype,
+                )

@@ -22,17 +22,11 @@ three-phase DMD2 alternation (student update / fake-score update / EMA step).
 
 Backbone: **Qwen-Image** (``Qwen/Qwen-Image``) — 4D ``image_latents``,
 :class:`QwenImageDMDPipeline` handles 2x2 patch packing / img_shapes /
-unpacking. Configs: ``configs/dmd2_qwen_image.yaml`` for the canonical
-real-data run (4-step + CFG + GAN); ``configs/dmd2_qwen_image_smoke.yaml``
-for the mock-data wiring smoke (no dataset required).
+unpacking. Config: ``configs/dmd2_qwen_image.yaml`` — the canonical
+real-data run (4-step + CFG + GAN).
 
 Launch::
 
-    # Mock-data wiring smoke (no real cache required).
-    torchrun --nproc-per-node=8 \\
-        examples/diffusers/fastgen/dmd2_finetune.py \\
-        --config examples/diffusers/fastgen/configs/dmd2_qwen_image_smoke.yaml
-    # Real-data formal training (canonical).
     torchrun --nproc-per-node=8 \\
         examples/diffusers/fastgen/dmd2_finetune.py \\
         --config examples/diffusers/fastgen/configs/dmd2_qwen_image.yaml
@@ -52,6 +46,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 # nemo_automodel is required to run this example (installed via requirements.txt). Wrap
 # the import in a clear, actionable error, but still re-raise so it fails loudly with a
@@ -66,6 +61,10 @@ except ImportError as exc:
         "dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt"
     ) from exc
+# Local sibling module (this example directory is on ``sys.path`` — see ``dmd2_finetune.py``).
+# Provides the FSDP2 partial-load-tolerant optimizer restore so the example does not depend
+# on a patched ``nemo_automodel.components.checkpoint.checkpointing``.
+from fastgen_checkpoint import make_optimizer_partial_load_tolerant
 from torch import nn
 
 import modelopt.torch.fastgen as mtf
@@ -139,7 +138,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
     Classifier-free guidance, the GAN discriminator branch, and real-data training are
     configurable via the ``dmd2:`` / ``data:`` YAML blocks — all enabled in the canonical
-    ``configs/dmd2_qwen_image.yaml`` and off in the mock-data smoke. See
+    ``configs/dmd2_qwen_image.yaml``. See
     ``examples/diffusers/fastgen/README.md`` for details.
     """
 
@@ -160,10 +159,6 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         #    self.dataloader / self.step_scheduler / self.checkpointer / etc. The parent's
         #    trailing call to self.load_checkpoint(self.restore_from) runs BEFORE our
         #    extras exist, so it only restores the student — that is intentional and safe.
-        #
-        #    For the mock-data smoke, ``data.dataloader._target_`` in the YAML points at
-        #    ``nemo_automodel.components.datasets.diffusion.build_mock_dataloader`` so the
-        #    parent wires up the mock dataloader for us — no swap needed.
         super().setup()
 
         # 2. Load the frozen teacher. Same from_pretrained path, same parallel_scheme, but
@@ -227,6 +222,58 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
     #  Training loop                                                     #
     # ------------------------------------------------------------------ #
 
+    def _rebuild_dataloader_for_resume(self, global_step: int) -> None:
+        """Reset the dataloader to the true data position when resuming (no-op if ``global_step==0``).
+
+        On resume the ``StatefulDataLoader``'s restored state does NOT advance past the
+        resume point -- re-checkpointing after a resume fails to capture progress, so each
+        window re-serves the same data slice (``_num_yielded`` climbs while the served
+        sample is identical; verified on production checkpoints and the harness). The one
+        reliably-restored counter is ``global_step``, so we discard the stuck loader state:
+        rebuild a FRESH ``StatefulDataLoader`` and skip the deterministic sampler to the
+        position implied by ``global_step`` -- epoch ``global_step // epoch_len``, skip
+        ``(global_step % epoch_len) * grad_acc`` batches. Not wrapped in try/except: the
+        inputs are a ``StatefulDataLoader``'s always-present attrs and the sampler's
+        ``set_epoch`` / ``_batches_to_skip``, so it cannot fail here, and silently falling
+        back to the stuck loader would reintroduce the re-serving bug. Regression test:
+        tests/examples/diffusers/fastgen/test_resume_dataloader.py.
+        """
+        epoch_len = int(getattr(self.step_scheduler, "epoch_len", 0) or 0)
+        grad_acc = int(getattr(self.step_scheduler, "grad_acc_steps", 1) or 1)
+        if epoch_len <= 0 or self.sampler is None or global_step <= 0:
+            return
+        cur_epoch = global_step // epoch_len
+        skip_batches = (global_step % epoch_len) * grad_acc
+        _old = self.dataloader
+        _kw = {
+            "collate_fn": getattr(_old, "collate_fn", None),
+            "num_workers": int(getattr(_old, "num_workers", 0) or 0),
+            "pin_memory": bool(getattr(_old, "pin_memory", False)),
+        }
+        if _kw["num_workers"] > 0:
+            _kw["prefetch_factor"] = getattr(_old, "prefetch_factor", 2)
+            _kw["persistent_workers"] = bool(getattr(_old, "persistent_workers", False))
+        # ``dataloader`` is already a tracked state key (registered by the parent setup);
+        # BaseRecipe.__setattr__ raises "State key 'dataloader' is already tracked" on a plain
+        # re-assignment. Update the underlying attribute directly so it stays tracked (its
+        # __state_tracked entry is unchanged) and the rebuilt loader is still checkpointed.
+        self.__dict__["dataloader"] = StatefulDataLoader(
+            _old.dataset, batch_sampler=self.sampler, **_kw
+        )
+        self.step_scheduler.epoch = cur_epoch
+        self.sampler.set_epoch(cur_epoch)
+        self.sampler._batches_to_skip = skip_batches
+        if is_main_process():
+            logging.info(
+                "[DMD2][resume-fix] fresh dataloader + sampler skip: epoch=%d "
+                "skip_batches=%d (global_step=%d epoch_len=%d grad_acc=%d)",
+                cur_epoch,
+                skip_batches,
+                global_step,
+                epoch_len,
+                grad_acc,
+            )
+
     def run_train_validation_loop(self) -> None:
         """Three-phase DMD2 alternation driven by ``step_scheduler``.
 
@@ -272,16 +319,19 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
         global_step = int(self.step_scheduler.step)
 
+        # On resume, discard the StatefulDataLoader's stuck restored state and reset the
+        # data position, epoch, and progress bar from the reliably-restored ``global_step``
+        # (see ``_rebuild_dataloader_for_resume``; regression-tested in
+        # tests/examples/diffusers/fastgen/test_resume_dataloader.py).
+        self._rebuild_dataloader_for_resume(global_step)
+
         for epoch in self.step_scheduler.epochs:
             if self.sampler is not None and hasattr(self.sampler, "set_epoch"):
                 self.sampler.set_epoch(epoch)
 
-            # On resume, the diffusion sampler's load_state_dict primes
-            # ``_batches_to_skip`` so the next ``__iter__`` skips already-yielded
-            # batches. Forward that to tqdm's ``initial=`` so the progress bar
-            # reads e.g. ``187/313`` instead of the misleading ``0/313`` (the
-            # sampler resets the counter to 0 on the next ``__iter__`` call,
-            # so reading it here is a one-shot for the resumed epoch only).
+            # Progress bar: mirror the sampler's pending skip on the resumed (first)
+            # epoch; the sampler zeroes it after the first __iter__, so later epochs
+            # start at 0 automatically.
             tqdm_initial = int(getattr(self.sampler, "_batches_to_skip", 0) or 0)
 
             if is_main_process():
@@ -289,7 +339,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
 
                 self.step_scheduler.dataloader = tqdm(
                     self.dataloader,
-                    desc=f"Epoch {epoch + 1}/{self.num_epochs}",
+                    desc=f"Epoch {epoch + 1}/{self.num_epochs} (global step {global_step})",
                     initial=tqdm_initial,
                 )
             else:
@@ -301,6 +351,13 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             fake_score_steps = 0
 
             for batch_group in self.step_scheduler:
+                # Read the live step counter so the student / fake-score phase matches a clean
+                # run exactly, including the first step after a resume. StepScheduler yields the
+                # batch then increments ``step``, so ``self.step_scheduler.step`` here is the step
+                # being processed; a ``global_step`` carried from the previous iteration lagged
+                # the phase by one, which made the first post-resume step take the student branch
+                # where a clean run takes fake_score.
+                global_step = int(self.step_scheduler.step)
                 is_student_phase = (global_step % cfg.student_update_freq) == 0
 
                 if is_student_phase:
@@ -407,8 +464,6 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
                     epoch_fake_score_loss += group_loss_mean
                     fake_score_steps += 1
 
-                global_step = int(self.step_scheduler.step)
-
                 if (
                     self.log_every
                     and self.log_every > 0
@@ -475,6 +530,14 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         so this method only resolves the path and delegates the student restore to the
         parent. The sidecars are restored later by ``_restore_dmd_extras``.
         """
+        # Upgrade our checkpointer instance in place so optimizer restores tolerate FSDP2
+        # partial shards. This single seam covers BOTH the parent student-optimizer restore
+        # (``super().load_checkpoint`` below) and the later fake-score restore in
+        # ``_restore_dmd_extras``. Instance-scoped; model-state load stays strict. Replaces the
+        # upstream ``Checkpointer.load_optimizer`` ``allow_partial_load`` patch so stock
+        # ``nemo_automodel`` can be used unmodified.
+        make_optimizer_partial_load_tolerant(self.checkpointer)
+
         resolved = self._resolve_complete_dmd_checkpoint(restore_from)
         self.__dict__["_dmd2_resolved_restore_from"] = resolved
 
@@ -666,12 +729,12 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
             )
 
         if os.path.isfile(ema_path) and self._dmd_pipeline.ema is not None:
-            ema_state = torch.load(ema_path, map_location="cpu", weights_only=False)
+            ema_state = torch.load(ema_path, map_location="cpu")
             self._dmd_pipeline.ema.load_state_dict(ema_state)
             if is_main_process():
                 logging.info("[DMD2] restored ema_shadow <- %s", ema_path)
         if os.path.isfile(state_path):
-            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            state = torch.load(state_path, map_location="cpu")
             self._dmd_pipeline._iteration = int(state.get("iteration", 0))
             if is_main_process():
                 logging.info(
@@ -684,7 +747,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if self._discriminator is not None:
             disc_path = os.path.join(ckpt_dir, "discriminator.pt")
             if os.path.isfile(disc_path):
-                disc_state = torch.load(disc_path, map_location="cpu", weights_only=False)
+                disc_state = torch.load(disc_path, map_location="cpu")
                 self._discriminator.load_state_dict(disc_state)
                 if is_main_process():
                     logging.info("[DMD2] restored discriminator <- %s", disc_path)
@@ -693,7 +756,7 @@ class DMD2DiffusionRecipe(TrainDiffusionRecipe):
         if self._discriminator_optimizer is not None:
             disc_opt_path = os.path.join(ckpt_dir, "discriminator_optimizer.pt")
             if os.path.isfile(disc_opt_path):
-                disc_opt_state = torch.load(disc_opt_path, map_location="cpu", weights_only=False)
+                disc_opt_state = torch.load(disc_opt_path, map_location="cpu")
                 self._discriminator_optimizer.load_state_dict(disc_opt_state)
                 if is_main_process():
                     logging.info("[DMD2] restored discriminator optimizer <- %s", disc_opt_path)

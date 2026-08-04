@@ -26,6 +26,7 @@ import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.autocast.__main__ import get_parser, main
+from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.autocast.logging_config import configure_logging
 
 configure_logging("DEBUG")
@@ -321,3 +322,36 @@ def test_opset_parser_argument():
     # Test parsing without opset (should be None)
     args = parser.parse_args(["--onnx_path", "test.onnx"])
     assert args.opset is None
+
+
+@pytest.fixture
+def weakly_typed_topk_model():
+    # TopK k (5) exceeds the static axis size (3), so ONNX shape inference cannot resolve it.
+    x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [1, 3])
+    out = onnx.helper.make_tensor_value_info("out", onnx.TensorProto.FLOAT, [1, 5])
+    weight = onnx.numpy_helper.from_array(np.ones((1, 3), dtype=np.float32), name="weight")
+    k = onnx.numpy_helper.from_array(np.array([5], dtype=np.int64), name="k")
+    nodes = [
+        onnx.helper.make_node("Add", ["X", "weight"], ["a"], name="add"),
+        onnx.helper.make_node("TopK", ["a", "k"], ["vals", "inds"], axis=1, name="topk"),
+        onnx.helper.make_node("Cast", ["inds"], ["out"], to=onnx.TensorProto.FLOAT, name="cast"),
+    ]
+    graph = onnx.helper.make_graph(nodes, "weakly_typed_topk", [x], [out], [weight, k])
+    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 17)])
+    model.ir_version = 10
+    return model
+
+
+def test_convert_to_f16_falls_back_on_unresolvable_op(weakly_typed_topk_model):
+    """A weakly-typed graph ONNX shape inference cannot resolve must still convert.
+
+    The TopK ``k`` (5) exceeds the static axis size (3), so ONNX shape inference raises
+    in strict mode (the same failure class as NVBug 6058907). ``convert_to_f16`` -- the
+    path used by INT8 + ``--high_precision_dtype fp16`` quantization -- runs infer_types
+    in strict mode and must fall back to standalone type inference instead of crashing,
+    typing the TopK's int64 indices output that feeds the downstream Cast.
+    """
+    converted_model = convert_to_f16(weakly_typed_topk_model, keep_io_types=True)
+
+    onnx.checker.check_model(converted_model)
+    assert any(n.op_type == "TopK" for n in converted_model.graph.node)

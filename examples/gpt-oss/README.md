@@ -184,4 +184,4 @@ ModelOpt provides easy end to end QAT via [LLaMA-Factory](https://github.com/hiy
 
 ### Deployment of ModelOpt QAT/PTQ models beyond GPT-OSS
 
-ModelOpt supports exporting a wide variety of models after QAT/PTQ to TensorRT-LLM, vLLM, SGLang etc. Please refer to [llm_ptq](../llm_ptq).
+ModelOpt supports exporting a wide variety of models after QAT/PTQ to TensorRT-LLM, vLLM, SGLang etc. Please refer to [hf_ptq](../hf_ptq).

@@ -40,6 +40,9 @@ class _QuantEmbedding(QuantModule):
     table (weight) and the lookup output (an activation feeding downstream layers)
     are quantizable.
 
+    TODO: Remove the example-side ``*embed_tokens*quantizer`` rotation workaround
+    once rotation configs stop targeting embedding token/input paths.
+
     Quantizer roles:
         - ``weight_quantizer``: quantizes the embedding table (``self.weight``).
         - ``input_quantizer``: permanently disabled placeholder

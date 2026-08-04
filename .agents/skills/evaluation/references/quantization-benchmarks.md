@@ -17,16 +17,17 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 
 | Recipe | Benchmark | What it measures | Quant sensitivity |
 |--------|-----------|------------------|-------------------|
-| `tasks/mmlu_pro.md` | MMLU-Pro (`mmlu_pro_aa_v3`, simple-evals) | General knowledge (10-choice) | Low — knowledge recall is robust to precision loss; cheap sanity check, not a regression detector |
+| `tasks/mmlu_pro.md` | MMLU-Pro (`ns_mmlu_pro`, nemo-skills, `num_repeats: 1`) | General knowledge (10-choice boxed) | Low — knowledge recall is robust to precision loss; cheap sanity check, not a regression detector |
 | `tasks/aime_2025.md` | AIME 2025 (`AIME_2025_aa_v2`, simple-evals) | Competition math (`n_samples: 64`) | High — single-token errors in long chains-of-thought cascade into wrong final answers |
 | `tasks/livecodebench.md` | LiveCodeBench v6 (`ns_livecodebench`, nemo-skills) | Code generation (`num_repeats: 8`) | High — code is brittle to single-token errors (one wrong identifier = test failure) |
-| `tasks/aa/gpqa_diamond.md` | GPQA Diamond (`gpqa_diamond_aa_v3`, simple-evals) | Hard science MCQ (`n_samples: 16`) | High — MCQ format but answers require multi-step reasoning that quantization can derail |
+| `tasks/aa/gpqa_diamond.md` | GPQA Diamond (`ns_gpqa`, nemo-skills, `num_repeats: 16`) | Hard science MCQ (4-choice) | High — MCQ format but answers require multi-step reasoning that quantization can derail |
 | `tasks/aa/hle.md` | HLE | Humanity's Last Exam, text-only, judge-scored | High — hard reasoning at the frontier; small precision losses move borderline answers |
 | `tasks/aa/lcr.md` | LCR | Long-context reasoning (~120K input, judge-scored) | Very high — KV-cache and attention quant error accumulate across the full context window |
 | `tasks/aa/scicode.md` | SciCode | Multi-step scientific code + sandbox execution | Very high — reasoning + code + sandbox stacked; errors compound across subtasks |
 | `tasks/aa/ifbench.md` | IFBench | Instruction following | Low — format-compliance is robust; even aggressive FP4 usually shows only small drops |
 | `tasks/aa/mmmu_pro.md` | MMMU-Pro | Multimodal reasoning | VLM-only; usually Low/Medium when only the LLM is quantized (vision encoder/adapter typically stay BF16) |
 | `tasks/aa/tau2_bench_telecom.md` | Tau2-Bench Telecom | Agentic tool use (user-simulator + judge) | Medium-high — tool-call JSON is brittle, but user-sim + judge variance often dominates the signal |
+| `tasks/aa/omniscience.md` | AA-Omniscience | Knowledge reliability (`ns_omniscience`, nemo-skills, `num_repeats: 10`) — correct vs hallucinate vs abstain on obscure facts, judge-scored | Medium — measures the hallucination/abstention balance; aggressive precision loss can erode factual recall and shift the omni-index |
 
 ## Recommended sets by use case
 
@@ -34,7 +35,7 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 |----------|-----------|
 | Quick sanity check | GPQA |
 | Standard quant validation (text LLM) | GPQA, SciCode, LCR |
-| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom |
+| AA / Artificial Analysis suite (text LLM) | All `tasks/aa/` text tasks: GPQA, HLE, LCR, SciCode, IFBench, Tau2-Bench Telecom, AA-Omniscience |
 | AA / Artificial Analysis suite (multimodal) | AA text suite + MMMU-Pro |
 | Code-focused model | LiveCodeBench, SciCode |
 | Reasoning model | AIME 2025, GPQA, HLE |
@@ -52,11 +53,13 @@ to precision loss. The Artificial Analysis (AA) Index v2 suite under
 - **Repeat / sample counts** in the task recipes are tuned for low variance —
   do **not** lower them for quant comparisons, or noise will mask real
   regressions. The field name differs by harness: `n_samples` for simple-evals
-  (AIME `64`, GPQA `16`) and tau2-bench (Tau2 `8`); `num_repeats` for
-  nemo-skills (AA-LCR `16`, LiveCodeBench/SciCode `8`, IFBench `5`).
-- **Judge / user-simulator endpoints** are required by AA-LCR, HLE AA, and
-  Tau2-Bench Telecom. Keep the judge and (for Tau2) user-simulator models
-  fixed across baseline and quantized runs for apples-to-apples comparison.
+  (AIME `64`) and tau2-bench (Tau2 `8`); `num_repeats` for nemo-skills
+  (AA-LCR/GPQA `16`, AA-Omniscience `10`, LiveCodeBench/SciCode `8`, IFBench `5`,
+  MMLU-Pro `1`).
+- **Judge / user-simulator endpoints** are required by AA-LCR, HLE AA,
+  AA-Omniscience, and Tau2-Bench Telecom. Keep the judge and (for Tau2)
+  user-simulator models fixed across baseline and quantized runs for
+  apples-to-apples comparison.
 - **IFBench** is the least quant-sensitive in the set but still useful as a
   regression check for aggressive formats (NVFP4, INT4-AWQ).
 

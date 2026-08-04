@@ -1,5 +1,8 @@
 # GitHub Teams defined at https://github.com/orgs/NVIDIA/teams/modelopt-devs/teams
 
+# Default owner for any path not matched by a more specific rule below
+* @NVIDIA/modelopt-devs
+
 # Configuration files
 .github @NVIDIA/modelopt-setup-codeowners
 .gitlab @NVIDIA/modelopt-setup-codeowners

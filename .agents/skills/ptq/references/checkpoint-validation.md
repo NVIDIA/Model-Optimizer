@@ -1,12 +1,13 @@
 # Post-Quantization Checkpoint Validation
 
-Before treating an exported checkpoint as ready for deployment/evaluation, verify checkpoint size/bits, quantized-weight coverage, and metadata consistency. This is a gate, not a guideline: do not submit evals, start serving jobs, or mark the checkpoint ready until all required checks pass and the validation report is recorded.
+Before treating an exported checkpoint as ready for deployment/evaluation, verify checkpoint size/bits, quantized-weight coverage, metadata consistency, and serving readiness. This is a gate, not a guideline: do not submit evals, start a production serving job, or mark the checkpoint ready until all required checks, including the serving canary, pass and the validation report is recorded.
 
 ## Required checks
 
 1. The quantized checkpoint is smaller on disk than the baseline/source checkpoint and has lower estimated bits per weight. Record source size, output size, and output/source ratio. A partial-quantization recipe may not shrink every tensor, but it should still match the intended quantization coverage. If the size reduction is small or missing, explain why before proceeding.
 2. The weights that were actually quantized match what the requested qformat/recipe/config targeted. Record layer precision counts grouped by actual/declarative precision, such as NVFP4, FP8, INT4, BF16/unquantized excluded, unexpected unquantized, and declaration mismatches. Quantization config patterns may silently miss layers if the model uses non-standard naming — this only surfaces later as deployment failures when the serving framework tries to load unquantized weights as quantized.
 3. Metadata that should not change still matches the baseline/source model. Compare generation settings, tokenizer files, chat template, model architecture fields, max positions/context length, and special tokens; quantization should affect weights and quantization metadata, not silently change prompting or generation behavior. Record every diff and classify it as expected or blocking.
+4. The checkpoint is ready for downstream deployment and evaluation. Record the exact checkpoint workspace and path that both downstream skills must inherit. Inventory every model-compatibility change made during PTQ that may be required to load or serve the checkpoint: dependency upgrades, source patches, custom code, environment variables, and launcher or container changes. Record each category separately and write `none` for every category with no changes. Then invoke the **deployment** skill and use that same workspace, checkpoint path, and compatibility inventory to serve the checkpoint in the intended deployment environment. Run a canary query such as `What is the capital of France?` and require a valid response (for this example, one that identifies Paris). Record the target environment, serving framework and launch configuration, canary query, and response. Stop the canary service after validation unless the user asked to keep it running.
 
 ## Gate report
 
@@ -17,6 +18,9 @@ Before moving to deployment/evaluation, report a table in this shape:
 | Size vs source | `<output> GB / <source> GB = <ratio>x`; PASS only if the ratio matches the recipe's compression intent |
 | Layer precision counts | `<count> NVFP4 / <count> FP8 / <count> INT4 / <count> BF16-or-excluded / <count> unexpected / <count> declaration mismatches` |
 | Metadata | `no unexpected diffs` or list exact diffs |
+| Checkpoint workspace/path | `<exact workspace>` / `<exact checkpoint path>`; these exact locations must be inherited by deployment and evaluation |
+| PTQ compatibility requirements | `dependency upgrades: ...; source patches: ...; custom code: ...; environment variables: ...; launcher/container changes: ...`; use `none` for each category with no changes |
+| Serving canary | `<target environment>; <framework and launch configuration>; <query> -> <response>`; PASS only if the deployment skill starts the service from the recorded workspace/path with all recorded compatibility requirements and returns a valid response |
 
 Stop instead of proceeding if:
 
@@ -24,6 +28,10 @@ Stop instead of proceeding if:
 - Any layer group intended to be quantized has zero or unexpectedly low coverage.
 - Any layer has quantization metadata inconsistent with its declared precision.
 - Prompting, tokenizer, generation, architecture, context-length, or special-token metadata changed unexpectedly.
+- The exact checkpoint workspace or path is missing or is not preserved for deployment and evaluation.
+- Any PTQ compatibility category is omitted instead of recording its requirements or `none`.
+- The **deployment** skill cannot start the checkpoint in the intended deployment environment from the recorded workspace/path with the recorded compatibility requirements.
+- The serving canary does not return a valid response.
 - **VLM only:** any vision-tower weight (`model.visual.*`/`vision_tower.*`/`vision_model.*`) carries quantization scales (unless quantizing the ViT is intended). Generic `*mlp*`/`*experts*` recipes silently match the ViT MLPs → garbage image embeddings (~0% on MMMU-Pro) while text looks fine; the precision script above counts them as valid NVFP4, so run the VLM check below.
 
 ## VLM check — vision tower must stay unquantized

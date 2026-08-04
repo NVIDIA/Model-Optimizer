@@ -63,7 +63,7 @@ from modelopt.onnx.quantization.graph_utils import (
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
-from modelopt.onnx.quantization.ort_utils import update_trt_ep_support
+from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile, update_trt_ep_support
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
     remove_graph_input_q,
@@ -92,6 +92,25 @@ def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
         return "float4_e2m1fn"
     # For "int8", "fp8", etc., return as-is (fp8 falls back to BASE_MIN_OPSET which is correct)
     return quantize_mode
+
+
+def _realign_input_shapes_profile(
+    input_shapes_profile: Sequence[dict[str, str]],
+    original_calibration_eps: list[str],
+    calibration_eps: list[str],
+) -> Sequence[dict[str, str]]:
+    """Keep per-EP profiles aligned after ``calibration_eps`` is updated."""
+    assert len(input_shapes_profile) == len(original_calibration_eps), (
+        "Number of calibration EPs and number of input-shapes-profile don't match"
+    )
+    assert len(set(original_calibration_eps)) == len(original_calibration_eps), (
+        "Calibration EPs must be unique when input_shapes_profile is provided"
+    )
+    if original_calibration_eps == calibration_eps:
+        return input_shapes_profile
+
+    profiles_by_ep = dict(zip(original_calibration_eps, input_shapes_profile, strict=True))
+    return [profiles_by_ep.get(ep, {}) for ep in calibration_eps]
 
 
 def _preprocess_onnx(
@@ -358,8 +377,11 @@ def quantize(
     simplify: bool = False,
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
+    model_id: str | None = None,
+    trust_remote_code: bool = False,
     direct_io_types: bool = False,
     opset: int | None = None,
+    target_dla: bool = False,
     autotune: bool = False,
     autotune_output_dir: str | None = None,
     autotune_num_schemes_per_region: int = 50,
@@ -491,6 +513,12 @@ def quantize(
             If None of the calibration_eps require any such shapes profile for model inputs, then nothing needs to be
             set for this "input_shapes_profile" parameter.
             Default value is None.
+        model_id:
+            Hugging Face model ID, local config directory, or local ``config.json`` path used to infer input shape
+            profiles when ``input_shapes_profile`` is not provided.
+        trust_remote_code:
+            Whether to allow custom code to be loaded when resolving ``model_id`` with Hugging Face transformers.
+            Defaults to False.
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
@@ -498,6 +526,9 @@ def quantize(
             Target ONNX opset version for the quantized model. If None, uses required minimum opset
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
+        target_dla:
+            If True, enable Q/DQ nodes to be placed in all tensors for optimal DLA deployment. This only has
+            effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
@@ -599,7 +630,17 @@ def quantize(
         quantize_mode,
         opset,
     )
+    original_calibration_eps = list(calibration_eps)
     trt_plugins = update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins)  # type: ignore[arg-type]
+
+    if input_shapes_profile is not None:
+        input_shapes_profile = _realign_input_shapes_profile(
+            input_shapes_profile, original_calibration_eps, calibration_eps
+        )
+    elif model_id:
+        input_shapes_profile = create_input_shapes_profile(
+            model_id, calibration_eps, trust_remote_code=trust_remote_code
+        )
 
     if calibration_data_reader is None:
         # Use random scales if calibration data is not supplied
@@ -621,16 +662,18 @@ def quantize(
     # MatMuls in MHA pattern.
     # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
     # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
-    nodes_to_exclude = find_nodes_from_mha_to_exclude(
-        onnx_path,
-        use_external_data_format,
-        nodes_to_exclude,
-        disable_mha_qdq,
-        quantize_mode,
-        intermediate_generated_files,
-        calibration_data_reader,
-        calibration_eps,
-    )
+    if not (target_dla and quantize_mode == "int8"):
+        nodes_to_exclude = find_nodes_from_mha_to_exclude(
+            onnx_path,
+            use_external_data_format,
+            nodes_to_exclude,
+            disable_mha_qdq,
+            quantize_mode,
+            intermediate_generated_files,
+            calibration_data_reader,
+            calibration_eps,
+            input_shapes_profile,
+        )
 
     if calibrate_per_node and not calibration_shapes:
         calibration_shapes = get_input_shapes(onnx_path)
@@ -665,6 +708,7 @@ def quantize(
             kwargs["no_quantize_inputs"] = no_quantize_inputs
             kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
 
+        kwargs["target_dla"] = target_dla
         quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
         onnx_model = quantize_func(
             onnx_path=onnx_path,
@@ -691,6 +735,7 @@ def quantize(
             direct_io_types=direct_io_types,
             opset=opset,
             autotune=autotune,
+            input_shapes_profile=input_shapes_profile,
             **kwargs,
         )
 

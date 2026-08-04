@@ -13,108 +13,96 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Custom vLLM worker for sparse attention.
-
-``SparseAttnWorker``: Replaces ``FlashAttentionImpl`` with
-``ModelOptSparseAttentionImpl`` on each Attention module after model loading.
-The sparse impl uses the ModelOpt Triton kernel for sparse prefill launches.
-Decode-only launches and launches without active sparse work delegate back to
-vLLM FlashAttention.
-
-Configuration flows exclusively through the loaded checkpoint's
-``sparse_attention_config`` block (written by ModelOpt's HF export). If the
-checkpoint has no such block, the worker logs a message and passes through
-unchanged.
-
-Quantization combined with sparse attention is not handled by this worker
-and will land in a follow-up PR once the combined path is tested.
-
-Usage:
-    python vllm_serve_sparse_attn.py <path/to/modelopt-exported-ckpt>
-"""
-
-import importlib
-
-try:
-    _has_legacy_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_legacy_attention_layer = False
-
-if _has_legacy_attention_layer:
-    from vllm.attention.layer import Attention as VLLMAttention
-else:
-    from vllm.model_executor.layers.attention import Attention as VLLMAttention
+"""vLLM worker lifecycle wiring for ModelOpt attention transforms."""
 
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
-from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_config import (
-    load_from_checkpoint_metadata,
-    match_sparse_config,
-)
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
-    _build_sparse_kw,
-    _clone_sparse_impl,
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm_runtime import (
+    install_vllm_nvfp4_attention,
+    install_vllm_sparse_attention_from_checkpoint,
 )
 
+__all__ = ["SparseAttnWorker", "QuantSparseAttnWorker"]  # noqa: RUF022
 
-def _replace_attention_impl(worker):
-    """Replace FlashAttentionImpl with ModelOptSparseAttentionImpl on all Attention layers.
+_QUANT_FORMAT_KEYS = ("q_format", "k_format", "p_format", "v_format")
 
-    The sole configuration source is the checkpoint's ``sparse_attention_config``
-    metadata. No-op if the checkpoint has no such block.
-    """
-    hf_config = getattr(worker.model_runner.model_config, "hf_config", None)
-    detected = load_from_checkpoint_metadata(hf_config)
-    if detected is None:
+
+def _unwrapped_model(worker):
+    model = worker.model_runner.model
+    return model.unwrap() if hasattr(model, "unwrap") else model
+
+
+def _print_install_report(policy, report) -> None:
+    if report.installed_count:
+        if policy != "Sparse attention":
+            print(
+                f"[ModelOpt] Installed {policy} (quant+sparse) on "
+                f"{report.installed_count} layers: {dict(report.backend_counts)}"
+            )
+        else:
+            if report.sparse_algorithm:
+                print(f"[ModelOpt] Sparse attention config: algo -> {report.sparse_algorithm}")
+            print(
+                f"[ModelOpt] Sparse attention: replaced impl on {report.installed_count} "
+                f"attention layers: {dict(report.backend_counts)}"
+            )
+    elif report.sparse_algorithm:
+        print(
+            f"[ModelOpt] Sparse attention config {report.sparse_algorithm} matched no active "
+            "attention layers; vLLM remains unchanged"
+        )
+    else:
         print(
             "[ModelOpt] No sparse_attention_config found in the checkpoint; "
-            "skipping sparse attention. Run examples/llm_sparsity/"
-            "attention_sparsity/hf_sa.py to calibrate and export a checkpoint "
-            "with the config embedded."
+            "skipping sparse attention. Run examples/llm_sparsity/attention_sparsity/"
+            "hf_sa.py to calibrate and export a checkpoint with the config embedded."
         )
-        return
-    cfg, preset_name = detected
-    print(f"[ModelOpt] Sparse attention config: algo -> {preset_name}")
-
-    model = worker.model_runner.model
-    if hasattr(model, "unwrap"):
-        model = model.unwrap()
-
-    patched = 0
-    for name, module in model.named_modules():
-        if not isinstance(module, VLLMAttention):
-            continue
-
-        layer_cfg = match_sparse_config(name, cfg)
-        if layer_cfg is None or not layer_cfg.get("enable", True):
-            continue
-
-        sparse_kw = _build_sparse_kw(layer_cfg)
-        if not sparse_kw:
-            # Keep vLLM's original impl when the exported layer config does not
-            # enable any sparse feature.
-            continue
-        new_impl = _clone_sparse_impl(module.impl)
-        new_impl.sparse_kw = sparse_kw
-        module.impl = new_impl
-        patched += 1
-    print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
-
-
-# ---------------------------------------------------------------------------
-# Workers
-# ---------------------------------------------------------------------------
 
 
 class SparseAttnWorker(BaseWorker):
-    """vLLM worker that uses the ModelOpt sparse attention backend.
-
-    Replaces FlashAttentionImpl with ModelOptSparseAttentionImpl on each
-    Attention module right after model loading — before any forward pass
-    (including determine_available_memory profiling).
-    """
+    """Install checkpoint-driven sparse attention after model loading."""
 
     def load_model(self, *args, **kwargs) -> None:
-        """Load model, then replace attention impl with sparse variant."""
+        """Load the model, then install checkpoint-configured attention."""
         super().load_model(*args, **kwargs)
-        _replace_attention_impl(self)
+        report = install_vllm_sparse_attention_from_checkpoint(self.model_runner)
+        _print_install_report("Sparse attention", report)
+
+
+class QuantSparseAttnWorker(BaseWorker):
+    """Install quantized attention plus optional checkpoint sparsity.
+
+    Per-operand formats come from vLLM's ``--additional-config``; absent keys
+    default to NVFP4 on all four operands (Q/K/P/V)::
+
+        --additional-config '{"modelopt_attn_quant": {"p_format": "fp8", "v_format": "fp8"}}'
+    """
+
+    def _quant_formats(self) -> dict[str, str]:
+        additional = getattr(self.vllm_config, "additional_config", None) or {}
+        formats = additional.get("modelopt_attn_quant", {})
+        unknown = set(formats) - set(_QUANT_FORMAT_KEYS)
+        if unknown:
+            raise ValueError(
+                f"unknown modelopt_attn_quant keys {sorted(unknown)}; "
+                f"allowed: {list(_QUANT_FORMAT_KEYS)}"
+            )
+        return dict(formats)
+
+    def load_model(self, *args, **kwargs) -> None:
+        """Load the model, then install the configured attention quant recipe."""
+        super().load_model(*args, **kwargs)
+        formats = self._quant_formats()
+        report = install_vllm_nvfp4_attention(self.model_runner, sparse_cfg="checkpoint", **formats)
+        policy = "NVFP4 attention" if not formats else f"Quant attention ({formats})"
+        _print_install_report(policy, report)
+
+    def determine_available_memory(self) -> int:
+        """Profile memory without compiling the dynamically converted modules."""
+        # Sparse-only imports must remain independent of quantization-specific APIs.
+        import torch
+
+        from modelopt.torch.quantization.plugins.vllm import disable_compilation
+
+        with torch.inference_mode(), disable_compilation(_unwrapped_model(self)):
+            return BaseWorker.determine_available_memory(self)
