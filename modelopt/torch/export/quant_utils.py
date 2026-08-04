@@ -991,18 +991,10 @@ def postprocess_state_dict(
         "weight_shape",
     ]
 
-    # For modelopt-trained LoRA models, we need to remove the base_layer prefix from the keys for deployment
-    if is_modelopt_qlora:
-        replacements.update(
-            {
-                "base_layer.weight": "weight",
-                "base_layer.input_scale": "input_scale",
-                "base_layer.weight_scale": "weight_scale",
-                # NVFP4 global scale; the exported model cannot be dequantized without it.
-                "base_layer.weight_scale_2": "weight_scale_2",
-            }
-        )
-        skip_keys.append("base_layer")
+    def _export_key(key: str) -> str:
+        # PEFT nests the quantized module under `base_layer`, which deployment does not expect.
+        # Strip it generically so new key types (bias, scales) do not need to be enumerated here.
+        return key.replace(".base_layer.", ".") if is_modelopt_qlora else key
 
     post_state_dict = {}
 
@@ -1014,7 +1006,7 @@ def postprocess_state_dict(
 
         # Skip keys not related to quantizers
         if all(skip_key not in key for skip_key in skip_keys):
-            post_state_dict[key] = value
+            post_state_dict[_export_key(key)] = value
             continue
 
         # Apply replacements if the key matches any suffix in the replacements dict
@@ -1035,7 +1027,7 @@ def postprocess_state_dict(
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
-                post_state_dict[prefix + new_suffix] = value
+                post_state_dict[_export_key(prefix + new_suffix)] = value
                 break
 
     # Squeeze scales with a leading dimension of 1

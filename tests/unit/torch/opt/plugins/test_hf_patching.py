@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import pytest
+import torch
+import torch.nn as nn
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_qwen3,
@@ -23,6 +25,9 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
+import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.plugins.transformers import _restore_qtensor_wrappers
+from modelopt.torch.quantization.qtensor import QTensorWrapper
 
 
 @pytest.mark.parametrize(
@@ -54,3 +59,43 @@ def test_nested_model_save_restore(tmp_path, model_cls, teacher_model_type):
     tf_output_tester(model, model_test)
     # KD state is not saved and it should be empty
     assert not mto.ModeloptStateManager(model_test).has_state
+
+
+class _LoraLike(nn.Module):
+    """Stand-in for peft's `lora.Linear`, which nests the original module under `base_layer`."""
+
+    def __init__(self, base_layer):
+        super().__init__()
+        self.base_layer = base_layer
+
+
+def _compressed_model_and_state_dir(tmp_path):
+    model = nn.Sequential()
+    model.fc = nn.Linear(64, 32)
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(2, 64)))
+    mtq.compress(model)
+    assert isinstance(model.fc.weight, QTensorWrapper)
+
+    torch.save(mto.modelopt_state(model), tmp_path / "modelopt_state.pth")
+
+    # transformers>=5 loads weights by assigning a plain Parameter holding the already-packed
+    # data, which leaves the module without its QTensorWrapper.
+    packed = model.fc.weight.data.clone()
+    del model.fc._parameters["weight"]
+    model.fc._parameters["weight"] = nn.Parameter(packed, requires_grad=False)
+    assert not isinstance(model.fc.weight, QTensorWrapper)
+    return model
+
+
+@pytest.mark.parametrize("wrap_in_lora", [False, True])
+def test_restore_qtensor_wrappers(tmp_path, wrap_in_lora):
+    """`q_tensor_state` is keyed by the pre-peft name, so `<name>.base_layer` must still match."""
+    model = _compressed_model_and_state_dir(tmp_path)
+    if wrap_in_lora:
+        model.fc = _LoraLike(model.fc)
+
+    _restore_qtensor_wrappers(model, str(tmp_path))
+
+    linear = model.fc.base_layer if wrap_in_lora else model.fc
+    assert isinstance(linear.weight, QTensorWrapper)
+    assert linear.weight.metadata["shape"] == torch.Size([32, 64])

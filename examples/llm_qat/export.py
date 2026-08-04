@@ -15,7 +15,6 @@
 
 import argparse
 import json
-import os
 import warnings
 from pathlib import Path
 
@@ -51,19 +50,16 @@ def get_model(
 
     # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this.
     # For QLoRA the base checkpoint is quantized, so from_pretrained already restored the state.
-    modelopt_state_path = os.path.join(ckpt_path, "modelopt_state_train.pth")
-    if hasattr(model, "peft_config") and os.path.isfile(modelopt_state_path):
-        modelopt_state = mto.load_modelopt_state(modelopt_state_path)
+    if hasattr(model, "peft_config") and not ModeloptStateManager.is_converted(model):
+        modelopt_state = mto.load_modelopt_state(f"{ckpt_path}/modelopt_state_train.pth")
+        restore_from_modelopt_state(model, modelopt_state)
+        print_rank_0("Restored modelopt state")
+
+        # Restore modelopt quantizer state dict
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
-
-        if not ModeloptStateManager.is_converted(model):
-            restore_from_modelopt_state(model, modelopt_state)
-            print_rank_0("Restored modelopt state")
-
-            # Restore modelopt quantizer state dict
-            if modelopt_weights is not None:
-                set_quantizer_state_dict(model, modelopt_weights)
-                print_rank_0("Restored modelopt quantizer state dict")
+        if modelopt_weights is not None:
+            set_quantizer_state_dict(model, modelopt_weights)
+            print_rank_0("Restored modelopt quantizer state dict")
 
     return model
 
