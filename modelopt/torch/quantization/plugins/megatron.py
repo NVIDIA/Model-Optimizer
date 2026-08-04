@@ -751,12 +751,73 @@ if HAS_TE:
                 mcore_parallel.get_tensor_model_parallel_group(),
             )
 
+            self.kv_quant_skip_first_n = 0
+
+        def set_kv_quant_skip_first_tokens(self, first_n: int) -> None:
+            """Keep the first K/V sequence positions in native dtype."""
+            if first_n < 0:
+                raise ValueError("K/V first-token skip count must be nonnegative.")
+            if first_n and self.config.context_parallel_size != 1:
+                raise RuntimeError("K/V first-token skipping requires context parallel size 1.")
+            self.kv_quant_skip_first_n = first_n
+
+        def _quantize_kv_after_first_tokens(self, tensor, quantizer, packed_seq_params=None):
+            quantized = quantizer(tensor)
+            qkv_format = (
+                packed_seq_params.qkv_format
+                if packed_seq_params is not None
+                else getattr(self, "qkv_format", "sbhd")
+            )
+            if qkv_format == "thd":
+                cu_seqlens_padded = packed_seq_params.cu_seqlens_q_padded
+                if cu_seqlens_padded is None:
+                    raise RuntimeError(
+                        "K/V first-token skipping on packed attention requires padded "
+                        "cumulative sequence lengths."
+                    )
+                token_indices = torch.arange(tensor.shape[0], device=tensor.device)
+                sequence_ids = torch.searchsorted(
+                    cu_seqlens_padded[1:], token_indices, right=True
+                ).clamp(max=cu_seqlens_padded.numel() - 2)
+                positions = token_indices - cu_seqlens_padded[sequence_ids]
+                quant_mask = positions >= self.kv_quant_skip_first_n
+                return torch.where(
+                    quant_mask.view((-1,) + (1,) * (tensor.ndim - 1)),
+                    quantized,
+                    tensor,
+                )
+
+            if qkv_format == "sbhd":
+                sequence_dim = 0
+            elif qkv_format == "bshd":
+                sequence_dim = 1
+            else:
+                raise RuntimeError(
+                    "K/V first-token skipping supports only sbhd and bshd attention layouts; "
+                    f"got {qkv_format}."
+                )
+
+            sequence_length = tensor.shape[sequence_dim]
+            positions = torch.arange(sequence_length, device=tensor.device)
+            quant_mask = positions >= self.kv_quant_skip_first_n
+            mask_shape = [1] * tensor.ndim
+            mask_shape[sequence_dim] = sequence_length
+            return torch.where(quant_mask.view(mask_shape), quantized, tensor)
+
         def forward(self, query, key, value, *args, **kwargs):
             """Apply post-RoPE quantization to KV cache."""
-            # Quantize Q, K, V
             query = self.q_bmm_quantizer(query)
-            key = self.k_bmm_quantizer(key)
-            value = self.v_bmm_quantizer(value)
+            if self.kv_quant_skip_first_n == 0:
+                key = self.k_bmm_quantizer(key)
+                value = self.v_bmm_quantizer(value)
+            else:
+                packed_seq_params = kwargs.get("packed_seq_params")
+                key = self._quantize_kv_after_first_tokens(
+                    key, self.k_bmm_quantizer, packed_seq_params
+                )
+                value = self._quantize_kv_after_first_tokens(
+                    value, self.v_bmm_quantizer, packed_seq_params
+                )
             return super().forward(query, key, value, *args, **kwargs)
 
         def modelopt_post_restore(self, name=""):

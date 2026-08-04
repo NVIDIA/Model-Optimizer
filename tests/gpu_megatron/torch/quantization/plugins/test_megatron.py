@@ -16,6 +16,7 @@
 import copy
 from contextlib import nullcontext
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -917,6 +918,35 @@ def _test_kv_cache_quant_helper(config, rank, size):
             # Verify K and V quantizers are enabled (main purpose of KV cache configs)
             assert module.k_bmm_quantizer.is_enabled, f"K quantizer not enabled in {name}"
             assert module.v_bmm_quantizer.is_enabled, f"V quantizer not enabled in {name}"
+
+            kv = torch.arange(12, device="cuda", dtype=torch.float32).view(12, 1, 1)
+            packed_seq_params = SimpleNamespace(
+                qkv_format="thd",
+                cu_seqlens_q_padded=torch.tensor([0, 8, 12], dtype=torch.int32, device="cuda"),
+            )
+            module.set_kv_quant_skip_first_tokens(2)
+            packed_output = module._quantize_kv_after_first_tokens(
+                kv, lambda tensor: tensor + 100, packed_seq_params
+            )
+            packed_expected = kv.clone()
+            packed_expected[[2, 3, 4, 5, 6, 7, 10, 11]] += 100
+            torch.testing.assert_close(packed_output, packed_expected)
+
+            nonpacked_output = module._quantize_kv_after_first_tokens(
+                kv,
+                lambda tensor: tensor + 100,
+                SimpleNamespace(qkv_format="sbhd"),
+            )
+            nonpacked_expected = kv.clone()
+            nonpacked_expected[2:] += 100
+            torch.testing.assert_close(nonpacked_output, nonpacked_expected)
+
+            context_parallel_size = module.config.context_parallel_size
+            module.config.context_parallel_size = 2
+            with pytest.raises(RuntimeError, match="context parallel size 1"):
+                module.set_kv_quant_skip_first_tokens(2)
+            module.config.context_parallel_size = context_parallel_size
+            module.set_kv_quant_skip_first_tokens(0)
 
     assert te_attention_found, "No TEDotProductAttention with KV cache quantizers found in model"
 

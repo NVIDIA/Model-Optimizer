@@ -34,6 +34,11 @@ import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
+try:
+    from vllm.forward_context import get_forward_context as _get_forward_context
+except ImportError:
+    _get_forward_context = None
+
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
@@ -502,11 +507,86 @@ class _QuantVLLMAttention(QuantModule):
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
+        self.kv_quant_skip_first_n = 0
+
+    def set_kv_quant_skip_first_tokens(self, first_n: int) -> None:
+        """Keep the first K/V positions in native dtype."""
+        if first_n < 0:
+            raise ValueError("K/V first-token skip count must be nonnegative.")
+        self.kv_quant_skip_first_n = first_n
+
+    def _get_boundary_skip_metadata(self):
+        if _get_forward_context is None:
+            raise RuntimeError("K/V boundary skipping requires vLLM forward context support.")
+        if getattr(self, "kv_cache_dtype", "auto") != "auto":
+            raise RuntimeError("K/V boundary skipping requires a native-dtype vLLM KV cache.")
+        if getattr(self, "attn_type", "decoder") != "decoder":
+            raise RuntimeError("K/V boundary skipping supports decoder self-attention only.")
+        if getattr(self, "kv_sharing_target_layer_name", None) is not None:
+            raise RuntimeError("K/V boundary skipping does not support shared KV-cache layers.")
+        if getattr(self, "sliding_window", None) is not None:
+            raise RuntimeError("K/V boundary skipping does not support sliding-window attention.")
+
+        backend_name = self.attn_backend.get_name()
+        if backend_name != "FLASH_ATTN":
+            raise RuntimeError(
+                "K/V boundary skipping currently requires the FLASH_ATTN backend; "
+                f"got {backend_name}."
+            )
+
+        forward_context = _get_forward_context()
+        if isinstance(forward_context.attn_metadata, list):
+            raise RuntimeError("K/V boundary skipping does not support vLLM DBO.")
+        cudagraph_mode = getattr(forward_context, "cudagraph_runtime_mode", None)
+        if cudagraph_mode is not None and getattr(cudagraph_mode, "name", "NONE") != "NONE":
+            raise RuntimeError("K/V boundary skipping requires eager vLLM execution.")
+        metadata = forward_context.attn_metadata[self.layer_name]
+        required = ("query_start_loc", "seq_lens")
+        missing = [name for name in required if not hasattr(metadata, name)]
+        if missing:
+            raise RuntimeError(
+                "K/V boundary skipping requires standard FlashAttention metadata; "
+                f"missing {missing}."
+            )
+        if getattr(metadata, "use_cascade", False):
+            raise RuntimeError("K/V boundary skipping does not support cascade attention.")
+        return metadata
+
+    @staticmethod
+    def _token_positions(
+        metadata, num_tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        token_indices = torch.arange(
+            num_tokens, device=metadata.query_start_loc.device, dtype=torch.long
+        )
+        request_ids = torch.searchsorted(
+            metadata.query_start_loc[1:], token_indices, right=True
+        ).clamp(max=metadata.seq_lens.numel() - 1)
+        query_lens = metadata.query_start_loc[1:] - metadata.query_start_loc[:-1]
+        old_lens = metadata.seq_lens - query_lens
+        positions = old_lens[request_ids] + token_indices - metadata.query_start_loc[request_ids]
+        valid_tokens = token_indices < metadata.query_start_loc[-1]
+        return positions, request_ids, valid_tokens
+
+    def _quantize_kv_after_first_tokens(self, tensor, quantizer, positions, valid_tokens):
+        quantized = quantizer(tensor)
+        quant_mask = valid_tokens & (positions >= self.kv_quant_skip_first_n)
+        return torch.where(quant_mask.view((-1,) + (1,) * (tensor.ndim - 1)), quantized, tensor)
 
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
-        key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if self.kv_quant_skip_first_n == 0:
+            key = self.k_bmm_quantizer(key)
+            value = self.v_bmm_quantizer(value)
+        else:
+            metadata = self._get_boundary_skip_metadata()
+            positions, _request_ids, valid_tokens = self._token_positions(metadata, key.shape[0])
+            key = self._quantize_kv_after_first_tokens(
+                key, self.k_bmm_quantizer, positions, valid_tokens
+            )
+            value = self._quantize_kv_after_first_tokens(
+                value, self.v_bmm_quantizer, positions, valid_tokens
+            )
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:
