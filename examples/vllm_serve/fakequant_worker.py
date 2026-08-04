@@ -33,6 +33,7 @@ from vllm_reload_utils import (
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.plugins.vllm_fakequant_hf import is_weight_quantizer_state_key
 from modelopt.torch.quantization.plugins.vllm import (
+    configure_kv_quant_skip_defaults,
     disable_compilation,
     post_restore_vllm_parallel_linears,
 )
@@ -50,6 +51,10 @@ quant_config: dict[str, Any] = {
     "recipe_path": os.environ.get("RECIPE_PATH", None),
     "kv_skip_first_m": int(os.environ.get("KV_SKIP_FIRST_M", 0)),
     "kv_skip_last_n": int(os.environ.get("KV_SKIP_LAST_N", 0)),
+    "skip_kv_fp8_enabled": os.environ.get("SKIP_KV_FP8_ENABLED", False),
+    "skip_kv_fp8_quant_cfg": os.environ.get("SKIP_KV_FP8_QUANT_CFG", None),  # JSON dict; default: kv_fp8_cast (E4M3, constant amax)
+    "skip_decode_only": os.environ.get("SKIP_DECODE_ONLY", False),
+    "skip_defer_chunked_prefill": os.environ.get("SKIP_DEFER_CHUNKED_PREFILL", False),
 }
 
 
@@ -114,7 +119,11 @@ def _fakequant_run_prolog_worker(self) -> None:
         skip_first_m = quant_config["kv_skip_first_m"]
         skip_last_n = quant_config["kv_skip_last_n"]
         if skip_first_m > 0 or skip_last_n > 0:
-            mtq.plugins.vllm.set_kv_quant_skip_tokens(model, skip_first_m=0, skip_last_n=0)
+            configure_kv_quant_skip_defaults(
+                skip_kv_fp8_enabled=quant_config["skip_kv_fp8_enabled"],
+                quantize_during_decode_only=quant_config["skip_decode_only"],
+                force_skip_defer_quant=quant_config["skip_defer_chunked_prefill"],
+            )
 
         if quant_config["quant_file_path"]:
             print("Will load quant, so only do a single sample calibration")
@@ -131,17 +140,24 @@ def _fakequant_run_prolog_worker(self) -> None:
         calibrate_loop = calibrate_fun(calib_dataloader, self)
 
         quant_cfg = get_quant_config(quant_config, model)
-        try:
-            with disable_compilation(model):
-                print("Quantizing model...")
-                mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
-        except Exception as e:
-            if "nan" in str(e).lower():
-                print(
-                    f"NaN detected during quantization: {e}\n"
-                    f"Consider downgraing vLLM version or reduce --max-num-batched-tokens to 2048"
-                )
-            raise e
+
+        if (skip_first_m > 0 or skip_last_n > 0) and quant_config["skip_kv_fp8_enabled"]:
+            import copy
+            skip_fp8_kv_cfg = copy.deepcopy(
+                getattr(mtq, quant_config["skip_kv_fp8_quant_cfg"] or "FP8_KV_SKIP_CFG")
+            )
+            quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
+                quant_cfg, skip_fp8_kv_cfg["quant_cfg"]
+            )
+
+        with disable_compilation(model):
+            print("Quantizing model...")
+            mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+
+        if skip_first_m > 0 or skip_last_n > 0:
+            mtq.plugins.vllm.set_kv_quant_skip_tokens(
+                model, skip_first_m=skip_first_m, skip_last_n=skip_last_n
+            )
 
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:

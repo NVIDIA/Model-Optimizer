@@ -1766,6 +1766,7 @@ MXINT8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/pre
 # _base_disable_all and "algorithm" because these are provided by the primary config.
 FP8_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8")
 FP8_AFFINE_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_affine")
+FP8_KV_SKIP_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_cast_skip")
 
 NVFP4_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/nvfp4")
 NVFP4_FOUR_OVER_SIX_CFG: dict[str, Any] = _load_quantize_config_dict(

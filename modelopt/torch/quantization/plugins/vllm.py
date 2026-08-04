@@ -725,20 +725,34 @@ if _has_routed_experts_cls:
 
 @QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})
 class _QuantVLLMAttention(QuantModule):
+    # Set via configure_kv_quant_skip_defaults() before mtq.quantize() so every
+    # instance picks up these flags during _setup().
+    _default_kv_skip: dict = {}
+
     def _setup(self):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+        self.k_bmm_fp8_quantizer = TensorQuantizer()
+        self.v_bmm_fp8_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
-        self.skip_kv_enabled: bool = False
+        cfg = self.__class__._default_kv_skip
+        self.skip_kv_enabled: bool = cfg.get("skip_kv_enabled", False)
+        self.skip_kv_fp8_enabled: bool = cfg.get("skip_kv_fp8_enabled", False)
         self.kv_quant_skip_first_m: int = 0
         self.kv_quant_skip_last_n: int = 0
+        self.quantize_during_decode_only: bool = cfg.get("quantize_during_decode_only", False)
+        self.force_skip_defer_quant: bool = cfg.get("force_skip_defer_quant", False)
 
     def forward(self, query, key, value, *args, **kwargs):
 
         if self.skip_kv_enabled:
             query = self.q_bmm_quantizer(query)
             if self.kv_quant_skip_first_m == 0 and self.kv_quant_skip_last_n == 0:
+                if self.skip_kv_fp8_enabled:
+                    # to calibrate the fp8 quantizer which is used for skipped tokens
+                    self.k_bmm_fp8_quantizer(key)
+                    self.v_bmm_fp8_quantizer(value)
                 key = self.k_bmm_quantizer(key)
                 value = self.v_bmm_quantizer(value)
             return super().forward(query, key, value, *args, **kwargs)
@@ -754,30 +768,43 @@ class _QuantVLLMAttention(QuantModule):
         _vllm_attention_modelopt_post_restore(self)
 
 
-def set_kv_quant_skip_tokens(model, skip_first_m: int = 0, skip_last_n: int = 0):
-    """Configure first-M / last-N KV cache quantization skipping for all attention layers.
+def configure_kv_quant_skip_defaults(
+    skip_kv_fp8_enabled: bool = False,
+    quantize_during_decode_only: bool = False,
+    force_skip_defer_quant: bool = False,
+) -> None:
+    """Set class-level defaults read by _QuantVLLMAttention._setup() during mtq.quantize().
 
-    After mtq.quantize(), call this to skip fake-quantization of the first
-    ``skip_first_m`` and last ``skip_last_n`` KV tokens at attention time.
-    Setting both to 0 disables skipping (all tokens are quantized as normal).
+    Call this before mtq.quantize() so every attention layer is created with these
+    behavior flags active from the first calibration forward pass.
+
+    kv_quant_skip_first_m / kv_quant_skip_last_n are intentionally excluded — leave
+    them at 0 so calibration quantizes all tokens, then set them via
+    set_kv_quant_skip_tokens() after quantization completes.
+    """
+    _QuantVLLMAttention._default_kv_skip = {
+        "skip_kv_enabled": True,
+        "skip_kv_fp8_enabled": skip_kv_fp8_enabled,
+        "quantize_during_decode_only": quantize_during_decode_only,
+        "force_skip_defer_quant": force_skip_defer_quant,
+    }
+
+
+def set_kv_quant_skip_tokens(model, skip_first_m: int = 0, skip_last_n: int = 0) -> None:
+    """Set kv_quant_skip_first_m / kv_quant_skip_last_n on all attention layers after mtq.quantize().
+
+    Call configure_kv_quant_skip_defaults() before mtq.quantize() to set the behavior
+    flags (skip_kv_enabled, skip_kv_fp8_enabled, etc.) — those are baked in at _setup()
+    time.  This function only sets the token counts that take effect at inference.
 
     Note: Standard vLLM Attention uses ``unified_attention_with_output`` skip logic.
     MLA Attention stores these fields but the vLLM MLA custom op does not apply them yet.
     """
-
-    def _apply(mod) -> None:
-        if skip_first_m > 0 or skip_last_n > 0:
-            print(f"set_kv_quant_skip_tokens for {module.layer_name}: skip_first_m={skip_first_m}, skip_last_n={skip_last_n}")
-        mod.kv_quant_skip_first_m = skip_first_m
-        mod.kv_quant_skip_last_n = skip_last_n
-        mod.skip_kv_enabled = True
     for name, module in model.named_modules():
         if isinstance(module, _QuantVLLMAttention):
-            module.layer_name = name
-            _apply(module)
-        elif VllmMLAAttention is not None and isinstance(module, _QuantVLLMMLAAttention):
-            module.layer_name = name
-            _apply(module)
+            print(f"set_kv_quant_skip_tokens for {name}: skip_first_m={skip_first_m}, skip_last_n={skip_last_n}")
+            module.kv_quant_skip_first_m = skip_first_m
+            module.kv_quant_skip_last_n = skip_last_n
 
 
 if CrossAttention is not None:

@@ -80,6 +80,10 @@ additional_env_vars = {
     "TRUST_REMOTE_CODE",
     "KV_SKIP_LAST_N",
     "KV_SKIP_FIRST_M",
+    "SKIP_KV_FP8_ENABLED",
+    "SKIP_KV_FP8_QUANT_CFG",
+    "SKIP_DECODE_ONLY",
+    "SKIP_DEFER_CHUNKED_PREFILL",
 }
 
 try:
