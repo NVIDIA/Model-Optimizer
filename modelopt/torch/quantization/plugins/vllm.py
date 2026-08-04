@@ -508,12 +508,20 @@ class _QuantVLLMAttention(QuantModule):
         self.v_bmm_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
         self.kv_quant_skip_first_n = 0
+        self.kv_quant_skip_last_n = 0
 
     def set_kv_quant_skip_first_tokens(self, first_n: int) -> None:
         """Keep the first K/V positions in native dtype."""
+        self.set_kv_quant_skip_tokens(first_n, self.kv_quant_skip_last_n)
+
+    def set_kv_quant_skip_tokens(self, first_n: int, last_n: int) -> None:
+        """Keep first and call-boundary recent K/V positions in native dtype."""
         if first_n < 0:
             raise ValueError("K/V first-token skip count must be nonnegative.")
+        if last_n < 0:
+            raise ValueError("K/V last-token skip count must be nonnegative.")
         self.kv_quant_skip_first_n = first_n
+        self.kv_quant_skip_last_n = last_n
 
     def _get_boundary_skip_metadata(self):
         if _get_forward_context is None:
@@ -542,6 +550,8 @@ class _QuantVLLMAttention(QuantModule):
             raise RuntimeError("K/V boundary skipping requires eager vLLM execution.")
         metadata = forward_context.attn_metadata[self.layer_name]
         required = ("query_start_loc", "seq_lens")
+        if self.kv_quant_skip_last_n:
+            required += ("block_table", "slot_mapping", "num_actual_tokens")
         missing = [name for name in required if not hasattr(metadata, name)]
         if missing:
             raise RuntimeError(
@@ -568,24 +578,130 @@ class _QuantVLLMAttention(QuantModule):
         valid_tokens = token_indices < metadata.query_start_loc[-1]
         return positions, request_ids, valid_tokens
 
-    def _quantize_kv_after_first_tokens(self, tensor, quantizer, positions, valid_tokens):
+    def _quantize_new_kv(self, tensor, quantizer, positions, request_ids, valid_tokens, seq_lens):
         quantized = quantizer(tensor)
         quant_mask = valid_tokens & (positions >= self.kv_quant_skip_first_n)
+        if self.kv_quant_skip_last_n:
+            quant_mask &= positions < (seq_lens[request_ids] - self.kv_quant_skip_last_n)
         return torch.where(quant_mask.view((-1,) + (1,) * (tensor.ndim - 1)), quantized, tensor)
+
+    def _quantize_aged_kv_cache(
+        self, kv_cache, metadata, positions, request_ids, valid_tokens
+    ) -> None:
+        """QDQ cached rows that leave the recent native-dtype window."""
+        query_lens = metadata.query_start_loc[1:] - metadata.query_start_loc[:-1]
+        if query_lens.numel() != metadata.seq_lens.numel():
+            raise RuntimeError("K/V last-token skipping requires one query range per request.")
+        old_lens = metadata.seq_lens - query_lens
+        torch._assert_async(
+            (old_lens >= 0).all(),
+            "K/V last-token skipping received invalid sequence lengths.",
+        )
+        if kv_cache.numel() == 0:
+            torch._assert_async(
+                (old_lens == 0).all(),
+                "K/V last-token skipping found history before cache allocation.",
+            )
+            return
+        if kv_cache.ndim != 5 or kv_cache.shape[0] != 2:
+            raise RuntimeError(
+                "K/V last-token skipping requires FlashAttention cache shape "
+                "[2, num_blocks, block_size, num_kv_heads, head_size]."
+            )
+        if kv_cache.dtype != torch.bfloat16:
+            raise RuntimeError(
+                f"K/V last-token skipping requires a BF16 native cache; got {kv_cache.dtype}."
+            )
+
+        num_actual_tokens = metadata.num_actual_tokens
+        if num_actual_tokens == 0:
+            return
+        positions = positions[:num_actual_tokens]
+        request_ids = request_ids[:num_actual_tokens]
+        valid_tokens = valid_tokens[:num_actual_tokens]
+        aged_positions = positions - self.kv_quant_skip_last_n
+        aged_mask = (
+            valid_tokens
+            & (aged_positions >= self.kv_quant_skip_first_n)
+            & (aged_positions < old_lens[request_ids])
+        )
+        block_size = kv_cache.shape[2]
+        block_table = metadata.block_table
+        if block_table.ndim != 2 or block_table.shape[0] < metadata.seq_lens.numel():
+            raise RuntimeError("K/V last-token skipping received an invalid block table.")
+        if block_table.shape[1] == 0:
+            raise RuntimeError("K/V last-token skipping received an empty block table.")
+
+        safe_positions = aged_positions.clamp(min=0)
+        logical_blocks = torch.div(safe_positions, block_size, rounding_mode="floor")
+        block_offsets = safe_positions.remainder(block_size)
+        torch._assert_async(
+            (~aged_mask | (logical_blocks < block_table.shape[1])).all(),
+            "K/V last-token skipping exceeded the request block table.",
+        )
+        logical_blocks = logical_blocks.clamp(max=block_table.shape[1] - 1)
+        physical_blocks = block_table[request_ids, logical_blocks].long()
+        torch._assert_async(
+            (~aged_mask | ((physical_blocks >= 0) & (physical_blocks < kv_cache.shape[1]))).all(),
+            "K/V last-token skipping resolved an invalid cache block.",
+        )
+        physical_blocks = physical_blocks.clamp(min=0, max=kv_cache.shape[1] - 1)
+
+        current_slots = metadata.slot_mapping[:num_actual_tokens].long()
+        torch._assert_async(
+            ((current_slots >= 0) & (current_slots < kv_cache.shape[1] * block_size)).all(),
+            "K/V last-token skipping received an invalid current-token cache slot.",
+        )
+        # Keep a fixed-size GPU update to avoid a host sync per attention layer.
+        # Invalid aged rows use current-token slots, which vLLM overwrites later
+        # in this same forward, and the mask preserves their old contents here.
+        aged_slots = physical_blocks * block_size + block_offsets
+        safe_slots = torch.where(aged_mask, aged_slots, current_slots)
+        physical_blocks = torch.div(safe_slots, block_size, rounding_mode="floor")
+        block_offsets = safe_slots.remainder(block_size)
+
+        key_cache, value_cache = kv_cache.unbind(0)
+        aged_keys = key_cache[physical_blocks, block_offsets]
+        aged_values = value_cache[physical_blocks, block_offsets]
+        mask = aged_mask.view((-1,) + (1,) * (aged_keys.ndim - 1))
+        quantized_keys = self.k_bmm_quantizer(torch.where(mask, aged_keys, 0))
+        quantized_values = self.v_bmm_quantizer(torch.where(mask, aged_values, 0))
+        key_cache[physical_blocks, block_offsets] = torch.where(mask, quantized_keys, aged_keys)
+        value_cache[physical_blocks, block_offsets] = torch.where(
+            mask, quantized_values, aged_values
+        )
 
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
-        if self.kv_quant_skip_first_n == 0:
+        if self.kv_quant_skip_first_n == 0 and self.kv_quant_skip_last_n == 0:
             key = self.k_bmm_quantizer(key)
             value = self.v_bmm_quantizer(value)
         else:
             metadata = self._get_boundary_skip_metadata()
-            positions, _request_ids, valid_tokens = self._token_positions(metadata, key.shape[0])
-            key = self._quantize_kv_after_first_tokens(
-                key, self.k_bmm_quantizer, positions, valid_tokens
+            positions, request_ids, valid_tokens = self._token_positions(metadata, key.shape[0])
+            if self.kv_quant_skip_last_n:
+                self._quantize_aged_kv_cache(
+                    self.kv_cache,
+                    metadata,
+                    positions,
+                    request_ids,
+                    valid_tokens,
+                )
+            key = self._quantize_new_kv(
+                key,
+                self.k_bmm_quantizer,
+                positions,
+                request_ids,
+                valid_tokens,
+                metadata.seq_lens,
             )
-            value = self._quantize_kv_after_first_tokens(
-                value, self.v_bmm_quantizer, positions, valid_tokens
+            value = self._quantize_new_kv(
+                value,
+                self.v_bmm_quantizer,
+                positions,
+                request_ids,
+                valid_tokens,
+                metadata.seq_lens,
             )
         return super().forward(query, key, value, *args, **kwargs)
 

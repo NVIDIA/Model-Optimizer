@@ -22,19 +22,40 @@ from modelopt.torch.quantization.plugins import vllm as vllm_plugin
 from modelopt.torch.quantization.plugins.vllm import _QuantVLLMAttention
 
 
-def _metadata(*, query_start_loc, seq_lens):
+def _metadata(*, query_start_loc, seq_lens, block_table=None, slot_mapping=None):
+    num_actual_tokens = query_start_loc[-1]
     return SimpleNamespace(
         query_start_loc=torch.tensor(query_start_loc),
         seq_lens=torch.tensor(seq_lens),
+        block_table=(
+            torch.tensor(block_table)
+            if block_table is not None
+            else torch.empty((len(seq_lens), 0), dtype=torch.int32)
+        ),
+        slot_mapping=(
+            torch.tensor(slot_mapping)
+            if slot_mapping is not None
+            else torch.arange(num_actual_tokens)
+        ),
+        num_actual_tokens=num_actual_tokens,
     )
 
 
 def _apply_first_token_skip(metadata, num_tokens, first_n):
-    attention = SimpleNamespace(kv_quant_skip_first_n=first_n)
-    positions, _request_ids, valid = _QuantVLLMAttention._token_positions(metadata, num_tokens)
+    attention = SimpleNamespace(
+        kv_quant_skip_first_n=first_n,
+        kv_quant_skip_last_n=0,
+    )
+    positions, request_ids, valid = _QuantVLLMAttention._token_positions(metadata, num_tokens)
     values = torch.arange(num_tokens, dtype=torch.float32).view(-1, 1, 1)
-    output = _QuantVLLMAttention._quantize_kv_after_first_tokens(
-        attention, values, lambda tensor: tensor + 100, positions, valid
+    output = _QuantVLLMAttention._quantize_new_kv(
+        attention,
+        values,
+        lambda tensor: tensor + 100,
+        positions,
+        request_ids,
+        valid,
+        metadata.seq_lens,
     )
     return positions, valid, output[:, 0, 0]
 
@@ -87,6 +108,147 @@ def test_first_token_skip_preserves_padding_rows():
     assert values.tolist() == [0, 101, 2, 3]
 
 
+def test_first_and_last_token_skip_uses_call_boundary_lengths():
+    metadata = _metadata(query_start_loc=[0, 4, 6], seq_lens=[7, 5])
+    attention = SimpleNamespace(
+        kv_quant_skip_first_n=1,
+        kv_quant_skip_last_n=2,
+    )
+    positions, request_ids, valid = _QuantVLLMAttention._token_positions(metadata, 8)
+    values = torch.arange(8, dtype=torch.float32).view(-1, 1, 1)
+
+    output = _QuantVLLMAttention._quantize_new_kv(
+        attention,
+        values,
+        lambda tensor: tensor + 100,
+        positions,
+        request_ids,
+        valid,
+        metadata.seq_lens,
+    )
+
+    assert positions.tolist() == [3, 4, 5, 6, 3, 4, 5, 6]
+    assert valid.tolist() == [True, True, True, True, True, True, False, False]
+    assert output[:, 0, 0].tolist() == [100, 101, 2, 3, 4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("hnd_strides", [False, True])
+def test_last_token_skip_quantizes_only_newly_aged_cache_rows(hnd_strides):
+    metadata = _metadata(
+        query_start_loc=[0, 2, 3],
+        seq_lens=[7, 5],
+        block_table=[[2, 0, 3], [1, 4, 5]],
+        slot_mapping=[10, 11, 2],
+    )
+    attention = SimpleNamespace(
+        kv_quant_skip_first_n=1,
+        kv_quant_skip_last_n=2,
+        k_bmm_quantizer=lambda tensor: tensor + 100,
+        v_bmm_quantizer=lambda tensor: tensor + 200,
+    )
+    positions, request_ids, valid = _QuantVLLMAttention._token_positions(metadata, 3)
+    if hnd_strides:
+        storage = torch.arange(2 * 6 * 1 * 2 * 1, dtype=torch.bfloat16).reshape(6, 1, 2, 2, 1)
+        kv_cache = storage.permute(2, 0, 3, 1, 4)
+        assert not kv_cache.is_contiguous()
+    else:
+        kv_cache = torch.arange(2 * 6 * 2, dtype=torch.bfloat16).reshape(2, 6, 2, 1, 1)
+    before = kv_cache.clone()
+
+    _QuantVLLMAttention._quantize_aged_kv_cache(
+        attention,
+        kv_cache,
+        metadata,
+        positions,
+        request_ids,
+        valid,
+    )
+
+    # Request 0 ages positions 3 and 4 into physical slots (block 0, offset 1)
+    # and (block 3, offset 0). Request 1 ages position 2 into (block 4, offset 0).
+    torch.testing.assert_close(kv_cache[0, 0, 1], before[0, 0, 1] + 100)
+    torch.testing.assert_close(kv_cache[0, 3, 0], before[0, 3, 0] + 100)
+    torch.testing.assert_close(kv_cache[0, 4, 0], before[0, 4, 0] + 100)
+    torch.testing.assert_close(kv_cache[1, 0, 1], before[1, 0, 1] + 200)
+    torch.testing.assert_close(kv_cache[1, 3, 0], before[1, 3, 0] + 200)
+    torch.testing.assert_close(kv_cache[1, 4, 0], before[1, 4, 0] + 200)
+    unchanged = torch.ones((6, 2), dtype=torch.bool)
+    unchanged[0, 1] = False
+    unchanged[3, 0] = False
+    unchanged[4, 0] = False
+    torch.testing.assert_close(kv_cache[0][unchanged], before[0][unchanged])
+    torch.testing.assert_close(kv_cache[1][unchanged], before[1][unchanged])
+
+
+def test_last_token_skip_allows_unallocated_cache_during_profiling():
+    metadata = _metadata(query_start_loc=[0, 2], seq_lens=[2], block_table=[[]])
+    attention = SimpleNamespace(
+        kv_quant_skip_first_n=0,
+        kv_quant_skip_last_n=2,
+    )
+    positions, request_ids, valid = _QuantVLLMAttention._token_positions(metadata, 2)
+
+    _QuantVLLMAttention._quantize_aged_kv_cache(
+        attention,
+        torch.tensor([]),
+        metadata,
+        positions,
+        request_ids,
+        valid,
+    )
+
+
+def test_last_token_skip_rejects_unallocated_cache_with_history():
+    metadata = _metadata(query_start_loc=[0, 1], seq_lens=[3], block_table=[[]])
+    attention = SimpleNamespace(
+        kv_quant_skip_first_n=0,
+        kv_quant_skip_last_n=2,
+    )
+    positions, request_ids, valid = _QuantVLLMAttention._token_positions(metadata, 1)
+
+    with pytest.raises(RuntimeError, match="history before cache allocation"):
+        _QuantVLLMAttention._quantize_aged_kv_cache(
+            attention,
+            torch.tensor([]),
+            metadata,
+            positions,
+            request_ids,
+            valid,
+        )
+
+
+def test_last_token_skip_masked_placeholder_does_not_touch_unaged_cache():
+    metadata = _metadata(
+        query_start_loc=[0, 2],
+        seq_lens=[3],
+        block_table=[[2, 0]],
+        slot_mapping=[0, 1],
+    )
+    attention = SimpleNamespace(
+        kv_quant_skip_first_n=0,
+        kv_quant_skip_last_n=2,
+        k_bmm_quantizer=lambda tensor: tensor + 100,
+        v_bmm_quantizer=lambda tensor: tensor + 200,
+    )
+    positions, request_ids, valid = _QuantVLLMAttention._token_positions(metadata, 2)
+    kv_cache = torch.arange(2 * 3 * 2, dtype=torch.bfloat16).reshape(2, 3, 2, 1, 1)
+    before = kv_cache.clone()
+
+    _QuantVLLMAttention._quantize_aged_kv_cache(
+        attention,
+        kv_cache,
+        metadata,
+        positions,
+        request_ids,
+        valid,
+    )
+
+    torch.testing.assert_close(kv_cache[0, 2, 0], before[0, 2, 0] + 100)
+    torch.testing.assert_close(kv_cache[1, 2, 0], before[1, 2, 0] + 200)
+    torch.testing.assert_close(kv_cache[:, 0], before[:, 0])
+    torch.testing.assert_close(kv_cache[:, 1], before[:, 1])
+
+
 def test_first_token_skip_rejects_cuda_graph_runtime(monkeypatch):
     attention = SimpleNamespace(
         kv_cache_dtype="auto",
@@ -124,6 +286,7 @@ def test_first_token_skip_rejects_unsupported_metadata(monkeypatch, case, messag
         sliding_window=None,
         attn_backend=SimpleNamespace(get_name=lambda: "FLASH_ATTN"),
         layer_name="layer",
+        kv_quant_skip_last_n=0,
     )
     metadata = _metadata(query_start_loc=[0, 1], seq_lens=[1])
     metadata.use_cascade = False
