@@ -40,9 +40,15 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
         ),
         # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid. Saved in Megatron checkpoint
         # format because HF export of a pruned NemotronH requires transformers<5.
+        # MTP heads are enabled so the run covers dropping them during calibration and the
+        # hybrid pattern MCore builds for them.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_nemotron_h_dir(
-                tmp_path, with_tokenizer=True, return_model=True
+                tmp_path,
+                with_tokenizer=True,
+                return_model=True,
+                num_nextn_predict_layers=1,
+                mtp_hybrid_override_pattern="*E",
             ),
             True,
             id="nemotron_h",

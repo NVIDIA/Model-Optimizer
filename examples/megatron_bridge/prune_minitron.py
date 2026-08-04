@@ -67,6 +67,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.nas.plugins.megatron_model_stats import parse_main_layer_chars
 from modelopt.torch.utils import (
     get_supported_datasets,
     num2hrb,
@@ -658,9 +659,12 @@ def main(args: argparse.Namespace):
                     "training/distillation instead of LM-only to recover vision quality."
                 )
         if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
-            hf_cfg, "hybrid_override_pattern"
+            text_cfg, "hybrid_override_pattern"
         ):
-            hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
+            # MCore's pattern can carry an MTP suffix (``/...``) and PP boundaries (``|``) which we need to remove
+            text_cfg.hybrid_override_pattern = "".join(
+                parse_main_layer_chars(getattr(unwrapped_model, hybrid_key), mcore_cfg.num_layers)
+            )
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
         # Mark MTP as disabled on the HF text config written after pruning
         for field in _MTP_HF_CONFIG_FIELDS:
