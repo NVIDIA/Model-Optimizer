@@ -70,10 +70,12 @@ If you encounter a legacy checkpoint (no `hf_quant_config.json`, has `rank*.safe
 ## Evaluation with TRT-LLM
 
 Runs lm-evaluation-harness benchmarks through lm-eval's built-in `trtllm` backend
-(requires `lm_eval>=0.4.12`; ModelOpt's own `lm_eval_tensorrt_llm.py` is deprecated).
+(requires `lm_eval>=0.4.12`; ModelOpt's own `lm_eval_tensorrt_llm.py` has been removed).
+`lm_eval_trtllm.py` is a thin wrapper that corrects the backend's `prompt_logprobs`
+alignment — without it every loglikelihood task raises `KeyError`.
 
 ```bash
-python examples/llm_eval/lm_eval_hf.py \
+python examples/llm_eval/lm_eval_trtllm.py \
     --model trtllm \
     --model_args model=<checkpoint_path>,tokenizer=<checkpoint_path>,tensor_parallel_size=<tp>,max_batch_size=<bs>,max_input_len=4096,max_output_len=512 \
     --tasks gsm8k,mmlu \

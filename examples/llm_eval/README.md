@@ -113,7 +113,7 @@ Uses the `trtllm` backend built into lm-eval (>= 0.4.12), which loads the quanti
 checkpoint directly with the TensorRT-LLM LLM API.
 
 ```sh
-python lm_eval_hf.py --model trtllm \
+python lm_eval_trtllm.py --model trtllm \
     --model_args model=<Quantized checkpoint dir>,tokenizer=<HF model folder>,tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,max_output_len=512 \
     --tasks <comma separated tasks> \
     --batch_size <max batch size>
@@ -126,15 +126,18 @@ python lm_eval_hf.py --model trtllm \
 > **_NOTE:_** `tensor_parallel_size` defaults to 1; set it to the number of GPUs the
 > checkpoint needs. `pipeline_parallel_size` is also supported.
 
-> **_NOTE:_** Run this through `lm_eval_hf.py`, not the plain `lm_eval` CLI. lm-eval
-> 0.4.12's `trtllm` backend misaligns TensorRT-LLM's `prompt_logprobs` by one position, so
-> every loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
-> `lm_eval_hf.py` patches the alignment before the model is built. The patch is removed
-> once the fix lands upstream.
+> **_NOTE:_** Use `lm_eval_trtllm.py` rather than the plain `lm_eval` CLI. lm-eval 0.4.12's
+> `trtllm` backend misaligns TensorRT-LLM's `prompt_logprobs` by one position, so every
+> loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
+> `lm_eval_trtllm.py` overrides the alignment. It goes away once the fix lands upstream.
 
-The previous `lm_eval_tensorrt_llm.py` entry point (`--model trt-llm`) is deprecated. It
-still works — it prints a warning and forwards the translated command to the above — but it
-will be removed in a future release.
+> **_NOTE:_** The backend forwards only a fixed set of arguments to TensorRT-LLM, so the
+> tuning the old `lm_eval_tensorrt_llm.py` applied is not reachable: expert parallelism is
+> left at the TensorRT-LLM default (MoE checkpoints can fail in DeepEP kernels on some
+> GPUs, e.g. SM 12.0) and the KV cache uses 90% of free GPU memory rather than 70%. Lower
+> `tensor_parallel_size` if you hit either.
+
+`lm_eval_tensorrt_llm.py` (`--model trt-llm`) has been removed; use the command above.
 
 ## MMLU
 

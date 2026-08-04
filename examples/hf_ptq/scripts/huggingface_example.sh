@@ -298,15 +298,17 @@ if [[ $TASKS =~ "lm_eval" ]]; then
     pip install -r requirements.txt
 
     # lm-eval's `trtllm` backend defaults to 1 GPU; shard over every visible one instead.
-    LM_EVAL_TP=$(python -c "import torch; print(max(torch.cuda.device_count(), 1))")
+    # Override LM_EVAL_TP to lower it -- TRT-LLM enables expert parallelism at higher TP,
+    # which fails in DeepEP kernels for MoE checkpoints on some GPUs (e.g. SM 12.0).
+    LM_EVAL_TP=${LM_EVAL_TP:-$(python -c "import torch; print(max(torch.cuda.device_count(), 1))")}
 
-    echo "Using the following config: max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE tp $LM_EVAL_TP"
+    echo "Using the following config: max input $BUILD_MAX_INPUT_LEN max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE tp $LM_EVAL_TP"
 
-    # max_input_len defaults to 2048, which silently truncates 5-shot prompts; size the
-    # engine for a 4096-token context plus the requested generation length.
-    python lm_eval_hf.py \
+    # max_input_len defaults to 2048, which silently truncates 5-shot prompts, so pass it
+    # explicitly; the engine's max_seq_len is max_input_len + max_output_len.
+    python lm_eval_trtllm.py \
         --model trtllm \
-        --model_args model=$SAVE_PATH,tokenizer=$MODEL_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=4096,max_output_len=$BUILD_MAX_OUTPUT_LEN \
+        --model_args "model=$SAVE_PATH,tokenizer=$MODEL_ABS_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=$BUILD_MAX_INPUT_LEN,max_output_len=$BUILD_MAX_OUTPUT_LEN" \
         --tasks $LM_EVAL_TASKS \
         --batch_size $BUILD_MAX_BATCH_SIZE $lm_eval_flags | tee $LM_EVAL_RESULT
 
