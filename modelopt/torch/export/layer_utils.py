@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright 2026 Google LLC and contributors
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -1650,15 +1651,15 @@ def build_decoder_config(
             elif name == "ln_mlp":
                 config.mlp_layernorm = layernorm_config
             elif (
-                config.decoder_type in ["gemma2", "gemma3"]
+                config.decoder_type in ["gemma2", "gemma3", "gemma4"]
             ) and "post_attention_layernorm" in name:
                 config.post_layernorm = layernorm_config
             elif (
-                config.decoder_type in ["gemma2", "gemma3"]
+                config.decoder_type in ["gemma2", "gemma3", "gemma4"]
             ) and "pre_feedforward_layernorm" in name:
                 config.pre_feedforward_layernorm = layernorm_config
             elif (
-                config.decoder_type in ["gemma2", "gemma3"]
+                config.decoder_type in ["gemma2", "gemma3", "gemma4"]
             ) and "post_feedforward_layernorm" in name:
                 config.post_feedforward_layernorm = layernorm_config
             elif config.input_layernorm is None:
