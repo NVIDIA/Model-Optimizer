@@ -168,17 +168,38 @@ def test_qwen3_lora_qat_nvfp4(tiny_qwen3_path, tmp_path):
     )
 
     # Step 2: LoRA QAT
+    lora_qat_output_dir = tmp_path / "lora_qat"
     _run_train(
         "configs/train/qat_nvfp4.yaml",
         [
             "--model_name_or_path", str(ptq_output_dir),
             "--do_train", "True",
             "--lora", "True",
-            "--output_dir", str(tmp_path / "lora_qat"),
+            "--output_dir", str(lora_qat_output_dir),
         ],
         backend="fsdp2",
         cache_dir=cache_dir,
     )
+
+    # Step 3: Export. Unlike QLoRA this checkpoint is fake-quantized, so the calibrated amaxes
+    # rather than packed weights are what must survive the load.
+    export_dir = tmp_path / "lora_qat_export"
+    _run_export(str(lora_qat_output_dir), str(export_dir))
+
+    base_model_dir = export_dir / "base_model"
+    with open(base_model_dir / "hf_quant_config.json") as f:
+        assert json.load(f)["quantization"]["quant_algo"] == "NVFP4"
+
+    # Scales are derived from the calibrated amaxes; missing ones mean the export silently
+    # fell back to uncalibrated quantizers.
+    base_weights = load_file(base_model_dir / "model.safetensors")
+    weight_scales = [k for k in base_weights if k.endswith(".weight_scale")]
+    assert weight_scales, "no NVFP4 weight scales in the exported base model"
+    for key in weight_scales:
+        prefix = key.removesuffix(".weight_scale")
+        assert f"{prefix}.weight_scale_2" in base_weights
+        assert f"{prefix}.input_scale" in base_weights
+    assert not any("base_layer" in k or k.endswith("_amax") for k in base_weights)
 
 
 @pytest.mark.parametrize("backend", [
