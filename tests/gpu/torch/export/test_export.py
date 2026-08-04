@@ -262,8 +262,7 @@ def test_postprocess_state_dict(state_dict, quantization, maxbound, expected_sta
 def test_postprocess_state_dict_qlora_strips_base_layer():
     """Every QLoRA `base_layer.*` tensor needed for deployment must survive the rename.
 
-    `weight_scale_2` is the NVFP4 global scale and `bias` matters for architectures such as
-    Qwen2; dropping either yields an undeployable checkpoint.
+    Dropping the NVFP4 global scale or a bias yields an undeployable checkpoint.
     """
     state_dict = {
         "layer1.base_layer.weight": torch.ones(4, 2, dtype=torch.uint8),

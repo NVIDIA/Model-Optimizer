@@ -79,16 +79,14 @@ def _compressed_model_and_state_dir(tmp_path, state_keyed_with_base_layer=False)
 
     state = mto.modelopt_state(model)
     if state_keyed_with_base_layer:
-        # Compressing after the adapters are attached (QATTrainer._quantize_model) saves the
-        # keys with the peft suffix already in them.
+        # Compressing after the adapters are attached saves the keys with the peft suffix.
         for _, mode_config in state["modelopt_state_dict"]:
             q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
             for key in list(q_tensor_state):
                 q_tensor_state[f"{key}.base_layer"] = q_tensor_state.pop(key)
     torch.save(state, tmp_path / "modelopt_state.pth")
 
-    # transformers>=5 loads weights by assigning a plain Parameter holding the already-packed
-    # data, which leaves the module without its QTensorWrapper.
+    # transformers>=5 assigns a plain Parameter holding the packed data, dropping the wrapper.
     packed = model.fc.weight.data.clone()
     del model.fc._parameters["weight"]
     model.fc._parameters["weight"] = nn.Parameter(packed, requires_grad=False)

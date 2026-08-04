@@ -110,12 +110,8 @@ def _restore_qtensor_wrappers(model, model_path):
         q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
         if not q_tensor_state:
             continue
-        # PEFT nests the quantized linear as `<name>.base_layer`, and either side may carry that
-        # suffix: the state is saved without it when the base model was compressed before adapters
-        # were attached (`quantize.py --compress`) and with it when compressed after
-        # (`QATTrainer._quantize_model`). Normalize both so the lookup works in either direction.
-        # This assumes transformers injects adapters in place; moving the trainer to
-        # `get_peft_model` would prefix module names with `base_model.model.` and break it.
+        # PEFT nests the quantized linear as `<name>.base_layer`, and either the saved keys or the
+        # live names may carry that suffix. Normalize both so the lookup works in either direction.
         q_tensor_state = {k.removesuffix(".base_layer"): v for k, v in q_tensor_state.items()}
 
         pending = [
@@ -134,8 +130,8 @@ def _restore_qtensor_wrappers(model, model_path):
             )
             matched += 1
 
-        # A total miss means the module names were remapped by a wrapper we do not know about.
-        # Warn here rather than letting it surface as an opaque shape error during dequantization.
+        # A total miss means some wrapper renamed the modules. Warn instead of letting it surface
+        # as an opaque shape error at dequantization.
         if pending and not matched:
             warnings.warn(
                 f"Found {len(q_tensor_state)} compressed weight(s) in {modelopt_state_path} but "
