@@ -18,12 +18,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 import torch
+import torch.nn as nn
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     tf_modelopt_state_and_output_tester,
 )
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
+
+from modelopt.torch.opt.plugins.transformers import (
+    _TRANSFORMERS_GE_5_0,
+    _legacy_tied_weights_keys_as_dict,
+)
 
 
 @pytest.mark.parametrize("model_cls", [LlamaForCausalLM, AutoModelForCausalLM])
@@ -38,6 +44,47 @@ def test_causal_lm_save_restore(tmp_path, model_cls):
 
     model_test = model_cls.from_pretrained(tiny_llama_dir / "modelopt_model")
     tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+def test_save_pretrained_with_legacy_tied_weights_keys(tmp_path):
+    """A model declaring 4.x list-style `_tied_weights_keys` must still save (nvbug 6518665).
+
+    transformers>=5 expects a `{target: source}` dict there and calls `.keys()` on it while
+    saving, which crashes for `trust_remote_code` modeling code that has not migrated yet.
+    """
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, hidden_size=128, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)
+    model = apply_mode_with_sampling(model, ["quantize"])
+
+    model._tied_weights_keys = ["lm_head.weight"]
+    model.model._tied_weights_keys = ["embed_tokens.weight"]
+
+    model.save_pretrained(tiny_llama_dir / "legacy_tied_keys_model")
+
+    # The declarations the model owned before the save are restored verbatim.
+    assert model._tied_weights_keys == ["lm_head.weight"]
+    assert model.model._tied_weights_keys == ["embed_tokens.weight"]
+
+    model_test = AutoModelForCausalLM.from_pretrained(tiny_llama_dir / "legacy_tied_keys_model")
+    tf_modelopt_state_and_output_tester(model, model_test)
+
+
+@pytest.mark.skipif(not _TRANSFORMERS_GE_5_0, reason="list-style keys are native to transformers 4")
+def test_legacy_tied_weights_keys_as_dict_restores_class_attribute():
+    """The shim must not leave an instance attribute shadowing the class declaration."""
+
+    class _LegacyChild(nn.Module):
+        # How remote-code models declare it: on the class, not the instance.
+        _tied_weights_keys = ["lm_head.weight"]
+
+    parent = nn.Module()
+    parent.child = _LegacyChild()
+
+    with _legacy_tied_weights_keys_as_dict(parent):
+        assert parent.child._tied_weights_keys == {"lm_head.weight": "lm_head.weight"}
+
+    assert _LegacyChild._tied_weights_keys == ["lm_head.weight"]
+    assert "_tied_weights_keys" not in parent.child.__dict__
 
 
 def test_causal_lm_from_config(tmp_path):
