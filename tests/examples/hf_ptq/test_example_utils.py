@@ -19,7 +19,7 @@ separate-file-standalone, separate-file-indexed) plus a negative case.
 """
 
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -162,6 +162,89 @@ def test_load_mtp_weights_no_mtp_returns_empty(tmp_path):
     prefixes, orphans = example_utils.load_mtp_weights(model, str(tmp_path))
     assert prefixes == []
     assert orphans == {}
+
+
+def test_get_checkpoint_weight_keys_reads_local_safetensors_index(tmp_path):
+    weight_map = {
+        "vision_tower.blocks.0.mlp.fc1.weight": "model-00001-of-00002.safetensors",
+        "model.layers.0.mlp.experts.0.gate_proj.weight_packed": (
+            "model-00002-of-00002.safetensors"
+        ),
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
+
+    assert example_utils._get_checkpoint_weight_keys(str(tmp_path)) == set(weight_map)
+
+
+def test_get_checkpoint_weight_keys_falls_back_to_remote_single_safetensors(tmp_path, monkeypatch):
+    tensors = {
+        "vision_tower.blocks.0.mlp.fc1.weight": torch.zeros(2, 2),
+        "model.layers.0.mlp.experts.0.gate_proj.weight_packed": torch.zeros(
+            2, 2, dtype=torch.int32
+        ),
+    }
+    safetensors_path = tmp_path / "model.safetensors"
+    _write_safetensors(safetensors_path, tensors)
+    requested_filenames = []
+
+    def fake_hf_hub_download(repo_id, filename):
+        assert repo_id == "owner/checkpoint"
+        requested_filenames.append(filename)
+        if filename == "model.safetensors.index.json":
+            raise FileNotFoundError(filename)
+        assert filename == "model.safetensors"
+        return str(safetensors_path)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_hf_hub_download)
+
+    assert example_utils._get_checkpoint_weight_keys("owner/checkpoint") == set(tensors)
+    assert requested_filenames == ["model.safetensors.index.json", "model.safetensors"]
+
+
+def test_get_model_passes_checkpoint_schema_to_compressed_tensors_patch(monkeypatch):
+    checkpoint_weight_keys = {
+        "vision_tower.blocks.0.mlp.fc1.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.weight_packed",
+    }
+    hf_config = SimpleNamespace(
+        architectures=["KimiForCausalLM"],
+        model_type="kimi",
+        quantization_config={"format": "pack-quantized"},
+    )
+    calls = {}
+
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
+
+    class FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            return FakeModel()
+
+    @contextmanager
+    def fake_loading_patch(weight_keys=None):
+        calls["patch_weight_keys"] = weight_keys
+        yield
+
+    monkeypatch.setattr(
+        example_utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: hf_config
+    )
+    monkeypatch.setattr(example_utils, "AutoModelForCausalLM", FakeAutoModelForCausalLM)
+    monkeypatch.setattr(
+        example_utils, "_get_checkpoint_weight_keys", lambda ckpt_path: checkpoint_weight_keys
+    )
+    monkeypatch.setattr(example_utils, "_unpack_compressed_linear_weights", lambda *args: None)
+    monkeypatch.setattr(
+        "modelopt.torch.quantization.plugins.huggingface.patch_compressed_linear_loading",
+        fake_loading_patch,
+    )
+
+    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+
+    assert calls["patch_weight_keys"] is checkpoint_weight_keys
+    assert calls["eval"]
 
 
 # ---------- get_original_hf_quant_method -------------------------------------

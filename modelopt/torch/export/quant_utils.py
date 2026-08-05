@@ -1540,9 +1540,10 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     paths see different activation distributions (encoder vs decoder in
     YOCO-style models). Must run BEFORE per-module export so the merged
     amax flows into ``input_scale`` derivation. Handles both dense
-    Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
-    ``(<first_proj>, down_proj)`` data_ptr tuple). Returns the number of
-    tied groups merged.
+    Linears (keyed by dense ``weight`` or compressed ``weight_packed`` storage)
+    and fused MoE (keyed by the ``(<first_proj>, down_proj)`` storage pair).
+    All storage identities are device-qualified. Returns the number of tied
+    groups merged.
     """
     from collections import defaultdict
 
@@ -1558,15 +1559,22 @@ def sync_tied_input_amax(model: nn.Module) -> int:
             and hasattr(m, "down_proj")
             and first_proj.dim() == 3
         ):
-            key = ("moe", first_proj.data_ptr(), m.down_proj.data_ptr())
+            key = (
+                "moe",
+                first_proj.device,
+                first_proj.data_ptr(),
+                m.down_proj.device,
+                m.down_proj.data_ptr(),
+            )
             by_dp[key].append(m)
-        # Dense quantized Linear with an input_quantizer
-        elif (
-            hasattr(m, "input_quantizer")
-            and hasattr(m, "weight")
-            and isinstance(m.weight, torch.nn.Parameter)
-        ):
-            by_dp[("dense", m.weight.data_ptr())].append(m)
+        # Dense or checkpoint-packed quantized Linear with an input_quantizer.
+        elif hasattr(m, "input_quantizer"):
+            if hasattr(m, "weight_packed") and isinstance(m.weight_packed, torch.Tensor):
+                source = m.weight_packed
+                by_dp[("packed", source.device, source.data_ptr())].append(m)
+            elif hasattr(m, "weight") and isinstance(m.weight, torch.nn.Parameter):
+                source = m.weight
+                by_dp[("dense", source.device, source.data_ptr())].append(m)
 
     def _merge(quantizers: list) -> bool:
         """Max-merge amaxes across the quantizer list. Returns True on merge."""

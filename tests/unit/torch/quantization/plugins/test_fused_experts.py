@@ -762,6 +762,54 @@ class TestExportFusedExpertsTiedDedup:
         finally:
             self._cleanup_registry(expert_type)
 
+    def test_wrapper_tied_keys_use_fused_source_slices(self, monkeypatch):
+        """Per-expert keys are captured before contiguous wrapper buffers are allocated."""
+        parent = _build_two_moe_blocks(tie=False)
+        expert_type = type(parent.encoder.experts)
+        self._cleanup_registry(expert_type)
+        try:
+            _calibrate_two_moe_blocks(parent)
+            module = parent.encoder.experts
+            first_proj = module.gate_up_proj
+            down_proj = module.down_proj
+            expected = []
+            for idx in range(NUM_EXPERTS):
+                for proj_name, weight_slice in (
+                    ("gate_proj", first_proj[idx, :INTERMEDIATE_DIM, :]),
+                    ("up_proj", first_proj[idx, INTERMEDIATE_DIM:, :]),
+                    ("down_proj", down_proj[idx]),
+                ):
+                    expected.append(
+                        (
+                            ("fused-expert-slice", proj_name, idx),
+                            weight_slice.device,
+                            weight_slice.data_ptr(),
+                        )
+                    )
+
+            observed = []
+
+            def record_export(
+                _wrapper,
+                _dtype,
+                weight_name="weight",
+                _tied_cache=None,
+                _tied_source_key=None,
+            ):
+                assert weight_name == "weight"
+                assert _tied_cache is not None
+                observed.append(_tied_source_key)
+
+            monkeypatch.setattr(
+                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                record_export,
+            )
+            _export_fused_experts(module, torch.float16, _tied_cache={})
+
+            assert observed == expected
+        finally:
+            self._cleanup_registry(expert_type)
+
 
 # ---------------------------------------------------------------------------
 # Tests for force_eager_experts_impl_on_the_fly

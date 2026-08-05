@@ -21,7 +21,7 @@ import tempfile
 import warnings
 from builtins import ValueError
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from pathlib import Path
 from typing import Any
 
@@ -565,11 +565,19 @@ def _compressed_per_block_scale(
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
 
 
+def _tensor_tied_source_key(
+    tensor: torch.Tensor, namespace: Hashable
+) -> tuple[Hashable, torch.device, int]:
+    """Return a namespaced, device-qualified identity for one live source tensor."""
+    return namespace, tensor.device, tensor.data_ptr()
+
+
 def _export_quantized_weight(
     sub_module: nn.Module,
     dtype: torch.dtype,
     weight_name: str = "weight",
-    _tied_cache: dict[int, nn.Module] | None = None,
+    _tied_cache: dict[Hashable, nn.Module] | None = None,
+    _tied_source_key: Hashable | None = None,
 ):
     """For the given weight attr of the sub_module, export the quantization info of it.
 
@@ -578,11 +586,13 @@ def _export_quantized_weight(
 
     Tied-weight dedup is opt-in via ``_tied_cache``: the setattr below replaces
     ``.weight`` with a fresh ``nn.Parameter`` wrapping packed bytes, breaking
-    any HF-level tie. When the caller passes a ``_tied_cache`` dict (keyed by
-    the pre-pack ``weight.data_ptr()``), the alias step at the end re-points
-    ``weight`` / ``weight_scale`` / ``weight_scale_2`` at a previously-processed
-    module sharing the same source memory so the downstream data_ptr dedup can
-    collapse them. The cache is owned by the caller (typically
+    any HF-level tie. When the caller passes a ``_tied_cache`` dict (keyed by a
+    namespaced, device-qualified pre-pack source identity), the alias step at the
+    end re-points ``weight`` / ``weight_scale`` / ``weight_scale_2`` at a
+    previously-processed module sharing the same source memory so the downstream
+    data_ptr dedup can collapse them. ``_tied_source_key`` lets transiently
+    decompressed modules supply the still-live packed source identity instead of
+    the allocator-recyclable dense buffer identity. The cache is owned by the caller (typically
     ``_export_transformers_checkpoint``) and scoped to one export invocation;
     when ``_tied_cache`` is ``None`` (the default) the alias step is skipped
     entirely. Uses memory identity only — no ``_tied_weights_keys`` lookup,
@@ -596,12 +606,12 @@ def _export_quantized_weight(
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)
 
-    # Capture source identity BEFORE any tensor-creating operation below.
-    # For HF-tied weights this matches across all modules sharing the
-    # underlying Parameter; the cache lookup at the end of this function
-    # uses it to detect ties whose Python identity is about to be broken
-    # by the setattr on `weight_name` further down.
-    _tied_source_data_ptr = weight.data_ptr()
+    # Capture source identity BEFORE any tensor-creating operation below. Modules
+    # restored transiently from packed checkpoints provide the original packed
+    # identity: their dense unpack buffer is freed after each module and the CUDA
+    # allocator can immediately reuse its data_ptr for an unrelated expert.
+    if _tied_cache is not None and _tied_source_key is None:
+        _tied_source_key = _tensor_tied_source_key(weight, ("dense", weight_name))
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
     )
@@ -819,7 +829,7 @@ def _export_quantized_weight(
     # this export) already max-merged the per-side amaxes. Gated on the
     # caller-owned _tied_cache so the dedup state is scoped to one export.
     if _tied_cache is not None:
-        _prior = _tied_cache.get(_tied_source_data_ptr)
+        _prior = _tied_cache.get(_tied_source_key)
         if _prior is not None and _prior is not sub_module:
             if hasattr(_prior, weight_name):
                 setattr(sub_module, weight_name, getattr(_prior, weight_name))
@@ -836,7 +846,7 @@ def _export_quantized_weight(
                     delattr(sub_module, _attr)
                 sub_module.register_buffer(_attr, getattr(_prior, _attr))
         else:
-            _tied_cache[_tied_source_data_ptr] = sub_module
+            _tied_cache[_tied_source_key] = sub_module
 
     torch.cuda.empty_cache()
 
@@ -879,15 +889,34 @@ def _process_quantized_modules(
             continue
 
         # Preprocessing: restore unpacked weight so the export path can read
-        # the live quantizer state. Falls through to the handler dispatch below.
-        if hasattr(sub_module, "weight_packed") or (
+        # the live quantizer state. Capture the still-live packed tensor first:
+        # the transient dense allocation may reuse another module's data_ptr as
+        # soon as that module is packed and its dense buffer is released.
+        needs_unpack = hasattr(sub_module, "weight_packed") or (
             "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
-        ):
-            sub_module.unpack_weight()
+        )
+        tied_source_slot = None
+        try:
+            if needs_unpack:
+                if ctx.tied_cache is not None:
+                    if hasattr(sub_module, "weight_packed"):
+                        source_weight = sub_module.weight_packed
+                        source_namespace = ("packed", "weight")
+                    else:
+                        source_weight = sub_module.weight
+                        source_namespace = ("pre-unpack-fp8", "weight")
+                    tied_source_slot = (id(sub_module), "weight")
+                    ctx.tied_source_keys[tied_source_slot] = _tensor_tied_source_key(
+                        source_weight, source_namespace
+                    )
+                sub_module.unpack_weight()
 
-        handler = ExportModuleRegistry.match(sub_module)
-        if handler is not None:
-            handler(name, sub_module, ctx)
+            handler = ExportModuleRegistry.match(sub_module)
+            if handler is not None:
+                handler(name, sub_module, ctx)
+        finally:
+            if tied_source_slot is not None:
+                ctx.tied_source_keys.pop(tied_source_slot, None)
 
 
 def _export_transformers_checkpoint(

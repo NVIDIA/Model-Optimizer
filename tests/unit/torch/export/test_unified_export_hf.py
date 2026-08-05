@@ -29,7 +29,10 @@ from modelopt.torch.export.model_utils import (
     _reorder_canonical_first,
 )
 from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.unified_export_hf import (
+    _export_quantized_weight,
+    _process_quantized_modules,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -116,6 +119,27 @@ def test_sync_tied_input_amax_no_op_for_untied_modules():
     assert torch.allclose(dec_q.amax, torch.tensor(5.0))
 
 
+def test_sync_tied_input_amax_max_merges_shared_packed_weight():
+    """Packed modules are grouped by their checkpoint source, even without .weight."""
+    parent = torch.nn.Module()
+    parent.encoder = torch.nn.Linear(16, 32, bias=False)
+    parent.decoder = torch.nn.Linear(16, 32, bias=False)
+    enc_q, dec_q = _quantize_and_get_input_quantizers(parent)
+    enc_q.amax = torch.tensor(2.0)
+    dec_q.amax = torch.tensor(5.0)
+
+    packed_source = torch.tensor([123], dtype=torch.int32)
+    for module in (parent.encoder, parent.decoder):
+        module.register_buffer("weight_packed", packed_source)
+        del module._parameters["weight"]
+
+    sync_tied_input_amax(parent)
+
+    expected = torch.tensor(5.0)
+    assert torch.allclose(enc_q.amax, expected)
+    assert torch.allclose(dec_q.amax, expected)
+
+
 def _calibrate_through_both_children(parent):
     """Insert NVFP4 quantizers and run a one-shot forward through both children for calibration."""
 
@@ -141,7 +165,7 @@ def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
     _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
 
     assert enc.weight.data_ptr() == dec.weight.data_ptr()
-    for scale_attr in ("weight_scale", "weight_scale_2"):
+    for scale_attr in ("weight_scale", "weight_scale_2", "input_scale"):
         if hasattr(enc, scale_attr) and hasattr(dec, scale_attr):
             assert getattr(enc, scale_attr).data_ptr() == getattr(dec, scale_attr).data_ptr()
 
@@ -162,6 +186,58 @@ def test_export_quantized_weight_no_alias_for_untied_linears():
     _export_quantized_weight(parent.decoder, torch.float16, "weight", _tied_cache=tied_cache)
 
     assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
+
+
+def _attach_transient_packed_source(module, packed_source):
+    module.register_buffer("weight_packed", packed_source)
+
+    def unpack_weight():
+        del module.weight_packed
+
+    module.unpack_weight = unpack_weight
+
+
+def test_process_quantized_modules_does_not_alias_reused_transient_data_ptr():
+    """Distinct packed sources win over a reused transient dense allocation."""
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec)
+    _calibrate_through_both_children(parent)
+
+    # The shared dense Parameter deterministically simulates allocator reuse, while
+    # the distinct packed buffers identify unrelated checkpoint weights.
+    _attach_transient_packed_source(enc, torch.tensor([101], dtype=torch.int32))
+    _attach_transient_packed_source(dec, torch.tensor([202], dtype=torch.int32))
+
+    _process_quantized_modules(parent, torch.float16)
+
+    assert enc.weight.data_ptr() != dec.weight.data_ptr()
+    for scale_attr in ("weight_scale", "weight_scale_2", "input_scale"):
+        if hasattr(enc, scale_attr) and hasattr(dec, scale_attr):
+            assert getattr(enc, scale_attr).data_ptr() != getattr(dec, scale_attr).data_ptr()
+    assert not hasattr(enc, "weight_packed")
+    assert not hasattr(dec, "weight_packed")
+
+
+def test_process_quantized_modules_aliases_matching_stable_packed_source():
+    """A shared packed source preserves a real tie after transient unpacking."""
+    parent = torch.nn.Module()
+    parent.encoder = torch.nn.Linear(16, 32, bias=False)
+    parent.decoder = torch.nn.Linear(16, 32, bias=False)
+    _calibrate_through_both_children(parent)
+
+    packed_source = torch.tensor([303], dtype=torch.int32)
+    _attach_transient_packed_source(parent.encoder, packed_source)
+    _attach_transient_packed_source(parent.decoder, packed_source)
+
+    _process_quantized_modules(parent, torch.float16)
+
+    assert parent.encoder.weight.data_ptr() == parent.decoder.weight.data_ptr()
+    for scale_attr in ("weight_scale", "weight_scale_2", "input_scale"):
+        if hasattr(parent.encoder, scale_attr) and hasattr(parent.decoder, scale_attr):
+            assert (
+                getattr(parent.encoder, scale_attr).data_ptr()
+                == getattr(parent.decoder, scale_attr).data_ptr()
+            )
 
 
 def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized():

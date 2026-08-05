@@ -26,7 +26,7 @@ precedence. Registering a handler for a new module type replaces what previously
 editing if/elif chains inside ``unified_export_hf.py``.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 
 import torch
@@ -49,15 +49,18 @@ class ExportContext:
     The tied-weight dedup caches must be scoped to one export invocation: a
     process-global cache would carry stale entries whose ``data_ptr`` keys can be
     recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
+    aliasing. ``tied_cache`` holds namespaced, device-qualified tensor identities
+    for dense Linear / per-expert wrapper dedup; ``moe_tied_cache`` holds MoE
+    fused-experts module dedup. ``tied_source_keys`` carries stable identities
+    captured before packed modules are transiently decompressed.
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
+    tied_cache: dict[Hashable, nn.Module] | None = field(default_factory=dict)
+    moe_tied_cache: dict[Hashable, nn.Module] | None = field(default_factory=dict)
+    tied_source_keys: dict[tuple[int, str], Hashable] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # FSDP2 may recycle data_ptr() values as modules are resharded, so pointer-keyed dedup can

@@ -308,5 +308,7 @@ def test_export_context_caches_are_per_instance():
     ctx_a = ExportContext(model=model, dtype=torch.float16)
     ctx_b = ExportContext(model=model, dtype=torch.float16)
     ctx_a.tied_cache[123] = model
+    ctx_a.tied_source_keys[(id(model), "weight")] = ("packed", "cpu", 123)
     assert ctx_b.tied_cache == {}
     assert ctx_b.moe_tied_cache == {}
+    assert ctx_b.tied_source_keys == {}

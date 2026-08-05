@@ -17,6 +17,7 @@
 
 import copy
 import warnings
+from collections.abc import Hashable
 from pathlib import Path
 
 import torch
@@ -77,8 +78,8 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
-    _moe_tied_cache: dict[tuple[int, int], nn.Module] | None = None,
-    _tied_cache: dict[int, nn.Module] | None = None,
+    _moe_tied_cache: dict[Hashable, nn.Module] | None = None,
+    _tied_cache: dict[Hashable, nn.Module] | None = None,
 ) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
@@ -103,18 +104,21 @@ def _export_fused_experts(
     Tied-experts dedup is opt-in via ``_moe_tied_cache``: when multiple
     fused-expert modules share their 3-D source params via HF
     ``_tied_weights_keys``, the unpacking creates fresh per-expert tensors
-    that break the tie. With ``_moe_tied_cache`` provided (tuple-keyed by
-    ``(<first_proj>.data_ptr(), down_proj.data_ptr())``), the alias step
+    that break the tie. With ``_moe_tied_cache`` provided (keyed by the
+    namespaced, device-qualified identities of both fused source tensors), the alias step
     at the end re-points the per-expert ``weight`` / ``weight_scale`` /
     ``weight_scale_2`` / ``input_scale`` buffers at a previously-processed
-    module sharing the same source memory. ``_tied_cache`` (int-keyed) is
+    module sharing the same source memory. ``_tied_cache`` is
     threaded through to the per-projection ``_export_quantized_weight``
     calls so wrapper-level dedup uses the same scope as standalone Linears.
     Both caches are owned by the caller (typically
     ``_export_transformers_checkpoint``) and scoped to one export
     invocation; when ``None`` the corresponding alias step is skipped.
     """
-    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+    from modelopt.torch.export.unified_export_hf import (
+        _export_quantized_weight,
+        _tensor_tied_source_key,
+    )
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts
@@ -126,10 +130,17 @@ def _export_fused_experts(
 
     # Capture source tensor identities BEFORE unpacking (the source
     # attrs are deleted at the end of this function).
-    _source_key = (
-        getattr(module, first_proj_attr).data_ptr(),
-        module.down_proj.data_ptr(),
-    )
+    _source_key = None
+    if _moe_tied_cache is not None:
+        first_proj_source = getattr(module, first_proj_attr)
+        _source_key = (
+            "fused-experts",
+            first_proj_attr,
+            first_proj_source.device,
+            first_proj_source.data_ptr(),
+            module.down_proj.device,
+            module.down_proj.data_ptr(),
+        )
 
     # Tied-experts fast path: if this exact (first_proj, down) source-tensor pair
     # has been processed before, alias all per-expert buffers directly from the
@@ -207,6 +218,14 @@ def _export_fused_experts(
             fused_total,
             uses_first_proj_quantizers,
         ) in projections:
+            tied_source_key = (
+                _tensor_tied_source_key(
+                    weight_slice,
+                    ("fused-expert-slice", proj_name, idx),
+                )
+                if _tied_cache is not None
+                else None
+            )
             w_quantizer_src = (
                 first_proj_weight_quantizers[idx]
                 if uses_first_proj_quantizers
@@ -271,7 +290,12 @@ def _export_fused_experts(
             wrapper.weight_quantizer = w_quantizer
             wrapper.input_quantizer = i_quantizer
 
-            _export_quantized_weight(wrapper, dtype, _tied_cache=_tied_cache)
+            _export_quantized_weight(
+                wrapper,
+                dtype,
+                _tied_cache=_tied_cache,
+                _tied_source_key=tied_source_key,
+            )
 
             proj = nn.Module()
             proj.weight = wrapper.weight

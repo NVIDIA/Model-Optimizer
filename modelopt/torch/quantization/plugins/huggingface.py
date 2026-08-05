@@ -18,9 +18,13 @@
 import inspect
 import logging
 import warnings
+from collections.abc import Collection
 from contextlib import contextmanager
-from functools import partial
+from contextvars import ContextVar
+from functools import partial, wraps
+from threading import RLock
 from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
 
 import torch
 import torch.nn as nn
@@ -38,6 +42,7 @@ from modelopt.torch.kernels.common.attention import (
 from modelopt.torch.kernels.quantization.gemm import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
+from modelopt.torch.utils.network import bind_forward_method
 
 from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
@@ -1153,40 +1158,178 @@ class _QuantDbrxFFN(_QuantSparseSequentialMoe):
             self.__dict__["top_k"] = value
 
 
-@contextmanager
-def patch_compressed_linear_loading():
-    """Context manager that patches CompressedLinear to survive custom ``_init_weights`` calls.
+def _reconcile_compressed_tensors_config(
+    model: nn.Module,
+    config,
+    checkpoint_weight_keys: Collection[str] | None,
+) -> list[str]:
+    """Ignore dense checkpoint linears that a stale compression config targets.
 
-    When loading pack-quantized models with ``trust_remote_code=True``,
-    ``compressed_tensors`` replaces ``.weight`` with ``.weight_packed`` on
-    CompressedLinear modules.  Custom model code (e.g. ``modeling_deepseek.py``)
-    often does ``module.weight.data.normal_(...)`` inside ``_init_weights``,
-    which crashes because ``.weight`` no longer exists.
-
-    This context manager monkey-patches ``CompressedLinear.__getattr__`` to
-    return a harmless dummy for ``.weight`` accesses, and restores the original
-    behaviour on exit (even if an exception is raised).
-
-    Usage::
-
-        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
-
-        with patch_compressed_linear_loading():
-            model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path, device_map="auto", trust_remote_code=True, dtype="auto"
-            )
+    Pack-quantized checkpoints identify compressed linears with ``weight_packed``.
+    Model configs can lag behind the checkpoint layout, particularly for newly added
+    vision and projector modules.  Matching the instantiated module names against the
+    checkpoint schema keeps those dense weights out of compressed-tensors without
+    relying on model-specific prefixes or divisibility heuristics.
     """
+    if config is None or not checkpoint_weight_keys:
+        return []
+
+    compression_format = getattr(config, "format", None)
+    compression_format = getattr(compression_format, "value", compression_format)
+    if compression_format != "pack-quantized":
+        return []
+
+    from compressed_tensors.utils.match import is_match
+
+    checkpoint_weight_keys = set(checkpoint_weight_keys)
+    ignore = list(getattr(config, "ignore", None) or [])
+    added = []
+    for name, module in model.named_modules():
+        if not name or not isinstance(module, nn.Linear):
+            continue
+        if f"{name}.weight" not in checkpoint_weight_keys:
+            continue
+        if f"{name}.weight_packed" in checkpoint_weight_keys:
+            continue
+        if is_match(name, module, ignore):
+            continue
+        ignore.append(name)
+        added.append(name)
+
+    if added:
+        config.ignore = ignore
+    return added
+
+
+_COMPRESSED_LOADING_PATCH_CONTEXTS: ContextVar[
+    tuple[tuple[object, object, frozenset[str] | None], ...]
+] = ContextVar("modelopt_compressed_loading_patch_contexts", default=())
+_COMPRESSED_LOADING_PATCH_LOCK = RLock()
+_COMPRESSED_LOADING_PATCH_STATES = WeakKeyDictionary()
+_COMPRESSED_LOADING_PATCH_MISSING = object()
+
+
+class _CompressedLoadingPatchState:
+    """Process-wide patch ownership shared by nested and concurrent contexts."""
+
+    def __init__(self, quantization_module, compressed_linear):
+        self.compressed_linear = compressed_linear
+        self.original_apply = quantization_module.apply_quantization_config
+        self.dispatcher = None
+        self.active: dict[object, frozenset[str] | None] = {}
+        self.warned_ambiguous_context = False
+
+        self.original_getattr = getattr(compressed_linear, "__getattr__", None)
+        self.original_local_getattr = compressed_linear.__dict__.get(
+            "__getattr__", _COMPRESSED_LOADING_PATCH_MISSING
+        )
+        self.original_marker = compressed_linear.__dict__.get(
+            "_modelopt_init_patched", _COMPRESSED_LOADING_PATCH_MISSING
+        )
+        self.owns_init_patch = not getattr(compressed_linear, "_modelopt_init_patched", False)
+        self.patched_getattr = None
+
+
+def _get_loading_checkpoint_keys(
+    state: _CompressedLoadingPatchState,
+) -> frozenset[str] | None:
+    """Select the innermost schema belonging to this compressed-tensors module."""
+    for context_state, _context_id, checkpoint_weight_keys in reversed(
+        _COMPRESSED_LOADING_PATCH_CONTEXTS.get()
+    ):
+        if context_state is state:
+            return checkpoint_weight_keys
+
+    # Context variables are not inherited by newly-created threads. A sole active
+    # load is still unambiguous, which covers libraries that dispatch preprocessing
+    # to a helper thread. Multiple concurrent loads must not borrow an arbitrary schema.
+    with _COMPRESSED_LOADING_PATCH_LOCK:
+        if len(state.active) == 1:
+            return next(iter(state.active.values()))
+        if len(state.active) > 1 and not state.warned_ambiguous_context:
+            logger.warning(
+                "Skipping checkpoint-schema reconciliation in a thread without ModelOpt "
+                "loading context because multiple compressed-tensors loads are active"
+            )
+            state.warned_ambiguous_context = True
+    return None
+
+
+def _restore_compressed_loading_patch(
+    state: _CompressedLoadingPatchState, quantization_module
+) -> bool:
+    """Restore only attributes still owned by ``state`` without clobbering other patches."""
+    restored = True
+    compressed_linear = state.compressed_linear
+
     try:
-        from compressed_tensors.linear.compressed_linear import CompressedLinear
-    except ImportError:
-        yield
-        return
+        if quantization_module.apply_quantization_config is state.dispatcher:
+            quantization_module.apply_quantization_config = state.original_apply
+        elif quantization_module.apply_quantization_config is not state.original_apply:
+            logger.warning(
+                "Not restoring compressed-tensors apply_quantization_config because "
+                "another patch replaced ModelOpt's dispatcher"
+            )
+    except Exception:
+        logger.exception("Failed to restore compressed-tensors apply_quantization_config")
+        restored = False
 
-    if getattr(CompressedLinear, "_modelopt_init_patched", False):
-        yield
-        return
+    if state.owns_init_patch:
+        try:
+            current_getattr = compressed_linear.__dict__.get(
+                "__getattr__", _COMPRESSED_LOADING_PATCH_MISSING
+            )
+            current_marker = compressed_linear.__dict__.get(
+                "_modelopt_init_patched", _COMPRESSED_LOADING_PATCH_MISSING
+            )
+            if current_getattr is state.patched_getattr:
+                if state.original_local_getattr is _COMPRESSED_LOADING_PATCH_MISSING:
+                    del compressed_linear.__getattr__
+                else:
+                    compressed_linear.__getattr__ = state.original_local_getattr
+            elif current_getattr is not state.original_local_getattr:
+                logger.warning(
+                    "Not restoring CompressedLinear.__getattr__ because another patch "
+                    "replaced ModelOpt's implementation"
+                )
 
-    original_getattr = getattr(CompressedLinear, "__getattr__", None)
+            if current_marker is True:
+                if state.original_marker is _COMPRESSED_LOADING_PATCH_MISSING:
+                    del compressed_linear._modelopt_init_patched
+                else:
+                    compressed_linear._modelopt_init_patched = state.original_marker
+            elif current_marker is not state.original_marker:
+                logger.warning(
+                    "Not restoring CompressedLinear patch marker because another "
+                    "patch replaced ModelOpt's value"
+                )
+        except Exception:
+            logger.exception("Failed to restore CompressedLinear original state")
+            restored = False
+
+    if restored:
+        logger.info("Restored compressed-tensors original state")
+    return restored
+
+
+def _install_compressed_loading_patch(
+    quantization_module, compressed_linear
+) -> _CompressedLoadingPatchState:
+    """Install one dispatcher, rolling back every mutation if setup fails."""
+    state = _CompressedLoadingPatchState(quantization_module, compressed_linear)
+
+    @wraps(state.original_apply)
+    def dispatch_apply_quantization_config(model, config, *args, **kwargs):
+        checkpoint_weight_keys = _get_loading_checkpoint_keys(state)
+        added = _reconcile_compressed_tensors_config(model, config, checkpoint_weight_keys)
+        if added:
+            logger.info(
+                "Kept %d checkpoint-dense linear modules out of pack quantization",
+                len(added),
+            )
+        return state.original_apply(model, config, *args, **kwargs)
+
+    state.dispatcher = dispatch_apply_quantization_config
 
     class _DummyWeightData:
         def __getattr__(self, name):
@@ -1206,27 +1349,245 @@ def patch_compressed_linear_loading():
             if "weight" in self.__dict__:
                 return self.__dict__["weight"]
             return _DummyWeight()
-        if original_getattr is not None:
-            return original_getattr(self, name)
+        if state.original_getattr is not None:
+            return state.original_getattr(self, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    CompressedLinear.__getattr__ = patched_getattr
-    CompressedLinear._modelopt_init_patched = True
-    logger.info("Patched CompressedLinear for transformers compatibility")
+    state.patched_getattr = patched_getattr
+    try:
+        quantization_module.apply_quantization_config = state.dispatcher
+        if state.owns_init_patch:
+            compressed_linear.__getattr__ = state.patched_getattr
+            compressed_linear._modelopt_init_patched = True
+            logger.info("Patched CompressedLinear for transformers compatibility")
+    except Exception:
+        _restore_compressed_loading_patch(state, quantization_module)
+        raise
+    return state
+
+
+@contextmanager
+def patch_compressed_linear_loading(
+    checkpoint_weight_keys: Collection[str] | None = None,
+):
+    """Patch compressed-tensors while a pack-quantized checkpoint is instantiated.
+
+    When loading pack-quantized models with ``trust_remote_code=True``,
+    ``compressed_tensors`` replaces ``.weight`` with ``.weight_packed`` on
+    CompressedLinear modules.  Custom model code (e.g. ``modeling_deepseek.py``)
+    often does ``module.weight.data.normal_(...)`` inside ``_init_weights``,
+    which crashes because ``.weight`` no longer exists.
+
+    The context also reconciles stale compression ignore lists with the checkpoint
+    tensor schema before compressed-tensors initializes modules.  All temporary
+    patches are restored on exit, including when model loading raises.
+
+    Usage::
+
+        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
+
+        with patch_compressed_linear_loading(checkpoint_weight_keys):
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path, device_map="auto", trust_remote_code=True, dtype="auto"
+            )
+    """
+    try:
+        import compressed_tensors.quantization as compressed_tensors_quantization
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+    except ImportError:
+        yield
+        return
+
+    normalized_weight_keys = (
+        frozenset(checkpoint_weight_keys) if checkpoint_weight_keys is not None else None
+    )
+    context_id = object()
+
+    with _COMPRESSED_LOADING_PATCH_LOCK:
+        state = _COMPRESSED_LOADING_PATCH_STATES.get(compressed_tensors_quantization)
+        state_is_current = state is not None and (
+            state.compressed_linear is CompressedLinear
+            and compressed_tensors_quantization.apply_quantization_config is state.dispatcher
+            and (
+                not state.owns_init_patch
+                or (
+                    CompressedLinear.__dict__.get("__getattr__", _COMPRESSED_LOADING_PATCH_MISSING)
+                    is state.patched_getattr
+                    and CompressedLinear.__dict__.get(
+                        "_modelopt_init_patched", _COMPRESSED_LOADING_PATCH_MISSING
+                    )
+                    is True
+                )
+            )
+        )
+        if state is not None and not state_is_current:
+            if state.active:
+                raise RuntimeError(
+                    "compressed-tensors changed while a ModelOpt loading patch was active"
+                )
+            if not _restore_compressed_loading_patch(state, compressed_tensors_quantization):
+                raise RuntimeError("failed to restore stale compressed-tensors loading patch")
+            _COMPRESSED_LOADING_PATCH_STATES.pop(compressed_tensors_quantization, None)
+            state = None
+
+        if state is None:
+            state = _install_compressed_loading_patch(
+                compressed_tensors_quantization, CompressedLinear
+            )
+            _COMPRESSED_LOADING_PATCH_STATES[compressed_tensors_quantization] = state
+        state.active[context_id] = normalized_weight_keys
+
+    contexts = _COMPRESSED_LOADING_PATCH_CONTEXTS.get()
+    try:
+        context_token = _COMPRESSED_LOADING_PATCH_CONTEXTS.set(
+            (*contexts, (state, context_id, normalized_weight_keys))
+        )
+    except Exception:
+        with _COMPRESSED_LOADING_PATCH_LOCK:
+            state.active.pop(context_id, None)
+            if not state.active and _restore_compressed_loading_patch(
+                state, compressed_tensors_quantization
+            ):
+                _COMPRESSED_LOADING_PATCH_STATES.pop(compressed_tensors_quantization, None)
+        raise
 
     try:
         yield
     finally:
-        if original_getattr is not None:
-            CompressedLinear.__getattr__ = original_getattr
-        elif hasattr(CompressedLinear, "__getattr__"):
-            del CompressedLinear.__getattr__
-        CompressedLinear._modelopt_init_patched = False
-        logger.info("Restored CompressedLinear original state")
+        try:
+            _COMPRESSED_LOADING_PATCH_CONTEXTS.reset(context_token)
+        finally:
+            with _COMPRESSED_LOADING_PATCH_LOCK:
+                state.active.pop(context_id, None)
+                if len(state.active) <= 1:
+                    state.warned_ambiguous_context = False
+                if not state.active and _restore_compressed_loading_patch(
+                    state, compressed_tensors_quantization
+                ):
+                    if (
+                        _COMPRESSED_LOADING_PATCH_STATES.get(compressed_tensors_quantization)
+                        is state
+                    ):
+                        _COMPRESSED_LOADING_PATCH_STATES.pop(compressed_tensors_quantization, None)
+
+
+def _build_compressed_linear_data(module: nn.Module) -> tuple[dict, object | None]:
+    """Collect per-layer packed tensors for old and new compressed-tensors APIs."""
+    compressed_data = {"weight_packed": module.weight_packed}
+    for name in (
+        "weight_scale",
+        "weight_shape",
+        "weight_zero_point",
+        "weight_g_idx",
+        "input_global_scale",
+    ):
+        if not hasattr(module, name):
+            continue
+        value = getattr(module, name)
+        if (
+            name == "weight_shape"
+            and hasattr(module, "out_features")
+            and hasattr(module, "in_features")
+        ):
+            # Avoid a device-to-host scalar sync for every expert.
+            value = [int(module.out_features), int(module.in_features)]
+        elif name == "weight_shape" and isinstance(value, torch.Tensor):
+            value = [int(x) for x in value.tolist()]
+        elif name == "weight_shape" and isinstance(value, (list, tuple)):
+            value = [int(x) for x in value]
+        compressed_data[name] = value
+
+    scheme = getattr(module, "quantization_scheme", None)
+    quant_args = getattr(scheme, "weights", None)
+    return compressed_data, quant_args
+
+
+def _decompress_compressed_linear_weight(module: nn.Module) -> Tensor:
+    """Decompress one packed linear without materializing weights on other layers."""
+    compressed_data, quant_args = _build_compressed_linear_data(module)
+
+    legacy_compressor = getattr(module, "compressor", None)
+    if legacy_compressor is not None and hasattr(legacy_compressor, "decompress_weight"):
+        return legacy_compressor.decompress_weight(
+            compressed_data=compressed_data,
+            quantization_args=quant_args,
+        )
+
+    from compressed_tensors.compressors import BaseCompressor
+
+    scheme = module.quantization_scheme
+    compression_format = getattr(scheme, "format", None)
+    compression_format = getattr(compression_format, "value", compression_format)
+    if compression_format is None:
+        compression_format = "pack-quantized"
+    compressor = BaseCompressor.get_value_from_registry(compression_format)
+    return compressor.decompress(compressed_data, scheme)["weight"]
+
+
+def _get_compressed_linear_weight(module: nn.Module) -> Tensor:
+    """Return the dense weight used for a single forward or calibration step."""
+    from compressed_tensors.quantization import QuantizationStatus
+
+    if module.quantization_status == QuantizationStatus.COMPRESSED:
+        if module.weight_packed.dtype == torch.int32:
+            if not hasattr(module, "_logged_on_the_fly"):
+                logger.debug("On-the-fly decompression for %s", module.__class__.__name__)
+                module._logged_on_the_fly = True
+            return _decompress_compressed_linear_weight(module)
+        return module.weight_packed
+    return module.weight
+
+
+class CompressedLinearCompat(nn.Linear):
+    """Marker linear for compressed-tensors 0.15+ packed-weight execution.
+
+    The class name intentionally contains ``CompressedLinear`` so ModelOpt's
+    generated quantized class follows the existing unified-export path.
+    """
+
+    def forward(self, input: Tensor) -> Tensor:
+        return linear(input, _get_compressed_linear_weight(self), self.bias)
+
+
+def _adapt_compressed_tensors_packed_linears(model: nn.Module) -> int:
+    """Adapt compressed-tensors 0.15+ linears to per-layer decompression."""
+    packed_modules = [
+        module
+        for module in model.modules()
+        if hasattr(module, "weight_packed") and not hasattr(module, "compressor")
+    ]
+    unsupported = [
+        module
+        for module in packed_modules
+        if type(module) is not nn.Linear and not isinstance(module, CompressedLinearCompat)
+    ]
+    if unsupported:
+        logger.warning(
+            "Leaving compressed-tensors execution unchanged because %d packed modules "
+            "are not standard Linear layers",
+            len(unsupported),
+        )
+        return 0
+
+    for module in packed_modules:
+        if isinstance(module, CompressedLinearCompat):
+            continue
+        module.__class__ = CompressedLinearCompat
+        if hasattr(module, "_hf_hook"):
+            bind_forward_method(module, CompressedLinearCompat.forward)
+        else:
+            # compressed-tensors installs its QDQ forward on the instance.  Removing
+            # it lets the marker (and later the generated quant class) win via MRO.
+            module.__dict__.pop("forward", None)
+
+    if packed_modules and hasattr(model, "ct_decompress_hook"):
+        model.ct_decompress_hook.remove()
+        delattr(model, "ct_decompress_hook")
+    return len(packed_modules)
 
 
 class _QuantCompressedLinear(QuantModule):
-    """Quantization wrapper for ``compressed_tensors`` CompressedLinear modules.
+    """Quantization wrapper for legacy and compatibility compressed linear modules.
 
     Handles on-the-fly decompression of pack-quantized INT4 weights during
     calibration.  This avoids fully decompressing all experts into GPU memory
@@ -1239,71 +1600,27 @@ class _QuantCompressedLinear(QuantModule):
         self.input_quantizer = TensorQuantizer()
         self.weight_quantizer = TensorQuantizer()
 
-    def _build_compressed_data(self):
-        """Build compressed_data dict and quantization_args from module attributes.
+    def _get_weight_for_quantization(self) -> Tensor:
+        """Return the weight tensor consumed by the ModelOpt weight quantizer."""
+        return _get_compressed_linear_weight(self)
 
-        Returns a (compressed_data, quant_args) tuple suitable for
-        ``self.compressor.decompress_weight()``.  ``weight_shape`` is
-        normalised to a plain ``list[int]`` so that ``compressed_tensors``
-        does not choke on a ``torch.Tensor`` value.
-        """
-        compressed_data = {"weight_packed": self.weight_packed}
-        if hasattr(self, "weight_scale"):
-            compressed_data["weight_scale"] = self.weight_scale
-        if hasattr(self, "weight_shape"):
-            ws = self.weight_shape
-            if isinstance(ws, torch.Tensor):
-                compressed_data["weight_shape"] = [int(x) for x in ws.tolist()]
-            elif isinstance(ws, (list, tuple)):
-                compressed_data["weight_shape"] = [int(x) for x in ws]
-            else:
-                compressed_data["weight_shape"] = ws
-        if hasattr(self, "weight_zero_point"):
-            compressed_data["weight_zero_point"] = self.weight_zero_point
-
-        quant_args = None
-        if hasattr(self, "quantization_scheme") and self.quantization_scheme:
-            if hasattr(self.quantization_scheme, "weights"):
-                quant_args = self.quantization_scheme.weights
-
-        return compressed_data, quant_args
+    def iter_weights_for_calibration(self):
+        """Yield the transiently decompressed weight for weight-only calibration."""
+        yield self._get_weight_for_quantization(), self.weight_quantizer
 
     def forward(self, input: Tensor) -> Tensor:
-        from compressed_tensors.quantization import QuantizationStatus
-
-        if self.quantization_status == QuantizationStatus.COMPRESSED:
-            # Real packed weights are int32. If it's float, it's not actually compressed.
-            if self.weight_packed.dtype == torch.int32:
-                compressed_data, quant_args = self._build_compressed_data()
-                if not hasattr(self, "_logged_on_the_fly"):
-                    logger.debug("On-the-fly decompression for %s", self.__class__.__name__)
-                    self._logged_on_the_fly = True
-                weight_data = self.compressor.decompress_weight(
-                    compressed_data=compressed_data,
-                    quantization_args=quant_args,
-                )
-            else:
-                weight_data = self.weight_packed
-        else:
-            weight_data = self.weight
-
-        return linear(self.input_quantizer(input), self.weight_quantizer(weight_data), self.bias)
+        weight = self._get_weight_for_quantization()
+        return linear(self.input_quantizer(input), self.weight_quantizer(weight), self.bias)
 
     def unpack_weight(self):
         from compressed_tensors.quantization import QuantizationStatus
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
-            compressed_data, quant_args = self._build_compressed_data()
-
             # Skip non-pack-quantized weights (e.g., vision modules stored as BF16)
-            if isinstance(compressed_data["weight_packed"], torch.Tensor):
-                if compressed_data["weight_packed"].dtype != torch.int32:
-                    return
+            if self.weight_packed.dtype != torch.int32:
+                return
 
-            decompressed = self.compressor.decompress_weight(
-                compressed_data=compressed_data,
-                quantization_args=quant_args,
-            )
+            decompressed = _decompress_compressed_linear_weight(self)
             # Clear any placeholder before registering the real parameter
             self._parameters.pop("weight", None)
             self._buffers.pop("weight", None)
@@ -1313,15 +1630,16 @@ class _QuantCompressedLinear(QuantModule):
             self._parameters["weight"] = param
             self.__dict__["weight"] = param
 
-        if hasattr(self, "weight_packed"):
-            del self.weight_packed
-        if hasattr(self, "weight_scale"):
-            del self.weight_scale
-        if hasattr(self, "weight_shape"):
-            if "weight_shape" in self._parameters:
-                del self._parameters["weight_shape"]
-            else:
-                delattr(self, "weight_shape")
+        for name in (
+            "weight_packed",
+            "weight_scale",
+            "weight_shape",
+            "weight_zero_point",
+            "weight_g_idx",
+            "input_global_scale",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
         if self.quantization_status == QuantizationStatus.COMPRESSED:
             self.quantization_status = QuantizationStatus.FROZEN
 
@@ -1410,6 +1728,11 @@ try:
         QuantModuleRegistry.register({FalconLinear: "hf.FalconLinear"})(_QuantLinear)
 except ImportError:
     pass
+
+if CompressedLinearCompat not in QuantModuleRegistry:
+    QuantModuleRegistry.register({CompressedLinearCompat: "hf.CompressedLinearCompat"})(
+        _QuantCompressedLinear
+    )
 
 try:
     from compressed_tensors.linear.compressed_linear import CompressedLinear

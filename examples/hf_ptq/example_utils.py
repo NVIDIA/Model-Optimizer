@@ -527,6 +527,49 @@ def get_dtype(dtype):
     return dtype
 
 
+def _get_checkpoint_weight_keys(ckpt_path) -> set[str] | None:
+    """Read a pack-quantized checkpoint's tensor names without loading its shards."""
+    index_filename = "model.safetensors.index.json"
+    if os.path.isdir(ckpt_path):
+        index_path = os.path.join(ckpt_path, index_filename)
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                return set(json.load(f).get("weight_map", {}))
+
+        safetensors_path = os.path.join(ckpt_path, "model.safetensors")
+        if os.path.exists(safetensors_path):
+            with safe_open(safetensors_path, framework="pt") as f:
+                return set(f.keys())
+        return None
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as error:
+        logger.warning("Could not inspect checkpoint tensor names for %s: %s", ckpt_path, error)
+        return None
+
+    try:
+        index_path = hf_hub_download(repo_id=ckpt_path, filename=index_filename)
+    except Exception as index_error:
+        try:
+            safetensors_path = hf_hub_download(repo_id=ckpt_path, filename="model.safetensors")
+        except Exception as safetensors_error:
+            logger.warning(
+                "Could not inspect checkpoint tensor names for %s: index lookup failed "
+                "with %s; single-file lookup failed with %s",
+                ckpt_path,
+                index_error,
+                safetensors_error,
+            )
+            return None
+
+        with safe_open(safetensors_path, framework="pt") as f:
+            return set(f.keys())
+
+    with open(index_path) as f:
+        return set(json.load(f).get("weight_map", {}))
+
+
 def _unpack_compressed_linear_weights(model, ckpt_path=None):
     """Hybrid restoration: restores BF16 layers and fixes expert metadata.
 
@@ -534,6 +577,15 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
     2. INT4 experts stay compressed in HBM to save memory (decompressed on-the-fly).
     3. Metadata (weight_shape) is fixed to avoid decompression errors.
     """
+    from modelopt.torch.quantization.plugins.huggingface import (
+        _adapt_compressed_tensors_packed_linears,
+    )
+
+    adapted = _adapt_compressed_tensors_packed_linears(model)
+    if adapted:
+        logger.info("Adapted %d packed linear modules for on-the-fly decompression", adapted)
+        return
+
     try:
         from compressed_tensors.linear.compressed_linear import CompressedLinear
         from compressed_tensors.quantization import QuantizationStatus
@@ -773,7 +825,8 @@ def get_model(
     elif has_pack_quantized_config(hf_config):
         from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
 
-        with patch_compressed_linear_loading():
+        checkpoint_weight_keys = _get_checkpoint_weight_keys(ckpt_path)
+        with patch_compressed_linear_loading(checkpoint_weight_keys):
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map="auto",

@@ -45,7 +45,13 @@ def _export_weight(
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
-    _export_quantized_weight(module, ctx.dtype, weight_name, _tied_cache=ctx.tied_cache)
+    _export_quantized_weight(
+        module,
+        ctx.dtype,
+        weight_name,
+        _tied_cache=ctx.tied_cache,
+        _tied_source_key=ctx.tied_source_keys.get((id(module), weight_name)),
+    )
 
 
 # Preparation handlers are registered in the same precedence as the legacy MoE prepass.
