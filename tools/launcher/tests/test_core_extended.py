@@ -27,6 +27,7 @@ Coverage:
 import os
 from unittest.mock import MagicMock, patch
 
+import core
 import pytest
 from core import (
     GlobalVariables,
@@ -38,6 +39,7 @@ from core import (
     get_default_env,
     run_jobs,
 )
+from slurm_config import SlurmConfig
 
 
 class TestCreateTaskFromYamlErrors:
@@ -118,6 +120,63 @@ class TestSandboxPipelineExtended:
         pipeline = SandboxPipeline(task_0=t0)
         # No interpolation happens — args kept as-is
         assert pipeline.tasks[0].args == ["<<global_vars.hf_model>>"]
+
+    def test_slurm_repair_preserves_explicit_nullable_gpus(self, monkeypatch):
+        """Inline --yaml repair keeps factory host and explicit no-GRES value."""
+
+        def factory():
+            return SlurmConfig(host="cluster.example.com", gpus_per_node=1)
+
+        monkeypatch.setitem(core._FACTORY_REGISTRY, "slurm_factory", factory)
+
+        task = SandboxTask0(
+            script="test.sh",
+            slurm_config=SlurmConfig(
+                host=None,
+                container="ubuntu:24.04",
+                gpus_per_node=None,
+            ),
+        )
+        pipeline = SandboxPipeline(task_0=task)
+
+        assert pipeline.tasks[0].slurm_config.host == "cluster.example.com"
+        assert pipeline.tasks[0].slurm_config.container == "ubuntu:24.04"
+        assert pipeline.tasks[0].slurm_config.gpus_per_node is None
+
+    def test_slurm_repair_uses_raw_yaml_keys_for_default_equal_values(self, monkeypatch, tmp_yaml):
+        """Inline --yaml repair preserves explicit values equal to dataclass defaults."""
+
+        def factory():
+            return SlurmConfig(
+                host="cluster.example.com",
+                partition="factory_partition",
+                gpus_per_node=1,
+            )
+
+        yaml_path = tmp_yaml(
+            """
+job_name: smoke
+pipeline:
+  task_0:
+    script: hostname.sh
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      gpus_per_node:
+"""
+        )
+        monkeypatch.setattr(core.sys, "argv", ["launch.py", "--yaml", yaml_path])
+        monkeypatch.setitem(core._FACTORY_REGISTRY, "slurm_factory", factory)
+
+        task = SandboxTask0(
+            script="hostname.sh",
+            slurm_config=SlurmConfig(host=None, partition="batch", gpus_per_node=None),
+        )
+        pipeline = SandboxPipeline(task_0=task)
+
+        assert pipeline.tasks[0].slurm_config.host == "cluster.example.com"
+        assert pipeline.tasks[0].slurm_config.partition == "batch"
+        assert pipeline.tasks[0].slurm_config.gpus_per_node is None
 
 
 class TestGitInfo:
@@ -337,3 +396,93 @@ class TestRunJobsExtended:
 
         captured = capsys.readouterr()
         assert "Version Report" in captured.out
+
+    @patch("core.run.Experiment")
+    @patch("core.build_docker_executor")
+    def test_reqs_inline_barrier(self, mock_docker, mock_exp, tmp_path):
+        """`reqs` on an inline task shlex-quotes pins and wraps the pip barrier."""
+        mock_exp_inst = MagicMock()
+        mock_exp_inst._id = "exp_reqs_inline"
+        mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
+        mock_exp_inst.__exit__ = MagicMock(return_value=False)
+        mock_exp.return_value = mock_exp_inst
+        mock_docker.return_value = MagicMock()
+
+        slurm_env, local_env = get_default_env()
+
+        t0 = SandboxTask0(
+            script=None,
+            inline="python eval.py",
+            slurm_config=MagicMock(),
+            reqs="transformers<5 fire",
+        )
+        pipeline = SandboxPipeline(task_0=t0)
+
+        with patch("core.run.Script") as mock_script:
+            run_jobs(
+                job_table={"job": pipeline},
+                hf_local="/tmp/hf",
+                user="u",
+                identity=None,
+                job_dir=str(tmp_path),
+                packager=MagicMock(),
+                default_slurm_env=slurm_env,
+                default_local_env=local_env,
+                base_dir=str(tmp_path),
+            )
+            inline = mock_script.call_args[1]["inline"]
+
+        # `<` and `>` are shlex-quoted so the shell treats them literally.
+        assert "python -m pip install 'transformers<5' fire" in inline
+        # Local rank 0 installs; other ranks wait on a per-job/step/node marker.
+        assert '[ "${SLURM_LOCALID:-0}" -eq 0 ]' in inline
+        marker = (
+            ".modelopt_launcher_reqs_done_${SLURM_JOB_ID:-0}_${SLURM_STEP_ID:-0}_${SLURM_NODEID:-0}"
+        )
+        assert f"touch {marker}" in inline
+        assert f"[ -f {marker} ]" in inline
+        assert "rm -f" not in inline  # unique marker name means no pre-clear needed
+        # The task's own command runs after the barrier (`&&`).
+        assert inline.rstrip().endswith("python eval.py")
+
+    @patch("core.run.Experiment")
+    @patch("core.build_docker_executor")
+    def test_reqs_script_wrapped_inline(self, mock_docker, mock_exp, tmp_path):
+        """`reqs` on a script task wraps `bash <script> <args>` inline behind the barrier."""
+        mock_exp_inst = MagicMock()
+        mock_exp_inst._id = "exp_reqs_script"
+        mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
+        mock_exp_inst.__exit__ = MagicMock(return_value=False)
+        mock_exp.return_value = mock_exp_inst
+        mock_docker.return_value = MagicMock()
+
+        slurm_env, local_env = get_default_env()
+
+        t0 = SandboxTask0(
+            script="run.sh",
+            slurm_config=MagicMock(),
+            args=["--flag value"],
+            reqs="fire",
+        )
+        pipeline = SandboxPipeline(task_0=t0)
+
+        with patch("core.run.Script") as mock_script:
+            run_jobs(
+                job_table={"job": pipeline},
+                hf_local="/tmp/hf",
+                user="u",
+                identity=None,
+                job_dir=str(tmp_path),
+                packager=MagicMock(),
+                default_slurm_env=slurm_env,
+                default_local_env=local_env,
+                base_dir=str(tmp_path),
+            )
+            call_kwargs = mock_script.call_args[1]
+
+        inline = call_kwargs["inline"]
+        assert "python -m pip install fire" in inline
+        # "--flag value" keeps the shell-word-split convention (expands to two args).
+        assert inline.rstrip().endswith("bash run.sh --flag value")
+        # Wrapped inline: no separate script/args kwargs.
+        assert "args" not in call_kwargs or not call_kwargs.get("args")

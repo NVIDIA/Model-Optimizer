@@ -27,6 +27,7 @@ from modelopt.onnx.quantization.qdq_utils import (
     apply_column_major_transformation,
     fp4qdq_to_2dq,
     insert_transpose_nodes_for_column_major,
+    qdq_to_dq,
     quantize_weights_to_int4,
     quantize_weights_to_mxfp8,
     replace_zero_scale_with_smallest_nonzero,
@@ -1097,6 +1098,23 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         scale_arr = numpy_helper.to_array(value_attr.t)
         assert not (scale_arr == 0).any()
         assert (scale_arr > 0).all()
+
+
+class TestQdqToDqValidation:
+    """Regression tests for qdq_to_dq input validation."""
+
+    def test_quantize_linear_without_inputs_raises_value_error(self):
+        q_node = helper.make_node("QuantizeLinear", inputs=[], outputs=["q_output"], name="bad_q")
+        graph = helper.make_graph(
+            nodes=[q_node],
+            name="test_graph",
+            inputs=[],
+            outputs=[helper.make_tensor_value_info("q_output", TensorProto.INT8, [1])],
+        )
+        model = helper.make_model(graph)
+
+        with pytest.raises(ValueError, match="QuantizeLinear node bad_q has no inputs"):
+            qdq_to_dq(model)
 
 
 class TestLegacyEdgeLLMShims:

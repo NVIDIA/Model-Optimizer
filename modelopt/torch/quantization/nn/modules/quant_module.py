@@ -17,6 +17,7 @@
 
 import contextlib
 import warnings
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -127,8 +128,36 @@ class QuantModule(DynamicModule):
             weight_quantizer = getattr(self, quantizer_attr_names(weight_name).weight_quantizer)
             yield getattr(self, weight_name), weight_quantizer
 
+    @staticmethod
+    @torch.no_grad()
+    def _fold_weight_quantizer(
+        quantizer: TensorQuantizer,
+        weights: Iterable[torch.Tensor],
+        keep_attrs: bool = False,
+    ):
+        """Fold ``quantizer`` into each weight view in place, then disable and clean it once.
+
+        ``weights`` is an iterable so a single quantizer shared across views (e.g. one
+        per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
+        view while disabling and dropping its calibration attrs exactly once.
+        """
+        for weight in weights:
+            weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
+        quantizer.disable()
+        quantizer.disable_rotate()
+        if not keep_attrs:
+            for attr_name in ("_pre_quant_scale", "_amax"):
+                if hasattr(quantizer, attr_name):
+                    delattr(quantizer, attr_name)
+
     def fold_weight(self, keep_attrs: bool = False):
-        """Fold the weight for faster eval."""
+        """Bake each fake-quant weight quantizer into its weight for faster eval.
+
+        Every fake-quant weight quantizer is folded regardless of its enabled state. The folded
+        transform is baked into the stored weight and then disabled, so subsequent forwards use
+        the stored weight directly. Calibration buffers (``_pre_quant_scale``, ``_amax``) are
+        dropped unless ``keep_attrs``.
+        """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
             attr = getattr(self, name)
@@ -144,16 +173,7 @@ class QuantModule(DynamicModule):
                     f"{name} doesn't have a corresponding {weight_name} in {self.__class__.__name__}"
                 )
                 weight = getattr(self, weight_name)
-                weight.data.copy_(attr(weight.float()).to(weight.dtype))
-                attr.disable()
-                if not keep_attrs:
-                    _attrs = [
-                        "_pre_quant_scale",
-                        "_amax",
-                    ]
-                    for attr_name in _attrs:
-                        if hasattr(attr, attr_name):
-                            delattr(attr, attr_name)
+                self._fold_weight_quantizer(attr, (weight,), keep_attrs)
 
 
 QuantModuleRegistry = _DMRegistryCls("Quant", QuantModule)

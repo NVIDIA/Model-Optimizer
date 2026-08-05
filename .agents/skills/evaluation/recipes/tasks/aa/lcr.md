@@ -2,18 +2,19 @@
 
 ## Task Details
 
-- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/catalog/all/harnesses/nemo_skills.html#nemo-skills-ns-aa-lcr>
+- Reference: <https://docs.nvidia.com/nemo/evaluator/latest/evaluation/benchmarks/index.html>
 
 ## Params
 
-Judge-scored (equality checker). Substitute the judge `model_id`/`url` with the
-literal values you keep in `.env` (`LCR_JUDGE_MODEL_ID` rec. **Qwen3 235B**,
-`NS_JUDGE_URL`; see `recipes/env.example`) — config, not secrets, so no export
-needed; only `api_key` (`INFERENCE_API_KEY`) is exported. Keep the judge fixed.
+Judge-scored (equality checker). The judge `model_id` is hardcoded in the fragment
+below (**Qwen3 235B**) — swap it for an equivalent on your own endpoint if needed.
+The judge `url` still comes from `.env` (`INFERENCE_JUDGE_URL`; see `recipes/env.example`)
+— config, not a secret, so no export; only `api_key` (`INFERENCE_API_KEY`) is
+exported. Keep the judge fixed.
 
-AA-LCR needs long context: plan for roughly 120K input tokens plus 16K
-generation tokens. Set deployment `--max-model-len` to at least `131072`, and
-use a larger value when the model supports it.
+AA-LCR needs long context (~120K input tokens plus generation). Set deployment
+`--max-model-len` to at least `196608`, and use a larger value when the model
+supports it. Use the same value on the baseline and quantized deployments.
 
 **Parallelism — set this *lower* than the top-level default.** AA-LCR is the
 suite's most concurrency-sensitive task on two fronts at once. (1) *KV-bound:* each
@@ -30,12 +31,12 @@ SKILL.md Step 3 (sized off the *max* parallelism across all tasks).
 
 ## YAML Fragment
 
-LCR has a deployment-side requirement (`--max-model-len 131072`) and a task
+LCR has a deployment-side requirement (`--max-model-len 196608`) and a task
 block. Per SKILL.md Step 3, the deployment flag must live inside
 `deployment.command:` — not in the deprecated `extra_args` field.
 
 **Deployment requirement:** ensure the `vllm serve ...` invocation in
-`deployment.command` includes `--max-model-len 131072` (or higher).
+`deployment.command` includes `--max-model-len 196608` (or higher).
 
 ```yaml
 - name: ns_aa_lcr
@@ -55,8 +56,8 @@ block. Per SKILL.md Step 3, the deployment flag must live inside
         extra:
           num_repeats: 16
           judge:
-            model_id: <LCR_JUDGE_MODEL_ID>   # from .env; recommended Qwen3 235B
-            url: <NS_JUDGE_URL>              # from .env (/v1 base)
+            model_id: nvidia/qwen/qwen-235b   # Qwen3 235B; use an equivalent on your own endpoint if needed
+            url: <INFERENCE_JUDGE_URL>              # from .env (/v1 base)
             api_key: INFERENCE_API_KEY       # env-var name; exported, read by harness
 ```
 

@@ -32,9 +32,9 @@ import torch
 import triton
 import triton.language as tl
 
+from ..common.nvfp4_quant import fp4_round_magnitude
 from ._fp8_scale_candidates import fp8_scale_candidates
 from .fp4_kernel import compute_fp4_scales
-from .nvfp4_quant import fp4_round_magnitude
 
 __all__ = [
     "fp8_scale_candidates",

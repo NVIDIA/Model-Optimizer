@@ -28,6 +28,7 @@ from modelopt.torch.quantization.model_calib import (
     max_calibrate,
 )
 from modelopt.torch.quantization.nn import QuantLinear, SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 
 class TensorQuantizerTester:
@@ -266,6 +267,81 @@ class TensorQuantizerTester:
         # After finish, use_constant_amax quantizer is re-enabled
         assert not model["tq_const"]._disabled
         assert model["tq_const"]._if_quant
+
+    def test_constant_amax_registers_amax(self):
+        """constant_amax pins the _amax buffer to the configured value (used by fwd and export)."""
+        tq = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                constant_amax=2688.0,
+            )
+        ).to(self.device)
+
+        assert tq._constant_amax == 2688.0
+        assert hasattr(tq, "_amax")
+        assert float(tq._amax) == 2688.0
+
+        # Default (unset) constant_amax must not register an _amax buffer.
+        tq_default = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            )
+        ).to(self.device)
+        assert tq_default._constant_amax is None
+        assert not hasattr(tq_default, "_amax")
+
+    def test_constant_amax_nvfp4_input_scale(self):
+        """For NVFP4, constant_amax=2688 (= E2M1_MAX * E4M3_MAX) exports input_scale == 1.0."""
+        tq = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                constant_amax=2688.0,
+            )
+        ).to(self.device)
+
+        input_scale = NVFP4QTensor.get_activation_scaling_factor(tq)
+        assert torch.allclose(input_scale.float(), torch.ones_like(input_scale.float()))
+
+    def test_constant_amax_skips_calibration(self):
+        """constant_amax quantizers are excluded from calibration and keep their fixed amax."""
+        model = nn.ModuleDict(
+            {
+                "tq_const": TensorQuantizer(
+                    QuantizerAttributeConfig(
+                        num_bits=(2, 1),
+                        block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                        constant_amax=2688.0,
+                    )
+                ),
+                "tq_calib": TensorQuantizer(QuantizerAttributeConfig(num_bits=8)),
+            }
+        ).to(self.device)
+
+        enable_stats_collection(model)
+        # constant_amax quantizer: quant disabled during calibration, not collecting stats.
+        assert not model["tq_const"]._if_calib
+        assert not model["tq_const"]._if_quant
+        assert float(model["tq_const"]._amax) == 2688.0
+
+        finish_stats_collection(model)
+        # Re-enabled and amax is NOT overwritten by calibration.
+        assert model["tq_const"]._if_quant
+        assert float(model["tq_const"]._amax) == 2688.0
+
+    def test_constant_amax_must_be_positive(self):
+        """constant_amax must be a positive value."""
+        with pytest.raises(Exception, match="constant_amax must be a positive value"):
+            QuantizerAttributeConfig(num_bits=(2, 1), constant_amax=-1.0)
+        with pytest.raises(Exception, match="constant_amax must be a positive value"):
+            QuantizerAttributeConfig(num_bits=(2, 1), constant_amax=0.0)
+
+    def test_constant_amax_mutually_exclusive_with_use_constant_amax(self):
+        """use_constant_amax and constant_amax cannot both be set."""
+        with pytest.raises(Exception, match="mutually exclusive"):
+            QuantizerAttributeConfig(num_bits=8, use_constant_amax=True, constant_amax=2688.0)
 
     def test_modelopt_state(self):
         # Test loading of amax from ref to test

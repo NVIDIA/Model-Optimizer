@@ -7,7 +7,7 @@ monitoring), see `skills/common/slurm-setup.md`.
 
 ## 1. Container
 
-Get the recommended image version from `examples/llm_ptq/README.md`, then look for an existing `.sqsh` file:
+Get the recommended image version from `examples/hf_ptq/README.md`, then look for an existing `.sqsh` file:
 
 ```bash
 ls *.sqsh ../*.sqsh ~/containers/*.sqsh 2>/dev/null
@@ -36,13 +36,17 @@ pip install -U transformers
 
 For unlisted models that need unreleased transformers (e.g., from git), see `references/unsupported-models.md` Step A.
 
-**Prefer `PYTHONPATH`** to use the synced ModelOpt source instead of installing inside the container — this avoids risking dependency conflicts (e.g., `pip install -U nvidia-modelopt[hf]` can upgrade PyTorch and break other packages):
+**Prefer `pip install -e ".[hf]" --no-build-isolation`** (run from the Model-Optimizer repo root) to make the synced ModelOpt source importable in the container — this matches how `examples/hf_ptq/slurm/multinode_fsdp2_ptq.slurm` sets up the job, and unlike `PYTHONPATH` it surfaces packaging/build issues instead of masking them. Avoid `pip install -U nvidia-modelopt[hf]` from PyPI, which can upgrade PyTorch and break other packages.
+
+```bash
+pip install -e ".[hf]" --no-build-isolation
+```
+
+If you specifically need to leave the container's installed packages untouched (e.g. to sidestep a dependency conflict), fall back to `PYTHONPATH` — but note it skips the editable install, so a missing compiled extension only surfaces at import time:
 
 ```bash
 export PYTHONPATH=/path/to/Model-Optimizer:$PYTHONPATH
 ```
-
-If `PYTHONPATH` doesn't work due to missing compiled extensions, fall back to `pip install -e ".[hf]" --no-build-isolation` (run from the Model-Optimizer repo root).
 
 **Watch for pip dependency conflicts** — NGC containers set `PIP_CONSTRAINT` to pin versions, causing `ResolutionImpossible` errors. Unset it first so pip can resolve freely:
 
@@ -63,23 +67,11 @@ pip install -U transformers --no-deps
 
 Estimate GPU count from model size and available GPU memory. `hf_ptq.py` uses `device_map="auto"` so it fills GPUs automatically — request only as many as needed.
 
-For multi-node PTQ (200B+ params), use `examples/llm_ptq/multinode_ptq.py` with FSDP2 and accelerate:
+For multi-node PTQ (200B+ params), use `hf_ptq.py --use_fsdp2`. For the launch commands (`sbatch`
+and manual `torchrun`) and the `--recipe` format, see the *Multi-Node Post-Training Quantization with
+FSDP2* section of `examples/hf_ptq/README.md`.
 
-```bash
-accelerate launch \
-    --config_file examples/llm_ptq/fsdp2.yaml \
-    --num_machines $NUM_NODES \
-    --num_processes $((NUM_NODES * GPUS_PER_NODE)) \
-    --main_process_ip $MASTER_ADDR \
-    --main_process_port $MASTER_PORT \
-    --machine_rank $SLURM_PROCID \
-    examples/llm_ptq/multinode_ptq.py \
-        --pyt_ckpt_path <model> \
-        --qformat <format> \
-        --export_path <output>
-```
-
-The `num_machines`, `num_processes`, `main_process_ip`, and `machine_rank` are overridden on the command line — no need to edit `fsdp2.yaml`. Only update `fsdp_transformer_layer_cls_to_wrap` in the YAML if the model uses a non-default decoder layer class.
+Sizing guidance specific to this path: when the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
 
 Use the multi-node template from `skills/common/slurm-setup.md` section 4 as the job script wrapper.
 

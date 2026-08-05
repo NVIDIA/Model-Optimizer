@@ -28,8 +28,9 @@ from modelopt.torch.export.model_utils import (
     _collect_canonical_tied_patterns,
     _reorder_canonical_first,
 )
-from modelopt.torch.export.quant_utils import sync_tied_input_amax
+from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def test_collect_canonical_tied_patterns_dict_style():
@@ -180,3 +181,37 @@ def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized()
     assert enc.weight.data_ptr() != original_shared_data_ptr  # encoder got fresh packed
     assert dec.weight.data_ptr() == original_shared_data_ptr  # decoder untouched
     assert enc.weight.data_ptr() != dec.weight.data_ptr()
+
+
+def _linear_with_input_quantizer():
+    linear = torch.nn.Linear(4, 4, bias=False)
+    linear.input_quantizer = TensorQuantizer()
+    return linear
+
+
+def test_fuse_prequant_layernorm_skips_modules_without_pre_quant_scale():
+    layernorm = torch.nn.LayerNorm(4)
+    original_weight = layernorm.weight.detach().clone()
+    modules = [_linear_with_input_quantizer(), _linear_with_input_quantizer()]
+
+    fuse_prequant_layernorm(layernorm, modules)
+
+    assert torch.allclose(layernorm.weight, original_weight)
+    assert not hasattr(modules[0], "fused_with_prequant")
+    assert not hasattr(modules[1], "fused_with_prequant")
+
+
+def test_fuse_prequant_layernorm_fuses_and_removes_pre_quant_scale():
+    layernorm = torch.nn.LayerNorm(4)
+    modules = [_linear_with_input_quantizer(), _linear_with_input_quantizer()]
+    pre_quant_scale = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    for module in modules:
+        module.input_quantizer._pre_quant_scale = pre_quant_scale
+
+    fuse_prequant_layernorm(layernorm, modules)
+
+    assert torch.allclose(layernorm.weight, pre_quant_scale)
+    assert torch.allclose(layernorm.bias, torch.zeros_like(pre_quant_scale))
+    for module in modules:
+        assert not hasattr(module.input_quantizer, "_pre_quant_scale")
+        assert module.fused_with_prequant

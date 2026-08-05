@@ -18,6 +18,7 @@ import torch
 
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
+    reduce_amax,
     reduce_block_amax,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -56,6 +57,25 @@ def test_reduce_block_amax(block_sizes, test_input, expected_scales):
     scales = reduce_block_amax(test_input, block_sizes)
 
     torch.allclose(scales, expected_scales)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize("axis", [None, 0, 1, (0, 1)])
+def test_reduce_amax_fp8(fp8_dtype, axis):
+    """FP8 tensors have no reduction/abs kernels; reduce_amax must upcast them.
+
+    Regression test for ``NotImplementedError: "max_all_cuda" not implemented for
+    'Float8_e4m3fn'`` when calibrating models with natively FP8 weights (e.g. DeepSeek-V3).
+    """
+    # Values chosen to be exactly representable in both FP8 formats so the upcast is lossless.
+    ref = torch.tensor([[1.0, -3.0, 2.0], [0.5, -0.25, 4.0]])
+    x_fp8 = ref.to(fp8_dtype)
+
+    out = reduce_amax(x_fp8, axis=axis)
+    expected = reduce_amax(ref, axis=axis)
+
+    assert out.dtype == torch.get_default_dtype()
+    assert torch.equal(out, expected)
 
 
 @pytest.mark.parametrize(

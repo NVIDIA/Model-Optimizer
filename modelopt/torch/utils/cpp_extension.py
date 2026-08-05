@@ -54,14 +54,7 @@ def load_cpp_extension(
     print(f"Loading extension {name}...")
     start = time()
 
-    if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
-        try:
-            device_capability = torch.cuda.get_device_capability()
-            os.environ["TORCH_CUDA_ARCH_LIST"] = f"{device_capability[0]}.{device_capability[1]}"
-        except Exception:
-            warnings.warn("GPU not detected. Please unset `TORCH_CUDA_ARCH_LIST` env variable.")
-
-    if torch.version.cuda is None:
+    if torch.version.cuda is None or not torch.cuda.is_available():
         fail_msg = f"Skipping extension {name} because CUDA is not available."
     elif cuda_version_specifiers and Version(torch.version.cuda) not in SpecifierSet(
         cuda_version_specifiers
@@ -71,6 +64,9 @@ def load_cpp_extension(
             f" does not satisfy the specifiers {cuda_version_specifiers}."
         )
     else:
+        if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+            device_capability = torch.cuda.get_device_capability()
+            os.environ["TORCH_CUDA_ARCH_LIST"] = f"{device_capability[0]}.{device_capability[1]}"
         if os.name == "nt":
             # Define USE_CUDA so PyTorch's compiled_autograd.h takes its Windows-safe branch;
             # otherwise, nvcc + MSVC fail with "error C2872: 'std': ambiguous symbol".

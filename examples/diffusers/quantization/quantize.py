@@ -189,6 +189,20 @@ class Quantizer:
             )
             quant_cfg_list.extend(recipe_rules)
 
+        # Per-model SVDQuant exclusions (e.g. Qwen-Image's text-stream linears):
+        # matching layers skip the SVDQuant low-rank branch and AWQ smoothing but
+        # stay quantized with plain max calibration.
+        svdquant_skip_layers = None
+        if self.config.algo == QuantAlgo.SVDQUANT:
+            svdquant_skip_layers = MODEL_DEFAULTS.get(self.model_config.model_type, {}).get(
+                "svdquant_skip_layers"
+            )
+            if svdquant_skip_layers:
+                self.logger.info(
+                    f"SVDQuant skip patterns for {self.model_config.model_type.value} "
+                    f"(plain quantization): {svdquant_skip_layers}"
+                )
+
         quant_config = {**base_cfg, "quant_cfg": quant_cfg_list}
         set_quant_config_attr(
             quant_config,
@@ -196,6 +210,7 @@ class Quantizer:
             self.config.algo.value,
             alpha=self.config.alpha,
             lowrank=self.config.lowrank,
+            skip_layers=svdquant_skip_layers,
         )
         self.logger.info(f"Quant config {quant_config}")
         return quant_config
@@ -320,10 +335,8 @@ class ExportManager:
         if not self.config.onnx_dir:
             return
 
-        # Imported lazily: the ONNX export tooling (onnx_graphsurgeon, etc.) is only
-        # needed when --onnx-dir is set, so the calibration + amax-save path still
-        # works in environments without the ONNX deps (e.g. the diffusers/fastgen
-        # container used for Qwen-Image DMD2 students).
+        # Deferred: the ONNX stack (onnx, onnx_graphsurgeon, ...) is only needed
+        # for --onnx-dir exports; HF-checkpoint-only runs must not require it.
         from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 
         self.logger.info(f"Starting ONNX export to {self.config.onnx_dir}")

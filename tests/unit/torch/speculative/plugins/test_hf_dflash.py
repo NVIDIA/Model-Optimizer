@@ -35,6 +35,7 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
@@ -117,6 +118,222 @@ class TestDFlashConvert:
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
+
+
+def test_qwen3_vl_transformers_530_position_ids_expand_video_grid(monkeypatch):
+    """Only mRoPE receives a per-frame video grid on Transformers 5.3.0."""
+    original_grid = torch.tensor([[3, 4, 5], [2, 6, 7]])
+    expected_position_ids = torch.ones(3, 1, 12, dtype=torch.long)
+    get_rope_index = MagicMock(return_value=(expected_position_ids, torch.zeros(1, 1)))
+    compute_position_ids = MagicMock()
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(
+            get_rope_index=get_rope_index,
+            compute_3d_position_ids=compute_position_ids,
+        ),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 12, dtype=torch.long),
+        attention_mask=torch.ones(1, 12, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": original_grid,
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 0, 0]]),
+        },
+    )
+
+    assert position_ids is expected_position_ids
+    assert not compute_position_ids.called
+    assert torch.equal(original_grid, torch.tensor([[3, 4, 5], [2, 6, 7]]))
+    assert torch.equal(
+        get_rope_index.call_args.kwargs["video_grid_thw"],
+        torch.tensor([[1, 4, 5], [1, 4, 5], [1, 4, 5], [1, 6, 7], [1, 6, 7]]),
+    )
+
+
+def test_qwen3_vl_moe_transformers_530_position_ids_expand_video_grid(monkeypatch):
+    """Qwen3-VL family variants use the same 5.3.0 mRoPE workaround."""
+    expected_position_ids = torch.ones(3, 1, 4, dtype=torch.long)
+    get_rope_index = MagicMock(return_value=(expected_position_ids, torch.zeros(1, 1)))
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl_moe"),
+        model=SimpleNamespace(get_rope_index=get_rope_index),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 4, dtype=torch.long),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": torch.tensor([[2, 4, 4]]),
+            "mm_token_type_ids": torch.tensor([[2, 0, 2, 0]]),
+        },
+    )
+
+    assert position_ids is expected_position_ids
+    assert torch.equal(
+        get_rope_index.call_args.kwargs["video_grid_thw"],
+        torch.tensor([[1, 4, 4], [1, 4, 4]]),
+    )
+
+
+def test_qwen3_vl_transformers_53_patch_release_raises(monkeypatch):
+    """Avoid double expansion when a 5.3 patch backports the upstream fix."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.1")
+
+    with pytest.raises(RuntimeError, match=r"5\.3\.0 or >=5\.4\.0"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 4, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "video_grid_thw": torch.tensor([[1, 4, 4]]),
+                "mm_token_type_ids": torch.tensor([[2, 0, 0, 0]]),
+            },
+        )
+
+
+def test_qwen3_vl_transformers_54_uses_native_position_ids(monkeypatch):
+    """Transformers 5.4+ performs the grid expansion inside get_rope_index."""
+    get_rope_index = MagicMock()
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=get_rope_index),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.4.0")
+
+    position_ids = HFDFlashModel._qwen3_vl_position_ids(
+        fake_model,
+        input_ids=torch.ones(1, 4, dtype=torch.long),
+        attention_mask=torch.ones(1, 4, dtype=torch.long),
+        position_ids=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        model_kwargs={
+            "video_grid_thw": torch.tensor([[1, 4, 4]]),
+            "mm_token_type_ids": torch.tensor([[2, 0, 0, 0]]),
+        },
+    )
+
+    assert position_ids is None
+    assert not get_rope_index.called
+
+
+def test_qwen3_vl_transformers_530_rejects_bad_video_frame_groups(monkeypatch):
+    """Fail before mRoPE construction when processor and video-grid contracts differ."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="video frame groups"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 4, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "video_grid_thw": torch.tensor([[2, 4, 4]]),
+                "mm_token_type_ids": torch.tensor([[2, 2, 0, 0]]),
+            },
+        )
+
+
+def test_multimodal_forward_kwargs_exclude_non_model_inputs():
+    """Do not forward Trainer or collator-only fields to Hugging Face models."""
+    pixel_values = torch.ones(1)
+    mm_token_type_ids = torch.zeros(1, 4, dtype=torch.long)
+
+    forwarded = hf_dflash._multimodal_forward_kwargs(
+        {
+            "pixel_values": pixel_values,
+            "mm_token_type_ids": mm_token_type_ids,
+            "assistant_masks": torch.ones(1, 4),
+            "loss_mask": torch.ones(1, 4),
+            "num_items_in_batch": 4,
+            "unexpected_dataset_column": "drop me",
+        }
+    )
+
+    assert set(forwarded) == {"pixel_values", "mm_token_type_ids"}
+    assert forwarded["pixel_values"] is pixel_values
+    assert forwarded["mm_token_type_ids"] is mm_token_type_ids
+
+
+def test_eval_does_not_precompute_qwen3_vl_position_ids(monkeypatch):
+    """Evaluation delegates mRoPE construction to the base model and its cache."""
+    model = get_tiny_llama(num_hidden_layers=4)
+    mtsp.convert(model, [("dflash", _get_dflash_config())])
+    precompute_position_ids = MagicMock()
+    monkeypatch.setattr(model, "_qwen3_vl_position_ids", precompute_position_ids)
+
+    model.eval()
+    model(input_ids=torch.tensor([[1, 2, 3, 4]]))
+
+    precompute_position_ids.assert_not_called()
+
+
+def test_qwen3_vl_transformers_53_position_ids_require_mm_token_types(monkeypatch):
+    """Never silently fall back to one-dimensional positions for a visual batch."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="mm_token_type_ids"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 12, dtype=torch.long),
+            attention_mask=torch.ones(1, 12, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={"image_grid_thw": torch.tensor([[1, 4, 4]])},
+        )
+
+
+def test_qwen3_vl_transformers_53_position_ids_reject_bad_mm_token_shape(monkeypatch):
+    """Keep processor-produced modality ids aligned with the padded text sequence."""
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="qwen3_vl"),
+        model=SimpleNamespace(get_rope_index=MagicMock()),
+    )
+    monkeypatch.setattr(hf_dflash.transformers, "__version__", "5.3.0")
+
+    with pytest.raises(ValueError, match="same shape as input_ids"):
+        HFDFlashModel._qwen3_vl_position_ids(
+            fake_model,
+            input_ids=torch.ones(1, 12, dtype=torch.long),
+            attention_mask=torch.ones(1, 12, dtype=torch.long),
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            model_kwargs={
+                "image_grid_thw": torch.tensor([[1, 4, 4]]),
+                "mm_token_type_ids": torch.zeros(1, 11, dtype=torch.long),
+            },
+        )
 
 
 class TestDPaceWeights:
@@ -372,6 +589,75 @@ class TestDFlashSlidingWindow:
         assert attn.sliding_window is None
 
 
+class TestDFlashSwaMask:
+    """Test all-layer non-causal sliding-window attention mask (MiMo-style)."""
+
+    def test_window_masks_context_beyond_window(self):
+        """Context beyond the window (relative to each query's real position) is masked out."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config(block_size=4)
+        window = 6
+        config["dflash_swa_window_size"] = window
+        mtsp.convert(model, [("dflash", config)])
+
+        seq_len = 16
+        block_size = 4
+        # One block anchored at position 10 → query real positions [10, 11, 12, 13].
+        anchor_positions = torch.tensor([[10]], dtype=torch.long)
+        block_keep_mask = torch.tensor([[True]])
+        dtype = torch.float32
+        device = torch.device("cpu")
+
+        mask = model._build_draft_attention_mask(
+            seq_len, anchor_positions, block_keep_mask, 1, dtype, device, window=window
+        )
+        neg = torch.finfo(dtype).min
+        attend = mask > neg / 2  # True where a position is attended (additive mask == 0)
+
+        # Context kv are positions [0, seq_len). For query k (real pos 10 + k) only context
+        # positions in (10 + k - window, 10) are visible.
+        for k in range(block_size):
+            q_real = 10 + k
+            for c in range(seq_len):
+                visible = attend[0, 0, k, c].item()
+                if c < 10:  # context strictly before the anchor
+                    assert visible == (c > q_real - window), (
+                        f"query k={k} (pos {q_real}), context c={c}: "
+                        f"expected visible={c > q_real - window}, got {visible}"
+                    )
+
+    def test_window_is_subset_of_full(self):
+        """The windowed mask attends to a subset of what the full-attention mask attends to."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config(block_size=4)
+        config["dflash_swa_window_size"] = 6
+        mtsp.convert(model, [("dflash", config)])
+
+        args = (
+            16,
+            torch.tensor([[10]]),
+            torch.tensor([[True]]),
+            1,
+            torch.float32,
+            torch.device("cpu"),
+        )
+        full = model._build_draft_attention_mask(*args, window=None)
+        windowed = model._build_draft_attention_mask(*args, window=6)
+        neg = torch.finfo(torch.float32).min
+        # Everything masked by full attention must also be masked by the windowed mask.
+        assert ((full <= neg / 2) <= (windowed <= neg / 2)).all()
+        # The window strictly removes some connections (it is not a no-op here).
+        assert (windowed <= neg / 2).sum() > (full <= neg / 2).sum()
+
+    def test_window_smaller_than_block_rejected(self):
+        """A window smaller than the block size is rejected at config validation."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config(block_size=4)
+        config["dflash_swa_window_size"] = 2  # < block_size
+        with pytest.raises(ValueError, match="dflash_swa_window_size"):
+            mtsp.convert(model, [("dflash", config)])
+
+
 class TestValidateOnline:
     """Test validate_online acceptance counting logic."""
 
@@ -513,6 +799,33 @@ class TestDFlashExporter:
         assert "vocab_size" in cfg
         assert "layer_types" in cfg
         assert len(cfg["layer_types"]) == NUM_DRAFT_LAYERS
+        # Without SWA configured, no sliding-window fields are emitted.
+        assert "sliding_window" not in cfg
+        assert "use_swa" not in cfg["dflash_config"]
+
+    def test_export_swa_fields(self, tmp_path):
+        """With dflash_swa_window_size set, exported config carries vLLM's SWA fields."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dflash_config()
+        config["dflash_swa_window_size"] = 256
+        mtsp.convert(model, [("dflash", config)])
+
+        exporter = model.get_exporter()
+        export_dir = tmp_path / "exported"
+        exporter.export(export_dir)
+
+        with open(export_dir / "config.json") as f:
+            cfg = json.load(f)
+
+        # vLLM _resolve_layer_attention reads these; all-full layer_types + use_swa=True
+        # → non-causal sliding window on every draft layer.
+        assert cfg["sliding_window"] == 256
+        assert cfg["dflash_config"]["use_swa"] is True
+        assert cfg["dflash_config"]["swa_window_size"] == 256
+        assert cfg["dflash_config"]["causal"] is False
+        # The pre-existing dflash_config keys must survive the update.
+        assert "mask_token_id" in cfg["dflash_config"]
+        assert "target_layer_ids" in cfg["dflash_config"]
 
     def test_export_tensor_count(self, tmp_path):
         """Exported model should have the right number of tensors."""

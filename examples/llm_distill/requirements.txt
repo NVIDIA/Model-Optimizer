@@ -1,3 +1,5 @@
 pyarrow
 torchao>=0.14.1
-trl>=0.23.0
+# TODO: trl>=1.7 stops materializing logits during eval, breaking KD eval loss in
+# modelopt/torch/distill/plugins/huggingface.py (_standard_kd_loss). Lift the cap once fixed.
+trl>=1.0,<1.7

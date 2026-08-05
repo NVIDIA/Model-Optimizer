@@ -25,13 +25,15 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_gpt_oss,
     get_tiny_llama,
+    get_tiny_nemotron_h,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
 from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
+from modelopt.recipe.loader import load_recipe
+from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
     _TransposedExpertsCalibMixin,
     get_homogeneous_hf_decoder_layers,
@@ -43,6 +45,7 @@ pytest.importorskip("transformers")
 
 import transformers
 from transformers import AutoModelForCausalLM, LlamaForCausalLM
+from transformers.integrations.finegrained_fp8 import FP8Linear
 from transformers.models.dbrx.configuration_dbrx import DbrxConfig, DbrxFFNConfig
 from transformers.models.dbrx.modeling_dbrx import DbrxExpertGLU, DbrxExperts, DbrxFFN
 
@@ -107,6 +110,21 @@ def test_convert_conv1d():
     assert torch.allclose(out_1, out_2)
 
 
+def test_fp8_linear_per_tensor_dequant(monkeypatch):
+    module = FP8Linear(2, 2, block_size=(128, 128))
+    module.weight_scale_inv = nn.Parameter(torch.tensor(2.0))
+    with torch.no_grad():
+        module.weight.copy_(torch.tensor([[-2.0, 1.0], [0.5, 4.0]], dtype=torch.float8_e4m3fn))
+
+    mtq.replace_quant_module(module)
+    monkeypatch.setattr("modelopt.torch.quantization.plugins.huggingface.weight_dequant", None)
+
+    assert module.block_size is None
+    torch.testing.assert_close(
+        module._dequantize_weight(torch.float32), module.weight.float() * 2.0
+    )
+
+
 @pytest.mark.skipif(
     Version(transformers.__version__) < Version("5.0"),
     reason="test_dbrx is not supported for transformers<5.0",
@@ -152,6 +170,47 @@ def test_dbrx():
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1[0], out_2[0])
+
+
+@pytest.mark.skipif(
+    not hasattr(transformers, "NemotronHConfig"),
+    reason="NemotronH is not supported by this Transformers version",
+)
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/ptq/nvfp4_experts_only-kv_fp8",
+        "general/ptq/nvfp4_experts_only-kv_fp8_cast",
+        "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
+        "general/ptq/nvfp4_experts_only_mse-kv_fp8_cast",
+    ],
+)
+def test_nemotron_h_experts_only_recipes_target_routed_experts(recipe_path):
+    model = get_tiny_nemotron_h(
+        num_hidden_layers=1,
+        hybrid_override_pattern="E",
+        n_routed_experts=2,
+    )
+    mtq.replace_quant_module(model)
+
+    recipe = load_recipe(recipe_path)
+    mtq.set_quantizer_by_cfg(model, recipe.quantize.model_dump()["quant_cfg"])
+
+    routed_expert_quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if ".mixer.experts." in name and isinstance(module, TensorQuantizer)
+    }
+    shared_expert_quantizers = {
+        name: module
+        for name, module in model.named_modules()
+        if ".mixer.shared_experts." in name and isinstance(module, TensorQuantizer)
+    }
+
+    assert routed_expert_quantizers
+    assert all(module.is_enabled for module in routed_expert_quantizers.values())
+    assert shared_expert_quantizers
+    assert not any(module.is_enabled for module in shared_expert_quantizers.values())
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
@@ -227,6 +286,16 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
 def test_is_homogeneous_hf_model_llama():
     model = get_tiny_llama()
     assert is_homogeneous_hf_model(model)
+
+
+def test_is_homogeneous_hf_vlm_language_model():
+    model = get_tiny_llama()
+    language_model = nn.Module()
+    language_model.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+    model.model.language_model = language_model
+
+    assert is_homogeneous_hf_model(model)
+    assert get_homogeneous_hf_decoder_layers(model) is language_model.layers
 
 
 def test_is_homogeneous_hf_model_gpt_oss():

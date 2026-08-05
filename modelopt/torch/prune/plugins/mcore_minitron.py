@@ -27,7 +27,8 @@ Actual dynamic module implementations are at :mod:`modelopt.torch.nas.plugins.me
 import io
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from functools import partial
 from itertools import product
 from typing import Any
@@ -66,6 +67,7 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMoELayer,
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
+    _DynamicTEGroupedMLP,
     _DynamicTransformerLayer,
 )
 from modelopt.torch.nas.plugins.megatron_model_stats import (
@@ -110,6 +112,10 @@ SUPPORTED_HPARAMS = {
     "num_layers",
 }
 
+# Explicit per-layer config patterns (indexed by original 1-indexed layer number) that must be sliced
+# to the surviving layers on depth pruning. Integer/None cadence values are ignored (need no update).
+_PER_LAYER_CONFIG_PATTERNS = ("linear_attention_freq", "moe_layer_freq")
+
 __all__ = [
     "SUPPORTED_HPARAMS",
     "MCoreMinitronConfig",
@@ -118,6 +124,31 @@ __all__ = [
     "drop_mcore_language_model_layers",
     "get_mcore_minitron_config",
 ]
+
+
+def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
+    """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
+
+    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
+    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
+    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
+    checks against a class hierarchy that may shift across MCore versions.
+    """
+    for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
+        if getattr(model, attr, None):
+            return attr
+    return None
+
+
+def _slice_per_layer_pattern(pattern: list | tuple | str, dropped_layers: set[int]):
+    """Slice a per-layer pattern to the surviving layers, preserving its type.
+
+    ``pattern`` is indexed by the original 1-indexed layer number (a list/tuple such as
+    ``linear_attention_freq`` or a hybrid block-type string such as ``"M*M-"``). Entries whose
+    layer number is in ``dropped_layers`` are removed.
+    """
+    kept = [p for i, p in enumerate(pattern) if (i + 1) not in dropped_layers]
+    return "".join(kept) if isinstance(pattern, str) else type(pattern)(kept)
 
 
 def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[int]) -> None:
@@ -138,7 +169,7 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     assert isinstance(model, supported_model_types), (
         f"Model should have one of {supported_model_types} submodule, got {model}"
     )
-    print_rank_0(f"Dropping decoder layers {layers_to_drop} from model.")
+    print_rank_0(f"Dropping decoder layers {layers_to_drop} (1-indexed) from model.")
 
     # get the number of layers remaining in each pp rank
     layers_remaining_per_pp = torch.zeros(
@@ -173,19 +204,18 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
 
     model.config.num_layers = new_num_layers
 
-
-def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
-    """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
-
-    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
-    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
-    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
-    checks against a class hierarchy that may shift across MCore versions.
-    """
-    for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
-        if getattr(model, attr, None):
-            return attr
-    return None
+    # Slice per-layer patterns to the surviving layers, else their length no longer matches
+    # ``num_layers`` and building/exporting the pruned model fails.
+    dropped = set(layers_to_drop)
+    # Explicit config lists (e.g. linear_attention_freq, moe_layer_freq); integer/None values are left untouched
+    for pattern_attr in _PER_LAYER_CONFIG_PATTERNS:
+        pattern = getattr(model.config, pattern_attr, None)
+        if isinstance(pattern, (list, tuple)):
+            setattr(model.config, pattern_attr, _slice_per_layer_pattern(pattern, dropped))
+    # Hybrid block-type string (Mamba ``hybrid_override_pattern`` / ``hybrid_layer_pattern``).
+    hybrid_key = _get_hybrid_pattern_key(model)
+    if hybrid_key is not None:
+        setattr(model, hybrid_key, _slice_per_layer_pattern(getattr(model, hybrid_key), dropped))
 
 
 def _rprint(*renderables: Any) -> None:
@@ -264,6 +294,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "layer_scores": {},
             "sorted_layers": None,
             "all_candidates_per_constraint": {},
+            "best": {},
         }
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
@@ -311,19 +342,25 @@ class MCoreMinitronSearcher(BaseSearcher):
                 assert isinstance(self.constraints[k], (int, float)), f"{k} must be a float!"
             assert self.has_score, "score_func (e.g. MMLU) is required for metric-based pruning!"
             export_config = None
-            # Sort all parameters for metric-based pruning
-            self.hps_to_sort = SUPPORTED_HPARAMS
+            # Sort only hparams that may be pruned: sorting never-pruned hparams is churn, and is
+            # unsafe for ``hidden_size`` on VLMs (shared with the frozen vision projector, so
+            # permuting it would misalign injected image features).
+            self.hps_to_sort = SUPPORTED_HPARAMS - set(self.config["hparams_to_skip"] or [])
 
         for n, hp in named_hparams(self.model, unique=True):
             hp_name = n.split(".")[-1]
+            hp.reset_choices()  # Refresh ConcatHparam choices (recomputed after modify()) before validating
             if hp.is_configurable:
                 # Make sure configurable hparams are the ones with right names else implementation needs to be fixed!
                 assert hp_name in SUPPORTED_HPARAMS, f"[ImplError] Invalid hparam {hp_name}!"
-                if export_config is not None and hp_name in export_config:
-                    assert export_config[hp_name] in hp.choices, (
-                        f"Invalid choice {export_config[hp_name]} for {n}! Available choices: {hp.choices}"
-                    )
-            hp.reset_choices()  # Make sure ConcatHparam choices are updated after modify()
+            # Validate every matching hparam (even non-configurable): an out-of-range value is else
+            # silently ignored while model.config is overwritten -> weights mismatch the saved config.
+            if export_config is not None and hp_name in export_config:
+                assert export_config[hp_name] in hp.choices, (
+                    f"Invalid choice {export_config[hp_name]} for {n}! Available choices: "
+                    f"{hp.choices}. Manual export_config values must match the search-space "
+                    "granularity (see the *_divisor settings)."
+                )
 
         assert isinstance(self.model, _DynamicMCoreLanguageModel), (
             "Input should be unwrapped MCore model!"
@@ -379,36 +416,55 @@ class MCoreMinitronSearcher(BaseSearcher):
             export_config = self.constraints["export_config"]
 
         # Prune homogeneously
-        self._prune(export_config, prune_depth=True)
-
-        # Update the hybrid block-type pattern if pruning a hybrid model.
-        hybrid_key = _get_hybrid_pattern_key(self.model)
-        if hybrid_key is not None:
-            print_rank_0(f"Original {hybrid_key}: {getattr(self.model, hybrid_key)}")
-            new_num_layers = self.model.config.num_layers
-            assert self.sorted_layers is not None
-            kept_layers_numbers = self.sorted_layers[:new_num_layers]
-            setattr(
-                self.model,
-                hybrid_key,
-                "".join(
-                    c
-                    for i, c in enumerate(getattr(self.model, hybrid_key))
-                    if i + 1 in kept_layers_numbers
-                ),
-            )
-            print_rank_0(f"Pruned {hybrid_key}: {getattr(self.model, hybrid_key)}")
+        self._prune(export_config)
 
         print_mcore_model_stats(
             self.model, "Pruned Model", self.config["seq_length"], self.config["batch_size"]
         )
 
-    def _prune(self, export_config: dict, prune_depth: bool = True) -> None:
+    @contextmanager
+    def _temporarily_pruned(self, export_config: dict):
+        """Prune to ``export_config`` for the duration of the block, then restore the max subnet.
+
+        Used to score a candidate subnet without permanently mutating the model. ``_prune`` drops
+        layers and slices per-layer patterns (config lists + hybrid string) in place; ``sample(max)``
+        only restores hparam-controlled state, so those must be snapshotted and restored here — else
+        the mutations compound across candidates and corrupt the final export.
+        """
+        model = self.model
+        all_layers = model.decoder.layers
+        start_layer_number = all_layers[0].layer_number
+        hybrid_key = _get_hybrid_pattern_key(model)
+        saved_patterns = {
+            attr: getattr(model.config, attr)
+            for attr in _PER_LAYER_CONFIG_PATTERNS
+            if isinstance(getattr(model.config, attr, None), (list, tuple))
+        }
+        saved_hybrid = getattr(model, hybrid_key) if hybrid_key else None
+        try:
+            self._prune(export_config)
+            yield
+        finally:
+            # Reattach the full layer list (with original numbering) BEFORE sampling the max subnet,
+            # so sample(max) reaches every layer -- including the dropped ones -- and resets their
+            # per-layer width hparams (otherwise the detached layers are reattached still holding
+            # their pruned widths). Then restore the in-place-sliced patterns (not hparam-controlled).
+            for offset, layer in enumerate(all_layers):
+                layer.layer_number = start_layer_number + offset
+            model.decoder.layers = all_layers
+            sample(model, sample_func=max)
+            for attr, pattern in saved_patterns.items():
+                setattr(model.config, attr, pattern)
+            if hybrid_key:
+                setattr(model, hybrid_key, saved_hybrid)
+
+    def _prune(self, export_config: dict) -> None:
         """Prune the model homogeneously based on the export_config by setting active choices for configurable hparams.
+
+        Also drops layers and slices all per-layer patterns.
 
         Args:
             export_config: Dictionary mapping hyperparameter names to their pruned values.
-            prune_depth: Whether to drop layers based on sorted_layers (default: True).
         """
         # Prune homogeneously
         for n, hp in named_hparams(self.model, configurable=True):
@@ -416,13 +472,12 @@ class MCoreMinitronSearcher(BaseSearcher):
             if hp_name in export_config:
                 hp.active = export_config[hp_name]
 
-        # Drop layers if depth pruning is enabled
-        if prune_depth:
-            num_layers_hp = self.model.get_hparam("num_layers")
-            if num_layers_hp.active != num_layers_hp.max:
-                assert self.sorted_layers is not None
-                layers_to_drop = self.sorted_layers[num_layers_hp.active :]
-                drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
+        # Drop layers based on sorted_layers
+        num_layers_hp = self.model.get_hparam("num_layers")
+        if num_layers_hp.active != num_layers_hp.max:
+            assert self.sorted_layers is not None
+            layers_to_drop = self.sorted_layers[num_layers_hp.active :]
+            drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
         # Update model config with pruned architecture
         # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
@@ -559,19 +614,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             smoothing=0.7,
         ):
             if candidate.score is None:  # not restored from checkpoint
-                all_layers = self.model.decoder.layers
-                start_layer_number = all_layers[0].layer_number
-
-                self._prune(candidate.ss_config, prune_depth=True)
-                candidate.score = self.eval_score(silent=False)
-                self.save_search_checkpoint(verbose=False)
-
-                # reset to max subnet and revert dropped layers
-                sample(self.model, sample_func=max)
-                for layer in all_layers:
-                    layer.layer_number = start_layer_number
-                    start_layer_number += 1
-                self.model.decoder.layers = all_layers
+                with self._temporarily_pruned(candidate.ss_config):
+                    candidate.score = self.eval_score(silent=False)
+                    self.save_search_checkpoint(verbose=False)
             metrics_str = ", ".join(
                 f"{self._fmt_metric(v, k)} {k}" for k, v in candidate.metrics.items()
             )
@@ -597,6 +642,7 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         dist.barrier()
         best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
+        self.best = asdict(best)
         best_grid = Table.grid(padding=(0, 2))
         best_grid.add_column(style="bold green", no_wrap=True)
         best_grid.add_column()
@@ -794,13 +840,42 @@ def get_mcore_minitron_config(
     return config
 
 
+def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
+    """Let registered model subclasses inherit their base ``SUPPORTED_MODELS`` rule.
+
+    Model subclasses (e.g. VLM language models like ``Qwen3VLGPTModel``) are registered under their
+    own ``DMRegistry`` key but share the dynamic class (and thus the search-space rule schema) of
+    their base ``GPTModel``/``MambaModel``. ``MCoreMinitronConfig`` only defines rule fields for the
+    base classes, so without this a subclass module would have no matching rule and get *frozen*
+    during conversion (disabling width/depth pruning). Copy the base rule onto the subclass key.
+    """
+    rules = dict(rules)
+    for base_cls, base_key in SUPPORTED_MODELS.items():
+        base_rule = rules.get(base_key)
+        if base_rule is None:
+            continue
+        # GPTModel/MambaModel are siblings (not subclasses of each other), so isinstance uniquely
+        # assigns each module to its base; the subclass shares the base's dynamic class and hence its
+        # rule schema. A subclass registered under its own key but absent from rules inherits it here.
+        for mod in model.modules():
+            if not isinstance(mod, base_cls) or type(mod) not in DMRegistry:
+                continue
+            key = DMRegistry.get_key(type(mod))
+            if key not in rules:
+                rules[key] = base_rule
+    return rules
+
+
 def _convert_model_to_dynamic_space(
     model: nn.Module, config: ModeloptBaseConfig | None = None
 ) -> DynamicSpace:
     """Create a dynamic space for the model (in-place)."""
     dynamic_space = DynamicSpace(model)
     dynamic_space._should_be_converted = lambda mod: isinstance(mod, tuple(SUPPORTED_MODELS.keys()))
-    dynamic_space.convert_to_dynamic(config.model_dump() if config else None, DMRegistry)
+    rules = config.model_dump() if config else None
+    if rules is not None:
+        rules = _inherit_base_model_rules(model, rules)
+    dynamic_space.convert_to_dynamic(rules, DMRegistry)
     if not dynamic_space.is_configurable():
         raise ApplyModeError(
             "The model does not contain any configurable hyperparameters! Please check the"
@@ -902,6 +977,8 @@ class ImportanceEstimatorRegistry:
                 _register_mlp_importance(module, self)
             elif isinstance(module, _DynamicSequentialMLP):
                 _register_sequential_mlp_importance(module, self)
+            elif isinstance(module, _DynamicTEGroupedMLP):
+                _register_grouped_mlp_importance(module, self)
             elif isinstance(module, _DynamicMambaMixer):
                 _register_mamba_mixer_importance(module, self)
 
@@ -1327,6 +1404,46 @@ def _register_sequential_mlp_importance(
         module,
         "num_local_experts",
         lambda: _estimate_expert_importance(module),
+    )
+
+
+def _register_grouped_mlp_importance(
+    module: _DynamicTEGroupedMLP, registry: ImportanceEstimatorRegistry
+) -> None:
+    """Register importance estimators for TEGroupedMLP (grouped-GEMM MoE experts) modules.
+
+    Mirrors the SequentialMLP path: ``num_local_experts`` reuses the expert-L2 hook (TEGroupedMLP
+    shares SequentialMLP's forward signature), and ``moe_ffn_hidden_size`` is a single shared score
+    from the fused ``linear_fc2`` input activations (all experts' tokens), since experts prune
+    homogeneously.
+    """
+    # Expert importance for num_local_experts; also creates module._activations (the dict saved and
+    # restored by the per-rank score checkpoint). We stash the ffn score in it so re-pruning from a
+    # checkpoint recovers it without re-running the forward loop.
+    _register_sequential_mlp_importance(module, registry)
+    module._activations["ffn_activations"] = None
+
+    def _grouped_fc2_forward_hook(mod, module_inner, input, output):
+        """Collect ffn-channel activations from the fused linear_fc2 input (all experts' tokens)."""
+        # input[0] is the permuted intermediate [total_tokens, moe_ffn_hidden_size] (no batch dim)
+        acts = gather_from_tensor_model_parallel_region(input[0]).detach()[:, None, :]
+        acts = acts.to(torch.float32).abs().mean(dim=0).pow(2).sum(dim=0)  # [moe_ffn_hidden_size]
+        prev = mod._activations["ffn_activations"]
+        mod._activations["ffn_activations"] = acts if prev is None else prev + acts
+
+    def _estimate_grouped_ffn_importance(mod):
+        """Return the activation magnitude-based importance (L2 norm) of moe_ffn_hidden_size."""
+        acts = mod._activations["ffn_activations"]
+        assert acts is not None, "No activations collected for importance estimation."
+        return acts.pow(0.5)
+
+    registry.register_hook(
+        module.linear_fc2,
+        partial(_grouped_fc2_forward_hook, module),
+        hook_type="forward",
+    )
+    registry.register_importance(
+        module, "moe_ffn_hidden_size", lambda: _estimate_grouped_ffn_importance(module)
     )
 
 

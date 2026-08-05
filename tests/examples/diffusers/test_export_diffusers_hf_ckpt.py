@@ -191,6 +191,28 @@ def _block_indices(prefixes: set[str]) -> set[int]:
 # last 2, so only blocks 2 and 3 are quantized.
 _QWEN_QUANTIZED_BLOCKS = {2, 3}
 _QWEN_LORA_RANK = 8
+# Per quantized block: image-stream linears keep full SVDQuant (low-rank branch +
+# pre_quant_scale), while the text-stream and modulation linears match the
+# "svdquant_skip_layers" patterns for qwen-image in
+# examples/diffusers/quantization/models_utils.py and are exported as plain NVFP4.
+_QWEN_SVDQUANT_PROMOTED_SUFFIXES = (
+    ".attn.to_q",
+    ".attn.to_k",
+    ".attn.to_v",
+    ".attn.to_out.0",
+    ".img_mlp.net.0.proj",
+    ".img_mlp.net.2",
+)
+_QWEN_SVDQUANT_SKIPPED_SUFFIXES = (
+    ".attn.add_q_proj",
+    ".attn.add_k_proj",
+    ".attn.add_v_proj",
+    ".attn.to_add_out",
+    ".txt_mlp.net.0.proj",
+    ".txt_mlp.net.2",
+    ".img_mod.1",
+    ".txt_mod.1",
+)
 
 
 @pytest.mark.parametrize(
@@ -249,10 +271,22 @@ def test_qwen_image_hf_ckpt_export(
         b_prefixes = _module_prefixes(keys, ".svdquant_lora_b")
         pqs_prefixes = _module_prefixes(keys, ".pre_quant_scale")
         assert a_prefixes, "no promoted svdquant_lora_a keys"
-        # Every promoted linear carries lora_a, lora_b, and pre_quant_scale, and
-        # every quantized linear is promoted (the sets are identical).
-        assert a_prefixes == b_prefixes == pqs_prefixes == weight_scale_prefixes
-        assert _block_indices(a_prefixes) == _QWEN_QUANTIZED_BLOCKS
+        # Every promoted linear carries lora_a, lora_b, and pre_quant_scale. The
+        # svdquant_skip_layers (text-stream + modulation linears) are quantized
+        # plain NVFP4: they have weight_scale but no low-rank/pre_quant_scale
+        # tensors, so the promoted and quantized sets differ by exactly them.
+        expected_promoted = {
+            f"transformer_blocks.{block}{suffix}"
+            for block in _QWEN_QUANTIZED_BLOCKS
+            for suffix in _QWEN_SVDQUANT_PROMOTED_SUFFIXES
+        }
+        expected_skipped = {
+            f"transformer_blocks.{block}{suffix}"
+            for block in _QWEN_QUANTIZED_BLOCKS
+            for suffix in _QWEN_SVDQUANT_SKIPPED_SUFFIXES
+        }
+        assert a_prefixes == b_prefixes == pqs_prefixes == expected_promoted
+        assert weight_scale_prefixes == expected_promoted | expected_skipped
         # Rank-consistent shapes; lora_a=[rank, in], lora_b=[out, rank], rank == --lowrank.
         for key, tensor in lora_tensors.items():
             if key.endswith(".svdquant_lora_a"):

@@ -31,6 +31,7 @@ Once inside the container with the repo available, install dependencies from the
 python -m pip uninstall nvidia-lm-eval -y 2>/dev/null
 python -m pip install -e ".[hf,puzzletron,dev-test]"
 python -m pip install -r examples/puzzletron/requirements.txt
+python -m pip install -r examples/llm_eval/requirements.txt
 ```
 
 To verify the install, you can run the GPU tests as a smoke check:
@@ -256,18 +257,7 @@ The plot shows how token accuracy changes with different compression rates. High
 
 ## Evaluation
 
-Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
-
-```bash
-python examples/llm_eval/lm_eval_hf.py \
-   --model hf \
-   --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
-   --tasks mmlu \
-   --num_fewshot 5 \
-   --batch_size 4
-```
-
-For a quick smoke test, add `--limit 10`.
+Evaluate AnyModel checkpoints using lm-eval. See the [LM-Eval-Harness section](../llm_eval/README.md#lm-eval-harness) in `examples/llm_eval/README.md` for full instructions, including multi-GPU and Slurm setup.
 
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
@@ -287,16 +277,13 @@ See [vLLM documentation](https://docs.vllm.ai/en/latest/getting_started/installa
 
 **NOTE:** This is a temporary workaround pending official vLLM integration. You can track merge status [here](https://github.com/vllm-project/vllm/pull/36512).
 
-Then, add the following to the model's `config.json` file (here we use Llama as an example):
+Then, convert the model's config.json to AnyModel format:
 
-```json
-{
-  ...
-  "architectures": ["AnyModel"],
-  "base_architecture": "LlamaForCausalLM",
-  ...
-}
+```bash
+python -m modelopt.torch.puzzletron.subblock_stats.runtime_utils convert_config_to_vllm_anymodel <model_dir>
 ```
+
+This will create a backup of the original config.json file at `config.bak`.
 
 For new architectures that are not supported by vLLM, you additionally need to add the following to the `config.json` file (using Llama3 as an example):
 

@@ -51,6 +51,8 @@ def fake_checkpoint(tmp_path, fake_config):
     tensors = {
         "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
         "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        # model_type "llama" is in the final-norm whitelist, so FakeBaseModel requires the norm.
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
     }
     shard = tmp_path / "model-00001-of-00001.safetensors"
     safetensors.torch.save_file(tensors, shard)
@@ -75,6 +77,7 @@ def test_fakebase_single_file_no_index(tmp_path, fake_config):
     tensors = {
         "lm_head.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
         "embed_tokens.weight": torch.zeros(_VOCAB_SIZE, _HIDDEN_SIZE),
+        "norm.weight": torch.ones(_HIDDEN_SIZE),
     }
     safetensors.torch.save_file(tensors, tmp_path / "model.safetensors")
     model = FakeBaseModel.from_source(str(tmp_path))
@@ -87,7 +90,10 @@ def test_fakebase_tied_embeddings_falls_back_to_embed(tmp_path, fake_config):
     FakeBaseModel must reuse ``embed_tokens`` for both."""
     fake_config.tie_word_embeddings = True
     weight = torch.randn(_VOCAB_SIZE, _HIDDEN_SIZE)
-    safetensors.torch.save_file({"embed_tokens.weight": weight}, tmp_path / "model.safetensors")
+    safetensors.torch.save_file(
+        {"embed_tokens.weight": weight, "norm.weight": torch.ones(_HIDDEN_SIZE)},
+        tmp_path / "model.safetensors",
+    )
     model = FakeBaseModel.from_source(str(tmp_path))
     torch.testing.assert_close(model.lm_head.weight, weight)
     torch.testing.assert_close(model.embed_tokens.weight, weight)
@@ -128,3 +134,31 @@ def test_load_vlm_or_llm_offline_zero_layers(monkeypatch):
     model = load_vlm_or_llm("fake-model", use_offline_training=True, use_fake_base=False)
     assert captured_kwargs.get("num_hidden_layers") == 0
     assert model.config.num_orig_hidden_layers == 4
+
+
+def test_load_vlm_or_llm_uses_transformers5_vlm_auto_class(monkeypatch):
+    """Transformers 5 loads VLMs through AutoModelForImageTextToText."""
+    cfg = transformers.PretrainedConfig()
+    cfg.model_type = "qwen3_vl"
+    cfg.text_config = object()
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *a, **kw: cfg)
+
+    captured = {}
+
+    class _FakeVLM:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return object()
+
+    # ``transformers`` exposes auto classes lazily, so deleting this attribute
+    # lets its module-level ``__getattr__`` recreate the legacy class.  An
+    # explicit ``None`` models its absence and reliably exercises the v5
+    # fallback.
+    monkeypatch.setattr(transformers, "AutoModelForVision2Seq", None, raising=False)
+    monkeypatch.setattr(transformers, "AutoModelForImageTextToText", _FakeVLM)
+
+    assert load_vlm_or_llm("qwen3-vl", dtype="auto") is not None
+    assert captured["args"] == ("qwen3-vl",)
+    assert captured["kwargs"]["torch_dtype"] == "auto"

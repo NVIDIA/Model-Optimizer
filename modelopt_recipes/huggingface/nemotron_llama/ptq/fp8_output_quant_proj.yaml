@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Llama-Nemotron embedding/reranking PTQ recipe: FP8 W8A8 plus per-tensor FP8
+# output quantizers on the projection Linears, so TensorRT picks FP8-output
+# GEMM kernels and carries FP8 activations between layers. Without output-side
+# quantization, FP8 GEMMs emit FP16 and each input Q/DQ adds an FP8 copy on
+# top of the FP16 activations, so the engine uses MORE activation memory than
+# an unquantized FP16 engine. [5726458]
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
+
+metadata:
+  recipe_type: ptq
+  description: 'Llama-Nemotron embedding/reranking PTQ recipe (fp8 + projection output quantizers): same numerics as the general fp8 preset, plus per-tensor
+    FP8 output quantizers on the projection Linears so TensorRT engines carry FP8 activations between layers.'
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: w8a8_fp8_fp8
+    - $import: default_disabled_quantizers
+    - quantizer_name: '*_proj.output_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*score*'
+      enable: false

@@ -1,0 +1,5 @@
+# Override the learning rate for LSQ's learnable amax parameters to 1e-4.
+"*weight_quantizer._amax_pre":
+  lr: 1e-4
+"*weight_quantizer._amax_post":
+  lr: 1e-4

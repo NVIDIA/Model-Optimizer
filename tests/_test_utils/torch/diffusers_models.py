@@ -318,6 +318,27 @@ def get_tiny_qwen_image_vae(**config_kwargs):
     return AutoencoderKLQwenImage(**kwargs)
 
 
+def _byte_level_unicode_chars() -> list[str]:
+    """The 256 GPT-2/Qwen byte-level BPE unicode characters, in byte order.
+
+    Inlined copy of the standard GPT-2 ``bytes_to_unicode`` mapping (transformers
+    v5 removed it from ``transformers.models.gpt2.tokenization_gpt2``).
+    """
+    bs = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    return [chr(c) for c in cs]
+
+
 def _build_local_qwen2_tokenizer(out_dir: Path):
     """Build a tiny, fully offline byte-level Qwen2 tokenizer (no Hub access).
 
@@ -329,22 +350,30 @@ def _build_local_qwen2_tokenizer(out_dir: Path):
     import json
 
     import transformers
-    from transformers.models.gpt2.tokenization_gpt2 import bytes_to_unicode
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    vocab = {token: idx for idx, token in enumerate(bytes_to_unicode().values())}
+    vocab = {token: idx for idx, token in enumerate(_byte_level_unicode_chars())}
     for special in ("<|endoftext|>", "<|im_start|>", "<|im_end|>"):
         vocab.setdefault(special, len(vocab))
     (out_dir / "vocab.json").write_text(json.dumps(vocab))
     (out_dir / "merges.txt").write_text("#version: 0.2\n")
 
-    return transformers.Qwen2Tokenizer(
-        vocab_file=str(out_dir / "vocab.json"),
-        merges_file=str(out_dir / "merges.txt"),
-        unk_token="<|endoftext|>",
-        eos_token="<|endoftext|>",
-        pad_token="<|endoftext|>",
-    )
+    special_kwargs = {
+        "unk_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "pad_token": "<|endoftext|>",
+    }
+    tokenizer_params = inspect.signature(transformers.Qwen2Tokenizer.__init__).parameters
+    if "vocab_file" in tokenizer_params:
+        # transformers v4: slow tokenizer reads vocab/merges from files.
+        return transformers.Qwen2Tokenizer(
+            vocab_file=str(out_dir / "vocab.json"),
+            merges_file=str(out_dir / "merges.txt"),
+            **special_kwargs,
+        )
+    # transformers v5: tokenizers-backed class takes the vocab dict and merge
+    # list directly (``vocab_file=`` would be silently swallowed by **kwargs).
+    return transformers.Qwen2Tokenizer(vocab=vocab, merges=[], **special_kwargs)
 
 
 def create_tiny_qwen_image_pipeline_dir(tmp_path: Path) -> Path:

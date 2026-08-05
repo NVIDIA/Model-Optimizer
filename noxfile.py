@@ -39,11 +39,12 @@ TORCH_VERSIONS = {
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
+    "torch_213": "torchvision~=0.28.0",
 }
 
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": "transformers~=5.9.0",
-    "tf_min": "transformers~=4.56.0",
+    "tf_latest": "transformers~=5.14.0",
+    "tf_min": "transformers~=4.57.0",
 }
 
 
@@ -53,6 +54,9 @@ def _cov_args():
 
 
 # ─── CPU unit tests ───────────────────────────────────────────────────────────
+_CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
+
+
 @nox.session(python=["3.10", "3.11", "3.12", "3.13", "3.14"])
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
@@ -62,7 +66,7 @@ def unit(session, torch_ver, tf_ver):
     tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pin:
         session.install(tf_pin)
-    session.run("python", "-m", "pytest", "tests/unit", *_cov_args())
+    session.run("python", "-m", "pytest", "tests/unit", *_cov_args(), env=_CPU_ONLY_ENV)
 
 
 @nox.session(python="3.12")
@@ -71,7 +75,7 @@ def partial_unit(session, subset):
     """Unit tests with partial installs."""
     if subset == "onnx":
         session.install("torchvision~=0.26.0", ".[onnx,dev-test]")
-        session.run("python", "-m", "pytest", "tests/unit/onnx")
+        session.run("python", "-m", "pytest", "tests/unit/onnx", env=_CPU_ONLY_ENV)
     elif subset == "torch":
         session.install("megatron-core", ".[dev-test]")
         session.run(
@@ -81,10 +85,11 @@ def partial_unit(session, subset):
             "tests/unit/torch",
             "--ignore=tests/unit/torch/deploy",
             "--ignore=tests/unit/torch/puzzletron",
+            env=_CPU_ONLY_ENV,
         )
     else:  # torch_deploy
         session.install(".[onnx,dev-test]")
-        session.run("python", "-m", "pytest", "tests/unit/torch/deploy")
+        session.run("python", "-m", "pytest", "tests/unit/torch/deploy", env=_CPU_ONLY_ENV)
 
 
 # ─── GPU sessions (run inside containers — no new venv) ──────────────────────
@@ -114,8 +119,9 @@ def gpu(session):
         "pip",
         "install",
         "--no-build-isolation",
-        "git+https://github.com/state-spaces/mamba.git",
-        "git+https://github.com/Dao-AILab/causal-conv1d.git",
+        # Install the latest *released* sdists (built against the container torch)
+        "mamba_ssm",
+        "causal-conv1d",
     )
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 

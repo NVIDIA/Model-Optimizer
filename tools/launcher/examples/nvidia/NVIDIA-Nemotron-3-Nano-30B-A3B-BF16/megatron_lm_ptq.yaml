@@ -1,0 +1,87 @@
+# NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 PTQ quantization + MMLU gate + export.
+# NemotronH-class hybrid Mamba-Transformer MoE. Smallest NemotronH MoE we ship
+# an example for, so it doubles as the fast MoE expert-parallel exerciser.
+#
+# Pipeline (1 node x 4 GPUs throughout):
+#   task_0 (quantize + MMLU): TP=1 PP=1 EP=4 ETP=1 — the MoE experts shard across
+#                      the 4 ranks (expert-parallel collective). Quantize the HF
+#                      weights from /hf-local (PTQ ckpt to /cicd), then run MMLU
+#                      (5-shot) on that same EP=4 collective as a regression gate.
+#                      MMLU runs at --fraction 0.01 (quantize.sh default) — a light
+#                      sample, so MMLU_LOWER_BOUND is set conservatively vs a full
+#                      run. Both stages exercise the MoE expert-parallel collective.
+#   task_1 (export):   TP=1 PP=4 EP=1 ETP=1 — pipeline-parallel for the hybrid
+#                      layer stack; writes the HF NVFP4 ckpt to /cicd/export.
+#
+# A vLLM NVFP4 serving smoke is intentionally omitted here: NVFP4 *inference*
+# requires Blackwell (native FP4). On Hopper, vLLM falls back to the Marlin FP4
+# kernel, which rejects this model's tensor dims — see the Super-120B example
+# (B200) for the FP4-serving smoke pattern.
+#
+# No dedicated Nano-30B recipe exists (only Nano-4B / Super-120B / Ultra-550B),
+# so this uses the named NVFP4_DEFAULT_CFG rather than a recipe path.
+#
+# GOTCHA — nemo containers install ModelOpt into a VENV at /opt/venv, whose
+# site-packages precede /usr/local on sys.path. The default modelopt_install_path
+# (/usr/local/lib/.../dist-packages/modelopt) is therefore never consulted and
+# the container's modelopt loads instead of the submodule pin. Point it at the
+# venv site-packages so the mounted modelopt actually overrides. modelopt_recipes
+# follows automatically (derived from this path's parent in core.py).
+#
+# Usage:
+#   source .env-slurm
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_lm_ptq.yaml --yes
+
+job_name: Nemotron-3-Nano-30B-A3B_PTQ
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "PTQ on Nemotron-3-Nano-30B-A3B (NVFP4): quantize + MMLU gate + export, 1 node x 4 GPUs"
+
+  task_0:
+    script: common/megatron_lm/quantize/quantize.sh
+    args:
+      - --seq-length 4096 --max-position-embeddings 4096
+      - --skip-generate
+      # Fast calibration. Bump (e.g. --calib-size 512) for production.
+      - --calib-size 32
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: NVFP4_DEFAULT_CFG
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      # MMLU regression gate on the quantized ckpt (same EP=4 expert-parallel
+      # collective). Export runs as its own task, so RUN_EXPORT stays false.
+      - RUN_MMLU: "true"
+      - MMLU_DATASET: /hf-local/cais/mmlu
+      - MMLU_LOWER_BOUND: "0.60"
+      - RUN_EXPORT: "false"
+      - TP: "1"
+      - PP: "1"
+      - EP: "4"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  task_1:
+    script: common/megatron_lm/export/export.sh
+    environment:
+      - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: NVFP4_DEFAULT_CFG
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - TP: "1"
+      - PP: "4"
+      - EP: "1"
+      - ETP: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.04
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4

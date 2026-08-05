@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
-from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import QuantModule, SequentialQuantizer, TensorQuantizer
@@ -135,15 +134,6 @@ def _check_all_weight_quantizers_disabled(model: nn.Module) -> None:
                         f"quantizer_state (weights already folded). "
                         f"See filter_modelopt_state_quantizer_state_for_model in vllm_reload_utils."
                     )
-
-
-def disable_rotate(quantizer: TensorQuantizer):
-    """Return a disabled copy of the quantizer's ``_rotate`` field, preserving its type."""
-    if isinstance(quantizer._rotate, RotateConfig):
-        return RotateConfig(enable=False)
-    if isinstance(quantizer._rotate, dict):  # backward compat: old checkpoints stored a dict
-        return dict(quantizer._rotate, enable=False)
-    return False
 
 
 def _fakequant_fused_experts_weights(
@@ -638,16 +628,12 @@ def export_hf_vllm_fq_checkpoint(
                     if isinstance(quantizer, SequentialQuantizer):
                         quantizer.disable()
                         for sub in quantizer:
-                            orig_rotate = sub._rotate
-                            if sub.rotate_is_enabled:
-                                sub._rotate = disable_rotate(sub)
-                            wqs_to_restore.append((sub, orig_rotate))
+                            wqs_to_restore.append((sub, sub._rotate))
+                            sub.disable_rotate()
                     elif isinstance(quantizer, TensorQuantizer):
                         quantizer.disable()
-                        orig_rotate = quantizer._rotate
-                        if quantizer.rotate_is_enabled:
-                            quantizer._rotate = disable_rotate(quantizer)
-                        wqs_to_restore.append((quantizer, orig_rotate))
+                        wqs_to_restore.append((quantizer, quantizer._rotate))
+                        quantizer.disable_rotate()
 
         quantizer_state_dict = get_quantizer_state_dict(model)
         for key in list(quantizer_state_dict):

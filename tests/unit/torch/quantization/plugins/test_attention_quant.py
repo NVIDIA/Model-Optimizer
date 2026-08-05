@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
-
 import pytest
 import torch
 import torch.nn as nn
@@ -22,11 +20,6 @@ import torch.nn.functional as F
 from _test_utils.torch.transformers_models import get_tiny_bert, get_tiny_llama, get_tiny_t5
 from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention
-
-try:
-    import kitchen
-except ImportError:
-    kitchen = None
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
@@ -63,7 +56,7 @@ class SDPAAttention(nn.Module):
 kv_cache_config = {
     "quant_cfg": [
         {"quantizer_name": "*[kv]_bmm_quantizer", "cfg": {"num_bits": 4}, "enable": True},
-        {"quantizer_name": "*softmax_quantizer", "enable": False},
+        {"quantizer_name": "*p_bmm_quantizer", "enable": False},
     ],
     "algorithm": "max",
 }
@@ -159,75 +152,48 @@ def test_kv_quant_bert():
     assert output.end_logits is not None
 
 
-@pytest.mark.skipif(kitchen is None, reason="kitchen is not installed.")
-def test_kitchen_fa():
-    batch_size = 2
-    num_q_heads = 4
-    num_kv_heads = 2
-    seqlen = 8
-    hidden_size = 128
-
+def _make_quant_attention(hidden_size=128, num_q_heads=4, num_kv_heads=2):
     config = LlamaConfig(
         hidden_size=hidden_size,
         num_attention_heads=num_q_heads,
         num_key_value_heads=num_kv_heads,
     )
-    original_attention = LlamaAttention(config, layer_idx=0)
-
-    q_states = torch.randn(
-        batch_size, num_q_heads, seqlen, hidden_size, dtype=torch.bfloat16, device="cuda"
-    )
-    k_states = torch.randn(
-        batch_size, num_kv_heads, seqlen, hidden_size, dtype=torch.bfloat16, device="cuda"
-    )
-    v_states = torch.randn(
-        batch_size, num_kv_heads, seqlen, hidden_size, dtype=torch.bfloat16, device="cuda"
-    )
-
-    # Convert it to _QuantAttention using the convert() class method
-    quant_attention = _QuantAttention.convert(original_attention)
+    quant_attention = _QuantAttention.convert(LlamaAttention(config, layer_idx=0))
     quant_attention.config._attn_implementation = "sdpa"
-    assert hasattr(quant_attention, "q_bmm_quantizer")
-    assert hasattr(quant_attention, "k_bmm_quantizer")
-    assert hasattr(quant_attention, "v_bmm_quantizer")
-    assert hasattr(quant_attention, "softmax_quantizer")
-    quant_attention.softmax_quantizer.disable()
-    module = inspect.getmodule(quant_attention.get_attn_type(quant_attention))
-    orig_attn_fn = module.ALL_ATTENTION_FUNCTIONS["sdpa"]
+    return quant_attention
 
-    output = quant_attention._quantized_attention(
-        orig_attn_fn,
-        quant_attention,
-        q_states,
-        k_states,
-        v_states,
-        attention_mask=None,
-    )
-    expected = output[0]
 
-    config = LlamaConfig(
-        hidden_size=hidden_size,
-        num_attention_heads=num_q_heads,
-        num_key_value_heads=num_kv_heads,
-    )
-    original_attention = LlamaAttention(config, layer_idx=0)
-    quant_attention = _QuantAttention.convert(original_attention)
-    quant_attention.config._attn_implementation = "sdpa"
-    quant_attention.softmax_quantizer.num_bits = (4, 3)
-    quant_attention.softmax_quantizer.block_sizes = {
-        -1: 32,
-        "type": "dynamic",
-        "scale_bits": (8, 0),
-    }
-    output = quant_attention._quantized_attention(
-        None,
-        quant_attention,
-        q_states,
-        k_states,
-        v_states,
-        attention_mask=None,
-    )
-    diff = (expected - output[0]).abs()
-    assert torch.allclose(expected, output[0], atol=0.75, rtol=0.75), (
-        f"{diff.max().item(), diff.mean().item(), diff.std().item()}"
-    )
+def test_p_qdq_mode_detection():
+    """p_bmm_quantizer config maps to the right Triton softmax qdq mode."""
+    quant_attention = _make_quant_attention()
+    sq = quant_attention.p_bmm_quantizer
+
+    # Default int8 quantizer: not a supported Triton qdq format
+    assert quant_attention._p_qdq_mode() is None
+
+    # Per-tensor FP8 E4M3
+    sq.num_bits = (4, 3)
+    assert quant_attention._p_qdq_mode() == "fp8"
+
+    # NVFP4: E2M1 with dynamic block-16 E4M3 scales
+    sq.num_bits = (2, 1)
+    sq.block_sizes = {-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+    assert quant_attention._p_qdq_mode() == "nvfp4"
+
+    # Static (calibrated) NVFP4 must not map to the dynamic-scale kernel,
+    # including configs where a missing "type" key means static.
+    sq.block_sizes = {-1: 16, "type": "static", "scale_bits": (4, 3)}
+    assert quant_attention._p_qdq_mode() is None
+    sq.block_sizes = {-1: 16, "scale_bits": (4, 3)}
+    assert quant_attention._p_qdq_mode() is None
+
+    # MXFP8 stays on the kitchen path
+    sq.num_bits = (4, 3)
+    sq.block_sizes = {-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+    assert quant_attention._p_qdq_mode() is None
+
+    # Disabled quantizer never maps to a mode
+    sq.num_bits = (4, 3)
+    sq.block_sizes = None
+    sq.disable()
+    assert quant_attention._p_qdq_mode() is None

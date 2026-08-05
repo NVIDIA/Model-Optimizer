@@ -6,7 +6,7 @@
 # references define benchmark requirements and YAML fragments, this file
 # defines the deployment + operational conventions.
 #
-# Includes (default): gpqa_diamond_aa_v3 (simple-evals harness, n_samples=16).
+# Includes (default): ns_gpqa (nemo-skills harness, num_repeats=16, AA mcq-4choices).
 # Add more AA tasks per recipes/tasks/aa/ and the AA suite rule in SKILL.md.
 #
 # Usage:
@@ -35,7 +35,7 @@
 # `huggingface_hub.snapshot_download`) and point `checkpoint_path` at it.
 #
 # Run a single task:
-#   nel run --config ... -t gpqa_diamond_aa_v3
+#   nel run --config ... -t ns_gpqa
 #
 # Canary (2 samples): use this before a full run to validate logs and tune
 # parallelism.
@@ -46,6 +46,8 @@ defaults:
   - execution: slurm/default
   - deployment: vllm
   - _self_
+cluster:
+  sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"Eval benchmark low GPU utilization"}}'
 execution:
   hostname: ???
   username: ${oc.env:USER}
@@ -65,6 +67,9 @@ execution:
   auto_export:          # REQUIRED trigger for auto-export. Without this, the
     destinations:       # export.mlflow block below is ignored and the run is
       - mlflow          # NOT uploaded — you'd have to `nel export` it by hand.
+  # Auto-export is a separate CPU-only sbatch; GPU-only partitions reject it ("Cannot
+  # find GPU specification") → export silently fails. Set a CPU partition (gcp-nrt: cpu).
+  cpu_partition: ???
 deployment:
   env_vars:
     HF_TOKEN: host:HF_TOKEN
@@ -77,13 +82,16 @@ deployment:
   checkpoint_path: ???
   hf_model_handle:
   served_model_name: ???
-  image: vllm/vllm-openai:v0.19.1
-  # NVFP4 on Blackwell B300/GB300 (sm_103): append `-cu130` to the (multi-arch)
-  # image tag — the default cu12 build has no sm_103 FP4 kernel, so the deploy
-  # dies at engine init with CUDA "no kernel image is available". e.g.:
-  #   image: vllm/vllm-openai:v0.19.1-cu130
-  # If a pinned release predates your model's arch, use the nightly instead
-  # (Qwen3.5-9B's qwen3_5 needed vllm/vllm-openai:cu130-nightly-x86_64, 0.19.2rc1.dev134).
+  image: vllm/vllm-openai:v0.26.0
+  # NVFP4 on Blackwell B300/GB300 (sm_103) needs a CUDA-13 build — a cu12 build
+  # has no sm_103 FP4 kernel, so the deploy dies at engine init with CUDA
+  # "no kernel image is available". From v0.20.0 on, release tags are CUDA-13
+  # unsuffixed (the tag above) with `-cu129` the CUDA-12 opt-out; v0.19.x and
+  # earlier were the other way round (`-cu130` = CUDA 13), and `-cu130` no longer
+  # exists after v0.20.0. Don't trust the tag name — pick a tag reporting
+  # CUDA_VERSION >= 13 in the config blob of your platform's child manifest
+  # (arm64 Grace/GB300, amd64 x86); TORCH_CUDA_ARCH_LIST differs between the two,
+  # so check your arch against the child you'll actually run.
   # Multimodal on sm_103 may also need `--mm-encoder-attn-backend TRITON_ATTN`
   # (ViT flash-attn workaround; drop if the encoder loads without it).
   #
@@ -91,6 +99,9 @@ deployment:
   # model as `/checkpoint` and eval requests 404 ("model does not exist").
   # For MoE models, add `--enable-expert-parallel` to the command.
   # For models with custom code, add `--trust-remote-code` to the command.
+  # `--model-loader-extra-config` enables multithreaded checkpoint loading (on by
+  # default below) — cuts large-checkpoint load from tens of minutes to a few;
+  # tune num_threads to the checkpoint size / shared-FS read bandwidth.
   # After filling in evaluation `parallelism` values (top-level + per-task),
   # append `--max-num-seqs N` to the command where
   # N = ceil(max_parallelism / data_parallel_size).
@@ -102,6 +113,7 @@ deployment:
     --tensor-parallel-size 1
     --data-parallel-size 1
     --max-model-len 131072
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}'
     --max-num-batched-tokens 8192
     --enable-chunked-prefill
 evaluation:
@@ -153,21 +165,24 @@ evaluation:
               # --max-model-len >= 393216. Uncomment for DeepSeek V4.
               # reasoning_effort: max
   tasks:
-  # Reasoning (chat endpoint, 8 repeats, short)
-    - name: gpqa_diamond_aa_v3
-      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
+  # Reasoning (chat endpoint, short). nemo-skills GPQA on the AA 4-choice MCQ
+  # prompt (golden Nemotron-3-Ultra harness); repeat count kept at this recipe's
+  # prior value of 16.
+    - name: ns_gpqa
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
       nemo_evaluator_config:
         config:
           params:
             extra:
-              n_samples: 16
+              num_repeats: 16
+              args: "++prompt_config=eval/aai/mcq-4choices"
 
 export:
   # Use LITERAL values below — NOT ${deployment.*} / ${evaluation.*} cross-refs.
   # With auto_export enabled (above), NEL resolves this block at SUBMIT time in a
   # scope that does NOT include `deployment` / `evaluation`, so cross-references
   # fail hard: "Interpolation key 'deployment.served_model_name' not found".
-  # `${oc.env:USER}` (an env-var interpolation) is fine.
+  # `${oc.env:USER}` / `${oc.env:MLFLOW_TRACKING_URI}` (env-var interpolations) are fine.
   #
   # CAUTION — these literals can drift. temperature / top_p / max_new_tokens are the
   # ONLY queryable record of the sampling config in MLflow (NEL does not log them as
@@ -176,7 +191,7 @@ export:
   # change the sampling params (or served_model_name), update these literals in the
   # SAME edit, or MLflow will misreport the run.
   mlflow:
-    tracking_uri: ???
+    tracking_uri: ${oc.env:MLFLOW_TRACKING_URI}   # from modelopttools:eval-config (canonical frontier-evals host; NOT the -nemo-evaluator alias)
     experiment_name: ${oc.env:USER}/CHANGEME-served-model-name
     description: 'CHANGEME-served-model-name | T=1.0, top_p=0.95, max_new_tokens=65536'
     log_logs: true

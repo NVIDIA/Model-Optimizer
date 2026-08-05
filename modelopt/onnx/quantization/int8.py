@@ -18,6 +18,7 @@
 import os
 import tempfile
 import time
+from collections.abc import Sequence
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -139,6 +140,7 @@ def quantize(
     direct_io_types: bool = False,
     opset: int | None = None,
     autotune: bool = False,
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies INT8 quantization to an ONNX file using the compiler friendly heuristics.
@@ -163,7 +165,7 @@ def quantize(
         return onnx_model
 
     enable_gemv_detection_for_trt = kwargs.get("enable_gemv_detection_for_trt", True)
-    if enable_gemv_detection_for_trt and not autotune:
+    if enable_gemv_detection_for_trt and not (autotune or kwargs.get("target_dla", False)):
         # Either of m or n in matmul is 1, this matmul cannot utilize TensorCores.
         # The perf of adding Q/DQ layers is not good in TRT. Thus, in this case,
         # do not add Q/DQ layers to this matmul.
@@ -177,17 +179,20 @@ def quantize(
             calibration_data_reader,
             calibration_eps,
             calibration_shapes,
+            input_shapes_profile,
         )
         nodes_to_exclude.extend(matmul_nodes_to_exclude)  # type: ignore[union-attr]
         logger.debug(f"Excluding {len(matmul_nodes_to_exclude)} MatMul nodes due to GEMV pattern")
 
     # Collect node names to exclude from quantization
     nodes_to_exclude = find_nodes_to_exclude(graph, nodes_to_exclude, op_types_to_exclude)  # type: ignore[arg-type]
-    if not autotune:
+    if not (autotune or kwargs.get("target_dla", False)):
         nodes_to_exclude.extend(find_nodes_from_convs_to_exclude(graph, quantize_mode="int8"))
 
     # Change the default configuration of ORT quantization
     op_types_to_quantize = op_types_to_quantize or []
+    if kwargs.get("target_dla", False) and not op_types_to_quantize:
+        op_types_to_quantize = list({node.op_type for node in onnx_model.graph.node})
     if op_types_to_quantize:
         op_types_to_quantize.extend(custom_ops_to_quantize)
     op_types = {node.op for node in graph.nodes}
@@ -199,6 +204,7 @@ def quantize(
         calibrate_per_node,
         custom_ops_to_quantize,
         kwargs.get("op_types_needing_output_quant"),
+        input_shapes_profile,
     )
     logger.info(f"Quantizable op types: {[t for t in quantizable_op_types if t in op_types]}")
 

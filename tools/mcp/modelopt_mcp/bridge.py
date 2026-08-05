@@ -34,10 +34,12 @@ need — keeps the surface area auditable.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess  # nosec B404 - fixed-argv CLI probes are required; shell=True is not used.
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +69,25 @@ _LAUNCHER_ERROR_RE = re.compile(
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _SAFE_PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_SLURM_TERMINAL_STATES: frozenset[str] = frozenset(
+    {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "NODE_FAIL",
+        "PREEMPTED",
+        "BOOT_FAIL",
+    }
+)
+_SLURM_FAILURE_STATES: frozenset[str] = frozenset(
+    {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL"}
+)
+_SLURM_RUNNING_STATES: frozenset[str] = frozenset(
+    {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "RESIZING", "SUSPENDED"}
+)
+_SLURM_STATUS_META = ".modelopt_mcp_slurm.json"
 
 
 @dataclass
@@ -92,6 +113,92 @@ class SourceCheckout:
 def _launcher_reported_error(stdout: str, stderr: str) -> bool:
     """Return True when launcher text contains a fatal error despite exit 0."""
     return bool(_LAUNCHER_ERROR_RE.search(f"{stdout}\n{stderr}"))
+
+
+def _parse_launcher_submission(text: str) -> tuple[str | None, str | None, str | None]:
+    """Best-effort parse of launcher/nemo_run submission output."""
+    experiment_id = None
+    experiment_dir = None
+    slurm_job_id = None
+
+    # nemo_run prints "Experiment Status for <id>" and often also the
+    # reconstructable form `Experiment.from_id("<id>")`.
+    m = re.search(r'Experiment\.from_id\("([^"]+)"\)', text)
+    if m:
+        experiment_id = m.group(1)
+    else:
+        m = re.search(
+            r"Experiment Status for\s+(\S+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        m = re.search(
+            r"experiment[_\s-]+id[:\s]+(\S+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m:
+            experiment_id = m.group(1)
+    if not experiment_id:
+        # Fallback for older nemo_run output that lacked the explicit
+        # "id:" label. Accepts any path-safe id token following the
+        # word "experiment" — not just timestamp-style.
+        m = re.search(
+            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if m and m.group(1).lower() not in {"status", "dir", "directory"}:
+            experiment_id = m.group(1)
+
+    # Match any path containing `/experiments/<id>/` — don't anchor on
+    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
+    # clusters' /scratch / /work / /data / /p / ...).
+    m = re.search(r"(?:experiment_dir[:=]\s*|(?<!\S))(\S+/experiments/[^\s/]+)", text)
+    if m:
+        experiment_dir = m.group(1)
+    m = re.search(r"Submitted batch job (\d+)", text)
+    if m:
+        slurm_job_id = m.group(1)
+    else:
+        m = re.search(r"Job id:\s*(\d+)", text, re.IGNORECASE)
+        if m:
+            slurm_job_id = m.group(1)
+
+    return experiment_id, experiment_dir, slurm_job_id
+
+
+def _docker_experiment_id_capture_timeout() -> float:
+    """Return how long Docker submit should tail launcher output for an id."""
+    raw = os.environ.get("MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC", "10")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 10.0
+
+
+def _tail_docker_launch_log(log_path: Path, proc: subprocess.Popen) -> tuple[str | None, str]:
+    """Tail detached Docker launcher output for an early experiment id."""
+    deadline = time.monotonic() + _docker_experiment_id_capture_timeout()
+    text = ""
+    while True:
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            text = ""
+        complete_text = text if text.endswith(("\n", "\r")) else text.rsplit("\n", 1)[0]
+        experiment_id, _, _ = _parse_launcher_submission(complete_text)
+        if experiment_id:
+            return experiment_id, _tail(text, 2000)
+        if time.monotonic() >= deadline or proc.poll() is not None:
+            experiment_id, _, _ = _parse_launcher_submission(text)
+            if experiment_id:
+                return experiment_id, _tail(text, 2000)
+            return None, _tail(text, 2000)
+        time.sleep(0.2)
 
 
 def _validate_experiment_id(experiment_id: str) -> dict | None:
@@ -464,7 +571,7 @@ def _launcher_argv(abs_yaml: Path, checkout: SourceCheckout | None, *flags: str)
     return [
         _uv_binary(),
         "run",
-        "--project",
+        "--with-editable",
         str(checkout.launcher_dir),
         "modelopt-launcher",
         "--yaml",
@@ -676,6 +783,8 @@ def verify_slurm_setup_impl(
     cluster_host: str,
     cluster_user: str | None = None,
     identity: str | None = None,
+    control_socket: str | None = None,
+    reconnect_command: str | None = None,
 ) -> dict:
     """Probe passwordless SSH to a Slurm cluster login node.
 
@@ -693,6 +802,63 @@ def verify_slurm_setup_impl(
         "-o",
         "ConnectTimeout=5",
     ]
+    if control_socket:
+        expanded_socket = os.path.expanduser(control_socket)
+        check_target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
+        try:
+            check = subprocess.run(  # nosec B603 B607 - fixed ssh argv; no shell.
+                [
+                    "ssh",
+                    "-O",
+                    "check",
+                    "-o",
+                    f"ControlPath={expanded_socket}",
+                    check_target,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "cluster_host": cluster_host,
+                "reason": "ssh_timeout",
+                "diagnostic": (
+                    f"ssh ControlMaster check for {cluster_host} did not respond within 15s. "
+                    "The control socket may be wedged; reconnect and retry."
+                ),
+            }
+        except FileNotFoundError:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "reason": "ssh_not_installed",
+                "diagnostic": "`ssh` binary not on PATH.",
+            }
+        if check.returncode != 0:
+            return {
+                "ok": False,
+                "executor": "slurm",
+                "cluster_host": cluster_host,
+                "cluster_user": cluster_user,
+                "reason": "mfa_reauth_required",
+                "control_socket": control_socket,
+                "reconnect_command": reconnect_command,
+                "diagnostic": (
+                    "OpenSSH ControlMaster socket is absent or expired. "
+                    f"Run `{reconnect_command or 'ssh <cluster>'}`, keep it "
+                    "connected, then retry."
+                ),
+            }
+        argv += [
+            "-o",
+            f"ControlPath={expanded_socket}",
+            "-o",
+            "ControlMaster=no",
+        ]
     if identity:
         argv += ["-i", identity]
     target = f"{cluster_user}@{cluster_host}" if cluster_user else cluster_host
@@ -701,7 +867,7 @@ def verify_slurm_setup_impl(
     # B603/B607 false positive — `ssh` invoked by name with a controlled
     # argv (BatchMode, ConnectTimeout, identity path, target). No shell.
     try:
-        proc = subprocess.run(  # nosec B603 B607 - fixed ssh CLI argv; no shell.
+        proc = subprocess.run(  # nosec B603 - fixed ssh CLI argv; no shell.
             argv,
             capture_output=True,
             text=True,
@@ -749,6 +915,7 @@ def verify_slurm_setup_impl(
         "executor": "slurm",
         "cluster_host": cluster_host,
         "cluster_user": cluster_user,
+        "control_socket": control_socket,
         "whoami": lines[0] if lines else "",
         "remote_hostname": lines[1] if len(lines) > 1 else "",
     }
@@ -792,17 +959,83 @@ def _normalize_yaml_path(yaml_path: str, *, examples_dir: Path | None = None) ->
     return (Path.cwd() / yaml_path).resolve()
 
 
+def _launcher_overrides(
+    *,
+    executor: str,
+    extra_overrides: dict[str, str] | None,
+    account: str | None,
+    partition: str | None,
+    container: str | None,
+    gpus_per_node: int | None,
+    ntasks_per_node: int | None,
+) -> dict[str, str]:
+    """Build launcher CLI overrides shared by live submit and dry-run."""
+    overrides = dict(extra_overrides or {})
+    if executor == "slurm":
+        slurm_prefix = "pipeline.task_0.slurm_config."
+        if account:
+            overrides.setdefault(f"{slurm_prefix}account", account)
+        if partition:
+            overrides.setdefault(f"{slurm_prefix}partition", partition)
+        if container:
+            overrides.setdefault(f"{slurm_prefix}container", container)
+        if gpus_per_node is not None:
+            overrides.setdefault(f"{slurm_prefix}gpus_per_node", str(gpus_per_node))
+        if ntasks_per_node is not None:
+            overrides.setdefault(f"{slurm_prefix}ntasks_per_node", str(ntasks_per_node))
+    return overrides
+
+
+def _apply_launcher_env(
+    env: dict[str, str],
+    *,
+    checkout: SourceCheckout | None,
+    executor: str,
+    cluster_host: str | None,
+    account: str | None,
+    partition: str | None,
+    control_socket: str | None,
+    reconnect_command: str | None,
+) -> None:
+    """Apply launcher env shared by live submit and dry-run."""
+    env.setdefault("NEMORUN_HOME", os.getcwd())
+    if checkout is not None:
+        env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
+        env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
+        env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
+    if executor == "slurm":
+        env["SLURM_HOST"] = cluster_host or ""
+        if account:
+            env["SLURM_ACCOUNT"] = account
+        if partition:
+            env["SLURM_PARTITION"] = partition
+        if control_socket:
+            env["MODELOPT_LAUNCHER_SSH_CONTROL_PATH"] = os.path.expanduser(control_socket)
+        if reconnect_command:
+            env["MODELOPT_LAUNCHER_SSH_RECONNECT_COMMAND"] = reconnect_command
+
+
 def submit_job_impl(
     *,
     yaml_path: str,
-    hf_local: str | None,
-    cluster_host: str | None,
-    cluster_user: str | None,
-    identity: str | None,
-    job_dir: str | None,
-    job_name: str | None,
-    extra_overrides: dict[str, str] | None,
-    skip_verify: bool,
+    hf_local: str | None = None,
+    cluster_host: str | None = None,
+    cluster_user: str | None = None,
+    identity: str | None = None,
+    job_dir: str | None = None,
+    job_name: str | None = None,
+    extra_overrides: dict[str, str] | None = None,
+    skip_verify: bool = False,
+    account: str | None = None,
+    partition: str | None = None,
+    container: str | None = None,
+    gpus_per_node: int | None = None,
+    ntasks_per_node: int | None = None,
+    control_socket: str | None = None,
+    reconnect_command: str | None = None,
+    gpu_type: str | None = None,
+    mfa: bool = False,
+    ssh_alias: str | None = None,
     dry_run: bool = False,
     source_ref: str | None = None,
     source_repo: str | None = None,
@@ -827,6 +1060,20 @@ def submit_job_impl(
     ``core.run_jobs``. We don't re-implement nemo_run integration here —
     that lives upstream.
     """
+    reconnect_command = reconnect_command or (f"ssh {ssh_alias}" if ssh_alias else None)
+    if mfa and cluster_host and not control_socket:
+        return {
+            "ok": False,
+            "reason": "mfa_control_socket_required",
+            "executor": "slurm",
+            "cluster_host": cluster_host,
+            "ssh_alias": ssh_alias,
+            "diagnostic": (
+                "mfa=True requires control_socket so the launcher can reuse "
+                "an authenticated OpenSSH ControlMaster session."
+            ),
+        }
+
     # ---- Dry-run branch (no cluster contact) -----------------------
     if dry_run:
         return _submit_job_dry_run(
@@ -838,6 +1085,13 @@ def submit_job_impl(
             job_dir=job_dir,
             job_name=job_name,
             extra_overrides=extra_overrides,
+            account=account,
+            partition=partition,
+            container=container,
+            gpus_per_node=gpus_per_node,
+            ntasks_per_node=ntasks_per_node,
+            control_socket=control_socket,
+            reconnect_command=reconnect_command,
             source_ref=source_ref,
             source_repo=source_repo,
         )
@@ -873,6 +1127,8 @@ def submit_job_impl(
                 cluster_host=cluster_host or "",
                 cluster_user=cluster_user,
                 identity=identity,
+                control_socket=control_socket,
+                reconnect_command=reconnect_command,
             )
         if not check.get("ok"):
             return {
@@ -939,7 +1195,16 @@ def submit_job_impl(
         argv.append(f"job_dir={job_dir}")
     if job_name:
         argv.append(f"job_name={job_name}")
-    for k, v in (extra_overrides or {}).items():
+
+    for k, v in _launcher_overrides(
+        executor=executor,
+        extra_overrides=extra_overrides,
+        account=account,
+        partition=partition,
+        container=container,
+        gpus_per_node=gpus_per_node,
+        ntasks_per_node=ntasks_per_node,
+    ).items():
         argv.append(f"{k}={v}")
 
     # Propagate env so submit-side and status-side agree on NEMORUN_HOME.
@@ -948,50 +1213,81 @@ def submit_job_impl(
     # MCP server's cwd — different paths, so job_status would return
     # experiment_dir_not_found for jobs that actually succeeded.
     child_env = os.environ.copy()
-    child_env.setdefault("NEMORUN_HOME", os.getcwd())
-    if checkout is not None:
-        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
-        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
-        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
-    if executor == "slurm":
-        # Required for slurm_factory's host default. Verify_setup ran
-        # against this same host above (when verify_setup=True), so the
-        # value is known good.
-        child_env["SLURM_HOST"] = cluster_host or ""
+    _apply_launcher_env(
+        child_env,
+        checkout=checkout,
+        executor=executor,
+        cluster_host=cluster_host,
+        account=account,
+        partition=partition,
+        control_socket=control_socket,
+        reconnect_command=reconnect_command,
+    )
 
     if executor == "docker":
-        # Docker mode: spawn detached. Discard stdout/stderr to /dev/null —
-        # leaving them as Popen.PIPE without a reader fills the kernel's
-        # ~64 KB pipe buffer and BLOCKS the launcher's next write(), which
-        # would hang long-running PTQ jobs forever while the MCP server
-        # appears to have "succeeded".
+        # Docker mode: spawn detached. Redirect stdout/stderr to a side-channel
+        # log file, then tail it briefly for nemo_run's experiment id. This
+        # avoids PIPE deadlock while still giving callers the id needed for
+        # job_status/job_logs polling.
         # `start_new_session=True` detaches from the MCP server's process
         # group so an MCP server restart / SIGINT doesn't SIGHUP the
         # in-flight launcher.
         # B603 false positive — argv is a controlled list built above.
+        log_dir = Path(child_env["NEMORUN_HOME"]) / ".modelopt-mcp" / "docker-submit-logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = tempfile.NamedTemporaryFile(
+                prefix="submit-",
+                suffix=".log",
+                dir=log_dir,
+                delete=False,
+                mode="w+b",
+            )
+        except OSError as e:
+            return {
+                "ok": False,
+                "executor": "docker",
+                "reason": "docker_submit_log_unavailable",
+                "diagnostic": f"Unable to create Docker submit log under {log_dir}: {e}",
+                "argv": argv,
+                **_source_result_fields(checkout),
+            }
+        log_path = Path(log_file.name)
         try:
             proc = subprocess.Popen(  # nosec B603 - fixed launcher argv list; no shell.
                 argv,
                 env=child_env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         except FileNotFoundError:
+            log_file.close()
+            log_path.unlink(missing_ok=True)
             return _launcher_not_installed(argv)
+        finally:
+            log_file.close()
+
+        experiment_id, stdout_tail = _tail_docker_launch_log(log_path, proc)
         return {
             "ok": True,
             "executor": "docker",
             "pid": proc.pid,
             "argv": argv,
             "nemorun_home": child_env["NEMORUN_HOME"],
-            "experiment_id": None,  # Phase 2: tail launcher's output
+            "experiment_id": experiment_id,
+            "stdout_log": str(log_path),
+            "stdout_tail": stdout_tail,
             **_source_result_fields(checkout),
-            # via a side-channel log file to capture nemo_run's id
-            "spike_note": (
-                "Docker mode launched detached. Phase 1: experiment_id "
-                "is None — list under $NEMORUN_HOME/experiments/ or use "
-                "Phase 2's tail-based id capture."
+            "diagnostic": (
+                "Docker mode launched detached and experiment_id was captured from launcher output."
+                if experiment_id
+                else (
+                    "Docker mode launched detached, but no experiment_id was "
+                    "captured before the short output-tail timeout. Inspect "
+                    "stdout_log or retry with MODELOPT_MCP_DOCKER_ID_TIMEOUT_SEC "
+                    "set higher."
+                )
             ),
         }
 
@@ -1047,59 +1343,7 @@ def submit_job_impl(
             **_source_result_fields(checkout),
         }
 
-    # Best-effort experiment_id + dir + slurm_job_id parse. nemo_run's
-    # output format may shift across versions; on parse miss, fields
-    # come back None and the caller still gets stdout_tail to inspect
-    # by hand.
-    experiment_id = None
-    experiment_dir = None
-    slurm_job_id = None
-    # nemo_run prints "Entering Experiment <title>_<id> with id: <id>" —
-    # match the trailing id directly so we don't have to encode the
-    # title prefix or hard-code timestamp width.
-    m = re.search(r'Experiment\.from_id\("([^"]+)"\)', stdout_tail)
-    if m:
-        experiment_id = m.group(1)
-    else:
-        m = re.search(
-            r"Experiment Status for\s+(\S+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m:
-            experiment_id = m.group(1)
-    if not experiment_id:
-        m = re.search(
-            r"experiment[_\s-]+id[:\s]+(\S+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m:
-            experiment_id = m.group(1)
-    if not experiment_id:
-        # Fallback for older nemo_run output that lacked the explicit
-        # "id:" label. Accepts any path-safe id token following the
-        # word "experiment" — not just timestamp-style.
-        m = re.search(
-            r"experiment[_\s-]+([A-Za-z0-9_-]+)",
-            stdout_tail,
-            re.IGNORECASE,
-        )
-        if m and m.group(1).lower() not in {"status"}:
-            experiment_id = m.group(1)
-    # Match any path containing `/experiments/<id>/` — don't anchor on
-    # cluster-specific filesystem roots (NVIDIA's /lustre, partner
-    # clusters' /scratch / /work / /data / /p / ...).
-    m = re.search(r"(\S+/experiments/[^\s/]+)", stdout_tail)
-    if m:
-        experiment_dir = m.group(1)
-    m = re.search(r"Submitted batch job (\d+)", stdout_tail)
-    if m:
-        slurm_job_id = m.group(1)
-    else:
-        m = re.search(r"Job id:\s*(\d+)", stdout_tail, re.IGNORECASE)
-        if m:
-            slurm_job_id = m.group(1)
+    experiment_id, experiment_dir, slurm_job_id = _parse_launcher_submission(stdout_tail)
 
     if not experiment_id:
         return {
@@ -1118,6 +1362,16 @@ def submit_job_impl(
             "argv": argv,
             **_source_result_fields(checkout),
         }
+
+    _write_slurm_status_metadata(
+        experiment_id=experiment_id,
+        slurm_job_id=slurm_job_id,
+        cluster_host=cluster_host,
+        cluster_user=cluster_user,
+        identity=identity,
+        control_socket=control_socket,
+        reconnect_command=reconnect_command,
+    )
 
     return {
         "ok": True,
@@ -1142,6 +1396,13 @@ def _submit_job_dry_run(
     job_dir: str | None,
     job_name: str | None,
     extra_overrides: dict[str, str] | None,
+    account: str | None,
+    partition: str | None,
+    container: str | None,
+    gpus_per_node: int | None,
+    ntasks_per_node: int | None,
+    control_socket: str | None,
+    reconnect_command: str | None,
     source_ref: str | None,
     source_repo: str | None,
 ) -> dict:
@@ -1205,20 +1466,32 @@ def _submit_job_dry_run(
         argv.append(f"job_dir={job_dir}")
     if job_name:
         argv.append(f"job_name={job_name}")
-    for k, v in (extra_overrides or {}).items():
+    executor = "docker" if hf_local else "slurm" if cluster_host else "dryrun"
+    for k, v in _launcher_overrides(
+        executor=executor,
+        extra_overrides=extra_overrides,
+        account=account,
+        partition=partition,
+        container=container,
+        gpus_per_node=gpus_per_node,
+        ntasks_per_node=ntasks_per_node,
+    ).items():
         argv.append(f"{k}={v}")
 
     # Propagate env so the launcher's factory resolution matches what
     # the live submit would see (mainly: SLURM_HOST for slurm-factory
     # default when cluster_host is set).
     child_env = os.environ.copy()
-    child_env.setdefault("NEMORUN_HOME", os.getcwd())
-    if checkout is not None:
-        child_env["MODELOPT_MCP_SOURCE_ROOT"] = str(checkout.root)
-        child_env["MODELOPT_MCP_SOURCE_REF"] = checkout.ref
-        child_env["MODELOPT_MCP_SOURCE_SHA"] = checkout.resolved_sha
-    if cluster_host:
-        child_env["SLURM_HOST"] = cluster_host
+    _apply_launcher_env(
+        child_env,
+        checkout=checkout,
+        executor=executor,
+        cluster_host=cluster_host,
+        account=account,
+        partition=partition,
+        control_socket=control_socket,
+        reconnect_command=reconnect_command,
+    )
 
     # Dry-run is fast (no network, no container) — 60s timeout is
     # generous. Same subprocess invocation shape as the live-submit
@@ -1348,6 +1621,172 @@ def _experiment_not_found_diagnostic() -> str:
     )
 
 
+def _local_completion_status(done_marker: Path, any_failed: bool) -> str:
+    """Return status based on local nemo_run completion markers."""
+    if done_marker.exists():
+        return "failed" if any_failed else "done"
+    return "running"
+
+
+def _write_slurm_status_metadata(
+    *,
+    experiment_id: str,
+    slurm_job_id: str | None,
+    cluster_host: str | None,
+    cluster_user: str | None,
+    identity: str | None,
+    control_socket: str | None,
+    reconnect_command: str | None,
+) -> None:
+    """Persist Slurm submit metadata so status polling can query Slurm."""
+    if not slurm_job_id or not cluster_host:
+        return
+    exp_dir = _resolve_experiment_dir(experiment_id)
+    if exp_dir is None:
+        return
+    payload = {
+        "executor": "slurm",
+        "experiment_id": experiment_id,
+        "slurm_job_id": slurm_job_id,
+        "cluster_host": cluster_host,
+        "cluster_user": cluster_user,
+        "identity": identity,
+        "control_socket": os.path.expanduser(control_socket) if control_socket else None,
+        "reconnect_command": reconnect_command,
+    }
+    try:
+        (exp_dir / _SLURM_STATUS_META).write_text(
+            json.dumps(payload, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        # Status remains filesystem-based if the sidecar cannot be written.
+        return
+
+
+def _load_slurm_status_metadata(exp_dir: Path) -> dict | None:
+    """Load Slurm status metadata written by submit_job_impl."""
+    try:
+        payload = json.loads((exp_dir / _SLURM_STATUS_META).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("executor") != "slurm":
+        return None
+    if not payload.get("slurm_job_id") or not payload.get("cluster_host"):
+        return None
+    return payload
+
+
+def _ssh_argv_for_slurm(meta: dict, remote_command: str) -> list[str]:
+    """Build a fixed SSH argv for querying Slurm status."""
+    argv = ["ssh", "-o", "BatchMode=yes"]
+    if meta.get("identity"):
+        argv += ["-i", str(meta["identity"])]
+    if meta.get("control_socket"):
+        argv += [
+            "-o",
+            f"ControlPath={os.path.expanduser(str(meta['control_socket']))}",
+            "-o",
+            "ControlMaster=no",
+        ]
+    user = meta.get("cluster_user")
+    host = meta["cluster_host"]
+    target = f"{user}@{host}" if user else host
+    return [*argv, target, remote_command]
+
+
+def _parse_slurm_records(text: str, job_id: str) -> dict[str, str] | None:
+    """Return the parent Slurm job record from sacct -P output."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    headers = lines[0].split("|")
+    for line in lines[1:]:
+        values = line.split("|")
+        record = dict(zip(headers, values))
+        if record.get("JobID") == job_id:
+            return record
+    return None
+
+
+def _query_slurm_status(meta: dict) -> dict:
+    """Query remote Slurm for a detached job's authoritative status."""
+    job_id = str(meta["slurm_job_id"])
+    sacct_cmd = f"sacct -j {job_id} --format=JobID,State,ExitCode,Elapsed,NodeList -P"
+    try:
+        proc = subprocess.run(  # nosec B603 - fixed ssh argv, no shell.
+            _ssh_argv_for_slurm(meta, sacct_cmd),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return {
+            "ok": False,
+            "reason": "slurm_status_query_failed",
+            "diagnostic": f"Unable to query Slurm status via SSH: {e}.",
+        }
+
+    record = _parse_slurm_records(proc.stdout, job_id) if proc.returncode == 0 else None
+    if record is None:
+        squeue_cmd = f"squeue -j {job_id} -h -o '%T|%M|%R'"
+        try:
+            squeue = subprocess.run(  # nosec B603 - fixed ssh argv, no shell.
+                _ssh_argv_for_slurm(meta, squeue_cmd),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            return {
+                "ok": False,
+                "reason": "slurm_status_query_failed",
+                "diagnostic": f"Unable to query Slurm queue via SSH: {e}.",
+                "sacct_stderr_tail": _tail(proc.stderr),
+            }
+        if squeue.returncode == 0 and squeue.stdout.strip():
+            state = squeue.stdout.strip().split("|", 1)[0].upper()
+            return {
+                "ok": True,
+                "status": "running",
+                "slurm_state": state,
+                "slurm_job_id": job_id,
+                "slurm_source": "squeue",
+            }
+        return {
+            "ok": False,
+            "reason": "slurm_status_not_found",
+            "diagnostic": "Slurm job was not found by sacct or squeue.",
+            "slurm_job_id": job_id,
+            "sacct_stdout_tail": _tail(proc.stdout),
+            "sacct_stderr_tail": _tail(proc.stderr),
+            "squeue_stdout_tail": _tail(squeue.stdout),
+            "squeue_stderr_tail": _tail(squeue.stderr),
+        }
+
+    state = (record.get("State", "").split() or [""])[0].upper()
+    if state in _SLURM_FAILURE_STATES:
+        status = "failed"
+    elif state in _SLURM_TERMINAL_STATES:
+        status = "done"
+    elif state in _SLURM_RUNNING_STATES or state:
+        status = "running"
+    else:
+        status = "unknown"
+    return {
+        "ok": True,
+        "status": status,
+        "slurm_state": state,
+        "slurm_job_id": job_id,
+        "slurm_exit_code": record.get("ExitCode"),
+        "slurm_elapsed": record.get("Elapsed"),
+        "slurm_node_list": record.get("NodeList"),
+        "slurm_source": "sacct",
+    }
+
+
 def job_status_impl(experiment_id: str) -> dict:
     """Read filesystem-based status from a nemo_run experiment dir.
 
@@ -1391,10 +1830,26 @@ def job_status_impl(experiment_id: str) -> dict:
         if first_word in _STATUS_FAILURE_WORDS:
             any_failed = True
 
-    if done_marker.exists():
-        overall = "failed" if any_failed else "done"
-    else:
-        overall = "running"
+    slurm_meta = _load_slurm_status_metadata(exp_dir)
+    if slurm_meta is not None:
+        slurm_status = _query_slurm_status(slurm_meta)
+        if slurm_status.get("ok"):
+            overall = slurm_status.get("status", "unknown")
+        elif slurm_status.get("reason") == "slurm_status_not_found":
+            overall = _local_completion_status(done_marker, any_failed)
+        else:
+            overall = "running"
+        return {
+            "ok": True,
+            "experiment_id": experiment_id,
+            "experiment_dir": str(exp_dir),
+            "status": overall,
+            "task_statuses": task_statuses,
+            "has_done_marker": done_marker.exists(),
+            "slurm_status": slurm_status,
+        }
+
+    overall = _local_completion_status(done_marker, any_failed)
 
     return {
         "ok": True,

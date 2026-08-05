@@ -266,6 +266,21 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             "exclude_last_n": 2,
             "block_module": "transformer_blocks",
         },
+        # The text-stream linears (joint-attention added-KV projections and the
+        # txt MLP) and the modulation linears cannot use the SVDQuant low-rank
+        # branch; they are exported as plain NVFP4 instead (no pre_quant_scale,
+        # no svdquant_lora_a/b). The remaining image-stream linears keep full
+        # SVDQuant.
+        "svdquant_skip_layers": [
+            "*.attn.add_q_proj",
+            "*.attn.add_k_proj",
+            "*.attn.add_v_proj",
+            "*.attn.to_add_out",
+            "*.txt_mlp.net.0.proj",
+            "*.txt_mlp.net.2",
+            "*.img_mod.1",
+            "*.txt_mod.1",
+        ],
     },
 }
 

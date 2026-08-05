@@ -5,7 +5,7 @@ Common detection for all ModelOpt skills. After this, you know what's available.
 ## Env-1. Get ModelOpt source
 
 ```bash
-ls examples/llm_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
+ls examples/hf_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
 ```
 
 If not found: `git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Model-Optimizer`

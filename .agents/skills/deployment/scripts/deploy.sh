@@ -337,12 +337,10 @@ start_trtllm() {
 
     cat <<TRTEOF
 
-# Option 1: AutoDeploy (recommended)
-./examples/llm_autodeploy/scripts/run_auto_quant_and_deploy.sh \\
-    --hf_ckpt "$MODEL" \\
-    --save_quantized_ckpt <output_path> \\
-    --quant fp8,nvfp4 \\
-    --effective_bits 4.5
+# Option 1: AutoDeploy (recommended for AutoQuant / mixed-precision)
+# Quantize with ModelOpt PTQ (examples/llm_ptq) to produce a unified HF checkpoint,
+# then deploy it with TensorRT-LLM's AutoDeploy backend:
+#   https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy
 
 # Option 2: Python API
 python3 -c "

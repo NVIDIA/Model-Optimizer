@@ -26,7 +26,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 ## Pre-Requisites
 
-For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
+For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.06`) which has all the dependencies installed.
 
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
@@ -174,19 +174,21 @@ If your model parameters are already sorted and you just want to prune the weigh
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core<sup>1</sup> (M-Bridge, M-LM) based dense / MoE / hybrid Mamba-Transformer LLMs<sup>2</sup> | **Auto:** one or more of `params`, `active_params`, `memory_mb` <br>**Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`<sup>3</sup>, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values |
-| Puzzletron | Hugging Face based dense / MoE / hybrid Mamba-Transformer LLMs & VLMs<sup>4</sup> | **Target:** one or more of `target_memory`, `num_params`, `target_latency_seconds`<br>**Heterogeneous (per-layer) search dimensions:**<sup>5</sup> FFN `intermediate_size` (different sizes per layer), attention `op`/`no_op` (selective attention-layer removal) and KV heads (GQA grouping), `hidden_size`, and MoE `num_experts` (expert removal) |
+| Minitron | Megatron-core<sup>1</sup> (M-Bridge, M-LM) based dense / MoE / hybrid Mamba-Transformer LLMs<sup>4</sup> (and the language model of VLMs)<sup>2</sup> | **Auto:** one or more of `params`, `active_params`, `memory_mb` <br>**Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`<sup>3</sup>, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values |
+| Puzzletron | Hugging Face based dense / MoE / hybrid Mamba-Transformer LLMs & VLMs<sup>5</sup> | **Target:** one or more of `target_memory`, `num_params`, `target_latency_seconds`<br>**Heterogeneous (per-layer) search dimensions:**<sup>6</sup> FFN `intermediate_size` (different sizes per layer), attention `op`/`no_op` (selective attention-layer removal) and KV heads (GQA grouping), `hidden_size`, and MoE `num_experts` (expert removal) |
 | FastNAS | Computer Vision models | `flops`, `params` |
 
 > *<sup>1.</sup>Hugging Face models can be imported into M-Bridge/M-LM format as long as they are [supported](https://docs.nvidia.com/nemo/megatron-bridge/latest/index.html#supported-models) by the framework.*
 
-> *<sup>2.</sup>Language model part of VLMs can be pruned as well.*
+> *<sup>2.</sup>The language model of vision-language models (e.g. Qwen3.5-VL, Gemma3-VL) can be pruned as well; the vision tower is left intact. `hidden_size` is not pruned for VLMs as it is shared with the vision projector. See the [Megatron-Bridge pruning example](../megatron_bridge/README.md#pruning).*
 
 > *<sup>3.</sup>`num_attention_heads` pruning is not supported for some attention types — GatedDeltaNet (linear attention), gated attention (`attention_output_gate`, e.g. Qwen3.5) and Multi-Latent Attention (MLA, e.g. DeepSeek); for these only `hidden_size` is pruned.*
 
-> *<sup>4.</sup>Puzzletron operates on Hugging Face checkpoints via its `AnyModel` abstraction. New architectures can be added by writing a model descriptor + converter — see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md). Available configs are in the Puzzletron [configs](../puzzletron/configs/) directory.*
+> *<sup>4.</sup>Multi-token-prediction (MTP) heads (e.g. Qwen3.5) are not pruned yet — they are dropped for the prune run and the saved checkpoint has no MTP. Autoregressive inference is unaffected; for speculative decoding, run a separate MTP SFT on the pruned model.*
 
-> *<sup>5.</sup>The MIP search produces a heterogeneous architecture (dimensions can differ per layer). Which dimensions are searched is model- and config-dependent.*
+> *<sup>5.</sup>Puzzletron operates on Hugging Face checkpoints via its `AnyModel` abstraction. New architectures can be added by writing a model descriptor + converter — see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md). Available configs are in the Puzzletron [configs](../puzzletron/configs/) directory.*
+
+> *<sup>6.</sup>The MIP search produces a heterogeneous architecture (dimensions can differ per layer). Which dimensions are searched is model- and config-dependent.*
 
 ## Examples
 
