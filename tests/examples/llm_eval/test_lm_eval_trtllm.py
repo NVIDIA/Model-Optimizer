@@ -109,6 +109,49 @@ def test_raises_when_a_continuation_token_is_missing():
         lm_eval_trtllm._parse_logprobs(tokens=TOKENS, outputs=_Outputs(entries), ctxlen=CTXLEN)
 
 
+def test_trust_remote_code_reaches_the_backend(monkeypatch):
+    """`--trust_remote_code` must land in model_args, since we call lm-eval's CLI directly.
+
+    `huggingface_example.sh` passes the flag, and unlike `lm_eval_hf.py` this entry point
+    does no rewriting of its own -- it relies on lm-eval doing it. On the live path that is
+    `_cli/run.py:355` -> `EvaluatorConfig.from_cli` -> `_configure()` ->
+    `_set_trust_remote_code()`.
+    """
+    import datasets
+    from lm_eval.config.evaluate_config import EvaluatorConfig
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_TRUST_REMOTE_CODE", False)
+
+    cfg = EvaluatorConfig(
+        model="trtllm", model_args={"model": "/ckpt", "tokenizer": "/tok"}, trust_remote_code=True
+    )
+    cfg._set_trust_remote_code()
+
+    assert cfg.model_args["trust_remote_code"] is True
+    assert datasets.config.HF_DATASETS_TRUST_REMOTE_CODE is True
+
+
+def test_trust_remote_code_not_injected_when_unset(monkeypatch):
+    import datasets
+    from lm_eval.config.evaluate_config import EvaluatorConfig
+
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_TRUST_REMOTE_CODE", False)
+
+    cfg = EvaluatorConfig(model="trtllm", model_args={"model": "/ckpt"}, trust_remote_code=False)
+    cfg._set_trust_remote_code()
+
+    assert "trust_remote_code" not in cfg.model_args
+
+
+def test_trtllm_backend_accepts_trust_remote_code():
+    """The key lm-eval injects has to be a parameter the backend actually takes."""
+    import inspect
+
+    from lm_eval.models.trtllm_causallms import TRTLLM
+
+    assert "trust_remote_code" in inspect.signature(TRTLLM.__init__).parameters
+
+
 def test_upstream_is_still_misaligned():
     """Tripwire: when this fails, upstream fixed the bug and this file can be deleted.
 
