@@ -17,8 +17,8 @@
 
 Split out of :mod:`unified_export_hf`, which it shares almost nothing with: the
 transformers and diffusers paths meet only at the dispatch in ``export_hf_checkpoint``.
-That dispatch imports :func:`_export_diffusers_checkpoint` lazily, since this module
-imports the shared module-walking helpers back from ``unified_export_hf``.
+What they do share -- model preparation and per-module weight packing -- lives in
+:mod:`hf_export_prep` and :mod:`hf_weight_export`.
 """
 
 import json

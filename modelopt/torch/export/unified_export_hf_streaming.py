@@ -16,9 +16,9 @@
 """Streaming HF checkpoint export for disk/CPU-offloaded models.
 
 Kept apart from :mod:`unified_export_hf` so the resident exporter cannot drift back into
-being offload-aware: the only edge between them is the dispatch in
-``export_hf_checkpoint``, which imports :func:`_export_transformers_checkpoint_streaming`
-lazily to keep the dependency acyclic.
+being offload-aware. Shared work lives in :mod:`hf_export_prep` and
+:mod:`hf_weight_export`, so the only edge between the two exporters is the dispatch in
+``export_hf_checkpoint``.
 """
 
 import contextlib

@@ -63,6 +63,8 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import get_quant_config, postprocess_state_dict, sync_tied_input_amax
+from .unified_export_diffusers import _export_diffusers_checkpoint
+from .unified_export_hf_streaming import _export_transformers_checkpoint_streaming
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
@@ -256,11 +258,6 @@ def export_hf_checkpoint(
     if HAS_DIFFUSERS:
         is_diffusers_obj = is_diffusers_object(model)
     if is_diffusers_obj:
-        # Imported here rather than at module scope: the diffusers exporter imports the
-        # shared module-walking helpers from this module, so a top-level import would be
-        # circular. The cycle goes away once those helpers move to their own modules.
-        from .unified_export_diffusers import _export_diffusers_checkpoint
-
         _export_diffusers_checkpoint(
             model,
             dtype,
@@ -283,10 +280,6 @@ def export_hf_checkpoint(
 
     try:
         if _offloaded:
-            # Imported here rather than at module scope: the streaming exporter imports the
-            # shared prep helpers from this module, so a top-level import would be circular.
-            from .unified_export_hf_streaming import _export_transformers_checkpoint_streaming
-
             if save_modelopt_state:
                 warnings.warn(
                     "save_modelopt_state=True is not supported in the streaming offload export "
