@@ -303,10 +303,11 @@ def test_process_quantized_modules_exports_via_registry():
         assert weight.dtype == torch.float8_e4m3fn
 
 
-def test_export_context_caches_are_per_instance():
+def test_export_context_duplicate_state_is_per_instance():
     model = nn.Linear(2, 2)
     ctx_a = ExportContext(model=model, dtype=torch.float16)
     ctx_b = ExportContext(model=model, dtype=torch.float16)
-    ctx_a.tied_cache[123] = model
-    assert ctx_b.tied_cache == {}
-    assert ctx_b.moe_tied_cache == {}
+    ctx_a.duplicate_weight_map["alias.weight"] = "canonical.weight"
+    ctx_a.mark_skipped("alias.weight")
+    assert ctx_b.duplicate_weight_map == {}
+    assert ctx_b.skipped_weight_names == set()

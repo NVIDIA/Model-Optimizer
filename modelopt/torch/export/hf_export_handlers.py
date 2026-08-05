@@ -24,7 +24,7 @@ from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
 
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .model_config import QUANTIZATION_NONE
-from .moe_utils import _export_fused_experts
+from .moe_utils import _delete_fused_moe_source_attrs, _export_fused_experts
 from .quant_utils import get_quantization_format
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
@@ -36,16 +36,39 @@ def _has_fused_experts_quantizers(module: nn.Module) -> bool:
     return hasattr(module, f"{first_proj_attr}_weight_quantizers")
 
 
+def _full_weight_name(module_name: str, weight_name: str) -> str:
+    return f"{module_name}.{weight_name}" if module_name else weight_name
+
+
+def _is_duplicate_with_same_format(
+    module_name: str,
+    ctx: ExportContext,
+    weight_name: str,
+) -> bool:
+    """Whether this source weight can be omitted in favor of its canonical tied name."""
+    full_name = _full_weight_name(module_name, weight_name)
+    canonical_name = ctx.duplicate_of(full_name)
+    if canonical_name is None:
+        return False
+    return ctx.weight_formats[canonical_name] == ctx.weight_formats[full_name]
+
+
 def _export_weight(
+    module_name: str,
     module: nn.Module,
     ctx: ExportContext,
     weight_name: str = "weight",
 ) -> None:
+    full_name = _full_weight_name(module_name, weight_name)
+    if _is_duplicate_with_same_format(module_name, ctx, weight_name):
+        ctx.mark_skipped(full_name)
+        return
+
     # Imported lazily to avoid a cycle: unified_export_hf imports this module to
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
-    _export_quantized_weight(module, ctx.dtype, weight_name, _tied_cache=ctx.tied_cache)
+    _export_quantized_weight(module, ctx.dtype, weight_name)
 
 
 # Preparation handlers are registered in the same precedence as the legacy MoE prepass.
@@ -129,13 +152,27 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 @ExportModuleRegistry.register(predicate=_has_fused_experts_quantizers)
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers."""
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    first_name = _full_weight_name(name, first_proj_attr)
+    down_name = _full_weight_name(name, "down_proj")
+    first_canonical = ctx.duplicate_of(first_name)
+    down_canonical = ctx.duplicate_of(down_name)
+
+    # Omit the entire tied subtree when both source projections point to one canonical
+    # fused-experts module and use the same quantization representation.
+    if (
+        first_canonical is not None
+        and down_canonical is not None
+        and first_canonical.rsplit(".", 1)[0] == down_canonical.rsplit(".", 1)[0]
+        and _is_duplicate_with_same_format(name, ctx, first_proj_attr)
+        and _is_duplicate_with_same_format(name, ctx, "down_proj")
+    ):
+        ctx.mark_skipped(first_name, down_name)
+        _delete_fused_moe_source_attrs(module)
+        return
+
     with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-        _export_fused_experts(
-            module,
-            ctx.dtype,
-            _moe_tied_cache=ctx.moe_tied_cache,
-            _tied_cache=ctx.tied_cache,
-        )
+        _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
@@ -145,7 +182,7 @@ def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> No
         return
     try:
         with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-            _export_weight(module, ctx)
+            _export_weight(name, module, ctx)
     except AssertionError as e:
         raise AssertionError(
             f"Failed to export module '{name}' (type={type(module).__name__}): {e}"
@@ -176,7 +213,7 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
         return
     try:
         with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-            _export_weight(module, ctx)
+            _export_weight(name, module, ctx)
     except AssertionError as e:
         raise AssertionError(
             f"Failed to export embedding '{name}' (type={type(module).__name__}): {e}"
@@ -199,4 +236,4 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
     )
     with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
         for weight_name in ["gate_up_proj", "down_proj"]:
-            _export_weight(module, ctx, weight_name)
+            _export_weight(name, module, ctx, weight_name)

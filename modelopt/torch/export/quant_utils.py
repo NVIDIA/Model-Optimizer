@@ -1063,13 +1063,12 @@ def postprocess_state_dict(
     # Check for tied weights and remove duplicates
     seen_tensors = {}
 
-    # Remove any tied weights if found.
+    # Remove any tied weights if found. Device and size distinguish independent tensors whose
+    # allocator addresses happen to match. Zero-pointer tensors are left for serialization to reject.
     for key, value in post_state_dict.items():
-        if isinstance(value, torch.Tensor):
-            # Use tensor data pointer to identify tied weights
-            tensor_id = value.data_ptr()
+        if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
+            tensor_id = (value.device, value.data_ptr(), value.numel() * value.element_size())
             if tensor_id in seen_tensors:
-                # This is a tied weight, mark for deletion and warn
                 keys_to_delete.append(key)
                 logger.warning(
                     f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "

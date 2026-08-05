@@ -34,6 +34,8 @@ import torch.nn as nn
 
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
+from .model_utils import _reorder_canonical_first
+
 __all__ = [
     "ExportContext",
     "ExportHandler",
@@ -46,27 +48,49 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    The tied-weight dedup caches must be scoped to one export invocation: a
-    process-global cache would carry stale entries whose ``data_ptr`` keys can be
-    recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
+    ``duplicate_weight_map`` maps each duplicate source-parameter name to the canonical
+    name that should survive export. It is snapshotted before export mutates Parameters.
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
+    duplicate_weight_map: dict[str, str] = field(init=False, default_factory=dict)
+    weight_locations: dict[str, tuple[nn.Module, str]] = field(init=False, default_factory=dict)
+    weight_formats: dict[str, str | None] = field(init=False, default_factory=dict)
+    skipped_weight_names: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
-        # FSDP2 may recycle data_ptr() values as modules are resharded, so pointer-keyed dedup can
-        # falsely alias distinct weights. Disable it for FSDP2; consequently, legitimately tied
-        # packed weights and scale buffers are not re-aliased and may be stored as duplicates.
-        # TODO: replace this with stable, name-based tied-group deduplication.
+        # FSDP2 replaces Parameters while resharding. Keep its existing behavior of writing
+        # tied packed weights independently instead of relying on pre-reshard identities.
         if is_fsdp2_model(self.model):
-            self.tied_cache = None
-            self.moe_tied_cache = None
+            return
+
+        names_by_source_id: dict[int, list[str]] = {}
+        for module_name, module in self.model.named_modules(remove_duplicate=False):
+            for weight_name, parameter in module._parameters.items():
+                if parameter is None:
+                    continue
+                full_name = f"{module_name}.{weight_name}" if module_name else weight_name
+                self.weight_locations[full_name] = (module, weight_name)
+                names_by_source_id.setdefault(id(parameter), []).append(full_name)
+
+        for names in names_by_source_id.values():
+            if len(names) < 2:
+                continue
+            # Reuse the existing HF canonical-name policy. For models without an explicit
+            # canonical side this preserves traversal order and keeps the first name.
+            ordered = list(_reorder_canonical_first(dict.fromkeys(names), self.model))
+            canonical = ordered[0]
+            self.duplicate_weight_map.update(dict.fromkeys(ordered[1:], canonical))
+
+    def duplicate_of(self, weight_name: str) -> str | None:
+        """Return the canonical source weight name, or ``None`` if it is not duplicated."""
+        return self.duplicate_weight_map.get(weight_name)
+
+    def mark_skipped(self, *weight_names: str) -> None:
+        """Record duplicate source weights omitted from packing and the state dict."""
+        self.skipped_weight_names.update(weight_names)
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

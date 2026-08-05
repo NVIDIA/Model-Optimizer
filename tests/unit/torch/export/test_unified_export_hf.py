@@ -28,8 +28,16 @@ from modelopt.torch.export.model_utils import (
     _collect_canonical_tied_patterns,
     _reorder_canonical_first,
 )
-from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.quant_utils import (
+    fuse_prequant_layernorm,
+    postprocess_state_dict,
+    sync_tied_input_amax,
+)
+from modelopt.torch.export.registry import ExportContext
+from modelopt.torch.export.unified_export_hf import (
+    _process_quantized_modules,
+    _remove_skipped_duplicate_weights,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -127,60 +135,86 @@ def _calibrate_through_both_children(parent):
     mtq.quantize(parent, mtq.NVFP4_DEFAULT_CFG, forward_loop=forward_loop)
 
 
-def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
-    """Tied Linears share data_ptr for packed .weight and scale buffers after export."""
+def test_export_context_maps_tied_alias_to_canonical_weight_name():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec)
-    _calibrate_through_both_children(parent)
 
-    # Per-call dedup cache (the production pattern: caller owns the cache, scoped
-    # to one export invocation). Threaded through both sides of the tied pair so
-    # the alias step at the end of _export_quantized_weight catches the dedup.
-    tied_cache: dict = {}
-    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
+    ctx = ExportContext(parent, torch.float16)
 
-    assert enc.weight.data_ptr() == dec.weight.data_ptr()
-    for scale_attr in ("weight_scale", "weight_scale_2"):
-        if hasattr(enc, scale_attr) and hasattr(dec, scale_attr):
-            assert getattr(enc, scale_attr).data_ptr() == getattr(dec, scale_attr).data_ptr()
+    assert ctx.duplicate_weight_map == {"encoder.weight": "decoder.weight"}
 
 
-def test_export_quantized_weight_no_alias_for_untied_linears():
-    """Untied Linears keep independent data_ptrs after export — no false-positive aliasing."""
+def test_export_context_duplicate_map_survives_weight_replacement():
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec)
+    ctx = ExportContext(parent, torch.float16)
+
+    enc.weight = torch.nn.Parameter(enc.weight.detach().clone())
+    dec.weight = torch.nn.Parameter(dec.weight.detach().clone())
+
+    assert ctx.duplicate_of("encoder.weight") == "decoder.weight"
+
+
+def test_export_context_has_no_duplicates_for_untied_linears():
     parent = torch.nn.Module()
     parent.encoder = torch.nn.Linear(16, 32, bias=False)
     parent.decoder = torch.nn.Linear(16, 32, bias=False)
-    assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
-    _calibrate_through_both_children(parent)
 
-    # Same fresh cache shape as the positive case — confirms that even with
-    # dedup enabled, untied modules with distinct source data_ptrs do not get
-    # falsely aliased.
-    tied_cache: dict = {}
-    _export_quantized_weight(parent.encoder, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(parent.decoder, torch.float16, "weight", _tied_cache=tied_cache)
+    ctx = ExportContext(parent, torch.float16)
 
-    assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
+    assert ctx.duplicate_weight_map == {}
 
 
-def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized():
-    """Unquantized side early-returns; its .weight stays at the original shared Parameter."""
+def test_process_quantized_modules_skips_and_filters_tied_alias():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec)
-    original_shared_data_ptr = enc.weight.data_ptr()
-
     _calibrate_through_both_children(parent)
-    # is_enabled is a read-only property; .disable() is the canonical bypass.
+    original_weight = enc.weight
+
+    ctx = _process_quantized_modules(parent, torch.float16)
+    state_dict = _remove_skipped_duplicate_weights(parent.state_dict(), ctx)
+
+    assert parent.encoder.weight is original_weight
+    assert parent.decoder.weight is not original_weight
+    assert ctx.skipped_weight_names == {"encoder.weight"}
+    assert "encoder.weight" not in state_dict
+    assert "decoder.weight" in state_dict
+    assert "decoder.weight_scale" in state_dict
+
+
+def test_process_quantized_modules_keeps_differently_quantized_tied_weights():
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec)
+    _calibrate_through_both_children(parent)
     dec.weight_quantizer.disable()
 
-    tied_cache: dict = {}
-    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
+    ctx = _process_quantized_modules(parent, torch.float16)
+    state_dict = _remove_skipped_duplicate_weights(parent.state_dict(), ctx)
 
-    assert enc.weight.data_ptr() != original_shared_data_ptr  # encoder got fresh packed
-    assert dec.weight.data_ptr() == original_shared_data_ptr  # decoder untouched
-    assert enc.weight.data_ptr() != dec.weight.data_ptr()
+    assert ctx.skipped_weight_names == set()
+    assert "encoder.weight" in state_dict
+    assert "decoder.weight" in state_dict
+
+
+def test_postprocess_state_dict_preserves_tensors_with_different_byte_ranges():
+    storage = torch.arange(4)
+    state_dict = {"short": storage[:2], "long": storage}
+    assert state_dict["short"].data_ptr() == state_dict["long"].data_ptr()
+
+    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+
+    assert set(processed) == set(state_dict)
+
+
+def test_postprocess_state_dict_preserves_zero_pointer_tensors():
+    state_dict = {
+        "first": torch.empty(4, device="meta"),
+        "second": torch.empty(4, device="meta"),
+    }
+
+    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+
+    assert set(processed) == set(state_dict)
 
 
 def _linear_with_input_quantizer():
