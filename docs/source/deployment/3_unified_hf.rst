@@ -51,48 +51,132 @@ The unified HF export API supports the following quantization formats:
 5. INT4_AWQ - 4-bit integer with AWQ optimization
 6. W4A8_AWQ - 4-bit weights and 8-bit activations with AWQ optimization
 
-Framework-Specific Support
+Minimum Framework Versions
 --------------------------
 
-TensorRT-LLM
-~~~~~~~~~~~~
+===============  =================
+Framework        Minimum version
+===============  =================
+TensorRT-LLM     v0.17.0
+vLLM             v0.10.1
+SGLang           v0.4.10
+===============  =================
 
-Models:
-  * Llama 4, 3.x (FP8, NVFP4)
-  * Qwen 3, 2.5 (FP8, NVFP4)
-  * Qwen 3 MoE (FP8, NVFP4)
-  * Qwen 3-VL (FP8, NVFP4)
-  * Deepseek R1/V3 (NVFP4)
-  * Mixtral 8x7B (FP8, NVFP4)
-  * Medusa (FP8)
-  * Eagle (FP8)
+.. _unified-hf-support-matrix:
 
-Requirements: TensorRT-LLM v0.17.0 or later
+Model Support Matrix
+--------------------
 
-vLLM
-~~~~
+Legend:
 
-Models:
-  * Llama 4, 3.x (FP8, NVFP4)
-  * Qwen 3, 2.5 (FP8, NVFP4)
-  * Qwen 3 MoE (FP8, NVFP4)
-  * Mixtral 8x7B (FP8)
-  * Deepseek R1/V3 (NVFP4)
+* ``Y`` — covered by the release deployment test suite
+  (`tests/examples/hf_ptq/test_deploy.py <https://github.com/NVIDIA/Model-Optimizer/blob/main/tests/examples/hf_ptq/test_deploy.py>`_),
+  which loads the exported checkpoint in the framework and runs generation.
+* ``~`` — documented as working previously but not in the current test suite; expected to work, unvalidated.
+* ``-`` — not currently covered. It may still work; see `Models not listed here`_.
 
-Requirements: vLLM v0.10.1 or later
+Language models
+~~~~~~~~~~~~~~~
 
-SGLang
-~~~~~~
+============================================  ==============  ============  ======  ========
+Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
+============================================  ==============  ============  ======  ========
+Llama 3.1, 3.3                                FP8, NVFP4      Y             Y       Y
+Llama 4 Scout, Maverick                       FP8             Y             Y       Y
+Llama 4 Scout                                 NVFP4           Y             Y       Y
+Llama Nemotron Super 49B v1, v1.5             FP8             Y             Y       Y
+Llama Nemotron Ultra 253B v1                  FP8             Y             Y       Y
+Nemotron 3 Nano 30B-A3B                       FP8, NVFP4      Y             Y       Y
+Nemotron 3 Super 120B-A12B                    FP8, NVFP4      Y             Y       Y
+Nemotron 3 Ultra 550B-A55B                    NVFP4           Y             Y       Y
+DeepSeek R1, R1-0528                          NVFP4           Y             Y       Y
+DeepSeek V3, V3.1, V3.2                       NVFP4           Y             Y       Y
+DeepSeek V4 Flash                             NVFP4           Y             Y       Y
+DeepSeek V4 Pro                               NVFP4           \-            Y       Y
+Qwen 3 (8B, 14B, 32B)                         FP8, NVFP4      Y             Y       Y
+Qwen 3 MoE 235B-A22B                          FP8, NVFP4      Y             Y       Y
+Qwen 3 MoE 30B-A3B                            NVFP4           Y             Y       Y
+Qwen 3 Coder 480B-A35B                        NVFP4           Y             Y       Y
+Qwen 3-Next 80B-A3B                           NVFP4           Y             Y       Y
+Qwen 3.5 397B-A17B                            NVFP4           Y             Y       Y
+Qwen 3.5 122B-A10B, Qwen 3.6 35B-A3B          NVFP4           \-            Y       \-
+Qwen 2.5                                      FP8             ~             ~       ~
+Qwen 2.5                                      NVFP4           ~             ~       \-
+QwQ-32B                                       FP8             ~             ~       ~
+QwQ-32B                                       NVFP4           ~             ~       \-
+Phi-4 reasoning-plus                          FP8, NVFP4      Y             Y       Y
+Gemma 4 31B                                   NVFP4           Y             Y       Y
+Gemma 4 26B-A4B                               NVFP4           \-            Y       \-
+GLM-4.7, GLM-5, GLM-5.2                       NVFP4           Y             Y       Y
+GLM-5.1                                       NVFP4           \-            Y       Y
+Kimi K2-Thinking, K2.5                        NVFP4           Y             Y       Y
+Kimi K2.6                                     NVFP4           \-            Y       \-
+MiniMax M2.5, M3                              NVFP4           Y             Y       Y
+Mixtral 8x7B                                  FP8             ~             ~       ~
+Mixtral 8x7B                                  NVFP4           ~             \-      \-
+============================================  ==============  ============  ======  ========
 
-Models:
-  * Llama 4, 3.x (FP8, NVFP4)
-  * Qwen 3, 2.5 (FP8, NVFP4)
-  * Qwen 3 MoE (FP8, NVFP4)
-  * Deepseek R1/V3 (NVFP4)
+Vision-language and multimodal models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Requirements: SGLang v0.4.10 or later
+For VLMs, modelopt quantizes the language model only; the vision encoder is kept in high precision.
+The exported checkpoint therefore relies on the serving framework's own multimodal support for that
+architecture — see the
+`TensorRT-LLM multimodal support matrix <https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend>`_.
 
-Note: While other models and quantization formats may work, they have not been thoroughly tested and validated.
+============================================  ==============  ============  ======  ========
+Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
+============================================  ==============  ============  ======  ========
+Qwen 2.5-VL 7B                                FP8, NVFP4      Y             Y       Y
+Qwen 3-VL 235B-A22B                           NVFP4           Y             Y       Y
+Phi-4-multimodal                              FP8, NVFP4      Y             Y       Y
+Nemotron 3 Nano Omni 30B-A3B                  FP8, NVFP4      Y             Y       Y
+============================================  ==============  ============  ======  ========
+
+Speculative decoding drafters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Drafters are deployed on top of their base checkpoint. vLLM is not currently covered for these.
+
+============================================================  ============  ============  ======  ========
+Drafter                                                       Quant format  TensorRT-LLM  vLLM    SGLang
+============================================================  ============  ============  ======  ========
+EAGLE3 for Llama 3.3 70B, Llama 4 Maverick                    FP8           Y             \-      Y
+EAGLE3 for Qwen 3 235B-A22B (incl. Thinking-2507, FP4)        BF16, NVFP4   Y             \-      Y
+EAGLE3 for Qwen 3 30B-A3B-Thinking-2507                       BF16          Y             \-      Y
+EAGLE3 for Kimi K2-Thinking, K2.5, K2.6                       NVFP4         Y             \-      Y
+EAGLE3 for gpt-oss-120b                                       BF16          Y             \-      Y
+Medusa for Llama 3.1 8B                                       FP8           Y             \-      Y
+============================================================  ============  ============  ======  ========
+
+Diffusion models
+~~~~~~~~~~~~~~~~
+
+============================================  ==============  ============  ======  ========
+Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
+============================================  ==============  ============  ======  ========
+Wan 2.2 T2V A14B                              FP8, NVFP4      Y             \-      Y
+DiffusionGemma 26B-A4B                        NVFP4           Y             Y       Y
+============================================  ==============  ============  ======  ========
+
+.. note::
+   NVFP4 inference requires Blackwell GPUs. Hopper can produce an NVFP4 checkpoint but cannot serve
+   it. On B300/GB300 (``sm_103``) use a CUDA-13 build of the serving framework; CUDA-12 builds lack
+   the ``sm_103`` FP4 kernels.
+
+Models not listed here
+~~~~~~~~~~~~~~~~~~~~~~
+
+This matrix records the combinations modelopt validates. It is not an exhaustive list of what will
+run: vLLM, SGLang, and TensorRT-LLM load unified HF checkpoints generically, so a model built from
+standard ``nn.Linear`` layers with an ``hf_quant_config.json`` will often deploy without any modelopt
+change. Check the serving framework's own model support list first, then try it.
+
+The exact checkpoints behind every ``Y`` above, including tensor-parallel size and minimum SM
+version, are listed in
+`tests/examples/hf_ptq/test_deploy.py <https://github.com/NVIDIA/Model-Optimizer/blob/main/tests/examples/hf_ptq/test_deploy.py>`__;
+most are published under the
+`NVIDIA Hugging Face organization <https://huggingface.co/nvidia>`_.
 
 
 Deployment with Selected Inference Frameworks
@@ -136,7 +220,8 @@ Deployment with Selected Inference Frameworks
 
     Follow `vLLM installation instructions. <https://github.com/vllm-project/vllm?tab=readme-ov-file#getting-started>`_
 
-    Currently we support fp8 quantized models (without fp8 kv cache) for vLLM deployment, you need v0.6.5 or later version of vLLM.
+    FP8 and NVFP4 quantized models are supported; you need v0.10.1 or later version of vLLM. Pass
+    ``quantization="modelopt"`` for FP8 and ``quantization="modelopt_fp4"`` for NVFP4.
 
     To run modelopt quantized model from Huggingface model hub, e.g., `nvidia/Llama-3.1-8B-Instruct-FP8`_, refer to the sample code below:
 
@@ -171,7 +256,8 @@ Deployment with Selected Inference Frameworks
 
     Follow the `SGLang installation instructions. <https://docs.sglang.ai/get_started/install.html>`_
 
-    Currently we support fp8 quantized models (without fp8 kv cache) for SGLang deployment, you need to use the main branch of SGLang (since Jan 6, 2025) and build it from source.
+    FP8 and NVFP4 quantized models are supported; you need v0.4.10 or later version of SGLang. Pass
+    ``quantization="modelopt"`` for FP8 and ``quantization="modelopt_fp4"`` for NVFP4.
 
     To run modelopt quantized model from Huggingface model hub, e.g., `nvidia/Llama-3.1-8B-Instruct-FP8`_, refer to the sample code below:
 

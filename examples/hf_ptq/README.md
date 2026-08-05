@@ -587,27 +587,20 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 
 ### Unified HF Checkpoint Deployment Model Support Matrix
 
-| Model | Quant format | TRT-LLM | vLLM | SGLang |
-| :---: | :---: | :---: | :---: | :---: |
-| LLAMA 3.x | FP8 | ✅ | ✅ | ✅ |
-| LLAMA 3.x | FP4 | ✅ | ✅ | ✅ |
-| LLAMA 4 | FP8 | ✅ | - | ✅ |
-| LLAMA 4 | FP4 | ✅ | - | - |
-| DS-R1 | FP8 | ✅ | ✅ | ✅ |
-| DS-R1 | FP4 | ✅ | ✅ | ✅ |
-| DS-V3 | FP8 | ✅ | ✅ | ✅ |
-| DS-V3 | FP4 | ✅ | ✅ | ✅ |
-| QWen3 | FP8 | ✅ | ✅ | ✅ |
-| QWen3 | FP4 | ✅ | ✅ | - |
-| QWen3 MoE | FP8 | ✅ | ✅ | ✅ |
-| QWen3 MoE | FP4 | ✅ | - | - |
-| QWen3.5 MoE | FP4 | - | - | ✅ |
-| QWen2.5 | FP8 | ✅ | ✅ | ✅ |
-| QWen2.5 | FP4 | ✅ | ✅ | - |
-| QwQ-32B | FP8 | ✅ | ✅ | ✅ |
-| QwQ-32B | FP4 | ✅ | ✅ | - |
-| Mixtral 8x7B | FP8 | ✅ | ✅ | ✅ |
-| Mixtral 8x7B | FP4 | ✅ | - | - |
+The deployment support matrix — which model families and quantization formats are validated on
+TRT-LLM, vLLM, and SGLang, including vision-language models, speculative decoding drafters, and
+diffusion models — lives in the documentation so there is a single copy to keep current:
+
+**[Unified HF Checkpoint → Model Support Matrix](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html#model-support-matrix)**
+
+Every validated entry there is backed by [`tests/examples/hf_ptq/test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py),
+which loads the exported checkpoint in each framework and runs generation. That file is also the
+place to look for the exact checkpoint, tensor-parallel size, and minimum SM version behind each
+entry.
+
+> *Note: the matrix records what modelopt validates, not the full set of what will run. vLLM, SGLang,
+> and TRT-LLM load unified HF checkpoints generically, so unlisted models frequently deploy without
+> any modelopt change — check the serving framework's own model support list and try it.*
 
 ### (Legacy) TensorRT-LLM Checkpoints
 
