@@ -20,7 +20,6 @@ import inspect
 import json
 import logging
 import os
-import shutil
 import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -44,6 +43,7 @@ from transformers import (
 )
 
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
 
 try:
     from huggingface_hub import snapshot_download
@@ -55,6 +55,27 @@ from modelopt.torch.utils import distributed as dist_utils
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
+    "*.jinja",
+    "*.json",
+    "*.md",
+    "*.model",
+    "*.py",
+    "*.tiktoken",
+    "*.txt",
+    "LICENSE*",
+    "NOTICE*",
+]
+_HF_PTQ_EXPORT_OWNED_FILES = {
+    "config.json",
+    "hf_quant_config.json",
+    "quant_config.json",
+    "quantization_config.json",
+    "quantize_config.json",
+    "recipe.yaml",
+    "recipe.yml",
+}
 
 
 @dataclass
@@ -895,11 +916,13 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
             try:
                 local_path = snapshot_download(
                     repo_id=model_name_or_path,
-                    allow_patterns=["*.py", "*.json"],  # Only download Python files and config
+                    allow_patterns=_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
                 )
                 return local_path
             except Exception as e:
-                print(f"Warning: Could not download model files using snapshot_download: {e}")
+                print(
+                    f"Warning: Could not download checkpoint sidecars using snapshot_download: {e}"
+                )
 
         # Fallback: try to find in HuggingFace cache
         from transformers.utils import TRANSFORMERS_CACHE
@@ -935,48 +958,23 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
 
 
 def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
-    """Copy processor/tokenizer artifacts (and, with trust_remote_code, custom code) to export.
+    """Copy source checkpoint sidecar files to an HF PTQ export.
 
-    Processor and tokenizer *data* artifacts -- e.g. a VLM's ``preprocessor_config.json``,
-    ``merges.txt``/``vocab.json``, and the processor helper modules -- are needed by the
-    deployment stack (vLLM/SGLang) even when the model itself runs on native (non-remote)
-    transformers code. transformers 5.x restructured many VLM configs and no longer
-    re-saves these on ``save_pretrained`` for models loaded natively, so without copying
-    them a native-path export is missing e.g. ``preprocessor_config.json`` and fails to
-    load (``Can't load image processor``). These are copied regardless of
-    ``trust_remote_code``. Executable model/config code (``modeling*.py``,
-    ``configuration_*.py``, ``tokenization_*.py``, and other custom JSON) is only meaningful
-    with ``trust_remote_code`` and is copied only then. ``config.json`` and
-    ``model.safetensors.index.json`` are always skipped (handled by the export itself).
+    The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
+    copies source checkpoint sidecars so tokenizer/processor files, remote-code modules,
+    README assets, parser plugins, and similar deployment files are preserved for both
+    native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
+    to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
+    ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
+    Source tokenizer, processor, and generation files intentionally still win because
+    Transformers may not regenerate all metadata in the source format.
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
-        trust_remote_code: Whether trust_remote_code was used (gates the executable code files)
+        trust_remote_code: Whether trust_remote_code was used when resolving HuggingFace model
+            IDs
     """
-    # Deployment-critical processor/tokenizer artifacts: safe to copy regardless of
-    # trust_remote_code (data + processor helpers, not model code).
-    always_copy_patterns = [
-        "preprocessor_config.json",
-        "processor_config.json",
-        "image_processing*.py",
-        "processing_*.py",
-        "video_processing*.py",
-        "feature_extraction_*.py",
-        "added_tokens.json",
-        "special_tokens_map.json",
-        "vocab.json",
-        "merges.txt",
-        "tokenizer.model",
-    ]
-    # Executable custom model/config code + other custom JSON: only used with trust_remote_code.
-    code_patterns = [
-        "configuration_*.py",
-        "modeling*.py",
-        "tokenization_*.py",
-        "*.json",
-    ]
-
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
 
@@ -997,29 +995,18 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Warning: Export directory {export_path} does not exist")
         return
 
-    patterns = [*always_copy_patterns, *(code_patterns if trust_remote_code else [])]
-
-    copied_files: list[str] = []
-    for pattern in patterns:
-        for file_path in source_dir.glob(pattern):
-            if file_path.is_file():
-                # Skip config.json and model.safetensors.index.json as they're handled separately
-                if file_path.name in ["config.json", "model.safetensors.index.json"]:
-                    continue
-                if file_path.name in copied_files:  # e.g. matched by both pattern lists
-                    continue
-                dest_path = export_dir / file_path.name
-                try:
-                    shutil.copy2(file_path, dest_path)
-                    copied_files.append(file_path.name)
-                    print(f"Copied custom model file: {file_path.name}")
-                except Exception as e:
-                    print(f"Warning: Failed to copy {file_path.name}: {e}")
+    copied_files = copy_non_safetensor_files_from_ckpt(
+        source_dir,
+        export_dir,
+        exclude_files=_HF_PTQ_EXPORT_OWNED_FILES,
+    )
 
     if copied_files:
-        print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
+        for file_name in copied_files:
+            print(f"Copied checkpoint sidecar file: {file_name}")
+        print(f"Successfully copied {len(copied_files)} checkpoint sidecar files to {export_path}")
     else:
-        print("No custom model files found to copy")
+        print("No checkpoint sidecar files found to copy")
 
 
 def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
