@@ -67,6 +67,31 @@ _HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
     "LICENSE*",
     "NOTICE*",
 ]
+_HF_PTQ_WEIGHT_FILE_PATTERNS = (
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.bin",
+    "*.bin.index.json",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.npy",
+    "*.npz",
+    "*.onnx",
+    "*.pb",
+    "*.pickle",
+    "*.pkl",
+    "*.pt",
+    "*.pth",
+    "*.tar",
+    "*.tar.bz2",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.tflite",
+    "*.tgz",
+    "*.zip",
+)
 _HF_PTQ_EXPORT_OWNED_FILES = {
     "config.json",
     "hf_quant_config.json",
@@ -957,7 +982,12 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
     return model_name_or_path
 
 
-def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
+def copy_custom_model_files(
+    source_path: str,
+    export_path: str,
+    trust_remote_code: bool = False,
+    exclude_files: Iterable[str] | None = None,
+):
     """Copy source checkpoint sidecar files to an HF PTQ export.
 
     The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
@@ -966,14 +996,16 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
     native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
     to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
     ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
-    Source tokenizer, processor, and generation files intentionally still win because
-    Transformers may not regenerate all metadata in the source format.
+    Source tokenizer and processor files intentionally still win because Transformers may
+    not regenerate all metadata in the source format. Callers that write a generation config
+    can exclude it; the TensorRT-LLM export retains the source generation config.
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
         trust_remote_code: Whether trust_remote_code was used when resolving HuggingFace model
             IDs
+        exclude_files: Additional source file names to skip.
     """
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
@@ -998,7 +1030,8 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
     copied_files = copy_non_safetensor_files_from_ckpt(
         source_dir,
         export_dir,
-        exclude_files=_HF_PTQ_EXPORT_OWNED_FILES,
+        exclude_files=_HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ()),
+        exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
     )
 
     if copied_files:

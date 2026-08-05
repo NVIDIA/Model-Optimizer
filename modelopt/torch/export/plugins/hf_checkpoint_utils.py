@@ -31,31 +31,6 @@ from safetensors.torch import safe_open
 from tqdm import tqdm
 
 _HF_HUB_OFFLINE_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
-_HF_CHECKPOINT_WEIGHT_FILE_PATTERNS = (
-    "*.safetensors",
-    "*.safetensors.index.json",
-    "*.bin",
-    "*.bin.index.json",
-    "*.ckpt",
-    "*.gguf",
-    "*.h5",
-    "*.msgpack",
-    "*.npy",
-    "*.npz",
-    "*.onnx",
-    "*.pb",
-    "*.pickle",
-    "*.pkl",
-    "*.pt",
-    "*.pth",
-    "*.tar",
-    "*.tar.bz2",
-    "*.tar.gz",
-    "*.tar.xz",
-    "*.tflite",
-    "*.tgz",
-    "*.zip",
-)
 
 
 def _as_nonnegative_int(value: Any) -> int | None:
@@ -289,17 +264,19 @@ def copy_non_safetensor_files_from_ckpt(
     dst: str | os.PathLike,
     *,
     exclude_files: Iterable[str] | None = None,
+    exclude_patterns: Iterable[str] | None = None,
 ) -> list[str]:
-    """Copy every non-weight sidecar file from a local HF checkpoint dir verbatim.
+    """Copy every non-safetensors file from a local HF checkpoint dir verbatim.
 
     Use as a baseline so tokenizer files, remote_code ``*.py``, README, LICENSE, etc.
-    are preserved from the source. Callers can pass files through ``exclude_files`` when
+    are preserved from the source. Callers can exclude additional files or patterns when
     copying after export-owned metadata has already been written.
 
     Args:
         src: Source HF checkpoint directory. Must be a local path.
         dst: Destination directory; created if missing.
-        exclude_files: Exact file names to skip in addition to weights and weight indexes.
+        exclude_files: Exact file names to skip.
+        exclude_patterns: Glob patterns for additional files to skip.
 
     Returns:
         File names copied into ``dst``.
@@ -307,12 +284,11 @@ def copy_non_safetensor_files_from_ckpt(
     if not os.path.isdir(src):
         raise ValueError(f"Invalid source path: {src}. It should be a directory.")
     exclude_files = set(exclude_files or ())
+    exclude_patterns = tuple(exclude_patterns or ())
     copied_files = []
     os.makedirs(dst, exist_ok=True)
     for entry in sorted(os.listdir(src)):
-        if entry in exclude_files or _matches_any_pattern(
-            entry, _HF_CHECKPOINT_WEIGHT_FILE_PATTERNS
-        ):
+        if entry in exclude_files or _matches_any_pattern(entry, exclude_patterns):
             continue
         sp = os.path.join(src, entry)
         if not os.path.isfile(sp):

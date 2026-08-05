@@ -99,6 +99,14 @@ def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
     assert not (export_dir / "model-00001-of-00001.safetensors").exists()
     assert not (export_dir / "model.gguf").exists()
 
+    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
+    example_utils.copy_custom_model_files(
+        str(source_dir),
+        str(export_dir),
+        exclude_files={"generation_config.json"},
+    )
+    assert (export_dir / "generation_config.json").read_text() == '{"export": "generation"}\n'
+
 
 def test_resolve_model_path_snapshot_download_stays_allowlisted(monkeypatch, tmp_path):
     snapshot_dir = tmp_path / "snapshot"
