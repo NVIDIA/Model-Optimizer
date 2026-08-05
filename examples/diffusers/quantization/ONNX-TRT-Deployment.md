@@ -23,7 +23,7 @@ python quantize.py \
     --format int8 --batch-size 2 \
     --calib-size 32 --alpha 0.8 --n-steps 20 \
     --model-dtype {Half/BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
-    --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --onnx-dir {ONNX_DIR}
+    --output-bundle ./{MODEL_NAME}-training-bundle --onnx-dir {ONNX_DIR}
 ```
 
 #### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantize.py)
@@ -34,7 +34,7 @@ python quantize.py \
 python quantize.py \
     --model {flux-dev|sdxl-1.0|sdxl-turbo|ltx-video-dev} --model-dtype {Half|BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
     --format {fp8|fp4} --batch-size 2 --calib-size {128|256} --quantize-mha \
-    --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
+    --n-steps 20 --output-bundle ./{MODEL_NAME}-training-bundle --collect-method default \
     --onnx-dir {ONNX_DIR}
 ```
 
@@ -106,7 +106,8 @@ Note, the engines must be built on the same GPU, and ensure that the INT8 engine
 
 DeviceModel is an interface designed to run TensorRT engines like torch models. It takes torch inputs and returns torch outputs. Under the hood, DeviceModel exports a torch checkpoint to ONNX and then generates a TensorRT engine from it. This allows you to swap the backbone of the diffusion pipeline with DeviceModel and execute the pipeline for your desired prompt.
 
-Generate a quantized torch checkpoint using the [Script](./quantize.py) shown below:
+Generate a native quantized Diffusers training bundle using the
+[Script](./quantize.py) shown below:
 
 ```bash
 python quantize.py \
@@ -115,18 +116,19 @@ python quantize.py \
     --batch-size {1|2} \
     --calib-size 128 \
     --n-steps 20 \
-    --quantized-torch-ckpt-save-path ./{MODEL}_fp8.pt \
+    --output-bundle ./{MODEL}-fp8-training-bundle \
     --collect-method default
 ```
 
-Generate images for the quantized checkpoint with the following [Script](./diffusion_trt.py):
+Generate images from the quantized bundle with the following
+[Script](./diffusion_trt.py):
 
 ```bash
 python diffusion_trt.py \
     --model {sdxl-1.0|sdxl-turbo|sd3-medium|flux-dev} \
     --prompt "A cat holding a sign that says hello world" \
     [--override-model-path /path/to/model] \
-    [--restore-from ./{MODEL}_fp8.pt] \
+    [--restore-from ./{MODEL}-fp8-training-bundle] \
     [--onnx-load-path {ONNX_DIR}] \
     [--trt-engine-load-path {ENGINE_DIR}] \
     [--dq-only] \

@@ -50,8 +50,9 @@ from quantize_config import (
     QuantFormat,
     QuantizationConfig,
 )
-from utils import check_conv_and_mha, check_lora, restore_quantizer_state, save_quantizer_state
+from utils import check_conv_and_mha, check_lora
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
 
@@ -281,40 +282,34 @@ class ExportManager:
             True if model contains Conv layers, False otherwise
         """
         for module in model.modules():
-            if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and (
+            if isinstance(module, torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d) and (
                 module.input_quantizer.is_enabled or module.weight_quantizer.is_enabled
             ):
                 return True
         return False
 
-    def save_checkpoint(
-        self,
-        backbone: torch.nn.Module,
-        backbone_name: str | None = None,
-    ) -> None:
-        """
-        Save quantized model checkpoint.
-
-        Args:
-            backbone: The quantized backbone module to save (must be the same instance
-                that was passed to mtq.quantize, as it carries the _modelopt_state).
-            backbone_name: Optional name for the backbone file (defaults to "backbone").
-        """
-        if not self.config.quantized_torch_ckpt_path:
+    def save_training_bundle(self, pipe: DiffusionPipeline) -> None:
+        """Save the calibrated pipeline in native, ModelOpt-aware Diffusers format."""
+        if not self.config.output_bundle:
             return
 
-        ckpt_path = self.config.quantized_torch_ckpt_path
-        ckpt_path.mkdir(parents=True, exist_ok=True)
-        filename = f"{backbone_name}.pt" if backbone_name else "backbone.pt"
-        target_path = ckpt_path / filename
+        output_bundle = self.config.output_bundle
+        self.logger.info("Saving ModelOpt training bundle to %s", output_bundle)
+        pipe.save_pretrained(output_bundle)
 
-        # Save ONLY the quantization state (recipe + quantizer buffers incl. amax),
-        # not the model weights. The weights live in the base HF/diffusers checkpoint
-        # and are reloaded there on restore; this keeps the artifact tiny.
-        self.logger.info(f"Saving quantizer state (amax + recipe, no weights) to {target_path}")
-        save_quantizer_state(backbone, str(target_path))
-
-        self.logger.info("Checkpoint saved successfully")
+        model_index_path = output_bundle / "model_index.json"
+        if not model_index_path.is_file():
+            raise RuntimeError(f"Training bundle is missing {model_index_path}.")
+        if self.pipeline_manager is None:
+            raise RuntimeError("Pipeline manager is required to validate the training bundle.")
+        for backbone_name, backbone in self.pipeline_manager.iter_backbones():
+            if mto.ModeloptStateManager.is_converted(backbone):
+                state_path = output_bundle / backbone_name / "modelopt_state.pth"
+                if not state_path.is_file():
+                    raise RuntimeError(
+                        f"ModelOpt state was not saved for {backbone_name}: {state_path}"
+                    )
+        self.logger.info("ModelOpt training bundle saved successfully")
 
     def export_onnx(
         self,
@@ -359,34 +354,6 @@ class ExportManager:
             )
 
         self.logger.info("ONNX export completed successfully")
-
-    def restore_checkpoint(self) -> None:
-        """
-        Restore a previously quantized model.
-
-        """
-        if not self.config.restore_from:
-            return
-
-        restore_path = self.config.restore_from
-        if self.pipeline_manager is None:
-            raise RuntimeError("Pipeline manager is required for per-backbone checkpoints.")
-
-        if not restore_path.exists() or not restore_path.is_dir():
-            raise FileNotFoundError(f"Checkpoint directory not found: {restore_path}")
-
-        for backbone_name, backbone in self.pipeline_manager.iter_backbones():
-            source_path = restore_path / f"{backbone_name}.pt"
-            if not source_path.exists():
-                raise FileNotFoundError(
-                    f"Checkpoint not found for '{backbone_name}' in {restore_path}"
-                )
-            self.logger.info(f"Restoring {backbone_name} from {source_path}")
-            # The pipeline was just created with the base (unquantized) weights, so
-            # this re-applies the quantization recipe + amax on top of them.
-            restore_quantizer_state(backbone, str(source_path))
-
-        self.logger.info("Checkpoints restored successfully")
 
     # TODO: should not do the any data type
     def export_hf_ckpt(self, pipe: Any, model_config: ModelConfig | None = None) -> None:
@@ -460,8 +427,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
             # Faster LTX-Video quantization (skip upsampler)
             %(prog)s --model ltx-video-dev --format fp8 --batch-size 1 --calib-size 32 --ltx-skip-upsampler
 
-            # Restore and export a previously quantized model
-            %(prog)s --model flux-schnell --restore-from checkpoint.pt --onnx-dir ./exports/
+            # Restore and export a previously quantized native training bundle
+            %(prog)s --model flux-schnell --restore-from ./flux-schnell-int8 --onnx-dir ./exports/
         """,
     )
     model_group = parser.add_argument_group("Model Configuration")
@@ -579,9 +546,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
 
     export_group = parser.add_argument_group("Export Configuration")
     export_group.add_argument(
+        "--output-bundle",
         "--quantized-torch-ckpt-save-path",
+        dest="output_bundle",
         type=str,
-        help="Path to save quantized PyTorch checkpoint",
+        help=(
+            "Directory for the native ModelOpt-aware Diffusers training bundle. "
+            "The legacy --quantized-torch-ckpt-save-path spelling is accepted as an alias."
+        ),
     )
     export_group.add_argument("--onnx-dir", type=str, help="Directory for ONNX export")
     export_group.add_argument(
@@ -590,7 +562,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Directory for HuggingFace checkpoint export",
     )
     export_group.add_argument(
-        "--restore-from", type=str, help="Path to restore from previous checkpoint"
+        "--restore-from", type=str, help="Native Diffusers training bundle to restore"
     )
     export_group.add_argument(
         "--trt-high-precision-dtype",
@@ -613,7 +585,17 @@ def main() -> None:
     parser = create_argument_parser()
     args, unknown_args = parser.parse_known_args()
 
+    # Patch Diffusers ModelMixin before any pipeline is loaded or saved. Converted
+    # components then restore/save their topology in <component>/modelopt_state.pth.
+    mto.enable_huggingface_checkpointing()
+
     model_type = ModelType(args.model)
+    if model_type == ModelType.LTX2 and (args.output_bundle or args.restore_from):
+        parser.error(
+            "LTX-2 uses a third-party TI2VidTwoStagesPipeline without native Diffusers "
+            "save_pretrained/from_pretrained support, so --output-bundle and "
+            "--restore-from are unavailable. Use --hf-ckpt-dir for its deployment export."
+        )
     if args.backbone is None:
         args.backbone = [MODEL_DEFAULTS[model_type]["backbone"]]
     s = time.time()
@@ -633,9 +615,13 @@ def main() -> None:
             model_dtype=model_dtype,
             backbone=args.backbone,
             trt_high_precision_dtype=DataType(args.trt_high_precision_dtype),
-            override_model_path=Path(args.override_model_path)
-            if args.override_model_path
-            else None,
+            override_model_path=(
+                Path(args.restore_from)
+                if args.restore_from
+                else Path(args.override_model_path)
+                if args.override_model_path
+                else None
+            ),
             cpu_offloading=args.cpu_offloading,
             ltx_skip_upsampler=args.ltx_skip_upsampler,
             extra_params=extra_params,
@@ -669,9 +655,7 @@ def main() -> None:
         )
 
         export_config = ExportConfig(
-            quantized_torch_ckpt_path=Path(args.quantized_torch_ckpt_save_path)
-            if args.quantized_torch_ckpt_save_path
-            else None,
+            output_bundle=Path(args.output_bundle) if args.output_bundle else None,
             onnx_dir=Path(args.onnx_dir) if args.onnx_dir else None,
             hf_ckpt_dir=Path(args.hf_ckpt_dir) if args.hf_ckpt_dir else None,
             restore_from=Path(args.restore_from) if args.restore_from else None,
@@ -689,10 +673,7 @@ def main() -> None:
 
         export_manager = ExportManager(export_config, logger, pipeline_manager)
 
-        if export_config.restore_from and export_config.restore_from.exists():
-            export_manager.restore_checkpoint()
-
-        else:
+        if not export_config.restore_from:
             logger.info("Initializing calibration...")
             calibrator = Calibrator(pipeline_manager, calib_config, model_config.model_type, logger)
             batched_prompts = calibrator.load_and_batch_prompts()
@@ -727,9 +708,8 @@ def main() -> None:
                         backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
                     )
 
-                export_manager.save_checkpoint(backbone, backbone_name)
-
         pipeline_manager.print_quant_summary()
+        export_manager.save_training_bundle(pipe)
 
         for backbone_name, backbone in pipeline_manager.iter_backbones():
             export_manager.export_onnx(

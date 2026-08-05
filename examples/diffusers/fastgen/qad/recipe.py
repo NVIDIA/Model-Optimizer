@@ -98,15 +98,16 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
         if self.cfg.get("peft", None) is not None:
             raise ValueError(
                 "Do not set AutoModel's top-level peft block for QAD. SVDQuant's "
-                "modelopt_svdquant HF PEFT topology must come from the student bundle."
+                "modelopt_svdquant HF PEFT topology comes from the student bundle."
             )
         if str(self.cfg.get("model.mode", "finetune")).lower() != "finetune":
             raise ValueError("QAD supports model.mode=finetune only.")
         if self.cfg.get("ddp", None) is not None:
             raise ValueError("QAD currently supports AutoModel FSDP2, not DDP.")
 
-        # Diffusers' ModelMixin must be patched before from_pretrained so a
-        # SVDQuant bundle rebuilds quant/PEFT topology before loading its weights.
+        # Diffusers' ModelMixin must be patched before from_pretrained so both
+        # regular NVFP4 and SVDQuant bundles rebuild their ModelOpt topology and
+        # load component-local modelopt_state.pth before AutoModel applies FSDP.
         mto.enable_huggingface_checkpointing()
 
         with patch_student_build(settings) as build_state:
@@ -186,6 +187,18 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
             raise ValueError("Missing required qad configuration block.")
 
         student_cfg = _as_dict(qad.get("student"))
+        secondary_artifact_fields = sorted(
+            field
+            for field in ("quant_state_path", "modelopt_state_path")
+            if student_cfg.get(field) is not None
+        )
+        if secondary_artifact_fields:
+            raise ValueError(
+                "QAD accepts one complete Diffusers student bundle through "
+                "model.pretrained_model_name_or_path; remove unsupported secondary "
+                "artifact field(s): "
+                + ", ".join(f"qad.student.{field}" for field in secondary_artifact_fields)
+            )
         model_name_or_path = self.cfg.get("model.pretrained_model_name_or_path", None)
         if not model_name_or_path:
             raise ValueError(
@@ -207,7 +220,6 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
         settings = StudentSettings(
             mode=mode,
             model_name_or_path=str(model_name_or_path),
-            quant_state_path=student_cfg.get("quant_state_path"),
             train_scope=str(student_cfg.get("train_scope", "all")).lower(),
         )
         settings.validate()
@@ -254,7 +266,6 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
         return {
             "student_source": settings.model_name_or_path,
             "student_mode": settings.mode,
-            "quant_state_path": settings.quant_state_path,
             "train_scope": settings.train_scope,
             "teacher_source": loss_config["teacher_model_name_or_path"],
             "output_weight": float(loss_config["output_weight"]),
@@ -275,6 +286,17 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
         model_cfg = _as_dict(config.get("model"))
         qad_cfg = _as_dict(config.get("qad"))
         student_cfg = _as_dict(qad_cfg.get("student"))
+        secondary_artifact_fields = sorted(
+            field
+            for field in ("quant_state_path", "modelopt_state_path")
+            if student_cfg.get(field) is not None
+        )
+        if secondary_artifact_fields:
+            raise RuntimeError(
+                "The saved QAD checkpoint uses unsupported secondary student artifact "
+                "field(s): "
+                + ", ".join(f"qad.student.{field}" for field in secondary_artifact_fields)
+            )
         output_cfg = _as_dict(qad_cfg.get("output_loss"))
         task_cfg = _as_dict(qad_cfg.get("task_loss"))
         layerwise_cfg = _as_dict(qad_cfg.get("layerwise"))
@@ -292,7 +314,6 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
         settings = StudentSettings(
             mode=mode,
             model_name_or_path=str(model_cfg.get("pretrained_model_name_or_path", "")),
-            quant_state_path=student_cfg.get("quant_state_path"),
             train_scope=str(student_cfg.get("train_scope", "all")).lower(),
         )
         return cls._resume_signature(settings, loss_config)
@@ -331,7 +352,7 @@ class QADDiffusionRecipe(TrainDiffusionRecipe):
             raise RuntimeError(
                 "QAD resume contract changed for "
                 + ", ".join(changed)
-                + ". Use the same student artifact, quantization mode/state, train scope, "
+                + ". Use the same student bundle, quantization mode, train scope, "
                 "teacher, and loss configuration as the saved run."
             )
 

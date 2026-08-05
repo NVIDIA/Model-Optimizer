@@ -1,8 +1,7 @@
 # Qwen-Image QAD with a regular ModelOpt NVFP4 student.
 #
-# The student is loaded from its Diffusers checkpoint, then the weight-free
-# quantizer state is restored. Paths are placeholders and should be supplied by
-# dotted CLI overrides in production launches.
+# model.pretrained_model_name_or_path must be a complete ModelOpt-aware
+# Diffusers training bundle produced by quantize.py --output-bundle.
 
 seed: 42
 
@@ -16,8 +15,8 @@ dist_env:
   timeout_minutes: 60
 
 model:
-  # Canonical student source; AutoModel records this field in checkpoints.
-  pretrained_model_name_or_path: Qwen/Qwen-Image
+  # Complete calibrated NVFP4 bundle; AutoModel records this field in checkpoints.
+  pretrained_model_name_or_path: /path/to/qwen-image-nvfp4-training-bundle
   mode: finetune
 
 step_scheduler:
@@ -48,7 +47,6 @@ qad:
 
   student:
     mode: nvfp4
-    quant_state_path: /path/to/qwen-image/quant/transformer.nvfp4.pt
     train_scope: all
 
 optim:

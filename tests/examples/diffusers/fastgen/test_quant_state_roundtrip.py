@@ -23,9 +23,9 @@ DIFFERENT weights reproduces the amax bit-identically and leaves that model's we
 untouched -- i.e. amax stays exactly as calibrated and the warm-started student weights
 are preserved.
 
-The on-disk state is built here with ModelOpt's own idiom (the same one the calibration
-example's ``--quantized-torch-ckpt-save-path`` uses), so the test also pins format
-compatibility with that file.
+The on-disk state is built here with ModelOpt's own weight-free state idiom. This pins
+compatibility with the historical DMD2 QAT artifacts independently from the current
+quantization example's complete Diffusers training-bundle output.
 
 Dependency-guarded with ``importorskip`` so it skips where torch / modelopt are absent.
 """

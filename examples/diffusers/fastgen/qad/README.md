@@ -18,16 +18,20 @@ teacher and student.
 
 ## Supported students
 
-The `qad.student.mode` field selects one of two restore contracts.
+The `qad.student.mode` field selects one of two bundle validation contracts. In
+both cases, `model.pretrained_model_name_or_path` is the only student artifact
+path: it points to a complete, calibrated Diffusers pipeline written by
+`quantize.py --output-bundle`. QAD restores the pipeline's weights and
+component-local ModelOpt state together before FSDP; it does not accept a second
+quantizer-state or transformer-checkpoint path.
 
 ### Regular NVFP4
 
 Set `qad.student.mode=nvfp4` and point
-`model.pretrained_model_name_or_path` at the unquantized Diffusers model. The recipe
-loads its weights first and then restores the weight-free ModelOpt NVFP4 state
-from `qad.student.quant_state_path`. The quantizer state must have been calibrated
-against exactly the same student weights. This mode trains all student
-parameters, so its only valid `train_scope` is `all`.
+`model.pretrained_model_name_or_path` at a regular NVFP4 training bundle. The
+bundle includes the calibrated weights and ModelOpt quantizer topology/state.
+This mode trains all student parameters, so its only valid `train_scope` is
+`all`.
 
 Use [`configs/qwen_image_nvfp4.yaml`](configs/qwen_image_nvfp4.yaml) as the
 starting configuration.
@@ -48,10 +52,11 @@ For the standard Diffusers layout, the transformer files and ModelOpt sidecar
 are under `transformer/`, including `transformer/modelopt_state.pth`. The path
 given to QAD is the parent DiffusionPipeline directory.
 
-A weight-free NVFP4 quantizer-state file is not a valid SVDQuant bundle.
-SVDQuant subtracts the low-rank branch from the original weight, so both the
-resulting residual weight and the PEFT factors are required. A unified
-deployment export is also not a training bundle and must not be used here.
+A standalone weight-free NVFP4 quantizer-state file is not a QAD student bundle.
+This is especially important for SVDQuant: calibration subtracts the low-rank
+branch from the original weight, so both the resulting residual weight and the
+PEFT factors are required. A unified deployment export is also not a training
+bundle and must not be used here.
 
 The SVDQuant topology is restored before FSDP and before optimizer construction.
 `qad.student.train_scope=all` is the default and trains both the residual/base
@@ -65,6 +70,52 @@ as the starting configuration.
 
 QAD is restore-only in both modes. It does not calibrate a student during
 distributed training.
+
+## Prepare a student bundle
+
+Patch Diffusers ModelMixin support and save the complete pipeline through the
+quantization entry point. `quantize.py` does this automatically before model
+load and calls `pipe.save_pretrained(output_bundle)` after calibration. For
+example:
+
+```bash
+# Regular NVFP4
+python examples/diffusers/quantization/quantize.py \
+  --model qwen-image \
+  --override-model-path /path/to/Qwen-Image \
+  --model-dtype BFloat16 \
+  --format fp4 \
+  --quant-algo max \
+  --block-size 16 \
+  --batch-size 1 \
+  --calib-size 32 \
+  --n-steps 50 \
+  --extra-param true_cfg_scale=4.0 \
+  --extra-param "negative_prompt= " \
+  --output-bundle /path/to/Qwen-Image-NVFP4-Calib32
+
+# NVFP4 SVDQuant, rank 32
+python examples/diffusers/quantization/quantize.py \
+  --model qwen-image \
+  --override-model-path /path/to/Qwen-Image \
+  --model-dtype BFloat16 \
+  --format fp4 \
+  --quant-algo svdquant \
+  --lowrank 32 \
+  --block-size 16 \
+  --batch-size 1 \
+  --calib-size 32 \
+  --n-steps 50 \
+  --extra-param true_cfg_scale=4.0 \
+  --extra-param "negative_prompt= " \
+  --output-bundle /path/to/Qwen-Image-NVFP4-SVDQuant-Calib32
+```
+
+The saved root must contain `model_index.json`; the converted transformer must
+contain `transformer/modelopt_state.pth`. For Qwen-Image-Flash, use `--n-steps 4`
+and `--extra-param true_cfg_scale=1.0`; omit `negative_prompt`. Standard output
+includes ModelOpt's full quantizer summary; capture it with `tee` and retain that
+log with the bundle.
 
 ## Distillation losses
 
@@ -169,6 +220,6 @@ The teacher and the transient ModelOpt distillation controller are not training
 checkpoint payloads. Checkpoints contain the student state required by the
 selected training scope together with optimizer, scheduler, dataloader, RNG, and
 global-step state. Resolved dotted CLI overrides are materialized into the saved
-`config.yaml`. Resume validates the student bundle, quantizer state, mode, train
+`config.yaml`. Resume validates the student bundle, quantization mode, train
 scope, teacher, and loss configuration before loading optimizer shards; do not
 change them while resuming an existing run.

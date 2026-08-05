@@ -53,9 +53,9 @@ cleaned_m="${model//\//-}"
 curt_exp="${cleaned_m}_${format}"
 echo "=====>Processing $curt_exp"
 if [ "$format" == "fp8" ]; then
-    python quantize.py --model "$model" --format "$format" --batch-size 2 --calib-size 128 --n-steps 20 --quantized-torch-ckpt-save-path "$curt_exp".pt --collect-method default --onnx-dir "$curt_exp".onnx
+    python quantize.py --model "$model" --format "$format" --batch-size 2 --calib-size 128 --n-steps 20 --output-bundle "$curt_exp"-training-bundle --collect-method default --onnx-dir "$curt_exp".onnx
 else
-    python quantize.py --model "$model" --format "$format" --batch-size 2 --calib-size 32 --collect-method "min-mean" --percentile 1.0 --alpha 0.8 --n-steps 20 --quantized-torch-ckpt-save-path "$curt_exp".pt --onnx-dir "$curt_exp".onnx
+    python quantize.py --model "$model" --format "$format" --batch-size 2 --calib-size 32 --collect-method "min-mean" --percentile 1.0 --alpha 0.8 --n-steps 20 --output-bundle "$curt_exp"-training-bundle --onnx-dir "$curt_exp".onnx
 fi
 
 echo "=====>Exported to ONNX model."

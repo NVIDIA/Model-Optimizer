@@ -1,8 +1,7 @@
 # Qwen-Image QAD with a ModelOpt NVFP4 SVDQuant + Hugging Face PEFT student.
 #
-# model.pretrained_model_name_or_path must be a complete, user-prepared ModelOpt-enabled
-# Diffusers training bundle. A weight-free quantizer-state file or a unified
-# deployment export is not sufficient.
+# model.pretrained_model_name_or_path must be a complete ModelOpt-aware
+# Diffusers training bundle produced by quantize.py --output-bundle.
 
 seed: 42
 
@@ -16,7 +15,7 @@ dist_env:
   timeout_minutes: 60
 
 model:
-  # Complete user-prepared ModelOpt-enabled Diffusers training bundle.
+  # Complete calibrated NVFP4 SVDQuant bundle.
   pretrained_model_name_or_path: /path/to/qwen-image-nvfp4-svdquant-training-bundle
   mode: finetune
 

@@ -18,12 +18,13 @@
 The generic AutoModel diffusion builder intentionally owns FSDP and optimizer
 construction. QAD only needs two narrowly-scoped hooks around that builder:
 
-* restore a standalone, weight-free ModelOpt state before FSDP for regular NVFP4;
+* validate the ModelOpt topology restored by a native Diffusers training bundle
+  before FSDP;
 * after FSDP, optionally freeze everything except ModelOpt SVDQuant's HF PEFT A/B
   parameters and rebuild AdamW from the live sharded parameters.
 
-SVDQuant itself is never calibrated here. Its complete topology and weights must
-already be present in a ModelOpt-enabled Diffusers training bundle.
+Quantization itself is never calibrated here. The complete topology, weights,
+and quantizer buffers must already be present in the student bundle.
 """
 
 from __future__ import annotations
@@ -32,13 +33,11 @@ import contextlib
 import dataclasses
 import inspect
 import logging
-import os
 import re
 from typing import TYPE_CHECKING, Any
 
 import modelopt.torch.opt as mto
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.utils.core_utils import set_quantizer_state_dict
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -58,7 +57,6 @@ class StudentSettings:
     mode: str
     model_name_or_path: str
     train_scope: str = "all"
-    quant_state_path: str | None = None
 
     def validate(self) -> None:
         if self.mode not in _SUPPORTED_STUDENT_MODES:
@@ -73,18 +71,8 @@ class StudentSettings:
                 f"qad.student.train_scope must be 'all' or 'lora_only', got {self.train_scope!r}."
             )
 
-        if self.mode == "nvfp4":
-            if not self.quant_state_path:
-                raise ValueError(
-                    "qad.student.quant_state_path is required for a regular NVFP4 student."
-                )
-            if self.train_scope != "all":
-                raise ValueError("Regular NVFP4 supports only qad.student.train_scope=all.")
-        elif self.quant_state_path:
-            raise ValueError(
-                "A SVDQuant student must be restored from a complete ModelOpt-enabled "
-                "Diffusers training bundle; do not set qad.student.quant_state_path."
-            )
+        if self.mode == "nvfp4" and self.train_scope != "all":
+            raise ValueError("Regular NVFP4 supports only qad.student.train_scope=all.")
 
 
 @dataclasses.dataclass
@@ -94,51 +82,6 @@ class StudentBuildState:
     parallel_scheme: dict[str, dict[str, Any]] | None = None
     quantizer_count: int = 0
     svdquant_parameter_names: tuple[str, ...] = ()
-
-
-def _restore_regular_quant_state(model: nn.Module, path: str, device: torch.device) -> int:
-    """Restore a regular weight-free ModelOpt quantizer state before FSDP."""
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"ModelOpt quantizer state does not exist: {path}")
-    if mto.ModeloptStateManager.is_converted(model):
-        raise RuntimeError(
-            "The regular NVFP4 base model already contains ModelOpt topology while "
-            "qad.student.quant_state_path was also supplied. Use exactly one restore source."
-        )
-
-    state = mto.load_modelopt_state(path)
-    mode_states = state.get("modelopt_state_dict", ())
-    if any(
-        mode_name == "svdquant_calibrate" or mode_state.get("metadata", {}).get("svdquant_peft")
-        for mode_name, mode_state in mode_states
-    ):
-        raise RuntimeError(
-            "qad.student.mode=nvfp4 cannot restore an SVDQuant state. Use "
-            "mode=nvfp4_svdquant with a complete ModelOpt-enabled Diffusers bundle."
-        )
-    quantizer_state = state.pop("modelopt_state_weights", None)
-    if quantizer_state is None:
-        raise RuntimeError(
-            f"{path} has no modelopt_state_weights payload. Expected the weight-free "
-            "quantizer state produced by the Diffusers quantization example."
-        )
-
-    mto.restore_from_modelopt_state(model, state)
-    set_quantizer_state_dict(model, quantizer_state)
-
-    quantizers = [module for module in model.modules() if isinstance(module, TensorQuantizer)]
-    if not quantizers:
-        raise RuntimeError(f"No TensorQuantizer modules were restored from {path}.")
-    for quantizer in quantizers:
-        quantizer.to(device)
-    _validate_nvfp4_quantizers(model, artifact_name=path)
-
-    logging.info(
-        "[QAD] restored regular ModelOpt quantizer state before FSDP: %s (%d quantizers)",
-        path,
-        len(quantizers),
-    )
-    return len(quantizers)
 
 
 def _is_block16_nvfp4(quantizer: TensorQuantizer) -> bool:
@@ -216,22 +159,58 @@ def _validate_nvfp4_quantizers(
     )
 
 
-def _svdquant_metadata(model: nn.Module) -> dict[str, Any] | None:
+def _modelopt_mode_states(model: nn.Module) -> dict[str, dict[str, Any]]:
     if not mto.ModeloptStateManager.is_converted(model):
-        return None
-    for mode_name, mode_state in mto.modelopt_state(model)["modelopt_state_dict"]:
-        if mode_name == "svdquant_calibrate":
-            return mode_state.get("metadata", {}).get("svdquant_peft")
-    return None
+        return {}
+    return dict(mto.modelopt_state(model)["modelopt_state_dict"])
+
+
+def _reject_non_training_modes(mode_states: dict[str, dict[str, Any]]) -> None:
+    if "real_quantize" in mode_states:
+        raise RuntimeError(
+            "QAD cannot train a compressed real-quantized bundle. Recalibrate without "
+            "quantize.py --compress and provide the resulting fake-quantized training bundle."
+        )
+
+
+def _validate_regular_bundle(model: nn.Module) -> int:
+    mode_states = _modelopt_mode_states(model)
+    if not mode_states:
+        raise RuntimeError(
+            "qad.student.mode=nvfp4 requires a ModelOpt-aware Diffusers training bundle. "
+            "Calibrate it with quantize.py --output-bundle before starting QAD."
+        )
+    _reject_non_training_modes(mode_states)
+    if "svdquant_calibrate" in mode_states:
+        raise RuntimeError(
+            "qad.student.mode=nvfp4 received an SVDQuant bundle; use mode=nvfp4_svdquant."
+        )
+    quantizers = [module for module in model.modules() if isinstance(module, TensorQuantizer)]
+    if not quantizers:
+        raise RuntimeError("The regular NVFP4 student bundle restored no TensorQuantizers.")
+    _validate_nvfp4_quantizers(model, artifact_name="The regular NVFP4 student bundle")
+    logging.info(
+        "[QAD] validated regular ModelOpt NVFP4 bundle before FSDP: %d quantizers",
+        len(quantizers),
+    )
+    return len(quantizers)
 
 
 def _validate_svdquant_bundle(model: nn.Module) -> tuple[str, ...]:
-    metadata = _svdquant_metadata(model)
+    mode_states = _modelopt_mode_states(model)
+    _reject_non_training_modes(mode_states)
+    mode_state = mode_states.get("svdquant_calibrate")
+    if mode_state is None:
+        raise RuntimeError(
+            "qad.student.mode=nvfp4_svdquant requires a bundle containing the "
+            "svdquant_calibrate ModelOpt mode."
+        )
+    metadata = mode_state.get("metadata", {}).get("svdquant_peft")
     if not metadata:
         raise RuntimeError(
-            "qad.student.mode=nvfp4_svdquant requires a ModelOpt-enabled Diffusers "
-            "training bundle with svdquant_peft metadata. The topology must be restored "
-            "during Diffusers from_pretrained(), before FSDP."
+            "The SVDQuant bundle is malformed or predates the HF PEFT contract: its "
+            "svdquant_calibrate mode has no svdquant_peft metadata. Recalibrate it "
+            "with quantize.py --output-bundle."
         )
 
     expected_targets = tuple(metadata.get("target_modules", ()))
@@ -391,15 +370,12 @@ def patch_student_build(
         state.parallel_scheme = parallel_scheme
         transformer = pipe.transformer
         if settings.mode == "nvfp4":
-            quant_state_path = settings.quant_state_path
-            assert quant_state_path is not None
-            state.quantizer_count = _restore_regular_quant_state(
-                transformer,
-                quant_state_path,
-                next(transformer.parameters()).device,
-            )
+            state.quantizer_count = _validate_regular_bundle(transformer)
         else:
             state.svdquant_parameter_names = _validate_svdquant_bundle(transformer)
+            state.quantizer_count = sum(
+                isinstance(module, TensorQuantizer) for module in transformer.modules()
+            )
         return original_apply_parallelization(pipe, parallel_scheme)
 
     def build_model_and_optimizer(**kwargs):
