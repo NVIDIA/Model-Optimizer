@@ -336,12 +336,12 @@ def _scope_prefixes(rev) -> tuple[str, ...]:
     scope_dot = f"{scope}." if scope != "" else ""
     base = getattr(rev, "base_model_prefix", None) or ""
     base_dot = f"{base}." if base != "" else ""
-    candidates = [base_dot + scope_dot, scope_dot]
-    # Deduplicate while preserving order; drop the empty prefix (matches everything, so
-    # it is equivalent to an unscoped rule and must not short-circuit a real prefix).
+    # Deduplicate while preserving order. An empty candidate is kept: it only arises for
+    # ``scope_prefix == ""`` and, matching transformers, acts as the always-matching
+    # fallback that applies the pattern to the whole key.
     seen: list[str] = []
-    for c in candidates:
-        if c and c not in seen:
+    for c in (base_dot + scope_dot, scope_dot):
+        if c not in seen:
             seen.append(c)
     return tuple(seen)
 
