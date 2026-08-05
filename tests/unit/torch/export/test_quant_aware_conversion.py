@@ -393,6 +393,46 @@ def test_scoped_rule_maps_config_module_names_consistently():
     assert mapper("model.vision_tower*") == "model.vision_tower.vision_model*"
 
 
+def test_root_scoped_rule_still_faces_shadowing_guard():
+    """A ``scope_prefix == ""`` rule has whole-key-space reach and must not bypass #2032.
+
+    ``_scope_prefixes`` keeps an empty candidate for the root scope, which
+    ``_sub_scoped`` matches against every key -- so such a rule is as broad as an
+    unscoped one. Skipping the shadowing heuristic merely because ``scope_prefixes`` is a
+    non-empty *tuple* would reintroduce NVBug 6525534: the nested text model's
+    ``^model.language_model.`` reverse would be kept and rewrite ``model.visual.*``.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.visual = torch.nn.Module()
+    model.model.visual.patch_embed = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+
+    renaming = WeightRenaming(
+        source_patterns=r"^model.language_model.",
+        target_patterns=r"^model.(?!language_model.)",
+    )
+    # Root scope: reaches every key, exactly like an unscoped rule.
+    renaming.scope_prefix = ""
+    renaming.base_model_prefix = ""
+    model._weight_conversions = [renaming]
+
+    state_dict = {
+        "model.visual.patch_embed.weight": torch.randn(2, 2),
+        "model.language_model.layers.0.weight": torch.randn(2, 2),
+    }
+    reverted = revert_weight_conversion_quant_aware(model, state_dict)
+
+    # The sibling vision namespace must be untouched (the #2032 guarantee).
+    assert set(reverted) == set(state_dict)
+    assert not any("language_model.visual" in k for k in reverted)
+
+
 def test_scoped_weight_converter_is_refused():
     """A scoped ``WeightConverter`` must fall back rather than emit unscoped rules.
 

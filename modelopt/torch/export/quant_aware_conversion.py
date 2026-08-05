@@ -354,9 +354,12 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     ``model.language_model`` is already registered and applying the rule globally
     would capture both that namespace and siblings such as ``model.visual``.
 
-    Only unscoped rules are considered: a rule carrying ``scope_prefixes`` is already
-    confined to its sub-model's subtree by :func:`_sub_scoped`, so it cannot reach a
-    sibling namespace and this whole-key-space heuristic does not apply to it.
+    Only rules that are genuinely confined are skipped. A rule is confined when every
+    one of its ``scope_prefixes`` is non-empty, because :func:`_sub_scoped` then applies
+    it solely under that prefix and it cannot reach a sibling namespace. An *empty*
+    candidate (which ``scope_prefix == ""`` produces) matches every key, so such a rule
+    has the reach of an unscoped one and must still face this heuristic -- otherwise a
+    root-scoped nested-text rename would bypass the guard added for NVBug 6525534.
     """
     named_modules = getattr(model, "named_modules", None)
     if not callable(named_modules):
@@ -366,7 +369,9 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     probe_suffix = ".\x00modelopt_namespace_probe"
     kept: list[RenameRule] = []
     for rule in rules:
-        if rule.scope_prefixes:
+        # `all(...)` matters: an empty candidate matches every key, so a rule carrying one
+        # is not actually confined and still needs the check below.
+        if rule.scope_prefixes and all(rule.scope_prefixes):
             kept.append(rule)
             continue
         pattern = re.compile(rule.pattern)
