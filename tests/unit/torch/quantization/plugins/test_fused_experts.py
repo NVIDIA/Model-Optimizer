@@ -512,7 +512,7 @@ class TestExportFusedExperts:
                         return
 
             monkeypatch.setattr(
-                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                "modelopt.torch.export.hf_weight_export._export_quantized_weight",
                 _spy_export,
             )
 
@@ -601,7 +601,7 @@ class TestExportFusedExperts:
                         return
 
             monkeypatch.setattr(
-                "modelopt.torch.export.unified_export_hf._export_quantized_weight",
+                "modelopt.torch.export.hf_weight_export._export_quantized_weight",
                 _spy_export,
             )
 

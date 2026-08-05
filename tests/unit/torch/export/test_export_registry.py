@@ -33,13 +33,13 @@ from modelopt.torch.export.hf_export_handlers import (
     _prepare_fused_experts,
     _prepare_iterable_experts,
 )
+from modelopt.torch.export.hf_weight_export import _process_quantized_modules
 from modelopt.torch.export.registry import (
     ExportContext,
     ExportModuleRegistry,
     PrepareMoEInputsRegistry,
     _ExportHandlerRegistryCls,
 )
-from modelopt.torch.export.unified_export_hf import _process_quantized_modules
 
 
 class _Experts(nn.Module):

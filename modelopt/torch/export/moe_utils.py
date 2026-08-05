@@ -114,7 +114,7 @@ def _export_fused_experts(
     ``_export_transformers_checkpoint``) and scoped to one export
     invocation; when ``None`` the corresponding alias step is skipped.
     """
-    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+    from modelopt.torch.export.hf_weight_export import _export_quantized_weight
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
 
     n = module.num_experts

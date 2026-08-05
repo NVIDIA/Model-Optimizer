@@ -20,7 +20,7 @@ import torch
 from _test_utils.torch.export.utils import ToyModel
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.hf_weight_export import _export_quantized_weight
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.utils import quantizer_attr_names
 

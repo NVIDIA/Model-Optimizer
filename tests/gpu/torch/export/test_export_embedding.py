@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import _process_quantized_modules
+from modelopt.torch.export.hf_weight_export import _process_quantized_modules
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
 VOCAB_SIZE = 16

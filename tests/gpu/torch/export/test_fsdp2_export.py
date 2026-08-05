@@ -23,8 +23,8 @@ from torch.distributed._composable.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.hf_export_prep import requantize_resmooth_fused_llm_layers
+from modelopt.torch.export.hf_weight_export import _export_quantized_weight
 from modelopt.torch.export.layer_utils import is_quantlinear
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, patch_fsdp_mp_dtypes
 
 

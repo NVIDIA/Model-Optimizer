@@ -43,7 +43,7 @@ def _export_weight(
 ) -> None:
     # Imported lazily to avoid a cycle: unified_export_hf imports this module to
     # install the built-in handlers while retaining this legacy helper's import path.
-    from .unified_export_hf import _export_quantized_weight
+    from .hf_weight_export import _export_quantized_weight
 
     _export_quantized_weight(module, ctx.dtype, weight_name, _tied_cache=ctx.tied_cache)
 

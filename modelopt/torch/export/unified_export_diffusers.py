@@ -35,10 +35,10 @@ from safetensors.torch import save_file
 from .convert_hf_config import convert_hf_quant_config_format
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 from .hf_export_prep import _fuse_shared_input_modules, collect_shared_input_modules
+from .hf_weight_export import _process_quantized_modules
 from .layer_utils import is_quantlinear
 from .model_config import QUANTIZATION_NONE
 from .quant_utils import get_quant_config, get_quantization_format, has_quantized_modules
-from .unified_export_hf import _process_quantized_modules
 
 try:
     import diffusers
