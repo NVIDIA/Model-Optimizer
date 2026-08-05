@@ -105,19 +105,23 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
             finally:
                 # finish_requests runs before add_requests inside execute_model, so
                 # req IDs aren't registered yet at that point — call it directly after.
-                if hasattr(self.model_runner, "finish_requests"):
-                    cleanup_output = dataclasses.replace(
-                        scheduler_output,
-                        scheduled_new_reqs=[],
-                        num_scheduled_tokens={},
-                        total_num_scheduled_tokens=0,
-                        finished_req_ids=set(num_scheduled_tokens.keys()),
-                    )
-                    self.model_runner.finish_requests(cleanup_output)
-                else:
-                    warnings.warn(
-                        "model_runner.finish_requests not found; request state may leak during calibration."
-                    )
+                # Wrap in try/except so a cleanup error never masks the original exception.
+                try:
+                    if hasattr(self.model_runner, "finish_requests"):
+                        cleanup_output = dataclasses.replace(
+                            scheduler_output,
+                            scheduled_new_reqs=[],
+                            num_scheduled_tokens={},
+                            total_num_scheduled_tokens=0,
+                            finished_req_ids=set(num_scheduled_tokens.keys()),
+                        )
+                        self.model_runner.finish_requests(cleanup_output)
+                    else:
+                        warnings.warn(
+                            "model_runner.finish_requests not found; request state may leak during calibration."
+                        )
+                except Exception as cleanup_err:
+                    warnings.warn(f"Failed to clean up request state: {cleanup_err}")
 
     return calibrate_loop
 
