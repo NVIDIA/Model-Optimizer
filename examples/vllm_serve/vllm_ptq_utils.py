@@ -66,6 +66,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     NewRequestData,
                     req_id=req_id,
                     prompt_token_ids=input_ids_list,
+                    prefill_token_ids=input_ids_list,
                     mm_kwargs=[],
                     mm_hashes=[],
                     mm_positions=[],
@@ -99,6 +100,26 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
             if hasattr(self, "sample_tokens"):
                 if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
                     self.sample_tokens(None)
+
+            # finish_requests runs before add_requests inside execute_model, so
+            # req IDs aren't registered yet at that point — call it directly after.
+            if hasattr(self.model_runner, "finish_requests"):
+                cleanup_output = _create_new_data_cls(
+                    SchedulerOutput,
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=CachedRequestData.make_empty(),
+                    num_scheduled_tokens={},
+                    total_num_scheduled_tokens=0,
+                    scheduled_spec_decode_tokens={},
+                    scheduled_encoder_inputs={},
+                    num_common_prefix_blocks=[0] * num_groups,
+                    finished_req_ids=set(num_scheduled_tokens.keys()),
+                    free_encoder_mm_hashes=[],
+                    kv_connector_metadata=None,
+                    structured_output_request_ids={},
+                    grammar_bitmask=None,
+                )
+                self.model_runner.finish_requests(cleanup_output)
 
     return calibrate_loop
 

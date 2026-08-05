@@ -124,10 +124,17 @@ def _fakequant_run_prolog_worker(self) -> None:
         calibrate_loop = calibrate_fun(calib_dataloader, self)
 
         quant_cfg = get_quant_config(quant_config, model)
-
-        with disable_compilation(model):
-            print("Quantizing model...")
-            mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+        try:
+            with disable_compilation(model):
+                print("Quantizing model...")
+                mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+        except Exception as e:
+            if "nan" in str(e).lower():
+                print(
+                    f"NaN detected during quantization: {e}\n"
+                    f"Consider downgraing vLLM version or reduce --max-num-batched-tokens to 2048"
+                )
+            raise e
 
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
