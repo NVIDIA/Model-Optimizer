@@ -2,26 +2,14 @@
 
 ## Unified HF Checkpoint — Framework Compatibility
 
-| Model | Quant Format | TRT-LLM | vLLM | SGLang |
-|-------|-------------|---------|------|--------|
-| Llama 3.x | FP8 | yes | yes | yes |
-| Llama 3.x | FP4 | yes | yes | yes |
-| Llama 4 | FP8 | yes | — | yes |
-| Llama 4 | FP4 | yes | — | — |
-| DeepSeek R1 | FP8 | yes | yes | yes |
-| DeepSeek R1 | FP4 | yes | yes | yes |
-| DeepSeek V3 | FP8 | yes | yes | yes |
-| DeepSeek V3 | FP4 | yes | yes | yes |
-| Qwen 3 | FP8 | yes | yes | yes |
-| Qwen 3 | FP4 | yes | yes | — |
-| Qwen 3 MoE | FP8 | yes | yes | yes |
-| Qwen 3 MoE | FP4 | yes | — | — |
-| Qwen 2.5 | FP8 | yes | yes | yes |
-| Qwen 2.5 | FP4 | yes | yes | — |
-| QwQ-32B | FP8 | yes | yes | yes |
-| QwQ-32B | FP4 | yes | yes | — |
-| Mixtral 8x7B | FP8 | yes | yes | yes |
-| Mixtral 8x7B | FP4 | yes | — | — |
+**Do not maintain a copy of the matrix here.** The single source of truth is
+`docs/source/deployment/3_unified_hf.rst` ("Model Support Matrix"), and every validated entry in it
+is backed by `tests/examples/hf_ptq/test_deploy.py`.
+
+To answer "is model X supported on framework Y", read one of those two files — `test_deploy.py` is
+the more precise answer, since it also carries the exact checkpoint, tensor-parallel size, and
+minimum SM version per entry. It covers language models, VLMs (Qwen2.5-VL, Qwen3-VL,
+Phi-4-multimodal, Nemotron Omni), EAGLE3/Medusa drafters, and diffusion models.
 
 ## Supported Quantization Formats
 
@@ -50,9 +38,9 @@
 | SGLang | `quantization="modelopt"` | `quantization="modelopt_fp4"` |
 | TRT-LLM | auto-detected from checkpoint | auto-detected from checkpoint |
 
-## Models not in this list
+## Models not in the matrix
 
-This matrix covers officially validated combinations. For unlisted models:
+The matrix covers officially validated combinations, not the full set of what will run. For unlisted models:
 
 1. **Check the framework's own docs** — vLLM and SGLang support many HuggingFace models natively. Use WebSearch to check `vllm supported models` or `sglang supported models`.
 2. **Try it** — if the model uses standard `nn.Linear` layers and has `hf_quant_config.json`, vLLM/SGLang will likely work with `--quantization modelopt`.
@@ -64,4 +52,5 @@ This matrix covers officially validated combinations. For unlisted models:
   - **B300/GB300 are `sm_103`** and need a **CUDA-13** serving image — from v0.20.0 the unsuffixed tag is CUDA-13 (`-cu129` opts back to CUDA 12); `cu12` images lack the `sm_103` FP4 kernel and serve NVFP4 as gibberish or error out. See the CUDA-13 note in the deployment `SKILL.md`.
   - **Verify the GPU with `nvidia-smi`** before choosing the image — cluster GPU labels can be stale.
 - INT4_AWQ and W4A8_AWQ are only supported by TRT-LLM (not vLLM or SGLang).
-- Source: `examples/hf_ptq/README.md` and `docs/source/deployment/3_unified_hf.rst`
+- For VLMs, only the language model is quantized; the vision encoder stays in high precision, so multimodal serving depends on the framework's own support for that architecture.
+- Source: `docs/source/deployment/3_unified_hf.rst` and `tests/examples/hf_ptq/test_deploy.py`
