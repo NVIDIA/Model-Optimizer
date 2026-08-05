@@ -28,7 +28,12 @@ from modelopt.torch.export.model_utils import (
     _collect_canonical_tied_patterns,
     _reorder_canonical_first,
 )
-from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
+from modelopt.torch.export.quant_utils import (
+    fuse_prequant_layernorm,
+    postprocess_state_dict,
+    sync_tied_input_amax,
+)
+from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 
@@ -146,6 +151,33 @@ def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
             assert getattr(enc, scale_attr).data_ptr() == getattr(dec, scale_attr).data_ptr()
 
 
+def test_export_quantized_weight_preserves_tie_across_weight_replacement():
+    """Pre-export identities preserve a tie after temporary Parameters replace source weights."""
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec)
+    _calibrate_through_both_children(parent)
+    ctx = ExportContext(parent, torch.float16)
+    source_id = ctx.source_parameter_ids[(id(enc), "weight")]
+    assert source_id == ctx.source_parameter_ids[(id(dec), "weight")]
+
+    enc.weight = torch.nn.Parameter(enc.weight.detach().clone())
+    dec.weight = torch.nn.Parameter(dec.weight.detach().clone())
+    _export_quantized_weight(
+        enc,
+        torch.float16,
+        _tied_cache=ctx.tied_cache,
+        _tied_source_id=source_id,
+    )
+    _export_quantized_weight(
+        dec,
+        torch.float16,
+        _tied_cache=ctx.tied_cache,
+        _tied_source_id=source_id,
+    )
+
+    assert enc.weight.data_ptr() == dec.weight.data_ptr()
+
+
 def test_export_quantized_weight_no_alias_for_untied_linears():
     """Untied Linears keep independent data_ptrs after export — no false-positive aliasing."""
     parent = torch.nn.Module()
@@ -181,6 +213,27 @@ def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized()
     assert enc.weight.data_ptr() != original_shared_data_ptr  # encoder got fresh packed
     assert dec.weight.data_ptr() == original_shared_data_ptr  # decoder untouched
     assert enc.weight.data_ptr() != dec.weight.data_ptr()
+
+
+def test_postprocess_state_dict_preserves_tensors_with_different_byte_ranges():
+    storage = torch.arange(4)
+    state_dict = {"short": storage[:2], "long": storage}
+    assert state_dict["short"].data_ptr() == state_dict["long"].data_ptr()
+
+    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+
+    assert set(processed) == set(state_dict)
+
+
+def test_postprocess_state_dict_preserves_zero_pointer_tensors():
+    state_dict = {
+        "first": torch.empty(4, device="meta"),
+        "second": torch.empty(4, device="meta"),
+    }
+
+    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+
+    assert set(processed) == set(state_dict)
 
 
 def _linear_with_input_quantizer():
