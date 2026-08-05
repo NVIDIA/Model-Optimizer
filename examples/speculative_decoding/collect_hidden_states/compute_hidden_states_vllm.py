@@ -89,6 +89,33 @@ def _resolve_aux_layers_standalone(
     return ids
 
 
+def _conversation_id(entry) -> str:
+    """Return an entry's conversation id, rejecting values that are not a plain filename.
+
+    The id is used directly as the output filename (``<id>.pt``), so an absolute path or one
+    containing a separator or ``..`` would resolve outside ``--output-dir``. The dataset is
+    external input, so validate once here, where it is read, rather than at each use.
+    """
+    conversation_id = entry.get("conversation_id", entry.get("uuid", None))
+    if conversation_id is None:
+        raise ValueError("conversation_id is required")
+    conversation_id = str(conversation_id)
+    if conversation_id in {"", ".", ".."} or conversation_id != Path(conversation_id).name:
+        raise ValueError(
+            f"conversation_id {conversation_id!r} is not a usable filename: it must not be "
+            "empty, '.', '..', or contain a path separator."
+        )
+    return conversation_id
+
+
+def _positive_int(value: str) -> int:
+    """argparse type for options that must be >= 1."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value}")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="""Collect hidden states from conversations using vLLM's native extractor."""
@@ -112,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tp", type=int, default=None, help="Tensor parallel size.")
     parser.add_argument(
         "--save-chunk-size",
-        type=int,
+        type=_positive_int,
         default=256,
         help="Number of conversations to generate before saving and freeing their staged "
         "hidden states. Bounds how much the KV connector stages at once (its shared_storage_path "
@@ -163,9 +190,7 @@ def main(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def keep_conversation(entry):
-        conversation_id = entry.get("conversation_id", entry.get("uuid", None))
-        assert conversation_id is not None, "conversation_id is required"
-        return not (output_dir / f"{conversation_id}.pt").exists()
+        return not (output_dir / f"{_conversation_id(entry)}.pt").exists()
 
     original_num = len(dataset)
     # load_from_cache_file=False is required for correctness here: keep_conversation depends on
@@ -213,7 +238,7 @@ def main(args: argparse.Namespace) -> None:
     num_invalid = 0
 
     for entry in dataset:
-        conversation_id = entry.get("conversation_id", entry.get("uuid"))
+        conversation_id = _conversation_id(entry)
         # Accept either the "conversations" or OpenAI-style "messages" key (the
         # MiniMax synthetic data uses "messages").
         conversations = entry.get("conversations") or entry.get("messages")
@@ -300,7 +325,7 @@ def main(args: argparse.Namespace) -> None:
     # bounds staging to one chunk, and makes the dump incrementally durable so an interrupted
     # run keeps its finished conversations and can resume.
     sampling_params = SamplingParams(max_tokens=1)
-    chunk_size = max(1, args.save_chunk_size)
+    chunk_size = args.save_chunk_size
 
     # Save in the same format as compute_hidden_states_hf.py, including loss_mask.
     num_success = 0
@@ -315,44 +340,49 @@ def main(args: argparse.Namespace) -> None:
                 print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
                 continue
 
-            obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-            token_ids = obj["token_ids"]
-            # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
-            # extract_layer_ids. Last layer = final output; the rest = aux layers.
-            hidden_states = obj["hidden_states"]
+            # Staged hidden states must be freed on every path, not just the success one:
+            # an early `continue` (e.g. a short loss_mask) would otherwise leak this
+            # conversation's staging file, and enough of them exhaust shared_storage_path.
+            try:
+                obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+                token_ids = obj["token_ids"]
+                # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
+                # extract_layer_ids. Last layer = final output; the rest = aux layers.
+                hidden_states = obj["hidden_states"]
 
-            output_hidden_states = hidden_states[:, -1, :].cpu()
-            if hidden_states.shape[1] > 1:
-                # Concatenate aux layers along the hidden dim, matching the HF dump format.
-                aux = hidden_states[:, :-1, :].cpu()
-                aux_hidden_states = aux.reshape(aux.shape[0], -1)
-            else:
-                aux_hidden_states = torch.empty(0)
+                output_hidden_states = hidden_states[:, -1, :].cpu()
+                if hidden_states.shape[1] > 1:
+                    # Concatenate aux layers along the hidden dim, matching the HF dump format.
+                    aux = hidden_states[:, :-1, :].cpu()
+                    aux_hidden_states = aux.reshape(aux.shape[0], -1)
+                else:
+                    aux_hidden_states = torch.empty(0)
 
-            # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
-            # to itself and silently misalign with the hidden states, so guard explicitly.
-            n_hs = output_hidden_states.shape[0]
-            if loss_mask.shape[0] < n_hs:
-                print(
-                    f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
-                    f"states ({n_hs}); skipping to avoid misalignment"
-                )
-                continue
+                # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
+                # to itself and silently misalign with the hidden states, so guard explicitly.
+                n_hs = output_hidden_states.shape[0]
+                if loss_mask.shape[0] < n_hs:
+                    print(
+                        f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
+                        f"states ({n_hs}); skipping to avoid misalignment"
+                    )
+                    continue
 
-            output_file = output_dir / f"{conv_id}.pt"
-            with open(output_file, "wb") as f:
-                torch.save(
-                    {
-                        "input_ids": token_ids.cpu(),
-                        "hidden_states": output_hidden_states,
-                        "aux_hidden_states": aux_hidden_states,
-                        "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
-                        "conversation_id": conv_id,
-                    },
-                    f,
-                )
-            example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
-            num_success += 1
+                output_file = output_dir / f"{conv_id}.pt"
+                with open(output_file, "wb") as f:
+                    torch.save(
+                        {
+                            "input_ids": token_ids.cpu(),
+                            "hidden_states": output_hidden_states,
+                            "aux_hidden_states": aux_hidden_states,
+                            "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
+                            "conversation_id": conv_id,
+                        },
+                        f,
+                    )
+                num_success += 1
+            finally:
+                example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
     progress.close()
 
     print(f"Successfully processed {num_success} out of {len(prompts)} conversations.")
