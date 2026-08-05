@@ -46,7 +46,7 @@ def assert_unmodified_tree(path: Path | str) -> Iterator[Path]:
     before = _manifest(path)
     yield path
     if not path.exists():
-        return
+        raise AssertionError(f"shared fixture directory {path} was deleted by a test")
     after = _manifest(path)
     added = sorted(after.keys() - before.keys())
     removed = sorted(before.keys() - after.keys())
