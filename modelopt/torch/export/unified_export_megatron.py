@@ -42,6 +42,7 @@ from .model_config import (
     KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
@@ -311,6 +312,11 @@ class GPTModelExporter:
             quantization = "NVFP4"
         elif quantization_format == QUANTIZATION_W4A16_NVFP4:
             quantization = "W4A16_NVFP4"
+        elif quantization_format == QUANTIZATION_FP8_PB_W8A8:
+            raise NotImplementedError(
+                "Block-wise FP8 W8A8 (FP8_PB_W8A8) export is not supported on the "
+                "Megatron path; export via the HF path (unified_export_hf)."
+            )
 
         if is_last_stage_main_rank:
             if is_writer_rank:
@@ -869,6 +875,11 @@ class GPTModelExporter:
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
+        if qformat == QUANTIZATION_FP8_PB_W8A8:
+            raise NotImplementedError(
+                "Block-wise FP8 W8A8 (FP8_PB_W8A8) export is not supported on the "
+                "Megatron path; export via the HF path (unified_export_hf)."
+            )
         if qformat is None and "norm" not in prefix:
             self._record_excluded_module(prefix)
         block_size = get_weight_block_size(module)
