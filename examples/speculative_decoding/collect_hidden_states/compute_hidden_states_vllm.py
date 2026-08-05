@@ -111,6 +111,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tp", type=int, default=None, help="Tensor parallel size.")
     parser.add_argument(
+        "--save-chunk-size",
+        type=int,
+        default=256,
+        help="Number of conversations to generate before saving and freeing their staged "
+        "hidden states. Bounds how much the KV connector stages at once (its shared_storage_path "
+        "defaults to /dev/shm, i.e. RAM); larger values amortize generate() calls, smaller ones "
+        "use less staging space.",
+    )
+    parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
     )
     add_aux_layers_args(parser)
@@ -159,7 +168,13 @@ def main(args: argparse.Namespace) -> None:
         return not (output_dir / f"{conversation_id}.pt").exists()
 
     original_num = len(dataset)
-    dataset = dataset.filter(keep_conversation)
+    # load_from_cache_file=False is required for correctness here: keep_conversation depends on
+    # on-disk state (which .pt files exist), which is NOT part of the cache fingerprint that
+    # datasets computes from the function and the dataset. With a persistent HF cache (e.g.
+    # HF_HOME on shared storage, reused across a resumed/requeued run) a cached result from an
+    # earlier run -- when fewer or no .pt files existed -- is reused, so the filter keeps
+    # everything and the run re-dumps and overwrites conversations it already finished.
+    dataset = dataset.filter(keep_conversation, load_from_cache_file=False)
     print(f"Removed {original_num - len(dataset)} conversations due to existing output files")
 
     if args.debug_max_num_conversations is not None:
@@ -276,56 +291,69 @@ def main(args: argparse.Namespace) -> None:
     )
 
     # max_tokens=1: we only need a single forward pass over the prompt tokens.
-    outputs = llm.generate(prompts, SamplingParams(max_tokens=1))
+    #
+    # Generate and save in chunks of --save-chunk-size rather than generating everything up
+    # front: the connector stages each conversation's hidden states under its
+    # shared_storage_path (default /dev/shm, i.e. RAM) and they are only freed by
+    # cleanup_hidden_states() once saved. Generating the whole dataset first keeps every
+    # conversation staged simultaneously, which exhausts that space on large runs. Chunking
+    # bounds staging to one chunk, and makes the dump incrementally durable so an interrupted
+    # run keeps its finished conversations and can resume.
+    sampling_params = SamplingParams(max_tokens=1)
+    chunk_size = max(1, args.save_chunk_size)
 
     # Save in the same format as compute_hidden_states_hf.py, including loss_mask.
     num_success = 0
-    for conv_id, loss_mask, output in tqdm(
-        zip(conversation_ids, loss_masks, outputs), total=len(outputs), desc="Saving"
-    ):
-        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
-        if hidden_states_path is None:
-            print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
-            continue
+    progress = tqdm(total=len(prompts), desc="Dumping")
+    for chunk_start in range(0, len(prompts), chunk_size):
+        chunk = slice(chunk_start, chunk_start + chunk_size)
+        outputs = llm.generate(prompts[chunk], sampling_params)
+        for conv_id, loss_mask, output in zip(conversation_ids[chunk], loss_masks[chunk], outputs):
+            progress.update(1)
+            hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+            if hidden_states_path is None:
+                print(f"WARNING: no hidden_states_path for conversation {conv_id}; skipping")
+                continue
 
-        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-        token_ids = obj["token_ids"]
-        # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
-        # extract_layer_ids. Last layer = final output; the rest = aux layers.
-        hidden_states = obj["hidden_states"]
+            obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+            token_ids = obj["token_ids"]
+            # hidden_states: [num_tokens, num_extracted_layers, hidden_size], ordered to match
+            # extract_layer_ids. Last layer = final output; the rest = aux layers.
+            hidden_states = obj["hidden_states"]
 
-        output_hidden_states = hidden_states[:, -1, :].cpu()
-        if hidden_states.shape[1] > 1:
-            # Concatenate aux layers along the hidden dim, matching the HF dump format.
-            aux = hidden_states[:, :-1, :].cpu()
-            aux_hidden_states = aux.reshape(aux.shape[0], -1)
-        else:
-            aux_hidden_states = torch.empty(0)
+            output_hidden_states = hidden_states[:, -1, :].cpu()
+            if hidden_states.shape[1] > 1:
+                # Concatenate aux layers along the hidden dim, matching the HF dump format.
+                aux = hidden_states[:, :-1, :].cpu()
+                aux_hidden_states = aux.reshape(aux.shape[0], -1)
+            else:
+                aux_hidden_states = torch.empty(0)
 
-        # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
-        # to itself and silently misalign with the hidden states, so guard explicitly.
-        n_hs = output_hidden_states.shape[0]
-        if loss_mask.shape[0] < n_hs:
-            print(
-                f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
-                f"states ({n_hs}); skipping to avoid misalignment"
-            )
-            continue
+            # loss_mask is sliced to the dumped length below; a shorter loss_mask would slice
+            # to itself and silently misalign with the hidden states, so guard explicitly.
+            n_hs = output_hidden_states.shape[0]
+            if loss_mask.shape[0] < n_hs:
+                print(
+                    f"WARNING: {conv_id}: loss_mask ({loss_mask.shape[0]}) shorter than hidden "
+                    f"states ({n_hs}); skipping to avoid misalignment"
+                )
+                continue
 
-        output_file = output_dir / f"{conv_id}.pt"
-        with open(output_file, "wb") as f:
-            torch.save(
-                {
-                    "input_ids": token_ids.cpu(),
-                    "hidden_states": output_hidden_states,
-                    "aux_hidden_states": aux_hidden_states,
-                    "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
-                    "conversation_id": conv_id,
-                },
-                f,
-            )
-        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
-        num_success += 1
+            output_file = output_dir / f"{conv_id}.pt"
+            with open(output_file, "wb") as f:
+                torch.save(
+                    {
+                        "input_ids": token_ids.cpu(),
+                        "hidden_states": output_hidden_states,
+                        "aux_hidden_states": aux_hidden_states,
+                        "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
+                        "conversation_id": conv_id,
+                    },
+                    f,
+                )
+            example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
+            num_success += 1
+    progress.close()
 
     print(f"Successfully processed {num_success} out of {len(prompts)} conversations.")
 
