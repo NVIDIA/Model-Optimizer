@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
+from modelopt.models import list_all_possible, match_class_names
 from modelopt.torch.quantization.model_calib import (
     enable_stats_collection,
     finish_stats_collection,
@@ -1143,19 +1144,14 @@ def _update_svdquant(modules, new_pre_quant_scale):
         finish_stats_collection(module.weight_quantizer)
 
 
-# Format: (list of target modules, tuple of (linear_to_fuse_into, linear_from_with_scale))
-PQS_FUSE_MODULE_MAPPING = [
-    # Attention: Fuse o_proj's pre_quant_scale into v_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
-    #   After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
-    (["LlamaAttention", "Qwen3Attention", "Qwen3MoeAttention"], ("v_proj", "o_proj")),
-    # MLP: Fuse down_proj's pre_quant_scale into up_proj's output dimension
-    # Mathematical equivalence:
-    #   Before: down_proj_out = {[act_fn(self.gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
-    #   After:  down_proj_out = {[act_fn(self.gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
-    (["LlamaMLP", "Qwen3MLP", "Qwen3MoeMLP"], ("up_proj", "down_proj")),
-]
+# AWQ pre_quant_scale fusion rules are per-model data and live in modelopt/models/*:
+#   - Attention: fold o_proj's pre_quant_scale into v_proj's output dimension.
+#       Before: o_proj_out = [attn @ (v_proj_in @ v_proj.W^T)^T * scale] @ o_proj.W^T
+#       After:  o_proj_out = [attn @ (v_proj_in @ (v_proj.W * scale)^T)^T] @ o_proj.W^T
+#   - MLP: fold down_proj's pre_quant_scale into up_proj's output dimension.
+#       Before: down_proj_out = {[act_fn(gate_proj(x)) * up_proj(x)] * scale} @ down_proj.W^T
+#       After:  down_proj_out = {[act_fn(gate_proj(x)) * (up_proj(x) * scale)]} @ down_proj.W^T
+# Each rule is a (module_class_substrings, fuse_into, fuse_from) triple.
 
 
 def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
@@ -1171,12 +1167,10 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
     """
     # Fuse pre_quant_scale to the linear weights
     for _, module in model.named_modules():
-        for module_map in PQS_FUSE_MODULE_MAPPING:
-            target_module_list = module_map[0]
-            linear_pair = module_map[1]
+        for target_module_list, fuse_into, fuse_from in list_all_possible("pqs_fuse_rules"):
             if any(module_name in type(module).__name__ for module_name in target_module_list):
-                linear_fuse_into = module.get_submodule(linear_pair[0])
-                linear_pqs_from = module.get_submodule(linear_pair[1])
+                linear_fuse_into = module.get_submodule(fuse_into)
+                linear_pqs_from = module.get_submodule(fuse_from)
                 if hasattr(linear_pqs_from, "input_quantizer") and hasattr(
                     linear_pqs_from.input_quantizer, "_pre_quant_scale"
                 ):
@@ -1237,10 +1231,9 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
 
 
 def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
-    if any(
-        name in type(module).__name__
-        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
-    ):
+    # Weight-plus-one norm class names are per-model data (ExportSpec); the
+    # zero_centered_gamma attribute check is the structural fallback.
+    if match_class_names(module, list_all_possible("weight_plus_one_norm_names")):
         return True
 
     return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
