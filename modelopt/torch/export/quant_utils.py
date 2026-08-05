@@ -959,12 +959,94 @@ def from_quantized_weight(
     raise NotImplementedError(f"quantization format {quantization} not supported")
 
 
+_KV_CACHE_REPLACEMENTS: dict[str, str] = {
+    "k_bmm_quantizer._amax": "k_proj.k_scale",
+    "v_bmm_quantizer._amax": "v_proj.v_scale",
+    "k_bmm_quantizer._bias_value": "k_proj.k_bias",
+    "v_bmm_quantizer._bias_value": "v_proj.v_bias",
+    "input_quantizer._pre_quant_scale": "pre_quant_scale",
+}
+_BASE_SKIP_KEYS: tuple[str, ...] = (
+    "output_quantizer",
+    "_amax",
+    "_bias_value",
+    "input_quantizer._pre_quant_scale",
+    "weight_shape",
+)
+
+
 def _strip_base_layer(key: str, is_modelopt_qlora: bool) -> str:
     """Drop the `base_layer` component PEFT inserts, which deployment does not expect.
 
     Stripping generically means new key types (bias, scales) need no enumeration here.
     """
     return key.replace(".base_layer.", ".") if is_modelopt_qlora else key
+
+
+def _maybe_squeeze_scale(key: str, value: Any) -> Any:
+    """Squeeze a leading dim=1 from 3-D scale tensors of shape (1, n, m)."""
+    if (
+        "scale" in key
+        and isinstance(value, torch.Tensor)
+        and value.dim() == 3
+        and value.shape[0] == 1
+    ):
+        return value.squeeze(0)
+    return value
+
+
+def _postprocess_single_tensor(
+    key: str,
+    value: torch.Tensor,
+    kv_cache_max_bound: float,
+    kv_cache_format: str | None,
+    is_modelopt_qlora: bool = False,
+) -> tuple[str | None, torch.Tensor | None]:
+    """Per-tensor subset of :func:`postprocess_state_dict`, for streaming export.
+
+    Returns ``(new_key, new_value)`` to emit, or ``(None, None)`` to skip.
+    Tied-weight dedup is NOT performed here; callers should pre-compute alias
+    keys from ``model._tied_weights_keys`` and filter them at the call site.
+    """
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
+
+    # Skip problematic VL model parameters
+    if key == "vision_model.radio_model.summary_idxs":
+        return None, None
+
+    # Skip real quant parameters
+    if any(key.endswith("weight_quantizer." + q) for q in RealQuantLinear.list_of_scale_tensors):
+        return None, None
+
+    # Skip LoRA adapters for QLoRA models
+    if is_modelopt_qlora and "lora" in key:
+        return None, None
+
+    # Keys not related to quantizers: keep as-is
+    if all(sk not in key for sk in skip_keys):
+        new_key = _strip_base_layer(key, is_modelopt_qlora)
+        return new_key, _maybe_squeeze_scale(new_key, value)
+
+    # Apply replacements if the key matches any suffix in the replacements dict
+    for old_suffix, new_suffix in replacements.items():
+        if key.endswith(old_suffix):
+            prefix = key[: -len(old_suffix)]
+            if "_amax" in key:
+                assert kv_cache_format in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
+                    "Invalid KV cache quantization format."
+                )
+                assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
+                value = value.float() / kv_cache_max_bound
+                if kv_cache_format == KV_CACHE_FP8 and value.item() > 0.5:
+                    logger.warning(
+                        "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
+                    )
+            new_key = _strip_base_layer(prefix + new_suffix, is_modelopt_qlora)
+            return new_key, _maybe_squeeze_scale(new_key, value)
+
+    # Key has a skip_key but no replacement matched — drop it
+    return None, None
 
 
 def postprocess_state_dict(
@@ -984,20 +1066,8 @@ def postprocess_state_dict(
     Returns:
         The filtered state_dict without unnecessary keys like '_amax' and non KV cache output quantizers.
     """
-    replacements = {
-        "k_bmm_quantizer._amax": "k_proj.k_scale",
-        "v_bmm_quantizer._amax": "v_proj.v_scale",
-        "k_bmm_quantizer._bias_value": "k_proj.k_bias",
-        "v_bmm_quantizer._bias_value": "v_proj.v_bias",
-        "input_quantizer._pre_quant_scale": "pre_quant_scale",
-    }
-    skip_keys = [
-        "output_quantizer",
-        "_amax",
-        "_bias_value",
-        "input_quantizer._pre_quant_scale",
-        "weight_shape",
-    ]
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
 
     def _export_key(key: str) -> str:
         return _strip_base_layer(key, is_modelopt_qlora)
@@ -1036,15 +1106,7 @@ def postprocess_state_dict(
                 post_state_dict[_export_key(prefix + new_suffix)] = value
                 break
 
-    # Squeeze scales with a leading dimension of 1
-    for key, value in post_state_dict.items():
-        if (
-            "scale" in key
-            and isinstance(value, torch.Tensor)
-            and value.dim() == 3
-            and value.shape[0] == 1
-        ):
-            post_state_dict[key] = value.squeeze(0)
+    post_state_dict = {k: _maybe_squeeze_scale(k, v) for k, v in post_state_dict.items()}
 
     # remove real quant parameters from the state dict
     keys_to_delete = []

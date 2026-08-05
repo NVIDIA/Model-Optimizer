@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
-from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.quantization.utils.core_utils import has_non_resident_weights
 
 __all__ = [
     "ExportContext",
@@ -51,6 +51,10 @@ class ExportContext:
     recycled by PyTorch's allocator across exports, causing silent false-positive
     aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
     dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
+
+    Both are ``None`` when the model's weights are not resident for the whole export
+    (FSDP2 or accelerate offload), since ``data_ptr`` keys are meaningless once weights
+    move.
     """
 
     model: nn.Module
@@ -60,11 +64,12 @@ class ExportContext:
     moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # FSDP2 may recycle data_ptr() values as modules are resharded, so pointer-keyed dedup can
-        # falsely alias distinct weights. Disable it for FSDP2; consequently, legitimately tied
-        # packed weights and scale buffers are not re-aliased and may be stored as duplicates.
-        # TODO: replace this with stable, name-based tied-group deduplication.
-        if is_fsdp2_model(self.model):
+        # data_ptr() only identifies a tensor while it stays resident, so dedup is unsafe
+        # once weights move. Tied weights are then written as duplicates rather than
+        # re-aliased, making tied-weight export (DiffusionGemma) resident-path only.
+        # TODO: dedup by tied-group name instead, reusing the _tied_weights_keys
+        # resolution in _collect_canonical_tied_patterns, which survives weight moves.
+        if has_non_resident_weights(self.model):
             self.tied_cache = None
             self.moe_tied_cache = None
 

@@ -29,7 +29,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 20 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 21 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -46,6 +46,7 @@ supported combinations.
 | `nvfp4_experts_only-kv_fp8` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max |
 | `nvfp4_experts_only-kv_fp8_cast` | NVFP4 W4A4, MoE experts only | FP8 (constant amax) | max |
 | `nvfp4_experts_only-kv_fp8_layerwise` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise |
+| `nvfp4_experts_only-kv_fp8_layerwise_offload` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise (non-mutating, for disk offload) |
 | `nvfp4_experts_only_mse-kv_fp8_cast` | NVFP4 W4A4, MoE experts only | FP8 (constant amax) | MSE + FP8 sweep |
 | `nvfp4_experts_only_input_scale1-kv_fp8_cast` | NVFP4 W4A4, MoE experts only, expert `input_scale` pinned to 1.0 | FP8 (constant amax) | max (weights); expert activations uncalibrated |
 | `nvfp4_omlp_only-kv_fp8` | NVFP4 W4A4, o_proj + MLP/MoE | FP8 (calibrated) | max |
