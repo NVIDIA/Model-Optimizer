@@ -294,6 +294,12 @@ python -m pip check
 Record the three source revisions and verification output with the campaign.
 Re-run verification after pulling either fork or rebuilding a CUDA extension.
 
+### Build docker image
+Building a docker image encapsulates the steps above. To build the image pelase run 
+```bash
+docker build -f puzzletron_setup/docker/Dockerfile -t puzzletron_v2:26.08 .
+```
+
 ## Run with an agent
 
 The canonical agent workflow is
