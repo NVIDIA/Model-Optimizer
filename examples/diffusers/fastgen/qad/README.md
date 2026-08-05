@@ -55,8 +55,8 @@ given to QAD is the parent DiffusionPipeline directory.
 A standalone weight-free NVFP4 quantizer-state file is not a QAD student bundle.
 This is especially important for SVDQuant: calibration subtracts the low-rank
 branch from the original weight, so both the resulting residual weight and the
-PEFT factors are required. A unified deployment export is also not a training
-bundle and must not be used here.
+PEFT factors are required. Deployment artifacts are not training bundles and
+must not be used here.
 
 The SVDQuant topology is restored before FSDP and before optimizer construction.
 `qad.student.train_scope=all` is the default and trains both the residual/base

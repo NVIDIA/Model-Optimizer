@@ -68,8 +68,8 @@ class DiffuserModel(NamedTuple):
             *self._format_args(),
             "--trt-high-precision-dtype",
             self.dtype,
-            "--output-bundle",
-            str(tmp_path / f"{self.name}_{self.format_type}_bundle"),
+            "--quantized-torch-ckpt-save-path",
+            str(tmp_path / f"{self.name}_{self.format_type}.pt"),
             "--onnx-dir",
             str(tmp_path / f"{self.name}_{self.format_type}_onnx"),
         )
@@ -81,7 +81,7 @@ class DiffuserModel(NamedTuple):
             "--trt-high-precision-dtype",
             self.dtype,
             "--restore-from",
-            str(tmp_path / f"{self.name}_{self.format_type}_bundle"),
+            str(tmp_path / f"{self.name}_{self.format_type}.pt"),
             "--onnx-dir",
             str(tmp_path / f"{self.name}_{self.format_type}_onnx"),
         )
@@ -160,10 +160,10 @@ class Wan22Model(NamedTuple):
     quant_algo: str
     collect_method: str
 
-    def _bundle_path(self, tmp_path: Path) -> str:
+    def _ckpt_path(self, tmp_path: Path) -> str:
         stem = self.model.replace("wan2.2-t2v-", "")
         parts = [stem, *([self.backbone] if self.backbone else []), self.format_type]
-        return str(tmp_path / f"wan22_{'_'.join(parts)}_bundle")
+        return str(tmp_path / f"wan22_{'_'.join(parts)}.pt")
 
     def _common_args(self, tiny_wan22_path: str) -> list[str]:
         cmd_args = [
@@ -205,15 +205,15 @@ class Wan22Model(NamedTuple):
         run_example_command(
             [
                 *self._common_args(tiny_wan22_path),
-                "--output-bundle",
-                self._bundle_path(tmp_path),
+                "--quantized-torch-ckpt-save-path",
+                self._ckpt_path(tmp_path),
             ],
             "diffusers/quantization",
         )
 
     def restore(self, tiny_wan22_path: str, tmp_path: Path) -> None:
         run_example_command(
-            [*self._common_args(tiny_wan22_path), "--restore-from", self._bundle_path(tmp_path)],
+            [*self._common_args(tiny_wan22_path), "--restore-from", self._ckpt_path(tmp_path)],
             "diffusers/quantization",
         )
 

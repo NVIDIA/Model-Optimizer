@@ -15,7 +15,6 @@
 
 import argparse
 from contextlib import nullcontext
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -152,10 +151,7 @@ def main():
         help="Path to the model if not using default paths in MODEL_ID mapping.",
     )
     parser.add_argument(
-        "--restore-from",
-        type=str,
-        default=None,
-        help="Native Diffusers training bundle or legacy ModelOpt backbone checkpoint",
+        "--restore-from", type=str, default=None, help="Path to the modelopt quantized checkpoint"
     )
     parser.add_argument(
         "--prompt",
@@ -200,18 +196,11 @@ def main():
 
     image_name = args.save_image_as or f"{args.model}.png"
     model_dtype = DTYPE_MAP[args.model]
-    restore_bundle = bool(
-        args.restore_from
-        and Path(args.restore_from).is_dir()
-        and (Path(args.restore_from) / "model_index.json").is_file()
-    )
-    if restore_bundle:
-        mto.enable_huggingface_checkpointing()
 
     pipe = PipelineManager.create_pipeline_from(
         MODEL_ID[args.model],
         torch_dtype=model_dtype,
-        override_model_path=args.restore_from if restore_bundle else args.override_model_path,
+        override_model_path=args.override_model_path,
     )
 
     if args.torch_compile:
@@ -229,7 +218,7 @@ def main():
     else:
         raise ValueError("Pipeline does not have a transformer or unet backbone")
 
-    if args.restore_from and not restore_bundle:
+    if args.restore_from:
         mto.restore(backbone, args.restore_from)
 
     if args.torch:

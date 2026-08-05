@@ -101,7 +101,7 @@ python quantize.py \
     --format int8 --batch-size 2 \
     --calib-size 32 --alpha 0.8 --n-steps 20 \
     --model-dtype {Half/BFloat16} \
-    --output-bundle ./{MODEL_NAME}-training-bundle \
+    --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
@@ -112,7 +112,7 @@ python quantize.py \
     --model {flux-dev|flux-schnell|sdxl-1.0|sdxl-turbo|sd3-medium|sd3.5-medium|ltx-video-dev|wan2.2-t2v-14b|wan2.2-t2v-5b} \
     --model-dtype {Half|BFloat16} \
     --format {fp8|fp4} --batch-size 2 --calib-size {128|256} --quantize-mha \
-    --n-steps 20 --output-bundle ./{MODEL_NAME}-training-bundle --collect-method default \
+    --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
@@ -127,7 +127,7 @@ python quantize.py \
     --format fp4 --quant-algo max --collect-method default \
     --model-dtype BFloat16 --trt-high-precision-dtype BFloat16 \
     --batch-size 1 --calib-size 32 --n-steps 30 \
-    --output-bundle ./wan22-vae-fp4-training-bundle
+    --quantized-torch-ckpt-save-path ./wan22_vae_fp4.pt
 ```
 
 #### [LTX-2](https://github.com/Lightricks/LTX-2) FP4
@@ -146,11 +146,7 @@ python quantize.py \
 > (including quantized or distilled checkpoints) remain subject to the LTX Community License
 > Agreement and are **not** covered by Apache 2.0.
 
-LTX-2 uses a third-party pipeline that does not implement native Diffusers
-`save_pretrained`/`from_pretrained`, so `--output-bundle` is not available for
-this model. The example produces a Hugging Face deployment checkpoint
-(`--hf-ckpt-dir`) and a ComfyUI-compatible merged safetensor
-(`--extra-param merged_base_safetensor_path`).
+This example produces three outputs: a PyTorch checkpoint (`--quantized-torch-ckpt-save-path`), a Hugging Face checkpoint (`--hf-ckpt-dir`), and a ComfyUI-compatible merged safetensor (`--extra-param merged_base_safetensor_path`).
 
 ```sh
 python quantize.py \
@@ -160,6 +156,7 @@ python quantize.py \
     --extra-param spatial_upsampler_path=./ltx-2-spatial-upscaler-x2-1.0.safetensors \
     --extra-param gemma_root=./gemma-3-12b-it-qat-q4_0-unquantized \
     --extra-param fp8transformer=true \
+    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt \
     --hf-ckpt-dir ./LTX2-NVFP4/ \
     --extra-param merged_base_safetensor_path=./ltx-2-19b-dev-fp8.safetensors
 ```
@@ -178,10 +175,7 @@ To additionally apply NVFP4 scale swizzle and padding , add:
 - `calib-size`: For SDXL INT8, we recommend 32 or 64, for SDXL FP8, 128 is recommended.
 - `n_steps`: Recommendation: SD/SDXL 20 or 30, SDXL-Turbo 4.
 
-**You can restore the generated Diffusers training bundle directly in PyTorch,
-export a Hugging Face deployment checkpoint (`--hf-ckpt-dir`) for
-SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in
-[`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
+**You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
 
 ## Quantization Aware Training (QAT)
 
