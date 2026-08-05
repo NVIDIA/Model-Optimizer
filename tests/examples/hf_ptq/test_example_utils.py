@@ -61,6 +61,7 @@ def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
         "README.md": "# Source model\n",
         "LICENSE": "license text\n",
         "chat_template.jinja": "{{ messages }}\n",
+        "tokenizer_config.json": '{"chat_template": "source"}\n',
         "generation_config.json": '{"source": "generation"}\n',
         "config.json": '{"source": "config"}\n',
         "hf_quant_config.json": '{"source": "quant"}\n',
@@ -77,6 +78,8 @@ def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
     (export_dir / "config.json").write_text('{"export": "config"}\n')
     (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
     (export_dir / "hf_quant_config.json").write_text('{"export": "quant"}\n')
+    (export_dir / "chat_template.jinja").write_text("{{ exported_messages }}\n")
+    (export_dir / "tokenizer_config.json").write_text('{"chat_template": "export"}\n')
 
     example_utils.copy_custom_model_files(str(source_dir), str(export_dir), trust_remote_code=False)
 
@@ -92,6 +95,7 @@ def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
 
     assert (export_dir / "config.json").read_text() == '{"export": "config"}\n'
     assert (export_dir / "hf_quant_config.json").read_text() == '{"export": "quant"}\n'
+    assert (export_dir / "tokenizer_config.json").read_text() == '{"chat_template": "export"}\n'
     assert not (export_dir / "quant_config.json").exists()
     assert not (export_dir / "quantize_config.json").exists()
     assert not (export_dir / "recipe.yaml").exists()

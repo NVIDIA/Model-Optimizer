@@ -997,14 +997,14 @@ def copy_custom_model_files(
     to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
     ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
     Source tokenizer and processor files intentionally still win because Transformers may
-    not regenerate all metadata in the source format. Callers that write a generation config
-    can exclude it; the TensorRT-LLM export retains the source generation config.
+    not regenerate all metadata in the source format. The exported ``tokenizer_config.json``
+    wins when it has a separate chat template. Callers that write a generation config can
+    exclude it; the TensorRT-LLM export retains the source generation config.
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
-        trust_remote_code: Whether trust_remote_code was used when resolving HuggingFace model
-            IDs
+        trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
         exclude_files: Additional source file names to skip.
     """
     # Resolve the source path (handles both local paths and HF model IDs)
@@ -1027,10 +1027,14 @@ def copy_custom_model_files(
         print(f"Warning: Export directory {export_path} does not exist")
         return
 
+    exclude_files = _HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ())
+    if (export_dir / "chat_template.jinja").is_file():
+        exclude_files.add("tokenizer_config.json")
+
     copied_files = copy_non_safetensor_files_from_ckpt(
         source_dir,
         export_dir,
-        exclude_files=_HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ()),
+        exclude_files=exclude_files,
         exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
     )
 
