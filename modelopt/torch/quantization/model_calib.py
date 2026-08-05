@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from modelopt.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
@@ -88,10 +89,10 @@ def _is_calibrated_nvfp4_static(q) -> bool:
 
 def _collect_grouped_linears(model: nn.Module) -> list[list[nn.Module]]:
     """Collect name-based sibling groups (Q/K/V, gate/up, w1/w3) of calibrated NVFP4-static linears."""
-    # Inline import: layer_utils -> quant_utils -> model_calib cycle.
-    from modelopt.torch.export.layer_utils import _GATE_UP_PAIRS
-
-    patterns: tuple[tuple[str, ...], ...] = (("q_proj", "k_proj", "v_proj"), *_GATE_UP_PAIRS)
+    patterns: tuple[tuple[str, ...], ...] = (
+        ("q_proj", "k_proj", "v_proj"),
+        *list_all_possible("gate_up_pairs"),
+    )
     groups: list[list[nn.Module]] = []
     for parent in model.modules():
         for sibling_names in patterns:
