@@ -11,7 +11,7 @@ ARG AUTOMODEL_ROOT=/workspace/Automodel
 
 # Copy only the setup script first so that the expensive dep-install layer
 # stays cached as long as the script hasn't changed, regardless of source edits.
-COPY examples/puzzletron/configs/families/nemotron3/setup_env.sh /tmp/setup_env.sh
+COPY puzzletron_setup/docker/setup_env.sh /tmp/setup_env.sh
 
 # Tell the build system to proceed without a live GPU
 ARG FORCE_CUDA=1
