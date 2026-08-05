@@ -15,6 +15,7 @@
 
 
 import pytest
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.transformers_models import (
     create_tiny_gpt_oss_dir,
     create_tiny_llama_dir,
@@ -24,34 +25,34 @@ from _test_utils.torch.transformers_models import (
 
 @pytest.fixture(scope="session")
 def tiny_llama_path(tmp_path_factory):
-    return str(
-        create_tiny_llama_dir(
-            tmp_path_factory.mktemp("tiny_llama"),
-            with_tokenizer=True,
-            hidden_size=512,
-            intermediate_size=512,
-        )
+    model_dir = create_tiny_llama_dir(
+        tmp_path_factory.mktemp("tiny_llama"),
+        with_tokenizer=True,
+        hidden_size=512,
+        intermediate_size=512,
     )
+    with assert_unmodified_tree(model_dir) as path:
+        yield str(path)
 
 
 @pytest.fixture(scope="session")
 def tiny_qwen3_path(tmp_path_factory):
-    return str(
-        create_tiny_qwen3_dir(
-            tmp_path_factory.mktemp("tiny_qwen3"),
-            with_tokenizer=True,
-            hidden_size=512,
-            intermediate_size=512,
-        )
+    model_dir = create_tiny_qwen3_dir(
+        tmp_path_factory.mktemp("tiny_qwen3"),
+        with_tokenizer=True,
+        hidden_size=512,
+        intermediate_size=512,
     )
+    with assert_unmodified_tree(model_dir) as path:
+        yield str(path)
 
 
 @pytest.fixture(scope="session")
 def tiny_gpt_oss_path(tmp_path_factory):
-    return str(
-        create_tiny_gpt_oss_dir(
-            tmp_path_factory.mktemp("tiny_gpt_oss"),
-            with_tokenizer=True,
-            num_hidden_layers=2,
-        )
+    model_dir = create_tiny_gpt_oss_dir(
+        tmp_path_factory.mktemp("tiny_gpt_oss"),
+        with_tokenizer=True,
+        num_hidden_layers=2,
     )
+    with assert_unmodified_tree(model_dir) as path:
+        yield str(path)

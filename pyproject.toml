@@ -82,7 +82,7 @@ hf = [
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "tiktoken",
-    "transformers>=4.56,<5.13",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
+    "transformers>=4.57,<5.15",                                                       # Should match modelopt/torch/__init__.py and noxfile.py
     "wonderwords",
 ]
 
@@ -127,8 +127,14 @@ dev-test = [
     "torch-geometric",
 ]
 # Compound extras via self-references
+mlflow = [ # Dependencies for modelopt.torch.utils.mlflow run tracking
+    "mlflow-skinny>=2.9", # client only; the tracking server's own deps are not needed here
+]
+
+# mlflow is deliberately not in `all`: it is opt-in tracking for the examples, and the
+# full client would land in the documented `nvidia-modelopt[all]` install path.
 all = ["nvidia-modelopt[onnx,hf,puzzletron]"]
-dev = ["nvidia-modelopt[all,dev-docs,dev-lint,dev-test]"]
+dev = ["nvidia-modelopt[all,mlflow,dev-docs,dev-lint,dev-test]"]
 
 [project.urls]
 Homepage = "https://github.com/NVIDIA/Model-Optimizer"

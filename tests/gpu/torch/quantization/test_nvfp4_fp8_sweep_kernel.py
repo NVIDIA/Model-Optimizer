@@ -29,6 +29,10 @@ from contextlib import contextmanager
 import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleLinear
+from _test_utils.torch.quantization.quant_utils import (
+    assert_nvfp4_static_amaxes_fp32,
+    nvfp4_static_amax_dtypes,
+)
 from conftest import requires_triton
 
 import modelopt.torch.opt as mto
@@ -40,7 +44,6 @@ from modelopt.torch.kernels.quantization.gemm import (
 from modelopt.torch.quantization.calib import NVFP4MSECalibrator
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 from modelopt.torch.quantization.model_calib import _LocalHessianAccumulator
-from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.tensor_quant import static_blockwise_fp4_fake_quant
 from modelopt.torch.quantization.utils.numeric_utils import E4M3_MAX
 
@@ -78,26 +81,6 @@ def _make_calibrator(per_block_amax, global_amax):
         axis=0,
         global_amax=global_amax,
         quant_func=_reference_quant_func(global_amax),
-    )
-
-
-def _nvfp4_static_amax_dtypes(model):
-    amax_dtypes = {}
-    for name, module in model.named_modules():
-        if (
-            isinstance(module, TensorQuantizer)
-            and module.is_nvfp4_static
-            and module.amax is not None
-        ):
-            amax_dtypes[name] = module.amax.dtype
-    return amax_dtypes
-
-
-def _assert_nvfp4_static_amaxes_fp32(amax_dtypes, model_dtype, label):
-    assert amax_dtypes, f"{label}: expected NVFP4 static amaxes for model dtype {model_dtype}"
-    assert all(amax_dtype == torch.float32 for amax_dtype in amax_dtypes.values()), (
-        f"{label}: expected all NVFP4 static amaxes to be fp32 for model dtype {model_dtype}, "
-        f"got {amax_dtypes}"
     )
 
 
@@ -338,14 +321,14 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
                 m(batch)
 
         mtq.quantize(model, cfg, forward_loop=forward_loop)
-        amax_dtypes = _nvfp4_static_amax_dtypes(model)
-        _assert_nvfp4_static_amaxes_fp32(amax_dtypes, dtype, label)
+        amax_dtypes = nvfp4_static_amax_dtypes(model)
+        assert_nvfp4_static_amaxes_fp32(amax_dtypes, dtype, label)
 
         ckpt_path = tmp_path / f"mse_calibrate_{label}_{str(dtype).rpartition('.')[-1]}.pt"
         mto.save(model, ckpt_path)
         restored_model = mto.restore(SimpleLinear(dtype=dtype).cuda(), ckpt_path)
-        restored_amax_dtypes = _nvfp4_static_amax_dtypes(restored_model)
-        _assert_nvfp4_static_amaxes_fp32(restored_amax_dtypes, dtype, f"{label} restored")
+        restored_amax_dtypes = nvfp4_static_amax_dtypes(restored_model)
+        assert_nvfp4_static_amaxes_fp32(restored_amax_dtypes, dtype, f"{label} restored")
 
         # Run a deterministic input through and snapshot the output.
         torch.manual_seed(1)
@@ -367,10 +350,10 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
     # under the same seed) before we compare post-calibration outputs.
     for name in w0:
         assert torch.equal(w0[name], w1[name]), name
-    _assert_nvfp4_static_amaxes_fp32(dtypes_default, dtype, "fast")
-    _assert_nvfp4_static_amaxes_fp32(dtypes_optout, dtype, "reference")
-    _assert_nvfp4_static_amaxes_fp32(restored_dtypes_default, dtype, "fast restored")
-    _assert_nvfp4_static_amaxes_fp32(restored_dtypes_optout, dtype, "reference restored")
+    assert_nvfp4_static_amaxes_fp32(dtypes_default, dtype, "fast")
+    assert_nvfp4_static_amaxes_fp32(dtypes_optout, dtype, "reference")
+    assert_nvfp4_static_amaxes_fp32(restored_dtypes_default, dtype, "fast restored")
+    assert_nvfp4_static_amaxes_fp32(restored_dtypes_optout, dtype, "reference restored")
     assert y_default.dtype == dtype
     assert y_optout.dtype == dtype
     assert torch.equal(y_default, y_optout)

@@ -333,6 +333,10 @@ if [[ $TASKS =~ "mmlu" ]]; then
         mmlu_flags+=" --limit $MMLU_LIMIT "
     fi
 
+    if $TRUST_REMOTE_CODE; then
+        mmlu_flags+=" --trust_remote_code "
+    fi
+
     python mmlu.py \
         --model_name causal \
         --model_path $MODEL_ABS_PATH \

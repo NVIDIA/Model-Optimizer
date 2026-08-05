@@ -40,6 +40,17 @@ from modelopt.torch.export.quant_aware_conversion import (
 
 BLOCK = 16
 
+# Tiny Mixtral shaped to match the synthetic expert tensors built by ``_nvfp4_linear`` below.
+_MIXTRAL_KWARGS = {
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_local_experts": 2,
+    "num_experts_per_tok": 2,
+    "vocab_size": 64,
+    "max_position_embeddings": 64,
+}
+
 
 def _nvfp4_linear(module: str, out: int, in_features: int) -> dict[str, torch.Tensor]:
     """Synthetic NVFP4 quantized-linear tensor group keyed under ``module``."""
@@ -176,8 +187,9 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     a ModelOpt-expanded per-expert state dict (in-memory ``mlp.experts.<i>.*`` names)
     must revert to the hub layout (``block_sparse_moe.experts.<i>.w{1,2,3}``).
     """
+    # Imports stay function-local: unit tests must import without transformers installed.
     pytest.importorskip("transformers")
-    from transformers import MixtralConfig, MixtralForCausalLM
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
 
     try:
         from transformers.conversion_mapping import get_checkpoint_conversion_mapping
@@ -186,18 +198,7 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     if not get_checkpoint_conversion_mapping("mixtral"):
         pytest.skip("transformers build has no mixtral conversion_mapping")
 
-    cfg = MixtralConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        num_local_experts=2,
-        num_experts_per_tok=2,
-        vocab_size=64,
-        max_position_embeddings=64,
-    )
-    model = MixtralForCausalLM(cfg)
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
 
     p = "model.layers.0"
     sd = {f"{p}.mlp.gate.weight": torch.randn(2, 32)}
@@ -354,22 +355,11 @@ def test_revert_quant_config_names_mapper():
     deployment loader matched none of the excludes and loaded an excluded BF16 layer as
     quantized. Uses Mixtral's real mapping (``mlp.experts`` <-> ``block_sparse_moe.experts``).
     """
+    # Import stays function-local: the helper needs transformers, which unit tests run without.
     pytest.importorskip("transformers.core_model_loading")
-    from transformers import MixtralConfig, MixtralForCausalLM
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
 
-    model = MixtralForCausalLM(
-        MixtralConfig(
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_local_experts=2,
-            num_experts_per_tok=2,
-            vocab_size=64,
-            max_position_embeddings=64,
-        )
-    )
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
     mapper = build_reverse_name_mapper(model)
     assert mapper is not None
 

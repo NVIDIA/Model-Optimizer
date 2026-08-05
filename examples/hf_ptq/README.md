@@ -19,6 +19,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
+| Tracking runs with MLflow | Record a PTQ run on an MLflow server so it can be reproduced from its entry alone | \[[Link](#tracking-runs-with-mlflow)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -637,6 +638,61 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 - Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
+
+## Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ
+run on an MLflow server so it can be reproduced later from its MLflow entry alone:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+  --export_path <quantized_ckpt_path> \
+  --mlflow https://<your-mlflow-server>/
+```
+
+The run is opened *before* the model loads, so a bad URI or a missing token fails within
+seconds rather than after a full calibration.
+
+<details>
+<summary>Uploaded artifacts</summary>
+
+| Artifact | Contents |
+| --- | --- |
+| `command.txt` | The full invocation, copy-pasteable, with credentials masked |
+| `version.txt` | The ModelOpt version that ran |
+| `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
+| `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
+| `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
+| `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
+
+</details>
+
+Every command-line argument is also logged as a searchable param, alongside
+`user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
+still recorded, with status `FAILED` and its log attached.
+
+Other flags:
+
+- `--mlflow_experiment` — defaults to `$USER/hf_ptq/<checkpoint basename>-<recipe name>`,
+  falling back to `--qformat` when no `--recipe` is used.
+- `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
+- `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
+  from the environment is best-effort — if the client is missing or the server is
+  unreachable the run warns and continues untracked, since the variable is often exported
+  for other tooling. An explicit `--mlflow` fails loudly instead.
+
+Authentication uses MLflow's own environment variables (`MLFLOW_TRACKING_TOKEN`, or
+`MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`).
+
+The tracking itself lives in `modelopt.torch.utils.mlflow`
+([`MlflowRunLogger`](../../modelopt/torch/utils/mlflow.py)), so other example scripts can
+record runs the same way; `hf_ptq.py` only supplies the params and artifacts specific to PTQ.
+
+> Note: only the main rank uploads, so `--use_fsdp2` runs produce a single run. The log
+> captures Python output; output written directly by native libraries (NCCL, CUDA) goes to
+> the terminal only. On SLURM, keep the job's own `.out` file for those.
 
 ## Resources
 

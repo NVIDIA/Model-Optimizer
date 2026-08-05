@@ -73,6 +73,7 @@ def run(args):
         tokenizer=tokenizer,
         max_batch_size=len(input_texts),
         enable_kv_cache_reuse=False,
+        trust_remote_code=args.trust_remote_code,
     )
     torch.cuda.cudart().cudaProfilerStart()
     outputs = llm.generate_text(input_texts, args.max_output_len)

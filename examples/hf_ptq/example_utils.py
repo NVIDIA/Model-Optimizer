@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import copy
 import glob
 import hashlib
@@ -22,6 +23,7 @@ import logging
 import os
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -29,6 +31,7 @@ from typing import Any
 
 import torch
 import transformers
+import yaml
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
@@ -42,6 +45,7 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
 
@@ -51,6 +55,11 @@ except ImportError:
     snapshot_download = None
 
 from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.mlflow import (
+    MlflowRunLogger,
+    default_experiment_name,
+    validate_tracking_uri,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +357,20 @@ def is_speculative(hf_config):
     return hf_config.architectures and any(
         name in hf_config.architectures[0] for name in SPECULATIVE_MODEL_LIST
     )
+
+
+def is_diffusion_gemma(hf_config) -> bool:
+    """Check if the model architecture is DiffusionGemma.
+
+    Underscores are ignored: the family is spelled ``diffusion_gemma`` in configs
+    and ``DiffusionGemma`` in class names. The nested ``text_config`` is checked too,
+    since multi-modal wrappers keep the family name there.
+    """
+    names = []
+    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
+        names.append(getattr(cfg, "model_type", None) or "")
+        names.extend(getattr(cfg, "architectures", None) or [])
+    return any("diffusiongemma" in name.lower().replace("_", "") for name in names)
 
 
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
@@ -742,6 +765,19 @@ def get_model(
     model_kwargs = config_kwargs.copy()
     model_kwargs.setdefault("dtype", "auto")
 
+    # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
+    # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
+    # Sequential packs the model onto GPU 0 first (up to gpu_mem_percentage), keeping tied
+    # modules together for checkpoints that fit; larger ones can still spill and split a
+    # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
+    # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
+    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
+        print(
+            "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
+            "'auto' mapping can split its tied encoder/decoder weights across GPUs."
+        )
+        use_seq_device_map = True
+
     if use_seq_device_map:
         device_map = "sequential"
         # If we use sequential, set max_memory limit to ensure that the model does not occupy the full GPU
@@ -1094,3 +1130,129 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
         algo["layerwise"]["checkpoint_dir"] = resolved
     return quant_cfg, resolved
+
+
+def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
+    """Add the MLflow tracking flags."""
+    parser.add_argument(
+        "--mlflow",
+        default=None,
+        help=(
+            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+            "uploading the command, the resolved recipe, the run log and the quantization "
+            "summaries. MLflow's own $MLFLOW_TRACKING_URI enables tracking without this "
+            "flag, which overrides it. A URI taken from the environment is best-effort: if "
+            "it is unusable the run warns and continues untracked."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_experiment",
+        default=None,
+        help=(
+            "MLflow experiment name. Default: "
+            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_run_name",
+        default=None,
+        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
+    )
+
+
+def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Settle where tracking is configured from, and name the experiment."""
+    # MLflow's own variable enables tracking on its own; --mlflow overrides it. Only the
+    # flag is a deliberate request, so only the flag is fatal when the URI is unusable: the
+    # variable is commonly exported for unrelated tooling and must not fail a quantization.
+    args.mlflow_required = args.mlflow is not None
+    args.mlflow = args.mlflow or os.environ.get("MLFLOW_TRACKING_URI") or None
+    if args.mlflow:
+        try:
+            args.mlflow = validate_tracking_uri(args.mlflow)
+        except ValueError as e:
+            if args.mlflow_required:
+                parser.error(f"--mlflow: {e}")
+            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
+            args.mlflow = None
+        else:
+            args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
+                "hf_ptq",
+                args.pyt_ckpt_path,
+                Path(args.recipe).stem if args.recipe else args.qformat,
+            )
+
+
+_MLFLOW_NON_PARAM_ARGS = frozenset(
+    {"dist_state", "mlflow", "mlflow_experiment", "mlflow_required", "mlflow_run_name"}
+)
+
+
+def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Params and start-time artifacts describing this PTQ run."""
+    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
+    # dist_state is an object, so record the one field worth searching on.
+    params["world_size"] = args.dist_state.world_size
+    texts = {}
+    if args.recipe:
+        # The resolved recipe, not the source file: a recipe may be a directory or use
+        # $imports, and only the resolved form is self-contained.
+        resolved = load_recipe(args.recipe).model_dump(mode="json")
+        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
+    return params, texts
+
+
+def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
+    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
+    return MlflowRunLogger(
+        args.mlflow,
+        args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        enabled=bool(args.mlflow) and args.dist_state.is_main,
+        required=args.mlflow_required,
+    )
+
+
+def mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
+    """Track this invocation for the duration of the block, or do nothing if untracked."""
+    logger = _mlflow_logger(args)
+    if not logger.enabled:
+        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
+        return nullcontext()
+    params, texts = _mlflow_run_inputs(args)
+    return logger.track(
+        params=params,
+        tags=_mlflow_run_tags(args),
+        texts=texts,
+        files=_mlflow_run_outputs(args),
+    )
+
+
+def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
+    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
+    checkpoint it produced can be found together on one tracking server.
+
+    ``checkpoint_path`` is the checkpoint this run *writes*, because that is what an
+    evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``); the input is
+    kept separately. It is resolved because ``--export_path`` defaults to a relative path,
+    which is useless as a join key.
+    """
+    return {
+        "model": Path(args.pyt_ckpt_path).name,
+        "checkpoint_path": str(Path(args.export_path).resolve()),
+        "source_checkpoint_path": args.pyt_ckpt_path,
+    }
+
+
+def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
+    """Summaries written by post_quantize, keyed by artifact path.
+
+    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
+    entries are skipped: the MoE table only exists for MoE models, and neither file is
+    written under ``--no-verbose``.
+    """
+    export_path = Path(args.export_path)
+    return {
+        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
+        "summary/moe.html": export_path / ".moe.html",
+    }

@@ -32,19 +32,10 @@ from _test_utils.onnx.lib_test_models import (
     build_small_grouped_conv_model,
     export_as_onnx,
 )
+from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 
 from modelopt.onnx.quantization.quantize import quantize
 from modelopt.onnx.utils import get_opset_version, save_onnx
-
-
-def assert_nodes_are_quantized(nodes):
-    for node in nodes:
-        for inp_idx, inp in enumerate(node.inputs):
-            if isinstance(inp, gs.Variable) and node.i(inp_idx).op != "Identity":
-                assert node.i(inp_idx).op == "DequantizeLinear", (
-                    f"Input '{inp.name}' of node '{node.name}' is not quantized but should be!"
-                )
-    return True
 
 
 def assert_nodes_are_not_quantized(nodes):
@@ -77,7 +68,7 @@ def test_bias_add_rule(tmp_path):
 
     #   Check that all Conv nodes are quantized
     conv_nodes = [n for n in graph.nodes if n.op == "Conv"]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     #   Check that all other nodes are not quantized
     other_nodes = [
@@ -99,7 +90,7 @@ def _check_resnet_residual_connection(onnx_path):
 
     #   Check that all Conv nodes are quantized
     conv_nodes = [n for n in graph.nodes if n.op == "Conv"]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     #   Check that the left-side branch of Add contains a QDQ node
     #   In this case, this means that the inputs of Add should be DequantizeLinear and Conv.
@@ -148,7 +139,7 @@ def test_convtranspose_conv_residual_int8(tmp_path):
 
     # Check that Conv and ConvTransposed are quantized
     conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     # Check that only 1 input of Add is quantized
     add_nodes = [n for n in graph.nodes if n.op == "Add"]
@@ -177,7 +168,7 @@ def test_conv_batchnorm_sig_mul_int8(tmp_path):
 
     # Check that Conv and ConvTransposed are quantized
     conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     # Check that only 1 input of Add is quantized
     add_nodes = [n for n in graph.nodes if n.op == "Add"]
@@ -207,7 +198,7 @@ def test_conv_act_pool_int8(tmp_path, include_reshape_node):
 
     # Check that Conv is quantized
     conv_nodes = [n for n in graph.nodes if n.op == "Conv"]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     # Check that MaxPool is not quantized
     pool_nodes = [n for n in graph.nodes if n.op == "MaxPool"]
@@ -233,7 +224,7 @@ def test_conv_isinf_int8(tmp_path):
 
     # Check that Conv is quantized
     conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     # Check that IsInf is running in the lowest supported precision:
     # - FP32 if opset < 20, or
@@ -269,7 +260,7 @@ def test_conv_layernorm_quantization(tmp_path):
 
     # Check that Conv nodes are quantized (inputs have Q/DQ)
     conv_nodes = [n for n in graph.nodes if n.op == "Conv"]
-    assert assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
 
     # Check that LayerNormalization has Q/DQ on its activation input
     ln_nodes = [n for n in graph.nodes if n.op == "LayerNormalization"]
@@ -308,8 +299,8 @@ def test_target_dla_conv(tmp_path, target_dla):
     mul_nodes = [n for n in graph.nodes if "Mul" in n.op]
     if target_dla:
         # Check that all Convs and Mul nodes are quantized
-        assert assert_nodes_are_quantized(conv_nodes)
-        assert assert_nodes_are_quantized(mul_nodes)
+        assert assert_nodes_are_quantized(conv_nodes, ignore_identity_inputs=True)
+        assert assert_nodes_are_quantized(mul_nodes, ignore_identity_inputs=True)
     else:
         # Check that only the 1st Conv is quantized
         assert assert_nodes_are_quantized([conv_nodes[0]])
@@ -331,7 +322,7 @@ def test_target_dla_matmul(tmp_path, target_dla):
     matmul_nodes = [n for n in graph.nodes if n.op == "MatMul"]
     if target_dla:
         # Check that MatMul is quantized
-        assert assert_nodes_are_quantized(matmul_nodes)
+        assert assert_nodes_are_quantized(matmul_nodes, ignore_identity_inputs=True)
     else:
         # GEMV detection excludes the MatMul (m=1) from quantization.
         assert assert_nodes_are_not_quantized(matmul_nodes)
