@@ -77,6 +77,17 @@ def _parse_logprobs(tokens: list[int], outputs, ctxlen: int) -> tuple[float, boo
     return continuation_logprobs, is_greedy
 
 
+if not hasattr(TRTLLM, "_parse_logprobs"):
+    raise RuntimeError(
+        "lm_eval.models.trtllm_causallms.TRTLLM has no _parse_logprobs to override; the "
+        f"backend changed shape in lm-eval {version('lm_eval')}. Recheck whether this file "
+        "is still needed."
+    )
+
+# Kept so the unit tests can assert the upstream implementation is still the broken one.
+# When that assertion starts failing, upstream has fixed the alignment and this whole file
+# should be deleted in favour of calling `lm_eval` directly.
+_UPSTREAM_PARSE_LOGPROBS = TRTLLM._parse_logprobs
 TRTLLM._parse_logprobs = staticmethod(_parse_logprobs)
 
 
