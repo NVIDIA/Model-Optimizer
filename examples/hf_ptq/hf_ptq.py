@@ -663,11 +663,15 @@ def load_model(args: argparse.Namespace):
         default_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "left"
 
-        # Quantize only the language model, but keep the full_model for calibration forward.
-        extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(full_model)
-        if extracted_lm is not None:
-            language_model = extracted_lm
-            model_type = extracted_model_type
+        # Plain PTQ quantizes only the language model. Recipes and AutoQuantize keep the complete
+        # VLM so their quantizer rules can target vision and language components in one state.
+        if args.recipe is None and args.auto_quantize_bits is None:
+            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                full_model
+            )
+            if extracted_lm is not None:
+                language_model = extracted_lm
+                model_type = extracted_model_type
     else:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
@@ -762,7 +766,7 @@ def mono_quantize(
     calib_dataloader: DataLoader,
     is_nemotron_vl_model: bool,
 ):
-    """Plain quantization of the given language model to a single quantization configuration."""
+    """Plain quantization of the selected model target to one quantization configuration."""
 
     model_is_already_quantized = is_quantized(language_model)
 
@@ -781,9 +785,10 @@ def mono_quantize(
             warnings.warn("Dynamic quantization. Calibration skipped.")
         calibrate_loop = None
         if use_calibration:
-            # For Nemotron VL image calibration, the dataloader yields multimodal kwargs (e.g., pixel_values).
-            # Those kwargs must be consumed by the *full* VLM model, not the extracted language_model.
-            if args.calib_with_images and is_nemotron_vl_model:
+            # Image calibration batches contain multimodal kwargs (for example pixel_values).
+            # They must be consumed by the complete VLM even when only a nested component is the
+            # quantization target; the full forward still exercises that component's quantizers.
+            if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
                 calibrate_loop = create_forward_loop(
@@ -801,7 +806,7 @@ def mono_quantize(
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
         # For VL models, update full_model to use the quantized language model
-        if is_nemotron_vl_model:
+        if is_nemotron_vl_model and language_model is not full_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")

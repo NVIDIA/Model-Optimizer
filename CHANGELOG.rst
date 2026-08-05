@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add opt-in FP8 Vision Encoder recipes under the ``qwen3_vl`` and ``qwen3_5`` model types. The vision-only recipe keeps the language model and KV cache in high precision; the joint recipe quantizes Vision Encoder and language-model Linears and uses FP8 KV-cache cast. Both quantize primary and deepstack merger Linears where present, while leaving patch embedding and vision-attention BMMs in high precision. Exported checkpoints require an inference runtime that supports quantized Vision Encoder Linears.
 - Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Plain ``max`` sets a tensor's global scale from the largest per-block amax seen during calibration, leaving no room above it, so any activation larger than the calibration max saturates. ``nvfp4_act_headroom`` instead anchors the global scale to a low percentile of the per-block amax distribution, ``amax = max(rho * anchor, upper)``, placing the calibrated blocks in the lower part of the FP8 block-scale range and leaving the rest as headroom. ``upper`` is the top of the range the scale commits to representing and defaults to the 99.99th percentile rather than the literal maximum: chasing a lone freak block would drag the global scale up until every other block's FP8 block scale falls below subnormal and flushes to zero, so the rarest blocks are clipped instead. Set ``upper_percentile=100`` to use the literal observed max, which guarantees no calibration data is clipped. The calibrator warns when the per-block range is too wide for ``rho`` to clear any headroom. Tunable via ``anchor_percentile`` (default 1), ``upper_percentile`` (default 99.99) and ``rho`` (default 16384). Applies only to NVFP4 dynamic-block input quantizers. Weight scales are an orthogonal axis, selected by a nested ``weight_scale_algorithm`` (``max`` by default, or ``mse`` / ``local_hessian`` with that algorithm's own options), so one recipe can combine a weight calibration with this activation policy in a single pass. ``SequentialQuantizer`` activation quantizers are not supported and raise. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` (dynamic NVFP4 W4A4 plus FP8 KV-cache cast) with only the calibration algorithm swapped, so it exports a standard NVFP4 checkpoint.
 
 *Misc*
@@ -17,9 +18,13 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Image-text calibration with ``--recipe`` now applies recipe rules to the complete VLM. Custom recipes must explicitly exclude the vision branch when it should remain in high precision. The deprecated ``--auto_quantize_bits`` path also retains the complete VLM, although AutoQuantize continues to reject image-text calibration before quantization.
+
 **Deprecations**
 
 **Bug Fixes**
+
+- Fix image-text calibration for non-Nemotron VLMs by forwarding multimodal batches through the complete VLM while instrumenting only the selected quantization target.
 
 0.46 (2026-08-xx)
 ^^^^^^^^^^^^^^^^^
