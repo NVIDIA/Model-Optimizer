@@ -14,19 +14,12 @@
 # limitations under the License.
 
 import pytest
-from _test_utils.fs_utils import read_only_tree
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.diffusers_models import create_tiny_qwen_image_pipeline_dir
 
 
 @pytest.fixture(scope="session")
 def tiny_qwen_image_path(tmp_path_factory):
-    """Create a tiny Qwen-Image pipeline and return its path (built once per session).
-
-    Used by the diffusers Qwen export tests and the recipe-level DMD2 e2e
-    (``test_fastgen_recipe_e2e.py``). The pipeline is built fully offline by
-    ``create_tiny_qwen_image_pipeline_dir`` (inline tiny Qwen2.5-VL text encoder +
-    local byte-level tokenizer).
-    """
     tmp_path = tmp_path_factory.mktemp("qwen_image")
-    with read_only_tree(create_tiny_qwen_image_pipeline_dir(tmp_path)) as path:
+    with assert_unmodified_tree(create_tiny_qwen_image_pipeline_dir(tmp_path)) as path:
         yield str(path)

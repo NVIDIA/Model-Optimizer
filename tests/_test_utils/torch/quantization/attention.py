@@ -15,6 +15,10 @@
 
 """Shared attention-quantization fixtures for the unit and gpu attention tests."""
 
+import pytest
+
+pytest.importorskip("transformers")
+
 from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaAttention
 

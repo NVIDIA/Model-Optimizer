@@ -16,7 +16,7 @@ import contextlib
 
 import pytest
 import torch
-from _test_utils.fs_utils import read_only_tree
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.distributed.utils import DistributedWorkerPool
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
@@ -29,7 +29,7 @@ import modelopt.torch.utils.distributed as dist
 def tiny_tokenizer_path(tmp_path_factory):
     tokenizer_path = tmp_path_factory.mktemp("tiny_tokenizer")
     get_tiny_tokenizer().save_pretrained(tokenizer_path)
-    with read_only_tree(tokenizer_path) as path:
+    with assert_unmodified_tree(tokenizer_path) as path:
         yield str(path)
 
 

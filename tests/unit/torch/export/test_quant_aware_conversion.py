@@ -355,6 +355,7 @@ def test_revert_quant_config_names_mapper():
     deployment loader matched none of the excludes and loaded an excluded BF16 layer as
     quantized. Uses Mixtral's real mapping (``mlp.experts`` <-> ``block_sparse_moe.experts``).
     """
+    # Import stays function-local: the helper needs transformers, which unit tests run without.
     pytest.importorskip("transformers.core_model_loading")
     from _test_utils.torch.transformers_models import get_tiny_mixtral
 

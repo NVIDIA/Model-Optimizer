@@ -17,7 +17,6 @@ import json
 from pathlib import Path
 
 import pytest
-from _test_utils.fs_utils import read_only_tree
 
 
 @pytest.fixture(scope="session")
@@ -42,8 +41,7 @@ def tiny_conversations_path(tmp_path_factory):
     ]
     with open(output_file, "w") as f:
         f.writelines(json.dumps(conv) + "\n" for conv in conversations)
-    with read_only_tree(tmp_dir):
-        yield output_file
+    return output_file
 
 
 @pytest.fixture(scope="session", autouse=True)

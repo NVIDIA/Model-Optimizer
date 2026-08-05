@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
-from _test_utils.fs_utils import read_only_tree
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 
 _KERNELS_DIR = Path(__file__).parent
@@ -92,5 +92,5 @@ def tiny_llama_dir(tmp_path_factory):
         intermediate_size=64,
         max_position_embeddings=64,
     )
-    with read_only_tree(model_dir) as path:
+    with assert_unmodified_tree(model_dir) as path:
         yield path

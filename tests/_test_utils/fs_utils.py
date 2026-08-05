@@ -15,39 +15,45 @@
 
 """Filesystem helpers for tests."""
 
-import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-# Read + traverse for everyone, write for no one.
-_RO_DIR = 0o555
-_RO_FILE = 0o444
+__all__ = ["assert_unmodified_tree"]
 
 
-def _set_read_only(root: Path, read_only: bool) -> None:
-    for path in [root, *root.rglob("*")]:
-        if path.is_symlink():
-            continue
-        if read_only:
-            path.chmod(_RO_DIR if path.is_dir() else _RO_FILE)
-        else:
-            path.chmod(path.stat().st_mode | stat.S_IWUSR)
+def _manifest(root: Path) -> dict[str, tuple[int, int]]:
+    """``relative path -> (size, mtime_ns)`` for every file below ``root``."""
+    return {
+        str(p.relative_to(root)): (p.stat().st_size, p.stat().st_mtime_ns)
+        for p in root.rglob("*")
+        if p.is_file() and not p.is_symlink()
+    }
 
 
 @contextmanager
-def read_only_tree(path: Path | str) -> Iterator[Path]:
-    """Make ``path`` read-only for the body, restoring write permission on exit.
+def assert_unmodified_tree(path: Path | str) -> Iterator[Path]:
+    """Fail if anything under ``path`` is added, removed, or rewritten inside the ``with``.
 
     For session/module-scoped model-directory fixtures: a test that writes into a shared
-    directory silently changes what every later test sees, so make that fail loudly at the
-    write instead. Write permission is restored on teardown so pytest's ``tmp_path``
-    retention cleanup can still remove the tree.
+    directory silently changes what every later test sees. Comparing a file manifest on
+    teardown catches that. ``chmod``-ing the tree read-only would report at the write rather
+    than at teardown, but it only works for an unprivileged user -- root has
+    ``CAP_DAC_OVERRIDE`` and writes straight through the permission bits, and the CI
+    containers run as root.
     """
     path = Path(path)
-    _set_read_only(path, read_only=True)
-    try:
-        yield path
-    finally:
-        if path.exists():
-            _set_read_only(path, read_only=False)
+    before = _manifest(path)
+    yield path
+    if not path.exists():
+        return
+    after = _manifest(path)
+    added = sorted(after.keys() - before.keys())
+    removed = sorted(before.keys() - after.keys())
+    changed = sorted(k for k in before.keys() & after.keys() if before[k] != after[k])
+    if added or removed or changed:
+        raise AssertionError(
+            f"shared fixture directory {path} was modified by a test "
+            f"(added={added}, removed={removed}, changed={changed}); "
+            "copy it into the test's own tmp_path instead of writing into the shared tree"
+        )

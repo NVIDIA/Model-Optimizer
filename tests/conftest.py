@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.distributed as dist
-from _test_utils.fs_utils import read_only_tree
+from _test_utils.fs_utils import assert_unmodified_tree
 from _test_utils.torch.distributed.utils import init_process
 
 import modelopt.torch.opt as mto
@@ -177,5 +177,5 @@ def tiny_wan22_path(tmp_path_factory):
     from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
 
     pipeline_dir = create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22"))
-    with read_only_tree(pipeline_dir) as path:
+    with assert_unmodified_tree(pipeline_dir) as path:
         yield str(path)
