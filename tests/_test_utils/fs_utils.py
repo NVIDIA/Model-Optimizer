@@ -19,8 +19,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-__all__ = ["assert_unmodified_tree"]
-
 
 def _manifest(root: Path) -> dict[str, tuple[int, int]]:
     """``relative path -> (size, mtime_ns)`` for every file below ``root``."""

@@ -586,17 +586,6 @@ def get_tiny_mixtral(**config_kwargs) -> PreTrainedModel:
     return AutoModelForCausalLM.from_config(MixtralConfig(**kwargs))
 
 
-def create_tiny_mixtral_dir(
-    tmp_path: Path | str, with_tokenizer: bool = False, **config_kwargs
-) -> Path:
-    return _create_tiny_llm_dir(
-        Path(tmp_path) / "tiny_mixtral",
-        get_tiny_mixtral,
-        with_tokenizer=with_tokenizer,
-        **config_kwargs,
-    )
-
-
 ##### LLAMA #####
 def get_tiny_llama(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
@@ -700,10 +689,6 @@ def get_tiny_bert(**config_kwargs) -> PreTrainedModel:
     }
     kwargs.update(config_kwargs)
     return AutoModelForQuestionAnswering.from_config(BertConfig(**kwargs))
-
-
-def create_tiny_bert_dir(tmp_path: Path | str, **config_kwargs) -> Path:
-    return _create_tiny_llm_dir(Path(tmp_path) / "tiny_bert", get_tiny_bert, **config_kwargs)
 
 
 ##### ViT (vision) #####
