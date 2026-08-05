@@ -539,6 +539,35 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
     _supports_layerwise = False
 
     @property
+    def convert(self) -> ConvertEntrypoint:
+        """Calibrate SVDQuant and move its low-rank branch into HF PEFT.
+
+        This applies to every ``algorithm.method=svdquant`` recipe, independent
+        of the quantization format.
+        """
+
+        def wrapped_func(model, config, forward_loop=None):
+            from .plugins.svdquant_peft import _externalize_svdquant_lora
+
+            rank = config.lowrank
+            model, _ = wrapped_calib_func(
+                model,
+                config,
+                forward_loop,
+                func=self.__class__._calib_func,
+                supports_layerwise=self.__class__._supports_layerwise,
+            )
+
+            peft_metadata = _externalize_svdquant_lora(model, rank)
+            metadata = {}
+            update_quantize_metadata(model, config, metadata)
+            if peft_metadata is not None:
+                metadata["svdquant_peft"] = peft_metadata
+            return model, metadata
+
+        return wrapped_func
+
+    @property
     def restore(self) -> RestoreEntrypoint:
         """The mode's entrypoint for restoring a model."""
         return restore_svdquant_model

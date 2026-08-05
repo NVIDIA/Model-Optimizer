@@ -72,8 +72,13 @@ def quantize_model_and_forward(model, config, calib_data, compress=False):
     if compress:
         mtq.compress(model)
 
-    for module in model.modules():
-        assert not isinstance(module, torch.nn.Linear) or is_quantized_linear(module)
+    for name, module in model.named_modules():
+        is_peft_adapter = ".lora_A." in name or ".lora_B." in name
+        assert (
+            not isinstance(module, torch.nn.Linear)
+            or is_quantized_linear(module)
+            or is_peft_adapter
+        )
 
     model.train()
 

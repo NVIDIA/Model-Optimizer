@@ -69,16 +69,25 @@ import itertools
 import logging
 import os
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
 import torch
 from diffusers import QwenImagePipeline, QwenImageTransformer2DModel
 from diffusers.utils.torch_utils import randn_tensor
+from packaging.version import Version
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+try:
+    # Diffusers 0.35/0.36 needs explicit sequence lengths; starting in 0.37 the
+    # attention mask is authoritative and ``txt_seq_lens`` was removed.
+    _DIFFUSERS_NEEDS_TXT_SEQ_LENS = Version(version("diffusers")) < Version("0.37.0")
+except PackageNotFoundError:  # pragma: no cover - diffusers is imported above
+    _DIFFUSERS_NEEDS_TXT_SEQ_LENS = False
 
 
 @dataclass
@@ -294,15 +303,19 @@ class QwenImageDMDInferencePipeline:
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_sequence_length,
             )
-        txt_seq_lens = (
-            prompt_embeds_mask.sum(dim=1).int().tolist() if prompt_embeds_mask is not None else None
-        )
-        neg_txt_seq_lens = (
-            neg_prompt_embeds_mask.sum(dim=1).int().tolist()
-            if neg_prompt_embeds_mask is not None
-            else None
-        )
-
+        positive_transformer_kwargs = {}
+        negative_transformer_kwargs = {}
+        if _DIFFUSERS_NEEDS_TXT_SEQ_LENS:
+            positive_transformer_kwargs["txt_seq_lens"] = (
+                prompt_embeds_mask.sum(dim=1).int().tolist()
+                if prompt_embeds_mask is not None
+                else None
+            )
+            negative_transformer_kwargs["txt_seq_lens"] = (
+                neg_prompt_embeds_mask.sum(dim=1).int().tolist()
+                if neg_prompt_embeds_mask is not None
+                else None
+            )
         # ---- 3. Build initial noisy latents at t = schedule[0] ---------------
         if isinstance(prompt, str):
             batch_size = 1
@@ -334,9 +347,9 @@ class QwenImageDMDInferencePipeline:
                 encoder_hidden_states_mask=prompt_embeds_mask,
                 timestep=timestep,
                 img_shapes=img_shapes,
-                txt_seq_lens=txt_seq_lens,
                 guidance=None,
                 return_dict=False,
+                **positive_transformer_kwargs,
             )[0]
             if do_cfg:
                 # CFG two-pass: ``v_cfg = v_neg + s*(v_pos - v_neg)``. Equivalent
@@ -352,9 +365,9 @@ class QwenImageDMDInferencePipeline:
                     encoder_hidden_states_mask=neg_prompt_embeds_mask,
                     timestep=timestep,
                     img_shapes=img_shapes,
-                    txt_seq_lens=neg_txt_seq_lens,
                     guidance=None,
                     return_dict=False,
+                    **negative_transformer_kwargs,
                 )[0]
                 flow_packed = (
                     neg_flow_packed.to(torch.float64)

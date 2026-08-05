@@ -114,6 +114,22 @@ Here is an example of performing QAT:
     # Adjust learning rate and training duration
     train(model, train_loader, optimizer, scheduler, ...)
 
+For SVDQuant, the calibrated low-rank residual is represented by a structural
+Hugging Face PEFT adapter on only the layers to which SVDQuant was applied. The
+adapter A/B factors are trainable immediately after calibration or restoration,
+so they are included by a normally constructed optimizer. Construct distributed
+wrappers and the optimizer after quantization or checkpoint restoration:
+
+.. code-block:: python
+
+    model = mtq.quantize(model, quant_config, forward_loop)
+    model = DistributedDataParallel(model)
+    optimizer = create_optimizer(parameter for parameter in model.parameters() if parameter.requires_grad)
+
+The adapter implements the SVDQuant decomposition
+``Q(W_residual)x + B(Ax)`` and requires the ``nvidia-modelopt[hf]`` optional
+dependencies.
+
 .. tip::
 
     We recommend QAT for 10% of the original training epochs. For LLMs, we find that QAT fine-tuning for even
@@ -125,6 +141,11 @@ Storing and restoring quantized model
 The model weights and quantizer states need to saved for future use or to resume training.
 Please see :ref:`saving and restoring of ModelOpt-modified models <save-restore>` to learn
 how to save and restore the quantized model.
+
+For PEFT-backed SVDQuant, ``mto.save`` / ``mto.restore`` preserve the adapter
+topology and factor values. The split checkpoint flow is also supported: restore
+``mto.modelopt_state(model)`` first, then load the complete
+``model.state_dict()`` before constructing the distributed wrapper and optimizer.
 
 
 Optimal Partial Quantization using ``auto_quantize``

@@ -136,22 +136,23 @@ class SVDQuantLinear(QuantLinearConvBase):
 
     def _compute_lora_residual(self, input: torch.Tensor):
         """Compute the LoRA residual if present, otherwise return None."""
+        lora_a_weight = getattr(self.weight_quantizer, "svdquant_lora_a", None)
+        lora_b_weight = getattr(self.weight_quantizer, "svdquant_lora_b", None)
         if (
             self._not_sequential_quantizers()
-            and self.weight_quantizer.svdquant_lora_a is not None
-            and self.weight_quantizer.svdquant_lora_b is not None
+            and lora_a_weight is not None
+            and lora_b_weight is not None
         ):
-            lora_a = F.linear(input, weight=self.weight_quantizer.svdquant_lora_a)
-            lora_b = F.linear(lora_a, weight=self.weight_quantizer.svdquant_lora_b)
+            lora_a = F.linear(input, weight=lora_a_weight)
+            lora_b = F.linear(lora_a, weight=lora_b_weight)
             return lora_b
         return None
 
     def forward(self, input, *args, **kwargs):
         """SVDQuant layer forward function."""
-        has_svdquant_lora = (
-            self._not_sequential_quantizers()
-            and self.weight_quantizer.svdquant_lora_a is not None
-            and self.weight_quantizer.svdquant_lora_b is not None
+        has_svdquant_lora = self._not_sequential_quantizers() and all(
+            getattr(self.weight_quantizer, factor_name, None) is not None
+            for factor_name in ("svdquant_lora_a", "svdquant_lora_b")
         )
         if has_svdquant_lora:
             input = self._apply_pre_quant_scale(input)
@@ -170,15 +171,10 @@ class SVDQuantLinear(QuantLinearConvBase):
             and hasattr(self, "weight")
             and self.weight_quantizer.fake_quant
         ):
-            if (
-                self._not_sequential_quantizers()
-                and self.weight_quantizer.svdquant_lora_a is not None
-                and self.weight_quantizer.svdquant_lora_b is not None
-            ):
-                self.weight.data.copy_(
-                    self.weight
-                    + self.weight_quantizer.svdquant_lora_b @ self.weight_quantizer.svdquant_lora_a
-                )
+            lora_a = getattr(self.weight_quantizer, "svdquant_lora_a", None)
+            lora_b = getattr(self.weight_quantizer, "svdquant_lora_b", None)
+            if self._not_sequential_quantizers() and lora_a is not None and lora_b is not None:
+                self.weight.data.copy_(self.weight + lora_b @ lora_a)
             if not keep_attrs:
                 _attrs = [
                     "_svdquant_lora_a",
