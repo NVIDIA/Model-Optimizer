@@ -46,11 +46,10 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    The tied-weight dedup caches must be scoped to one export invocation: a
-    process-global cache would carry stale entries whose ``data_ptr`` keys can be
-    recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
+    The tied-weight dedup caches must be scoped to one export invocation. ``tied_cache``
+    holds dense Linear dedup entries keyed by the source Parameter's Python identity.
+    ``source_parameter_ids`` snapshots those identities before export-time replacement.
+    ``moe_tied_cache`` holds fused-experts dedup entries.
     """
 
     model: nn.Module
@@ -58,11 +57,17 @@ class ExportContext:
     is_modelopt_qlora: bool = False
     tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
     moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
+    source_parameter_ids: dict[tuple[int, str], int] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
-        # FSDP2 may recycle data_ptr() values as modules are resharded, so pointer-keyed dedup can
-        # falsely alias distinct weights. Disable it for FSDP2; consequently, legitimately tied
-        # packed weights and scale buffers are not re-aliased and may be stored as duplicates.
+        self.source_parameter_ids = {
+            (id(module), name): id(parameter)
+            for module in self.model.modules()
+            for name, parameter in module._parameters.items()
+            if parameter is not None
+        }
+        # FSDP2 replaces Parameters as modules are resharded, so their identities are not stable
+        # during export. Disable dedup; tied packed weights and scales may be stored as duplicates.
         # TODO: replace this with stable, name-based tied-group deduplication.
         if is_fsdp2_model(self.model):
             self.tied_cache = None

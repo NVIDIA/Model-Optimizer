@@ -570,6 +570,7 @@ def _export_quantized_weight(
     dtype: torch.dtype,
     weight_name: str = "weight",
     _tied_cache: dict[int, nn.Module] | None = None,
+    _tied_source_id: int | None = None,
 ):
     """For the given weight attr of the sub_module, export the quantization info of it.
 
@@ -578,15 +579,11 @@ def _export_quantized_weight(
 
     Tied-weight dedup is opt-in via ``_tied_cache``: the setattr below replaces
     ``.weight`` with a fresh ``nn.Parameter`` wrapping packed bytes, breaking
-    any HF-level tie. When the caller passes a ``_tied_cache`` dict (keyed by
-    the pre-pack ``weight.data_ptr()``), the alias step at the end re-points
-    ``weight`` / ``weight_scale`` / ``weight_scale_2`` at a previously-processed
-    module sharing the same source memory so the downstream data_ptr dedup can
-    collapse them. The cache is owned by the caller (typically
-    ``_export_transformers_checkpoint``) and scoped to one export invocation;
-    when ``_tied_cache`` is ``None`` (the default) the alias step is skipped
-    entirely. Uses memory identity only — no ``_tied_weights_keys`` lookup,
-    no-op for non-tied modules.
+    any HF-level tie. The cache uses the pre-pack Parameter's Python identity, avoiding
+    allocator address reuse that can falsely alias later independent weights. On a cache
+    hit, the alias step re-points the packed weight and scale buffers at the previously
+    processed module. Whole-model callers pass ``_tied_source_id`` captured before export
+    mutates any Parameters.
     """
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
@@ -596,12 +593,10 @@ def _export_quantized_weight(
     quantizer_attrs = quantizer_attr_names(weight_name)
     weight: nn.Parameter = getattr(sub_module, weight_name)
 
-    # Capture source identity BEFORE any tensor-creating operation below.
-    # For HF-tied weights this matches across all modules sharing the
-    # underlying Parameter; the cache lookup at the end of this function
-    # uses it to detect ties whose Python identity is about to be broken
-    # by the setattr on `weight_name` further down.
-    _tied_source_data_ptr = weight.data_ptr()
+    # Direct callers can capture the identity here. Whole-model export passes an identity
+    # snapshotted before export can replace source Parameters.
+    if _tied_source_id is None:
+        _tied_source_id = id(weight)
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
     )
@@ -819,7 +814,7 @@ def _export_quantized_weight(
     # this export) already max-merged the per-side amaxes. Gated on the
     # caller-owned _tied_cache so the dedup state is scoped to one export.
     if _tied_cache is not None:
-        _prior = _tied_cache.get(_tied_source_data_ptr)
+        _prior = _tied_cache.get(_tied_source_id)
         if _prior is not None and _prior is not sub_module:
             if hasattr(_prior, weight_name):
                 setattr(sub_module, weight_name, getattr(_prior, weight_name))
@@ -836,7 +831,7 @@ def _export_quantized_weight(
                     delattr(sub_module, _attr)
                 sub_module.register_buffer(_attr, getattr(_prior, _attr))
         else:
-            _tied_cache[_tied_source_data_ptr] = sub_module
+            _tied_cache[_tied_source_id] = sub_module
 
     torch.cuda.empty_cache()
 
