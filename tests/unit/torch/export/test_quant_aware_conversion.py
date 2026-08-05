@@ -327,6 +327,7 @@ def test_scoped_submodel_prefix_change_does_not_capture_siblings():
     "There is no module or parameter named 'vision_model'".
     """
     pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import PrefixChange
 
     model = torch.nn.Module()
@@ -367,6 +368,7 @@ def test_scoped_rule_maps_config_module_names_consistently():
     excluded layer as quantized.
     """
     pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
     from transformers.core_model_loading import PrefixChange
 
     model = torch.nn.Module()
@@ -389,6 +391,34 @@ def test_scoped_rule_maps_config_module_names_consistently():
     # A trailing-wildcard exclude pattern tracks the same rename its weights got, so the
     # excluded (BF16) vision tower still matches the exported tensor names.
     assert mapper("model.vision_tower*") == "model.vision_tower.vision_model*"
+
+
+def test_scoped_weight_converter_is_refused():
+    """A scoped ``WeightConverter`` must fall back rather than emit unscoped rules.
+
+    Converter-derived rules (expert leaf renames, dense splits) match by module suffix,
+    so they cannot be confined to a sub-model subtree the way an anchored rename can.
+    No current architecture scopes a converter -- transformers only scopes
+    ``WeightRenaming``/``PrefixChange`` -- so if one ever appears, refusing the whole
+    conversion keeps the in-memory names (a warning) instead of silently rewriting an
+    identically-named module in a sibling namespace.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import Chunk, WeightConverter
+
+    conv = WeightConverter(
+        source_patterns="mlp.gate_up_proj",
+        target_patterns=["mlp.gate_proj", "mlp.up_proj"],
+        operations=[Chunk(dim=0)],
+    )
+    conv.scope_prefix = "model.language_model"
+    conv.base_model_prefix = "model"
+    model = types.SimpleNamespace(_weight_conversions=[conv])
+
+    sd = _nvfp4_linear("model.language_model.layers.0.mlp.gate_up_proj", 8, 16)
+    with pytest.raises(QuantConversionUnsupportedError, match="scoped WeightConverter"):
+        revert_weight_conversion_quant_aware(model, sd)
 
 
 def test_split_collision_raises():

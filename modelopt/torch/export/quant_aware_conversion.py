@@ -447,6 +447,18 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
                     RenameRule(pattern=pattern, repl=repl, scope_prefixes=scope_prefixes)
                 )
         elif isinstance(rev, WeightConverter):
+            # Converter-derived rules (expert leaf renames, dense split) are matched by
+            # module suffix, not by an anchored pattern, so they carry no scope and would
+            # reach identically-named modules in sibling namespaces. No current model
+            # scopes a WeightConverter -- transformers only scopes WeightRenaming /
+            # PrefixChange -- so rather than emit rules we cannot scope, refuse the
+            # conversion and let the caller fall back to in-memory names. That is a
+            # warning plus unchanged names, instead of a silently mis-named checkpoint.
+            if _scope_prefixes(rev):
+                raise QuantConversionUnsupportedError(
+                    f"scoped WeightConverter (scope_prefix="
+                    f"{getattr(rev, 'scope_prefix', None)!r}) cannot be reversed scope-aware"
+                )
             ops = list(rev.operations)
             if any(isinstance(op, SplitModulelist) for op in ops):
                 # Expert converter: ModelOpt already un-stacked/un-fused experts to
