@@ -408,11 +408,16 @@ def _resolver(
     state: WizardState,
     defaults_path: Path | None,
     preset: SetupPreset | None = None,
+    family_config: str | Path | None = None,
 ) -> DefaultsResolver:
     return DefaultsResolver(
         builtins=BUILTINS,
         model_derived={},
-        preset_defaults=(preset.resolved_defaults() if preset is not None else {}),
+        preset_defaults=(
+            preset.resolved_defaults(family_config)
+            if preset is not None and family_config is not None
+            else {}
+        ),
         file_defaults=load_defaults(defaults_path),
         preserved=_nested_records(state),
     )
@@ -4861,7 +4866,6 @@ def run_wizard_v2(
     else:
         print("  Full setup enabled: every advanced section is customizable.")
     selected_defaults = defaults_path or state.defaults_path
-    resolver = _resolver(state, selected_defaults, preset)
     if resume is not None and defaults_path is not None:
         state.set_defaults_path(defaults_path)
         print(f"  Persisted replacement defaults file: {state.defaults_path}")
@@ -4874,6 +4878,8 @@ def run_wizard_v2(
     if state.payload.get("model", {}).get("source"):
         saved = state.payload["model"]
         context["model"] = inspect_model(str(saved["source"]))
+    family_config = context["model"].inventory.family_config if "model" in context else None
+    resolver = _resolver(state, selected_defaults, preset, family_config)
 
     index = 0
     while index < len(SECTION_BUILDERS):
@@ -4885,6 +4891,13 @@ def run_wizard_v2(
         builder = SECTION_BUILDERS[index]
         completed = builder(session, resolver, context)
         if completed:
+            if SECTION_NAMES[index] == "model" and "model" in context:
+                resolver = _resolver(
+                    state,
+                    selected_defaults,
+                    preset,
+                    context["model"].inventory.family_config,
+                )
             index += 1
         else:
             target = session.consume_back_target()
@@ -4896,7 +4909,10 @@ def run_wizard_v2(
                 if replacement is not BACK:
                     state.set_preset(str(replacement))
                     preset = get_setup_preset(str(replacement))
-                    resolver = _resolver(state, selected_defaults, preset)
+                    family_config = (
+                        context["model"].inventory.family_config if "model" in context else None
+                    )
+                    resolver = _resolver(state, selected_defaults, preset, family_config)
                     print(f"  Profile changed to: {preset.choice_title}")
                 continue
             index = SECTION_NAMES.index(target.section) if target is not None else index

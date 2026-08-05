@@ -3,7 +3,7 @@
 
 """Schema-driven Puzzletron campaign setup."""
 
-from .defaults import DefaultsResolver, ResolvedDefault, load_defaults
+from .defaults import DefaultsResolver, ResolvedDefault, load_defaults, validate_defaults
 from .state import FieldRecord, PromptFrame, WizardState
 
 __all__ = [
@@ -13,4 +13,5 @@ __all__ = [
     "ResolvedDefault",
     "WizardState",
     "load_defaults",
+    "validate_defaults",
 ]

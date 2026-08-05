@@ -30,7 +30,7 @@ import yaml
 
 from puzzletron_setup import SetupError
 
-__all__ = ["DefaultsResolver", "ResolvedDefault", "load_defaults"]
+__all__ = ["DefaultsResolver", "ResolvedDefault", "load_defaults", "validate_defaults"]
 
 
 class _AnyMapping:
@@ -125,6 +125,16 @@ def _validate_mapping(value: Any, schema: Any, path: str) -> None:
         _validate_mapping(item, schema[key], child_path)
 
 
+def validate_defaults(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and isolate one versioned setup-defaults mapping."""
+    if payload.get("schema_version") != 1:
+        raise SetupError(
+            f"Unsupported defaults schema {payload.get('schema_version')!r}; expected 1."
+        )
+    _validate_mapping(payload, _SCHEMA, "")
+    return deepcopy(dict(payload))
+
+
 def load_defaults(path: Path | None) -> dict[str, Any]:
     """Load an explicitly selected versioned defaults file."""
     if path is None:
@@ -138,12 +148,7 @@ def load_defaults(path: Path | None) -> dict[str, Any]:
         raise SetupError(f"Cannot read defaults file {resolved}: {error}") from error
     if not isinstance(payload, Mapping):
         raise SetupError(f"Defaults file must contain a YAML mapping: {resolved}")
-    if payload.get("schema_version") != 1:
-        raise SetupError(
-            f"Unsupported defaults schema {payload.get('schema_version')!r}; expected 1."
-        )
-    _validate_mapping(payload, _SCHEMA, "")
-    return deepcopy(dict(payload))
+    return validate_defaults(payload)
 
 
 def _lookup(mapping: Mapping[str, Any], dotted_path: str) -> tuple[bool, Any]:

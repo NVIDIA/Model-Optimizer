@@ -36,6 +36,9 @@ from puzzletron_setup.v2.wizard import (
     output_review_section,
 )
 
+_QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
+_NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
+
 
 def _context():
     return {
@@ -45,7 +48,7 @@ def _context():
     }
 
 
-def test_guided_profiles_explain_cost_and_supply_nested_defaults():
+def test_guided_profiles_explain_cost_and_load_family_defaults():
     assert [preset.name for preset in QUICK_SETUP_PRESETS] == [
         "smoke",
         "balanced",
@@ -55,12 +58,55 @@ def test_guided_profiles_explain_cost_and_supply_nested_defaults():
 
     resolver = DefaultsResolver(
         builtins={"pruning": {"bypass": {"enabled": True}}},
-        preset_defaults=get_setup_preset("smoke").resolved_defaults(),
+        preset_defaults=get_setup_preset("smoke").resolved_defaults(_QWEN_FAMILY_CONFIG),
     )
 
     resolved = resolver.resolve_default("pruning.bypass.enabled")
     assert resolved.value is False
     assert resolved.source == "preset"
+
+
+def test_guided_profile_defaults_are_selected_by_model_family(tmp_path):
+    families = {}
+    for family, num_solutions in (("first", 2), ("second", 7)):
+        family_dir = tmp_path / family
+        family_dir.mkdir()
+        family_config = family_dir / "family.yaml"
+        family_config.write_text("family: {}\n")
+        (family_dir / "setup_v2_defaults.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "schema_version": 1,
+                    "profiles": {"smoke": {"mip": {"num_solutions": num_solutions}}},
+                }
+            )
+        )
+        families[family] = family_config
+
+    preset = get_setup_preset("smoke")
+
+    assert preset.resolved_defaults(families["first"])["mip"]["num_solutions"] == 2
+    assert preset.resolved_defaults(families["second"])["mip"]["num_solutions"] == 7
+
+
+def test_guided_profile_defaults_fail_closed_when_family_profile_is_missing(tmp_path):
+    family_config = tmp_path / "family.yaml"
+    family_config.write_text("family: {}\n")
+    (tmp_path / "setup_v2_defaults.yaml").write_text(
+        yaml.safe_dump({"schema_version": 1, "profiles": {}})
+    )
+
+    with pytest.raises(SetupError, match="profile 'balanced' is not configured"):
+        get_setup_preset("balanced").resolved_defaults(family_config)
+
+
+@pytest.mark.parametrize("family_config", [_QWEN_FAMILY_CONFIG, _NEMOTRON_FAMILY_CONFIG])
+@pytest.mark.parametrize("preset_name", ["smoke", "balanced", "high-confidence"])
+def test_each_model_family_defines_every_guided_profile(family_config, preset_name):
+    defaults = get_setup_preset(preset_name).resolved_defaults(family_config)
+
+    assert defaults["pruning"]
+    assert defaults["mip"]
 
 
 def test_explicit_defaults_override_guided_profile():
@@ -142,7 +188,12 @@ def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
         setup_mode="quick",
         preset="balanced",
     )
+    state.payload["model"] = {"source": "saved-model"}
+    state.save()
     resolved_baseline = {}
+    inspected = SimpleNamespace(
+        inventory=SimpleNamespace(family_config=_QWEN_FAMILY_CONFIG),
+    )
 
     def capture_baseline(session, resolver, context):
         del session, context
@@ -152,6 +203,7 @@ def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
 
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (capture_baseline,))
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
+    monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
     monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
@@ -226,7 +278,7 @@ def test_guided_data_asks_only_for_source_and_uses_nested_defaults(
     assert data_section(
         WizardSession(state, backend, guided=True),
         DefaultsResolver(
-            preset_defaults=get_setup_preset("balanced").resolved_defaults(),
+            preset_defaults=get_setup_preset("balanced").resolved_defaults(_QWEN_FAMILY_CONFIG),
             file_defaults={
                 "data": {
                     "modality": "text",
@@ -391,6 +443,12 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     assert (campaign / "smoke" / "experiment.yaml").is_file()
     assert (campaign / "production" / "experiment.yaml").is_file()
     assert (campaign / "resolved_defaults.yaml").is_file()
+    generated = WizardState.resume(campaign)
+    assert generated.collection("pruning")["depth_remove"] == 1
+    assert generated.collection("default_resolutions")["pruning.depth_remove"] == {
+        "value": 1,
+        "source": "preset",
+    }
 
 
 def test_guided_section_uses_profile_without_action_prompt(tmp_path):

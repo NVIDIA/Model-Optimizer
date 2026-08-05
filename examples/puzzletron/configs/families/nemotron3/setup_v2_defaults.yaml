@@ -1,0 +1,52 @@
+schema_version: 1
+
+profiles:
+  smoke:
+    pruning:
+      depth_remove: 1
+      depth_importance_samples: 32
+      width_importance_samples: 512
+      sort_sanity: false
+      width_sanity: false
+      slicing_sanity: false
+      replacement_samples: 32
+      bypass:
+        enabled: false
+        samples: 64
+    mip:
+      goal_value: 90%
+      num_solutions: 2
+
+  balanced:
+    pruning:
+      depth_remove: 4
+      depth_importance_samples: 128
+      width_importance_samples: 32768
+      sort_sanity: false
+      width_sanity: false
+      slicing_sanity: false
+      replacement_samples: 128
+      bypass:
+        enabled: true
+        samples: 4096
+    mip:
+      goal_value: 75%
+      num_solutions: 8
+
+  high-confidence:
+    pruning:
+      depth_remove: 6
+      depth_importance_samples: 512
+      width_importance_samples: 65536
+      sort_sanity: true
+      sort_sanity_samples: 512
+      width_sanity: true
+      width_sanity_samples: 512
+      slicing_sanity: true
+      replacement_samples: 512
+      bypass:
+        enabled: true
+        samples: 8192
+    mip:
+      goal_value: 70%
+      num_solutions: 16
