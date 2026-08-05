@@ -21,6 +21,8 @@ Changelog
 
 **Bug Fixes**
 
+- Fix unified HF export of multimodal models whose vision tower carries its own ``PrefixChange`` conversion (``LlavaForConditionalGeneration`` on ``transformers>=5.12`` — NVBug 6525511). transformers collects conversion mappings recursively and scopes each sub-model's transforms to that sub-module via ``scope_prefix``, matching only keys under that prefix. ModelOpt's quant-aware reverse conversion read the raw patterns and ignored ``scope_prefix``, so the vision tower's "add a ``vision_model.`` prefix" rule was applied to *every* key in the state dict: an exported llava-1.5-13b checkpoint had all 758 tensors moved under a bogus top-level ``vision_model.`` namespace (``vision_model.language_model.*``, ``vision_model.lm_head.*``), and vLLM rejected it with ``ValueError: There is no module or parameter named 'vision_model' in LlavaForConditionalGeneration``. Reverse rename rules now carry their scope and are applied only to keys under it, matching transformers' own ``WeightTransform._scoped_match`` semantics.
+
 0.46 (2026-08-xx)
 ^^^^^^^^^^^^^^^^^
 

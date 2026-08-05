@@ -316,6 +316,81 @@ def test_nested_text_prefix_reverse_still_applies_to_text_model():
     assert mapper("model.layers.0") == "model.language_model.layers.0"
 
 
+def test_scoped_submodel_prefix_change_does_not_capture_siblings():
+    """A vision sub-model's ``PrefixChange`` must not prefix the whole VLM state dict.
+
+    NVBug 6525511: ``LlavaForConditionalGeneration`` on transformers>=5.12 collects the
+    vision tower's own "add ``vision_model.``" prefix change. transformers scopes it to
+    ``model.vision_tower`` via ``scope_prefix`` and only matches keys under that prefix;
+    applying the raw pattern instead prefixes *every* key, so the export writes
+    ``vision_model.language_model.*`` / ``vision_model.lm_head.*`` and vLLM fails with
+    "There is no module or parameter named 'vision_model'".
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import PrefixChange
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.vision_tower = torch.nn.Module()
+    model.model.vision_tower.encoder = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model.lm_head = torch.nn.Linear(2, 2, bias=False)
+
+    prefix_change = PrefixChange(prefix_to_remove="vision_model")
+    prefix_change.scope_prefix = "model.vision_tower"
+    prefix_change.base_model_prefix = "model"
+    model._weight_conversions = [prefix_change]
+
+    state_dict = {
+        "model.vision_tower.encoder.weight": torch.randn(2, 2),
+        "model.language_model.layers.0.weight": torch.randn(2, 2),
+        "lm_head.weight": torch.randn(2, 2),
+    }
+    reverted = revert_weight_conversion_quant_aware(model, state_dict)
+
+    # Only the vision tower's own subtree gains the ``vision_model.`` segment.
+    assert set(reverted) == {
+        "model.vision_tower.vision_model.encoder.weight",
+        "model.language_model.layers.0.weight",
+        "lm_head.weight",
+    }
+    # Regression guard: nothing may be moved under a bogus top-level ``vision_model``.
+    assert not any(k.startswith("vision_model.") for k in reverted)
+
+
+def test_scoped_rule_maps_config_module_names_consistently():
+    """``build_reverse_name_mapper`` must apply the same scoping as the weight rename.
+
+    Otherwise ``exclude_modules`` (which lists the BF16 vision tower) lands in a
+    different namespace than the weights and a deployment loader silently treats an
+    excluded layer as quantized.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    from transformers.core_model_loading import PrefixChange
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.vision_tower = torch.nn.Module()
+    model.model.vision_tower.encoder = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+
+    prefix_change = PrefixChange(prefix_to_remove="vision_model")
+    prefix_change.scope_prefix = "model.vision_tower"
+    prefix_change.base_model_prefix = "model"
+    model._weight_conversions = [prefix_change]
+
+    mapper = build_reverse_name_mapper(model)
+    assert mapper is not None
+    assert mapper("model.vision_tower.encoder") == "model.vision_tower.vision_model.encoder"
+    # Sibling namespaces are untouched.
+    assert mapper("model.language_model.layers.0") == "model.language_model.layers.0"
+    # A trailing-wildcard exclude pattern tracks the same rename its weights got, so the
+    # excluded (BF16) vision tower still matches the exported tensor names.
+    assert mapper("model.vision_tower*") == "model.vision_tower.vision_model*"
+
+
 def test_split_collision_raises():
     """A split whose target key already exists must fail instead of overwriting."""
     sd = _nvfp4_linear("m.gate_up_proj", 8, 16)
