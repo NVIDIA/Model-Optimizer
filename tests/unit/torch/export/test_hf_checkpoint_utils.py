@@ -35,6 +35,7 @@ def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     (src_dir / "model.safetensors").write_text("weights")
+    (src_dir / "model.safetensors.index.json").write_text('{"weight_map": {}}')
     (src_dir / "pytorch_model.bin").write_text("weights")
     (src_dir / "stats.npy").write_text("stats")
     (src_dir / "reasoning_parser.py").write_text("parser")
@@ -42,6 +43,7 @@ def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_
     default_dst = tmp_path / "default"
     copy_non_safetensor_files_from_ckpt(src_dir, default_dst)
     assert not (default_dst / "model.safetensors").exists()
+    assert not (default_dst / "model.safetensors.index.json").exists()
     assert (default_dst / "pytorch_model.bin").exists()
     assert (default_dst / "stats.npy").exists()
 

@@ -293,6 +293,8 @@ def copy_non_safetensor_files_from_ckpt(
         sp = os.path.join(src, entry)
         if not os.path.isfile(sp):
             continue
+        if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
+            continue
         shutil.copy2(sp, dst)
         copied_files.append(entry)
     return copied_files
