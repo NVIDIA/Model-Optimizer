@@ -13,6 +13,8 @@ Changelog
 **Bug Fixes**
 
 - Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first generated token when KV-cache decoding is off, including the automatic fallback under sequence parallelism, which made generation silently ignore the image. No other ModelOpt feature is affected.
+- Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- Fix ONNX Autotune remote autotuning to pre-check board connectivity (configurable retries via ``--remote_connection_retries``) before each trtexec invocation. If unreachable, the autotuner saves state and exits cleanly instead of running trtexec and permanently marking schemes as errored.
 
 0.47.0 (2026-09-xx)
 ^^^^^^^^^^^^^^^^^^^
