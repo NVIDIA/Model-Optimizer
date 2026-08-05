@@ -52,6 +52,7 @@ from quantize_config import (
 )
 from utils import check_conv_and_mha, check_lora, restore_quantizer_state, save_quantizer_state
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
 
@@ -315,6 +316,29 @@ class ExportManager:
         save_quantizer_state(backbone, str(target_path))
 
         self.logger.info("Checkpoint saved successfully")
+
+    def save_training_bundle(self, pipe: DiffusionPipeline) -> None:
+        """Save a calibrated pipeline for QAD through native Diffusers checkpointing."""
+        if not self.config.output_bundle:
+            return
+
+        output_bundle = self.config.output_bundle
+        self.logger.info("Saving ModelOpt training bundle to %s", output_bundle)
+        pipe.save_pretrained(output_bundle)
+
+        model_index_path = output_bundle / "model_index.json"
+        if not model_index_path.is_file():
+            raise RuntimeError(f"Training bundle is missing {model_index_path}.")
+        if self.pipeline_manager is None:
+            raise RuntimeError("Pipeline manager is required to validate the training bundle.")
+        for backbone_name, backbone in self.pipeline_manager.iter_backbones():
+            if mto.ModeloptStateManager.is_converted(backbone):
+                state_path = output_bundle / backbone_name / "modelopt_state.pth"
+                if not state_path.is_file():
+                    raise RuntimeError(
+                        f"ModelOpt state was not saved for {backbone_name}: {state_path}"
+                    )
+        self.logger.info("ModelOpt training bundle saved successfully")
 
     def export_onnx(
         self,
@@ -583,6 +607,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
         type=str,
         help="Path to save quantized PyTorch checkpoint",
     )
+    export_group.add_argument(
+        "--output-bundle",
+        type=str,
+        help="Directory for a native ModelOpt-aware Diffusers training bundle used by QAD",
+    )
     export_group.add_argument("--onnx-dir", type=str, help="Directory for ONNX export")
     export_group.add_argument(
         "--hf-ckpt-dir",
@@ -612,6 +641,10 @@ def main() -> None:
 
     parser = create_argument_parser()
     args, unknown_args = parser.parse_known_args()
+
+    if args.output_bundle:
+        # Install ModelOpt's Diffusers save/load hooks before pipeline construction.
+        mto.enable_huggingface_checkpointing()
 
     model_type = ModelType(args.model)
     if args.backbone is None:
@@ -672,6 +705,7 @@ def main() -> None:
             quantized_torch_ckpt_path=Path(args.quantized_torch_ckpt_save_path)
             if args.quantized_torch_ckpt_save_path
             else None,
+            output_bundle=Path(args.output_bundle) if args.output_bundle else None,
             onnx_dir=Path(args.onnx_dir) if args.onnx_dir else None,
             hf_ckpt_dir=Path(args.hf_ckpt_dir) if args.hf_ckpt_dir else None,
             restore_from=Path(args.restore_from) if args.restore_from else None,
@@ -730,6 +764,7 @@ def main() -> None:
                 export_manager.save_checkpoint(backbone, backbone_name)
 
         pipeline_manager.print_quant_summary()
+        export_manager.save_training_bundle(pipe)
 
         for backbone_name, backbone in pipeline_manager.iter_backbones():
             export_manager.export_onnx(

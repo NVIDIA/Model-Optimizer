@@ -1,0 +1,106 @@
+# Qwen-Image QAD with a regular ModelOpt NVFP4 student.
+#
+# model.pretrained_model_name_or_path must be a complete ModelOpt-aware
+# Diffusers training bundle produced by quantize.py --output-bundle.
+
+seed: 42
+
+wandb:
+  project: fastgen-qad-qwen-image
+  mode: online
+  name: qwen_image_qad_nvfp4
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 60
+
+model:
+  # Complete calibrated NVFP4 bundle; AutoModel records this field in checkpoints.
+  pretrained_model_name_or_path: /path/to/qwen-image-nvfp4-training-bundle
+  mode: finetune
+
+step_scheduler:
+  global_batch_size: 64
+  local_batch_size: 1
+  ckpt_every_steps: 1000
+  num_epochs: 200
+  log_every: 1
+  max_steps: 50000
+
+qad:
+  # The teacher is always an unquantized, frozen Diffusers model.
+  teacher_model_name_or_path: Qwen/Qwen-Image
+
+  # weight=1.0 is pure teacher-output MSE; the flow-matching task weight is 0.
+  output_loss:
+    type: mse
+    weight: 1.0
+
+  # Independent additive coefficient for the ordinary flow-matching target.
+  task_loss:
+    weight: 0.0
+
+  # Layer pairs use exact module names relative to each transformer.
+  layerwise:
+    enabled: false
+    pairs: []
+
+  student:
+    mode: nvfp4
+    train_scope: all
+
+optim:
+  learning_rate: 2.0e-6
+  optimizer:
+    weight_decay: 0.01
+    betas: [0.9, 0.999]
+
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  min_lr: 2.0e-6
+
+fsdp:
+  tp_size: 1
+  cp_size: 1
+  pp_size: 1
+  dp_replicate_size: 1
+  dp_size: 1
+  activation_checkpointing: true
+
+flow_matching:
+  adapter_type: qwen_image
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  flow_shift: 3.0
+  mix_uniform_ratio: 0.1
+  use_sigma_noise: true
+  sigma_min: 0.0
+  sigma_max: 1.0
+  num_train_timesteps: 1000
+  cfg_dropout_prob: 0.0
+  use_loss_weighting: true
+  loss_weighting_scheme: linear
+  adapter_kwargs:
+    guidance_scale: 3.5
+    use_guidance_embeds: false
+
+data:
+  dataloader:
+    _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
+    cache_dir: /path/to/preprocessed/qwen_image_1024p
+    base_resolution: [1024, 1024]
+    batch_size: 1
+    drop_last: false
+    shuffle: true
+    num_workers: 0
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /path/to/output/qwen_image_qad_nvfp4/checkpoints
+  model_save_format: safetensors
+  # Save full sharded student DCP. Deployment export is a separate operation.
+  save_consolidated: false
+  diffusers_compatible: false
+  restore_from: LATEST

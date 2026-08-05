@@ -82,6 +82,15 @@ class Calibrator:
         """
         self.logger.info(f"Starting calibration with {self.config.num_batches} batches")
         extra_args = MODEL_DEFAULTS.get(self.model_type, {}).get("inference_extra_args", {})
+        if self.model_type == ModelType.QWEN_IMAGE:
+            extra_params = self.pipeline_manager.config.extra_params
+            self.logger.info(
+                "Qwen-Image calibration path: steps=%d true_cfg_scale=%s "
+                "negative_prompt=%s output_type=latent",
+                self.config.n_steps,
+                extra_params.get("true_cfg_scale", "pipeline default"),
+                "provided" if "negative_prompt" in extra_params else "omitted",
+            )
 
         with tqdm(total=self.config.num_batches, desc="Calibration", unit="batch") as pbar:
             for i, prompt_batch in enumerate(batched_prompts):
@@ -99,6 +108,8 @@ class Calibrator:
                 elif self.model_type == ModelType.QWEN_IMAGE_DMD2:
                     # DMD2 students use a custom few-step sampler, not the standard loop.
                     self._run_qwen_image_dmd2_calibration(prompt_batch)
+                elif self.model_type == ModelType.QWEN_IMAGE:
+                    self._run_qwen_image_calibration(prompt_batch, extra_args)
                 else:
                     common_args = {
                         "prompt": prompt_batch,
@@ -108,6 +119,31 @@ class Calibrator:
                 pbar.update(1)
                 self.logger.debug(f"Completed calibration batch {i + 1}/{self.config.num_batches}")
         self.logger.info("Calibration completed successfully")
+
+    def _run_qwen_image_calibration(
+        self, prompt_batch: list[str], extra_args: dict[str, Any]
+    ) -> None:
+        """Run Qwen-Image's standard denoising loop without the unused VAE decode.
+
+        ``true_cfg_scale`` alone does not enable true CFG in QwenImagePipeline; a
+        negative prompt is also required. Keep both values explicit launch-time
+        parameters so the 50-step base model and four-step Flash model can share
+        this model type while calibrating against their actual inference paths.
+        """
+        extra_params = self.pipeline_manager.config.extra_params
+        kwargs = {
+            "height": extra_params.get("height", extra_args.get("height", 1024)),
+            "width": extra_params.get("width", extra_args.get("width", 1024)),
+            "num_inference_steps": self.config.n_steps,
+            "output_type": "latent",
+        }
+        for name in ("negative_prompt", "true_cfg_scale", "guidance_scale"):
+            if name in extra_params:
+                value = extra_params[name]
+                if name == "negative_prompt" and isinstance(value, str):
+                    value = [value] * len(prompt_batch)
+                kwargs[name] = value
+        self.pipe(prompt=prompt_batch, **kwargs).images
 
     def _run_qwen_image_dmd2_calibration(self, prompt_batch: list[str]) -> None:
         """Calibrate a DMD2 Qwen-Image student via its few-step sampler.

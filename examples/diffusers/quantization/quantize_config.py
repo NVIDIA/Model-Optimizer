@@ -141,6 +141,7 @@ class ExportConfig:
     """Configuration for model export."""
 
     quantized_torch_ckpt_path: Path | None = None
+    output_bundle: Path | None = None
     onnx_dir: Path | None = None
     hf_ckpt_dir: Path | None = None
     restore_from: Path | None = None
@@ -154,6 +155,19 @@ class ExportConfig:
             parent_dir = self.quantized_torch_ckpt_path.parent
             if not parent_dir.exists():
                 parent_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.output_bundle:
+            parent_dir = self.output_bundle.parent
+            if not parent_dir.exists():
+                parent_dir.mkdir(parents=True, exist_ok=True)
+            if self.output_bundle.exists() and not self.output_bundle.is_dir():
+                raise FileExistsError(
+                    f"Output training bundle path is not a directory: {self.output_bundle}"
+                )
+            if self.output_bundle.exists() and any(self.output_bundle.iterdir()):
+                raise FileExistsError(
+                    f"Output training bundle directory is not empty: {self.output_bundle}"
+                )
 
         if self.onnx_dir and not self.onnx_dir.exists():
             self.onnx_dir.mkdir(parents=True, exist_ok=True)
