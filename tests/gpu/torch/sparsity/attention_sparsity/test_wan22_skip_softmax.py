@@ -31,13 +31,8 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::DeprecationWarning"),
 ]
 
-diffusers = pytest.importorskip("diffusers")
-
 import numpy as np
-from _test_utils.torch.diffusers_models import (
-    create_tiny_wan22_pipeline_dir,
-    get_tiny_wan22_transformer,
-)
+from _test_utils.torch.diffusers_models import get_tiny_wan22_transformer
 from diffusers import WanPipeline
 
 import modelopt.torch.opt as mto
@@ -54,12 +49,6 @@ if TRITON_KERNEL_AVAILABLE:
 # ---------------------------------------------------------------------------
 # Tiny Wan 2.2 pipeline fixture — shared across tests (pipeline load is costly)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def tiny_wan22_path(tmp_path_factory):
-    """Create and save a tiny Wan 2.2 pipeline to disk once per module."""
-    return str(create_tiny_wan22_pipeline_dir(tmp_path_factory.mktemp("tiny_wan22")))
 
 
 @pytest.fixture

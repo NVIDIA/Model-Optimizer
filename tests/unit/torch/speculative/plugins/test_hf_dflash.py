@@ -21,12 +21,12 @@ GPU-dependent tests (training forward, module forward) are in tests/gpu/.
 import json
 import logging
 import os
-from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import (
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
@@ -36,7 +36,6 @@ from transformers import AutoModelForCausalLM
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 import modelopt.torch.speculative.plugins.hf_dflash as hf_dflash
-from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import (
     DFlashAttention,
     DFlashModule,
@@ -52,32 +51,20 @@ NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
 
 
-def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
-    """Create a DFlash config for testing."""
-    config = deepcopy(DFLASH_DEFAULT_CFG["config"])
-    config["dflash_block_size"] = block_size
-    config["dflash_use_torch_compile"] = False
-    config["dflash_mask_token_id"] = 0  # use token 0 as mask for tiny model
-    config["dflash_architecture_config"] = {
-        "num_hidden_layers": num_layers,
-    }
-    return config
-
-
 class TestDFlashConvert:
     """Test DFlash model conversion."""
 
     def test_convert_creates_dflash_model(self):
         """Test that convert produces an HFDFlashModel."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert isinstance(model, HFDFlashModel)
 
     def test_convert_creates_dflash_module(self):
         """Test that convert attaches a DFlashModule."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "dflash_module")
         assert isinstance(model.dflash_module, DFlashModule)
@@ -85,7 +72,7 @@ class TestDFlashConvert:
     def test_convert_freezes_base_model(self):
         """Test that base model parameters are frozen after convert."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         for name, param in model.named_parameters():
             if "dflash_module" not in name:
@@ -94,7 +81,7 @@ class TestDFlashConvert:
     def test_convert_dflash_module_trainable(self):
         """Test that DFlash module parameters are trainable after convert."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         dflash_params = [(n, p) for n, p in model.named_parameters() if "dflash_module" in n]
         assert len(dflash_params) > 0
@@ -104,7 +91,7 @@ class TestDFlashConvert:
     def test_convert_sets_target_layer_ids(self):
         """Test that target layer IDs are set correctly."""
         model = get_tiny_llama(num_hidden_layers=8)
-        config = _get_dflash_config(num_layers=3)
+        config = get_dflash_config(num_layers=3)
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "target_layer_ids")
         assert len(model.target_layer_ids) == 3
@@ -114,7 +101,7 @@ class TestDFlashConvert:
     def test_convert_sets_mask_token_id(self):
         """Test that mask_token_id is set from config."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert hasattr(model, "mask_token_id")
         assert model.mask_token_id == 0
@@ -283,7 +270,7 @@ def test_multimodal_forward_kwargs_exclude_non_model_inputs():
 def test_eval_does_not_precompute_qwen3_vl_position_ids(monkeypatch):
     """Evaluation delegates mRoPE construction to the base model and its cache."""
     model = get_tiny_llama(num_hidden_layers=4)
-    mtsp.convert(model, [("dflash", _get_dflash_config())])
+    mtsp.convert(model, [("dflash", get_dflash_config())])
     precompute_position_ids = MagicMock()
     monkeypatch.setattr(model, "_qwen3_vl_position_ids", precompute_position_ids)
 
@@ -395,26 +382,26 @@ class TestDPaceWeights:
     def test_default_objective_is_dpace(self):
         """D-PACE is the default (alpha=0.5); an explicit alpha override is wired through."""
         model = get_tiny_llama(num_hidden_layers=4)
-        mtsp.convert(model, [("dflash", _get_dflash_config())])
+        mtsp.convert(model, [("dflash", get_dflash_config())])
         assert model.dflash_loss_objective == "dpace"
         assert model.dflash_dpace_alpha == 0.5
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_dpace_alpha"] = 0.3
         mtsp.convert(model, [("dflash", config)])
         assert model.dflash_dpace_alpha == 0.3
 
     def test_convert_rejects_bad_objective(self):
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = "nope"
         with pytest.raises(ValueError, match="dflash_loss_objective"):
             mtsp.convert(model, [("dflash", config)])
 
     def test_convert_rejects_degenerate_alpha(self):
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = "dpace"
         config["dflash_dpace_alpha"] = 0.0
         with pytest.raises(ValueError, match="dflash_dpace_alpha"):
@@ -423,7 +410,7 @@ class TestDPaceWeights:
     def test_convert_dpace_with_decay_factor_warns(self, caplog):
         """dpace + a non-zero decay factor converts but warns that decay is ignored."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = "dpace"
         config["dflash_loss_decay_factor"] = 4.0
         with caplog.at_level(logging.WARNING):
@@ -447,7 +434,7 @@ class TestDPaceLossIntegration:
 
     def _converted_model(self, objective, **overrides):
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_loss_objective"] = objective
         config.update(overrides)
         mtsp.convert(model, [("dflash", config)])
@@ -485,7 +472,7 @@ class TestDFlashSaveRestore:
         """Test round-trip save/load preserves modelopt state and outputs."""
         mto.enable_huggingface_checkpointing()
         model_ref = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model_ref, [("dflash", config)])
 
         model_ref.save_pretrained(tmp_path / "modelopt_model")
@@ -506,14 +493,14 @@ class TestDFlashLazyRotaryEmb:
     def test_rotary_emb_not_created_in_init(self):
         """rotary_emb should not exist after convert (before forward)."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert not hasattr(model.dflash_module, "rotary_emb")
 
     def test_rotary_emb_created_on_forward(self):
         """rotary_emb should be created on first forward call."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         dflash_mod = model.dflash_module
@@ -595,7 +582,7 @@ class TestDFlashSwaMask:
     def test_window_masks_context_beyond_window(self):
         """Context beyond the window (relative to each query's real position) is masked out."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config(block_size=4)
+        config = get_dflash_config(block_size=4)
         window = 6
         config["dflash_swa_window_size"] = window
         mtsp.convert(model, [("dflash", config)])
@@ -629,7 +616,7 @@ class TestDFlashSwaMask:
     def test_window_is_subset_of_full(self):
         """The windowed mask attends to a subset of what the full-attention mask attends to."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config(block_size=4)
+        config = get_dflash_config(block_size=4)
         config["dflash_swa_window_size"] = 6
         mtsp.convert(model, [("dflash", config)])
 
@@ -652,7 +639,7 @@ class TestDFlashSwaMask:
     def test_window_smaller_than_block_rejected(self):
         """A window smaller than the block size is rejected at config validation."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config(block_size=4)
+        config = get_dflash_config(block_size=4)
         config["dflash_swa_window_size"] = 2  # < block_size
         with pytest.raises(ValueError, match="dflash_swa_window_size"):
             mtsp.convert(model, [("dflash", config)])
@@ -748,7 +735,7 @@ class TestDFlashExporter:
         """Test that export produces model.safetensors and config.json."""
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -763,7 +750,7 @@ class TestDFlashExporter:
         from safetensors.torch import load_file
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -779,7 +766,7 @@ class TestDFlashExporter:
     def test_export_config_fields(self, tmp_path):
         """Exported config.json should have required DFlash fields."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()
@@ -806,7 +793,7 @@ class TestDFlashExporter:
     def test_export_swa_fields(self, tmp_path):
         """With dflash_swa_window_size set, exported config carries vLLM's SWA fields."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_swa_window_size"] = 256
         mtsp.convert(model, [("dflash", config)])
 
@@ -832,7 +819,7 @@ class TestDFlashExporter:
         from safetensors.torch import load_file
 
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         exporter = model.get_exporter()

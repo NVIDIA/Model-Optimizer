@@ -17,9 +17,8 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from _test_utils.torch.quantization.attention import make_quant_attention
 from _test_utils.torch.transformers_models import get_tiny_bert, get_tiny_llama, get_tiny_t5
-from transformers import LlamaConfig
-from transformers.models.llama.modeling_llama import LlamaAttention
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
@@ -152,20 +151,9 @@ def test_kv_quant_bert():
     assert output.end_logits is not None
 
 
-def _make_quant_attention(hidden_size=128, num_q_heads=4, num_kv_heads=2):
-    config = LlamaConfig(
-        hidden_size=hidden_size,
-        num_attention_heads=num_q_heads,
-        num_key_value_heads=num_kv_heads,
-    )
-    quant_attention = _QuantAttention.convert(LlamaAttention(config, layer_idx=0))
-    quant_attention.config._attn_implementation = "sdpa"
-    return quant_attention
-
-
 def test_p_qdq_mode_detection():
     """p_bmm_quantizer config maps to the right Triton softmax qdq mode."""
-    quant_attention = _make_quant_attention()
+    quant_attention = make_quant_attention()
     sq = quant_attention.p_bmm_quantizer
 
     # Default int8 quantizer: not a supported Triton qdq format
