@@ -131,8 +131,7 @@ def _fakequant_run_prolog_worker(self) -> None:
         except AssertionError as e:
             if "nan" in str(e).lower() and "amax" in str(e).lower():
                 print_rank_0(
-                    "NaN detected in calibration amax. "
-                    "Try reducing --max-num-batched-tokens (e.g. to 2048)."
+                    "NaN detected in calibration amax. Try reducing --max-num-batched-tokens."
                 )
             raise
 

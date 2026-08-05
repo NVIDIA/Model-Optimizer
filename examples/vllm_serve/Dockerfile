@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:v0.20.0
+FROM vllm/vllm-openai:v0.26.0
 
 # Set environment variables
 ENV PIP_NO_CACHE_DIR=off \
