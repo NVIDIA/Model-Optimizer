@@ -873,6 +873,14 @@ class _QuantDbrxExpertGLU(QuantModule):
 
 
 class _QuantQwen3VLMoeTextExperts(QuantModule):
+    """Quantized wrapper for the pre-transformers-5.12 ``Qwen3VLMoeTextExperts`` layout.
+
+    That layout stores ``gate_up_proj`` as (num_experts, hidden_size, 2*expert_dim) and runs
+    the experts through ``torch.bmm``/``@``, so it is unrolled into ``nn.Linear`` modules here.
+    transformers>=5.12 moved this module to the standard fused layout handled by
+    :class:`_QuantFusedExperts`; see the registration site below.
+    """
+
     def _setup(self):
         """Modify the Qwen3VLMoeTextExperts by using nn.Linear layers."""
         from accelerate import init_empty_weights
@@ -1424,7 +1432,21 @@ except ImportError:
 try:
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
 
-    if Qwen3VLMoeTextExperts not in QuantModuleRegistry:
+    # transformers>=5.12 rewrote Qwen3VLMoeTextExperts onto the standard
+    # ``@use_experts_implementation`` fused layout: ``hidden_size``/``expert_dim`` became
+    # ``hidden_dim``/``intermediate_dim``, ``gate_up_proj`` was transposed to
+    # (num_experts, 2*intermediate_dim, hidden_dim), and the forward now calls ``F.linear``
+    # twice per expert. ``_QuantQwen3VLMoeTextExperts`` only understands the older layout,
+    # so registering it against the new one crashes on ``self.hidden_size`` (nvbug 6518551).
+    # The decorator sets ``_apply_gate`` on the class; use it to detect the new layout and
+    # leave those modules to ``register_fused_experts_on_the_fly``, which claims them with
+    # the generic ``_QuantFusedExperts``. The old layout must stay explicitly registered:
+    # it is structurally indistinguishable from a generic fused-experts module, yet its
+    # forward uses ``torch.bmm``/``@`` rather than ``F.linear``, so the generic wrapper
+    # would silently quantize nothing.
+    if Qwen3VLMoeTextExperts not in QuantModuleRegistry and not hasattr(
+        Qwen3VLMoeTextExperts, "_apply_gate"
+    ):
         QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
             _QuantQwen3VLMoeTextExperts
         )

@@ -206,10 +206,16 @@ def isolated_flashinfer_builder_patch():
 def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
     monkeypatch, isolated_flashinfer_builder_patch
 ):
-    """The real builder result must retain the common metadata contract."""
+    """The real builder result must retain the common metadata contract.
+
+    ``causal=True`` keeps the real ``build`` on the all-TRTLLM path, which needs no workspace
+    buffers or wrapper planning; the stashed fields are path-independent.
+    """
     monkeypatch.setattr(flashinfer_backend, "use_trtllm_attention", lambda *_args, **_kwargs: True)
     assert patch_flashinfer_metadata_builder() is True
     builder = object.__new__(FlashInferMetadataBuilder)
+    # vLLM >= 0.26 splits ``q_data_type`` per phase and carries the resolved decode kernel on the builder
+    decode_kernel_enum = getattr(flashinfer_backend, "FlashInferDecodeKernel", None)
     builder.__dict__.update(
         reorder_batch_threshold=1,
         page_size=16,
@@ -218,6 +224,11 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         dcp_world_size=1,
         cache_dtype=torch.float16,
         q_data_type=torch.float16,
+        q_data_type_prefill=torch.float16,
+        q_data_type_decode=torch.float16,
+        flashinfer_trtllm_api_decode_kernel=(
+            next(iter(decode_kernel_enum)) if decode_kernel_enum is not None else None
+        ),
         attention_config=SimpleNamespace(use_trtllm_attention=True),
         has_sinks=False,
         use_trtllm_decode_attention=True,
@@ -233,7 +244,7 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
         max_seq_len=16,
         block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
         slot_mapping=torch.tensor([0], dtype=torch.int64),
-        causal=False,
+        causal=True,
     )
 
     metadata = builder.build(0, common, fast_build=False)
