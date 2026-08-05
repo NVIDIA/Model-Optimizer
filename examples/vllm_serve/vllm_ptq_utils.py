@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import dataclasses
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -96,30 +97,27 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                 structured_output_request_ids={},
                 grammar_bitmask=None,
             )
-            output = self.execute_model(scheduler_output)
-            if hasattr(self, "sample_tokens"):
-                if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
-                    self.sample_tokens(None)
-
-            # finish_requests runs before add_requests inside execute_model, so
-            # req IDs aren't registered yet at that point — call it directly after.
-            if hasattr(self.model_runner, "finish_requests"):
-                cleanup_output = _create_new_data_cls(
-                    SchedulerOutput,
-                    scheduled_new_reqs=[],
-                    scheduled_cached_reqs=CachedRequestData.make_empty(),
-                    num_scheduled_tokens={},
-                    total_num_scheduled_tokens=0,
-                    scheduled_spec_decode_tokens={},
-                    scheduled_encoder_inputs={},
-                    num_common_prefix_blocks=[0] * num_groups,
-                    finished_req_ids=set(num_scheduled_tokens.keys()),
-                    free_encoder_mm_hashes=[],
-                    kv_connector_metadata=None,
-                    structured_output_request_ids={},
-                    grammar_bitmask=None,
-                )
-                self.model_runner.finish_requests(cleanup_output)
+            try:
+                output = self.execute_model(scheduler_output)
+                if hasattr(self, "sample_tokens"):
+                    if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
+                        self.sample_tokens(None)
+            finally:
+                # finish_requests runs before add_requests inside execute_model, so
+                # req IDs aren't registered yet at that point — call it directly after.
+                if hasattr(self.model_runner, "finish_requests"):
+                    cleanup_output = dataclasses.replace(
+                        scheduler_output,
+                        scheduled_new_reqs=[],
+                        num_scheduled_tokens={},
+                        total_num_scheduled_tokens=0,
+                        finished_req_ids=set(num_scheduled_tokens.keys()),
+                    )
+                    self.model_runner.finish_requests(cleanup_output)
+                else:
+                    warnings.warn(
+                        "model_runner.finish_requests not found; request state may leak during calibration."
+                    )
 
     return calibrate_loop
 

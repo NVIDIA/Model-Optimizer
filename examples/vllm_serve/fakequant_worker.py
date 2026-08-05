@@ -36,7 +36,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,
 )
-from modelopt.torch.utils import safe_load
+from modelopt.torch.utils import print_rank_0, safe_load
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 quant_config: dict[str, Any] = {
@@ -128,11 +128,11 @@ def _fakequant_run_prolog_worker(self) -> None:
             with disable_compilation(model):
                 print("Quantizing model...")
                 mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
-        except Exception as e:
-            if "nan" in str(e).lower():
-                print(
-                    f"NaN detected during quantization: {e}\n"
-                    f"Consider downgrading vLLM version or reduce --max-num-batched-tokens to 2048"
+        except AssertionError as e:
+            if "nan" in str(e).lower() and "amax" in str(e).lower():
+                print_rank_0(
+                    "NaN detected in calibration amax. "
+                    "Try reducing --max-num-batched-tokens (e.g. to 2048)."
                 )
             raise
 
