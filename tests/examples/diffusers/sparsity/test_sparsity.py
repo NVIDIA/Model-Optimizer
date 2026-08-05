@@ -30,6 +30,10 @@ import torch
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.diffusers_models import create_tiny_wan22_pipeline_dir
 
+import modelopt.torch.sparsity.attention_sparsity as mtsa
+from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
+
 EXAMPLE_PATH = "diffusers/sparsity"
 
 # Tiny inference settings — fast but exercises all code paths
@@ -162,11 +166,8 @@ def test_wan22_calibrated_export(tmp_path):
     (top-level ``threshold_scale_factor`` of the form ``a * exp(b * target_sparsity)``)
     and that the dense (cross-attention) layers are recorded under ``ignore``.
     """
+    # diffusers stays function-local: this module must import without diffusers installed.
     from diffusers import AutoencoderKLWan, WanPipeline
-
-    import modelopt.torch.sparsity.attention_sparsity as mtsa
-    from modelopt.torch.export import export_hf_checkpoint
-    from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
     pipe_dir = create_tiny_wan22_pipeline_dir(tmp_path / "model")
     vae = AutoencoderKLWan.from_pretrained(pipe_dir, subfolder="vae", torch_dtype=torch.float32)

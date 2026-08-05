@@ -20,6 +20,7 @@ from _test_utils.torch.distributed.utils import DistributedWorkerPool
 from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from megatron.core.parallel_state import destroy_model_parallel
 
+import modelopt.torch.quantization.extensions as ext
 import modelopt.torch.utils.distributed as dist
 
 
@@ -48,8 +49,6 @@ def _prebuild_quant_cuda_extensions():
     is not itself capped by a per-test timeout. Worker subprocesses then load the cached
     .so from the shared ``TORCH_EXTENSIONS_DIR``.
     """
-    import modelopt.torch.quantization.extensions as ext
-
     ext.precompile()
 
 

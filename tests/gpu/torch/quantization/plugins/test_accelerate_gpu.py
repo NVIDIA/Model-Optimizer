@@ -17,6 +17,7 @@ import copy
 import json
 import os
 import shutil
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -474,8 +475,6 @@ class _TupleUnpackingModel(torch.nn.Module):
 
 def test_skip_dummy_has_no_hf_hook(monkeypatch):
     """Dummies must not carry _hf_hook from the original layer."""
-    from contextlib import nullcontext
-
     monkeypatch.setattr(
         LayerActivationCollector,
         "_decoder_layer_support",
@@ -512,8 +511,6 @@ def test_skip_dummy_has_no_hf_hook(monkeypatch):
 
 
 def _assert_persistent_materialization_bypasses_top_hook(layer):
-    from modelopt.torch.quantization.utils import persistent_materialization
-
     assert hasattr(layer, "_hf_hook")
     original_old_forward = layer._old_forward
 

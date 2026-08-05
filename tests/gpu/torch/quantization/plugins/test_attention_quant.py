@@ -34,8 +34,6 @@ except ImportError:
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_FA_AVAILABLE
 from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
 
-pytest.importorskip("transformers")
-
 
 def _make_quant_attention(hidden_size=128, num_q_heads=4, num_kv_heads=2):
     config = LlamaConfig(
