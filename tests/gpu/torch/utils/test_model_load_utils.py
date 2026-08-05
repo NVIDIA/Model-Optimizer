@@ -17,21 +17,23 @@
 
 import json
 import os
-import tempfile
 from functools import partial
 
 import pytest
 import torch
-import torch.distributed as dist
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from torch.distributed.tensor import DTensor
+
+from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
+from modelopt.torch.utils.distributed import broadcast_state_dict
+from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
+
+VOCAB_SIZE = 64
 
 
 def _test_broadcast_state_dict_roundtrip(rank, size):
-    """Round-trip from every rank as source (matches the per-layer rotation in the loader)."""
-    from modelopt.torch.utils.distributed import broadcast_state_dict
-
+    """Round-trip from every rank as source, with a distinct payload per source rank."""
     device = torch.device(f"cuda:{rank}")
-    # Distinct payload per source rank so a wrong-src result would fail content checks.
     for source in range(size):
         src_dict = {
             "w": torch.full((2, 4), float(source)),
@@ -48,41 +50,8 @@ def test_broadcast_state_dict_roundtrip(dist_workers):
     dist_workers.run(_test_broadcast_state_dict_roundtrip)
 
 
-def _build_tiny_llama_checkpoint(path: str) -> None:
-    """Write a tiny LlamaForCausalLM checkpoint (config + safetensors) to ``path``."""
-    from transformers import LlamaConfig, LlamaForCausalLM
-
-    config = LlamaConfig(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        max_position_embeddings=32,
-        torch_dtype="bfloat16",
-    )
-    model = LlamaForCausalLM(config).to(torch.bfloat16)
-    model.save_pretrained(path)
-
-
-def _test_parallel_load_and_export(rank, size, cpu_offload):
-    """Load a tiny Llama via the FSDP2 loader, forward, then export — config.architectures preserved.
-
-    Parametrized over ``cpu_offload`` to cover both shard placements:
-      - off: decoder DTensor shards on GPU, plain root on GPU.
-      - on:  decoder DTensor shards on CPU (streamed per layer), root promoted to GPU
-             via ``_promote_non_dtensor_to_gpu``.
-    """
-    from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
-    from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
-
-    suffix = "offload" if cpu_offload else "noffload"
-    ckpt_dir = os.path.join(tempfile.gettempdir(), f"_test_parallel_load_{suffix}_{os.getpid()}")
-    if rank == 0:
-        os.makedirs(ckpt_dir, exist_ok=True)
-        _build_tiny_llama_checkpoint(ckpt_dir)
-    dist.barrier()
-
+def _test_parallel_load_and_export(rank, size, ckpt_dir, export_dir, cpu_offload):
+    """Load a tiny Llama via the FSDP2 loader, forward, then export."""
     device = torch.device(f"cuda:{rank}")
     model = parallel_load_and_prepare_fsdp2(
         ckpt_dir,
@@ -105,17 +74,11 @@ def _test_parallel_load_and_export(rank, size, cpu_offload):
         assert all(p.to_local().device.type == "cpu" for p in decoder_dtensors)
 
     # Forward exercises FSDP2 hooks + (under cpu_offload) the per-layer CPU↔GPU stream.
-    input_ids = torch.randint(0, 64, (1, 8), device=device)
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8), device=device)
     out = model(input_ids=input_ids).logits
-    assert out.shape == (1, 8, 64)
+    assert out.shape == (1, 8, VOCAB_SIZE)
 
     # Export and verify the saved config.json retains the original architectures.
-    export_dir = os.path.join(
-        tempfile.gettempdir(), f"_test_parallel_export_{suffix}_{os.getpid()}"
-    )
-    if rank == 0:
-        os.makedirs(export_dir, exist_ok=True)
-    dist.barrier()
     export_hf_checkpoint(model, export_dir=export_dir, dtype=torch.bfloat16)
 
     if rank == 0:
@@ -125,5 +88,14 @@ def _test_parallel_load_and_export(rank, size, cpu_offload):
 
 
 @pytest.mark.parametrize("cpu_offload", [False, True])
-def test_parallel_load_and_export(dist_workers, cpu_offload):
-    dist_workers.run(partial(_test_parallel_load_and_export, cpu_offload=cpu_offload))
+def test_parallel_load_and_export(dist_workers, tmp_path, cpu_offload):
+    # Build the checkpoint once here (not inside the workers): every rank must see the same path.
+    ckpt_dir = create_tiny_llama_dir(tmp_path, vocab_size=VOCAB_SIZE)
+    dist_workers.run(
+        partial(
+            _test_parallel_load_and_export,
+            ckpt_dir=str(ckpt_dir),
+            export_dir=str(tmp_path / "export"),
+            cpu_offload=cpu_offload,
+        )
+    )
