@@ -33,8 +33,9 @@ class _FakeMoeLayer(nn.Module):
     """Name contains 'moelayer' — detected by naming convention."""
 
 
-class _FakeArcticMoe(nn.Module):
-    """Name contains 'arcticmoe' — detected by explicit match."""
+class ArcticMoE(nn.Module):
+    """Non-standard MoE block name — detected via the model spec registry (exact
+    MRO class name, so the fake must carry the real name)."""
 
 
 class _StructuralMoeModule(nn.Module):
@@ -64,7 +65,7 @@ class _PartialStructuralModule(nn.Module):
 
 @pytest.mark.parametrize(
     "module_cls",
-    [_FakeSparseMoeBlock, _FakeMoeLayer, _FakeArcticMoe],
+    [_FakeSparseMoeBlock, _FakeMoeLayer, ArcticMoE],
 )
 def test_is_moe_name_based(module_cls):
     assert is_moe(module_cls())
@@ -87,20 +88,20 @@ def test_is_moe_partial_structural():
 # ---------------------------------------------------------------------------
 
 
-class _FakeGemma4TextDecoderLayer(nn.Module):
+class Gemma4TextDecoderLayer(nn.Module):
     pass
 
 
-class _FakeMixtralSparseMoeBlock(nn.Module):
+class MixtralSparseMoeBlock(nn.Module):
     pass
 
 
-class _FakeNemotronHMOE(nn.Module):
+class NemotronHMOE(nn.Module):
     pass
 
 
 def test_get_expert_linear_names_gemma4():
-    assert get_expert_linear_names(_FakeGemma4TextDecoderLayer()) == [
+    assert get_expert_linear_names(Gemma4TextDecoderLayer(), "gemma4") == [
         "gate_proj",
         "down_proj",
         "up_proj",
@@ -108,8 +109,8 @@ def test_get_expert_linear_names_gemma4():
 
 
 def test_get_expert_linear_names_mixtral():
-    assert get_expert_linear_names(_FakeMixtralSparseMoeBlock()) == ["w1", "w2", "w3"]
+    assert get_expert_linear_names(MixtralSparseMoeBlock(), "mixtral") == ["w1", "w2", "w3"]
 
 
 def test_get_expert_linear_names_nemotron():
-    assert get_expert_linear_names(_FakeNemotronHMOE()) == ["up_proj", "down_proj"]
+    assert get_expert_linear_names(NemotronHMOE(), "nemotron_h") == ["up_proj", "down_proj"]
