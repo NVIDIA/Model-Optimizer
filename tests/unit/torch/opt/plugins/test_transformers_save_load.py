@@ -24,6 +24,7 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     tf_modelopt_state_and_output_tester,
 )
+from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM
 
 from modelopt.torch.opt.plugins.transformers import (
@@ -46,26 +47,40 @@ def test_causal_lm_save_restore(tmp_path, model_cls):
     tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
-def test_save_pretrained_with_legacy_tied_weights_keys(tmp_path):
+@pytest.mark.parametrize("tie_word_embeddings", [False, True])
+def test_save_pretrained_with_legacy_tied_weights_keys(tmp_path, tie_word_embeddings):
     """A model declaring 4.x list-style `_tied_weights_keys` must still save (nvbug 6518665).
 
     transformers>=5 expects a `{target: source}` dict there and calls `.keys()` on it while
     saving, which crashes for `trust_remote_code` modeling code that has not migrated yet.
+
+    Both tying configurations are covered because normalizing the list to `{key: key}` feeds
+    those keys to the save-time dedup as patterns: an untied weight must survive it, and a
+    genuinely tied one must still be deduped down to its canonical name.
     """
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, hidden_size=128, dtype=torch.float32)
+    tiny_llama_dir = create_tiny_llama_dir(
+        tmp_path, hidden_size=128, dtype=torch.float32, tie_word_embeddings=tie_word_embeddings
+    )
     model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)
     model = apply_mode_with_sampling(model, ["quantize"])
 
     model._tied_weights_keys = ["lm_head.weight"]
     model.model._tied_weights_keys = ["embed_tokens.weight"]
 
-    model.save_pretrained(tiny_llama_dir / "legacy_tied_keys_model")
+    save_dir = tiny_llama_dir / "legacy_tied_keys_model"
+    model.save_pretrained(save_dir)
 
     # The declarations the model owned before the save are restored verbatim.
     assert model._tied_weights_keys == ["lm_head.weight"]
     assert model.model._tied_weights_keys == ["embed_tokens.weight"]
 
-    model_test = AutoModelForCausalLM.from_pretrained(tiny_llama_dir / "legacy_tied_keys_model")
+    # No weight is silently dropped: `lm_head.weight` is written out unless it really does
+    # share storage with the embedding, in which case transformers re-ties it on load.
+    saved_keys = set(load_file(save_dir / "model.safetensors"))
+    assert "model.embed_tokens.weight" in saved_keys
+    assert ("lm_head.weight" in saved_keys) is not tie_word_embeddings
+
+    model_test = AutoModelForCausalLM.from_pretrained(save_dir)
     tf_modelopt_state_and_output_tester(model, model_test)
 
 

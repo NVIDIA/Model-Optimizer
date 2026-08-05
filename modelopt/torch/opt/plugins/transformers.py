@@ -171,14 +171,14 @@ def _legacy_tied_weights_keys_as_dict(model: nn.Module):
         return
 
     patched = []
-    for module in model.modules():
-        tied = getattr(module, "_tied_weights_keys", None)
-        if isinstance(tied, (list, tuple, set)):
-            # The attribute is usually a class attribute; remember whether this instance had
-            # its own so the restore does not leave a shadowing copy behind.
-            patched.append((module, tied, "_tied_weights_keys" in module.__dict__))
-            module._tied_weights_keys = {key: key for key in tied}
     try:
+        for module in model.modules():
+            tied = getattr(module, "_tied_weights_keys", None)
+            if isinstance(tied, (list, tuple, set)):
+                # The attribute is usually a class attribute; remember whether this instance
+                # had its own so the restore does not leave a shadowing copy behind.
+                patched.append((module, tied, "_tied_weights_keys" in module.__dict__))
+                module._tied_weights_keys = {key: key for key in tied}
         yield
     finally:
         for module, tied, had_own_attr in patched:
