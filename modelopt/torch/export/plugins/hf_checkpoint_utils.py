@@ -295,6 +295,10 @@ def copy_non_safetensor_files_from_ckpt(
             continue
         if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
             continue
-        shutil.copy2(sp, dst)
+        try:
+            shutil.copy2(sp, dst)
+        except OSError as error:
+            warnings.warn(f"Failed to copy checkpoint sidecar {entry}: {error}")
+            continue
         copied_files.append(entry)
     return copied_files
