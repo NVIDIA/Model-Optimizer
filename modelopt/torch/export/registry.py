@@ -27,13 +27,11 @@ editing if/elif chains inside ``unified_export_hf.py``.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-
-from modelopt.torch.quantization.utils.core_utils import has_non_resident_weights
 
 if TYPE_CHECKING:
     from .model_utils import TiedGroupResolver
@@ -54,17 +52,13 @@ class ExportContext:
     weights from the model's own ``_tied_weights_keys`` / ``tie_word_embeddings``
     declarations (stable across packing, FSDP resharding, and offload, unlike a
     ``data_ptr``). It is the single source of truth for tied-weight identity across the
-    export. ``moe_tied_cache`` holds fused-experts dedup entries keyed by the tied
-    group's canonical container name; it must be scoped to one export invocation. It is
-    only a compute/memory optimization that lets a tied experts container skip
-    re-unpacking/packing -- on-disk dedup is guaranteed independently by the name-based
-    pass in ``postprocess_state_dict``.
+    export: both dense and fused-MoE tied weights are packed independently and their
+    duplicate keys are dropped by name in ``postprocess_state_dict``.
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    moe_tied_cache: dict[str, nn.Module] | None = field(default_factory=dict)
     resolver: "TiedGroupResolver | None" = None
 
     def __post_init__(self) -> None:
@@ -74,12 +68,6 @@ class ExportContext:
         # Reuse a caller-provided resolver when given (built once per export), else build.
         if self.resolver is None:
             self.resolver = TiedGroupResolver(self.model)
-        # The MoE fast-path aliases live module buffers, which is unsafe once weights are
-        # not resident for the whole export (FSDP2 or accelerate offload). Disable that
-        # optimization there; on-disk dedup is still handled name-based in
-        # postprocess_state_dict, which runs on the gathered/materialized state_dict.
-        if has_non_resident_weights(self.model):
-            self.moe_tied_cache = None
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
