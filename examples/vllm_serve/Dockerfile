@@ -1,4 +1,4 @@
-FROM vllm/vllm-openai:v0.20.0
+FROM vllm/vllm-openai:v0.26.0
 
 # Set environment variables
 ENV PIP_NO_CACHE_DIR=off \
@@ -28,8 +28,10 @@ RUN pip install flash-attn==2.7.4.post1 --no-build-isolation
 # Pre-compile CUDA extensions to avoid compilation time during runtime
 RUN python3 -c "import modelopt.torch.quantization.extensions as ext; ext.precompile()" || true
 
-# Allow users to run without root
+# Allow the non-root vllm user to access the workspace
 RUN chmod -R 777 /workspace
+
+USER vllm
 
 # Override the ENTRYPOINT from the base image to allow flexible usage
 ENTRYPOINT []
