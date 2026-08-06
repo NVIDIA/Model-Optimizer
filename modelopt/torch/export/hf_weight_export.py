@@ -19,8 +19,9 @@ The leaf of the export pipeline: packing one module's weight into its quantized
 representation and registering the scale buffers beside it, plus the registry dispatch
 and the whole-model walk that drive it.
 
-Like :mod:`hf_export_prep`, this depends on nothing else in the export package, so the
-exporters and the MoE/handler plugins can import it directly instead of lazily.
+Like :mod:`hf_export_prep`, this imports only leaf helpers (model_config, quant_utils,
+registry) and never an exporter, so the exporters and the MoE/handler plugins can import
+it directly instead of lazily.
 """
 
 import torch

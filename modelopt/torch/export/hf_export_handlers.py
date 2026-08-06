@@ -42,9 +42,6 @@ def _export_weight(
     ctx: ExportContext,
     weight_name: str = "weight",
 ) -> None:
-    # Imported lazily to avoid a cycle: unified_export_hf imports this module to
-    # install the built-in handlers while retaining this legacy helper's import path.
-
     _export_quantized_weight(module, ctx.dtype, weight_name, _tied_cache=ctx.tied_cache)
 
 

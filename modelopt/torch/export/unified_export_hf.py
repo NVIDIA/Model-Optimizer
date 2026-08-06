@@ -23,18 +23,15 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-
-try:
-    from .diffusers_utils import is_diffusers_object
-
-    HAS_DIFFUSERS = True
-except ImportError:
-    HAS_DIFFUSERS = False
-
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.distributed import is_fsdp2_model
+
+# _HAS_DIFFUSERS is diffusers_utils' own probe; re-deriving it here would drift, since
+# that module imports cleanly whether or not diffusers is installed.
+from .diffusers_utils import _HAS_DIFFUSERS as HAS_DIFFUSERS
+from .diffusers_utils import is_diffusers_object
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config

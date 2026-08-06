@@ -210,8 +210,8 @@ def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
     name to scope the reorder to DiffusionGemma; other tied
     encoder-decoder models that ship dict-style ``_tied_weights_keys``
     can be added to the allowlist here. Mirrors the ``model_type``
-    dispatch used for the Whisper and Nemotron-VL branches elsewhere
-    in ``unified_export_hf.py``.
+    dispatch used for the Whisper and Nemotron-VL branches in
+    ``hf_export_prep.py``.
     """
     model_type = type(model).__name__.lower()
     if "diffusiongemma" not in model_type and "diffusion_gemma" not in model_type:

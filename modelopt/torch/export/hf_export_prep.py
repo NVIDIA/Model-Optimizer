@@ -19,8 +19,9 @@ Everything here runs on the whole model before any weight is packed: dtype resol
 MoE input-quantizer preparation, resmoothing and shared-input fusion, quant-config
 adjustments, and the transformers patches needed while writing artifacts.
 
-This module depends on nothing else in the export package, which is what lets the
-three exporters import it without a cycle.
+It imports only leaf helpers (layer_utils, model_config, model_utils, quant_utils,
+registry, diffusers_utils) and never an exporter, which is what lets all three exporters
+import it without a cycle.
 """
 
 import re
@@ -37,6 +38,7 @@ from modelopt.torch.quantization.nn import SequentialQuantizer
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 
+from .diffusers_utils import get_qkv_group_key, is_qkv_projection
 from .layer_utils import (
     get_experts_list,
     is_layernorm,
@@ -58,11 +60,6 @@ from .quant_utils import (
     preprocess_linear_fusion,
 )
 from .registry import ExportContext, PrepareMoEInputsRegistry
-
-try:
-    from .diffusers_utils import get_qkv_group_key, is_qkv_projection
-except ImportError:  # diffusers not installed; QKV fusion is diffusers-only
-    get_qkv_group_key = is_qkv_projection = None
 
 
 def _is_enabled_quantizer(quantizer):

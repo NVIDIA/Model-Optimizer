@@ -33,28 +33,23 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .convert_hf_config import convert_hf_quant_config_format
-from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
+from .diffusers_utils import _HAS_DIFFUSERS as HAS_DIFFUSERS
+from .diffusers_utils import (
+    build_layerwise_quant_metadata,
+    generate_diffusion_dummy_forward_fn,
+    get_diffusion_components,
+    get_diffusion_model_type,
+    hide_quantizers_from_state_dict,
+    infer_dtype_from_model,
+    merge_diffusion_checkpoint,
+    pad_nvfp4_weights,
+    swizzle_nvfp4_scales,
+)
 from .hf_export_prep import _fuse_shared_input_modules, collect_shared_input_modules
 from .hf_weight_export import _process_quantized_modules
 from .layer_utils import is_quantlinear
 from .model_config import QUANTIZATION_NONE
 from .quant_utils import get_quant_config, get_quantization_format, has_quantized_modules
-
-try:
-    import diffusers
-
-    from .diffusers_utils import (
-        generate_diffusion_dummy_forward_fn,
-        get_diffusion_components,
-        get_diffusion_model_type,
-        hide_quantizers_from_state_dict,
-        infer_dtype_from_model,
-        merge_diffusion_checkpoint,
-    )
-
-    HAS_DIFFUSERS = True
-except ImportError:
-    HAS_DIFFUSERS = False
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -559,6 +554,8 @@ def _export_diffusers_checkpoint(
 
         # Last resort: synthesize a minimal model_index.json from exported components.
         if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
+            import diffusers  # only reachable on the diffusers path
+
             model_index = {
                 "_class_name": type(pipe).__name__,
                 "_diffusers_version": diffusers.__version__,
