@@ -66,6 +66,39 @@ def _update_weight_test(rank, size):
         assert torch.allclose(torch.zeros(4, 4).to(output.device).to(output.dtype), output)
 
 
+def _update_weight_error_propagates_test(rank, size):
+    """An error raised while the context manager is active must propagate unchanged.
+
+    Regression test: the finally block references locals (fsdp_param_mapping,
+    fsdp_param_group, root_module) that are only bound after the in-body unshard. If an
+    error fires before they are bound, the finally must not raise UnboundLocalError and
+    mask the real error.
+    """
+    with patch_fsdp_mp_dtypes():
+        model = ToyModel(dims=[4, 4], bias=False).to("cuda")
+        fully_shard(model.linears)
+        fully_shard(model)
+
+        torch.distributed.barrier()
+
+        class _SentinelError(RuntimeError):
+            pass
+
+        # Force the in-body unshard to raise (stands in for an OOM) before the context
+        # manager binds its bookkeeping locals.
+        original_unshard = model.linears.unshard
+
+        def _raising_unshard(*args, **kwargs):
+            raise _SentinelError("boom during unshard")
+
+        model.linears.unshard = _raising_unshard
+        try:
+            with pytest.raises(_SentinelError), fsdp2_aware_weight_update(model, model.linears):
+                pass
+        finally:
+            model.linears.unshard = original_unshard
+
+
 def _compress_weight_test(rank, size):
     """Test fsdp2 weight update context for weight compression -> only value,shape and dtype changed"""
     with patch_fsdp_mp_dtypes():
@@ -211,6 +244,10 @@ def test_fsdp2_weight_compress_context_for_export(dist_workers):
 
 def test_fsdp2_weight_update_context_for_export(dist_workers):
     dist_workers.run(_update_weight_test)
+
+
+def test_fsdp2_weight_update_context_error_propagates(dist_workers):
+    dist_workers.run(_update_weight_error_propagates_test)
 
 
 @pytest.mark.parametrize(
