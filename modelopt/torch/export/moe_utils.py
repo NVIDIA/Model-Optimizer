@@ -77,8 +77,8 @@ def _delete_fused_moe_source_attrs(module: nn.Module) -> None:
 def _export_fused_experts(
     module: nn.Module,
     dtype: torch.dtype,
-    _moe_tied_cache: dict[tuple[int, int], nn.Module] | None = None,
-    _tied_cache: dict[int, nn.Module] | None = None,
+    _moe_tied_cache: dict[str, nn.Module] | None = None,
+    _tied_group_key: str | None = None,
 ) -> None:
     """Split fused MoE expert weights and export per-expert quantization scales.
 
@@ -100,19 +100,19 @@ def _export_fused_experts(
            {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
            {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
 
-    Tied-experts dedup is opt-in via ``_moe_tied_cache``: when multiple
-    fused-expert modules share their 3-D source params via HF
-    ``_tied_weights_keys``, the unpacking creates fresh per-expert tensors
-    that break the tie. With ``_moe_tied_cache`` provided (tuple-keyed by
-    ``(<first_proj>.data_ptr(), down_proj.data_ptr())``), the alias step
-    at the end re-points the per-expert ``weight`` / ``weight_scale`` /
-    ``weight_scale_2`` / ``input_scale`` buffers at a previously-processed
-    module sharing the same source memory. ``_tied_cache`` (int-keyed) is
-    threaded through to the per-projection ``_export_quantized_weight``
-    calls so wrapper-level dedup uses the same scope as standalone Linears.
-    Both caches are owned by the caller (typically
-    ``_export_transformers_checkpoint``) and scoped to one export
-    invocation; when ``None`` the corresponding alias step is skipped.
+    Tied-experts dedup is opt-in via ``_moe_tied_cache`` together with
+    ``_tied_group_key``: when multiple fused-expert modules share their 3-D
+    source params via HF ``_tied_weights_keys``, the unpacking creates fresh
+    per-expert tensors that break the tie. ``_tied_group_key`` is the name-based
+    container group key from :class:`TiedGroupResolver` (stable across FSDP
+    resharding and allocator reuse, unlike a ``data_ptr`` pair); on a cache hit
+    the fast path aliases the per-expert ``weight`` / ``weight_scale`` /
+    ``weight_scale_2`` / ``input_scale`` buffers at the previously-processed tied
+    module and skips re-unpacking entirely. This is an export-time compute/memory
+    optimization; on-disk dedup is guaranteed independently by the name-based pass
+    in ``postprocess_state_dict``. ``_moe_tied_cache`` is owned by the caller and
+    scoped to one export invocation; when either it or ``_tied_group_key`` is
+    ``None`` the fast path is skipped.
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
     from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
@@ -124,20 +124,15 @@ def _export_fused_experts(
     # Only the gated split needs the per-expert intermediate dim (gate|up boundary).
     expert_dim = _get_fused_expert_intermediate_dim(module) if is_gated else None
 
-    # Capture source tensor identities BEFORE unpacking (the source
-    # attrs are deleted at the end of this function).
-    _source_key = (
-        getattr(module, first_proj_attr).data_ptr(),
-        module.down_proj.data_ptr(),
-    )
-
-    # Tied-experts fast path: if this exact (first_proj, down) source-tensor pair
-    # has been processed before, alias all per-expert buffers directly from the
-    # prior module — no unpacking, no per-expert packing, no transient buffers
-    # thrown away. Cache miss falls through to the full unpack/pack below and
+    # Tied-experts fast path: if a module in this same declared tie group has been
+    # processed before, alias all per-expert buffers directly from the prior module —
+    # no unpacking, no per-expert packing, no transient buffers thrown away. The key
+    # is a name-based container group key, so it is immune to the allocator address
+    # reuse that a (first_proj, down) data_ptr pair was exposed to once the source
+    # attrs are deleted below. Cache miss falls through to the full unpack/pack and
     # registers this module as the prior for any later tied module.
-    if _moe_tied_cache is not None:
-        _prior = _moe_tied_cache.get(_source_key)
+    if _moe_tied_cache is not None and _tied_group_key is not None:
+        _prior = _moe_tied_cache.get(_tied_group_key)
         if _prior is not None and _prior is not module:
             _alias_per_expert_subtree_from_prior(module, _prior, n)
             _delete_fused_moe_source_attrs(module)
@@ -271,7 +266,7 @@ def _export_fused_experts(
             wrapper.weight_quantizer = w_quantizer
             wrapper.input_quantizer = i_quantizer
 
-            _export_quantized_weight(wrapper, dtype, _tied_cache=_tied_cache)
+            _export_quantized_weight(wrapper, dtype)
 
             proj = nn.Module()
             proj.weight = wrapper.weight
@@ -287,11 +282,11 @@ def _export_fused_experts(
     _delete_fused_moe_source_attrs(module)
 
     # 5. Register this module in the dedup cache so any later tied module
-    # (same source data_ptr pair) takes the fast path at the top of this
-    # function. Reached only on cache miss; cache-hit modules early-exited
+    # (same name-based container group key) takes the fast path at the top of
+    # this function. Reached only on cache miss; cache-hit modules early-exited
     # above before any unpack work.
-    if _moe_tied_cache is not None:
-        _moe_tied_cache[_source_key] = module
+    if _moe_tied_cache is not None and _tied_group_key is not None:
+        _moe_tied_cache[_tied_group_key] = module
 
 
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):
