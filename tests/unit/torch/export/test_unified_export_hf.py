@@ -132,6 +132,57 @@ def test_tied_group_resolver_per_layer_backreference():
     ) != resolver.container_group_key("encoder.layers.1.experts", "gate_up_proj")
 
 
+def test_tied_group_resolver_parallel_pattern_declaration():
+    """DiffusionGemma-style {alias_regex: canonical_regex} (parallel patterns, no backrefs).
+
+    Both sides are regexes that differ only in a leading literal head
+    (``encoder.language_model.`` -> ``decoder.``); the shared trailing structure is copied
+    from the concrete name. The container's fused expert Parameter is split into per-expert
+    keys on export, so the alias-prefix rewrite must map those to the decoder canonical.
+    """
+
+    class _Model(torch.nn.Module):
+        _tied_weights_keys = {
+            r"encoder.language_model.layers\.(?:[^.]+\.)*gate_up_proj": r"decoder.layers\.(?:[^.]+\.)*gate_up_proj",
+            r"encoder.language_model.layers\.(?:[^.]+\.)*down_proj": r"decoder.layers\.(?:[^.]+\.)*down_proj",
+        }
+
+        def __init__(self):
+            super().__init__()
+            self.decoder = torch.nn.Module()
+            self.encoder = torch.nn.Module()
+            self.encoder.language_model = torch.nn.Module()
+            for root in (self.decoder, self.encoder.language_model):
+                root.layers = torch.nn.ModuleList([torch.nn.Module()])
+            gup = torch.nn.Parameter(torch.zeros(4, 8, 8))
+            dp = torch.nn.Parameter(torch.zeros(4, 8, 8))
+            for root in (self.decoder, self.encoder.language_model):
+                root.layers[0].experts = torch.nn.Module()
+                root.layers[0].experts.gate_up_proj = gup  # tied (same object)
+                root.layers[0].experts.down_proj = dp
+
+    class _Root(torch.nn.Module):  # ForCausalLM-style `.model` wrapper
+        def __init__(self):
+            super().__init__()
+            self.model = _Model()
+
+    resolver = TiedGroupResolver(_Root())
+
+    # container group key: encoder side resolves to the decoder canonical container
+    assert (
+        resolver.container_group_key(
+            "model.encoder.language_model.layers.0.experts", "gate_up_proj"
+        )
+        == "model.decoder.layers.0.experts"
+    )
+    # post-export per-expert split key rewrites to the decoder canonical (so it is dropped)
+    prefixes = resolver.alias_prefix_pairs()
+    got = resolver.canonical_state_dict_key(
+        "model.encoder.language_model.layers.0.experts.3.gate_proj.weight", prefixes
+    )
+    assert got == "model.decoder.layers.0.experts.3.gate_proj.weight"
+
+
 def test_reorder_canonical_first_puts_decoder_keys_before_encoder_keys():
     """_reorder_canonical_first moves canonical-side state_dict keys ahead of alias-side keys."""
     enc, dec = make_tied_linear_pair()
