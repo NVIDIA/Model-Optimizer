@@ -1,7 +1,7 @@
 Changelog
 =========
 
-0.47 (2026-xx-xx)
+0.47 (2026-09-xx)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
@@ -21,7 +21,9 @@ Changelog
 
 **Bug Fixes**
 
-0.46 (2026-08-xx)
+- Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+
+0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
