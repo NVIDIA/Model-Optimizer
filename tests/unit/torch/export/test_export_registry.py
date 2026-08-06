@@ -307,6 +307,5 @@ def test_export_context_caches_are_per_instance():
     model = nn.Linear(2, 2)
     ctx_a = ExportContext(model=model, dtype=torch.float16)
     ctx_b = ExportContext(model=model, dtype=torch.float16)
-    ctx_a.tied_cache[123] = model
-    assert ctx_b.tied_cache == {}
+    ctx_a.moe_tied_cache["some.experts"] = model
     assert ctx_b.moe_tied_cache == {}

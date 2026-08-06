@@ -26,6 +26,7 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
+from modelopt.torch.export.model_utils import TiedGroupResolver
 from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -641,12 +642,22 @@ class TestExportFusedExperts:
 # Tests for tied-experts dedup in _export_fused_experts
 # ---------------------------------------------------------------------------
 def _build_two_moe_blocks(tie: bool) -> nn.Module:
-    """Build a parent with two _SyntheticSparseMoeBlock children, optionally with tied 3-D params."""
+    """Build a parent with two _SyntheticSparseMoeBlock children, optionally with tied 3-D params.
+
+    When ``tie`` is set, the parent both shares the 3-D expert Parameters AND declares the
+    tie via ``_tied_weights_keys`` (as real encoder/decoder models do), so the name-based
+    :class:`TiedGroupResolver` resolves it -- object sharing alone is intentionally not
+    enough to trigger dedup.
+    """
     parent = nn.Module()
     parent.encoder = _SyntheticSparseMoeBlock()
     parent.decoder = _SyntheticSparseMoeBlock()
     if tie:
         tie_fused_experts_3d_params(parent.encoder.experts, parent.decoder.experts)
+        parent._tied_weights_keys = {
+            r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj",
+            r"^encoder\.experts\.down_proj$": "decoder.experts.down_proj",
+        }
     return parent
 
 
@@ -693,21 +704,24 @@ class TestExportFusedExpertsTiedDedup:
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Per-call dedup caches threaded through both export calls; int keys
-            # for per-expert wrapper dedup, tuple keys for module-level dedup.
-            tied_cache: dict = {}
+            # The cache is keyed by the name-based container group key (both sides
+            # resolve to one key); no declared tie -> no key -> no dedup.
+            resolver = TiedGroupResolver(parent)
+            enc_key = resolver.container_group_key("encoder.experts", "gate_up_proj")
+            dec_key = resolver.container_group_key("decoder.experts", "gate_up_proj")
+            assert enc_key is not None and enc_key == dec_key
             moe_tied_cache: dict = {}
             _export_fused_experts(
                 parent.encoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
+                _tied_group_key=enc_key,
             )
             _export_fused_experts(
                 parent.decoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
+                _tied_group_key=dec_key,
             )
 
             for idx in range(NUM_EXPERTS):
@@ -734,22 +748,22 @@ class TestExportFusedExpertsTiedDedup:
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Same fresh caches as the positive case — confirms that even with
-            # dedup enabled, untied modules with distinct source data_ptrs do
-            # not get falsely aliased.
-            tied_cache: dict = {}
+            # No declared tie -> resolver yields no group key -> the cache must not
+            # alias these independent fused experts.
+            resolver = TiedGroupResolver(parent)
+            assert resolver.container_group_key("encoder.experts", "gate_up_proj") is None
             moe_tied_cache: dict = {}
             _export_fused_experts(
                 parent.encoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
+                _tied_group_key=resolver.container_group_key("encoder.experts", "gate_up_proj"),
             )
             _export_fused_experts(
                 parent.decoder.experts,
                 torch.float16,
                 _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
+                _tied_group_key=resolver.container_group_key("decoder.experts", "gate_up_proj"),
             )
 
             for idx in range(NUM_EXPERTS):
