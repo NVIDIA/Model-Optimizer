@@ -7,8 +7,8 @@ Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated
 The general fakequant example is tested with vLLM 0.9.0, 0.19.1, and 0.26.0. The compact
 NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
-> **Note:** When using KV cache quantization (`KV_QUANT_CFG`), NaN errors during calibration can
-> occur. If you encounter this, try reducing `--max-num-batched-tokens` or increasing tensor parallelism.
+> **Note:** On some models with hybrid Mamba+Attention layers (e.g. NemotronH) NaN errors may occur
+> during calibration at low tensor parallelism. Set `CLAMP_MAMBA_NAN=1` to enable a workaround.
 
 ## Prepare environment
 
@@ -33,6 +33,7 @@ You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, 
 | MODELOPT_STATE_PATH | Optional path to exported `vllm_fq_modelopt_state.pth` (restores quantizer state and parameters) | None |
 | CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
 | RECIPE_PATH      | Optional path to a ModelOpt PTQ recipe YAML  | None |
+| CLAMP_MAMBA_NAN  | Clamp NaN in MambaMixer2 layers during calibration (for hybrid Mamba+Attention models) | 0 |
 
 Set these variables in your shell or Docker environment as needed to customize calibration.
 
