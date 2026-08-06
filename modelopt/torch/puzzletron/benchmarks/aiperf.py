@@ -143,6 +143,38 @@ def _topology_vllm_args(topology: dict[str, Any]) -> list[str]:
     return args
 
 
+def _extra_vllm_args(topology: dict[str, Any]) -> tuple[str, ...]:
+    """Return caller-provided vLLM args without treating a string as characters."""
+
+    raw = topology.get("extra_vllm_args", ())
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(str(arg) for arg in raw)
+
+
+def _has_vllm_option(args: Iterable[str], *options: str) -> bool:
+    """Return whether an option is present as ``--flag`` or ``--flag=value``."""
+
+    option_set = set(options)
+    return any(str(arg).split("=", 1)[0] in option_set for arg in args)
+
+
+def _server_vllm_args(
+    checkpoint_dir: Path, topology: dict[str, Any], concurrency_values: Iterable[int]
+) -> list[str]:
+    """Build stable vLLM server args derived from topology and benchmark demand."""
+
+    args = _topology_vllm_args(topology)
+    args.extend(_descriptor_vllm_args(checkpoint_dir))
+    extra_args = _extra_vllm_args(topology)
+    if not _has_vllm_option(extra_args, "--max-num-seqs", "--max_num_seqs"):
+        args.extend(("--max-num-seqs", str(max(concurrency_values))))
+    args.extend(extra_args)
+    return args
+
+
 def _exact_length_extra_inputs(
     extra_inputs: dict[str, Any] | None, output_tokens: int
 ) -> dict[str, Any]:
@@ -405,6 +437,8 @@ def run_aiperf_sweep(
     model_name = f"puzzletron-{architecture_id[:16]}"
     tokenizer_dir = _short_tokenizer_alias(checkpoint_dir, artifact_dir)
     server_log = artifact_dir / "vllm_server.log"
+    server_max_model_len = _server_max_model_len(input_tokens, output_tokens, topology)
+    server_vllm_args = _server_vllm_args(checkpoint_dir, topology, concurrency_values)
     server_cmd = [
         "vllm",
         "serve",
@@ -416,12 +450,10 @@ def run_aiperf_sweep(
         "--served-model-name",
         model_name,
         "--max-model-len",
-        str(_server_max_model_len(input_tokens, output_tokens, topology)),
+        str(server_max_model_len),
         "--trust-remote-code",
     ]
-    server_cmd.extend(_topology_vllm_args(topology))
-    server_cmd.extend(_descriptor_vllm_args(checkpoint_dir))
-    server_cmd.extend(str(arg) for arg in topology.get("extra_vllm_args", ()))
+    server_cmd.extend(server_vllm_args)
     executable = _resolve_executable(executable)
     env = _clean_subprocess_environment(
         gpu_ids,
@@ -463,6 +495,10 @@ def run_aiperf_sweep(
                 "endpoint_type": endpoint_type,
                 "extra_inputs": _exact_length_extra_inputs(extra_inputs, output_tokens),
                 "use_server_token_count": use_server_token_count,
+                "server": {
+                    "max_model_len": server_max_model_len,
+                    "vllm_args": tuple(server_vllm_args),
+                },
                 "revisions": revisions,
             },
             prefix="aiperf_result",
