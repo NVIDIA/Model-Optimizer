@@ -81,7 +81,9 @@ jobs:
         with:
           files: |
             .github/workflows/unit_tests.yml
+            examples/puzzletron/**/*.html
             examples/puzzletron/**/*.json
+            examples/puzzletron/**/*.md
             examples/puzzletron/**/*.py
             examples/puzzletron/**/*.sh
             examples/puzzletron/**/*.txt

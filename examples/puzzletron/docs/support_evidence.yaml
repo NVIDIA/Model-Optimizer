@@ -1,0 +1,171 @@
+schema_version: 1
+definition: >-
+  Reported with known slicing warnings means that a campaign executed the
+  listed pruning dimensions and settings through its stated stage boundary,
+  while its report also records unresolved slicing-equivalence warnings. A
+  completed stage status records execution and artifacts, not a successful
+  correctness gate or a model support claim.
+
+campaigns:
+  - id: nemotron3_nano_30b_a3b
+    display_name: Nemotron-3 Nano 30B-A3B
+    model_repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    model_config: examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml
+    current_config: >-
+      examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
+    report: examples/puzzletron/reports/nemotron3_nano_30b_a3b.html
+    classification: reported_with_known_slicing_warnings
+    support_claim: false
+    known_slicing_warnings:
+      equivalence_tolerance_findings: 176
+      descriptor_realization_gate_findings: 2
+      consequence: >-
+        Slicing equivalence and descriptor realization must be resolved before
+        this campaign can establish a model support claim.
+    config_relationship: migrated_current_entry
+    config_relationship_note: >-
+      The checked-in entry is the current-code migration of the reported
+      production campaign, not a byte-identical copy of the executed config.
+    reported_sequence_length: 8192
+    reported_embedding_widths: [2688, 2560, 2432]
+    current_embedding_widths: [2688, 2560, 2432]
+    current_model_axes:
+      - kv_groups
+      - q_heads_per_group
+      - mamba_heads
+      - mamba_head_dim
+      - moe_experts
+      - moe_expert_intermediate
+      - moe_shared_expert_intermediate
+      - moe_top_k
+    reported_pruning_dimensions:
+      - embedding_width
+      - kv_groups
+      - q_heads_per_group
+      - mamba_heads
+      - mamba_head_dim
+      - moe_experts
+      - moe_expert_intermediate
+      - moe_shared_expert_intermediate
+      - moe_top_k
+      - conditional_depth
+    reported_mip_profiles:
+      - params-075
+      - runtime-075
+      - memory-075
+    mip_goal_dimensions: [params, runtime, memory]
+    reported_boundary_stage: zero_shot_evaluation
+    completed_stages:
+      - convert
+      - tokenize_data
+      - vllm_stats
+      - depth_importance
+      - width_importance
+      - sort
+      - sort_sanity
+      - width_sanity
+      - slicing_sanity
+      - bypass_sanity
+      - bypass
+      - build_library
+      - replacement_scoring
+      - mip
+      - zero_shot_evaluation
+      - global_distillation_sanity
+    pending_enabled_stages:
+      - aiperf
+      - global_distillation
+      - post_distillation_evaluation
+    report_config_override_count: 0
+    focused_unit_equivalence:
+      covered_dimensions: []
+      gaps:
+        - embedding_width
+        - kv_groups
+        - q_heads_per_group
+        - mamba_heads
+        - mamba_head_dim
+        - moe_experts
+        - moe_expert_intermediate
+        - moe_shared_expert_intermediate
+        - moe_top_k
+        - conditional_depth
+
+  - id: qwen3p5_9b
+    display_name: Qwen3.5-9B
+    model_repo: Qwen/Qwen3.5-9B
+    model_config: examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml
+    current_config: examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml
+    report: examples/puzzletron/reports/qwen3p5_9b.html
+    classification: reported_with_known_slicing_warnings
+    support_claim: false
+    known_slicing_warnings:
+      equivalence_tolerance_findings: 101
+      descriptor_realization_gate_findings: 0
+      consequence: >-
+        Sorted-versus-physical deltas exceed the configured tolerance, so this
+        campaign does not establish a model support claim.
+    config_relationship: reconstructed_current_entry
+    config_relationship_note: >-
+      The checked-in entry reconstructs the current-code campaign. The report
+      was generated with additional overrides and embedding widths 4096, 3840,
+      and 3584; the current entry retains only the teacher width 4096.
+    reported_sequence_length: 16384
+    reported_embedding_widths: [4096, 3840, 3584]
+    current_embedding_widths: [4096]
+    current_model_axes:
+      - ffn_intermediate
+      - kv_groups
+      - q_heads_per_group
+      - gdn_key_groups
+      - gdn_value_heads_per_group
+      - gdn_key_head_dim
+      - gdn_value_head_dim
+    reported_pruning_dimensions:
+      - embedding_width
+      - ffn_intermediate
+      - kv_groups
+      - q_heads_per_group
+      - gdn_key_groups
+      - gdn_value_heads_per_group
+      - gdn_key_head_dim
+      - gdn_value_head_dim
+      - conditional_depth
+    reported_mip_profiles:
+      - latency-095
+    mip_goal_dimensions: [runtime]
+    reported_boundary_stage: post_distillation_evaluation
+    completed_stages:
+      - convert
+      - tokenize_data
+      - vllm_stats
+      - depth_importance
+      - width_importance
+      - sort
+      - sort_sanity
+      - width_sanity
+      - slicing_sanity
+      - bypass_sanity
+      - bypass
+      - build_library
+      - replacement_scoring
+      - mip
+      - zero_shot_evaluation
+      - global_distillation_sanity
+      - aiperf
+      - global_distillation
+      - post_distillation_evaluation
+    pending_enabled_stages: []
+    report_config_override_count: 23
+    focused_unit_equivalence:
+      covered_dimensions:
+        - ffn_intermediate
+      gaps:
+        - embedding_width
+        - kv_groups
+        - q_heads_per_group
+        - gdn_key_groups
+        - gdn_value_heads_per_group
+        - gdn_key_head_dim
+        - gdn_value_head_dim
+        - conditional_depth
