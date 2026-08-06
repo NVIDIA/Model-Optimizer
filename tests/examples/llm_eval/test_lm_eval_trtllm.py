@@ -26,7 +26,11 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("lm_eval", reason="lm_eval is an examples/llm_eval requirement")
+# Skip on the backend module, not just `lm_eval`: it currently guards its `tensorrt_llm`
+# import, but if that ever becomes eager this should skip rather than error.
+pytest.importorskip(
+    "lm_eval.models.trtllm_causallms", reason="lm_eval is an examples/llm_eval requirement"
+)
 
 _LLM_EVAL_DIR = Path(__file__).resolve().parents[3] / "examples" / "llm_eval"
 if str(_LLM_EVAL_DIR) not in sys.path:
