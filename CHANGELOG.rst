@@ -6,15 +6,22 @@ Experimental
 
 - Add pruning examples for Qwen3.5-9B and Nemotron3-Nano using the `new experimental puzzletron branch <https://github.com/NVIDIA/Model-Optimizer/blob/puzzletron_v2/examples/puzzletron/README.md#end-to-end-tested-models>`_, this branch uses `AutoModel <https://github.com/NVIDIA-NeMo/Automodel>`_ for better parallelization and efficiency.
 
-0.46 (2026-08-xx)
+0.47 (2026-xx-xx)
 ^^^^^^^^^^^^^^^^^
+
+**New Features**
 
 - Add per-expert weight quantization for Transformer Engine ``TEGroupedMLP`` (fused MoE experts): each expert now has its own ``weight_quantizer`` (a ``GroupedQuantizer`` holding one ``TensorQuantizer`` per expert) with an independent ``amax``, instead of a single shared ``amax`` across all experts. Applies to ``mtq.quantize`` calibration, HF / Megatron export, and QAD.
 - Add opt-in ``torch.compile`` execution for Transformer Engine grouped-linear per-expert weight quantizers while preserving their native checkpoint amax shapes. Set ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP=1`` before quantized-module conversion; the default path remains eager.
 
 **Backward Breaking Changes**
 
-- Transformer Engine ``TEGroupedMLP`` (fused MoE experts) now uses **per-expert** weight quantization (one ``amax`` per expert) instead of a single shared ``amax`` across all experts. As a result, ModelOpt checkpoints containing quantized ``TEGroupedMLP`` modules saved before 0.46 are **not compatible** with 0.46: the per-expert ``weight_quantizer`` amax layout differs from the previous single-quantizer layout. Re-run PTQ (or re-quantize) with 0.46 to regenerate compatible checkpoints.
+- Transformer Engine ``TEGroupedMLP`` (fused MoE experts) now uses **per-expert** weight quantization (one ``amax`` per expert) instead of a single shared ``amax`` across all experts. As a result, ModelOpt checkpoints containing quantized ``TEGroupedMLP`` modules saved before 0.47 are **not compatible** with 0.47: the per-expert ``weight_quantizer`` amax layout differs from the previous single-quantizer layout. Re-run PTQ (or re-quantize) with 0.47 to regenerate compatible checkpoints.
+
+0.46 (2026-08-xx)
+^^^^^^^^^^^^^^^^^
+
+**Backward Breaking Changes**
 
 - Remove the ``examples/diffusers/eval`` image-quality evaluation example (ImageReward / CLIP-IQA / CLIP metrics) and its references in ``examples/diffusers/README.md``. The example was deprecated in 0.45 and is no longer maintained.
 - Remove the deprecated ``examples/llm_autodeploy`` example (deprecated in 0.45). Use TensorRT-LLM's `AutoDeploy <https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy>`_ directly together with ModelOpt PTQ in ``examples/llm_ptq``.
