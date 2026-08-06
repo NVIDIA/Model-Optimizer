@@ -1,0 +1,121 @@
+# NEL 0.3.x (engine) — SIMPLE / no-tools, SLURM-sharded.
+# Built-in + skills math/multichoice benchmarks for a reasoning checkpoint.
+# Fill every <...> placeholder. See references/nel-v0.3.0-migration.md.
+#
+#   nel eval run r030_example_eval.yaml --dry-run
+#   nel eval run r030_example_eval.yaml
+#   # after all shards finish:
+#   nel eval merge <output.dir>/<run-id>
+#   # then export from the LOGIN node (SLURM does NOT auto-export — see migration doc "Export results to MLFlow"):
+#   nel export <output.dir>/<run-id>/<bench> --dest mlflow -o tracking_uri=<uri> -o experiment_name=<exp>
+
+services:
+  model:
+    type: vllm
+    # HOST checkpoint path; the engine auto-mounts it <hostpath>:/model:ro and serves `vllm serve /model`.
+    # Do NOT also hand-mount it. For an HF handle, set `model: <org/model>` (no mount needed).
+    model: /path/to/checkpoint
+    served_model_name: my-model      # required; referenced by benchmarks
+    protocol: chat_completions
+    # Reasoning models: uncomment to emit the thinking block (see the migration doc's gym caveats).
+    # extra_body is merged into every request; pair it with a big enough generation max_tokens or the
+    # reasoning gets truncated -> empty answer -> score collapses. (Applies to native type:vllm too.)
+    # proxy:
+    #   extra_body:
+    #     chat_template_kwargs:
+    #       enable_thinking: true
+    port: 8000
+    node_pool: gpu
+    # Single-instance serving. Pick TP/PP from model size & GPU count (references/parallelism.md).
+    # Scale THROUGHPUT with cluster.shards below, not data_parallel (DP can be fragile on stock images).
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    num_nodes: 1
+    image: <vllm-image.sqsh-or-handle>   # pin a version; never :latest. Cross-check recipes.vllm.ai.
+    startup_timeout: 3600.0
+    extra_args:
+      - "--gpu-memory-utilization=0.9"
+      - "--max-model-len=262144"             # must exceed prompt + generation.max_tokens
+      - "--trust-remote-code"                # if config.json has auto_map
+      # Reasoning checkpoint: use YOUR model's parser (and plugin path if it ships a custom one).
+      - "--reasoning-parser=<your-reasoning-parser>"
+      # - "--reasoning-parser-plugin=/model/<custom_parser>.py"   # only if the checkpoint bundles one
+      - "--enable-expert-parallel"           # MoE only; no-op for dense
+      - "--max-num-seqs=512"                 # serving-side concurrency knob — raise to use the GPU
+    extra_env:
+      HF_TOKEN: ${HF_TOKEN}
+      HF_HOME: /cache/huggingface
+    container_mounts:
+      - /path/to/hf-cache:/cache/huggingface
+    proxy:
+      verbose: true                          # REQUIRED for request_timeout to apply
+      request_timeout: 36000.0               # LARGE for reasoning models (120s default kills long gens)
+      # max_concurrent_upstream: 512         # default 64 is the hidden throttle — raise to use the GPU
+    generation:
+      temperature: 1.0                       # from model card
+      top_p: 0.95                            # from model card
+      # PER model-call cap. Leave headroom under --max-model-len AND bound one call under the SLURM wall
+      # so a single long sample can't loop auto_resume forever.
+      max_tokens: 196608
+
+benchmarks:
+  - name: gpqa                               # built-in
+    repeats: 8
+    max_concurrent: 64
+    solver: {type: simple, service: model}
+  - name: mmlu_pro                           # built-in
+    repeats: 1
+    max_concurrent: 64
+    solver: {type: simple, service: model}
+  - name: skills://aime25                    # nemo-skills math (per-sample) — needs nemo-skills baked in
+    repeats: 64
+    max_concurrent: 64
+    solver: {type: simple, service: model}
+  # WITH-TOOLS variant of a native benchmark: SAME backend/name, just a tool_calling solver + a local
+  # sandbox — NO gym server involved. Use in place of the simple `gpqa` entry above to give it tools.
+  # NOTE: the served model must be launched with --enable-auto-tool-choice + --tool-call-parser=<parser>
+  # (add them to services.model.extra_args) or the tool calls won't be parsed.
+  # - name: gpqa                             # still BUILT-IN
+  #   repeats: 8
+  #   max_concurrent: 64
+  #   solver: {type: tool_calling, service: model, sandbox_tools: true, max_turns: 100}
+  #   sandbox: {type: local, concurrency: 64}
+
+cluster:
+  type: slurm
+  account: <your-slurm-account>
+  walltime: "04:00:00"                       # cluster wall; long evals continue via auto_resume / shards
+  auto_resume: true                          # safe here (no-tools can't loop a single call past the wall)
+  shards: 8                                  # N independent single-node workers + `nel eval merge`
+  eval_image: <eval-image.sqsh>              # the one eval container, with nemo-skills + lm-eval pip-installed
+  mount_home: false                          # avoid a stale host ~/.local/bin/nel shadowing the CLI
+  container_mounts:
+    - /path/to/hf-cache:/cache/huggingface
+  container_env:
+    HF_HOME: /cache/huggingface
+    HF_TOKEN: ${HF_TOKEN}
+  node_pools:
+    gpu:
+      partition: <gpu-partition>
+      nodes: 1
+      ntasks_per_node: 1
+      gres: "gpu:4"                          # match the node's GPU count + TP×DP
+  sbatch_extra_flags:
+    exclusive: true
+
+output:
+  dir: /abs/path/to/rundir                   # MUST be absolute
+  export:
+    - mlflow                                 # NOTE: NOT auto-exported on SLURM — run `nel export` manually
+  export_config:
+    mlflow:
+      tracking_uri: <your-mlflow-uri>
+      experiment_name: <experiment>
+      tags:
+        model: my-model                    # set this — dashboards attribute/group runs by it
+        checkpoint_path: <abs path>        # per-checkpoint row label downstream
+        precision: <bf16|fp8|nvfp4>
+        pipeline: r0.3.0
+        # (no static `benchmark` tag — this config runs several benchmarks; the engine
+        #  carries each one's identity in its own export bundle)
