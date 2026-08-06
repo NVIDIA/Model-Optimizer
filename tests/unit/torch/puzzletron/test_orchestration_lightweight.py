@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for the dependency-light orchestration entrypoint."""
 
@@ -18,6 +30,12 @@ from puzzletron_orchestrator.config import load_experiment_config
 from puzzletron_orchestrator.logging import OrchestratorLogger
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _write_terminal_manifest(root: Path, stage: str, **extra) -> None:
+    path = root / "manifests" / f"{stage}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"status": "success", **extra}))
 
 
 def test_lightweight_package_does_not_import_torch() -> None:
@@ -191,6 +209,7 @@ def test_convert_completeness_requires_runtime_subblock_library(tmp_path: Path) 
         "ckpts/teacher/config.json",
         "subblock_library.json",
     )
+    _write_terminal_manifest(tmp_path, "convert")
     teacher = tmp_path / "ckpts" / "teacher"
     teacher.mkdir(parents=True)
     (teacher / "config.json").write_text("{}")
@@ -208,6 +227,7 @@ def test_non_elastic_bypass_completeness_does_not_require_dp_observations(
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path), "bypass": {"elastic": False}}
+    _write_terminal_manifest(tmp_path, "bypass")
     history = tmp_path / "artifacts" / "bypass" / "local_kd_loss_history.json"
     history.parent.mkdir(parents=True)
     history.write_text("{}\n")
@@ -281,6 +301,7 @@ def test_depth_completeness_requires_matching_complete_trajectory(tmp_path: Path
         "puzzle_dir": str(tmp_path),
         "depth_importance": {"enabled": True, "max_removals": 2},
     }
+    _write_terminal_manifest(tmp_path, "depth_importance")
     output = tmp_path / "depth" / "iterative"
     output.mkdir(parents=True)
     trajectory = output / "trajectory.json"
@@ -299,6 +320,7 @@ def test_build_library_requires_its_own_complete_outputs(tmp_path: Path) -> None
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path)}
+    _write_terminal_manifest(tmp_path, "build_library")
     (tmp_path / "subblock_stats.json").write_text("{}")
     assert not stage_is_complete(config, "build_library")
 
@@ -315,6 +337,7 @@ def test_embedding_build_library_requires_every_width_scenario(tmp_path: Path) -
         "puzzle_dir": str(tmp_path),
         "embedding_pruning": {"enabled": True, "widths": [1024, 768]},
     }
+    _write_terminal_manifest(tmp_path, "build_library")
     for name in ("replacement_library.json", "candidate_library.json"):
         (tmp_path / name).write_text("{}")
     assert not stage_is_complete(config, "build_library")
@@ -344,6 +367,7 @@ def test_stage_completeness_requires_every_declared_output(tmp_path: Path) -> No
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path)}
+    _write_terminal_manifest(tmp_path, "tokenize_data")
     cache = tmp_path / "dataset_cache"
     cache.mkdir()
     (cache / "train.tokens").write_text("tokens")
@@ -353,7 +377,7 @@ def test_stage_completeness_requires_every_declared_output(tmp_path: Path) -> No
     assert stage_is_complete(config, "tokenize_data")
 
 
-def test_stage_completeness_accepts_successful_noop_manifest(tmp_path: Path) -> None:
+def test_stage_completeness_rejects_untyped_required_skip(tmp_path: Path) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path)}
@@ -363,13 +387,26 @@ def test_stage_completeness_accepts_successful_noop_manifest(tmp_path: Path) -> 
         json.dumps({"status": "skipped", "outputs": {"enabled": False}})
     )
 
-    assert stage_is_complete(config, "tokenize_data")
+    assert not stage_is_complete(config, "tokenize_data")
+
+
+def test_stage_completeness_accepts_only_current_disabled_skip(tmp_path: Path) -> None:
+    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
+
+    config = {"puzzle_dir": str(tmp_path), "aiperf": {"enabled": False}}
+    _write_terminal_manifest(tmp_path, "aiperf", status="skipped", skip_reason="disabled")
+
+    assert stage_is_complete(config, "aiperf")
+
+    config["aiperf"]["enabled"] = True
+    assert not stage_is_complete(config, "aiperf")
 
 
 def test_vllm_completeness_requires_nonempty_canonical_stats(tmp_path: Path) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path), "vllm_stats": {"enabled": True}}
+    _write_terminal_manifest(tmp_path, "vllm_stats")
     summary = tmp_path / "artifacts" / "vllm_stats" / "summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text("{}")
@@ -389,6 +426,8 @@ def test_legacy_mip_and_evaluation_completeness(tmp_path: Path) -> None:
         "mip": {"profiles": {"params": {}, "runtime": {}}},
         "zero_shot_evaluation": {"profile_ids": ["params", "runtime"]},
     }
+    _write_terminal_manifest(tmp_path, "mip")
+    _write_terminal_manifest(tmp_path, "zero_shot_evaluation")
     params_grid = tmp_path / "mip" / "profiles" / "params" / "mip_grid.json"
     params_grid.parent.mkdir(parents=True)
     params_grid.write_text("{}")

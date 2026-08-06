@@ -39,10 +39,11 @@ class StageResult:
     status: str
     manifest_path: Path
     message: str
+    skip_reason: str | None = None
 
 
 # Import after StageResult: stage handlers import this public result type.
-from .stages.graph import stage_ids
+from .stages.graph import StageSkipReason, stage_ids, stage_is_enabled, stage_spec
 
 STAGES = stage_ids()
 
@@ -166,10 +167,18 @@ def _manifest_path(config: dict[str, Any], stage: str) -> Path:
     return _experiment_dir(config) / "manifests" / f"{stage}.json"
 
 
-def _noop_stage(config: dict[str, Any], stage: str, manifest: StageManifest) -> StageResult:
+def _skip_stage(
+    config: dict[str, Any],
+    stage: str,
+    manifest: StageManifest,
+    *,
+    reason: StageSkipReason,
+    message: str,
+) -> StageResult:
     manifest.complete(
         outputs={},
         status="skipped",
+        skip_reason=reason,
     )
     manifest_path = _manifest_path(config, stage)
     write_stage_manifest(manifest_path, manifest)
@@ -177,7 +186,8 @@ def _noop_stage(config: dict[str, Any], stage: str, manifest: StageManifest) -> 
         stage=stage,
         status="skipped",
         manifest_path=manifest_path,
-        message=f"Stage '{stage}' has no handler registered for this invocation.",
+        message=message,
+        skip_reason=reason.value,
     )
 
 
@@ -189,14 +199,22 @@ def run_stage(
 ) -> StageResult:
     """Run a Puzzletron stage through the new manifest/capability skeleton.
 
-    Missing handlers no-op with a manifest so config and capability preflight can
-    be exercised independently from GPU-heavy stage execution.
+    Disabled optional stages and unimplemented optional stages emit typed skips.
+    Required stages fail closed when their handler is missing.
     """
     stage = canonical_stage_name(stage)
     if stage not in STAGES:
         raise ValueError(f"Unknown Puzzletron stage '{stage}'. Expected one of {STAGES}")
 
     cfg = normalize_config(config)
+    if not stage_is_enabled(stage, cfg):
+        return _skip_stage(
+            cfg,
+            stage,
+            StageManifest(stage=stage, inputs={"config": cfg}, config=cfg),
+            reason=StageSkipReason.DISABLED,
+            message=f"Stage '{stage}' is disabled by configuration.",
+        )
     # These reports consume existing JSON artifacts and intentionally do not import a model,
     # initialize distributed state, or require the original checkpoint to remain accessible.
     artifact_only_stages = {"slicing_sanity"}
@@ -225,12 +243,21 @@ def run_stage(
         )
         runtime_cfg["_runtime"] = runtime
 
-    if handlers is None:
+    handler_map = handlers
+    if handler_map is None:
         from .stages import DEFAULT_HANDLERS
 
-        handlers = DEFAULT_HANDLERS
+        handler_map = DEFAULT_HANDLERS
 
-    handler = handlers.get(stage)
+    handler = handler_map.get(stage)
     if handler is None:
-        return _noop_stage(runtime_cfg, stage, manifest)
+        if stage_spec(stage).required:
+            raise RuntimeError(f"required stage {stage!r} has no registered handler")
+        return _skip_stage(
+            runtime_cfg,
+            stage,
+            manifest,
+            reason=StageSkipReason.OPTIONAL,
+            message=f"Optional stage '{stage}' has no registered handler.",
+        )
     return handler(runtime_cfg, manifest)

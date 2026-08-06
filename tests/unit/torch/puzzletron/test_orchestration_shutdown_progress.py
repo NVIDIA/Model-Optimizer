@@ -41,6 +41,7 @@ from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
 from puzzletron_orchestrator.progress import summarize_active_progress, summarize_stage_artifacts
 from puzzletron_orchestrator.schema import AttemptSpec, CommandSpec, JobHandle, JobState, JobStatus
+from puzzletron_orchestrator.state import StageRunRecord
 from puzzletron_orchestrator.terminal import ShutdownAction
 
 
@@ -193,10 +194,22 @@ def _write_sanity_drain_configs(tmp_path: Path):
     return experiment, runner, execution, run_dir
 
 
-def _seed_sort_complete(run_dir: Path) -> None:
+def _seed_terminal_manifest(run_dir: Path, stage_id: str) -> None:
     manifests = run_dir / "manifests"
     manifests.mkdir(parents=True, exist_ok=True)
-    (manifests / "sort.json").write_text(json.dumps({"status": "success"}) + "\n")
+    (manifests / f"{stage_id}.json").write_text(json.dumps({"status": "success"}) + "\n")
+
+
+def _seed_convert_complete(run_dir: Path) -> None:
+    _seed_terminal_manifest(run_dir, "convert")
+    teacher = run_dir / "ckpts" / "teacher"
+    teacher.mkdir(parents=True, exist_ok=True)
+    (teacher / "config.json").write_text("{}\n")
+    (run_dir / "subblock_library.json").write_text("[]\n")
+
+
+def _seed_sort_complete(run_dir: Path) -> None:
+    _seed_terminal_manifest(run_dir, "sort")
     sorted_dir = run_dir / "ckpts" / "sorted_teacher"
     sorted_dir.mkdir(parents=True, exist_ok=True)
     (sorted_dir / "config.json").write_text("{}\n")
@@ -212,16 +225,16 @@ def _seed_sort_sanity_complete(run_dir: Path) -> None:
 
 
 def _seed_sanity_complete(run_dir: Path, stage_id: str) -> None:
+    _seed_terminal_manifest(run_dir, stage_id)
     summary = run_dir / "artifacts" / stage_id / "summary.json"
     summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text(json.dumps({"passed": True}) + "\n")
 
 
 def _seed_vllm_stats_complete(run_dir: Path) -> None:
+    _seed_terminal_manifest(run_dir, "vllm_stats")
     stats = run_dir / "subblock_stats.json"
-    stats.write_text(
-        json.dumps([{"args": {"runtime_stats": True, "n_embd": 1}}]) + "\n"
-    )
+    stats.write_text(json.dumps([{"args": {"runtime_stats": True, "n_embd": 1}}]) + "\n")
     summary = run_dir / "artifacts" / "vllm_stats" / "summary.json"
     summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text("{}\n")
@@ -473,6 +486,31 @@ def test_controller_completed_retry_satisfies_work_plan(tmp_path: Path, monkeypa
     assert not controller._stage_has_active_or_completed_work(plan.stages[0])
 
 
+def test_controller_result_rejects_store_only_completion(tmp_path: Path, monkeypatch):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    controller.store.write_stage_record(
+        StageRunRecord(
+            stage_id="convert",
+            status=JobState.COMPLETED.value,
+            attempts=[],
+            aggregated=True,
+        )
+    )
+    monkeypatch.setattr(controller, "_ready_nodes", list)
+
+    result = controller.run(once=True)
+
+    assert controller.store.stage_is_complete("convert")
+    assert "convert" not in result["completed"]
+
+
 def test_controller_aggregates_completed_work_before_resubmitting(tmp_path: Path, monkeypatch):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     plan = compile_campaign_plan(
@@ -500,10 +538,7 @@ def test_controller_aggregates_completed_work_before_resubmitting(tmp_path: Path
             return getattr(delegate, name)
 
         def aggregate(self, *, plan, node, work_plan):
-            teacher = plan.puzzle_dir / "ckpts" / "teacher"
-            teacher.mkdir(parents=True)
-            (teacher / "config.json").write_text("{}")
-            (plan.puzzle_dir / "subblock_library.json").write_text("[]")
+            _seed_convert_complete(plan.puzzle_dir)
 
     aggregate_adapter = _AggregateAdapter()
     monkeypatch.setattr(
@@ -880,10 +915,7 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
 ):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     run_dir = tmp_path / "run"
-    teacher = run_dir / "ckpts" / "teacher"
-    teacher.mkdir(parents=True)
-    (teacher / "config.json").write_text("{}")
-    (run_dir / "subblock_library.json").write_text("[]")
+    _seed_convert_complete(run_dir)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -996,10 +1028,7 @@ def test_controller_collects_failed_attempt_log_paths(tmp_path: Path):
 def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(tmp_path: Path):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     run_dir = tmp_path / "run"
-    teacher = run_dir / "ckpts" / "teacher"
-    teacher.mkdir(parents=True)
-    (teacher / "config.json").write_text("{}")
-    (run_dir / "subblock_library.json").write_text("[]")
+    _seed_convert_complete(run_dir)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),

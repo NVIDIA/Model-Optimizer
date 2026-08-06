@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Scheduler-neutral registry for public Puzzletron pipeline stages."""
 
@@ -7,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable
 
@@ -15,7 +28,10 @@ __all__ = [
     "STAGE_REGISTRY",
     "STAGE_SPECS",
     "ArtifactChoice",
+    "StageSkipReason",
     "StageSpec",
+    "StageStatus",
+    "StageTerminalState",
     "configured_parent_stage_ids",
     "configured_stage_ids",
     "distributed_stage_ids",
@@ -26,6 +42,7 @@ __all__ = [
     "stage_ids",
     "stage_is_enabled",
     "stage_spec",
+    "stage_terminal_state",
     "topological_mapping_items",
     "topological_stage_ids",
 ]
@@ -70,6 +87,66 @@ class StageSpec:
     distributed: bool = False
     report_order: int = 0
     topology_order: int = 0
+
+
+class StageStatus(str, Enum):
+    """Manifest terminal states accepted by Puzzletron stage consumers."""
+
+    SUCCESS = "success"
+    IMPORTED = "imported"
+    SKIPPED = "skipped"
+
+
+class StageSkipReason(str, Enum):
+    """Reasons that may make a skipped stage an accepted terminal state."""
+
+    DISABLED = "disabled"
+    OPTIONAL = "optional"
+
+
+@dataclass(frozen=True)
+class StageTerminalState:
+    """Typed terminal state shared by workers, manifests, resume, and orchestration."""
+
+    status: StageStatus
+    skip_reason: StageSkipReason | None = None
+
+    @property
+    def produced_artifacts(self) -> bool:
+        """Return whether completion must be backed by stage artifacts."""
+
+        return self.status in {StageStatus.SUCCESS, StageStatus.IMPORTED}
+
+    def allows_completion(self, stage_id: str, config: Mapping[str, Any]) -> bool:
+        """Return whether graph and config semantics allow this terminal state."""
+
+        if self.produced_artifacts:
+            return True
+        if self.skip_reason is StageSkipReason.DISABLED:
+            return not stage_is_enabled(stage_id, config)
+        return self.skip_reason is StageSkipReason.OPTIONAL and not stage_spec(stage_id).required
+
+
+def stage_terminal_state(payload: Mapping[str, Any] | None) -> StageTerminalState | None:
+    """Parse one manifest terminal state, returning ``None`` for invalid evidence."""
+
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        status = StageStatus(payload.get("status"))
+    except (TypeError, ValueError):
+        return None
+    raw_reason = payload.get("skip_reason")
+    if status is StageStatus.SKIPPED:
+        try:
+            reason = StageSkipReason(raw_reason)
+        except (TypeError, ValueError):
+            return None
+    else:
+        if raw_reason not in (None, ""):
+            return None
+        reason = None
+    return StageTerminalState(status=status, skip_reason=reason)
 
 
 def topological_mapping_items(

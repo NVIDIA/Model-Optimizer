@@ -45,13 +45,21 @@ from modelopt.torch.puzzletron.manifest import (
     semantic_stage_config,
     write_stage_manifest,
 )
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import (
+    stage_is_complete as artifacts_are_complete,
+)
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import (
+    stage_output_patterns as canonical_stage_output_patterns,
+)
 from modelopt.torch.puzzletron.stages.graph import (
+    StageStatus,
     configured_parent_stage_ids,
     distributed_stage_ids,
     enabled_stage_ids,
     required_stage_ids,
     stage_ids,
     stage_is_enabled,
+    stage_terminal_state,
     topological_stage_ids,
 )
 
@@ -217,13 +225,21 @@ def _report_model_name(config: dict) -> str:
 
 
 def _manifest_is_complete(config: dict, stage: str) -> bool:
+    state = _manifest_terminal_state(config, stage)
+    return state is not None and state.produced_artifacts and artifacts_are_complete(config, stage)
+
+
+def _manifest_terminal_state(config: dict, stage: str):
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     path = puzzle_dir / "manifests" / f"{stage}.json"
     try:
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
-        return False
-    return payload.get("status") in {"success", "imported"}
+        return None
+    state = stage_terminal_state(payload)
+    if state is None or not state.allows_completion(stage, config):
+        return None
+    return state
 
 
 def _runtime_stats_filename(config: dict) -> str:
@@ -289,17 +305,75 @@ def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
 
 
 def _completion_is_valid(config: dict, config_path: str | Path, stage: str) -> bool:
-    if not _manifest_is_complete(config, stage):
+    state = _manifest_terminal_state(config, stage)
+    if state is None:
+        return False
+    if state.status is StageStatus.SKIPPED:
+        return True
+    if not artifacts_are_complete(config, stage):
         return False
     kwargs = _resume_kwargs(config, config_path, stage)
     return check_marker(marker_path(kwargs["root"], stage, None, None), **kwargs)
 
 
 def _mark_completion(config: dict, config_path: str | Path, stage: str) -> None:
-    if not _manifest_is_complete(config, stage):
-        raise RuntimeError(f"enabled stage {stage!r} did not write a successful manifest")
+    state = _manifest_terminal_state(config, stage)
+    if state is None:
+        raise RuntimeError(f"stage {stage!r} did not write an accepted terminal manifest")
+    if state.status is StageStatus.SKIPPED:
+        return
+    if not artifacts_are_complete(config, stage):
+        raise RuntimeError(f"stage {stage!r} failed canonical artifact validation")
     kwargs = _resume_kwargs(config, config_path, stage)
     write_marker(kwargs["root"], stage, build_payload(**kwargs))
+
+
+def _validate_worker_result(config: dict, result, *, expected_stage: str | None = None) -> None:
+    """Fail the worker unless its result, manifest, and required artifacts agree."""
+
+    expected_stage = expected_stage or result.stage
+    if result.stage != expected_stage:
+        raise RuntimeError(
+            f"worker stage {expected_stage!r} returned result for stage {result.stage!r}"
+        )
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    expected_manifest_path = puzzle_dir / "manifests" / f"{expected_stage}.json"
+    if Path(result.manifest_path).resolve() != expected_manifest_path.resolve():
+        raise RuntimeError(
+            f"stage {expected_stage!r} returned manifest path {result.manifest_path!s}; "
+            f"expected {expected_manifest_path!s}"
+        )
+    try:
+        payload = json.loads(expected_manifest_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"stage {expected_stage!r} wrote an unreadable manifest") from exc
+    if payload.get("stage") != expected_stage:
+        raise RuntimeError(
+            f"stage {expected_stage!r} manifest identifies stage {payload.get('stage')!r}"
+        )
+
+    state = _manifest_terminal_state(config, expected_stage)
+    if state is None:
+        raise RuntimeError(f"stage {expected_stage!r} wrote an invalid terminal manifest")
+    if result.status != state.status.value:
+        raise RuntimeError(
+            f"stage {expected_stage!r} result status {result.status!r} disagrees with "
+            f"manifest status {state.status.value!r}"
+        )
+    expected_reason = state.skip_reason.value if state.skip_reason is not None else None
+    if result.skip_reason != expected_reason:
+        raise RuntimeError(
+            f"stage {expected_stage!r} result skip reason {result.skip_reason!r} disagrees with "
+            f"manifest skip reason {expected_reason!r}"
+        )
+    if not state.produced_artifacts:
+        return
+    if not artifacts_are_complete(config, expected_stage):
+        expected = canonical_stage_output_patterns(config, expected_stage)
+        raise RuntimeError(
+            f"stage {expected_stage!r} failed canonical artifact validation; expected: "
+            + (", ".join(expected) or "stage-specific outputs")
+        )
 
 
 def run_pipeline(
@@ -369,7 +443,9 @@ def _run_worker(args: argparse.Namespace) -> None:
     )
     gpus_per_node = int(args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8))
     composite_only = {"replacement_scoring", "mip"}
-    if args.worker_stage == "tokenize_data":
+    if not _stage_enabled(cfg, args.worker_stage):
+        result = mtpz.stage_runner.run_stage(cfg, args.worker_stage, handlers={})
+    elif args.worker_stage == "tokenize_data":
         if __package__:
             from .tokenize_data import tokenize_data_stage
         else:
@@ -405,13 +481,13 @@ def _run_worker(args: argparse.Namespace) -> None:
             )
             outputs["base_manifest"] = str(result.manifest_path)
             result = _complete_composite_stage(cfg, args.worker_stage, outputs)
+    if int(os.environ.get("RANK", "0")) == 0:
+        _validate_worker_result(cfg, result, expected_stage=args.worker_stage)
     refresh_campaign_report(cfg)
     mtpz.tools.mprint(
         f"Puzzletron stage {result.stage!r} finished with status {result.status}: "
         f"{result.manifest_path}"
     )
-    if result.status not in {"success", "skipped"}:
-        raise RuntimeError(f"stage {result.stage!r} finished with status {result.status!r}")
 
 
 def _complete_composite_stage(config: dict, stage: str, outputs: dict):
