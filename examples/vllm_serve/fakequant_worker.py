@@ -36,7 +36,7 @@ from modelopt.torch.quantization.plugins.vllm import (
     disable_compilation,
     post_restore_vllm_parallel_linears,
 )
-from modelopt.torch.utils import print_rank_0, safe_load
+from modelopt.torch.utils import safe_load
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 quant_config: dict[str, Any] = {
@@ -48,6 +48,7 @@ quant_config: dict[str, Any] = {
     "modelopt_state_path": os.environ.get("MODELOPT_STATE_PATH", None),
     "calib_batch_size": int(os.environ.get("CALIB_BATCH_SIZE", 1)),
     "recipe_path": os.environ.get("RECIPE_PATH", None),
+    "clamp_mamba_nan": os.environ.get("CLAMP_MAMBA_NAN", "0") == "1",
 }
 
 
@@ -121,19 +122,14 @@ def _fakequant_run_prolog_worker(self) -> None:
             device=self.device,
         )
 
-        calibrate_loop = calibrate_fun(calib_dataloader, self)
+        calibrate_loop = calibrate_fun(
+            calib_dataloader, self, clamp_mamba_nan=quant_config["clamp_mamba_nan"]
+        )
 
         quant_cfg = get_quant_config(quant_config, model)
-        try:
-            with disable_compilation(model):
-                print("Quantizing model...")
-                mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
-        except AssertionError as e:
-            if "nan" in str(e).lower() and "amax" in str(e).lower():
-                print_rank_0(
-                    "NaN detected in calibration amax. Try reducing --max-num-batched-tokens."
-                )
-            raise
+        with disable_compilation(model):
+            print("Quantizing model...")
+            mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
 
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:

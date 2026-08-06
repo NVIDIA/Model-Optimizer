@@ -36,7 +36,45 @@ def _create_new_data_cls(data_cls, **kwargs):
     return data_cls(**filtered_kwargs)
 
 
-def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], None]:
+def _patch_mamba_mixer2(model: Any) -> None:
+    """Clamp NaN in MambaMixer2 and causal_conv1d_fn for hybrid Mamba+Attention models.
+
+    Enable via CLAMP_MAMBA_NAN=1 when calibration produces NaN on models with
+    MambaMixer2 layers (e.g. NemotronH at low TP).
+    """
+    mamba_cls = next(
+        (type(m) for _, m in model.named_modules() if "MambaMixer2" in type(m).__name__),
+        None,
+    )
+    if mamba_cls is None:
+        return
+
+    class PatchedMambaMixer2(mamba_cls):  # type: ignore[misc,valid-type]
+        def forward(self, *args, **kwargs):
+            return torch.nan_to_num(super().forward(*args, **kwargs), nan=0.0)
+
+    for _, parent in model.named_modules():
+        for _, child in list(parent.named_children()):
+            if type(child) is mamba_cls:
+                child.__class__ = PatchedMambaMixer2
+
+    try:
+        import vllm.model_executor.layers.mamba.mamba_mixer2 as _mm2
+
+        _orig_conv = _mm2.causal_conv1d_fn
+        _mm2.causal_conv1d_fn = lambda x, w, b=None, *a, **kw: torch.nan_to_num(
+            _orig_conv(x, w, b, *a, **kw), nan=0.0
+        )
+    except Exception as e:
+        warnings.warn(f"causal_conv1d_fn patch failed: {e}")
+
+
+def calibrate_fun(
+    calib_dataloader: DataLoader, self: Any, clamp_mamba_nan: bool = False
+) -> Callable[[Any], None]:
+    if clamp_mamba_nan:
+        _patch_mamba_mixer2(self.model_runner.model)
+
     def calibrate_loop(model: Any) -> None:
         for batch_idx, batch in tqdm(enumerate(calib_dataloader)):
             input_ids_batch = batch["input_ids"]
@@ -56,7 +94,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     input_ids_list_batch = [input_ids_list_batch]
 
             num_groups = len(self.model_runner.kv_cache_config.kv_cache_groups)
-            empty_block_ids = tuple([] for _ in range(num_groups))
+            calib_block_ids = tuple([batch_idx] for _ in range(num_groups))
 
             scheduled_new_reqs = []
             num_scheduled_tokens = {}
@@ -74,7 +112,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     mm_features=[],
                     sampling_params=SamplingParams(max_tokens=1),
                     pooling_params=None,
-                    block_ids=empty_block_ids,
+                    block_ids=calib_block_ids,
                     num_computed_tokens=0,
                     lora_request=None,
                 )
@@ -91,7 +129,7 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                 scheduled_spec_decode_tokens={},
                 scheduled_encoder_inputs={},
                 num_common_prefix_blocks=[0] * num_groups,
-                finished_req_ids=set(),
+                finished_req_ids=set(num_scheduled_tokens),
                 free_encoder_mm_hashes=[],
                 kv_connector_metadata=None,
                 structured_output_request_ids={},

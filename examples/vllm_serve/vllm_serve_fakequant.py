@@ -78,6 +78,7 @@ additional_env_vars = {
     "CALIB_BATCH_SIZE",
     "RECIPE_PATH",
     "TRUST_REMOTE_CODE",
+    "CLAMP_MAMBA_NAN",
 }
 
 try:
