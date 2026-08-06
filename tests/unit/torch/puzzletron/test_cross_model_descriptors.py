@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import dataclasses
@@ -551,6 +566,7 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
     def handler(config, manifest):
         observed["runtime_descriptor"] = config["_runtime"]["descriptor"]
         observed["manifest_config"] = manifest.config
+        observed["manifest_effective_config"] = manifest.effective_config
         observed["resolution"] = manifest.inputs["descriptor_resolution"]
         return StageResult(
             stage="width_importance",
@@ -574,6 +590,7 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
 
     assert observed["runtime_descriptor"] == "llama"
     assert "_runtime" not in observed["manifest_config"]
+    assert observed["manifest_effective_config"]["_runtime"]["descriptor"] == "llama"
     assert "descriptor_override" not in observed["manifest_config"]["model"]
     assert observed["resolution"]["name"] == "llama"
 

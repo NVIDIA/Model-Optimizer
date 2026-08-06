@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 import modelopt.torch.puzzletron as mtpz
+from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
     semantic_stage_config,
@@ -149,6 +150,37 @@ def build_worker_command(
     return tuple(command)
 
 
+def _pipeline_config_from_path(
+    config_path: str | Path,
+    *,
+    overrides: Sequence[str] = (),
+) -> dict:
+    """Load authored Hydra config or an immutable resolved execution config."""
+
+    path = Path(config_path)
+    if path.suffix == ".json":
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("schema") == "puzzletron.stage-execution/v1":
+            if overrides:
+                raise ValueError("resolved execution configs do not accept overrides")
+            stage = payload.get("stage")
+            config = payload.get("effective_config")
+            expected_identity = payload.get("resolved_config_identity")
+            if not isinstance(stage, str) or not isinstance(config, dict):
+                raise ValueError(f"invalid resolved execution config: {path}")
+            actual_identity = stable_hash(config, prefix=f"{stage}_resolved_cfg")
+            if actual_identity != expected_identity:
+                raise ValueError(f"resolved execution config identity mismatch: {path}")
+            runtime = dict(config.get("_runtime") or {})
+            runtime["resolved_config_path"] = str(path.resolve())
+            config["_runtime"] = runtime
+            return config
+    return mtpz.pipeline_config.pipeline_config_from_path(path, overrides=overrides)
+
+
 def refresh_campaign_report(config: dict, running_stage: str | None = None) -> None:
     """Refresh the stable campaign report from rank zero.
 
@@ -213,6 +245,28 @@ def _manifest_terminal_state(config: dict, stage: str):
     return state
 
 
+def _stage_execution_record_patterns(config: dict, stage: str) -> tuple[str, ...]:
+    """Return immutable execution-record paths referenced by a stage manifest."""
+
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return ()
+    record = payload.get("execution_record") or {}
+    patterns = []
+    for key in ("resolved_config_path", "artifact_manifest_path"):
+        raw_path = record.get(key)
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        relative = Path(raw_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"unsafe stage execution record path: {raw_path!r}")
+        patterns.append(relative.as_posix())
+    return tuple(patterns)
+
+
 def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     upstream = {
@@ -231,6 +285,7 @@ def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
         "depth": None,
         "required_patterns": (
             f"manifests/{stage}.json",
+            *_stage_execution_record_patterns(config, stage),
             *canonical_stage_output_patterns(config, stage),
         ),
         "upstream_markers": upstream,
@@ -368,7 +423,7 @@ def _embedding_followup_stage(stage: str) -> bool:
 
 
 def _run_worker(args: argparse.Namespace) -> None:
-    cfg = mtpz.pipeline_config.pipeline_config_from_path(
+    cfg = _pipeline_config_from_path(
         args.config,
         overrides=args.override,
     )
@@ -376,6 +431,9 @@ def _run_worker(args: argparse.Namespace) -> None:
         bool((cfg.get("embedding_pruning") or {}).get("enabled", False)) and not args.scenario_child
     )
     gpus_per_node = int(args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8))
+    runtime = dict(cfg.get("_runtime") or {})
+    runtime["gpus_per_node"] = gpus_per_node
+    cfg["_runtime"] = runtime
     composite_only = {"replacement_scoring", "mip"}
     if not _stage_enabled(cfg, args.worker_stage):
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage, handlers={})
@@ -446,7 +504,7 @@ def main() -> None:
         _run_worker(args)
         return
 
-    cfg = mtpz.pipeline_config.pipeline_config_from_path(args.config, overrides=args.override)
+    cfg = _pipeline_config_from_path(args.config, overrides=args.override)
     execution = cfg.get("execution") or {}
     gpus_per_node = int(args.gpus_per_node or execution.get("gpus_per_node", 8))
     stages = stage_sequence(args.stage, cfg)

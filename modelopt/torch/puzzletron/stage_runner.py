@@ -223,15 +223,6 @@ def run_stage(
     except CapabilityValidationError:
         raise
 
-    manifest = StageManifest(
-        stage=stage,
-        inputs={
-            "config": cfg,
-            "descriptor_resolution": resolution.to_dict() if resolution else None,
-        },
-        config=cfg,
-        capability_snapshot=resolution.capabilities.to_dict() if resolution else None,
-    )
     runtime_cfg = copy.deepcopy(cfg)
     if resolution is not None:
         runtime = dict(runtime_cfg.get("_runtime") or {})
@@ -241,6 +232,16 @@ def run_stage(
             descriptor_confidence=resolution.confidence,
         )
         runtime_cfg["_runtime"] = runtime
+    manifest = StageManifest(
+        stage=stage,
+        inputs={
+            "config": cfg,
+            "descriptor_resolution": resolution.to_dict() if resolution else None,
+        },
+        config=cfg,
+        effective_config=runtime_cfg,
+        capability_snapshot=resolution.capabilities.to_dict() if resolution else None,
+    )
 
     handler_map = handlers
     if handler_map is None:
