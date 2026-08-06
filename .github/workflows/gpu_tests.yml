@@ -22,11 +22,15 @@ jobs:
     secrets: inherit
     with:
       files: |
-        .github/actions/cache-extensions/**
+        .github/actions/**
+        .github/workflows/_pr_gate.yml
         .github/workflows/gpu_tests.yml
         modelopt/**
+        modelopt_recipes/**
         noxfile.py
         pyproject.toml
+        tests/_test_utils/**
+        tests/conftest.py
         tests/gpu/**
         tests/gpu_megatron/**
         tests/gpu_trtllm/**
