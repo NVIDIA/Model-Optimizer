@@ -1,0 +1,76 @@
+# @package _global_
+
+# Runnable public Hugging Face repository ID; this is not a placeholder.
+input_hf_model_path: Qwen/Qwen3.5-0.8B
+
+model_info:
+  # Immutable public model identity used by the focused MIP smoke.
+  # Geometry is reproducible from the config at this exact revision.
+  hf_repo: Qwen/Qwen3.5-0.8B
+  hf_revision: 2fc06364715b967f1860aea9cf38778875588b17
+  model_type: qwen3_5
+  architectures: [Qwen3_5ForConditionalGeneration]
+  num_hidden_layers: 24
+  hidden_size: 1024
+  intermediate_size: 3584
+  num_attention_heads: 8
+  num_key_value_heads: 2
+  head_dim: 256
+  vocab_size: 248320
+  tie_word_embeddings: true
+  max_position_embeddings: 262144
+  mtp_num_hidden_layers: 1
+  layer_counts:
+    linear_attention: 18
+    full_attention: 6
+  mamba:
+    linear_key_head_dim: 128
+    linear_num_key_heads: 16
+    linear_num_value_heads: 16
+    linear_value_head_dim: 128
+    linear_conv_kernel_dim: 4
+
+# These lists contain reduced targets. Candidate construction adds the teacher
+# value for every enabled axis.
+pruning:
+  intermediate_size_list: [3072, 2560, 2048, 1792, 1536]
+  attn_heads_list:
+    - [2, 1]
+    - [4, 1]
+    - [4, 2]
+    - [8, 2]
+
+search_space:
+  axes:
+    hidden_width:
+      enabled: true
+      teacher_value: 1024
+      values: [768]
+    kv_groups:
+      enabled: true
+      teacher_value: 2
+      values: [1]
+    q_heads_per_group:
+      enabled: true
+      teacher_value: 4
+      values: [2]
+    ffn_intermediate:
+      enabled: true
+      teacher_value: 3584
+      values: [3072, 2560, 2048, 1792, 1536]
+    gdn_key_groups:
+      enabled: true
+      teacher_value: 16
+      values: [12, 8]
+    gdn_value_heads_per_group:
+      enabled: false
+      teacher_value: 1
+      values: []
+    gdn_key_head_dim:
+      enabled: true
+      teacher_value: 128
+      values: [96]
+    gdn_value_head_dim:
+      enabled: true
+      teacher_value: 128
+      values: [96]
