@@ -230,6 +230,39 @@ def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
     return head
 
 
+def _canonical_via_pattern_pair(alias_pat: str, canonical_pat: str, name: str) -> str | None:
+    r"""Rewrite ``name`` into its canonical form for a *parallel-pattern* tie declaration.
+
+    Some models (e.g. DiffusionGemma) declare ``_tied_weights_keys`` as
+    ``{alias_regex: canonical_regex}`` where the value is **not** a ``re.sub`` template
+    but a second regex that is structurally identical to the alias except for a leading
+    literal segment, e.g.::
+
+        r"encoder.language_model.layers\.(?:[^.]+\.)*gate_up_proj"
+        -> r"decoder.layers\.(?:[^.]+\.)*gate_up_proj"
+
+    The shared trailing structure is copied verbatim from ``name``; only the differing
+    literal head (``encoder.language_model.`` -> ``decoder.``) is swapped. Returns ``None``
+    when the declaration is not of this form (e.g. a genuine ``\1`` backreference
+    template), so the caller can fall back to ``re.sub``.
+    """
+    # Longest common suffix of the two pattern strings.
+    i = 0
+    while (
+        i < len(alias_pat) and i < len(canonical_pat) and alias_pat[-1 - i] == canonical_pat[-1 - i]
+    ):
+        i += 1
+    alias_head = alias_pat[: len(alias_pat) - i]
+    canon_head = canonical_pat[: len(canonical_pat) - i]
+    # The heads must be literal path prefixes (a backreference template will not be):
+    # any regex metacharacter means this is not the parallel-pattern form.
+    if not alias_head or not name.startswith(alias_head):
+        return None
+    if any(c in alias_head or c in canon_head for c in r"\()[]{}*+?|^$"):
+        return None
+    return canon_head + name[len(alias_head) :]
+
+
 def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
     r"""Map each declared *alias* parameter full-name to its *canonical* full-name.
 
@@ -280,13 +313,18 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
                 rel = full_name[plen:]
                 if not alias_re.search(rel):
                     continue
-                # ``sub`` rewrites the matched alias name into the canonical name,
-                # expanding any backreferences the template uses. A template that
-                # references a group the pattern lacks raises ``re.error`` — skip it.
-                try:
-                    canonical_full = prefix + alias_re.sub(canonical_tmpl, rel)
-                except re.error:
-                    continue
+                # Two declaration flavors: a parallel canonical *pattern* (swap the
+                # differing literal head, copy the shared structure) or a ``re.sub``
+                # *template* (expand backreferences). Try the pattern-pair form first;
+                # fall back to ``sub`` for backreference templates and plain-name canonicals.
+                canonical_rel = _canonical_via_pattern_pair(alias_pat, canonical_tmpl, rel)
+                if canonical_rel is None:
+                    # A template referencing a group the pattern lacks raises re.error.
+                    try:
+                        canonical_rel = alias_re.sub(canonical_tmpl, rel)
+                    except re.error:
+                        continue
+                canonical_full = prefix + canonical_rel
                 if canonical_full != full_name:
                     alias_to_canonical[full_name] = canonical_full
 
