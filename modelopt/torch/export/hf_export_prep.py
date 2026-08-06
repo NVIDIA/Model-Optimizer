@@ -400,6 +400,11 @@ def _warn_on_unsynced_moe_gate_up(model: nn.Module) -> None:
         )
 
 
+# TODO: Remove this workaround once HuggingFace fixes revert_weight_conversion to handle
+# scalar (0-d) tensors. transformers' Chunk.convert() calls torch.chunk() on quantization
+# scale buffers that are 0-d scalars, raising RuntimeError ("chunk expects at least a
+# 1-dimensional tensor"). Confirmed in transformers 5.12.0.
+# See: transformers/core_model_loading.py, Chunk.convert()
 def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
     """No-op replacement for transformers' revert_weight_conversion."""
     return state_dict

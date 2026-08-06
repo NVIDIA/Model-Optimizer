@@ -163,13 +163,6 @@ def _export_transformers_checkpoint(
     return quantized_state_dict, quant_config
 
 
-# TODO: Remove this workaround once HuggingFace fixes revert_weight_conversion to handle
-# scalar (0-d) tensors. transformers' Chunk.convert() calls torch.chunk() on quantization
-# scale buffers that are 0-d scalars, raising RuntimeError ("chunk expects at least a
-# 1-dimensional tensor"). Confirmed in transformers 5.12.0.
-# See: transformers/core_model_loading.py, Chunk.convert()
-
-
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
