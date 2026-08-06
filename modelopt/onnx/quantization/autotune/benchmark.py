@@ -87,13 +87,15 @@ def _check_remote_connectivity(trtexec_args: list[str], retries: int = 3) -> Non
     parsed = urllib.parse.urlparse(config_value)
     hostname = parsed.hostname
     if not hostname:
-        raise RemoteConnectionError(f"Missing hostname in remote autotuning URI: {config_value!r}")
+        raise RemoteConnectionError(
+            f"Missing hostname in remote autotuning URI (scheme={parsed.scheme!r})"
+        )
 
     try:
         port = parsed.port
     except ValueError as e:
         raise RemoteConnectionError(
-            f"Invalid port in remote autotuning URI: {config_value!r} - {e}"
+            f"Invalid port in remote autotuning URI: {parsed.scheme}://{hostname} - {e}"
         ) from e
     if port is None:
         port = _DEFAULT_PORTS.get(parsed.scheme, 22)
