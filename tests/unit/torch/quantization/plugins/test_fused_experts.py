@@ -26,7 +26,6 @@ from _test_utils.torch.quantization.tied_modules import tie_fused_experts_3d_par
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
-from modelopt.torch.export.model_utils import TiedGroupResolver
 from modelopt.torch.export.moe_utils import _export_fused_experts
 from modelopt.torch.export.quant_utils import get_quant_config, get_quantization_format
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -696,33 +695,21 @@ class TestExportFusedExpertsTiedDedup:
         if QuantModuleRegistry.get(mod_type) is not None:
             QuantModuleRegistry.unregister(mod_type)
 
-    def test_per_expert_buffers_share_data_ptr_for_tied_fused_experts(self):
-        """Two tied FusedExperts modules: every per-expert .weight + scale buffer shares data_ptr."""
+    def test_tied_fused_experts_pack_independently_to_equal_values(self):
+        """Tied FusedExperts pack independently (distinct storage), byte-identical values.
+
+        There is no per-module dedup cache: each container splits and packs the shared
+        source itself, so per-expert buffers have DIFFERENT data_ptrs but EQUAL bytes --
+        the duplicate keys are then dropped by name in postprocess_state_dict.
+        """
         parent = _build_two_moe_blocks(tie=True)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # The cache is keyed by the name-based container group key (both sides
-            # resolve to one key); no declared tie -> no key -> no dedup.
-            resolver = TiedGroupResolver(parent)
-            enc_key = resolver.container_group_key("encoder.experts", "gate_up_proj")
-            dec_key = resolver.container_group_key("decoder.experts", "gate_up_proj")
-            assert enc_key is not None and enc_key == dec_key
-            moe_tied_cache: dict = {}
-            _export_fused_experts(
-                parent.encoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_group_key=enc_key,
-            )
-            _export_fused_experts(
-                parent.decoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_group_key=dec_key,
-            )
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))
@@ -730,41 +717,23 @@ class TestExportFusedExpertsTiedDedup:
                 for proj_name in ("gate_proj", "up_proj", "down_proj"):
                     enc_proj = getattr(enc_expert, proj_name)
                     dec_proj = getattr(dec_expert, proj_name)
-                    assert enc_proj.weight.data_ptr() == dec_proj.weight.data_ptr()
-                    for scale_attr in ("weight_scale", "weight_scale_2"):
-                        if hasattr(enc_proj, scale_attr) and hasattr(dec_proj, scale_attr):
-                            assert (
-                                getattr(enc_proj, scale_attr).data_ptr()
-                                == getattr(dec_proj, scale_attr).data_ptr()
-                            )
+                    # independent storage (no aliasing) ...
+                    assert enc_proj.weight.data_ptr() != dec_proj.weight.data_ptr()
+                    # ... but byte-identical, so postprocess drops one by name
+                    assert torch.equal(enc_proj.weight, dec_proj.weight)
         finally:
             self._cleanup_registry(expert_type)
 
-    def test_per_expert_buffers_have_independent_data_ptrs_for_untied_fused_experts(self):
-        """Two untied FusedExperts modules: per-expert buffers stay independent (no false-positive alias)."""
+    def test_untied_fused_experts_have_independent_buffers(self):
+        """Untied FusedExperts stay fully independent — no aliasing, distinct values."""
         parent = _build_two_moe_blocks(tie=False)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # No declared tie -> resolver yields no group key -> the cache must not
-            # alias these independent fused experts.
-            resolver = TiedGroupResolver(parent)
-            assert resolver.container_group_key("encoder.experts", "gate_up_proj") is None
-            moe_tied_cache: dict = {}
-            _export_fused_experts(
-                parent.encoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_group_key=resolver.container_group_key("encoder.experts", "gate_up_proj"),
-            )
-            _export_fused_experts(
-                parent.decoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_group_key=resolver.container_group_key("decoder.experts", "gate_up_proj"),
-            )
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))
