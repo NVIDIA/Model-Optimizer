@@ -1,3 +1,6 @@
+# Dependencies for the isolated FAR3D Python 3.8 environment. ModelOpt and its ONNX
+# dependencies are installed separately in the base Python environment.
+
 --extra-index-url https://pypi.nvidia.com
 --find-links https://download.openmmlab.com/mmcv/dist/cu117/torch1.13.0/index.html
 

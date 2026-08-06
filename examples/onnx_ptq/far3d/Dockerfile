@@ -25,6 +25,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
 
+# FAR3D requires the legacy PyTorch 1.13/MMCV stack in Python 3.8. ModelOpt is installed
+# separately below in the base image's Python 3.12 environment.
 RUN python -m pip install --no-cache-dir uv && \
     uv python install 3.8 && \
     uv venv --seed --python 3.8 /opt/far3d
