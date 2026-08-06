@@ -85,6 +85,18 @@ def test_quantizer_container_base_delegates_shared_contract(
     container.enable()
     assert all(quantizer.is_enabled for quantizer in quantizers)
 
+    rotate_quantizers = (
+        TensorQuantizer(quant_attribute_cfg=QuantizerAttributeConfig(rotate={"enable": True})),
+        TensorQuantizer(
+            quant_attribute_cfg=QuantizerAttributeConfig(
+                rotate={"enable": True, "mode": "rotate_back"}
+            )
+        ),
+    )
+    rotate_container = container_cls(*rotate_quantizers)
+    assert rotate_container.disable_rotate() == expected_disable_result
+    assert not any(quantizer.rotate_is_enabled for quantizer in rotate_quantizers)
+
 
 @pytest.mark.parametrize("container_cls", [SequentialQuantizer, GroupedQuantizer])
 def test_quantizer_container_base_sets_attribute_config(container_cls):

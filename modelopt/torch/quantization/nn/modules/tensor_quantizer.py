@@ -1737,8 +1737,15 @@ NVFP4StaticQuantizer = StaticBlockScaleQuantizer
 class _QuantizerContainerBase:
     """Shared delegation helpers for quantizer containers."""
 
-    _delegated_properties: list[str]
-    _delegated_methods: list[str]
+    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
+    _delegated_methods = [
+        "reset_amax",
+        "disable",
+        "disable_rotate",
+        "enable",
+        "load_calib_amax",
+        "load_calib_bias",
+    ]
 
     def __getitem__(self, idx) -> Any:
         return super().__getitem__(idx)  # type: ignore[misc]
@@ -1806,16 +1813,6 @@ class SequentialQuantizer(_QuantizerContainerBase, nn.Sequential):
 
     """
 
-    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
-    _delegated_methods = [
-        "reset_amax",
-        "disable",
-        "disable_rotate",
-        "enable",
-        "load_calib_amax",
-        "load_calib_bias",
-    ]
-
     def __init__(self, *quantizers: TensorQuantizer):
         """Initialize SequentialQuantizer module."""
         super().__init__(*quantizers)
@@ -1879,15 +1876,6 @@ class GroupedQuantizer(_QuantizerContainerBase, nn.ModuleList):
     checks; the real per-group values live on the members and are used via indexing.
     Lifecycle/config methods broadcast to every member.
     """
-
-    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
-    _delegated_methods = [
-        "reset_amax",
-        "disable",
-        "enable",
-        "load_calib_amax",
-        "load_calib_bias",
-    ]
 
     def __init__(self, *quantizers: "TensorQuantizer | SequentialQuantizer"):
         """Initialize GroupedQuantizer module."""
