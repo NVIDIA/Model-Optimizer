@@ -350,12 +350,23 @@ def _match_quantizer(
     if not isinstance(module, (TensorQuantizer, SequentialQuantizer)):
         return False
     if isinstance(wildcard_or_filter_func, str):
-        normalized = _normalize_fused_experts_quantizer_name(name)
-        if not (
-            fnmatch.fnmatch(name, wildcard_or_filter_func)
-            or (normalized != name and fnmatch.fnmatch(normalized, wildcard_or_filter_func))
-        ):
-            return False
+        if not fnmatch.fnmatch(name, wildcard_or_filter_func):
+            normalized = _normalize_fused_experts_quantizer_name(name)
+            if normalized == name or not fnmatch.fnmatch(normalized, wildcard_or_filter_func):
+                return False
+            # The index-stripping normalization exists solely for fused-experts layouts
+            # that hold per-expert quantizers in an ``nn.ModuleList``. A
+            # ``SequentialQuantizer`` stored at attribute ``weight_quantizer`` exposes
+            # children with the same dotted shape (``...weight_quantizer.0``), so
+            # normalizing them would make each sub-quantizer match singular wildcards
+            # like ``*weight_quantizer`` on its own. That corrupts re-application of
+            # list configs (nesting SequentialQuantizers inside sub-slots) and breaks
+            # list-based partial updates on existing SequentialQuantizers. Sub-quantizers
+            # must only be addressed through their container, so skip the normalized
+            # match when the quantizer's direct parent is a SequentialQuantizer.
+            parent_name = name.rpartition(".")[0]
+            if isinstance(full_model.get_submodule(parent_name), SequentialQuantizer):
+                return False
     elif callable(wildcard_or_filter_func):
         if not wildcard_or_filter_func(name):
             return False
