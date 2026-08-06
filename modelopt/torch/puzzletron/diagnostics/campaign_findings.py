@@ -34,12 +34,12 @@ class MetricSpec:
 
 @dataclass(frozen=True)
 class Finding:
-    """One non-blocking warning derived from report evidence."""
+    """One evidence-derived advisory warning or correctness error."""
 
     stage: str
     message: str
     evidence: Mapping[str, Any]
-    severity: Literal["warning"] = "warning"
+    severity: Literal["warning", "error"] = "warning"
 
 
 def _allowed(left: float, right: float, spec: MetricSpec) -> float:
@@ -111,6 +111,7 @@ def equivalence_findings(
                         "delta": delta,
                         "tolerance": allowed,
                     },
+                    severity="error",
                 )
             )
     return findings

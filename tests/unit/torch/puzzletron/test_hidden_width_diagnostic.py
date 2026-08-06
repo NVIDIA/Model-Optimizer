@@ -7,6 +7,7 @@ from modelopt.torch.puzzletron.stages.diagnostics import (
     _hidden_width_result_metrics,
     _merge_reused_sort_equivalence,
     _near_teacher_axis_targets,
+    _parent_sweep_sanity_verdict,
     _ratio_aligned_hidden_widths,
     _select_diagnostic_hidden_width,
     _select_layers,
@@ -219,3 +220,23 @@ def test_reused_parent_sweep_preserves_existing_sort_diagnosis_metrics():
     assert merged["sorted_teacher"] == existing["sorted_teacher"]
     assert merged["reverse_sorted"] == existing["reverse_sorted"]
     assert merged["reused_parent_sweep"] is True
+
+
+def test_parent_sweep_sort_miss_is_blocking_but_width_miss_remains_advisory():
+    verdict = _parent_sweep_sanity_verdict(
+        {
+            "passed": False,
+            "findings": [{"stage": "width_sanity", "message": "ranking regressed"}],
+        },
+        {
+            "passed": False,
+            "findings": [{"stage": "width_sanity", "message": "teacher drifted"}],
+        },
+    )
+
+    assert verdict.passed is False
+    assert verdict.blocking is True
+    assert verdict.findings == [
+        {"stage": "width_sanity", "message": "ranking regressed"},
+        {"stage": "sort_sanity", "message": "teacher drifted", "severity": "error"},
+    ]

@@ -186,11 +186,15 @@ def test_progress_report_renders_canonical_sort_sanity_metrics(tmp_path: Path):
     assert 'data-stage="sort_sanity" data-status="completed"' in document
 
 
-def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: Path):
+def test_sort_sanity_failure_renders_blocking_failure_and_failed_dag_node(tmp_path: Path):
     message = "sorted teacher loss drift exceeded tolerance"
     _write(
         tmp_path / "manifests/sort_sanity.json",
-        {"config": {"sort_sanity": {"enabled": True}}},
+        {
+            "status": "failed",
+            "config": {"sort_sanity": {"enabled": True}},
+            "outputs": {"passed": False, "verdict": "failed", "blocking": True},
+        },
     )
     _write(
         tmp_path / "artifacts/sort_sanity/summary.json",
@@ -201,7 +205,7 @@ def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: P
             "findings": [
                 {
                     "stage": "sort_sanity",
-                    "severity": "warning",
+                    "severity": "error",
                     "message": message,
                     "evidence": {"metric": "lm_loss"},
                 }
@@ -212,10 +216,10 @@ def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: P
     result = generate_campaign_progress_report(tmp_path)
     document = Path(result["html"]).read_text(encoding="utf-8")
 
-    assert "Equivalence gate: warning" in document
+    assert "Equivalence gate: failed (blocking correctness)" in document
     assert "warning-value" in document
     assert f"data-warning='{message}'" in document
-    assert 'data-stage="sort_sanity" data-status="completed"' in document
+    assert 'data-stage="sort_sanity" data-status="failed"' in document
 
 
 def test_progress_report_uses_pending_instead_of_transient_running_state(tmp_path: Path):
@@ -257,18 +261,36 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
     _write(
         tmp_path / "artifacts/width_sanity/summary.json",
         {
+            "passed": False,
             "rows": [
                 {**common, "method": "sorted", "raw_replacement_loss": 1.2},
                 {**common, "method": "original", "raw_replacement_loss": 1.1},
                 {**common, "method": "reverse", "raw_replacement_loss": 1.3},
             ],
-            "findings": [],
+            "findings": [
+                {
+                    "stage": "width_sanity",
+                    "message": "sorted ranking is worse than original.",
+                    "severity": "warning",
+                    "evidence": {
+                        "group": {
+                            "axis": "arbitrary_axis",
+                            "layer_idx": 3,
+                            "target_value": 8,
+                        },
+                        "metric": "raw_replacement_loss",
+                        "preferred_method": "sorted",
+                        "comparison_method": "original",
+                    },
+                }
+            ],
         },
     )
     message = "sorted and physical differ for raw_replacement_loss."
     _write(
         tmp_path / "artifacts/slicing_sanity/summary.json",
         {
+            "passed": False,
             "rows": [
                 {**common, "method": "sorted", "raw_replacement_loss": 1.2},
                 {**common, "method": "physical", "raw_replacement_loss": 1.0},
@@ -277,7 +299,7 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
                 {
                     "stage": "slicing_sanity",
                     "message": message,
-                    "severity": "warning",
+                    "severity": "error",
                     "evidence": {
                         "group": {
                             "axis": "arbitrary_axis",
@@ -296,6 +318,9 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
     result = generate_campaign_progress_report(tmp_path)
     document = Path(result["html"]).read_text(encoding="utf-8")
 
+    assert "Width ranking: warning (advisory)" in document
+    assert "Dynamic/physical equivalence: failed (blocking correctness)" in document
+    assert 'data-stage="slicing_sanity" data-status="failed"' in document
     assert "class='warning-cell'" in document
     assert "class='warning-value'" in document
     assert "tabindex='0'" in document

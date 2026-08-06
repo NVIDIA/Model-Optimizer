@@ -1607,6 +1607,27 @@ def _merge_reused_sort_equivalence(
     return merged
 
 
+def _parent_sweep_sanity_verdict(
+    width_summary: dict[str, Any], sort_summary: dict[str, Any]
+):
+    """Combine advisory width quality with blocking reused-sort correctness."""
+
+    from ..diagnostics.sanity_verdict import SanityVerdict
+
+    width_findings = list(width_summary.get("findings") or ())
+    sort_findings = [
+        {**finding, "stage": "sort_sanity", "severity": "error"}
+        for finding in sort_summary.get("findings") or ()
+    ]
+    width_passed = bool(width_summary.get("passed", not width_findings))
+    sort_passed = sort_summary.get("passed") is True
+    return SanityVerdict(
+        passed=width_passed and sort_passed,
+        findings=[*width_findings, *sort_findings],
+        blocking=not sort_passed,
+    )
+
+
 def _extract_rows(method: str, output_dir: Path) -> list[dict[str, Any]]:
     rows = []
     for result_path in sorted(output_dir.glob("solution_*.json")):
@@ -2046,7 +2067,13 @@ def _publish_parent_sweep_sanity(
         ("slicing_sanity", slicing_summary),
     ):
         payload["passed"] = not payload.get("findings")
-        payload["verdict"] = "passed" if payload["passed"] else "warning"
+        payload["verdict"] = (
+            "passed"
+            if payload["passed"]
+            else "failed"
+            if stage == "slicing_sanity"
+            else "warning"
+        )
         payload["provenance"] = provenance
         output = puzzle_dir / "artifacts" / stage / "summary.json"
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -2657,7 +2684,10 @@ def _activation_diagnostic_parent_sweep(
             activation_equivalence = (
                 (sweep_manifest.get("parents") or {}).get("activation") or {}
             ).get("equivalence") or {}
-            equivalence_findings = list(activation_equivalence.get("findings") or ())
+            equivalence_findings = [
+                {**finding, "stage": "sort_sanity", "severity": "error"}
+                for finding in activation_equivalence.get("findings") or ()
+            ]
             sort_passed = activation_equivalence.get("passed") is True
             sort_equivalence_dir = puzzle_dir / "artifacts" / "sort_sanity"
             sort_equivalence_dir.mkdir(parents=True, exist_ok=True)
@@ -2672,6 +2702,8 @@ def _activation_diagnostic_parent_sweep(
                 "sorted_teacher_dir": str(sorted_dir),
                 "equivalence": activation_equivalence,
                 "findings": equivalence_findings,
+                "blocking": not sort_passed,
+                "verdict": "passed" if sort_passed else "failed",
                 "parent_sweep_manifest": str(load_manifest_path),
             }
             sort_summary_path.write_text(
@@ -2706,8 +2738,9 @@ def _activation_diagnostic_parent_sweep(
 
     width_summary_path = puzzle_dir / "artifacts" / "width_sanity" / "summary.json"
     width_verdict = json.loads(width_summary_path.read_text(encoding="utf-8"))
-    width_findings = list(width_verdict.get("findings") or ())
-    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
+    sort_summary_path = puzzle_dir / "artifacts" / "sort_sanity" / "summary.json"
+    sort_verdict = json.loads(sort_summary_path.read_text(encoding="utf-8"))
+    from ..diagnostics.sanity_verdict import complete_sanity_stage
 
     return complete_sanity_stage(
         config,
@@ -2733,10 +2766,7 @@ def _activation_diagnostic_parent_sweep(
                 puzzle_dir / "artifacts" / "slicing_sanity" / "summary.json"
             ),
         },
-        verdict=SanityVerdict(
-            passed=bool(width_verdict.get("passed", not width_findings)),
-            findings=width_findings,
-        ),
+        verdict=_parent_sweep_sanity_verdict(width_verdict, sort_verdict),
     )
 
 
@@ -3310,7 +3340,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             "max_abs_reverse_delta": reverse_tolerance,
             "passed": passed,
             "findings": [],
-            "verdict": "passed" if passed else "warning",
+            "verdict": "passed" if passed else "failed",
             "teacher_result": str(scoring_output_dir / "teacher.json"),
             "sorted_result": str(sorted_result_path),
             "reverse_sorted_dir": str(reverse_dir) if include_reverse else None,
@@ -3365,6 +3395,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
                             f"tolerance={tolerance:.6g}"
                         ),
                         evidence={"metric": metric, "delta": delta, "tolerance": tolerance},
+                        severity="error",
                     )
                 )
             if include_reverse and not reverse_passed:
@@ -3381,6 +3412,7 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
                             "reverse_delta": reverse_delta,
                             "tolerance": reverse_tolerance,
                         },
+                        severity="error",
                     )
                 )
             summary["findings"] = findings
@@ -3560,7 +3592,7 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
             "stage": "slicing_sanity",
             "message": f"width-slice equivalence failed for case {case.get('case_id')}",
             "evidence": {"case": case},
-            "severity": "warning",
+            "severity": "error",
         }
         for case in summary.get("cases", ())
         if not case.get("passed", True)

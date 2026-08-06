@@ -13,12 +13,6 @@ from examples.puzzletron.run_axis_diagnostic_worker import (
     _validate_worker_topology,
     _worker_config,
 )
-from modelopt.torch.puzzletron.diagnostics.sanity_verdict import (
-    SanityVerdict,
-    complete_sanity_stage,
-    finding_from_message,
-)
-from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.stages import diagnostics
 from modelopt.torch.puzzletron.stages.diagnostics import _scoring_cfg_for_method
 
@@ -98,26 +92,6 @@ def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separa
         tolerance=1.0e-3,
         reverse_tolerance=1.0e-3,
     )["passed"]
-
-
-def test_failed_sort_verdict_completes_manifest_with_warning(tmp_path: Path):
-    config = {"experiment": {"dir": str(tmp_path)}}
-    manifest = StageManifest(stage="sort_sanity", config=config)
-    finding = finding_from_message(
-        stage="sort_sanity",
-        message="sorted teacher drift exceeded tolerance",
-    )
-
-    result = complete_sanity_stage(
-        config,
-        manifest,
-        verdict=SanityVerdict(passed=False, findings=[finding]),
-    )
-
-    assert result.status == "success"
-    assert manifest.status == "success"
-    assert manifest.outputs["passed"] is False
-    assert manifest.outputs["verdict"] == "warning"
 
 
 def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: Path):
