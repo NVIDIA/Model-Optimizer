@@ -301,37 +301,35 @@ def test_postprocess_scale_squeezed():
 # ---------------------------------------------------------------------------
 
 
-def test_export_context_dedup_follows_weight_residency():
-    """Pointer-keyed dedup is enabled only while weights stay resident.
+def test_export_context_moe_cache_follows_weight_residency():
+    """The MoE fast-path cache is enabled only while weights stay resident.
 
-    An offloaded module's weights are freed when its materialization window closes, so a
-    recycled address would alias an unrelated module. Tied-weight export is therefore
-    supported on the resident path only, matching what FSDP2 already does.
+    It aliases live module buffers, which is unsafe once an offloaded module's weights are
+    freed when its materialization window closes. It is only an optimization; on-disk dedup
+    is handled name-based in postprocess_state_dict regardless of residency.
     """
     resident_ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
-    assert resident_ctx.tied_cache == {}
     assert resident_ctx.moe_tied_cache == {}
 
     offloaded, _ = _make_offloaded_linear()
     offloaded_ctx = ExportContext(model=offloaded, dtype=torch.float16)
-    assert offloaded_ctx.tied_cache is None
     assert offloaded_ctx.moe_tied_cache is None
 
 
-def test_export_context_dedup_disabled_for_fsdp2(monkeypatch):
-    """FSDP2 shards recycle addresses, so its dedup opt-out must survive the offload rework."""
+def test_export_context_moe_cache_disabled_for_fsdp2(monkeypatch):
+    """FSDP2 shards recycle addresses, so the MoE fast-path opt-out must hold."""
     monkeypatch.setattr(core_utils, "is_fsdp2_model", lambda _: True)
 
     ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
-    assert ctx.tied_cache is None
     assert ctx.moe_tied_cache is None
 
 
 def test_tied_weights_exported_independently_without_cache():
-    """With dedup off, tied modules each pack their own weight instead of aliasing.
+    """Tied dense modules each pack their own weight instead of aliasing.
 
-    Guards the offload path: an alias would make two shard entries share storage, which
-    the writer must then drop or copy. Independent tensors keep both keys intact.
+    Dense ties are no longer deduped at pack time (the duplicate is dropped by name in
+    postprocess_state_dict), so both sides pack independently to byte-identical tensors.
+    Guards the offload path: independent tensors keep both shard keys intact.
     """
     shared = nn.Parameter(torch.randn(16, 16))
     first, second = nn.Linear(16, 16, bias=False), nn.Linear(16, 16, bias=False)
@@ -339,7 +337,7 @@ def test_tied_weights_exported_independently_without_cache():
 
     for linear in (first, second):
         mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 16)))
-        _export_quantized_weight(linear, torch.float16, _tied_cache=None)
+        _export_quantized_weight(linear, torch.float16)
 
     assert first.weight.data_ptr() != second.weight.data_ptr()
     assert torch.equal(first.weight, second.weight)

@@ -21,6 +21,7 @@ Changelog
 
 **Bug Fixes**
 
+- Resolve tied weights during HF checkpoint export by their declared **name** (from the model's ``_tied_weights_keys`` / ``tie_word_embeddings``) instead of by tensor ``data_ptr()``. Address identity misfires in several ways -- a freed address recycled by the allocator can falsely alias two unrelated weights, and the FSDP full-state-dict gather (and offload) materializes tied weights at distinct addresses so a genuine tie is missed and both copies are written. A single ``TiedGroupResolver`` now drives the input-amax sync, the fused-MoE fast-path cache, and the authoritative dedup in ``postprocess_state_dict``, which drops a declared alias key whenever its canonical counterpart is present -- correct on 1 GPU and under multi-GPU FSDP alike (e.g. a 4-GPU MiniMax export). A ``(device, data_ptr, size)`` pass is retained as a backstop for undeclared/coincidental shares. The per-module dense dedup cache is removed (both sides pack identically and the duplicate is dropped by name); the fused-MoE cache remains a resident-path compute/memory optimization.
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 
 0.46 (2026-08-17)

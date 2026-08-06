@@ -1052,6 +1052,7 @@ def postprocess_state_dict(
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
+    resolver=None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -1060,6 +1061,13 @@ def postprocess_state_dict(
         maxbound: The maximum bound value for the output quantizer.
         quantization: The KV cache quantization format.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        resolver: Optional :class:`TiedGroupResolver`. When provided, tied-weight
+            dedup is authoritative and name-based: a declared alias key whose canonical
+            counterpart is present is dropped, independent of tensor address. This is
+            what makes dedup correct under the FSDP full-state-dict gather (and offload),
+            where tied tensors are materialized at distinct addresses and the address
+            pass below cannot see the tie. The address pass is retained as a backstop for
+            undeclared genuine shares and coincidental collisions.
 
     Returns:
         The filtered state_dict without unnecessary keys like '_amax' and non KV cache output quantizers.
@@ -1117,16 +1125,34 @@ def postprocess_state_dict(
         for key in post_state_dict:
             if "lora" in key and key not in keys_to_delete:
                 keys_to_delete.append(key)
-    # Check for tied weights and remove duplicates
-    seen_tensors = {}
+    # Name-based tied-weight dedup (authoritative; address-independent). Drops a
+    # declared-alias key when its canonical counterpart is present. Works under the
+    # FSDP full-state-dict gather / offload, where tied tensors are materialized at
+    # distinct addresses so the address pass below cannot see the tie.
+    if resolver is not None:
+        alias_prefixes = resolver.alias_prefix_pairs()
+        if alias_prefixes:
+            for key in post_state_dict:
+                canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
+                if canonical_key is not None and canonical_key in post_state_dict:
+                    keys_to_delete.append(key)
+                    logger.warning(
+                        f"Tied weight (declared): dropping alias '{key}'; "
+                        f"canonical '{canonical_key}' is kept."
+                    )
 
-    # Remove any tied weights if found.
+    # Address backstop for undeclared genuine shares / coincidental duplicates. Device
+    # and size distinguish independent tensors whose allocator addresses happen to match;
+    # zero-pointer tensors are left for serialization to reject. Keys already marked for
+    # deletion (declared aliases) are skipped so they do not seed the first-wins map.
+    already_marked = set(keys_to_delete)
+    seen_tensors = {}
     for key, value in post_state_dict.items():
-        if isinstance(value, torch.Tensor):
-            # Use tensor data pointer to identify tied weights
-            tensor_id = value.data_ptr()
+        if key in already_marked:
+            continue
+        if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
+            tensor_id = (value.device, value.data_ptr(), value.numel() * value.element_size())
             if tensor_id in seen_tensors:
-                # This is a tied weight, mark for deletion and warn
                 keys_to_delete.append(key)
                 logger.warning(
                     f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "
@@ -1135,8 +1161,10 @@ def postprocess_state_dict(
             else:
                 seen_tensors[tensor_id] = key
 
-    for key in keys_to_delete:
-        del post_state_dict[key]
+    # dict.fromkeys dedups while preserving order, so a key marked by both passes is
+    # deleted once (avoids a KeyError on the second delete).
+    for key in dict.fromkeys(keys_to_delete):
+        post_state_dict.pop(key, None)
 
     return post_state_dict
 
@@ -1584,8 +1612,8 @@ def has_quantized_modules(model: nn.Module) -> bool:
     )
 
 
-def sync_tied_input_amax(model: nn.Module) -> int:
-    """Max-merge input_quantizer amaxes across modules sharing a weight ``data_ptr``.
+def sync_tied_input_amax(model: nn.Module, resolver=None) -> int:
+    """Max-merge input_quantizer amaxes across modules in the same declared tie.
 
     Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
     affected ``input_quantizer`` with the per-group maximum. Intended to
@@ -1596,15 +1624,26 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     Closes the loop on ``input_scale`` for HF-tied modules whose forward
     paths see different activation distributions (encoder vs decoder in
     YOCO-style models). Must run BEFORE per-module export so the merged
-    amax flows into ``input_scale`` derivation. Handles both dense
-    Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
-    ``(<first_proj>, down_proj)`` data_ptr tuple). Returns the number of
+    amax flows into ``input_scale`` derivation.
+
+    Grouping is name-based via :class:`TiedGroupResolver`, resolved from the
+    model's own ``_tied_weights_keys`` / ``tie_word_embeddings`` declarations —
+    so it is unaffected by allocator address reuse or FSDP resharding, which
+    can make tied Parameters share or diverge ``data_ptr`` unpredictably. Handles
+    both dense Linears (keyed by the canonical weight name) and fused MoE (keyed
+    by the canonical experts-container name). A ``resolver`` may be passed to reuse
+    an existing one; otherwise it is built from ``model``. Returns the number of
     tied groups merged.
     """
     from collections import defaultdict
 
-    by_dp: dict = defaultdict(list)
-    for _, m in model.named_modules():
+    from .model_utils import TiedGroupResolver
+
+    if resolver is None:
+        resolver = TiedGroupResolver(model)
+
+    by_group: dict = defaultdict(list)
+    for name, m in model.named_modules():
         # Fused MoE: 3-D source tensors with shared input quantizers
         first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
         first_proj = getattr(m, first_proj_attr, None)
@@ -1615,15 +1654,18 @@ def sync_tied_input_amax(model: nn.Module) -> int:
             and hasattr(m, "down_proj")
             and first_proj.dim() == 3
         ):
-            key = ("moe", first_proj.data_ptr(), m.down_proj.data_ptr())
-            by_dp[key].append(m)
+            gk = resolver.container_group_key(name, first_proj_attr)
+            if gk is not None:
+                by_group[("moe", gk)].append(m)
         # Dense quantized Linear with an input_quantizer
         elif (
             hasattr(m, "input_quantizer")
             and hasattr(m, "weight")
             and isinstance(m.weight, torch.nn.Parameter)
         ):
-            by_dp[("dense", m.weight.data_ptr())].append(m)
+            gk = resolver.group_key(f"{name}.weight" if name else "weight")
+            if gk is not None:
+                by_group[("dense", gk)].append(m)
 
     def _merge(quantizers: list) -> bool:
         """Max-merge amaxes across the quantizer list. Returns True on merge."""
@@ -1651,7 +1693,7 @@ def sync_tied_input_amax(model: nn.Module) -> int:
         return True
 
     synced = 0
-    for key, modules in by_dp.items():
+    for key, modules in by_group.items():
         if len(modules) < 2:
             continue
         if key[0] == "moe":

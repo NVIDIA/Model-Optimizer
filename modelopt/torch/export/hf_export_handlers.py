@@ -45,7 +45,9 @@ def _export_weight(
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
-    _export_quantized_weight(module, ctx.dtype, weight_name, _tied_cache=ctx.tied_cache)
+    # Dense tied weights are not deduped at pack time: both sides pack independently
+    # and the duplicate is dropped by name in postprocess_state_dict.
+    _export_quantized_weight(module, ctx.dtype, weight_name)
 
 
 # Preparation handlers are registered in the same precedence as the legacy MoE prepass.
@@ -129,12 +131,14 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 @ExportModuleRegistry.register(predicate=_has_fused_experts_quantizers)
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Split and quantize a fused-experts module with plural weight quantizers."""
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    group_key = ctx.resolver.container_group_key(name, first_proj_attr) if ctx.resolver else None
     with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
         _export_fused_experts(
             module,
             ctx.dtype,
             _moe_tied_cache=ctx.moe_tied_cache,
-            _tied_cache=ctx.tied_cache,
+            _tied_group_key=group_key,
         )
 
 
