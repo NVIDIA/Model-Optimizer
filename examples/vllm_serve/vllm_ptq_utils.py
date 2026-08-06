@@ -120,8 +120,8 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                         warnings.warn(
                             "model_runner.finish_requests not found; request state may leak during calibration."
                         )
-                except Exception as cleanup_err:
-                    warnings.warn(f"Failed to clean up request state: {cleanup_err}")
+                except Exception:
+                    warnings.warn("Failed to clean up request state after calibration batch.")
 
     return calibrate_loop
 
