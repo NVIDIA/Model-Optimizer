@@ -356,7 +356,7 @@ def test_mcore_gpt_pruning(
     )
 
 
-def _test_mcore_gpt_moe_parameter_sorting(rank, size):
+def _test_mcore_gpt_moe_parameter_sorting(moe_grouped_gemm, rank, size):
     set_seed(SEED)
     # Use relatively bigger model here for more accurate test for sorting
     channel_divisor = 64
@@ -385,6 +385,7 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
         activation_func="squared_relu",
         transformer_impl="transformer_engine",
         num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         bf16=False,
@@ -408,9 +409,11 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     sortable_per_pp = [
         n for n, hp in dynamic_space.named_hparams(configurable=True) if hp.importance is not None
     ]
-    # (num_moe_experts + 3) hps per layer + 1 for hidden_size (num_layers is not sorted!)
-    # Per layer: num_attention_heads, num_moe_experts, moe_ffn (per expert), moe_shared_ffn
-    assert len(sortable_per_pp) == (num_moe_experts + 3) * num_layers // size + 1
+    # (moe_ffn_count + 3) hps per layer + 1 for hidden_size (num_layers is not sorted!)
+    # Per layer: num_attention_heads, num_moe_experts, moe_ffn, moe_shared_ffn.
+    # SequentialMLP registers one moe_ffn hparam per expert; TEGroupedMLP shares a single one.
+    moe_ffn_count = 1 if moe_grouped_gemm else num_moe_experts
+    assert len(sortable_per_pp) == (moe_ffn_count + 3) * num_layers // size + 1
 
     # sanity check if the model functionality is preserved after sorting
     export_searchspace(model, mtn.get_subnet_config(model))
@@ -418,11 +421,12 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
-def test_mcore_gpt_moe_parameter_sorting(dist_workers):
-    dist_workers.run(_test_mcore_gpt_moe_parameter_sorting)
+@pytest.mark.parametrize("moe_grouped_gemm", [False, True])
+def test_mcore_gpt_moe_parameter_sorting(dist_workers, moe_grouped_gemm):
+    dist_workers.run(partial(_test_mcore_gpt_moe_parameter_sorting, moe_grouped_gemm))
 
 
-def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
+def _test_mcore_gpt_pruning_moe(ckpt_dir, moe_grouped_gemm, rank, size):
     channel_divisor = 4
 
     num_layers = size
@@ -446,6 +450,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
             activation_func="squared_relu",
             transformer_impl="transformer_engine",
             num_moe_experts=num_moe_experts,
+            moe_grouped_gemm=moe_grouped_gemm,
             moe_ffn_hidden_size=moe_ffn_hidden_size,
             moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         ).cuda()
@@ -483,10 +488,24 @@ def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
         assert moe.router.expert_bias.shape == (pruned_num_moe_experts,)
         assert moe.router.weight.shape == (pruned_num_moe_experts, pruned_hidden_size)
         assert moe.experts.num_local_experts == pruned_num_moe_experts
-        assert len(moe.experts.local_experts) == pruned_num_moe_experts
-        for expert in moe.experts.local_experts:
-            assert expert.linear_fc1.weight.shape == (pruned_moe_ffn, pruned_hidden_size)
-            assert expert.linear_fc2.weight.shape == (pruned_hidden_size, pruned_moe_ffn)
+        if moe_grouped_gemm:
+            # TEGroupedMLP fuses experts into two grouped linears with per-expert weight{i} params
+            assert moe.experts.linear_fc1.num_gemms == pruned_num_moe_experts
+            assert moe.experts.linear_fc2.num_gemms == pruned_num_moe_experts
+            for i in range(pruned_num_moe_experts):
+                assert getattr(moe.experts.linear_fc1, f"weight{i}").shape == (
+                    pruned_moe_ffn,
+                    pruned_hidden_size,
+                )
+                assert getattr(moe.experts.linear_fc2, f"weight{i}").shape == (
+                    pruned_hidden_size,
+                    pruned_moe_ffn,
+                )
+        else:
+            assert len(moe.experts.local_experts) == pruned_num_moe_experts
+            for expert in moe.experts.local_experts:
+                assert expert.linear_fc1.weight.shape == (pruned_moe_ffn, pruned_hidden_size)
+                assert expert.linear_fc2.weight.shape == (pruned_hidden_size, pruned_moe_ffn)
         assert moe.shared_experts.linear_fc1.weight.shape == (
             pruned_moe_shared_ffn,
             pruned_hidden_size,
@@ -519,8 +538,11 @@ def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
     )
 
 
-def test_mcore_gpt_pruning_moe(dist_workers, tmp_path):
-    dist_workers.run(partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores"))
+@pytest.mark.parametrize("moe_grouped_gemm", [False, True])
+def test_mcore_gpt_pruning_moe(dist_workers, tmp_path, moe_grouped_gemm):
+    dist_workers.run(
+        partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores", moe_grouped_gemm)
+    )
 
 
 def _build_and_prune_variant(size, export_config, *, num_attention_heads=4, **model_kwargs):

@@ -24,9 +24,11 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed._composable.fsdp.fully_shard import fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy
 from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_calib as model_calib
 from modelopt.torch.opt.dynamic import _pytorch_managed
 from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
@@ -34,6 +36,7 @@ from modelopt.torch.quantization.utils import (
     persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.dataset_utils import _forward_loop
 
 
 def _test_fsdp2_simple_linear(rank, size):
@@ -214,8 +217,6 @@ class _SimpleTransformerModel(nn.Module):
 
 def _test_layerwise_calibrate_fsdp2(rank, size):
     """Layerwise calibration on FSDP2-wrapped model matches non-FSDP reference."""
-    import modelopt.torch.quantization.model_calib as model_calib
-
     dim = 32
     torch.manual_seed(1)
     model = _SimpleTransformerModel(n_layers=3, dim=dim).cuda()
@@ -331,3 +332,128 @@ def _test_persistent_materialization(rank, size):
 
 def test_persistent_materialization(dist_workers):
     dist_workers.run(_test_persistent_materialization)
+
+
+def _test_writeback_root_unwrapped(rank, size):
+    """Writeback works when only the decoder layers are FSDP2-wrapped and the root is unsharded.
+
+    The root is only the search boundary: ``enable_weight_access_and_writeback(layer, model)``
+    walks ``layer[0]``'s ancestors to the sharded decoder layer and gathers/writes back its
+    DTensor, so the root needs no FSDP state. Covers the ``shard_root=False`` / nested-FSDP case
+    (``fsdp2_wrap`` now defaults to ``shard_root=True``, wrapping the root too). Regression guard
+    for the old ``isinstance(root_model, FSDPModule)`` assert that wrongly required a wrapped root.
+    """
+    dim = 32
+    torch.manual_seed(1)
+    # Root is a plain container; model[0] stands in for a decoder layer.
+    model = nn.Sequential(nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim))).cuda(rank)
+    synchronize_state_dict(model)
+
+    # Wrap ONLY the "decoder layer" -- intentionally NO ``fully_shard(model)`` on the root,
+    # mirroring fsdp2_wrap. ``root_model`` (model) is therefore not an FSDPModule.
+    fully_shard(model[0])
+    layer = model[0]
+    inputs = torch.randn(2, dim).cuda(rank)
+
+    # Warmup forward to trigger FSDP2's lazy_init (mirrors layerwise calibration).
+    model(inputs)
+
+    # This is the exact call save()/full_restore() make. Before the fix it tripped the
+    # ``assert isinstance(root_model, FSDPModule)`` because the root is unwrapped — that's
+    # the regression we guard. The DTensor-shape checks are not portable across torch
+    # versions when the root is not FSDP-wrapped, so we just verify the writeback path
+    # runs and mutations persist.
+    with enable_weight_access_and_writeback(layer[0], model):
+        ref_weight = layer[0].weight.clone()
+        layer[0].weight.data.add_(1.0)  # mutate -> exercises the writeback path
+
+    # Modification was written back into the shards.
+    with enable_weight_access_and_writeback(layer[0], model):
+        assert torch.allclose(layer[0].weight, ref_weight + 1.0)
+
+
+def test_writeback_root_unwrapped(dist_workers):
+    dist_workers.run(_test_writeback_root_unwrapped)
+
+
+def _test_writeback_cpu_offload(rank, size):
+    """Writeback round-trip when the FSDP2 shard is CPU-resident (``CPUOffloadPolicy``).
+
+    Regression guard for the CPU↔GPU mirror added to
+    ``fsdp2_weight_access_and_writeback_context``: the gathered shard is on CPU,
+    so the helper mirrors it to GPU for in-context mutation and must copy
+    modifications back to the CPU shard on exit.
+    """
+    dim = 32
+    torch.manual_seed(1)
+    model = nn.Sequential(nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim))).cuda(rank)
+    synchronize_state_dict(model)
+
+    # Wrap the "decoder layer" with cpu_offload; root stays unwrapped.
+    fully_shard(model[0], offload_policy=CPUOffloadPolicy())
+    layer = model[0]
+
+    # Warmup forward triggers FSDP2's lazy_init.
+    model(torch.randn(2, dim).cuda(rank))
+
+    # Regression guard for the CPU→GPU mirror in fsdp2_weight_access_and_writeback_context:
+    # if the helper handed back a CPU tensor under cpu_offload, calibration ops would crash
+    # on the in-context mutation below (GPU activations vs CPU weight). The fact that this
+    # block runs and the mutation persists is the evidence the mirror trip worked.
+    with enable_weight_access_and_writeback(layer[0], model):
+        ref_weight = layer[0].weight.clone()
+        layer[0].weight.data.add_(1.0)
+
+    # Mutation written back to the CPU shard.
+    with enable_weight_access_and_writeback(layer[0], model):
+        assert torch.allclose(layer[0].weight, ref_weight + 1.0)
+
+
+def test_writeback_cpu_offload(dist_workers):
+    dist_workers.run(_test_writeback_cpu_offload)
+
+
+class _EmbedRootModel(nn.Module):
+    """Root owns embed/norm params plus a decoder block. Mirrors the sharded-root layout
+    where ``model(**batch)`` must fire the root's FSDP2 hook to unshard embed for the forward."""
+
+    def __init__(self, vocab=16, dim=32):
+        super().__init__()
+        self.embed = nn.Embedding(vocab, dim)
+        self.block = _DecoderBlock(dim)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, input_ids=None, **kwargs):
+        return self.norm(self.block(self.embed(input_ids)))
+
+
+def _test_sharded_root_calibration(rank, size):
+    """Calibration through the standard forward loop works with a *sharded* FSDP2 root.
+
+    Regression guard for removing ``materialize_fsdp2_root``: ``_forward_loop`` now calls
+    ``model(**batch)`` (not ``model.forward``), so the root's FSDP2 pre/post-forward hooks
+    unshard embed/norm for the forward and reshard them after — no manual materialization.
+    With the old ``model.forward`` bypass this hit ``aten.embedding: mixed Tensor and DTensor``.
+    """
+    dim = 32
+    torch.manual_seed(1)
+    model = _EmbedRootModel(dim=dim).cuda(rank)
+    synchronize_state_dict(model)
+
+    # Shard the decoder block AND the root -> the root's own params (embed/norm) are sharded DTensors.
+    fully_shard(model.block)
+    model = fully_shard(model)
+    assert isinstance(model.embed.weight, DTensor)
+
+    batches = [{"input_ids": torch.randint(0, 16, (2, 8), device=rank)} for _ in range(2)]
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: _forward_loop(m, batches))
+
+    # Root params are resharded after calibration (needed for export / get_model_state_dict),
+    # and the model still runs.
+    assert isinstance(model.embed.weight, DTensor)
+    assert isinstance(model.norm.weight, DTensor)
+    model(input_ids=batches[0]["input_ids"])
+
+
+def test_sharded_root_calibration(dist_workers):
+    dist_workers.run(_test_sharded_root_calibration)

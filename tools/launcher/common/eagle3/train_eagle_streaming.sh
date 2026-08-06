@@ -47,6 +47,9 @@
 #   SERVE_CPU_OFFLOAD_GB  GB/GPU offloaded to host RAM (fits big models on too-few GPUs; slower)
 #   SERVE_MAX_MODEL_LEN   cap context length (trims KV/activation)
 #   SERVE_MAX_NUM_SEQS    cap concurrent sequences (trims KV/activation)
+#   SERVE_BLOCK_SIZE      KV-cache block size (e.g. 128 for MiniMax-M3 MSA sparse attention).
+#                         Needs its own knob: multi-token SERVE_EXTRA_ARGS values are mangled
+#                         by nemo_run's unquoted env export, so "--block-size 128" cannot ride it.
 #   SERVE_HOST          single-node: bind/connect host. default 127.0.0.1
 #   SERVE_GPU           single-node: CUDA_VISIBLE_DEVICES for vllm. default "0"
 #   SERVE_TP            tensor-parallel size. default 1 single-node / all serve-node GPUs
@@ -153,6 +156,7 @@ launch_vllm() {
     [ -n "${SERVE_CPU_OFFLOAD_GB:-}" ] && opt_args+=(--cpu-offload-gb "$SERVE_CPU_OFFLOAD_GB")
     [ -n "${SERVE_MAX_MODEL_LEN:-}" ]  && opt_args+=(--max-model-len "$SERVE_MAX_MODEL_LEN")
     [ -n "${SERVE_MAX_NUM_SEQS:-}" ]   && opt_args+=(--max-num-seqs "$SERVE_MAX_NUM_SEQS")
+    [ -n "${SERVE_BLOCK_SIZE:-}" ]     && opt_args+=(--block-size "$SERVE_BLOCK_SIZE")
     # --no-enable-chunked-prefill / --no-enable-prefix-caching: connector captures hidden states during prefill; both skip recomputing cached/partial prefixes, yielding short/empty hidden_states. Required.
     # --no-enable-flashinfer-autotune: on NVFP4 MoE the autotuner re-tunes on the first serving step and stalls a worker past vLLM's execute-model timeout, killing EngineCore.
     # Hidden states move serve -> trainer over NIXL RDMA (no disk round-trip): one

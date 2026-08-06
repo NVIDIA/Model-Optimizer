@@ -15,24 +15,20 @@
 
 import pytest
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import fuse_prequant_to_linear
 
-
-def get_tiny_llama(attention_heads=4, key_value_heads=4):
-    """Create a tiny Llama model for testing."""
-    config = LlamaConfig(
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=attention_heads,
-        num_key_value_heads=key_value_heads,
-        max_position_embeddings=128,
-        vocab_size=256,
-    )
-    return LlamaForCausalLM(config)
+# Wider than the shared defaults (AWQ block sizes need larger weight dims) and fp32 rather than
+# the shared bf16 default, which the post-fusion allclose tolerances below are calibrated for.
+_LLAMA_KWARGS = {
+    "dtype": torch.float32,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "max_position_embeddings": 128,
+    "vocab_size": 256,
+}
 
 
 @pytest.mark.parametrize(
@@ -52,7 +48,12 @@ def get_tiny_llama(attention_heads=4, key_value_heads=4):
 )
 def test_pattern_fuse_prequant(quant_config, attention_kv_heads_pair):
     """Test pattern_fuse_prequant on modules from a tiny Llama model."""
-    model = get_tiny_llama(attention_kv_heads_pair[0], attention_kv_heads_pair[1]).to("cuda")
+    num_attention_heads, num_key_value_heads = attention_kv_heads_pair
+    model = get_tiny_llama(
+        **_LLAMA_KWARGS,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+    ).to("cuda")
 
     # Quantize the model
     dummy_input = torch.randint(0, 256, (1, 16), device="cuda")
@@ -106,21 +107,17 @@ def test_pattern_fuse_prequant(quant_config, attention_kv_heads_pair):
 def test_pattern_fuse_prequant_moe(quant_config):
     """Test pattern_fuse_prequant on Qwen3 MoE sparse MLP."""
 
-    # Create a tiny Qwen3MoE model for testing
-    config = Qwen3MoeConfig(
+    model = get_tiny_qwen3_moe(
+        dtype=torch.float32,
         hidden_size=128,
         intermediate_size=256,
         moe_intermediate_size=256,
-        num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=4,
-        num_experts=4,
-        num_experts_per_tok=2,
         max_position_embeddings=128,
         vocab_size=256,
         shared_expert_intermediate_size=256,
-    )
-    model = Qwen3MoeForCausalLM(config).to("cuda")
+    ).to("cuda")
 
     # Quantize the model
     dummy_input = torch.randint(0, 256, (1, 16), device="cuda")

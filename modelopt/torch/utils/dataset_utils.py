@@ -497,6 +497,8 @@ def get_dataset_samples(
             "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
             f"its members: {DATASET_COMBOS[dataset_name]}"
         )
+    if num_samples < 0:
+        raise ValueError(f"``num_samples`` must be non-negative, got {num_samples}.")
 
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
@@ -615,7 +617,7 @@ def get_dataset_samples(
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print_rank_0(f"Loading dataset with {config=} and {splits=} {data_files_tmpl=}")
 
-    def _load_split(s: str):
+    def _load_split(s: str | None):
         if data_files_tmpl:
             # Raw files via the ``json`` builder: schema is inferred from data, and the
             # file-based builder labels everything as the ``train`` split.
@@ -628,14 +630,15 @@ def get_dataset_samples(
         return load_dataset(streaming=True, **config, split=s)
 
     try:
-        dataset_splits = [_load_split(s) for s in splits]
-
-        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+        num_per_split = [num_samples // len(splits)] * len(splits)
         num_per_split[-1] += num_samples - sum(num_per_split)
 
         samples: list[str] = []
-        for dataset, n in zip(dataset_splits, num_per_split):
-            for i, sample in enumerate(dataset):
+        for split_name, n in zip(splits, num_per_split):
+            # Skip zero-quota splits: starting a streamed split fetches its first record batch.
+            if n == 0:
+                continue
+            for i, sample in enumerate(_load_split(split_name)):
                 if i >= n:
                     break
                 text = _preprocess(sample)
@@ -1013,7 +1016,9 @@ def get_max_batch_size(
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
+    # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+    infer_method = model.generate if is_enc_dec else model
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -1163,7 +1168,9 @@ def _forward_loop(
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
+        # how FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+        infer_method = model.generate if is_enc_dec else model
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):

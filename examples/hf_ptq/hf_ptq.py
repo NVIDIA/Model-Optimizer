@@ -15,6 +15,7 @@
 
 import argparse
 import copy
+import os
 import random
 import time
 import warnings
@@ -28,7 +29,9 @@ from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     _resolve_model_path,
+    add_mlflow_args,
     build_quant_cfg,
+    cleanup_distributed,
     copy_custom_model_files,
     create_vlm_calibration_loop,
     get_model,
@@ -37,9 +40,14 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    mlflow_run,
+    mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
     resolve_checkpoint_dir,
+    resolve_mlflow_args,
     run_nemotron_vl_preview,
+    setup_distributed_args,
+    validate_fsdp2_supported,
 )
 from torch.utils.data import DataLoader
 from transformers import (
@@ -75,6 +83,7 @@ from modelopt.torch.speculative.eagle.utils import (
     EagleOfflineDataCollator,
     OfflineSupervisedDataset,
 )
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
@@ -82,6 +91,7 @@ from modelopt.torch.utils.dataset_utils import (
     get_supported_datasets,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from modelopt.torch.utils.plugins.model_load_utils import parallel_load_and_prepare_fsdp2
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -251,6 +261,12 @@ def make_calib_dataloader(
             max_sample_length=args.calib_seq,
             device=device,
             include_labels=include_labels,
+            distributed=args.use_fsdp2,
+            sampler_kwargs=(
+                {"num_replicas": args.dist_state.world_size, "rank": args.dist_state.rank}
+                if args.use_fsdp2
+                else None
+            ),
         )
     return calib_dataloader, first_text_speech_dataset
 
@@ -438,6 +454,13 @@ def auto_quantize(
         "Auto Quantization is not supported for pipeline parallel size > 1"
     )
 
+    if args.use_fsdp2:
+        warnings.warn(
+            "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
+            "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
+            "synchronization across ranks); use at your own risk."
+        )
+
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config, args, fixed_quantize_config=fixed_quantize_config
     )
@@ -530,14 +553,37 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if args.specdec_offline_dataset is not None or not args.low_memory_mode:
+    if args.use_fsdp2:
+        hf_config = AutoConfig.from_pretrained(
+            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+        )
+        validate_fsdp2_supported(args, hf_config)
+        full_model = parallel_load_and_prepare_fsdp2(
+            args.pyt_ckpt_path,
+            args.dist_state.device,
+            args.dist_state.rank,
+            args.dist_state.world_size,
+            trust_remote_code=args.trust_remote_code,
+            cpu_offload=args.cpu_offload,
+            attn_implementation=args.attn_implementation,
+            hf_config=hf_config,
+        )
+        # The FSDP2 loader drops MTP weights (re-attached BF16 at export); flag their prefixes now
+        # so the pre-quant exclusion below skips any MTP module from_config did build.
+        mtp_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
+        if mtp_prefixes:
+            full_model._mtp_layer_prefixes = mtp_prefixes
+    elif args.specdec_offline_dataset is not None or not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
-            args.device,
+            args.dist_state.device,
             gpu_mem_percentage=args.gpu_max_mem_percentage,
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            offload_folder=args.offload_folder,
+            max_cpu_memory_gb=args.max_cpu_memory_gb,
+            max_gpu_memory_gb=args.max_gpu_memory_gb,
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -565,9 +611,12 @@ def load_model(args: argparse.Namespace):
 
     model_type = get_model_type(full_model)
 
-    device = full_model.device
-    if hasattr(full_model, "model"):
-        device = full_model.model.device
+    if args.use_fsdp2:
+        device = args.dist_state.device
+    else:
+        device = full_model.device
+        if hasattr(full_model, "model"):
+            device = full_model.model.device
     processor = None
     tokenizer = None
     language_model = full_model
@@ -774,7 +823,9 @@ def export_quantized(
     default_padding_side,
     default_pad_token,
 ):
-    with torch.inference_mode():
+    # Not inference_mode: the FSDP2 path gathers full params in this context and
+    # inference tensors break the subsequent state_dict() -> param.detach().
+    with torch.no_grad():
         if model_type is None:
             print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
             model_type = f"unknown:{type(language_model).__name__}"
@@ -861,7 +912,6 @@ def export_quantized(
                 mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
                     full_model, args.pyt_ckpt_path
                 )
-
                 if mtp_layer_prefixes:
                     full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
@@ -882,16 +932,18 @@ def export_quantized(
             tokenizer.padding_side = default_padding_side
             if default_pad_token is not None:
                 tokenizer.pad_token = default_pad_token
-            tokenizer.save_pretrained(export_path)
+            if args.dist_state.is_main:
+                tokenizer.save_pretrained(export_path)
 
         # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
         # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
         # from the source checkpoint take precedence over regenerated ones (which may
         # differ in format due to newer transformers versions).
-        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+        if args.dist_state.is_main:
+            copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
 
         end_time = time.time()
-        print(
+        print_rank_0(
             f"Quantized model exported to: {export_path}. Total time used {end_time - start_time}s"
         )
 
@@ -992,7 +1044,7 @@ def post_quantize(
         )
         return
 
-    if args.verbose:
+    if args.verbose and args.dist_state.is_main:
         try:
             mtq.print_quant_summary(full_model, args.export_path)
             save_expert_token_count_table(full_model, args.export_path)
@@ -1454,6 +1506,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
     )
     parser.add_argument(
+        "--use_fsdp2",
+        action="store_true",
+        help=(
+            "Run calibration under PyTorch FSDP2 (requires torchrun); takes precedence over "
+            "--use_seq_device_map. v1: standard causal-LM only (no VILA / pack-quantized / "
+            "speculative / auto-quantize / sparsity / VLM / MTP)."
+        ),
+    )
+    parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="With --use_fsdp2, keep decoder shards on CPU between forwards (frees GPU memory, adds PCIe traffic).",
+    )
+    parser.add_argument(
         "--verbose",
         help="Print verbose output (e.g. quantization summary). Disable by --no-verbose.",
         default=True,
@@ -1563,8 +1629,44 @@ def parse_args() -> argparse.Namespace:
             "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
         ),
     )
+    parser.add_argument(
+        "--offload_folder",
+        type=str,
+        default=None,
+        help=(
+            "Path to a local folder for disk-offloaded model weights. "
+            "When set, activates disk-offload mode: model weights that exceed the GPU+CPU "
+            "budgets are streamed from disk during calibration and export. "
+            "Pair with --max_cpu_memory_gb to cap CPU RAM usage. "
+            "Incompatible with --low_memory_mode and --use_seq_device_map."
+        ),
+    )
+    parser.add_argument(
+        "--max_cpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum CPU RAM budget in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Weights beyond this limit are streamed from disk."
+        ),
+    )
+    parser.add_argument(
+        "--max_gpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum GPU memory budget per device in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Defaults to 80%% of available GPU memory when not specified."
+        ),
+    )
+
+    add_mlflow_args(parser)
 
     args = parser.parse_args()
+    resolve_mlflow_args(args, parser)
+
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
@@ -1583,10 +1685,50 @@ def parse_args() -> argparse.Namespace:
             "--low_memory_mode does not support --recipe or AutoQuantize (--auto_quantize_bits); "
             "the low-memory loader initializes quantizers from --qformat/--kv_cache_qformat."
         )
+    if args.use_fsdp2 and args.use_seq_device_map:
+        warnings.warn("--use_seq_device_map is ignored when --use_fsdp2 is set.")
+        args.use_seq_device_map = False
+    if args.use_fsdp2 and os.environ.get("RANK") is None:
+        parser.error("--use_fsdp2 requires launching with torchrun")
+    if args.cpu_offload and not args.use_fsdp2:
+        parser.error("--cpu_offload requires --use_fsdp2")
+    if args.use_fsdp2 and args.sparsity_fmt != "dense":
+        parser.error(f"--use_fsdp2 does not support --sparsity_fmt {args.sparsity_fmt}.")
+    if args.use_fsdp2 and args.vllm_fakequant_export:
+        parser.error("--use_fsdp2 does not support --vllm_fakequant_export.")
+    if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
+        parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
+
+    if args.offload_folder is not None and args.low_memory_mode:
+        parser.error("--offload_folder (disk-offload) is not compatible with --low_memory_mode.")
+
+    if args.offload_folder is not None and args.use_seq_device_map:
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --use_seq_device_map; "
+            "device_map=auto is used for disk-offload to let accelerate place layers across "
+            "GPU, CPU, and disk."
+        )
+
+    if args.offload_folder is not None and args.device == "cpu":
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --device cpu; "
+            "device_map=cpu makes accelerate ignore the memory budgets and offload folder, "
+            "loading the whole model into RAM."
+        )
+
+    if args.offload_folder is None and (
+        args.max_cpu_memory_gb is not None or args.max_gpu_memory_gb is not None
+    ):
+        parser.error(
+            "--max_cpu_memory_gb/--max_gpu_memory_gb only apply to disk-offload loading; "
+            "pass --offload_folder to enable it."
+        )
 
     return args
 
 
+# Derived state and the tracking settings themselves; everything else argparse parsed is a
+# parameter of the run. Deriving the list means a new flag is tracked without touching this.
 def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
@@ -1594,41 +1736,50 @@ def main(args: argparse.Namespace):
     random.seed(RAND_SEED)
     np.random.seed(RAND_SEED)
 
-    # launch a memory monitor to read the currently used GPU memory.
-    launch_memory_monitor()
+    setup_distributed_args(args)
 
-    # Force eager execution for all model types.
-    torch.compiler.set_stance("force_eager")
+    try:
+        # Entered inside the try: opening the run is fatal by design, and skipping
+        # cleanup_distributed would leave the other ranks blocked on the first collective
+        # until the NCCL timeout.
+        with mlflow_run(args):
+            # launch a memory monitor to read the currently used GPU memory.
+            launch_memory_monitor()
 
-    (
-        full_model,
-        language_model,
-        model_type,
-        calibration_only,
-        processor,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-        device,
-    ) = load_model(args)
+            # Force eager execution for all model types.
+            torch.compiler.set_stance("force_eager")
 
-    if args.sparsity_fmt != "dense":
-        # Sparse
-        sparsity_main(args, full_model, tokenizer, device)
-    else:
-        # Quantize
-        quantize_main(
-            args,
-            full_model,
-            language_model,
-            model_type,
-            calibration_only,
-            processor,
-            tokenizer,
-            default_padding_side,
-            default_pad_token,
-            device,
-        )
+            (
+                full_model,
+                language_model,
+                model_type,
+                calibration_only,
+                processor,
+                tokenizer,
+                default_padding_side,
+                default_pad_token,
+                device,
+            ) = load_model(args)
+
+            if args.sparsity_fmt != "dense":
+                # Sparse
+                sparsity_main(args, full_model, tokenizer, device)
+            else:
+                # Quantize
+                quantize_main(
+                    args,
+                    full_model,
+                    language_model,
+                    model_type,
+                    calibration_only,
+                    processor,
+                    tokenizer,
+                    default_padding_side,
+                    default_pad_token,
+                    device,
+                )
+    finally:
+        cleanup_distributed(args)
 
 
 if __name__ == "__main__":

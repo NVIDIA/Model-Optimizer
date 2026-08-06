@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import copy
 import glob
 import hashlib
@@ -23,11 +24,15 @@ import os
 import shutil
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import torch
 import transformers
+import yaml
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
@@ -41,6 +46,7 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
 
 try:
@@ -48,9 +54,71 @@ try:
 except ImportError:
     snapshot_download = None
 
+from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.mlflow import (
+    MlflowRunLogger,
+    default_experiment_name,
+    validate_tracking_uri,
+)
+
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+
+@dataclass
+class DistributedState:
+    """Example-local distributed state for model loading, dataloader sharding, and rank-0 output."""
+
+    rank: int
+    world_size: int
+    device: torch.device | str
+    is_main: bool
+
+
+def setup_distributed_args(args):
+    """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
+    if getattr(args, "use_fsdp2", False):
+        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
+        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        dist_utils.setup(timeout=timedelta(hours=2))
+        rank = dist_utils.rank()
+        args.dist_state = DistributedState(
+            rank=rank,
+            world_size=dist_utils.size(),
+            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
+            is_main=rank == 0,
+        )
+    else:
+        args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
+
+
+def cleanup_distributed(args):
+    """Destroy the process group if ``--use_fsdp2`` set it up."""
+    if getattr(args, "use_fsdp2", False):
+        dist_utils.cleanup()
+
+
+def validate_fsdp2_supported(args, config):
+    """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
+    issues = []
+    if "vila" in args.pyt_ckpt_path.lower():
+        issues.append("VILA (custom builder + non-standard layer layout)")
+    if is_nemotron_vl(config) or _is_multimodal_config(config):
+        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    if getattr(config, "quantization_config", None) is not None:
+        issues.append("pack-quantized / compressed-tensors checkpoints")
+    if getattr(args, "specdec_offline_dataset", None) is not None:
+        issues.append("speculative decoding (--specdec_offline_dataset)")
+    if getattr(args, "low_memory_mode", False):
+        issues.append("--low_memory_mode (redundant with FSDP2)")
+
+    if issues:
+        raise NotImplementedError(
+            "--use_fsdp2 does not support:\n  - "
+            + "\n  - ".join(issues)
+            + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
+        )
 
 
 def run_nemotron_vl_preview(
@@ -245,6 +313,20 @@ def is_speculative(hf_config):
     )
 
 
+def is_diffusion_gemma(hf_config) -> bool:
+    """Check if the model architecture is DiffusionGemma.
+
+    Underscores are ignored: the family is spelled ``diffusion_gemma`` in configs
+    and ``DiffusionGemma`` in class names. The nested ``text_config`` is checked too,
+    since multi-modal wrappers keep the family name there.
+    """
+    names = []
+    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
+        names.append(getattr(cfg, "model_type", None) or "")
+        names.extend(getattr(cfg, "architectures", None) or [])
+    return any("diffusiongemma" in name.lower().replace("_", "") for name in names)
+
+
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
     print(f"Initializing tokenizer from {ckpt_path}")
 
@@ -370,6 +452,19 @@ def _apply_to_model_state_dict(
     if in_state_dict:
         model.load_state_dict(in_state_dict, strict=False)
     return out_state_dict
+
+
+def mtp_layer_prefixes_from_checkpoint(model_path: str) -> list[str]:
+    """MTP exclude-prefixes from a checkpoint's safetensors index (``[]`` if none); reads no tensors.
+
+    Local-index-only, matching :func:`load_mtp_weights`, so detection and re-attach stay in sync.
+    """
+    index_file = Path(model_path) / "model.safetensors.index.json"
+    if not index_file.exists():
+        return []
+    weight_map = json.load(open(index_file))["weight_map"]
+    mtp_keys = [k for k, v in weight_map.items() if "mtp" in k or "mtp" in v]
+    return list(_keys_to_prefixes(mtp_keys))
 
 
 def load_mtp_weights(
@@ -587,6 +682,17 @@ def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_confi
     return model_kwargs
 
 
+def _fmt_max_memory(max_memory: dict) -> str:
+    """Format a ``{device: bytes}`` budget dict into a human-readable string."""
+    parts = []
+    for key in sorted(max_memory.keys(), key=lambda k: (isinstance(k, str), k)):
+        val = max_memory[key]
+        label = f"{val / 1024**3:.1f} GiB" if isinstance(val, int) else str(val)
+        key_str = f"GPU {key}" if isinstance(key, int) else str(key)
+        parts.append(f"  {key_str}: {label}")
+    return "\n".join(parts)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -594,8 +700,20 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    offload_folder=None,
+    max_cpu_memory_gb=None,
+    max_gpu_memory_gb=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+
+    _disk_offload = offload_folder is not None
+    if _disk_offload and max_cpu_memory_gb is None:
+        warnings.warn(
+            "offload_folder is set but max_cpu_memory_gb is not specified. "
+            "CPU memory usage during model load will be unbounded. "
+            "Pass max_cpu_memory_gb to cap CPU usage.",
+            UserWarning,
+        )
 
     device_map = "auto"
     if device == "cpu":
@@ -623,6 +741,19 @@ def get_model(
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
     model_kwargs.setdefault("dtype", "auto")
+
+    # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
+    # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
+    # Sequential packs the model onto GPU 0 first (up to gpu_mem_percentage), keeping tied
+    # modules together for checkpoints that fit; larger ones can still spill and split a
+    # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
+    # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
+    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
+        print(
+            "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
+            "'auto' mapping can split its tied encoder/decoder weights across GPUs."
+        )
+        use_seq_device_map = True
 
     if use_seq_device_map:
         device_map = "sequential"
@@ -655,6 +786,20 @@ def get_model(
             if fmt == "pack-quantized":
                 return True
         return False
+
+    # Only the general load path below threads max_memory/offload_folder into
+    # from_pretrained; the specialized loaders build their own calls.
+    if _disk_offload and (
+        is_speculative(hf_config)
+        or has_pack_quantized_config(hf_config)
+        or get_original_hf_quant_method(hf_config) == "mxfp4"
+    ):
+        warnings.warn(
+            "offload_folder is ignored for speculative, pack-quantized, and MXFP4 "
+            "checkpoints: these use dedicated load paths that cannot offload. The model "
+            "will be loaded fully resident.",
+            UserWarning,
+        )
 
     if is_speculative(hf_config):
         model = AutoModelForCausalLM.from_pretrained(
@@ -700,7 +845,11 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+        # DeepSeek ships bundled modeling code, but the built-in class is what the
+        # disk-offload and streaming-export paths are validated against.
+        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+
+        if not hasattr(transformers, architecture) or use_bundled_code:
             if not hasattr(transformers, architecture):
                 warnings.warn(
                     f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
@@ -737,24 +886,41 @@ def get_model(
             model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
-        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
 
-        on_cpu = "cpu" in inferred_device_map.values()
-
-        if on_cpu:
-            for _device in max_memory:
-                if isinstance(_device, int):
-                    max_memory[_device] *= gpu_mem_percentage
-
-            print(
-                "Model does not fit to the GPU mem. "
-                f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                "reduce the calibration `batch_size` manually."
-            )
+        if _disk_offload:
+            for _k in max_memory:
+                if isinstance(_k, int):
+                    if max_gpu_memory_gb is not None:
+                        max_memory[_k] = int(max_gpu_memory_gb * 1024**3)
+                    else:
+                        max_memory[_k] = int(max_memory[_k] * gpu_mem_percentage)
+            if max_cpu_memory_gb is not None:
+                max_memory["cpu"] = int(max_cpu_memory_gb * 1024**3)
             model_kwargs["max_memory"] = max_memory
+            print(
+                "Disk-offload mode enabled. "
+                f"Memory budgets: {_fmt_max_memory(max_memory)}\n"
+                f"Offload folder: {offload_folder}\n"
+                "Weights exceeding GPU+CPU budgets will be streamed from disk."
+            )
+        else:
+            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+            if "cpu" in inferred_device_map.values():
+                for _device in max_memory:
+                    if isinstance(_device, int):
+                        max_memory[_device] *= gpu_mem_percentage
+
+                print(
+                    "Model does not fit to the GPU mem. "
+                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                    "reduce the calibration `batch_size` manually."
+                )
+                model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        if _disk_offload:
+            model_kwargs2["offload_folder"] = offload_folder
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,
@@ -998,3 +1164,129 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
         algo["layerwise"]["checkpoint_dir"] = resolved
     return quant_cfg, resolved
+
+
+def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
+    """Add the MLflow tracking flags."""
+    parser.add_argument(
+        "--mlflow",
+        default=None,
+        help=(
+            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+            "uploading the command, the resolved recipe, the run log and the quantization "
+            "summaries. MLflow's own $MLFLOW_TRACKING_URI enables tracking without this "
+            "flag, which overrides it. A URI taken from the environment is best-effort: if "
+            "it is unusable the run warns and continues untracked."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_experiment",
+        default=None,
+        help=(
+            "MLflow experiment name. Default: "
+            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_run_name",
+        default=None,
+        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
+    )
+
+
+def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Settle where tracking is configured from, and name the experiment."""
+    # MLflow's own variable enables tracking on its own; --mlflow overrides it. Only the
+    # flag is a deliberate request, so only the flag is fatal when the URI is unusable: the
+    # variable is commonly exported for unrelated tooling and must not fail a quantization.
+    args.mlflow_required = args.mlflow is not None
+    args.mlflow = args.mlflow or os.environ.get("MLFLOW_TRACKING_URI") or None
+    if args.mlflow:
+        try:
+            args.mlflow = validate_tracking_uri(args.mlflow)
+        except ValueError as e:
+            if args.mlflow_required:
+                parser.error(f"--mlflow: {e}")
+            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
+            args.mlflow = None
+        else:
+            args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
+                "hf_ptq",
+                args.pyt_ckpt_path,
+                Path(args.recipe).stem if args.recipe else args.qformat,
+            )
+
+
+_MLFLOW_NON_PARAM_ARGS = frozenset(
+    {"dist_state", "mlflow", "mlflow_experiment", "mlflow_required", "mlflow_run_name"}
+)
+
+
+def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Params and start-time artifacts describing this PTQ run."""
+    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
+    # dist_state is an object, so record the one field worth searching on.
+    params["world_size"] = args.dist_state.world_size
+    texts = {}
+    if args.recipe:
+        # The resolved recipe, not the source file: a recipe may be a directory or use
+        # $imports, and only the resolved form is self-contained.
+        resolved = load_recipe(args.recipe).model_dump(mode="json")
+        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
+    return params, texts
+
+
+def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
+    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
+    return MlflowRunLogger(
+        args.mlflow,
+        args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        enabled=bool(args.mlflow) and args.dist_state.is_main,
+        required=args.mlflow_required,
+    )
+
+
+def mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
+    """Track this invocation for the duration of the block, or do nothing if untracked."""
+    logger = _mlflow_logger(args)
+    if not logger.enabled:
+        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
+        return nullcontext()
+    params, texts = _mlflow_run_inputs(args)
+    return logger.track(
+        params=params,
+        tags=_mlflow_run_tags(args),
+        texts=texts,
+        files=_mlflow_run_outputs(args),
+    )
+
+
+def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
+    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
+    checkpoint it produced can be found together on one tracking server.
+
+    ``checkpoint_path`` is the checkpoint this run *writes*, because that is what an
+    evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``); the input is
+    kept separately. It is resolved because ``--export_path`` defaults to a relative path,
+    which is useless as a join key.
+    """
+    return {
+        "model": Path(args.pyt_ckpt_path).name,
+        "checkpoint_path": str(Path(args.export_path).resolve()),
+        "source_checkpoint_path": args.pyt_ckpt_path,
+    }
+
+
+def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
+    """Summaries written by post_quantize, keyed by artifact path.
+
+    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
+    entries are skipped: the MoE table only exists for MoE models, and neither file is
+    written under ``--no-verbose``.
+    """
+    export_path = Path(args.export_path)
+    return {
+        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
+        "summary/moe.html": export_path / ".moe.html",
+    }

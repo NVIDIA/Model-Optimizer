@@ -21,8 +21,6 @@ bucket of configuration.json files. Worth exercising it explicitly.
 """
 
 import pytest
-
-pytest.importorskip("transformers")  # utils.py imports AutoTokenizer at module load
 from specdec_bench.utils import (
     _SENSITIVE_KEY_ALLOWLIST,
     _is_sensitive_key,

@@ -32,6 +32,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
+import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
@@ -623,8 +624,6 @@ def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
     """DP>1 fix predicate: only the DP0/EP0 rank among is_last_stage_main_rank writes
     sidecar files. Guards the predicate used at three sites in save_pretrained.
     """
-    import modelopt.torch.export.unified_export_megatron as uem
-
     # is_last_stage_main_rank=False is never a writer, regardless of DP/EP.
     monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
     monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)

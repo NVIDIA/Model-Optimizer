@@ -19,6 +19,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
+| Tracking runs with MLflow | Record a PTQ run on an MLflow server so it can be reproduced from its entry alone | \[[Link](#tracking-runs-with-mlflow)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -471,33 +472,37 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ## Multi-Node Post-Training Quantization with FSDP2
 
-ModelOpt enables quantization of LLMs across multiple GPU nodes using various quantization formats. It leverages HuggingFace's Accelerate library and FSDP2 for distributed model sharding and calibration.
+ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
 ### Usage
 
-For distributed execution across multiple nodes, use the `accelerate` library. A template configuration file (`fsdp2.yaml`) is provided and can be customized for user specific requirements.
+#### Slurm (recommended)
 
-On each node run the following command:
+Slurm orchestrates launching the job on every node for you, so this is the easiest way to run a multi-node PTQ. A ready-to-run example that quantizes Nemotron-3-Super to NVFP4 is provided in [`slurm/multinode_fsdp2_ptq.slurm`](./slurm/multinode_fsdp2_ptq.slurm). Edit the `CONFIG` block (container image, model path, export path, recipe) and submit:
 
 ```bash
-accelerate launch --config_file fsdp2.yaml \
-    --num_machines=<num_nodes> \
-    --machine_rank=<current_node_rank> \
-    --main_process_ip=<node0_ip_addr> \
-    --main_process_port=<port> \
-    --fsdp_transformer_layer_cls_to_wrap=<decoder_layer_name>
-     multinode_ptq.py \
-    --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_experts_only/nvfp4_omlp_only/nvfp4_awq/int8> \
-    --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
-    --batch_size <calib_batch_size> \
-    --calib_size <num_calib_samples> \
-    --dataset <dataset> \
-    --export_path <export_path> \
-    --trust_remote_code
+sbatch --nodes=2 slurm/multinode_fsdp2_ptq.slurm
 ```
 
-The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
+#### Manual (run on each node)
+
+Without Slurm, start `torchrun` on every node yourself:
+
+```bash
+torchrun \
+    --nnodes=<num_nodes> --node_rank=<current_node_rank> \
+    --master_addr=<node0_ip_addr> --master_port=<port> \
+    --nproc_per_node=<num_gpus_per_node> \
+    hf_ptq.py \
+    --pyt_ckpt_path <path_to_model> \
+    --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+    --batch_size <calib_batch_size> \
+    --calib_size <num_calib_samples> \
+    --export_path <export_path> \
+    --use_fsdp2
+```
+
+See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
@@ -633,6 +638,61 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 - Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
+
+## Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ
+run on an MLflow server so it can be reproduced later from its MLflow entry alone:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+  --export_path <quantized_ckpt_path> \
+  --mlflow https://<your-mlflow-server>/
+```
+
+The run is opened *before* the model loads, so a bad URI or a missing token fails within
+seconds rather than after a full calibration.
+
+<details>
+<summary>Uploaded artifacts</summary>
+
+| Artifact | Contents |
+| --- | --- |
+| `command.txt` | The full invocation, copy-pasteable, with credentials masked |
+| `version.txt` | The ModelOpt version that ran |
+| `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
+| `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
+| `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
+| `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
+
+</details>
+
+Every command-line argument is also logged as a searchable param, alongside
+`user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
+still recorded, with status `FAILED` and its log attached.
+
+Other flags:
+
+- `--mlflow_experiment` — defaults to `$USER/hf_ptq/<checkpoint basename>-<recipe name>`,
+  falling back to `--qformat` when no `--recipe` is used.
+- `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
+- `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
+  from the environment is best-effort — if the client is missing or the server is
+  unreachable the run warns and continues untracked, since the variable is often exported
+  for other tooling. An explicit `--mlflow` fails loudly instead.
+
+Authentication uses MLflow's own environment variables (`MLFLOW_TRACKING_TOKEN`, or
+`MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`).
+
+The tracking itself lives in `modelopt.torch.utils.mlflow`
+([`MlflowRunLogger`](../../modelopt/torch/utils/mlflow.py)), so other example scripts can
+record runs the same way; `hf_ptq.py` only supplies the params and artifacts specific to PTQ.
+
+> Note: only the main rank uploads, so `--use_fsdp2` runs produce a single run. The log
+> captures Python output; output written directly by native libraries (NCCL, CUDA) goes to
+> the terminal only. On SLURM, keep the job's own `.out` file for those.
 
 ## Resources
 
