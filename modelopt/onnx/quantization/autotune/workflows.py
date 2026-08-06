@@ -295,7 +295,12 @@ def region_pattern_autotuning_workflow(
         baseline_path = output_dir / "baseline.onnx"
         autotuner.export_onnx(str(baseline_path), insert_qdq=False)
         baseline_log = logs_dir / "baseline.log"
-        baseline_latency = benchmark_onnx_model(str(baseline_path), str(baseline_log))
+        try:
+            baseline_latency = benchmark_onnx_model(str(baseline_path), str(baseline_log))
+        except RemoteConnectionError:
+            logger.error("Remote board connection lost during baseline, saving state before exit")
+            autotuner.save_state(str(state_path))
+            raise
         autotuner.submit(baseline_latency)
         logger.info(f"Baseline: {baseline_latency:.2f} ms")
     else:
@@ -377,7 +382,14 @@ def region_pattern_autotuning_workflow(
     final_model_path = output_dir / "optimized_final.onnx"
     autotuner.export_onnx(str(final_model_path), insert_qdq=True)
     final_log = logs_dir / "final.log"
-    final_latency = benchmark_onnx_model(str(final_model_path), str(final_log))
+    try:
+        final_latency = benchmark_onnx_model(str(final_model_path), str(final_log))
+    except RemoteConnectionError:
+        logger.error(
+            "Remote board connection lost during final measurement, saving state before exit"
+        )
+        autotuner.save_state(str(state_path))
+        raise
 
     if final_latency > 0 and final_latency != float("inf"):
         speedup = baseline_latency / final_latency

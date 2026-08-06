@@ -82,12 +82,19 @@ def _check_remote_connectivity(trtexec_args: list[str], retries: int = 3) -> Non
     if config_value is None:
         return
 
+    config_value = config_value.strip("'\"")
+
     parsed = urllib.parse.urlparse(config_value)
     hostname = parsed.hostname
     if not hostname:
-        return
+        raise RemoteConnectionError(f"Missing hostname in remote autotuning URI: {config_value!r}")
 
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError as e:
+        raise RemoteConnectionError(
+            f"Invalid port in remote autotuning URI: {config_value!r} - {e}"
+        ) from e
     if port is None:
         port = _DEFAULT_PORTS.get(parsed.scheme, 22)
 
@@ -361,15 +368,17 @@ class TrtExecBenchmark(Benchmark):
             if result.returncode != 0:
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
                 self.logger.error(f"stderr: {result.stderr}")
-                return float("inf")
+                return self._benchmark_failed()
 
             if not (match := re.search(self.latency_pattern, result.stdout, re.IGNORECASE)):
                 self.logger.warning("Could not parse median latency from trtexec output")
                 self.logger.debug(f"trtexec stdout:\n{result.stdout}")
-                return float("inf")
+                return self._benchmark_failed()
             latency = float(match.group(1))
             self.logger.info(f"TrtExec benchmark (median): {latency:.2f} ms")
             return latency
+        except RemoteConnectionError:
+            raise
         except FileNotFoundError:
             self.logger.error(
                 "'trtexec' binary not found. Please ensure TensorRT is installed and 'trtexec' is in PATH."
@@ -377,7 +386,24 @@ class TrtExecBenchmark(Benchmark):
             return float("inf")
         except Exception as e:
             self.logger.error(f"Benchmark failed: {e}")
-            return float("inf")
+            return self._benchmark_failed()
+
+    def _benchmark_failed(self) -> float:
+        """Classify a trtexec failure as transient (board lost) or genuine.
+
+        The pre-check in run() passed, but the board can drop while trtexec is
+        running. Re-test connectivity: if the board is gone the failure is a
+        network event, not a property of the scheme, and must not be recorded
+        as an error in the state file.
+
+        Returns:
+            float('inf') if the board is still reachable (genuine scheme failure).
+
+        Raises:
+            RemoteConnectionError: If the remote board is no longer reachable.
+        """
+        _check_remote_connectivity(self._base_cmd, retries=self._remote_connection_retries)
+        return float("inf")
 
 
 class TensorRTPyBenchmark(Benchmark):
