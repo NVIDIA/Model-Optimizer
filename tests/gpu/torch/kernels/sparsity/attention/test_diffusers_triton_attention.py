@@ -18,8 +18,6 @@
 import pytest
 import torch
 
-diffusers = pytest.importorskip("diffusers")
-
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
 from modelopt.torch.kernels.sparsity.attention import diffusers_triton_attention as diffusers_mod
 from modelopt.torch.kernels.sparsity.attention import ltx_triton_attention as ltx_mod

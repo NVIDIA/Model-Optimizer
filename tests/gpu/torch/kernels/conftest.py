@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
+from _test_utils.fs_utils import assert_unmodified_tree
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 
 _KERNELS_DIR = Path(__file__).parent
 
@@ -80,9 +82,7 @@ def sdpa_reference(q, k, v, b_start_loc, b_seq_len, is_causal=True):
 @pytest.fixture(scope="module")
 def tiny_llama_dir(tmp_path_factory):
     """Tiny Llama: 2 layers, 64 hidden, 4 q-heads, 2 kv-heads, head_dim=16."""
-    from _test_utils.torch.transformers_models import create_tiny_llama_dir
-
-    return create_tiny_llama_dir(
+    model_dir = create_tiny_llama_dir(
         tmp_path_factory.mktemp("tiny_llama"),
         with_tokenizer=True,
         num_hidden_layers=2,
@@ -92,3 +92,5 @@ def tiny_llama_dir(tmp_path_factory):
         intermediate_size=64,
         max_position_embeddings=64,
     )
+    with assert_unmodified_tree(model_dir) as path:
+        yield path

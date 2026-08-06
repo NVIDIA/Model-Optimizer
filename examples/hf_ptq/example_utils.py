@@ -682,6 +682,17 @@ def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_confi
     return model_kwargs
 
 
+def _fmt_max_memory(max_memory: dict) -> str:
+    """Format a ``{device: bytes}`` budget dict into a human-readable string."""
+    parts = []
+    for key in sorted(max_memory.keys(), key=lambda k: (isinstance(k, str), k)):
+        val = max_memory[key]
+        label = f"{val / 1024**3:.1f} GiB" if isinstance(val, int) else str(val)
+        key_str = f"GPU {key}" if isinstance(key, int) else str(key)
+        parts.append(f"  {key_str}: {label}")
+    return "\n".join(parts)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -689,8 +700,20 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    offload_folder=None,
+    max_cpu_memory_gb=None,
+    max_gpu_memory_gb=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+
+    _disk_offload = offload_folder is not None
+    if _disk_offload and max_cpu_memory_gb is None:
+        warnings.warn(
+            "offload_folder is set but max_cpu_memory_gb is not specified. "
+            "CPU memory usage during model load will be unbounded. "
+            "Pass max_cpu_memory_gb to cap CPU usage.",
+            UserWarning,
+        )
 
     device_map = "auto"
     if device == "cpu":
@@ -764,6 +787,20 @@ def get_model(
                 return True
         return False
 
+    # Only the general load path below threads max_memory/offload_folder into
+    # from_pretrained; the specialized loaders build their own calls.
+    if _disk_offload and (
+        is_speculative(hf_config)
+        or has_pack_quantized_config(hf_config)
+        or get_original_hf_quant_method(hf_config) == "mxfp4"
+    ):
+        warnings.warn(
+            "offload_folder is ignored for speculative, pack-quantized, and MXFP4 "
+            "checkpoints: these use dedicated load paths that cannot offload. The model "
+            "will be loaded fully resident.",
+            UserWarning,
+        )
+
     if is_speculative(hf_config):
         model = AutoModelForCausalLM.from_pretrained(
             ckpt_path,
@@ -808,7 +845,11 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+        # DeepSeek ships bundled modeling code, but the built-in class is what the
+        # disk-offload and streaming-export paths are validated against.
+        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+
+        if not hasattr(transformers, architecture) or use_bundled_code:
             if not hasattr(transformers, architecture):
                 warnings.warn(
                     f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
@@ -845,24 +886,41 @@ def get_model(
             model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
-        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
 
-        on_cpu = "cpu" in inferred_device_map.values()
-
-        if on_cpu:
-            for _device in max_memory:
-                if isinstance(_device, int):
-                    max_memory[_device] *= gpu_mem_percentage
-
-            print(
-                "Model does not fit to the GPU mem. "
-                f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                "reduce the calibration `batch_size` manually."
-            )
+        if _disk_offload:
+            for _k in max_memory:
+                if isinstance(_k, int):
+                    if max_gpu_memory_gb is not None:
+                        max_memory[_k] = int(max_gpu_memory_gb * 1024**3)
+                    else:
+                        max_memory[_k] = int(max_memory[_k] * gpu_mem_percentage)
+            if max_cpu_memory_gb is not None:
+                max_memory["cpu"] = int(max_cpu_memory_gb * 1024**3)
             model_kwargs["max_memory"] = max_memory
+            print(
+                "Disk-offload mode enabled. "
+                f"Memory budgets: {_fmt_max_memory(max_memory)}\n"
+                f"Offload folder: {offload_folder}\n"
+                "Weights exceeding GPU+CPU budgets will be streamed from disk."
+            )
+        else:
+            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+            if "cpu" in inferred_device_map.values():
+                for _device in max_memory:
+                    if isinstance(_device, int):
+                        max_memory[_device] *= gpu_mem_percentage
+
+                print(
+                    "Model does not fit to the GPU mem. "
+                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                    "reduce the calibration `batch_size` manually."
+                )
+                model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        if _disk_offload:
+            model_kwargs2["offload_folder"] = offload_folder
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,

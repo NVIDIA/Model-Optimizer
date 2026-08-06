@@ -419,3 +419,55 @@ def test_get_model_device_map_for_diffusion_gemma(
 )
 def test_is_diffusion_gemma(hf_config, expected):
     assert example_utils.is_diffusion_gemma(hf_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("trust_remote_code", "expect_bundled_code"),
+    [(True, True), (False, False)],
+)
+def test_get_model_deepseek_honors_trust_remote_code(
+    monkeypatch, trust_remote_code, expect_bundled_code
+):
+    """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
+    used = {}
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV3ForCausalLM"],
+        dtype=torch.bfloat16,
+        model_type="deepseek_v3",
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            return None
+
+    def _record(tag):
+        class Fake:
+            @staticmethod
+            def from_config(config, **kwargs):
+                used["path"] = tag
+                return FakeModel()
+
+            _from_config = from_config
+
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                used["path"] = tag
+                return FakeModel()
+
+        return Fake
+
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: hf_config)
+    monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
+    monkeypatch.setattr(
+        example_utils.transformers, "DeepseekV3ForCausalLM", _record("builtin"), raising=False
+    )
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
+
+    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
+
+    assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
