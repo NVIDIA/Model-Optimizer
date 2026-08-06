@@ -1613,6 +1613,38 @@ def test_load_config_multi_doc_null_content(tmp_path):
     assert data == {"key": "value"}
 
 
+def test_load_config_multi_doc_null_header_list_body(tmp_path):
+    """Multi-document YAML with a null first doc and a list body keeps the list."""
+    cfg_file = tmp_path / "null_header_list.yaml"
+    cfg_file.write_text("null\n---\n- item1\n- item2\n")
+    data = load_config(cfg_file)
+    assert data == ["item1", "item2"]
+
+
+def test_load_config_multi_doc_empty_header_list_body(tmp_path):
+    """Multi-document YAML with an empty explicit first doc and a list body keeps the list."""
+    cfg_file = tmp_path / "empty_header_list.yaml"
+    cfg_file.write_text("---\n---\n- item1\n")
+    data = load_config(cfg_file)
+    assert data == ["item1"]
+
+
+def test_load_config_multi_doc_null_header_dict_body(tmp_path):
+    """Multi-document YAML with a null first doc and a dict body keeps the dict."""
+    cfg_file = tmp_path / "null_header_dict.yaml"
+    cfg_file.write_text("~\n---\nkey: value\n")
+    data = load_config(cfg_file)
+    assert data == {"key": "value"}
+
+
+def test_load_config_lone_null_doc(tmp_path):
+    """A single explicit null document still loads as an empty dict."""
+    cfg_file = tmp_path / "lone_null.yaml"
+    cfg_file.write_text("null\n")
+    data = load_config(cfg_file)
+    assert data == {}
+
+
 def test_load_config_multi_doc_first_not_dict_raises(tmp_path):
     """Multi-document YAML with non-dict first document raises ValueError."""
     cfg_file = tmp_path / "bad_multi.yaml"
