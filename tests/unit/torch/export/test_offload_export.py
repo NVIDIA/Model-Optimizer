@@ -33,14 +33,12 @@ except ImportError:
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
-from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
     _StreamingShardWriter,
 )
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
-from modelopt.torch.quantization.utils import core_utils
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 
 # ---------------------------------------------------------------------------
@@ -299,29 +297,6 @@ def test_postprocess_scale_squeezed():
 # tensor is resident. Getting this wrong silently exported wrong weights: meta
 # tensors all report 0, and freed addresses are recycled by the allocator.
 # ---------------------------------------------------------------------------
-
-
-def test_export_context_moe_cache_follows_weight_residency():
-    """The MoE fast-path cache is enabled only while weights stay resident.
-
-    It aliases live module buffers, which is unsafe once an offloaded module's weights are
-    freed when its materialization window closes. It is only an optimization; on-disk dedup
-    is handled name-based in postprocess_state_dict regardless of residency.
-    """
-    resident_ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
-    assert resident_ctx.moe_tied_cache == {}
-
-    offloaded, _ = _make_offloaded_linear()
-    offloaded_ctx = ExportContext(model=offloaded, dtype=torch.float16)
-    assert offloaded_ctx.moe_tied_cache is None
-
-
-def test_export_context_moe_cache_disabled_for_fsdp2(monkeypatch):
-    """FSDP2 shards recycle addresses, so the MoE fast-path opt-out must hold."""
-    monkeypatch.setattr(core_utils, "is_fsdp2_model", lambda _: True)
-
-    ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
-    assert ctx.moe_tied_cache is None
 
 
 def test_tied_weights_exported_independently_without_cache():
