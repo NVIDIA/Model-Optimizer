@@ -280,3 +280,54 @@ def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, 
     }
     assert Path(result["result_path"]).is_file()
     assert Path(result["raw_result_path"]).name == "results.json"
+
+
+def test_downstream_evaluation_reports_lmms_eval_output_when_results_are_missing(
+    monkeypatch, tmp_path
+):
+    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
+        del cwd, env, capture_output, text, timeout, check
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="Saving results aggregated\nCould not save results aggregated\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    node = SimpleNamespace(
+        node_id="lmms_eval",
+        flow_id="runtime",
+        stage_id="post.runtime.lmms_eval",
+        config={
+            "config": {
+                "command_prefix": ["python", "-m", "lmms_eval"],
+                "tasks": ["ifeval"],
+                "limit": 1,
+                "topology": {"gpu_group_size": 1},
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    try:
+        runner._downstream_evaluation(
+            {"puzzle_dir": str(tmp_path)}, node, source, "execution"
+        )
+    except FileNotFoundError as error:
+        message = str(error)
+    else:
+        raise AssertionError("expected missing lmms-eval results to fail")
+
+    assert "lmms-eval wrote no JSON results" in message
+    assert "stdout tail:" in message
+    assert "Could not save results aggregated" in message
+    stream_root = (
+        tmp_path
+        / "artifacts/post_mip/nodes/lmms_eval/executions/execution/raw/architecture/lmms_eval"
+    )
+    assert list(stream_root.glob("attempt_*/stdout.txt"))

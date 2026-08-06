@@ -259,6 +259,7 @@ _REUSABLE_RUNTIME_FIELDS = (
     "latency_difference_negative",
 )
 _REUSABLE_RUNTIME_ARG_FIELDS = (
+    "workload_id",
     "runtime_granularity",
     "runtime_backend",
     "num_iters",
@@ -270,7 +271,67 @@ _REUSABLE_RUNTIME_ARG_FIELDS = (
 )
 
 
-def _reuse_runtime_stats(target: dict, source: dict, *, source_path: str) -> dict:
+def _runtime_reuse_key_from_args(
+    args: Mapping,
+    *,
+    fallback_workload_id: str | None = None,
+) -> tuple | None:
+    """Return the exact runtime-reuse identity represented by persisted args."""
+
+    if not args.get("runtime_stats") or args.get("weights_dtype") != str(torch.bfloat16):
+        return None
+    workload_id = args.get("workload_id")
+    if workload_id is None:
+        workload_id = fallback_workload_id
+    return (
+        int(args["n_embd"]),
+        int(args["batch_size"]),
+        int(args.get("prefill_seq_len")),
+        int(args.get("generation_seq_len")),
+        args.get("max_num_seqs"),
+        args.get("runtime_granularity", "subblock"),
+        args.get("runtime_backend"),
+        args.get("num_iters"),
+        args.get("num_warmup_iters"),
+        args.get("repeat_block_n_times"),
+        _freeze_stats_args(args.get("vllm_args")),
+        workload_id,
+    )
+
+
+def _runtime_reuse_key(
+    *,
+    width: int,
+    batch_size: int,
+    prefill_seq_len: int,
+    generation_seq_len: int,
+    runtime_stats_config: Mapping,
+) -> tuple:
+    """Return the exact runtime-reuse identity requested by this calculation."""
+
+    return (
+        int(width),
+        int(batch_size),
+        int(prefill_seq_len),
+        int(generation_seq_len),
+        runtime_stats_config.get("max_num_seqs"),
+        runtime_stats_config.get("granularity", "subblock"),
+        runtime_stats_config.get("backend"),
+        runtime_stats_config.get("num_iters", 30),
+        runtime_stats_config.get("num_warmup_iters", 10),
+        max(2, int(runtime_stats_config.get("repeat_block_n_times", 10))),
+        _freeze_stats_args([str(arg) for arg in runtime_stats_config.get("vllm_args", [])]),
+        runtime_stats_config.get("workload_id"),
+    )
+
+
+def _reuse_runtime_stats(
+    target: dict,
+    source: dict,
+    *,
+    source_path: str,
+    fallback_workload_id: str | None = None,
+) -> dict:
     """Overlay immutable measured latency onto refreshed static statistics."""
 
     # Synthetic vLLM timings are layer-independent: collection benchmarks the
@@ -302,7 +363,10 @@ def _reuse_runtime_stats(target: dict, source: dict, *, source_path: str) -> dic
     target_args["runtime_stats"] = True
     target_args["runtime_reuse_source"] = str(source_path)
     for field in _REUSABLE_RUNTIME_ARG_FIELDS:
-        target_args[field] = source_args.get(field)
+        value = source_args.get(field)
+        if field == "workload_id" and value is None:
+            value = target_args.get("workload_id") or fallback_workload_id
+        target_args[field] = value
 
     source_non_block = source.get("non_block", {})
     target_non_block = target.setdefault("non_block", {})
@@ -812,6 +876,7 @@ def calculate_subblock_stats(
             max_num_seqs=(
                 runtime_stats_config.get("max_num_seqs") if runtime_stats_enabled else None
             ),
+            workload_id=runtime_stats_config.get("workload_id") if runtime_stats_enabled else None,
             repeat_block_n_times=(
                 max(2, int(runtime_stats_config.get("repeat_block_n_times", 10)))
                 if runtime_stats_enabled
@@ -1160,6 +1225,7 @@ def _arg_signature(args: dict) -> tuple:
         runtime_stats,
         args.get("runtime_granularity") if runtime_stats else None,
         args.get("max_num_seqs") if runtime_stats else None,
+        args.get("workload_id") if runtime_stats else None,
         args.get("runtime_selection_identity"),
         args.get("parameter_inventory_identity"),
     )
@@ -1174,6 +1240,7 @@ def _subblock_stats_already_complete(
     runtime_stats_enabled: bool,
     runtime_granularity: str = "subblock",
     runtime_max_num_seqs: int | None = None,
+    runtime_workload_id: str | None = None,
     runtime_selection_identity: str | None = None,
     parameter_inventory_identities: Mapping[int, str] | None = None,
     prefill_seq_len: int = 2048,
@@ -1221,6 +1288,7 @@ def _subblock_stats_already_complete(
             runtime_expected,
             runtime_granularity if runtime_expected else None,
             runtime_max_num_seqs if runtime_expected else None,
+            runtime_workload_id if runtime_expected else None,
             (
                 runtime_selection_identity
                 if runtime_expected
@@ -1290,6 +1358,8 @@ def calculate_subblock_stats_for_puzzle_dir(
         batch_sizes = [
             int(batch_size) for batch_size in batch_sizes.strip("[]").replace(" ", "").split(",")
         ]
+    else:
+        batch_sizes = list(batch_sizes)
 
     master_puzzle_dir = Path(master_puzzle_dir)
     teacher_dir = (
@@ -1333,7 +1403,7 @@ def calculate_subblock_stats_for_puzzle_dir(
     teacher_hidden_size = int(lm_config.hidden_size)
     model_hidden_sizes = _unique_hidden_sizes(model_hidden_sizes, teacher_hidden_size)
     runtime_reuse_path = runtime_stats_config.get("reuse_stats_path")
-    runtime_reuse_by_width: dict[int, dict] = {}
+    runtime_reuse_by_key: dict[tuple, dict] = {}
     if runtime_stats_enabled and runtime_reuse_path:
         runtime_reuse_path = Path(str(runtime_reuse_path))
         if not runtime_reuse_path.is_file():
@@ -1345,17 +1415,30 @@ def calculate_subblock_stats_for_puzzle_dir(
                     f"Reusable runtime stats file does not exist: {runtime_reuse_path}"
                 )
         reusable_entries = json.loads(runtime_reuse_path.read_text())
-        runtime_reuse_by_width = {
-            int(entry["args"]["n_embd"]): entry
-            for entry in reusable_entries
-            if entry.get("args", {}).get("runtime_stats")
-            and entry.get("args", {}).get("weights_dtype") == str(torch.bfloat16)
+        fallback_workload_id = runtime_stats_config.get("reuse_workload_id_if_missing")
+        for entry in reusable_entries:
+            key = _runtime_reuse_key_from_args(
+                entry.get("args", {}),
+                fallback_workload_id=fallback_workload_id,
+            )
+            if key is not None:
+                runtime_reuse_by_key[key] = entry
+        requested_runtime_keys = {
+            _runtime_reuse_key(
+                width=int(width),
+                batch_size=int(batch_size),
+                prefill_seq_len=int(prefill_seq_len),
+                generation_seq_len=int(generation_seq_len),
+                runtime_stats_config=runtime_stats_config,
+            )
+            for width in model_hidden_sizes
+            for batch_size in batch_sizes
         }
-        missing_runtime_widths = set(model_hidden_sizes) - set(runtime_reuse_by_width)
-        if missing_runtime_widths:
+        missing_runtime_keys = requested_runtime_keys - set(runtime_reuse_by_key)
+        if missing_runtime_keys:
             raise ValueError(
-                f"Reusable runtime stats {runtime_reuse_path} are missing widths "
-                f"{sorted(missing_runtime_widths)}"
+                f"Reusable runtime stats {runtime_reuse_path} are missing requested "
+                f"runtime identities {sorted(missing_runtime_keys)}"
             )
         runtime_selection_identity = "reuse-" + hashlib.sha256(
             runtime_reuse_path.read_bytes()
@@ -1410,6 +1493,9 @@ def calculate_subblock_stats_for_puzzle_dir(
             runtime_max_num_seqs=calc_subblock_stats_config.get("runtime_stats", {}).get(
                 "max_num_seqs"
             ),
+            runtime_workload_id=calc_subblock_stats_config.get("runtime_stats", {}).get(
+                "workload_id"
+            ),
             runtime_selection_identity=runtime_selection_identity,
             parameter_inventory_identities=parameter_inventory_identities,
             prefill_seq_len=prefill_seq_len,
@@ -1455,11 +1541,17 @@ def calculate_subblock_stats_for_puzzle_dir(
         curr_runtime_stats_enabled = (
             runtime_stats_enabled if weights_dtype == torch.bfloat16 else False
         )
-        reused_runtime_stats = (
-            runtime_reuse_by_width.get(int(model_hidden_size))
-            if curr_runtime_stats_enabled
-            else None
-        )
+        reused_runtime_stats = None
+        if curr_runtime_stats_enabled:
+            reused_runtime_stats = runtime_reuse_by_key.get(
+                _runtime_reuse_key(
+                    width=int(model_hidden_size),
+                    batch_size=int(batch_size),
+                    prefill_seq_len=int(prefill_seq_len),
+                    generation_seq_len=int(generation_seq_len),
+                    runtime_stats_config=runtime_stats_config,
+                )
+            )
 
         curr_subblock_stats = calculate_subblock_stats(
             calc_subblock_stats_config,
@@ -1489,6 +1581,7 @@ def calculate_subblock_stats_for_puzzle_dir(
                 curr_subblock_stats,
                 reused_runtime_stats,
                 source_path=str(runtime_reuse_path),
+                fallback_workload_id=runtime_stats_config.get("workload_id"),
             )
             curr_subblock_stats["args"]["runtime_selection_identity"] = (
                 runtime_selection_identity

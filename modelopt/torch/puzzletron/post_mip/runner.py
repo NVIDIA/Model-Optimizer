@@ -740,6 +740,29 @@ def _lmms_eval_result_payload(output_path: Path) -> tuple[dict[str, Any], Path]:
     return payload, path
 
 
+def _write_lmms_eval_streams(
+    output_path: Path, result: subprocess.CompletedProcess[str]
+) -> dict[str, str]:
+    stream_paths = {}
+    for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
+        if not text:
+            continue
+        stream_path = output_path / f"{stream_name}.txt"
+        stream_path.write_text(text)
+        stream_paths[f"{stream_name}_path"] = str(stream_path)
+    return stream_paths
+
+
+def _lmms_eval_output_tail(result: subprocess.CompletedProcess[str], *, max_lines: int = 20) -> str:
+    sections = []
+    for stream_name, text in (("stderr", result.stderr), ("stdout", result.stdout)):
+        lines = (text or "").strip().splitlines()
+        if lines:
+            sections.append(f"{stream_name} tail:")
+            sections.extend(lines[-max_lines:])
+    return "\n".join(sections)
+
+
 def _downstream_evaluation(
     config: dict[str, Any],
     node: CompiledPostMIPNode,
@@ -782,14 +805,18 @@ def _downstream_evaluation(
         timeout=timeout,
         check=False,
     )
+    stream_paths = _write_lmms_eval_streams(output, result)
     if result.returncode:
-        detail = (result.stderr or result.stdout).strip().splitlines()
-        tail = "\n".join(detail[-20:])
+        tail = _lmms_eval_output_tail(result)
         raise RuntimeError(
             f"lmms-eval failed with exit code {result.returncode}"
             + (f": {tail}" if tail else "")
         )
-    payload, result_path = _lmms_eval_result_payload(output)
+    try:
+        payload, result_path = _lmms_eval_result_payload(output)
+    except FileNotFoundError as error:
+        tail = _lmms_eval_output_tail(result)
+        raise FileNotFoundError(str(error) + (f": {tail}" if tail else "")) from error
     metrics = _flatten_lmms_eval_metrics(payload)
     if not metrics:
         raise RuntimeError(f"lmms-eval result has no numeric task metrics: {result_path}")
@@ -808,6 +835,7 @@ def _downstream_evaluation(
         "result_path": str(summary_path),
         "raw_result_path": str(result_path),
         "command_path": str(command_path),
+        **stream_paths,
     }
 
 

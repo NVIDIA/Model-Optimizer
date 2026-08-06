@@ -22,6 +22,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+import torch
 from immutabledict import immutabledict
 from omegaconf import OmegaConf
 
@@ -66,6 +67,7 @@ from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import (
     _reuse_runtime_stats,
     _runtime_measurement_fields,
     _select_runtime_subblock_configs,
+    _subblock_stats_already_complete,
     _unique_hidden_sizes,
     _validate_sparse_runtime_settings,
 )
@@ -187,6 +189,7 @@ def test_runtime_stats_can_be_reused_while_static_metrics_are_refreshed():
             "runtime_stats": True,
             "runtime_granularity": "subblock",
             "runtime_backend": "vllm",
+            "workload_id": "serving-default",
         },
         "subblocks": [
             {
@@ -211,6 +214,7 @@ def test_runtime_stats_can_be_reused_while_static_metrics_are_refreshed():
 
     assert result["args"]["runtime_stats"] is True
     assert result["args"]["runtime_reuse_source"] == "existing.json"
+    assert result["args"]["workload_id"] == "serving-default"
     assert result["subblocks"][0]["runtime_ms"] == 7.0
     assert result["subblocks"][1]["runtime_ms"] == 7.0
     assert result["subblocks"][0]["num_params"] == 123
@@ -219,6 +223,42 @@ def test_runtime_stats_can_be_reused_while_static_metrics_are_refreshed():
         "runtime_ms": "vllm_measured",
     }
     assert result["non_block"]["runtime_ms"] == 1.0
+
+
+def test_runtime_stats_reuse_preserves_target_workload_when_source_is_legacy():
+    config = FFNConfig(intermediate_size=16)
+    target = {
+        "args": {"runtime_stats": False, "workload_id": None},
+        "subblocks": [{"subblock_config": config.to_dict(), "parent_layer_index": 0}],
+        "non_block": {},
+    }
+    source = {
+        "args": {
+            "runtime_stats": True,
+            "runtime_granularity": "subblock",
+            "runtime_backend": "vllm",
+            "workload_id": None,
+        },
+        "subblocks": [
+            {
+                "subblock_config": config.to_dict(),
+                "parent_layer_index": 0,
+                "runtime_ms": 7.0,
+            }
+        ],
+        "non_block": {},
+    }
+
+    result = _reuse_runtime_stats(
+        target,
+        source,
+        source_path="measurement.json",
+        fallback_workload_id="serving-default",
+    )
+
+    assert result["args"]["runtime_stats"] is True
+    assert result["args"]["workload_id"] == "serving-default"
+    assert result["subblocks"][0]["runtime_ms"] == 7.0
 
 
 def test_runtime_block_candidates_load_converted_teacher_without_replacement_library(tmp_path):
@@ -1143,6 +1183,232 @@ def test_build_library_propagates_candidate_import_errors_without_success_manife
         build_library_stage(config, StageManifest(stage="build_library", config=config))
 
     assert not (tmp_path / "manifests" / "build_library.json").exists()
+
+
+def test_static_workload_stats_accept_instantiated_activation_pass_objects(monkeypatch):
+    class DummyMixin:
+        pass
+
+    hydra_cfg = OmegaConf.create(
+        {
+            "calc_subblock_stats": {
+                "batch_sizes": [1],
+                "prefill_seq_len": 64,
+                "generation_seq_len": 16,
+                "runtime_stats": {"enabled": True},
+                "merge_with_existing_stats": False,
+            },
+            "pruning": {
+                "activation_passes": [
+                    {
+                        "name": "attention_grouped",
+                        "pruning_mixin": DummyMixin,
+                    }
+                ]
+            },
+        },
+        flags={"allow_objects": True},
+    )
+    captured = []
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.launch_calc_subblock_stats",
+        lambda cfg: captured.append(cfg),
+    )
+
+    pipeline_stages._calculate_static_workload_stats(
+        {
+            "mip": {
+                "workloads": {
+                    "short": {"batch_size": 2, "isl": 32, "osl": 8},
+                }
+            }
+        },
+        hydra_cfg,
+    )
+
+    assert len(captured) == 1
+    stats_cfg = captured[0].calc_subblock_stats
+    assert stats_cfg.batch_sizes == [2]
+    assert stats_cfg.prefill_seq_len == 32
+    assert stats_cfg.generation_seq_len == 8
+    assert stats_cfg.runtime_stats.enabled is False
+    assert stats_cfg.merge_with_existing_stats is True
+    assert (
+        captured[0].pruning.activation_passes[0].pruning_mixin
+        is DummyMixin
+    )
+    assert hydra_cfg.calc_subblock_stats.batch_sizes == [1]
+    assert hydra_cfg.calc_subblock_stats.runtime_stats.enabled is True
+
+
+def test_width_scenario_runtime_stats_reuse_root_measurement(tmp_path, monkeypatch):
+    scenario = tmp_path / "scenarios" / "width-2688" / "depth-00"
+    scenario.mkdir(parents=True)
+    (scenario / "scenario_manifest.json").write_text(
+        json.dumps({"status": "complete", "hidden_width": 2688})
+    )
+    (tmp_path / "subblock_stats.json").write_text(
+        json.dumps(
+            [
+                {
+                    "args": {
+                        "runtime_stats": True,
+                        "runtime_granularity": "subblock",
+                        "runtime_backend": "vllm",
+                        "weights_dtype": "torch.bfloat16",
+                        "batch_size": 1,
+                        "prefill_seq_len": 4096,
+                        "generation_seq_len": 1024,
+                        "max_num_seqs": 1,
+                        "n_embd": 2688,
+                        "workload_id": "serving-default",
+                    },
+                    "subblocks": [],
+                }
+            ]
+        )
+    )
+    hydra_cfg = OmegaConf.create(
+        {
+            "puzzle_dir": str(scenario),
+            "calc_subblock_stats": {
+                "model_hidden_sizes": [2688, 2560],
+                "batch_sizes": [1],
+                "prefill_seq_len": 4096,
+                "generation_seq_len": 1024,
+                "subblock_stats_filename": "subblock_stats.json",
+                "merge_with_existing_stats": True,
+                "runtime_stats": {
+                    "enabled": True,
+                    "backend": "vllm",
+                    "granularity": "subblock",
+                    "max_num_seqs": 1,
+                    "num_iters": 30,
+                    "num_warmup_iters": 10,
+                    "repeat_block_n_times": 4,
+                    "topology": {"gpu_group_size": 1},
+                },
+            },
+        }
+    )
+    config = {
+        "puzzle_dir": str(scenario),
+        "vllm_stats": {
+            "enabled": True,
+            "subblock_stats_filename": "subblock_stats.json",
+            "measurements": {
+                "serving-default": {
+                    "prefill_seq_len": 4096,
+                    "generation_seq_len": 1024,
+                    "batch_size": 1,
+                    "max_num_seqs": 1,
+                    "granularity": "subblock",
+                    "runtime_stats": {
+                        "backend": "vllm",
+                        "granularity": "subblock",
+                        "max_num_seqs": 1,
+                        "num_iters": 30,
+                        "num_warmup_iters": 10,
+                        "repeat_block_n_times": 4,
+                        "topology": {"gpu_group_size": 1},
+                    },
+                }
+            },
+        },
+    }
+    calls = []
+
+    def launch(cfg):
+        calls.append(cfg)
+        assert list(cfg.calc_subblock_stats.model_hidden_sizes) == [2688]
+        assert cfg.calc_subblock_stats.runtime_stats.enabled is True
+        assert cfg.calc_subblock_stats.runtime_stats.workload_id == "serving-default"
+        assert (
+            cfg.calc_subblock_stats.runtime_stats.reuse_workload_id_if_missing
+            == "serving-default"
+        )
+        assert cfg.calc_subblock_stats.runtime_stats.reuse_stats_path == str(
+            tmp_path / "subblock_stats.json"
+        )
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.launch_calc_subblock_stats",
+        launch,
+    )
+
+    pipeline_stages._refresh_scenario_runtime_workload_stats(
+        config,
+        hydra_cfg,
+        scenario / "subblock_stats.json",
+    )
+
+    assert len(calls) == 1
+
+
+def test_runtime_stats_resume_signature_includes_workload_id():
+    config = FFNConfig(intermediate_size=16)
+    runtime_fields = {
+        "runtime_ms": 1.0,
+        "prefill_runtime_ms": 1.0,
+        "decode_runtime_ms": 1.0,
+        "decode_runtime_ms_per_token": 1.0,
+        "weight_memory_mib": 1.0,
+        "kv_cache_bytes_per_token": 1.0,
+        "state_cache_bytes_per_sequence": 1.0,
+        "prefill_flops": 1.0,
+        "decode_flops": 1.0,
+    }
+    existing = {
+        "args": {
+            "batch_size": 1,
+            "prefill_seq_len": 4096,
+            "generation_seq_len": 1024,
+            "weights_dtype": "torch.bfloat16",
+            "activations_dtype": "torch.bfloat16",
+            "kv_cache_dtype": "torch.bfloat16",
+            "n_embd": 2688,
+            "runtime_stats": True,
+            "runtime_granularity": "subblock",
+            "max_num_seqs": 1,
+            "workload_id": "serving-default",
+            "runtime_selection_identity": "reuse-root-aggregate",
+            "parameter_inventory_identity": "scenario-inventory",
+        },
+        "subblocks": [
+            {
+                "subblock_config": config.to_dict(),
+                "parent_layer_index": 0,
+                **runtime_fields,
+                "additive_metric_provenance": {
+                    field: "test" for field in runtime_fields
+                },
+            }
+        ],
+    }
+    kwargs = dict(
+        existing_stats=[existing],
+        subblock_configs=[_indexed(config, 0)],
+        batch_sizes=[1],
+        data_types=[(torch.bfloat16, torch.bfloat16, torch.bfloat16)],
+        model_hidden_sizes=[2688],
+        runtime_stats_enabled=True,
+        runtime_granularity="subblock",
+        runtime_max_num_seqs=1,
+        runtime_selection_identity="reuse-root-aggregate",
+        parameter_inventory_identities={2688: "scenario-inventory"},
+        prefill_seq_len=4096,
+        generation_seq_len=1024,
+    )
+
+    assert _subblock_stats_already_complete(
+        **kwargs,
+        runtime_workload_id="serving-default",
+    )
+    assert not _subblock_stats_already_complete(
+        **kwargs,
+        runtime_workload_id="different-workload",
+    )
+    assert hydra_cfg.calc_subblock_stats.merge_with_existing_stats is False
 
 
 def test_sparse_runtime_selection_is_unique_and_layer_independent():

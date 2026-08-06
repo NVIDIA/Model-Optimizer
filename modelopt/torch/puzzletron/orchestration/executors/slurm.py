@@ -90,6 +90,31 @@ def render_hook_lines(commands: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
+def _render_host_container_env(repository: str) -> str:
+    """Render host-side container runtime defaults for Pyxis/Enroot."""
+
+    cache_root = Path(repository) / ".cache" / "enroot"
+    lines = [
+        'if [[ -z "${ENROOT_CACHE_PATH:-}" ]]; then',
+        f"  export ENROOT_CACHE_PATH={shlex.quote(str(cache_root / 'cache'))}",
+        "fi",
+        'if [[ -z "${ENROOT_DATA_PATH:-}" ]]; then',
+        f"  export ENROOT_DATA_PATH={shlex.quote(str(cache_root / 'data'))}",
+        "fi",
+        'if [[ -z "${ENROOT_TEMP_PATH:-}" ]]; then',
+        '  export ENROOT_TEMP_PATH="/tmp/puzzletron-enroot-${USER:-$(id -u)}/tmp"',
+        "fi",
+        'if [[ -z "${ENROOT_RUNTIME_PATH:-}" ]]; then',
+        '  export ENROOT_RUNTIME_PATH="/tmp/puzzletron-enroot-${USER:-$(id -u)}/runtime"',
+        "fi",
+        (
+            'mkdir -p "$ENROOT_CACHE_PATH" "$ENROOT_DATA_PATH" '
+            '"$ENROOT_TEMP_PATH" "$ENROOT_RUNTIME_PATH"'
+        ),
+    ]
+    return "\n".join(lines)
+
+
 def render_sbatch_script(
     *,
     attempt: AttemptSpec,
@@ -178,6 +203,8 @@ def render_sbatch_script(
         header_lines.append(f"#SBATCH --gpus-per-node={step_gpus_per_node}")
     header_lines.append(f"#SBATCH --output={log_path}")
     script = "\n".join(header_lines) + "\n"
+    if container_image:
+        script += _render_host_container_env(repository) + "\n"
     prologue_parts = [
         "set -Eeuo pipefail",
         postrun_trap,
