@@ -130,16 +130,13 @@ def _export_moe_linear(name: str, module: nn.Module, ctx: ExportContext) -> None
 
 @ExportModuleRegistry.register(predicate=_has_fused_experts_quantizers)
 def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContext) -> None:
-    """Split and quantize a fused-experts module with plural weight quantizers."""
-    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
-    group_key = ctx.resolver.container_group_key(name, first_proj_attr) if ctx.resolver else None
+    """Split and quantize a fused-experts module with plural weight quantizers.
+
+    Tied experts are packed independently and their duplicate keys are dropped by name
+    in postprocess_state_dict; no per-module dedup cache is used.
+    """
     with fsdp2_aware_weight_update(ctx.model, module, reshard=False):
-        _export_fused_experts(
-            module,
-            ctx.dtype,
-            _moe_tied_cache=ctx.moe_tied_cache,
-            _tied_group_key=group_key,
-        )
+        _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
