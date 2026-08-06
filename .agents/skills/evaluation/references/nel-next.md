@@ -27,13 +27,10 @@ Installing 0.3.x into the 0.2.6 env clobbers `nel`, so it lives in its own venv:
 .agents/scripts/nel-next.sh eval run <cfg> --dry-run | --submit | …
 ```
 
-Default install is a git build from the **public upstream repo**
-(`github.com/NVIDIA-NeMo/Evaluator`, no auth) via `NEL_NEXT_ORIGIN` — its default branch is
-**0.4.0** and ships the vendored TB 2.1 registry override, matching the golden toolchain.
-Plain PyPI `nemo-evaluator` tops out at **0.3.0**, so a version pin can't reach 0.4.x; set
-`NEL_NEXT_SPEC` only to deliberately fall back to it (older, not golden-comparable). There is
-no `v0.4.0` tag — pin `NEL_NEXT_REF` to a commit SHA for reproducibility. To build from an
-internal mirror, set `NEL_NEXT_ORIGIN` in `.env`; internal URLs stay out of this repo.
+Default install is a git build from `github.com/NVIDIA-NeMo/Evaluator` via `NEL_NEXT_ORIGIN`
+(default branch → **0.4.0**). PyPI `nemo-evaluator` stops at **0.3.0**, so a version pin
+can't reach 0.4.x. No `v0.4.0` tag exists — pin `NEL_NEXT_REF` to a commit SHA for
+reproducibility. Set `NEL_NEXT_ORIGIN` in `.env` to build from a mirror.
 
 ## Credentials + internal infra (`.env`)
 
@@ -136,24 +133,20 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Rules & gotchas
 
-- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}`. Golden **pins `0.5.0.1-harbor`** (single
-  source of truth: `configs/shared/nel_next_containers.yaml` in the eval-factory repo) —
-  track that pin, don't treat it as a floor. `0.3.1.1-harbor` is the bare minimum that can
-  run **TB 2.1** at all but is two minors behind golden; older `0.17.x/0.18.x-harbor-<arch>`
-  are arch-suffixed. The TB2.1 task set itself is stable across these versions (the
-  vendored `registry_overrides/terminal_bench_2_1.json` has not changed since 2026-06-03,
-  and both 0.3.1.1 and 0.5.0.1 score 89 samples), so the bump is a toolchain fix, not a
-  benchmark change. Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
-- **`proxy.request_timeout` must be >= `agent_kwargs.llm_kwargs.timeout`** (both 3600 in
-  canonical TB2.1). A smaller proxy timeout silently truncates long agent turns.
-- **`drop_params` takes four params** for harbor agentic benchmarks: `max_tokens`,
-  `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild`. The last two are sent
-  by the 0.5.x eval image; vLLM 400s on them if they aren't stripped.
+- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
+  against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
+  pin and does move. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
+  Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
+- **`proxy.request_timeout` must be >= `agent_kwargs.llm_kwargs.timeout`** (both 3600). A
+  smaller proxy timeout silently truncates long agent turns.
+- **`drop_params`** for harbor agentic benchmarks: `max_tokens`, `max_completion_tokens`,
+  `max_input_tokens_per_task`, `no_rebuild`. The last two are sent by the 0.5.x eval image;
+  vLLM 400s on them if they aren't stripped.
 - **`exclude_patterns`** = `["shard*", "model_traffic.jsonl"]` — captured request bodies
-  (FEA-224) stay in the run dir and must never be exported to MLflow.
-- **`http_pairs_dump`** (FEP-1104/1120) goes **last** in the interceptor chain:
-  `config: {dump_path: $${NEL_OUTPUT_DIR}/http_pairs_metrics.json, first_n: 50}`. Note the
-  `$$` — it defers expansion to run time. Diagnostics only; does not affect scoring.
+  stay in the run dir, never MLflow.
+- **`http_pairs_dump`** — `config: {dump_path: $${NEL_OUTPUT_DIR}/http_pairs_metrics.json,
+  first_n: 50}`. The `$$` defers expansion to run time. Chain position is per benchmark
+  (last for TB2.1, first for SWE-bench). Diagnostics only.
 - **Mount sources must pre-exist** — pyxis won't create the host side of a bind
   mount (invisible to `--dry-run`, fails at canary). `ssh <login> 'mkdir -p
   <lustre>/<user>/.cache/{vllm,huggingface}'`.

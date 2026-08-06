@@ -75,7 +75,7 @@ cluster:
   account: ???
   walltime: "04:00:00"               # auto_resume chains across windows
   shards: 1                          # N = N nodes (each redeploys vLLM)
-  eval_image: ${NEL_NEXT_EVAL_IMAGE}  # from eval-config (golden pin 0.5.0.1-harbor, multi-arch; enroot creds per SKILL Step 7.5)
+  eval_image: ${NEL_NEXT_EVAL_IMAGE}  # from eval-config (0.5.0.1-harbor, multi-arch; enroot creds per SKILL Step 7.5)
   sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"nel-next agentic eval"}}'
   sbatch_extra_flags: {switches: 1, exclusive: true}
   container_env:                     # AWS creds reach the eval container ONLY via here
