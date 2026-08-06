@@ -15,15 +15,34 @@
 
 """Tests of tensor quantizer."""
 
+import pytest
+import torch
 from _test_utils.torch.quantization.tensor_quantizer_common import (
     BlockQuantTester,
     SequentialQuantizerTester,
     TensorQuantizerTester,
 )
 
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
+
 
 class TestTensorQuantizerCPU(TensorQuantizerTester):
     device = "cpu"
+
+    def test_disabled_extra_repr(self):
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(enable=False)).to(self.device)
+        assert quantizer.extra_repr() == "disabled"
+
+        quantizer.pre_quant_scale = torch.tensor([0.5, 2.0]).to(self.device)
+        extra_repr = quantizer.extra_repr()
+        assert extra_repr.startswith("disabled")
+        assert "pre_quant_scale=" in extra_repr
+
+    def test_dynamic_amax_set_rejected(self):
+        quantizer = TensorQuantizer(QuantizerAttributeConfig(type="dynamic")).to(self.device)
+        with pytest.raises(AssertionError, match="Dynamic quantization"):
+            quantizer.amax = 1.0
 
 
 class TestBlockQuantCPU(BlockQuantTester):

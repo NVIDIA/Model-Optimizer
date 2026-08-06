@@ -364,6 +364,12 @@ class TensorQuantizer(nn.Module):
     @amax.setter
     def amax(self, value):
         assert value is not None, "amax cannot be set to None."
+        # getattr (not self._dynamic): __init__ assigns self.amax = amax before
+        # set_from_attribute_config creates the _dynamic attribute, so a bare
+        # attribute access would break the amax= constructor argument.
+        assert not getattr(self, "_dynamic", False), (
+            "Dynamic quantization does not have fixed amax; amax cannot be set."
+        )
 
         if not isinstance(value, torch.Tensor):
             value = torch.tensor(value)
