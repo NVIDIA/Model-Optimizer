@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import sys
 from contextlib import nullcontext
@@ -1062,6 +1077,51 @@ def test_build_library_refreshes_static_stats_for_each_vllm_mode(
     build_library_stage(config, StageManifest(stage="build_library", config=config))
 
     assert calls == ["library", "static", "candidates"]
+
+
+def test_build_library_propagates_candidate_module_import_error(tmp_path, monkeypatch):
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "build_replacement_library": {},
+        "search_space": {},
+    }
+    hydra_cfg = OmegaConf.create(
+        {
+            "puzzle_dir": str(tmp_path),
+            "build_replacement_library": {},
+            "calc_subblock_stats": {"subblock_stats_filename": "subblock_stats.json"},
+        }
+    )
+
+    class ScoringParent:
+        path = teacher_dir
+
+        @staticmethod
+        def to_dict():
+            return {"path": str(teacher_dir)}
+
+    monkeypatch.setattr(pipeline_stages, "load_runtime_hydra_config", lambda _: hydra_cfg)
+    monkeypatch.setattr(
+        pipeline_stages,
+        "ensure_scoring_parent",
+        lambda *_args, **_kwargs: ScoringParent(),
+    )
+    monkeypatch.setattr(pipeline_stages, "_distributed", lambda _: nullcontext())
+    monkeypatch.setattr(pipeline_stages.dist, "is_master", lambda: True)
+    monkeypatch.setattr(pipeline_stages.dist, "barrier", lambda: None)
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.replacement_library.build_replacement_library.launch_build_replacement_library",
+        lambda _: None,
+    )
+    monkeypatch.setattr(pipeline_stages, "_calculate_static_workload_stats", lambda *_args: None)
+    monkeypatch.setitem(sys.modules, "modelopt.torch.puzzletron.candidates", None)
+
+    with pytest.raises(ImportError, match="candidates"):
+        build_library_stage(config, StageManifest(stage="build_library", config=config))
+
+    assert not (tmp_path / "manifests" / "build_library.json").exists()
 
 
 def test_sparse_runtime_selection_is_unique_and_layer_independent():

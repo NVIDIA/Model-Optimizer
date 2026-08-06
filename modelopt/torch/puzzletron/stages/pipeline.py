@@ -1000,32 +1000,29 @@ def build_library_stage(config: dict[str, Any], manifest: StageManifest):
 
             launch_build_replacement_library(hydra_cfg)
             _calculate_static_workload_stats(config, hydra_cfg)
-            try:
-                from ..candidates import build_candidate_library_from_checkpoint
+            from ..candidates import build_candidate_library_from_checkpoint
 
-                library_cfg = config.get("build_replacement_library") or {}
-                configured_parent = library_cfg.get("source_checkpoint_dir")
-                parent_dir = (
-                    Path(configured_parent).resolve() if configured_parent else scoring_parent.path
+            library_cfg = config.get("build_replacement_library") or {}
+            configured_parent = library_cfg.get("source_checkpoint_dir")
+            parent_dir = (
+                Path(configured_parent).resolve() if configured_parent else scoring_parent.path
+            )
+            if parent_dir.resolve() != scoring_parent.path.resolve():
+                raise RuntimeError(
+                    "build-library source does not match the resolved scoring parent: "
+                    f"{parent_dir} != {scoring_parent.path}"
                 )
-                if parent_dir.resolve() != scoring_parent.path.resolve():
-                    raise RuntimeError(
-                        "build-library source does not match the resolved scoring parent: "
-                        f"{parent_dir} != {scoring_parent.path}"
-                    )
-                build_candidate_library_from_checkpoint(
-                    parent_dir,
-                    search_space=config.get("search_space") or {},
-                    output_path=candidate_library_path,
-                    puzzle_dir=puzzle_dir,
-                    include_noops=bool(library_cfg.get("include_noops", True)),
-                    include_bypass=bool(library_cfg.get("include_bypass", True)),
-                    stats_paths=(stats_path,) if stats_path.is_file() else (),
-                    metadata={"library_settings": config.get("library") or {}},
-                    hidden_width=library_cfg.get("hidden_width"),
-                )
-            except ImportError:
-                pass
+            build_candidate_library_from_checkpoint(
+                parent_dir,
+                search_space=config.get("search_space") or {},
+                output_path=candidate_library_path,
+                puzzle_dir=puzzle_dir,
+                include_noops=bool(library_cfg.get("include_noops", True)),
+                include_bypass=bool(library_cfg.get("include_bypass", True)),
+                stats_paths=(stats_path,) if stats_path.is_file() else (),
+                metadata={"library_settings": config.get("library") or {}},
+                hidden_width=library_cfg.get("hidden_width"),
+            )
         dist.barrier()
     return complete_stage(
         config,
