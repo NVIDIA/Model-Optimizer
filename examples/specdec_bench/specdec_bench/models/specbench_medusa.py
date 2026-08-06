@@ -73,6 +73,7 @@ class SpecBenchMedusaModel(Model):
                 "Medusa dependencies not found. Please ensure Spec-Bench is available."
             )
         assert max_concurrent_requests == 1, "Only support batch size 1 for now!"
+        kwargs.pop("trust_remote_code", None)
         self.medusa_num_heads = kwargs.get("medusa_num_heads", 4)
         self.draft_model_path = kwargs.get("draft_model_dir")
         self.dtype = kwargs.get("dtype", "float16")
