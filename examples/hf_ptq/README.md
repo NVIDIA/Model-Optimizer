@@ -130,7 +130,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>2.</sup>For some models, there is only support for exporting quantized checkpoints.* \
 > *<sup>3.</sup>W4A8_AWQ is only available on some models but not all* \
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
-> *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later* \
+> *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v1.2 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
@@ -588,27 +588,20 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 
 ### Unified HF Checkpoint Deployment Model Support Matrix
 
-| Model | Quant format | TRT-LLM | vLLM | SGLang |
-| :---: | :---: | :---: | :---: | :---: |
-| LLAMA 3.x | FP8 | ✅ | ✅ | ✅ |
-| LLAMA 3.x | FP4 | ✅ | ✅ | ✅ |
-| LLAMA 4 | FP8 | ✅ | - | ✅ |
-| LLAMA 4 | FP4 | ✅ | - | - |
-| DS-R1 | FP8 | ✅ | ✅ | ✅ |
-| DS-R1 | FP4 | ✅ | ✅ | ✅ |
-| DS-V3 | FP8 | ✅ | ✅ | ✅ |
-| DS-V3 | FP4 | ✅ | ✅ | ✅ |
-| QWen3 | FP8 | ✅ | ✅ | ✅ |
-| QWen3 | FP4 | ✅ | ✅ | - |
-| QWen3 MoE | FP8 | ✅ | ✅ | ✅ |
-| QWen3 MoE | FP4 | ✅ | - | - |
-| QWen3.5 MoE | FP4 | - | - | ✅ |
-| QWen2.5 | FP8 | ✅ | ✅ | ✅ |
-| QWen2.5 | FP4 | ✅ | ✅ | - |
-| QwQ-32B | FP8 | ✅ | ✅ | ✅ |
-| QwQ-32B | FP4 | ✅ | ✅ | - |
-| Mixtral 8x7B | FP8 | ✅ | ✅ | ✅ |
-| Mixtral 8x7B | FP4 | ✅ | - | - |
+The deployment support matrix — which model families and quantization formats are validated on
+TRT-LLM, vLLM, and SGLang, including vision-language models, speculative decoding drafters, and
+diffusion models — lives in the documentation so there is a single copy to keep current:
+
+**[Unified HF Checkpoint → Model Support Matrix](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html#model-support-matrix)**
+
+Every validated entry there is backed by [`tests/examples/hf_ptq/test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py),
+which loads the exported checkpoint in each framework and runs generation. That file is also the
+place to look for the exact checkpoint, tensor-parallel size, and minimum SM version behind each
+entry.
+
+> *Note: the matrix records what modelopt validates, not the full set of what will run. vLLM, SGLang,
+> and TRT-LLM load unified HF checkpoints generically, so unlisted models frequently deploy without
+> any modelopt change — check the serving framework's own model support list and try it.*
 
 ### (Legacy) TensorRT-LLM Checkpoints
 
