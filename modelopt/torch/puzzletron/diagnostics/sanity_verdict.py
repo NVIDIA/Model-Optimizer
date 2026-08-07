@@ -61,7 +61,12 @@ def complete_sanity_stage(
     verdict: SanityVerdict,
     message: str | None = None,
 ) -> StageResult:
-    """Complete a sanity stage without downgrading correctness failures."""
+    """Complete a sanity stage using separate correctness and warning policies.
+
+    Correctness failures always fail the stage. Other failed verdicts remain
+    quality warnings unless ``sanity.fail_on_warnings`` promotes them to a
+    failed stage; campaign qualification remains a caller-owned policy.
+    """
 
     merged = dict(outputs or {})
     correctness_failure = not verdict.passed and (

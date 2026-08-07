@@ -10,14 +10,14 @@ Puzzletron v2 turns pruning from a sequence of model-specific scripts into a
 distributed, validated, end-to-end campaign. The design is driven by three
 goals:
 
-1. **Scalability** — run large and long-context models with stage-specific
+1. **Scalability**, run large and long-context models with stage-specific
    tensor, context, pipeline, expert, data, and sequence parallelism; avoid
    repeatedly loading or materializing checkpoints; and distribute independent
    work through persistent or sharded workers.
-2. **Semantic correctness** — describe every model and pruning axis explicitly,
+2. **Semantic correctness**, describe every model and pruning axis explicitly,
    collect all compatible importance statistics together, and gate the campaign
    with sorting, ranking, slicing, bypass, and distillation checks.
-3. **End-to-end automation** — generate a campaign from a setup wizard, execute
+3. **End-to-end automation**, generate a campaign from a setup wizard, execute
    its dependency graph, search for architectures, run downstream processing,
    and continuously assemble a durable HTML report.
 
@@ -139,7 +139,7 @@ flowchart TB
   and depth decisions can operate at block or subblock granularity.
 - **Correctness and quality are separate.** Sort and slice equivalence are
   correctness gates. Ranking against reverse and unsorted/random controls is a
-  quality gate whose warning remains visible.
+  quality check whose warning remains visible.
 - **Artifacts are APIs.** Stages communicate through versioned, hashed,
   transactionally published artifacts rather than in-memory coupling. This
   enables resume, parallel execution, and report regeneration.
@@ -358,12 +358,32 @@ durable manual decision gate.
 |---|---|---|
 | Capability validation | Does the model support every requested axis, backend, and parallel mode? | Invalid campaign configuration fails before expensive work |
 | Sort sanity | Does full-width sorting or reverse sorting preserve teacher behavior? | Difference beyond dtype-aware tolerance is a correctness failure |
-| Width sanity | Does the proposed ranking outperform reverse and unsorted/random controls at reduced width? | Poor ranking is surfaced as a quality warning |
+| Width sanity | Does the proposed ranking outperform reverse and unsorted/random controls at reduced width? | Poor ranking is a quality finding; warning policy determines whether it also fails the stage |
 | Slicing sanity | Does dynamic slicing agree with physical materialization? | Disagreement is a correctness failure |
 | Bypass sanity | Can a fixed small candidate and a sampled nested search overfit one batch? | Validates boundaries, gradients, and sampling mechanics |
 | Depth evaluation | Are removal scores recomputed after every selected removal? | Produces a conditional trajectory rather than independent linear scores |
 | Global KD sanity | Can the student overfit with the configured CE/KLD/MTP loss path? | Validates forward/backward and loss semantics before a long run |
 | Artifact completion | Are all expected identities, shards, candidates, and outputs present? | Partial work remains resumable progress, not a completed stage |
+
+These gates answer different questions. Width ranking compares the quality of
+different reduced candidates at the same target geometry. Sort and slicing
+equivalence compare routes that are supposed to represent the same model
+operation. A poor ranking can show that the importance heuristic is not useful
+for a case even when every candidate is structurally valid. An equivalence
+failure shows that a permutation or runtime slice does not reproduce its
+reference implementation, so later measurements cannot be trusted as evidence
+for the physical checkpoint.
+
+The implementation has two stage-completion policies. Correctness failures
+always fail their stage. Ranking-quality findings remain warnings by default
+and fail the stage when `sanity.fail_on_warnings` is enabled. Scientific,
+customer, or release qualification is a third layer and is not currently a
+separate Puzzletron verdict. A qualification plan must declare its required
+controls, metrics, sample count, tolerances, axis and target coverage, and
+aggregation rule. It may reject a campaign for a ranking-quality warning
+without reclassifying that warning as a correctness error. The
+[Puzzletron README](../README.md#understand-sorting-width-ranking-and-slicing)
+provides definitions and a worked example for new users.
 
 ## Current implementation versus design direction
 

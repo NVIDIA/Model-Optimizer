@@ -318,8 +318,10 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
     result = generate_campaign_progress_report(tmp_path)
     document = Path(result["html"]).read_text(encoding="utf-8")
 
-    assert "Width ranking: warning (advisory)" in document
+    assert "Width ranking: quality warning" in document
     assert "Dynamic/physical equivalence: failed (blocking correctness)" in document
+    assert "it does not mean the dynamic and physical implementations disagree" in document
+    assert "Campaign qualification may still require the ranking warning to pass" in document
     assert 'data-stage="slicing_sanity" data-status="failed"' in document
     assert "class='warning-cell'" in document
     assert "class='warning-value'" in document

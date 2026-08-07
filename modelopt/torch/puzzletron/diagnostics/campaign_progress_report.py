@@ -488,7 +488,7 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
         gates.append(
             "<p class='gate {}'>Width ranking: {}</p>".format(
                 "passed" if width_passed else "warning",
-                "passed" if width_passed else "warning (advisory)",
+                "passed" if width_passed else "quality warning",
             )
         )
     if summary.get("slicing_present"):
@@ -581,7 +581,11 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
     return gate_summary + (
         "<p class='note'>Every sliced model is compared with the full, unsliced original teacher. "
         "The original baseline is the teacher channel order sliced to the same target. "
-        "Physical is a materialized slice of the sorted checkpoint and is the slicing ground truth.</p>"
+        "Physical is a materialized slice of the sorted checkpoint and is the slicing ground truth. "
+        "A width-ranking quality warning means the activation-sorted candidate was worse than "
+        "an original or reverse control beyond tolerance; it does not mean the dynamic and "
+        "physical implementations disagree. Campaign qualification may still require the "
+        "ranking warning to pass.</p>"
         "<label class='selector-label' for='activation-axis-select'>Swept axis</label>"
         f'<select id="activation-axis-select">{axis_options}</select>'
         "<label class='selector-label' for='activation-metric-select'>Metric</label>"
