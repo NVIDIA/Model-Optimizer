@@ -27,33 +27,57 @@ MODEL_PATH = (
 
 def test_qwen3p5_0p8b_model_identity_and_geometry_are_pinned() -> None:
     model = yaml.safe_load(MODEL_PATH.read_text())
-    info = model["model_info"]
 
     assert model["input_hf_model_path"] == "Qwen/Qwen3.5-0.8B"
-    assert info["hf_repo"] == model["input_hf_model_path"]
-    assert info["hf_revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
-    assert info["architectures"] == ["Qwen3_5ForConditionalGeneration"]
-    assert info["num_hidden_layers"] == 24
-    assert info["layer_counts"] == {"linear_attention": 18, "full_attention": 6}
-    assert info["hidden_size"] == 1024
-    assert info["intermediate_size"] == 3584
-    assert info["num_attention_heads"] == 8
-    assert info["num_key_value_heads"] == 2
+    assert model["model_info"] == {
+        "hf_repo": model["input_hf_model_path"],
+        "hf_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+        "model_type": "qwen3_5",
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "num_hidden_layers": 24,
+        "hidden_size": 1024,
+        "intermediate_size": 3584,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "vocab_size": 248320,
+        "tie_word_embeddings": True,
+        "max_position_embeddings": 262144,
+        "mtp_num_hidden_layers": 1,
+        "layer_counts": {"linear_attention": 18, "full_attention": 6},
+        "mamba": {
+            "linear_key_head_dim": 128,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 16,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4,
+        },
+    }
 
 
 def test_qwen3p5_0p8b_axis_domains_keep_teacher_and_reduced_values_distinct() -> None:
     model = yaml.safe_load(MODEL_PATH.read_text())
     axes = model["search_space"]["axes"]
 
-    assert axes["hidden_width"] == {
-        "enabled": True,
-        "teacher_value": 1024,
-        "values": [768],
+    expected_enabled_domains = {
+        "hidden_width": (1024, [768]),
+        "kv_groups": (2, [1]),
+        "q_heads_per_group": (4, [2]),
+        "ffn_intermediate": (3584, [3072, 2560, 2048, 1792, 1536]),
+        "gdn_key_groups": (16, [12, 8]),
+        "gdn_key_head_dim": (128, [96]),
+        "gdn_value_head_dim": (128, [96]),
     }
-    assert axes["kv_groups"]["teacher_value"] == 2
-    assert axes["kv_groups"]["values"] == [1]
-    assert axes["q_heads_per_group"]["teacher_value"] == 4
-    assert axes["q_heads_per_group"]["values"] == [2]
-    assert axes["gdn_key_groups"]["teacher_value"] == 16
-    assert axes["gdn_key_groups"]["values"] == [12, 8]
-    assert axes["gdn_value_heads_per_group"]["enabled"] is False
+    enabled_domains = {
+        axis_id: (axis["teacher_value"], axis["values"])
+        for axis_id, axis in axes.items()
+        if axis["enabled"]
+    }
+
+    assert enabled_domains == expected_enabled_domains
+    assert axes["gdn_value_heads_per_group"] == {
+        "enabled": False,
+        "teacher_value": 1,
+        "values": [],
+    }
+    assert set(axes) == {*expected_enabled_domains, "gdn_value_heads_per_group"}
