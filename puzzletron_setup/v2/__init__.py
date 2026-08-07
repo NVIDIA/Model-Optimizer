@@ -17,9 +17,7 @@
 
 from .defaults import *
 from .defaults import __all__ as _defaults_all
-from .resolved import *
-from .resolved import __all__ as _resolved_all
 from .state import *
 from .state import __all__ as _state_all
 
-__all__ = [*_defaults_all, *_resolved_all, *_state_all]  # noqa: PLE0604
+__all__ = [*_defaults_all, *_state_all]  # noqa: PLE0604

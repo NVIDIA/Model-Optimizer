@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -33,7 +31,6 @@ __all__ = [
     "resolve_campaign_config",
 ]
 
-_RESOLVED_SCHEMA_VERSION = 1
 _PARALLEL_FIELDS = (
     "tp",
     "cp",
@@ -69,41 +66,6 @@ def _plain(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         return sorted((_plain(item) for item in value), key=repr)
     return deepcopy(value)
-
-
-def _canonical(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _canonical(item)
-            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
-        }
-    if isinstance(value, (list, tuple)):
-        return [_canonical(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        items = [_canonical(item) for item in value]
-        return sorted(
-            items,
-            key=lambda item: json.dumps(
-                item,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ),
-        )
-    if isinstance(value, Path):
-        return str(value)
-    return value
-
-
-def _digest(namespace: str, value: Any) -> str:
-    encoded = json.dumps(
-        _canonical(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode()
-    return hashlib.sha256(f"puzzletron:{namespace}:v1\0".encode() + encoded).hexdigest()
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -217,14 +179,6 @@ class ResolvedField:
         object.__setattr__(self, "requested", _freeze(self.requested))
         object.__setattr__(self, "effective", _freeze(self.effective))
 
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "value": _plain(self.value),
-            "source": self.source,
-            "requested": _plain(self.requested),
-            "effective": _plain(self.effective),
-        }
-
 
 @dataclass(frozen=True)
 class ResolvedAxisConfig:
@@ -243,7 +197,7 @@ class ResolvedAxisConfig:
         object.__setattr__(self, "values", tuple(int(value) for value in self.values))
         object.__setattr__(self, "alignment", int(self.alignment))
 
-    def _identity_payload(self) -> dict[str, Any]:
+    def _legacy_axis(self) -> dict[str, Any]:
         return {
             "axis_id": self.axis_id,
             "label": self.label,
@@ -304,39 +258,6 @@ class ResolvedModelConfig:
         object.__setattr__(self, "model_extra", _freeze_mapping(self.model_extra))
         object.__setattr__(self, "inventory_extra", _freeze_mapping(self.inventory_extra))
 
-    @property
-    def facts_digest(self) -> str:
-        """Return stable identity for the immutable revision and inspected facts."""
-        return _digest("model-facts", self._semantic_payload())
-
-    def _semantic_payload(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "resolved_revision": self.resolved_revision or self.requested_revision,
-            "is_local": self.is_local,
-            "config": _plain(self.config),
-            "family": self.family,
-            "descriptor": self.descriptor,
-            "family_config": self.family_config,
-            "model_type": self.model_type,
-            "architectures": list(self.architectures),
-            "multimodal": self.multimodal,
-            "moe": self.moe,
-            "num_layers": self.num_layers,
-            "num_sublayers": self.num_sublayers,
-            "layer_counts": _plain(self.layer_counts),
-            "facts": _plain(self.facts),
-            "axes": [axis._identity_payload() for axis in self.axes],
-            "model_extra": _plain(self.model_extra),
-            "inventory_extra": _plain(self.inventory_extra),
-        }
-
-    def _provenance_payload(self) -> dict[str, Any]:
-        return {
-            **self._semantic_payload(),
-            "requested_revision": self.requested_revision,
-        }
-
     def _legacy_model(self) -> dict[str, Any]:
         return {
             "source": self.source,
@@ -360,7 +281,7 @@ class ResolvedModelConfig:
             "num_sublayers": self.num_sublayers,
             "layer_counts": _plain(self.layer_counts),
             "facts": _plain(self.facts),
-            "axes": [axis._identity_payload() for axis in self.axes],
+            "axes": [axis._legacy_axis() for axis in self.axes],
             **_plain(self.inventory_extra),
         }
 
@@ -392,20 +313,6 @@ class ResolvedDataConfig:
         object.__setattr__(self, "subset_weights", _freeze_mapping(self.subset_weights))
         object.__setattr__(self, "acquisition", _freeze_mapping(self.acquisition))
 
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "selected_source": self.selected_source,
-            "adapter": self.adapter,
-            "modality": self.modality,
-            "layout": self.layout,
-            "sequence_length": self.sequence_length,
-            "subsets": list(self.subsets),
-            "subset_revision": self.subset_revision,
-            "subset_weights": _plain(self.subset_weights),
-            "acquisition": _plain(self.acquisition),
-        }
-
 
 @dataclass(frozen=True)
 class ResolvedInfrastructureConfig:
@@ -421,17 +328,6 @@ class ResolvedInfrastructureConfig:
         object.__setattr__(self, "slurm", _freeze_mapping(self.slurm))
         object.__setattr__(self, "execution_contract", _freeze_mapping(self.execution_contract))
         object.__setattr__(self, "gpus_per_node", int(self.gpus_per_node))
-
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "runner_kind": self.runner_kind,
-            "slurm": _plain(self.slurm),
-            "execution_contract": _plain(self.execution_contract),
-            "gpus_per_node": self.gpus_per_node,
-        }
-
-    def _semantic_payload(self) -> dict[str, Any]:
-        return self._identity_payload()
 
 
 @dataclass(frozen=True)
@@ -477,16 +373,6 @@ class ResolvedParallelProfile:
         }
         return {key: value for key, value in values.items() if key in self.present_fields}
 
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "source_nonempty": self.source_nonempty,
-            **self._parallel(),
-            "consumers": list(self.consumers),
-            "present_fields": sorted(self.present_fields),
-            "extra": _plain(self.extra),
-        }
-
 
 @dataclass(frozen=True)
 class ResolvedStageResource:
@@ -517,19 +403,6 @@ class ResolvedStageResource:
             object.__setattr__(self, "parallel", _freeze_mapping(self.parallel))
         object.__setattr__(self, "extra", _freeze_mapping(self.extra))
 
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "stage_id": self.stage_id,
-            "strategy": self.strategy,
-            "instances": self.instances,
-            "resource": self.resource,
-            "gpus_per_node": self.gpus_per_node,
-            "partition": self.partition,
-            "profile_name": self.profile_name,
-            "parallel": _plain(self.parallel) if self.parallel is not None else None,
-            "extra": _plain(self.extra),
-        }
-
 
 @dataclass(frozen=True)
 class CompatibilityOverrides:
@@ -541,12 +414,6 @@ class CompatibilityOverrides:
     def __post_init__(self) -> None:
         object.__setattr__(self, "experiment", _freeze_mapping(self.experiment))
         object.__setattr__(self, "runner", _freeze_mapping(self.runner))
-
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "experiment": _plain(self.experiment),
-            "runner": _plain(self.runner),
-        }
 
 
 @dataclass(frozen=True)
@@ -569,20 +436,11 @@ class CompatibilityProjection:
             if value is not None:
                 object.__setattr__(self, name, str(value))
 
-    def _identity_payload(self) -> dict[str, Any]:
-        return {
-            "workload_id": self.workload_id,
-            "first_measurement_id": self.first_measurement_id,
-            "runtime_measurement_id": self.runtime_measurement_id,
-            "first_parallel_profile_name": self.first_parallel_profile_name,
-        }
-
 
 @dataclass(frozen=True)
 class ResolvedCampaignConfig:
     """Immutable semantic authority consumed by setup-v2 bundle generation."""
 
-    schema_version: int
     model: ResolvedModelConfig
     data: ResolvedDataConfig
     infrastructure: ResolvedInfrastructureConfig
@@ -602,7 +460,6 @@ class ResolvedCampaignConfig:
     compatibility_projection: CompatibilityProjection
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_version", int(self.schema_version))
         for name in (
             "pruning",
             "serving_workloads",
@@ -630,50 +487,6 @@ class ResolvedCampaignConfig:
         )
         object.__setattr__(self, "result_root", str(self.result_root))
         object.__setattr__(self, "provenance", MappingProxyType(dict(self.provenance)))
-
-    @property
-    def semantic_digest(self) -> str:
-        """Return deterministic identity for resolved semantic values."""
-        return _digest("semantic", self._semantic_payload())
-
-    @property
-    def provenance_digest(self) -> str:
-        """Return deterministic identity for authoring and model-fact evidence."""
-        return _digest(
-            "provenance",
-            {
-                "fields": {
-                    path: record._identity_payload() for path, record in self.provenance.items()
-                },
-                "model_facts": self.model._provenance_payload(),
-            },
-        )
-
-    def _semantic_payload(self) -> dict[str, Any]:
-        return {
-            "schema_version": self.schema_version,
-            "model": self.model._semantic_payload(),
-            "data": self.data._identity_payload(),
-            "infrastructure": self.infrastructure._semantic_payload(),
-            "pruning": _plain(self.pruning),
-            "serving_workloads": _plain(self.serving_workloads),
-            "vllm_measurements": _plain(self.vllm_measurements),
-            "mip": _plain(self.mip),
-            "mip_configured": self.mip_configured,
-            "post_mip_flows": _plain(self.post_mip_flows),
-            "post_mip_flows_configured": self.post_mip_flows_configured,
-            "parallel_profiles": {
-                name: profile._identity_payload()
-                for name, profile in self.parallel_profiles.items()
-            },
-            "stage_resources": {
-                name: resource._identity_payload()
-                for name, resource in self.stage_resources.items()
-            },
-            "stage_batches": _plain(self.stage_batches),
-            "compatibility": self.compatibility._identity_payload(),
-            "compatibility_projection": self.compatibility_projection._identity_payload(),
-        }
 
 
 def _axis(raw: Mapping[str, Any]) -> ResolvedAxisConfig:
@@ -939,7 +752,6 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     )
 
     return ResolvedCampaignConfig(
-        schema_version=_RESOLVED_SCHEMA_VERSION,
         model=model,
         data=data,
         infrastructure=infrastructure,

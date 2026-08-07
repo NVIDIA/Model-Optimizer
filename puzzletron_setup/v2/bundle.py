@@ -82,6 +82,7 @@ def _plain(value: Any) -> Any:
 
 
 def _legacy_state_from_resolved(config: ResolvedCampaignConfig) -> dict[str, Any]:
+    """Temporary compatibility adapter from the resolved snapshot to legacy renderers."""
     serving_workloads = _plain(config.serving_workloads)
     measurements = _plain(config.vllm_measurements)
     projection = config.compatibility_projection
@@ -412,7 +413,6 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
         raise SetupError(f"Setup v2 validation failed:\n{details}")
 
     config = resolve_campaign_config(state)
-    state.set_collection("legacy_state", _legacy_state_from_resolved(config))
     campaign_dir = Path(campaign_dir).expanduser().resolve()
     campaign_dir.mkdir(parents=True, exist_ok=True)
     temp_root = Path(tempfile.mkdtemp(prefix=".puzzletron-v2-", dir=str(campaign_dir.parent)))
