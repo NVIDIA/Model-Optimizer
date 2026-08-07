@@ -54,7 +54,9 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 - Loads a pretrained timm torch model (default: ViT-Base).
 - Quantizes the torch model to FP8, MXFP8, INT8, NVFP4, or INT4_AWQ using ModelOpt.
 - For models with Conv2d layers (e.g., SwinTransformer), automatically overrides Conv2d quantization to FP8 (for MXFP8/NVFP4 modes) or INT8 (for INT4_AWQ mode) for TensorRT compatibility.
-- Uses ResNet FP8 and INT8 recipes to quantize shortcut inputs immediately before residual adds.
+- Supports FP8 and INT8 recipes for convolutional architectures such as ResNet. Other formats are
+  not supported for convolutional models because of limited TensorRT kernel support.
+- ResNet FP8 and INT8 recipes quantize shortcut inputs immediately before residual adds.
 - Exports the quantized model to ONNX.
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.
@@ -66,24 +68,30 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 ```bash
 python torch_quant_to_onnx.py \
     --timm_model_name=<timm model name> \
-    --quantize_mode=<fp8|mxfp8|int8|nvfp4|int4_awq|auto> \
+    --qformat=<fp8|mxfp8|int8|nvfp4|int4_awq|auto> \
     --onnx_save_path=<path to save the exported ONNX model>
 ```
 
-Quantization configs are loaded from the YAML preset recipes under
-`modelopt_recipes/configs/ptq/presets/model/`, selected by `--quantize_mode`. Pass
-`--recipe=<preset basename or path to a QuantizeConfig YAML>` to use a different
-recipe (e.g. `--recipe=nvfp4_awq_lite` or `--recipe=/path/to/my_quant_cfg.yaml`).
+Without `--recipe`, `--qformat` selects a quantization preset. Pass a built-in recipe name or YAML
+path to `--recipe` to use a PTQ or AutoQuantize recipe instead. The recipe is authoritative when
+provided, so `--qformat` is ignored.
+
+Convolutional architectures such as ResNet support only FP8 and INT8 quantization. MXFP8, NVFP4,
+INT4_AWQ, and AutoQuantize are not supported for these models because TensorRT does not provide
+the required convolution kernels.
 
 ### Conv2d Quantization Override
 
 TensorRT only supports FP8 and INT8 for convolution operations. When quantizing models with Conv2d layers (like SwinTransformer), the script automatically applies the following overrides:
 
-| Quantize Mode | Conv2d Override | Reason |
+| Qformat | Conv2d Override | Reason |
 | :---: | :---: | :--- |
 | FP8, INT8 | None (already compatible) | Native TRT support |
 | MXFP8, NVFP4 | Conv2d -> FP8 | TRT Conv limitation |
 | INT4_AWQ | Conv2d -> INT8 | TRT Conv limitation |
+
+These overrides support transformer architectures that contain individual Conv2d layers; they do
+not make MXFP8, NVFP4, INT4_AWQ, or AutoQuantize supported for convolutional architectures.
 
 ### Evaluation
 
@@ -333,7 +341,7 @@ For full documentation, see the [TensorRT-Edge-LLM Developer Guide](https://nvid
 
 ## Mixed Precision Quantization (Auto Mode)
 
-The `auto` mode enables mixed precision quantization by searching for the optimal quantization format per layer. This approach balances model accuracy and compression by assigning different precision formats (e.g., NVFP4, FP8) to different layers based on their sensitivity.
+AutoQuantize recipes enable mixed precision quantization by searching for the optimal quantization format per layer. This approach balances model accuracy and compression by assigning different precision formats (e.g., NVFP4, FP8) to different layers based on their sensitivity. The `--qformat=auto` CLI mode remains available for configuring the search with individual flags.
 
 ### How it works
 
@@ -354,7 +362,18 @@ The `auto` mode enables mixed precision quantization by searching for the optima
 ```bash
 python torch_quant_to_onnx.py \
     --timm_model_name=vit_base_patch16_224 \
-    --quantize_mode=auto \
+    --recipe=general/auto_quantize/nvfp4_fp8_at_5p4bits \
+    --calibration_data_size=512 \
+    --evaluate \
+    --onnx_save_path=vit_base_patch16_224.auto_quant.onnx
+```
+
+The equivalent flag-based form is:
+
+```bash
+python torch_quant_to_onnx.py \
+    --timm_model_name=vit_base_patch16_224 \
+    --qformat=auto \
     --auto_quantization_formats nvfp4_awq_lite fp8 \
     --effective_bits=4.8 \
     --num_score_steps=128 \
@@ -370,7 +389,7 @@ python torch_quant_to_onnx.py \
 | [vit_base_patch16_224](https://huggingface.co/timm/vit_base_patch16_224.augreg_in21k_ft_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [swin_tiny_patch4_window7_224](https://huggingface.co/timm/swin_tiny_patch4_window7_224.ms_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [swinv2_tiny_window8_256](https://huggingface.co/timm/swinv2_tiny_window8_256.ms_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [resnet50](https://huggingface.co/timm/resnet50.a1_in1k) | ✅ | ✅ | ✅ | ✅ | | |
+| [resnet50](https://huggingface.co/timm/resnet50.a1_in1k) | ✅ | ✅ | | | | |
 
 ## Resources
 

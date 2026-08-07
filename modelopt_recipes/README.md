@@ -43,12 +43,14 @@ huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 |-----------|-----------------|
 | `general/` | **Model-agnostic** recipes — a good starting point for any model. PTQ combos, speculative-decoding training, and distillation. |
 | `huggingface/<model_type>/` | **Model-specific** recipes keyed by a HF `model_type`, optionally nested by released checkpoint. Use these first if your model has an entry. |
+| `timm/<architecture>/` | **Architecture-specific** recipes for timm models. |
 | `models/<model_name>/` | **Instance-specific** recipes that mirror a particular published checkpoint's quantization config. |
 | `configs/` | Shared building blocks (`numerics/`, `ptq/units/`, `ptq/presets/`) that recipes compose from via `$import`. Not run directly. |
 
 **Choosing where to look:** check `huggingface/<model_type>/` (then any nested
-`<checkpoint>/`) for your model first; if there's no entry, fall back to
-`general/`. The presence of a model folder signals a recommended, tuned recipe.
+`<checkpoint>/`) for a Hugging Face model or `timm/<architecture>/` for a timm model. If there's
+no entry, fall back to `general/`. The presence of a model folder signals a recommended, tuned
+recipe.
 
 ---
 
@@ -90,6 +92,7 @@ a per-component mixed-precision scheme tuned to match a specific release. Browse
 - **Tuned for a HF architecture** → `huggingface/<model_type>/<task>/`, with a
   `README.md` documenting the delta from the generic preset. Verify the exact
   `model_type` against the checkpoint's `config.json` before placing it.
+- **Tuned for a timm architecture** → `timm/<architecture>/<task>/`.
 - **Mirrors a specific released checkpoint** → `models/<model_name>/`.
 - Share reused bodies via a `# modelopt-schema:`-tagged snippet and `$import`
   it; keep recipe wrappers thin.
