@@ -26,6 +26,7 @@ tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096 \
         --tasks <comma separated tasks> --batch_size <max batch size>
 """
 
+import sys
 from importlib.metadata import version
 
 from lm_eval.__main__ import cli_evaluate
@@ -36,6 +37,32 @@ if Version(version("lm_eval")) < Version("0.4.12"):
     raise ImportError(f"lm_eval_trtllm.py requires lm-eval >= 0.4.12; found {version('lm_eval')}.")
 
 from lm_eval.models.trtllm_causallms import TRTLLM
+
+# TensorRT-LLM only started passing the prompt token ids into `compute_logprobs` in
+# 1.3.0rc11 (`executor/base_worker.py`), which is what makes the requested token always
+# present in each `prompt_logprobs` entry. On 1.2.0 and earlier, `prompt_logprobs=1` keeps
+# only the top-1 token, so a non-greedy continuation token is simply absent and no correct
+# continuation logprob can be recovered -- by this file or by lm-eval's own version.
+_MIN_TRTLLM_VERSION = "1.3.0rc11"
+_trtllm_version_checked = False
+
+
+def _check_trtllm_version() -> None:
+    """Raise if TensorRT-LLM predates the `prompt_logprobs` layout scored below."""
+    try:
+        import tensorrt_llm
+    except ImportError:
+        # Nothing to check, and unreachable in a real run: the backend refuses to build a
+        # model without tensorrt_llm long before any logprob is scored.
+        return
+
+    if Version(tensorrt_llm.__version__) < Version(_MIN_TRTLLM_VERSION):
+        raise RuntimeError(
+            f"Loglikelihood tasks need TensorRT-LLM >= {_MIN_TRTLLM_VERSION}; found "
+            f"{tensorrt_llm.__version__}. Earlier releases return only the top-1 token per "
+            "prompt position, so the continuation token's logprob is unavailable. Use a "
+            "newer TensorRT-LLM container, or restrict the run to generative tasks."
+        )
 
 
 def _parse_logprobs(tokens: list[int], outputs, ctxlen: int) -> tuple[float, bool]:
@@ -50,6 +77,13 @@ def _parse_logprobs(tokens: list[int], outputs, ctxlen: int) -> tuple[float, boo
     ``prompt_logprobs[i][tokens[i]]`` and applies its own shift on top, which raises
     ``KeyError`` on the first request of every loglikelihood task (hellaswag, mmlu, arc).
     """
+    global _trtllm_version_checked
+    if not _trtllm_version_checked:
+        # Checked here rather than at startup so generative-only runs, which never reach
+        # this path, still work on older TensorRT-LLM releases.
+        _check_trtllm_version()
+        _trtllm_version_checked = True
+
     prompt_logprobs = outputs.outputs[0].prompt_logprobs
     # Scoring tokens[ctxlen:] reads entries ctxlen-1 .. len(tokens)-2; a shorter list means
     # the engine saw a different prompt than we asked about, which would shift every index.
@@ -92,4 +126,11 @@ TRTLLM._parse_logprobs = staticmethod(_parse_logprobs)
 
 
 if __name__ == "__main__":
+    # Warn up front so an unusable container is obvious before the model loads, but do not
+    # abort: generative tasks are unaffected by the old prompt_logprobs layout.
+    try:
+        _check_trtllm_version()
+    except RuntimeError as e:
+        print(f"WARNING: {e}", file=sys.stderr)
+
     cli_evaluate()

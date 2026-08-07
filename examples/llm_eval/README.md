@@ -119,6 +119,12 @@ python lm_eval_trtllm.py --model trtllm \
     --batch_size <max batch size>
 ```
 
+> **_NOTE:_** Loglikelihood tasks (mmlu, hellaswag, arc, ...) need **TensorRT-LLM >=
+> 1.3.0rc11**, which is when the engine started returning the requested token in every
+> `prompt_logprobs` entry. Earlier releases return only the top-1 token per position, so a
+> continuation token's logprob cannot be recovered and the run aborts with a clear error.
+> Generative tasks (gsm8k, ifeval) are unaffected.
+
 > **_NOTE:_** Set `max_input_len` and `max_output_len` explicitly. They default to 2048 and
 > 512, and prompts longer than `max_input_len` are silently truncated — 5-shot MMLU or
 > gsm8k prompts exceed 2048 tokens. `max_seq_len` of the engine is their sum.

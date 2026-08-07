@@ -21,6 +21,7 @@ object, which these tests stub out.
 """
 
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,7 +125,9 @@ def test_trust_remote_code_reaches_the_backend(monkeypatch):
     import datasets
     from lm_eval.config.evaluate_config import EvaluatorConfig
 
-    monkeypatch.setattr(datasets.config, "HF_DATASETS_TRUST_REMOTE_CODE", False)
+    # raising=False: datasets 4.x dropped this attribute, and lm-eval creates it on
+    # assignment. monkeypatch still removes it again on teardown.
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_TRUST_REMOTE_CODE", False, raising=False)
 
     cfg = EvaluatorConfig(
         model="trtllm", model_args={"model": "/ckpt", "tokenizer": "/tok"}, trust_remote_code=True
@@ -139,7 +142,9 @@ def test_trust_remote_code_not_injected_when_unset(monkeypatch):
     import datasets
     from lm_eval.config.evaluate_config import EvaluatorConfig
 
-    monkeypatch.setattr(datasets.config, "HF_DATASETS_TRUST_REMOTE_CODE", False)
+    # raising=False: datasets 4.x dropped this attribute, and lm-eval creates it on
+    # assignment. monkeypatch still removes it again on teardown.
+    monkeypatch.setattr(datasets.config, "HF_DATASETS_TRUST_REMOTE_CODE", False, raising=False)
 
     cfg = EvaluatorConfig(model="trtllm", model_args={"model": "/ckpt"}, trust_remote_code=False)
     cfg._set_trust_remote_code()
@@ -154,6 +159,36 @@ def test_trtllm_backend_accepts_trust_remote_code():
     from lm_eval.models.trtllm_causallms import TRTLLM
 
     assert "trust_remote_code" in inspect.signature(TRTLLM.__init__).parameters
+
+
+def _fake_trtllm(monkeypatch, version):
+    module = types.ModuleType("tensorrt_llm")
+    module.__version__ = version
+    monkeypatch.setitem(sys.modules, "tensorrt_llm", module)
+
+
+@pytest.mark.parametrize("version", ["1.1.0rc2", "1.2.0", "1.3.0rc10"])
+def test_rejects_trtllm_without_the_prompt_token_ids_fix(monkeypatch, version):
+    """<1.3.0rc11 returns only the top-1 token per position, so continuations are absent."""
+    _fake_trtllm(monkeypatch, version)
+    with pytest.raises(RuntimeError, match=r"1\.3\.0rc11"):
+        lm_eval_trtllm._check_trtllm_version()
+
+
+@pytest.mark.parametrize("version", ["1.3.0rc11", "1.3.0rc23", "1.3.0", "1.4.0"])
+def test_accepts_trtllm_with_the_prompt_token_ids_fix(monkeypatch, version):
+    _fake_trtllm(monkeypatch, version)
+    lm_eval_trtllm._check_trtllm_version()
+
+
+def test_version_is_checked_before_scoring(monkeypatch):
+    """The guard has to fire from _parse_logprobs, not only from __main__."""
+    _fake_trtllm(monkeypatch, "1.2.0")
+    monkeypatch.setattr(lm_eval_trtllm, "_trtllm_version_checked", False)
+    with pytest.raises(RuntimeError, match=r"1\.3\.0rc11"):
+        lm_eval_trtllm._parse_logprobs(
+            tokens=TOKENS, outputs=_Outputs(_prompt_logprobs()), ctxlen=CTXLEN
+        )
 
 
 def test_upstream_is_still_misaligned():
