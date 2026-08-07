@@ -19,8 +19,8 @@ import re
 import subprocess
 import sys
 import warnings
+from copy import deepcopy
 from pathlib import Path
-from typing import Any
 
 # Add onnx_ptq to path for shared modules
 sys.path.insert(0, str(Path(__file__).parent.parent / "onnx_ptq"))
@@ -34,9 +34,8 @@ from download_example_onnx import export_to_onnx
 from evaluation import evaluate
 
 import modelopt.torch.quantization as mtq
-from modelopt.recipe import load_config, load_recipe
-from modelopt.recipe.presets import MODEL_QUANT_PRESET_DIR
-from modelopt.torch.quantization.config import QuantizeConfig
+from modelopt.recipe import ModelOptAutoQuantizeRecipe, ModelOptPTQRecipe, load_recipe
+from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.plugins.custom import CUSTOM_POST_CONVERSION_PLUGINS
 
@@ -58,24 +57,6 @@ The script will:
 
 
 mp.set_start_method("spawn", force=True)  # Needed for data loader with multiple workers
-
-
-def load_quant_config(recipe: str) -> dict:
-    """Load a quantization config from a recipe YAML.
-
-    ``recipe`` is either a preset basename under
-    ``modelopt_recipes/configs/ptq/presets/model/`` (e.g. ``nvfp4``) or a path to a
-    ``QuantizeConfig`` YAML file (filesystem or built-in recipe library).
-    """
-    if "/" not in recipe and not recipe.endswith((".yml", ".yaml")):
-        recipe = f"{MODEL_QUANT_PRESET_DIR}/{recipe}"
-    return load_config(recipe, schema_type=QuantizeConfig).model_dump()
-
-
-_RESNET_RECIPES = {
-    "fp8": "timm/resnet/ptq/fp8",
-    "int8": "timm/resnet/ptq/int8",
-}
 
 
 _FP8_CONV_OVERRIDE: list = [
@@ -130,27 +111,28 @@ _NEEDS_FP8_CONV_OVERRIDE: set[str] = {
 _NEEDS_INT8_CONV_OVERRIDE: set[str] = {"int4_awq"}
 
 
-def get_quant_config(quantize_mode, recipe=None):
+def get_quant_config(qformat):
     """Get quantization config, overriding Conv2d for TRT compatibility.
 
-    The config is loaded from ``recipe`` when given, else from the preset YAML
-    matching ``quantize_mode``. TensorRT only supports FP8 and INT8 for Conv layers.
+    The config is loaded from the preset YAML matching ``qformat``. TensorRT only supports FP8
+    and INT8 for Conv layers.
     - For FP8: add MHA-aware LayerNorm output quantizer so TRT fuses shared Q/DQ into
       downstream attention matmuls. Softmax-output Q/DQ is inserted by the FP8 ONNX
       exporter's post-processing (fixed 1/448 scale, no calibration needed).
     - For MXFP8, NVFP4: override Conv2d to FP8
     - For INT4_AWQ: override Conv2d to INT8
     """
-    config: dict = load_quant_config(recipe or quantize_mode)
-    if quantize_mode == "fp8":
+    config = deepcopy(QUANT_CFG_CHOICES[qformat])
+    if qformat == "fp8":
         config["quant_cfg"].extend(_FP8_MHA_OVERRIDE)
-    elif quantize_mode in ("mxfp8", "nvfp4"):
+    elif qformat in ("mxfp8", "nvfp4"):
         warnings.warn(
             f"TensorRT only supports FP8/INT8 for Conv layers. "
-            f"Overriding Conv2d quantization to FP8 for '{quantize_mode}' mode."
+            f"Overriding Conv2d quantization to FP8 for '{qformat}' format."
         )
         config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
-    elif quantize_mode == "int4_awq":
+        config["algorithm"] = "max"
+    elif qformat == "int4_awq":
         warnings.warn(
             "TensorRT only supports FP8/INT8 for Conv layers. "
             "Overriding Conv2d quantization to INT8 for 'int4_awq' mode."
@@ -159,25 +141,55 @@ def get_quant_config(quantize_mode, recipe=None):
     return config
 
 
-def _get_resnet_recipe(model, quantize_mode):
-    if not isinstance(model, timm.models.resnet.ResNet):
-        return None
-    recipe_path = _RESNET_RECIPES.get(quantize_mode)
-    return load_recipe(recipe_path) if recipe_path is not None else None
+def _prepare_auto_quantize_format(fmt):
+    config = deepcopy(QUANT_CFG_CHOICES[fmt]) if isinstance(fmt, str) else fmt.model_dump()
+    block_num_bits = {
+        entry["cfg"]["num_bits"]
+        for entry in config["quant_cfg"]
+        if isinstance(entry.get("cfg"), dict) and entry["cfg"].get("block_sizes")
+    }
+    if (isinstance(fmt, str) and fmt in _NEEDS_FP8_CONV_OVERRIDE) or block_num_bits & {
+        (4, 3),
+        (2, 1),
+    }:
+        config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
+    elif (isinstance(fmt, str) and fmt in _NEEDS_INT8_CONV_OVERRIDE) or 4 in block_num_bits:
+        config["quant_cfg"].extend(_INT8_CONV_OVERRIDE)
+    return config
 
 
 def _add_resnet_residual_quantizers(model):
+    """Add disabled quantizers immediately before each ResNet residual addition.
+
+    Appending to ``downsample`` places the quantizer on the shortcut immediately before the
+    residual addition. Identity shortcuts use an empty ``Sequential`` so the placement is the
+    same for every block. Quantizers start disabled and are enabled only by an explicit recipe.
+    """
     block_types = (timm.models.resnet.BasicBlock, timm.models.resnet.Bottleneck)
     for block in (module for module in model.modules() if isinstance(module, block_types)):
         if block.downsample is None:
             block.downsample = torch.nn.Sequential()
         elif not isinstance(block.downsample, torch.nn.Sequential):
             block.downsample = torch.nn.Sequential(block.downsample)
-        if "residual_quantizer" in block.downsample._modules:
+        if hasattr(block.downsample, "residual_quantizer"):
             continue
         residual_quantizer = TensorQuantizer()
         residual_quantizer.disable()
         block.downsample.add_module("residual_quantizer", residual_quantizer)
+
+
+def _enables_resnet_residual_quantization(recipe):
+    if not isinstance(recipe, ModelOptPTQRecipe):
+        return False
+    for entry in recipe.quantize.quant_cfg:
+        config = entry.model_dump(exclude_unset=True)
+        patterns = config.get("quantizer_name", [])
+        patterns = [patterns] if isinstance(patterns, str) else patterns
+        if any("residual_quantizer" in pattern for pattern in patterns) and config.get(
+            "enable", True
+        ):
+            return True
+    return False
 
 
 def filter_func(name):
@@ -205,6 +217,15 @@ def _disable_high_rank_input_quantizers(model, input_shape, device):
     but 3D in ViT) must be skipped. A forward pass with hooks identifies them at
     runtime, so this works across architectures without hardcoded paths.
     """
+    if not any(
+        isinstance(quantizer, TensorQuantizer)
+        and quantizer.is_enabled
+        and quantizer.block_sizes
+        and name.endswith("input_quantizer")
+        for name, quantizer in model.named_modules()
+    ):
+        return
+
     high_rank: set[str] = set()
     handles = []
     for name, mod in model.named_modules():
@@ -226,14 +247,15 @@ def _disable_high_rank_input_quantizers(model, input_shape, device):
             h.remove()
         model.train(was_training)
 
-    if not high_rank:
-        return
-    prefixes = tuple(n + "." for n in high_rank)
-    mtq.disable_quantizer(model, lambda n: n.startswith(prefixes))
+    modules = dict(model.named_modules())
+    for name in high_rank:
+        quantizer = getattr(modules[name], "input_quantizer", None)
+        if quantizer is not None and quantizer.is_enabled and quantizer.block_sizes:
+            quantizer.disable()
 
 
-def _disable_low_channel_conv_input_quantizers(model):
-    """Disable ``input_quantizer`` on Conv2d modules whose ``in_channels <= 3``.
+def _disable_low_channel_fp8_conv_input_quantizers(model):
+    """Disable FP8 ``input_quantizer`` on Conv2d modules whose ``in_channels <= 3``.
 
     The first Conv2d of an image backbone (e.g. ResNet50's ``conv1``) consumes raw
     RGB input, so ``in_channels == 3``. On Blackwell (compute capability 12.0) TRT
@@ -252,8 +274,20 @@ def _disable_low_channel_conv_input_quantizers(model):
     for _, mod in model.named_modules():
         if isinstance(mod, torch.nn.Conv2d) and mod.in_channels <= 3:
             q = getattr(mod, "input_quantizer", None)
-            if q is not None and q.is_enabled:
+            if q is not None and q.is_enabled and q.num_bits == (4, 3):
                 q.disable()
+
+
+def _validate_resnet_quantizers(model):
+    """Reject enabled ResNet quantizers other than per-tensor FP8 or INT8."""
+    for name, quantizer in model.named_modules():
+        if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
+            continue
+        if quantizer.num_bits not in ((4, 3), 8) or quantizer.block_sizes:
+            raise ValueError(
+                f"ResNet quantizer '{name}' uses an unsupported format; only FP8 and INT8 "
+                "are supported for convolutional models."
+            )
 
 
 def load_calibration_data(model, data_size, batch_size, device, with_labels=False):
@@ -301,7 +335,12 @@ def _disable_dead_quantizers(model):
     meaningful to quantize and would otherwise break ONNX export.
     """
     for _, mod in model.named_modules():
-        for attr in ("input_quantizer", "output_quantizer", "weight_quantizer"):
+        for attr in (
+            "input_quantizer",
+            "output_quantizer",
+            "weight_quantizer",
+            "residual_quantizer",
+        ):
             q = getattr(mod, attr, None)
             if q is None or not q.is_enabled:
                 continue
@@ -310,36 +349,6 @@ def _disable_dead_quantizers(model):
                 continue
             if torch.any(torch.isnan(amax)) or torch.all(amax <= 0):
                 q.disable()
-
-
-def _calibrate_uncalibrated_quantizers(model, data_loader):
-    """Calibrate FP8 quantizers that weren't calibrated by mtq.quantize().
-
-    When MXFP8/NVFP4 modes override Conv2d to FP8, the FP8 quantizers may not
-    be calibrated because the MXFP8/NVFP4 quantization pipeline skips standard
-    calibration. This function explicitly calibrates those uncalibrated quantizers.
-    """
-    uncalibrated = []
-    for _, module in model.named_modules():
-        for attr_name in ("input_quantizer", "weight_quantizer"):
-            if not hasattr(module, attr_name):
-                continue
-            quantizer = getattr(module, attr_name)
-            if quantizer.is_enabled and not quantizer.block_sizes and quantizer.amax is None:
-                quantizer.enable_calib()
-                uncalibrated.append(quantizer)
-
-    if not uncalibrated:
-        return
-
-    model.eval()
-    with torch.no_grad():
-        for batch in data_loader:
-            model(batch)
-
-    for quantizer in uncalibrated:
-        quantizer.disable_calib()
-        quantizer.load_calib_amax(strict=False)
 
 
 def quantize_model(model, config, data_loader=None):
@@ -354,13 +363,7 @@ def quantize_model(model, config, data_loader=None):
     else:
         quantized_model = mtq.quantize(model, config)
 
-    # Disable filtered quantizers BEFORE calibrating override quantizers so we don't
-    # waste time calibrating quantizers that are about to be turned off.
     mtq.disable_quantizer(quantized_model, filter_func)
-
-    # Calibrate any FP8 override quantizers that weren't calibrated by mtq.quantize().
-    if data_loader is not None:
-        _calibrate_uncalibrated_quantizers(quantized_model, data_loader)
 
     # Drop quantizers whose calibration saw only zeros (e.g. SwinV2 zero-init norm1/norm2)
     # so ``export_fp8`` doesn't divide by zero.
@@ -391,6 +394,40 @@ def _disable_inplace_relu(model):
             module.inplace = False
 
 
+def _mtq_inputs_from_auto_quantize_config(auto_config, fixed_quantize_config=None):
+    """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs."""
+    constraints = auto_config.constraints.model_dump(exclude_none=True)
+    if auto_config.cost_excluded_layers:
+        constraints.setdefault("cost", {})["excluded_module_name_patterns"] = (
+            auto_config.cost_excluded_layers
+        )
+    return {
+        "constraints": constraints,
+        "quantization_formats": [
+            _prepare_auto_quantize_format(fmt) for fmt in auto_config.candidate_formats
+        ],
+        "fixed_quantization_config": (
+            _prepare_auto_quantize_format(fixed_quantize_config)
+            if fixed_quantize_config is not None
+            else None
+        ),
+        "module_search_spaces": [
+            {
+                "module_name_patterns": search_space.module_name_patterns,
+                "quantization_formats": [
+                    _prepare_auto_quantize_format(candidate)
+                    for candidate in search_space.candidate_formats
+                ],
+                "allow_no_quant": search_space.allow_no_quant,
+            }
+            for search_space in auto_config.module_search_spaces
+        ],
+        "disabled_layers": auto_config.disabled_layers,
+        "method": auto_config.auto_quantize_method,
+        "num_score_steps": auto_config.score_size,
+    }
+
+
 def auto_quantize_model(
     model,
     data_loader,
@@ -416,63 +453,36 @@ def auto_quantize_model(
     """
     _disable_inplace_relu(model)
     if recipe is None:
-        constraints = {"effective_bits": 4.8 if effective_bits is None else effective_bits}
-        format_configs: list[dict[str, Any] | str] = []
-        for fmt in quantization_formats:
-            if isinstance(fmt, str):
-                config = load_quant_config(fmt)
-                if fmt in _NEEDS_FP8_CONV_OVERRIDE:
-                    config["quant_cfg"].extend(_FP8_CONV_OVERRIDE)
-                elif fmt in _NEEDS_INT8_CONV_OVERRIDE:
-                    config["quant_cfg"].extend(_INT8_CONV_OVERRIDE)
-                format_configs.append(config)
-            else:
-                format_configs.append(fmt)
-        fixed_quantization_config = None
-        module_search_spaces = None
-        disabled_layers = None
-        method = "gradient"
+        inputs = {
+            "constraints": {"effective_bits": 4.8 if effective_bits is None else effective_bits},
+            "quantization_formats": [
+                _prepare_auto_quantize_format(fmt) for fmt in quantization_formats
+            ],
+            "fixed_quantization_config": None,
+            "module_search_spaces": None,
+            "disabled_layers": None,
+            "method": "gradient",
+            "num_score_steps": num_score_steps,
+        }
     else:
-        auto_config = recipe.auto_quantize
-        constraints = auto_config.constraints.model_dump(exclude_none=True)
-        if effective_bits is not None:
-            constraints["effective_bits"] = effective_bits
-        format_configs = []
-        fixed_quantization_config = recipe.quantize.model_dump()
-        module_search_spaces = [
-            {
-                "module_name_patterns": search_space.module_name_patterns,
-                "quantization_formats": [
-                    candidate.model_dump() for candidate in search_space.candidate_formats
-                ],
-                "allow_no_quant": search_space.allow_no_quant,
-            }
-            for search_space in auto_config.module_search_spaces
-        ]
-        disabled_layers = auto_config.disabled_layers
-        method = auto_config.auto_quantize_method
+        inputs = _mtq_inputs_from_auto_quantize_config(recipe.auto_quantize, recipe.quantize)
 
-    format_count = len(format_configs) or sum(
-        len(search_space["quantization_formats"]) for search_space in module_search_spaces or []
+    format_count = len(inputs["quantization_formats"]) or sum(
+        len(search_space["quantization_formats"])
+        for search_space in inputs["module_search_spaces"] or []
     )
     print(f"Starting auto-quantization search with {format_count} formats...")
-    print(f"Effective bits constraint: {constraints['effective_bits']}")
-    print(f"Calibration steps: {num_calib_steps}, Scoring steps: {num_score_steps}")
+    print(f"Effective bits constraint: {inputs['constraints']['effective_bits']}")
+    print(f"Calibration steps: {num_calib_steps}, Scoring steps: {inputs['num_score_steps']}")
 
     quantized_model, search_state = mtq.auto_quantize(
         model,
-        constraints=constraints,
-        quantization_formats=format_configs,
         data_loader=data_loader,
         forward_step=forward_step,
         loss_func=loss_func,
         num_calib_steps=num_calib_steps,
-        num_score_steps=num_score_steps,
         verbose=True,
-        fixed_quantization_config=fixed_quantization_config,
-        module_search_spaces=module_search_spaces,
-        disabled_layers=disabled_layers,
-        method=method,
+        **inputs,
     )
 
     # Disable quantization for specified layers
@@ -506,20 +516,18 @@ def main():
         type=str,
     )
     parser.add_argument(
-        "--quantize_mode",
+        "--qformat",
         choices=["fp8", "mxfp8", "int8", "nvfp4", "int4_awq", "auto"],
         default="mxfp8",
-        help="Type of quantization to apply. Default is MXFP8.",
+        help="Quantization format to apply when --recipe is not provided. Default is MXFP8.",
     )
     parser.add_argument(
         "--recipe",
         type=str,
         default=None,
         help=(
-            "Quantization config recipe: a preset basename under "
-            "modelopt_recipes/configs/ptq/presets/model/ or a path to a QuantizeConfig "
-            "YAML. Defaults to the preset matching --quantize_mode. Not supported with "
-            "--quantize_mode=auto."
+            "PTQ or AutoQuantize recipe YAML file or built-in recipe name. The recipe is "
+            "authoritative when provided; --qformat is used only without a recipe."
         ),
     )
     parser.add_argument(
@@ -571,8 +579,8 @@ def main():
         type=float,
         default=None,
         help=(
-            "Target effective bits for auto quantization. Defaults to 4.8 without a recipe "
-            "and overrides the ResNet recipe when provided."
+            "Target effective bits for --qformat=auto. Defaults to 4.8 and is ignored when "
+            "an AutoQuantize recipe is provided."
         ),
     )
     parser.add_argument(
@@ -600,10 +608,12 @@ def main():
 
     args = parser.parse_args()
 
-    if args.recipe and args.quantize_mode == "auto":
+    recipe = load_recipe(args.recipe) if args.recipe is not None else None
+    if recipe is not None and not isinstance(
+        recipe, (ModelOptPTQRecipe, ModelOptAutoQuantizeRecipe)
+    ):
         parser.error(
-            "--recipe is not supported with --quantize_mode=auto; "
-            "use --auto_quantization_formats instead."
+            f"Expected a PTQ or AutoQuantize recipe, got {type(recipe).__name__} from {args.recipe}."
         )
 
     # Create model and move to appropriate device
@@ -630,12 +640,20 @@ def main():
         )
         print(f"Base Model - Top-1 Accuracy: {top1:.2f}%, Top-5 Accuracy: {top5:.2f}%")
 
-    resnet_recipe = None if args.recipe else _get_resnet_recipe(model, args.quantize_mode)
-    if resnet_recipe is not None:
+    is_resnet = isinstance(model, timm.models.resnet.ResNet)
+    run_auto_quantize = isinstance(recipe, ModelOptAutoQuantizeRecipe) or (
+        recipe is None and args.qformat == "auto"
+    )
+    if is_resnet and run_auto_quantize:
+        raise ValueError("AutoQuantize is not supported for convolutional models such as ResNet.")
+    if is_resnet and recipe is None and args.qformat not in {"fp8", "int8"}:
+        raise ValueError(
+            f"ResNet does not support qformat '{args.qformat}'; only FP8 and INT8 are supported."
+        )
+    if is_resnet and _enables_resnet_residual_quantization(recipe):
         CUSTOM_POST_CONVERSION_PLUGINS.add(_add_resnet_residual_quantizers)
 
-    # Quantize model based on mode
-    if args.quantize_mode == "auto":
+    if run_auto_quantize:
         # Auto quantization requires labels for loss computation
         data_loader = load_calibration_data(
             model,
@@ -652,7 +670,7 @@ def main():
             args.effective_bits,
             args.calibration_data_size,
             args.num_score_steps,
-            recipe=resnet_recipe,
+            recipe=recipe,
         )
     else:
         # Standard quantization - load calibration data
@@ -660,9 +678,9 @@ def main():
         # Conv2d layers are overridden to FP8 (for TRT compatibility), those FP8
         # quantizers require calibration data.
         config = (
-            resnet_recipe.quantize.model_dump()
-            if resnet_recipe is not None
-            else get_quant_config(args.quantize_mode, args.recipe)
+            recipe.quantize.model_dump()
+            if isinstance(recipe, ModelOptPTQRecipe)
+            else get_quant_config(args.qformat)
         )
 
         data_loader = load_calibration_data(
@@ -675,28 +693,14 @@ def main():
 
         quantized_model = quantize_model(model, config, data_loader)
 
-    # MXFP8/NVFP4 lower their input quantizers to TRT DynamicQuantize (2D/3D only).
-    # Disable quantizers on 4D-input layers (Swin's norm1 / downsample.norm / top-level norm).
-    # Auto mode also needs this when an MXFP8/NVFP4 candidate format is in the search set.
-    uses_dynamic_quantize = args.quantize_mode in ("mxfp8", "nvfp4") or (
-        args.quantize_mode == "auto"
-        and resnet_recipe is None
-        and any(fmt in _NEEDS_FP8_CONV_OVERRIDE for fmt in args.auto_quantization_formats)
-    )
-    if uses_dynamic_quantize:
-        _disable_high_rank_input_quantizers(quantized_model, input_shape, device)
+    if is_resnet:
+        _validate_resnet_quantizers(quantized_model)
 
-    # FP8-family modes emit TRT_FP8QuantizeLinear on the first-layer conv; Blackwell has
-    # no tactic for that 3-channel Q→Conv fusion. Skip for pure INT8 (unaffected).
-    uses_fp8_conv_input = args.quantize_mode in ("fp8", "mxfp8", "nvfp4") or (
-        args.quantize_mode == "auto"
-        and (
-            resnet_recipe is not None
-            or any(fmt not in {"int8", "int4_awq"} for fmt in args.auto_quantization_formats)
-        )
-    )
-    if uses_fp8_conv_input:
-        _disable_low_channel_conv_input_quantizers(quantized_model)
+    # Disable block quantizers on 4D-input layers, which TRT DynamicQuantize does not support.
+    _disable_high_rank_input_quantizers(quantized_model, input_shape, device)
+
+    # Blackwell has no tactic for an FP8 Q→Conv fusion on the first RGB layer.
+    _disable_low_channel_fp8_conv_input_quantizers(quantized_model)
 
     # Print quantization summary
     print("\nQuantization Summary:")
