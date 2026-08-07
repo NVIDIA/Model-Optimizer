@@ -89,6 +89,7 @@ def test_quantize_infers_input_profiles_after_ep_support_update(monkeypatch, tmp
         trt_plugins_precision,
         override_shapes,
         simplify,
+        simplify_backend,
         quantize_mode,
         opset,
     ):

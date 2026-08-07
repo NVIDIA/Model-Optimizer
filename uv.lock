@@ -2273,6 +2273,7 @@ all = [
     { name = "onnxruntime-gpu", version = "1.22.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin') or sys_platform == 'win32'" },
     { name = "onnxruntime-gpu", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin' and sys_platform != 'win32'" },
     { name = "onnxscript" },
+    { name = "onnxsim" },
     { name = "onnxslim" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -2312,6 +2313,7 @@ dev = [
     { name = "onnxruntime-gpu", version = "1.22.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin') or sys_platform == 'win32'" },
     { name = "onnxruntime-gpu", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin' and sys_platform != 'win32'" },
     { name = "onnxscript" },
+    { name = "onnxsim" },
     { name = "onnxslim" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -2396,6 +2398,7 @@ onnx = [
     { name = "onnxruntime-gpu", version = "1.22.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin') or sys_platform == 'win32'" },
     { name = "onnxruntime-gpu", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin' and sys_platform != 'win32'" },
     { name = "onnxscript" },
+    { name = "onnxsim" },
     { name = "onnxslim" },
     { name = "polygraphy" },
 ]
@@ -2445,6 +2448,7 @@ requires-dist = [
     { name = "onnxruntime-gpu", marker = "python_full_version < '3.11' and platform_machine != 'aarch64' and sys_platform != 'darwin' and sys_platform != 'win32' and extra == 'onnx'", specifier = "~=1.22.0" },
     { name = "onnxruntime-gpu", marker = "sys_platform == 'win32' and extra == 'onnx'", specifier = "==1.22.0" },
     { name = "onnxscript", marker = "extra == 'onnx'" },
+    { name = "onnxsim", marker = "extra == 'onnx'", specifier = ">=0.7.0" },
     { name = "onnxslim", marker = "extra == 'onnx'", specifier = ">=0.1.76" },
     { name = "packaging" },
     { name = "pandas", marker = "extra == 'puzzletron'" },
@@ -2756,6 +2760,31 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c4/3a/4d79bce3f460e0df7fed54a92ce80827f25da66511da368bb00783ad8d20/onnxscript-0.7.1.tar.gz", hash = "sha256:309fb86484b11fa4ded90dba580e0d63f1a0827588e521cecaf2eeddb46d6e86", size = 618160, upload-time = "2026-06-29T23:33:21.526Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/bd/a0c8e737b6afda10e42a597787d53d5b66e00268df6f59184701eeae37d9/onnxscript-0.7.1-py3-none-any.whl", hash = "sha256:544763b7fdef49940cdd9412ff5135cbae96d59ac6bc1921457f21280f40f4b7", size = 721970, upload-time = "2026-06-29T23:33:23.298Z" },
+]
+
+[[package]]
+name = "onnxsim"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "onnx" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/29/d4/0def0ec1f143963137419fc2cdfc8521724216861abd8ca2cc42f5d257c2/onnxsim-0.7.0.tar.gz", hash = "sha256:9ee396257785ce07c5a468ba6cc0a8aba4eee0c6ed73f945deb7dc14b5c892c0", size = 2976263, upload-time = "2026-07-26T08:14:26.164Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/6d/4eb3b9284bbcf43ec01e85a483241a85562d31d6065a5dd79ef24d01c9ee/onnxsim-0.7.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:e5c123acbee25b4d6b7aa8f273afb46d9adda1e2fa32f6d70cc9ea68345d63fb", size = 2590443, upload-time = "2026-07-26T08:14:03.104Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/31/898cbc058b77947aedc060a3fc631f5d15d4e877229a52d60960b27b2021/onnxsim-0.7.0-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a03b84c3e527a9516bf261194beb7f0a545183c53baabd347a2cb815327ecd4f", size = 2385717, upload-time = "2026-07-26T08:14:05.181Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/b4/dcd6f799f26f62b4242f3f0a2fa3a77b105349af1fc85aa053ce17f7675c/onnxsim-0.7.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:26c12ae184d308c75c01644bdb1c53da52cb8e4738e0a2e325f1238fcee63ad9", size = 2658534, upload-time = "2026-07-26T08:14:06.812Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/8a/125afeed244cbc37427568d56748c0dd72c2a43f9d1805dc170da8fc9777/onnxsim-0.7.0-cp310-cp310-win_amd64.whl", hash = "sha256:1803fbe03709896a90d0fce9203e1b0ae1e2b6c911126f45851658b39b776fea", size = 3085963, upload-time = "2026-07-26T08:14:09.212Z" },
+    { url = "https://files.pythonhosted.org/packages/10/50/40fb9043d5161a287e7df88b28c7b813cf893f9b1fa35317c0b9f67e73f7/onnxsim-0.7.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5902ccc6cc3f78249be3136a9e0e4c7c4d4b405cdb9a0390edcd814683b4fe50", size = 2589879, upload-time = "2026-07-26T08:14:10.828Z" },
+    { url = "https://files.pythonhosted.org/packages/98/5e/4251b34ce2305b10f818050317b83948ff39a68482bd0e756d2f77560b92/onnxsim-0.7.0-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f1409944a76b93b2a20c43b9cd7405a36b7482e44a84317d9a6ee9808f7d5561", size = 2385366, upload-time = "2026-07-26T08:14:12.453Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/f9/de22837a77f0dabfb5075cecbc7c1f5a2d2f2a7f741d9fe33097882edb3b/onnxsim-0.7.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ad35ab2066e44b5b839b553e59d135268faf3f7331f2c5e575d336128eaba171", size = 2658256, upload-time = "2026-07-26T08:14:14.094Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/06/5d516c4bdd77391e778206243e6d5538b6edda9084e364b7ab8d24143bbc/onnxsim-0.7.0-cp311-cp311-win_amd64.whl", hash = "sha256:c807b308fd7249ee7a31949efb42781a969dc705078d7342d94e3a6f3d482a86", size = 3085705, upload-time = "2026-07-26T08:14:15.89Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/65/583263cca89c18abd68192a40a0be25506e67f1bc8d53df7edb1fa3f3a6a/onnxsim-0.7.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:ba0fc54e1f8f0bac1643ff8a3c00516428913ae799ab7717b771cf23baa46680", size = 2589625, upload-time = "2026-07-26T08:14:18.053Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/bc/743235ea06f3ef7aa55c515ed4e28316fc851d696d1acc686171529fb48f/onnxsim-0.7.0-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a10fc08b853ce60d3b5b8076b26e2bda1322c1e01c808b8db908e73f9a047a9d", size = 2381363, upload-time = "2026-07-26T08:14:19.486Z" },
+    { url = "https://files.pythonhosted.org/packages/89/88/a771a9e5cfcd0210fdabdb242bb56857bd7beee59ba96f1178c1b702c17d/onnxsim-0.7.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0aa412583982475f7a5b45882d46353447b15694f7870737e43c59ed2300f472", size = 2654139, upload-time = "2026-07-26T08:14:21.148Z" },
+    { url = "https://files.pythonhosted.org/packages/92/03/8c7913bc77c6f29fd122e92381fac85da5918a939efd68f396474072500b/onnxsim-0.7.0-cp312-abi3-win_amd64.whl", hash = "sha256:c4cfe7b2df2feeef8daf255537378d9028123d4ef627842ef19db9a2f6bd68e0", size = 3084638, upload-time = "2026-07-26T08:14:22.815Z" },
+    { url = "https://files.pythonhosted.org/packages/94/d7/27430466aaff6e97d4ed4d1d335281363167f33ff5bc5726c6a3906e896d/onnxsim-0.7.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:477f9c8d9894e144d698a1216d7e94eee6043be6ed4669440063daa6c1616a68", size = 2658112, upload-time = "2026-07-26T08:14:24.386Z" },
 ]
 
 [[package]]

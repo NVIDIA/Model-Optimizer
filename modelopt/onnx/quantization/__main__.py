@@ -328,6 +328,16 @@ def get_parser() -> argparse.ArgumentParser:
         help="If True, the given ONNX model will be simplified before quantization is performed.",
     )
     argparser.add_argument(
+        "--simplify_backend",
+        type=str,
+        default="onnxslim",
+        choices=["onnxslim", "onnxsim"],
+        help=(
+            "ONNX simplification package to use when --simplify is set. "
+            "Both produce an equivalent simplified model (default: onnxslim)."
+        ),
+    )
+    argparser.add_argument(
         "--calibrate_per_node",
         action="store_true",
         help=(
@@ -552,6 +562,7 @@ def main():
         use_zero_point=args.use_zero_point,
         passes=args.passes,
         simplify=args.simplify,
+        simplify_backend=args.simplify_backend,
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
         opset=args.opset,
