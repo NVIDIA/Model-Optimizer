@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron sparse runtime statistics and library-building stages."""
+
 import json
 import sys
 from contextlib import nullcontext
@@ -1079,7 +1081,14 @@ def test_build_library_refreshes_static_stats_for_each_vllm_mode(
     assert calls == ["library", "static", "candidates"]
 
 
-def test_build_library_propagates_candidate_module_import_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "failure_source",
+    ["candidate_module_import", "candidate_library_build"],
+    ids=("candidate-module-import", "candidate-library-build"),
+)
+def test_build_library_propagates_candidate_import_errors_without_success_manifest(
+    tmp_path, monkeypatch, failure_source
+):
     teacher_dir = tmp_path / "teacher"
     teacher_dir.mkdir()
     config = {
@@ -1116,9 +1125,21 @@ def test_build_library_propagates_candidate_module_import_error(tmp_path, monkey
         lambda _: None,
     )
     monkeypatch.setattr(pipeline_stages, "_calculate_static_workload_stats", lambda *_args: None)
-    monkeypatch.setitem(sys.modules, "modelopt.torch.puzzletron.candidates", None)
+    if failure_source == "candidate_module_import":
+        monkeypatch.setitem(sys.modules, "modelopt.torch.puzzletron.candidates", None)
+        error_match = "candidates"
+    else:
+        error_match = "candidate library build failed"
 
-    with pytest.raises(ImportError, match="candidates"):
+        def raise_candidate_library_import_error(*_args, **_kwargs):
+            raise ImportError(error_match)
+
+        monkeypatch.setattr(
+            "modelopt.torch.puzzletron.candidates.build_candidate_library_from_checkpoint",
+            raise_candidate_library_import_error,
+        )
+
+    with pytest.raises(ImportError, match=error_match):
         build_library_stage(config, StageManifest(stage="build_library", config=config))
 
     assert not (tmp_path / "manifests" / "build_library.json").exists()
