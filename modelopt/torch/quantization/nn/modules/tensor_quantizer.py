@@ -1372,16 +1372,16 @@ class TensorQuantizer(nn.Module):
     def sync_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
         """Synchronize the amax across all ranks in the given group."""
         if parallel_group.is_initialized() and getattr(self, "_amax", None) is not None:
-            try:
-                dist.all_reduce(self._amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
-            except RuntimeError as e:
-                # This error happens if the distributed backend is using GPU and
-                # the tensor is not on GPU (or vice versa).
+            if (
+                self._amax.device.type == "cpu"
+                and dist.get_backend(parallel_group.group) == dist.Backend.NCCL
+            ):
                 warnings.warn(
-                    f"Failed to synchronize amax: {e}, probably because the tensor is on a device which is not"
-                    "supported by the current distributed backend. This warning can be ignored"
-                    "if happening during modelopt restore."
+                    "Failed to synchronize amax because the tensor is on CPU, but NCCL only supports CUDA "
+                    "tensors. This warning can be ignored if happening during modelopt restore."
                 )
+                return
+            dist.all_reduce(self._amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
 
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):
