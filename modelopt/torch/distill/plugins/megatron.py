@@ -621,6 +621,9 @@ def adjust_distillation_model_for_mcore(
         # promote it on the normal path; until then, without this block the output projection
         # would train through the generic FP8 path instead of static-block NVFP4.
         if not getattr(self, "_modelopt_nvfp4_promoted", False):
+            # Imported locally on purpose: this distillation plugin must stay usable without
+            # ``modelopt.torch.quantization`` installed/imported (a plain, non-quantized KD run
+            # never reaches this branch), so it must not take a module-scope dependency on it.
             from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
                 StaticBlockScaleQuantizer,
                 TensorQuantizer,

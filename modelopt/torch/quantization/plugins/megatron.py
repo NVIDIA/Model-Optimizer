@@ -276,7 +276,6 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
        typing-matching the QuantModuleRegistry.
     3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
-
     untied = _resolve_output_layer_untied(model)
 
     def _configure_attention_for_kv_cache_quant(module: Attention):
@@ -313,9 +312,7 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
                 # Fall back to the tying flag: an untied output_layer is quantizable.
                 if name.endswith("output_layer"):
                     _wq = getattr(module, "weight_quantizer", None)
-                    _skip = (
-                        not getattr(_wq, "is_enabled", False) if _wq is not None else not untied
-                    )
+                    _skip = not getattr(_wq, "is_enabled", False) if _wq is not None else not untied
                     if _skip:
                         continue
                 register_modelopt_extra_state_callbacks(
