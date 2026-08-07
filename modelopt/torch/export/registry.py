@@ -27,12 +27,14 @@ editing if/elif chains inside ``unified_export_hf.py``.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils.core_utils import has_non_resident_weights
+if TYPE_CHECKING:
+    from .model_utils import TiedGroupResolver
 
 __all__ = [
     "ExportContext",
@@ -46,32 +48,26 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    The tied-weight dedup caches must be scoped to one export invocation: a
-    process-global cache would carry stale entries whose ``data_ptr`` keys can be
-    recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
-
-    Both are ``None`` when the model's weights are not resident for the whole export
-    (FSDP2 or accelerate offload), since ``data_ptr`` keys are meaningless once weights
-    move.
+    ``resolver`` is the name-based :class:`TiedGroupResolver`, which resolves tied
+    weights from the model's own ``_tied_weights_keys`` / ``tie_word_embeddings``
+    declarations (stable across packing, FSDP resharding, and offload, unlike a
+    ``data_ptr``). It is the single source of truth for tied-weight identity across the
+    export: both dense and fused-MoE tied weights are packed independently and their
+    duplicate keys are dropped by name in ``postprocess_state_dict``.
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
+    resolver: "TiedGroupResolver | None" = None
 
     def __post_init__(self) -> None:
-        # data_ptr() only identifies a tensor while it stays resident, so dedup is unsafe
-        # once weights move. Tied weights are then written as duplicates rather than
-        # re-aliased, making tied-weight export (DiffusionGemma) resident-path only.
-        # TODO: dedup by tied-group name instead, reusing the _tied_weights_keys
-        # resolution in _collect_canonical_tied_patterns, which survives weight moves.
-        if has_non_resident_weights(self.model):
-            self.tied_cache = None
-            self.moe_tied_cache = None
+        # Import here to avoid a circular import at module load time.
+        from .model_utils import TiedGroupResolver
+
+        # Reuse a caller-provided resolver when given (built once per export), else build.
+        if self.resolver is None:
+            self.resolver = TiedGroupResolver(self.model)
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

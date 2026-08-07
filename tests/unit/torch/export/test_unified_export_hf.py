@@ -25,11 +25,16 @@ from _test_utils.torch.quantization.tied_modules import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_utils import (
+    TiedGroupResolver,
+    _build_tied_alias_map,
     _collect_canonical_tied_patterns,
     _reorder_canonical_first,
 )
-from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.quant_utils import (
+    fuse_prequant_layernorm,
+    postprocess_state_dict,
+    sync_tied_input_amax,
+)
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
@@ -56,6 +61,126 @@ def test_collect_canonical_tied_patterns_list_style_yields_no_canonical_info():
 
     assert patterns == []
     assert side_substrings == []
+
+
+def test_build_tied_alias_map_dict_style_maps_alias_to_canonical():
+    """Dict-style _tied_weights_keys yields {alias_full_name: canonical_full_name}."""
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+
+    amap = _build_tied_alias_map(parent)
+
+    assert amap == {"encoder.weight": "decoder.weight"}
+
+
+def test_build_tied_alias_map_list_style_is_empty():
+    """Legacy list-style _tied_weights_keys carries no canonical info — empty map."""
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
+
+    assert _build_tied_alias_map(parent) == {}
+
+
+def test_tied_group_resolver_group_key_is_shared_and_order_independent():
+    """Both sides of a declared tie map to the same key; untied params map to None."""
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+
+    resolver = TiedGroupResolver(parent)
+
+    assert resolver.group_key("encoder.weight") == resolver.group_key("decoder.weight")
+    assert resolver.group_key("encoder.weight") == "decoder.weight"  # canonical wins
+    assert resolver.group_key("unrelated.weight") is None
+
+
+def test_tied_group_resolver_per_layer_backreference():
+    """Per-layer alias regex with a backreference resolves each layer independently."""
+
+    class _Parent(torch.nn.Module):
+        _tied_weights_keys = {
+            r"^encoder\.layers\.(\d+)\.experts\.gate_up_proj$": r"decoder.layers.\1.experts.gate_up_proj",
+        }
+
+        def __init__(self):
+            super().__init__()
+            self.encoder = torch.nn.Module()
+            self.decoder = torch.nn.Module()
+            for side in (self.encoder, self.decoder):
+                side.layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
+            # Tie the fused expert Parameter per layer.
+            for i in range(2):
+                p = torch.nn.Parameter(torch.zeros(4, 8, 8))
+                self.decoder.layers[i].experts = torch.nn.Module()
+                self.decoder.layers[i].experts.gate_up_proj = p
+                self.encoder.layers[i].experts = torch.nn.Module()
+                self.encoder.layers[i].experts.gate_up_proj = p
+
+    parent = _Parent()
+    resolver = TiedGroupResolver(parent)
+
+    assert (
+        resolver.container_group_key("encoder.layers.0.experts", "gate_up_proj")
+        == "decoder.layers.0.experts"
+    )
+    assert (
+        resolver.container_group_key("encoder.layers.1.experts", "gate_up_proj")
+        == "decoder.layers.1.experts"
+    )
+    # Encoder layer 0 must not collapse into decoder layer 1.
+    assert resolver.container_group_key(
+        "encoder.layers.0.experts", "gate_up_proj"
+    ) != resolver.container_group_key("encoder.layers.1.experts", "gate_up_proj")
+
+
+def test_tied_group_resolver_parallel_pattern_declaration():
+    """DiffusionGemma-style {alias_regex: canonical_regex} (parallel patterns, no backrefs).
+
+    Both sides are regexes that differ only in a leading literal head
+    (``encoder.language_model.`` -> ``decoder.``); the shared trailing structure is copied
+    from the concrete name. The container's fused expert Parameter is split into per-expert
+    keys on export, so the alias-prefix rewrite must map those to the decoder canonical.
+    """
+
+    class _Model(torch.nn.Module):
+        _tied_weights_keys = {
+            r"encoder.language_model.layers\.(?:[^.]+\.)*gate_up_proj": r"decoder.layers\.(?:[^.]+\.)*gate_up_proj",
+            r"encoder.language_model.layers\.(?:[^.]+\.)*down_proj": r"decoder.layers\.(?:[^.]+\.)*down_proj",
+        }
+
+        def __init__(self):
+            super().__init__()
+            self.decoder = torch.nn.Module()
+            self.encoder = torch.nn.Module()
+            self.encoder.language_model = torch.nn.Module()
+            for root in (self.decoder, self.encoder.language_model):
+                root.layers = torch.nn.ModuleList([torch.nn.Module()])
+            gup = torch.nn.Parameter(torch.zeros(4, 8, 8))
+            dp = torch.nn.Parameter(torch.zeros(4, 8, 8))
+            for root in (self.decoder, self.encoder.language_model):
+                root.layers[0].experts = torch.nn.Module()
+                root.layers[0].experts.gate_up_proj = gup  # tied (same object)
+                root.layers[0].experts.down_proj = dp
+
+    class _Root(torch.nn.Module):  # ForCausalLM-style `.model` wrapper
+        def __init__(self):
+            super().__init__()
+            self.model = _Model()
+
+    resolver = TiedGroupResolver(_Root())
+
+    # container group key: encoder side resolves to the decoder canonical container
+    assert (
+        resolver.container_group_key(
+            "model.encoder.language_model.layers.0.experts", "gate_up_proj"
+        )
+        == "model.decoder.layers.0.experts"
+    )
+    # post-export per-expert split key rewrites to the decoder canonical (so it is dropped)
+    prefixes = resolver.alias_prefix_pairs()
+    got = resolver.canonical_state_dict_key(
+        "model.encoder.language_model.layers.0.experts.3.gate_proj.weight", prefixes
+    )
+    assert got == "model.decoder.layers.0.experts.3.gate_proj.weight"
 
 
 def test_reorder_canonical_first_puts_decoder_keys_before_encoder_keys():
@@ -116,71 +241,98 @@ def test_sync_tied_input_amax_no_op_for_untied_modules():
     assert torch.allclose(dec_q.amax, torch.tensor(5.0))
 
 
-def _calibrate_through_both_children(parent):
-    """Insert NVFP4 quantizers and run a one-shot forward through both children for calibration."""
-
-    def forward_loop(m):
-        x = torch.randn(2, 16)
-        m.encoder(x)
-        m.decoder(x)
-
-    mtq.quantize(parent, mtq.NVFP4_DEFAULT_CFG, forward_loop=forward_loop)
-
-
-def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
-    """Tied Linears share data_ptr for packed .weight and scale buffers after export."""
+def test_postprocess_name_based_drops_alias_across_distinct_addresses():
+    """Declared alias is dropped by name even when its tensor has a DIFFERENT address
+    than the canonical -- the FSDP full_state_dict case that address dedup cannot catch.
+    """
     enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec)
-    _calibrate_through_both_children(parent)
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    resolver = TiedGroupResolver(parent)
 
-    # Per-call dedup cache (the production pattern: caller owns the cache, scoped
-    # to one export invocation). Threaded through both sides of the tied pair so
-    # the alias step at the end of _export_quantized_weight catches the dedup.
-    tied_cache: dict = {}
-    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
+    # Distinct storages (different data_ptr): the address pass could never collapse these.
+    sd = {"encoder.weight": torch.randn(4, 4), "decoder.weight": torch.randn(4, 4)}
+    assert sd["encoder.weight"].data_ptr() != sd["decoder.weight"].data_ptr()
 
-    assert enc.weight.data_ptr() == dec.weight.data_ptr()
-    for scale_attr in ("weight_scale", "weight_scale_2"):
-        if hasattr(enc, scale_attr) and hasattr(dec, scale_attr):
-            assert getattr(enc, scale_attr).data_ptr() == getattr(dec, scale_attr).data_ptr()
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+
+    assert "decoder.weight" in out  # canonical kept
+    assert "encoder.weight" not in out  # alias dropped by name
 
 
-def test_export_quantized_weight_no_alias_for_untied_linears():
-    """Untied Linears keep independent data_ptrs after export — no false-positive aliasing."""
-    parent = torch.nn.Module()
-    parent.encoder = torch.nn.Linear(16, 32, bias=False)
-    parent.decoder = torch.nn.Linear(16, 32, bias=False)
-    assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
-    _calibrate_through_both_children(parent)
-
-    # Same fresh cache shape as the positive case — confirms that even with
-    # dedup enabled, untied modules with distinct source data_ptrs do not get
-    # falsely aliased.
-    tied_cache: dict = {}
-    _export_quantized_weight(parent.encoder, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(parent.decoder, torch.float16, "weight", _tied_cache=tied_cache)
-
-    assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
-
-
-def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized():
-    """Unquantized side early-returns; its .weight stays at the original shared Parameter."""
+def test_postprocess_name_based_keeps_alias_when_canonical_absent():
+    """An alias is NOT dropped when its canonical counterpart is missing (no orphaning)."""
     enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec)
-    original_shared_data_ptr = enc.weight.data_ptr()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    resolver = TiedGroupResolver(parent)
 
-    _calibrate_through_both_children(parent)
-    # is_enabled is a read-only property; .disable() is the canonical bypass.
-    dec.weight_quantizer.disable()
+    sd = {"encoder.weight": torch.randn(4, 4)}  # canonical decoder.weight absent
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
 
-    tied_cache: dict = {}
-    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
+    assert "encoder.weight" in out
 
-    assert enc.weight.data_ptr() != original_shared_data_ptr  # encoder got fresh packed
-    assert dec.weight.data_ptr() == original_shared_data_ptr  # decoder untouched
-    assert enc.weight.data_ptr() != dec.weight.data_ptr()
+
+def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
+    """A container-level declared expert tie drops every per-expert alias key by name,
+    keeping only the canonical subtree -- across distinct addresses (FSDP-safe)."""
+
+    class _Parent(torch.nn.Module):
+        _tied_weights_keys = {
+            r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj",
+            r"^encoder\.experts\.down_proj$": "decoder.experts.down_proj",
+        }
+
+        def __init__(self):
+            super().__init__()
+            self.encoder = torch.nn.Module()
+            self.encoder.experts = torch.nn.Module()
+            self.decoder = torch.nn.Module()
+            self.decoder.experts = torch.nn.Module()
+            gup = torch.nn.Parameter(torch.zeros(2, 4, 4))
+            dp = torch.nn.Parameter(torch.zeros(2, 4, 4))
+            # decoder registered first (canonical) to exercise remove_duplicate=False.
+            self.decoder.experts.gate_up_proj = gup
+            self.decoder.experts.down_proj = dp
+            self.encoder.experts.gate_up_proj = gup
+            self.encoder.experts.down_proj = dp
+
+    parent = _Parent()
+    resolver = TiedGroupResolver(parent)
+    assert resolver.alias_prefix_pairs() == {"encoder.experts": "decoder.experts"}
+
+    # Craft exported-style per-expert keys with distinct storages on both sides.
+    sd = {}
+    for side in ("encoder", "decoder"):
+        for e in range(2):
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                sd[f"{side}.experts.{e}.{proj}.weight"] = torch.randn(4, 4)
+                sd[f"{side}.experts.{e}.{proj}.weight_scale"] = torch.randn(4)
+
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+
+    assert not any(k.startswith("encoder.experts.") for k in out)  # all aliases dropped
+    assert all(k.startswith("decoder.experts.") for k in out)  # only canonical remains
+    assert len(out) == 2 * 3 * 2  # 2 experts * 3 projections * (weight + weight_scale)
+
+
+def test_postprocess_state_dict_preserves_tensors_with_different_byte_ranges():
+    storage = torch.arange(4)
+    state_dict = {"short": storage[:2], "long": storage}
+    assert state_dict["short"].data_ptr() == state_dict["long"].data_ptr()
+
+    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+
+    assert set(processed) == set(state_dict)
+
+
+def test_postprocess_state_dict_preserves_zero_pointer_tensors():
+    state_dict = {
+        "first": torch.empty(4, device="meta"),
+        "second": torch.empty(4, device="meta"),
+    }
+
+    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+
+    assert set(processed) == set(state_dict)
 
 
 def _linear_with_input_quantizer():
