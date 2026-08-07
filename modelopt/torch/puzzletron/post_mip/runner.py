@@ -45,6 +45,8 @@ __all__ = [
     "run_post_mip_node_shard",
 ]
 
+_DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
+
 
 def _puzzle_dir(config: Mapping[str, Any]) -> Path:
     return Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
@@ -672,19 +674,18 @@ def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) ->
                 ],
             }
         )
-    for key in _LMMS_EVAL_MODEL_ARG_FIELDS:
+    for key in sorted(_LMMS_EVAL_MODEL_ARG_FIELDS):
         if key in settings:
             derived[key] = settings[key]
 
     if isinstance(raw, str):
         prefix = raw.strip().strip(",")
         suffix = _model_arg_string(derived)
-        return ",".join(part for part in (prefix, suffix) if part)
+        return ",".join(part for part in (suffix, prefix) if part)
     if raw is not None and not isinstance(raw, Mapping):
         raise TypeError("downstream_evaluation.config.model_args must be a mapping or string")
     merged = dict(raw or {})
-    for key, value in derived.items():
-        merged.setdefault(key, value)
+    merged.update(derived)
     return _model_arg_string(merged)
 
 
@@ -779,7 +780,7 @@ def _lmms_eval_command(
     if settings.get("cache_dir") is not None:
         env.setdefault("LMMS_EVAL_HOME", str(settings["cache_dir"]))
     timeout = settings.get("timeout_seconds", settings.get("timeout"))
-    return argv, env, (float(timeout) if timeout is not None else None)
+    return argv, env, (float(timeout) if timeout is not None else _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS)
 
 
 def _metric_key(value: Any) -> str:
@@ -949,15 +950,25 @@ def _downstream_evaluation(
     )
     # Campaign config controls the executable and arguments, but subprocess receives
     # an argv list directly; no shell parsing is involved.
-    result = subprocess.run(
-        argv,
-        cwd=str(output),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=str(output),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as timeout_error:
+        timeout_result = subprocess.CompletedProcess(
+            args=argv,
+            returncode=-1,
+            stdout=timeout_error.stdout.decode("utf-8", errors="replace") if timeout_error.stdout else "",
+            stderr=timeout_error.stderr.decode("utf-8", errors="replace") if timeout_error.stderr else "",
+        )
+        _write_lmms_eval_streams(output, timeout_result)
+        raise
     stream_paths = _write_lmms_eval_streams(output, result)
     if result.returncode:
         tail = _lmms_eval_output_tail(result)
@@ -1165,7 +1176,7 @@ def run_post_mip_node_shard(
                         timeout_field = "timeout_seconds"
                     elif not isinstance(error, subprocess.TimeoutExpired):
                         timeout_field = "readiness_timeout"
-                    default_timeout = 3600 if node.node_type == "downstream_evaluation" else (
+                    default_timeout = _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS if node.node_type == "downstream_evaluation" else (
                         600 if timeout_field == "benchmark_timeout" else 1200
                     )
                     row["timeout_seconds"] = float(

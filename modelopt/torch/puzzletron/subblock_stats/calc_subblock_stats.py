@@ -289,20 +289,23 @@ def _runtime_reuse_key_from_args(
 
     if not args.get("runtime_stats") or args.get("weights_dtype") != str(torch.bfloat16):
         return None
+    required_fields = ["n_embd", "batch_size", "prefill_seq_len", "generation_seq_len"]
+    if any(args.get(field) is None for field in required_fields):
+        return None
     workload_id = args.get("workload_id")
     if workload_id is None:
         workload_id = fallback_workload_id
     return (
         int(args["n_embd"]),
         int(args["batch_size"]),
-        int(args.get("prefill_seq_len")),
-        int(args.get("generation_seq_len")),
+        int(args["prefill_seq_len"]),
+        int(args["generation_seq_len"]),
         args.get("max_num_seqs"),
         args.get("runtime_granularity", "subblock"),
         args.get("runtime_backend"),
-        args.get("num_iters"),
-        args.get("num_warmup_iters"),
-        args.get("repeat_block_n_times"),
+        args.get("num_iters", 30),
+        args.get("num_warmup_iters", 10),
+        max(2, int(args.get("repeat_block_n_times", 10))),
         _freeze_stats_args(args.get("vllm_args")),
         workload_id,
     )

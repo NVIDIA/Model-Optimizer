@@ -764,9 +764,13 @@ def _ask_downstream_evaluation_config(
     """
 
     defaults = defaults or {}
+    default_tasks = defaults.get("tasks", "ifeval,gsm8k")
+    if isinstance(default_tasks, list):
+        default_tasks = ",".join(default_tasks)
     tasks = prompts.text(
         "lmms-eval tasks (comma-separated):",
-        default=str(defaults.get("tasks", "ifeval,gsm8k")),
+        default=str(default_tasks),
+        validate=lambda value: bool(str(value).strip()) or "Enter at least one task.",
     )
     limit = prompts.integer(
         "lmms-eval sample limit:",
@@ -1127,7 +1131,8 @@ def _custom_flow(
                 detailed=detailed,
                 moe=moe,
             )
-            available_metrics.append(f"{node_id}.gsm8k.exact_match")
+            for task_name in node["config"].get("tasks", []):
+                available_metrics.append(f"{node_id}.{task_name}.strict-match")
         elif node_type == "global_kd":
             node["config"] = {"max_steps": prompts.integer("Global KD steps:", default=128)}
         elif node_type == "ptq":
