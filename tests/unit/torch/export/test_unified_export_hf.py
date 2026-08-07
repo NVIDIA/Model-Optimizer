@@ -24,12 +24,12 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.hf_weight_export import _export_quantized_weight
 from modelopt.torch.export.model_utils import (
     _collect_canonical_tied_patterns,
     _reorder_canonical_first,
 )
 from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 

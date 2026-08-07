@@ -31,14 +31,15 @@ pytest.importorskip("diffusers")
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-import modelopt.torch.export.unified_export_hf as unified_export_hf
+import modelopt.torch.export.unified_export_diffusers as unified_export_diffusers
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.diffusers_utils import (
     generate_diffusion_dummy_inputs,
     hide_quantizers_from_state_dict,
 )
-from modelopt.torch.export.unified_export_hf import _postprocess_safetensors, export_hf_checkpoint
+from modelopt.torch.export.unified_export_diffusers import _postprocess_safetensors
+from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 
 def _load_config(config_path):
@@ -92,7 +93,7 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
     model = get_tiny_unet()
     export_dir = tmp_path / "export_unet_quant"
 
-    monkeypatch.setattr(unified_export_hf, "has_quantized_modules", lambda *_: True)
+    monkeypatch.setattr(unified_export_diffusers, "has_quantized_modules", lambda *_: True)
 
     fuse_calls = {"count": 0}
     process_calls = {"count": 0}
@@ -103,15 +104,15 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
     def _process_stub(*_args, **_kwargs):
         process_calls["count"] += 1
 
-    monkeypatch.setattr(unified_export_hf, "_fuse_qkv_linears_diffusion", _fuse_stub)
-    monkeypatch.setattr(unified_export_hf, "_process_quantized_modules", _process_stub)
+    monkeypatch.setattr(unified_export_diffusers, "_fuse_qkv_linears_diffusion", _fuse_stub)
+    monkeypatch.setattr(unified_export_diffusers, "_process_quantized_modules", _process_stub)
 
     dummy_quant_config = {
         "quantization": {"quant_algo": "FP8", "kv_cache_quant_algo": "FP8"},
         "producer": {"name": "modelopt", "version": "0.0"},
     }
     monkeypatch.setattr(
-        unified_export_hf, "get_quant_config", lambda *_args, **_kwargs: dummy_quant_config
+        unified_export_diffusers, "get_quant_config", lambda *_args, **_kwargs: dummy_quant_config
     )
 
     export_hf_checkpoint(model, export_dir=export_dir)
@@ -178,7 +179,7 @@ def test_svdquant_diffusers_export_promotes_clean_keys():
     assert getattr(linear.input_quantizer, "_pre_quant_scale", None) is not None
 
     # Export promotes them to clean module-level keys and hides the quantizers.
-    unified_export_hf._promote_quantizer_tensors_to_module(model)
+    unified_export_diffusers._promote_quantizer_tensors_to_module(model)
     with hide_quantizers_from_state_dict(model):
         keys = set(model.state_dict().keys())
 
@@ -190,7 +191,7 @@ def test_svdquant_diffusers_export_promotes_clean_keys():
     )
 
     # The promotion is undone after export, leaving the live module unchanged.
-    unified_export_hf._remove_promoted_quantizer_tensors(model)
+    unified_export_diffusers._remove_promoted_quantizer_tensors(model)
     keys_after = set(model.state_dict().keys())
     assert not any(
         k.endswith((".svdquant_lora_a", ".svdquant_lora_b", ".pre_quant_scale")) for k in keys_after

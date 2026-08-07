@@ -16,9 +16,9 @@
 """Streaming HF checkpoint export for disk/CPU-offloaded models.
 
 Kept apart from :mod:`unified_export_hf` so the resident exporter cannot drift back into
-being offload-aware: the only edge between them is the dispatch in
-``export_hf_checkpoint``, which imports :func:`_export_transformers_checkpoint_streaming`
-lazily to keep the dependency acyclic.
+being offload-aware. Shared work lives in :mod:`hf_export_prep` and
+:mod:`hf_weight_export`, so the only edge between the two exporters is the dispatch in
+``export_hf_checkpoint``.
 """
 
 import contextlib
@@ -33,12 +33,8 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from .quant_aware_conversion import build_reverse_name_mapper
-from .quant_utils import _postprocess_single_tensor, get_quant_config
-from .registry import ExportContext
-from .unified_export_hf import (
+from .hf_export_prep import (
     _add_mtp_exclusions,
-    _dispatch_export_handler,
     _patch_revert_weight_conversion,
     _prepare_moe_inputs,
     _resolve_export_dtype,
@@ -47,6 +43,10 @@ from .unified_export_hf import (
     _warn_on_unsynced_moe_gate_up,
     requantize_resmooth_fused_llm_layers,
 )
+from .hf_weight_export import _dispatch_export_handler
+from .quant_aware_conversion import build_reverse_name_mapper
+from .quant_utils import _postprocess_single_tensor, get_quant_config
+from .registry import ExportContext
 
 __all__ = ["_export_transformers_checkpoint_streaming"]
 

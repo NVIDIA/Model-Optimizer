@@ -23,7 +23,7 @@ buffers for a module without changing its class.
 
 Preparation and export use separate registries because they have independent matching
 precedence. Registering a handler for a new module type replaces what previously required
-editing if/elif chains inside ``unified_export_hf.py``.
+editing if/elif chains inside ``hf_weight_export.py``.
 """
 
 from collections.abc import Callable

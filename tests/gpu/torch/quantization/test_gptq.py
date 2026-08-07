@@ -22,7 +22,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 from conftest import requires_triton
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.hf_weight_export import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import gptq
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.quantization.utils.calib_utils import (
