@@ -51,10 +51,10 @@ quant_config: dict[str, Any] = {
     "recipe_path": os.environ.get("RECIPE_PATH", None),
     "kv_skip_first_m": int(os.environ.get("KV_SKIP_FIRST_M", 0)),
     "kv_skip_last_n": int(os.environ.get("KV_SKIP_LAST_N", 0)),
-    "skip_kv_fp8_enabled": os.environ.get("SKIP_KV_FP8_ENABLED", False),
-    "skip_kv_fp8_quant_cfg": os.environ.get("SKIP_KV_FP8_QUANT_CFG", None),  # JSON dict; default: kv_fp8_cast (E4M3, constant amax)
-    "skip_decode_only": os.environ.get("SKIP_DECODE_ONLY", False),
-    "skip_defer_chunked_prefill": os.environ.get("SKIP_DEFER_CHUNKED_PREFILL", False),
+    "skip_kv_fp8_enabled": os.environ.get("SKIP_KV_FP8_ENABLED", "").lower() in ("1", "true", "yes"),
+    "skip_kv_fp8_quant_cfg": os.environ.get("SKIP_KV_FP8_QUANT_CFG") or None,  # default: FP8_KV_SKIP_CFG (targets *[kv]_bmm_fp8_quantizer)
+    "skip_decode_only": os.environ.get("SKIP_DECODE_ONLY", "").lower() in ("1", "true", "yes"),
+    "skip_defer_chunked_prefill": os.environ.get("SKIP_DEFER_CHUNKED_PREFILL", "").lower() in ("1", "true", "yes"),
 }
 
 

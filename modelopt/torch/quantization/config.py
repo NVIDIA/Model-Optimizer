@@ -1766,7 +1766,9 @@ MXINT8_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/pre
 # _base_disable_all and "algorithm" because these are provided by the primary config.
 FP8_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8")
 FP8_AFFINE_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_affine")
+FP8_CAST_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_cast")
 FP8_KV_SKIP_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/fp8_cast_skip")
+NVFP4_CAST_KV_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/kv/nvfp4_cast")
 
 NVFP4_DEFAULT_CFG: dict[str, Any] = _load_quantize_config_dict("configs/ptq/presets/model/nvfp4")
 NVFP4_FOUR_OVER_SIX_CFG: dict[str, Any] = _load_quantize_config_dict(
@@ -1833,6 +1835,7 @@ NVFP4_OMLP_ONLY_CFG: dict[str, Any] = _load_quantize_config_dict(
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",
+    "FP8_CAST_KV_CFG",
     "FP8_DEFAULT_CFG",
     "FP8_KV_CFG",
     "FP8_PER_CHANNEL_PER_TOKEN_CFG",
@@ -1864,6 +1867,7 @@ choices: set[str] = {
     "NVFP4_MLP_ONLY_CFG",
     "NVFP4_EXPERTS_ONLY_CFG",
     "NVFP4_OMLP_ONLY_CFG",
+    "NVFP4_CAST_KV_CFG",
     "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
