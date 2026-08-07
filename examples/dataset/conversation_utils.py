@@ -198,3 +198,6 @@ def normalize_messages(example: dict[str, Any], idx: int) -> dict[str, Any]:
             normalized.append({"role": "system", "content": m.get("content") or ""})
         # other roles (e.g. function, unknown) are dropped
     return {"messages": normalized}
+
+
+# ci gating probe
