@@ -207,13 +207,7 @@ def _vllm_stats_is_explicit(config: dict[str, Any]) -> bool:
 
 
 def _calculate_static_workload_stats(config: dict[str, Any], hydra_cfg: Any) -> None:
-    """
-    Append an analytical memory profile for each configured MIP workload.
-    
-    Parameters:
-    	config (dict[str, Any]): Pipeline configuration containing optional MIP workloads.
-    	hydra_cfg (Any): Base subblock-statistics configuration to customize for each workload.
-    """
+    """Append one analytical memory profile for every configured MIP workload."""
     from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
 
     workloads = dict((config.get("mip") or {}).get("workloads") or {})
@@ -249,15 +243,6 @@ def _calculate_static_workload_stats(config: dict[str, Any], hydra_cfg: Any) -> 
 
 
 def _scenario_hidden_width(puzzle_dir: Path) -> int | None:
-    """
-    Read the hidden width from a scenario manifest.
-    
-    Parameters:
-        puzzle_dir (Path): Directory containing the scenario manifest.
-    
-    Returns:
-        int | None: The manifest's hidden width, or `None` when the manifest or value is absent.
-    """
     manifest_path = puzzle_dir / "scenario_manifest.json"
     if not manifest_path.is_file():
         return None
@@ -273,20 +258,6 @@ def _has_runtime_measurement(
     measurement: Any,
     allow_missing_workload_id: bool = False,
 ) -> bool:
-    """
-    Determine whether a statistics file contains a compatible runtime measurement.
-
-    Parameters:
-    	path (Path): Statistics file to inspect.
-    	hidden_width (int): Model hidden width expected by the measurement.
-    	measurement (Any): Runtime measurement configuration to match.
-    	allow_missing_workload_id (bool): Whether entries without a workload identifier may match.
-
-    Returns:
-    	bool: `True` if a compatible runtime measurement is present, `False` otherwise.
-    """
-    from ..subblock_stats.calc_subblock_stats import _runtime_reuse_key, _runtime_stats_identity
-
     try:
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -294,27 +265,34 @@ def _has_runtime_measurement(
     if not isinstance(payload, list):
         return False
     expected_backend = (measurement.runtime_stats or {}).get("backend")
-    requested_key = _runtime_reuse_key(
-        width=hidden_width,
-        batch_size=measurement.batch_size,
-        prefill_seq_len=measurement.prefill_seq_len,
-        generation_seq_len=measurement.generation_seq_len,
-        runtime_stats_config=measurement.runtime_stats or {},
-    )
     for entry in payload:
         if not isinstance(entry, dict):
             continue
         args = entry.get("args") or {}
         if not isinstance(args, dict) or args.get("runtime_stats") is not True:
             continue
-        persisted_key = _runtime_stats_identity(
-            args,
-            fallback_workload_id=measurement.measurement_id if allow_missing_workload_id else None,
-        )
-        if persisted_key is None:
+        if int(args.get("n_embd", -1)) != int(hidden_width):
             continue
-        if persisted_key == requested_key:
-            return True
+        if args.get("weights_dtype") != "torch.bfloat16":
+            continue
+        if int(args.get("batch_size", -1)) != int(measurement.batch_size):
+            continue
+        if int(args.get("prefill_seq_len", -1)) != int(measurement.prefill_seq_len):
+            continue
+        if int(args.get("generation_seq_len", -1)) != int(measurement.generation_seq_len):
+            continue
+        if int(args.get("max_num_seqs", -1)) != int(measurement.max_num_seqs):
+            continue
+        if args.get("runtime_granularity", "subblock") != measurement.granularity:
+            continue
+        if expected_backend is not None and args.get("runtime_backend") != expected_backend:
+            continue
+        workload_id = args.get("workload_id")
+        if workload_id is None and not allow_missing_workload_id:
+            continue
+        if workload_id is not None and workload_id != measurement.measurement_id:
+            continue
+        return True
     return False
 
 
@@ -325,18 +303,6 @@ def _runtime_measurement_candidate_paths(
     stats_path: Path,
     measurement: Any,
 ) -> list[tuple[Path, bool]]:
-    """
-    Builds candidate paths for locating reusable runtime measurement statistics.
-    
-    Parameters:
-    	config (dict[str, Any]): Configuration containing the statistics filename.
-    	puzzle_dir (Path): Directory associated with the current scenario.
-    	stats_path (Path): Primary statistics file path.
-    	measurement (Any): Measurement configuration that may specify a relative statistics path.
-    
-    Returns:
-    	list[tuple[Path, bool]]: Candidate statistics paths paired with a flag indicating whether each path came from a configured relative path.
-    """
     stats_name = str(
         (config.get("vllm_stats") or {}).get("subblock_stats_filename", stats_path.name)
     )
@@ -363,22 +329,6 @@ def _runtime_reuse_source_path(
     hidden_width: int,
     measurement: Any,
 ) -> Path:
-    """
-    Finds a reusable vLLM measurement file matching the requested hidden width and workload.
-    
-    Parameters:
-    	config (dict[str, Any]): Runtime configuration used to resolve candidate measurement paths.
-    	puzzle_dir (Path): Experiment directory containing scenario-specific measurement files.
-    	stats_path (Path): Configured statistics file path.
-    	hidden_width (int): Hidden width required for the reusable measurement.
-    	measurement (Any): Workload measurement whose identity must match.
-    
-    Returns:
-    	Path: The first candidate measurement file containing a compatible runtime measurement.
-    
-    Raises:
-    	RuntimeError: If no candidate contains a matching reusable measurement.
-    """
     candidates = _runtime_measurement_candidate_paths(
         config=config,
         puzzle_dir=puzzle_dir,
@@ -405,7 +355,7 @@ def _refresh_scenario_runtime_workload_stats(
     hydra_cfg: Any,
     stats_path: Path,
 ) -> None:
-    """Refresh scenario-specific runtime statistics using measurements for the local hidden width."""
+    """Refresh width-scenario runtime rows with the local parameter inventory identity."""
     from ..subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
 
     puzzle_dir = _puzzle_dir(config, hydra_cfg)
@@ -445,13 +395,7 @@ def _refresh_scenario_runtime_workload_stats(
 
 
 def _write_runtime_subblock_library(path: Path, block_configs: tuple[Any, ...]) -> None:
-    """
-    Write runtime subblock configurations to a JSON library file.
-    
-    Parameters:
-        path (Path): Destination path for the library file.
-        block_configs (tuple[Any, ...]): Block configurations to serialize.
-    """
+    """Write the legacy subblock-library input without assembling a replacement library."""
     rows = []
     for block_config in block_configs:
         row = {
@@ -1180,21 +1124,6 @@ def bypass_overfit_stage(config: dict[str, Any], manifest: StageManifest):
 
 
 def build_library_stage(config: dict[str, Any], manifest: StageManifest):
-    """
-    Build the replacement and candidate libraries and record their associated statistics.
-    
-    The stage validates and shares the resolved scoring parent, optionally refreshes runtime
-    statistics, calculates static workload statistics, and publishes the resulting artifact
-    paths and execution metadata.
-    
-    Parameters:
-    	config (dict[str, Any]): Pipeline configuration.
-    	manifest (StageManifest): Manifest used to record stage completion and outputs.
-    
-    Returns:
-    	StageManifest: Updated manifest containing the generated library paths, statistics
-    	metadata, and scoring-parent information.
-    """
     hydra_cfg = load_runtime_hydra_config(config)
     puzzle_dir = _puzzle_dir(config, hydra_cfg)
     candidate_library_path = puzzle_dir / "candidate_library.json"

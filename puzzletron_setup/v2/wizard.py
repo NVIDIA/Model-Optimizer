@@ -3767,17 +3767,6 @@ def _post_mip_strategy(node: NodeDraft) -> str:
 
 
 def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
-    """
-    Configure post-MIP execution flows for each MIP run, using recommended or custom nodes.
-    
-    Parameters:
-    	session (WizardSession): Wizard session used to read state and collect configuration.
-    	resolver (DefaultsResolver): Resolver for stage resource defaults.
-    	context (dict): Model and pruning context required to configure serving and evaluation nodes.
-    
-    Returns:
-    	bool: `True` when post-MIP flows are configured, `False` when the section is exited through back navigation.
-    """
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
     sequence = int(session.state.get_field("data.sequence_length", 4096))
@@ -4204,22 +4193,7 @@ def _serving_setting_prompt(
     pruning: Mapping[str, Any],
     stage_id: str,
 ) -> Any:
-    """
-    Collect AIPerf serving workload settings and the vLLM serving topology.
-    
-    Parameters:
-    	session (WizardSession): Wizard session used to collect and validate responses.
-    	prefix (str): State key prefix for the serving settings.
-    	defaults (Mapping[str, Any]): Default workload and topology values.
-    	inventory (Any): Model inventory used to validate the topology.
-    	pruning (Mapping[str, Any]): Pruning configuration relevant to topology validation.
-    	stage_id (str): Pruning stage associated with the serving configuration.
-    
-    Returns:
-    	Any: A mapping containing input and output sequence lengths, concurrency values,
-    	request count, model selection mode, and topology, or the `BACK` sentinel when
-    	the user navigates to the previous prompt.
-    """
+    """Ask the complete AIPerf workload and serving-only parallel setting."""
     values = {}
     for name, label, default in (
         ("input_tokens", "Serving input sequence length (ISL):", defaults["input_tokens"]),
@@ -4296,30 +4270,9 @@ def _downstream_evaluation_setting_prompt(
     pruning: Mapping[str, Any],
     stage_id: str,
 ) -> Any:
-    """
-    Collect lmms-eval tasks, execution settings, model arguments, and vLLM topology.
-    
-    Parameters:
-    	session (WizardSession): Wizard session used to prompt for settings.
-    	prefix (str): State-key prefix for the prompted values.
-    	defaults (Mapping[str, Any]): Existing values used as prompt defaults.
-    	inventory (Any): Model inventory used to validate the vLLM topology.
-    	pruning (Mapping[str, Any]): Pruning configuration relevant to topology validation.
-    	stage_id (str): Identifier of the stage using the evaluation settings.
-    
-    Returns:
-    	Any: A mapping containing lmms-eval tasks, sample and batch limits, timeout, model arguments, logging settings, and vLLM topology, or `BACK` if prompting is cancelled.
-    """
+    """Ask lmms-eval task settings and the vLLM topology used to run them."""
 
     def validate_tasks(value: str) -> bool | str:
-        """Validate a comma-separated list of lmms-eval tasks.
-        
-        Parameters:
-        	value (str): Comma-separated task names.
-        
-        Returns:
-        	bool | str: `True` if at least one task is provided, otherwise an error message.
-        """
         tasks = [item.strip() for item in value.split(",") if item.strip()]
         return True if tasks else "Enter at least one lmms-eval task."
 
@@ -4393,16 +4346,7 @@ def _configure_dynamic_resources(
     *,
     ask: bool,
 ) -> Any:
-    """
-    Configure independent resource assignments for all nodes in a post-MIP flow.
-    
-    Parameters:
-        flow_id (str): Identifier of the flow whose nodes are configured.
-        ask (bool): Whether to prompt for resource and batch customizations.
-    
-    Returns:
-        True when configuration completes, or `BACK` when navigation is requested.
-    """
+    """Attach an independent resource/batch card to every node in one flow."""
     registry = ResourceProfileRegistry.from_dict(
         session.state.collection("parallel_profiles") or {}
     )

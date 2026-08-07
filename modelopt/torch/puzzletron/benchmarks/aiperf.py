@@ -114,14 +114,7 @@ def _canonical_topology(topology: dict[str, Any]) -> dict[str, Any]:
 
 
 def _topology_vllm_args(topology: dict[str, Any]) -> list[str]:
-    """Convert canonical parallelism settings into vLLM command-line arguments.
-    
-    Parameters:
-    	topology (dict[str, Any]): Topology configuration to normalize and convert.
-    
-    Returns:
-    	list[str]: vLLM command-line arguments for the configured tensor, pipeline, context, data, and expert parallelism.
-    """
+    """Translate the canonical TP/PP/DP/EP/CP contract to vLLM CLI arguments."""
 
     canonical = _canonical_topology(topology)
     args = [
@@ -171,17 +164,7 @@ def _has_vllm_option(args: Iterable[str], *options: str) -> bool:
 def _server_vllm_args(
     checkpoint_dir: Path, topology: dict[str, Any], concurrency_values: Iterable[int]
 ) -> list[str]:
-    """
-    Build vLLM server arguments from checkpoint configuration, topology, and concurrency demand.
-    
-    Parameters:
-        checkpoint_dir (Path): Directory containing the model checkpoint.
-        topology (dict[str, Any]): Topology and extra vLLM argument configuration.
-        concurrency_values (Iterable[int]): Requested concurrency levels used to set the default maximum number of sequences.
-    
-    Returns:
-        list[str]: Command-line arguments for the vLLM server.
-    """
+    """Build stable vLLM server args derived from topology and benchmark demand."""
 
     args = _topology_vllm_args(topology)
     args.extend(_descriptor_vllm_args(checkpoint_dir))
@@ -195,16 +178,7 @@ def _server_vllm_args(
 def _exact_length_extra_inputs(
     extra_inputs: dict[str, Any] | None, output_tokens: int
 ) -> dict[str, Any]:
-    """
-    Configure extra input settings for exact output-length measurements.
-    
-    Parameters:
-        extra_inputs (dict[str, Any] | None): Optional caller-provided input settings.
-    
-    Returns:
-        dict[str, Any]: The input settings with ``ignore_eos`` enabled when neither
-        ``ignore_eos`` nor ``min_tokens`` was explicitly provided.
-    """
+    """Guarantee the measured OSL unless the caller chose an explicit policy."""
     resolved = dict(extra_inputs or {})
     if "ignore_eos" not in resolved and "min_tokens" not in resolved:
         resolved["ignore_eos"] = True
@@ -435,33 +409,7 @@ def run_aiperf_sweep(
     benchmark_timeout: float = 600,
     gpu_telemetry: str | None = "pynvml",
 ) -> list[BenchmarkResult]:
-    """
-    Run multiple concurrency benchmarks against a persistent vLLM server.
-    
-    Parameters:
-    	checkpoint_dir (str | Path): Model checkpoint directory.
-    	artifact_dir (str | Path): Directory for benchmark outputs and logs.
-    	concurrencies (Iterable[int]): Unique positive concurrency levels to benchmark.
-    	input_tokens (int): Synthetic input length for each request.
-    	output_tokens (int): Synthetic output length for each request.
-    	gpu_ids (str): GPU visibility specification for the benchmark processes.
-    	topology (dict[str, Any]): vLLM parallelism and environment configuration.
-    	request_counts (dict[int, int] | None): Optional request count for each concurrency level.
-    	solution_id (str): Identifier for the benchmark solution.
-    	profile_id (str): Identifier for the benchmark profile.
-    	topology_id (str | None): Optional topology identifier.
-    	executable (str | Path): AIPerf executable to run.
-    	endpoint_type (str): Endpoint type used by AIPerf.
-    	extra_inputs (dict[str, Any] | None): Additional AIPerf input settings.
-    	use_server_token_count (bool): Whether to use token counts reported by the server.
-    	seed (int): Seed for synthetic request generation.
-    	readiness_timeout (float): Maximum time to wait for vLLM readiness, in seconds.
-    	benchmark_timeout (float): Maximum time allowed for each benchmark, in seconds.
-    	gpu_telemetry (str | None): GPU telemetry backend, or None to disable telemetry.
-    
-    Returns:
-    	list[BenchmarkResult]: Benchmark results in the original concurrency order.
-    """
+    """Run multiple concurrencies against one persistent vLLM server."""
 
     checkpoint_dir = Path(checkpoint_dir).resolve()
     artifact_dir = Path(artifact_dir).resolve()

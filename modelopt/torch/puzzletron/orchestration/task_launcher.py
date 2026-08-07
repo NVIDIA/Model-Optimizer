@@ -134,18 +134,7 @@ def build_task_command(
     binding: TaskBinding,
     gpus_per_task: int,
 ) -> tuple[str, ...]:
-    """
-    Build the command used to launch the application for the selected launcher and task topology.
-    
-    Parameters:
-        payload (Sequence[str]): Application command and its arguments.
-        launcher (TaskLauncher): Launcher mode that determines whether to wrap the payload.
-        binding (TaskBinding): Resolved task placement and rendezvous information.
-        gpus_per_task (int): Number of processes to launch per node when using distributed execution.
-    
-    Returns:
-        tuple[str, ...]: The original payload for direct execution, or a torchrun command configured for the task topology.
-    """
+    """Wrap an application payload in torchrun when the topology requests it."""
 
     command = tuple(str(part) for part in payload)
     if launcher is TaskLauncher.DIRECT:
@@ -185,20 +174,6 @@ def _direct_distributed_env(binding: TaskBinding) -> dict[str, str]:
 
 
 def _required_index(env: Mapping[str, str], primary: str, fallback: str) -> int:
-    """
-    Read a task index from the primary environment variable or its fallback.
-    
-    Parameters:
-        env (Mapping[str, str]): Environment variables containing the task index.
-        primary (str): Preferred environment variable name.
-        fallback (str): Alternate environment variable name.
-    
-    Returns:
-        int: The task index parsed from the selected environment variable.
-    
-    Raises:
-        RuntimeError: If neither environment variable is set.
-    """
     value = env.get(primary, env.get(fallback))
     if value is None:
         raise RuntimeError(f"missing task identity: set {primary} or {fallback}")
@@ -221,15 +196,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """
-    Resolve the task's distributed binding, prepare its execution environment, and replace the current process with the payload command.
-    
-    Parameters:
-        argv (Sequence[str] | None): Optional command-line arguments to parse instead of the process arguments.
-    
-    Returns:
-        int: Zero after replacing the current process with the payload command.
-    """
+    """Resolve this task's binding and replace the launcher with its payload."""
 
     args = _parser().parse_args(argv)
     payload = tuple(args.payload[1:] if args.payload[:1] == ["--"] else args.payload)

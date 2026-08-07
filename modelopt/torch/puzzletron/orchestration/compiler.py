@@ -431,22 +431,7 @@ def compile_campaign_plan(
     overrides: list[str] | None = None,
     stage_filter: str | None = None,
 ) -> CampaignPlan:
-    """
-    Compile a campaign plan from experiment, runner, and execution configurations.
-    
-    Parameters:
-        experiment_config_path: Path to the experiment configuration file.
-        runner: Runner environment used to execute the campaign.
-        execution: Execution defaults and per-stage settings.
-        overrides: Optional experiment configuration overrides.
-        stage_filter: Optional stage identifier limiting the plan to one enabled stage.
-    
-    Returns:
-        A compiled campaign plan containing stage meshes, dependencies, resources, and GPU allocations.
-    
-    Raises:
-        ValueError: If the selected stage is disabled, a CPU stage requests multiple instances, or a mesh override conflicts with its topology.
-    """
+    """Compile one campaign plan from experiment + runner + execution configs."""
 
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
