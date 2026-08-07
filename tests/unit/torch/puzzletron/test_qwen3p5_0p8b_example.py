@@ -18,10 +18,16 @@
 from pathlib import Path
 
 import yaml
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+CONFIG_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs"
 MODEL_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/model.yaml"
+)
+ADVANCED_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/advanced.yaml"
 )
 
 
@@ -55,9 +61,22 @@ def test_qwen3p5_0p8b_model_identity_and_geometry_are_pinned() -> None:
     }
 
 
-def test_qwen3p5_0p8b_axis_domains_keep_teacher_and_reduced_values_distinct() -> None:
+def test_qwen3p5_0p8b_default_search_matches_tracked_runtime_campaign() -> None:
     model = yaml.safe_load(MODEL_PATH.read_text())
-    axes = model["search_space"]["axes"]
+
+    assert model["pruning"] == {"intermediate_size_list": [3072, 2048]}
+    assert model["search_space"]["axes"] == {
+        "ffn_intermediate": {
+            "enabled": True,
+            "teacher_value": 3584,
+            "values": [3072, 2048],
+        }
+    }
+
+
+def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
+    advanced = yaml.safe_load(ADVANCED_PATH.read_text())
+    axes = advanced["search_space"]["axes"]
 
     expected_enabled_domains = {
         "hidden_width": (1024, [768]),
@@ -74,6 +93,10 @@ def test_qwen3p5_0p8b_axis_domains_keep_teacher_and_reduced_values_distinct() ->
         if axis["enabled"]
     }
 
+    assert advanced["pruning"] == {
+        "intermediate_size_list": [3072, 2560, 2048, 1792, 1536],
+        "attn_heads_list": [[2, 1], [4, 1], [4, 2], [8, 2]],
+    }
     assert enabled_domains == expected_enabled_domains
     assert axes["gdn_value_heads_per_group"] == {
         "enabled": False,
@@ -81,3 +104,19 @@ def test_qwen3p5_0p8b_axis_domains_keep_teacher_and_reduced_values_distinct() ->
         "values": [],
     }
     assert set(axes) == {*expected_enabled_domains, "gdn_value_heads_per_group"}
+
+
+def test_qwen3p5_0p8b_advanced_search_composes_the_pinned_model() -> None:
+    with initialize_config_dir(version_base=None, config_dir=str(CONFIG_ROOT)):
+        config = compose(config_name="families/qwen3_5/qwen3p5_0p8b/advanced")
+    config = OmegaConf.to_container(config, resolve=False)
+
+    assert config["input_hf_model_path"] == "Qwen/Qwen3.5-0.8B"
+    assert config["model_info"]["hf_revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
+    assert config["search_space"]["axes"]["ffn_intermediate"]["values"] == [
+        3072,
+        2560,
+        2048,
+        1792,
+        1536,
+    ]

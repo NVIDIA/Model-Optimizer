@@ -30,47 +30,14 @@ model_info:
     linear_value_head_dim: 128
     linear_conv_kernel_dim: 4
 
-# These lists contain reduced targets. Candidate construction adds the teacher
-# value for every enabled axis.
+# Keep the default search aligned with the tracked Qwen 3.5 0.8B runtime
+# campaign. Candidate construction adds the teacher value for the enabled axis.
 pruning:
-  intermediate_size_list: [3072, 2560, 2048, 1792, 1536]
-  attn_heads_list:
-    - [2, 1]
-    - [4, 1]
-    - [4, 2]
-    - [8, 2]
+  intermediate_size_list: [3072, 2048]
 
 search_space:
   axes:
-    hidden_width:
-      enabled: true
-      teacher_value: 1024
-      values: [768]
-    kv_groups:
-      enabled: true
-      teacher_value: 2
-      values: [1]
-    q_heads_per_group:
-      enabled: true
-      teacher_value: 4
-      values: [2]
     ffn_intermediate:
       enabled: true
       teacher_value: 3584
-      values: [3072, 2560, 2048, 1792, 1536]
-    gdn_key_groups:
-      enabled: true
-      teacher_value: 16
-      values: [12, 8]
-    gdn_value_heads_per_group:
-      enabled: false
-      teacher_value: 1
-      values: []
-    gdn_key_head_dim:
-      enabled: true
-      teacher_value: 128
-      values: [96]
-    gdn_value_head_dim:
-      enabled: true
-      teacher_value: 128
-      values: [96]
+      values: [3072, 2048]
