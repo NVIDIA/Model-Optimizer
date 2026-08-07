@@ -14,7 +14,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_orchestrator.controller import dry_run_plan
+from puzzletron_orchestrator.controller import _stage_dashboard_display_name, dry_run_plan
 from puzzletron_orchestrator.executors.baremetal import GpuLeaseManager
 from puzzletron_orchestrator.schema import (
     AttemptSpec,

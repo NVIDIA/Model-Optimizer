@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any
 from .base import NodeCapabilities, NodeKind, PostMIPNode, post_mip_node
 from .filters import filter_metric_references, validate_filter_config
 from .records import ArtifactKind
-from .reporting import render_aiperf_report, render_evaluation_report, render_global_kd_report
+from .reporting import (
+    render_aiperf_report,
+    render_downstream_evaluation_report,
+    render_evaluation_report,
+    render_global_kd_report,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -115,6 +120,10 @@ class DownstreamEvaluationNode(PostMIPNode):
         NodeKind.EVALUATOR,
         frozenset({ArtifactKind.CHECKPOINT}),
         distributed=True,
-        implemented=False,
         default_strategy="sharded",
     )
+
+    @classmethod
+    def render_report(cls, node, payload):
+        """Render the downstream evaluation report for the payload's section."""
+        return render_downstream_evaluation_report(str(payload["section_id"]), payload)

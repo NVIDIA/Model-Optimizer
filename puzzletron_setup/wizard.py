@@ -640,7 +640,18 @@ def _ask_aiperf_config(
     runtime: Mapping[str, Any],
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ask for one AIPerf node's independent Serving topology and workload."""
+    """
+    Configure an AIPerf serving node's parallel topology and workload settings.
+    
+    Parameters:
+        detailed (bool): Whether to prompt for workload and timeout values.
+        moe (bool): Whether to configure expert parallelism for a mixture-of-experts model.
+        runtime (Mapping[str, Any]): Runtime defaults for input length, output length, and concurrency.
+        defaults (Mapping[str, Any] | None): Previously saved configuration values.
+    
+    Returns:
+        dict[str, Any]: The configured AIPerf topology, workload, and timeout settings.
+    """
     defaults = dict(defaults or {})
     topology_defaults = dict(defaults.get("topology") or {})
     checkpoint = prompts.checkpoint()
@@ -733,6 +744,128 @@ def _ask_aiperf_config(
     return config
 
 
+def _ask_downstream_evaluation_config(
+    prompts: PromptSession,
+    *,
+    detailed: bool,
+    moe: bool,
+    defaults: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Collect lmms-eval tasks, sampling settings, vLLM topology, and evaluation timeout.
+    
+    Parameters:
+        detailed (bool): Whether to prompt for the per-candidate timeout.
+        moe (bool): Whether to allow configuring expert parallelism.
+        defaults (Mapping[str, Any] | None): Previously saved settings used as prompt defaults.
+    
+    Returns:
+        dict[str, Any]: The configured downstream evaluation settings.
+    """
+
+    defaults = defaults or {}
+    default_tasks = defaults.get("tasks", "ifeval,gsm8k")
+    if isinstance(default_tasks, list):
+        default_tasks = ",".join(default_tasks)
+    tasks = prompts.text(
+        "lmms-eval tasks (comma-separated):",
+        default=str(default_tasks),
+        validate=lambda value: bool(str(value).strip()) or "Enter at least one task.",
+    )
+    limit = prompts.integer(
+        "lmms-eval sample limit:",
+        default=int(defaults.get("limit", 128)),
+    )
+    batch_size = prompts.integer(
+        "lmms-eval batch size:",
+        default=int(defaults.get("batch_size", 1)),
+    )
+    topology_defaults = dict(defaults.get("topology") or {})
+    checkpoint = prompts.checkpoint()
+    while True:
+        tp = prompts.integer(
+            "lmms-eval vLLM tensor parallel (TP):",
+            default=int(topology_defaults.get("tensor_parallel_size", 1)),
+        )
+        pp = prompts.integer(
+            "lmms-eval vLLM pipeline parallel (PP):",
+            default=int(topology_defaults.get("pipeline_parallel_size", 1)),
+        )
+        dp = prompts.integer(
+            "lmms-eval vLLM data parallel (DP):",
+            default=int(topology_defaults.get("data_parallel_size", 1)),
+        )
+        prefill_cp = prompts.integer(
+            "lmms-eval vLLM prefill context parallel (CP):",
+            default=int(topology_defaults.get("prefill_context_parallel_size", 1)),
+        )
+        decode_cp = prompts.integer(
+            "lmms-eval vLLM decode context parallel (CP):",
+            default=int(topology_defaults.get("decode_context_parallel_size", 1)),
+        )
+        enable_expert_parallel = (
+            prompts.confirm(
+                (
+                    "Enable lmms-eval vLLM expert parallelism? "
+                    "vLLM effective EP is TP * DP."
+                ),
+                default=bool(
+                    topology_defaults.get("enable_expert_parallel")
+                    or int(topology_defaults.get("expert_parallel_size", 1)) > 1
+                ),
+            )
+            if moe
+            else False
+        )
+        dimensions = {
+            "TP": tp,
+            "PP": pp,
+            "DP": dp,
+            "prefill CP": prefill_cp,
+            "decode CP": decode_cp,
+        }
+        error = None
+        if any(int(value) < 1 for value in dimensions.values()):
+            error = f"lmms-eval vLLM parallel dimensions must be positive: {dimensions}"
+        elif decode_cp > tp or tp % decode_cp:
+            error = f"lmms-eval vLLM decode CP={decode_cp} must divide TP={tp}."
+        if error is None:
+            break
+        print(error)
+        prompts.rewind(checkpoint)
+    topology = {
+        "tensor_parallel_size": tp,
+        "pipeline_parallel_size": pp,
+        "prefill_context_parallel_size": prefill_cp,
+        "decode_context_parallel_size": decode_cp,
+        "data_parallel_size": dp,
+        "enable_expert_parallel": bool(enable_expert_parallel),
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": tp * pp * prefill_cp * dp,
+    }
+    timeout = (
+        prompts.integer(
+            "Per-candidate lmms-eval timeout (seconds):",
+            default=int(defaults.get("timeout_seconds", 3600)),
+        )
+        if detailed
+        else int(defaults.get("timeout_seconds", 3600))
+    )
+    return {
+        "model": "vllm",
+        "tasks": [item.strip() for item in str(tasks).split(",") if item.strip()],
+        "limit": int(limit),
+        "batch_size": int(batch_size),
+        "log_samples": True,
+        "topology": topology,
+        "model_args": {
+            "dtype": "bfloat16",
+            "gpu_memory_utilization": 0.85,
+        },
+        "timeout_seconds": int(timeout),
+    }
+
+
 def _default_flow(
     run_id: str,
     run: Mapping[str, Any],
@@ -743,6 +876,21 @@ def _default_flow(
     objective: Mapping[str, Any] | None = None,
     include_initial_filter: bool = True,
 ) -> dict[str, Any]:
+    """
+    Build the standard post-MIP evaluation and selection flow.
+    
+    Parameters:
+        run_id (str): Identifier of the MIP run.
+        run (Mapping[str, Any]): MIP run configuration.
+        runtime (Mapping[str, Any]): Runtime settings for serving evaluation.
+        data (Mapping[str, Any]): Dataset settings, including sequence length.
+        prefix (str): Prefix applied to generated node identifiers.
+        objective (Mapping[str, Any] | None): Objective used to configure ranking; the run's first objective is used when omitted.
+        include_initial_filter (bool): Whether to include the initial MIP-score filter.
+    
+    Returns:
+        dict[str, Any]: Flow configuration containing the source metadata and ordered post-MIP nodes.
+    """
     def node_id(name: str) -> str:
         return f"{prefix}{name}"
 
@@ -902,6 +1050,20 @@ def _custom_flow(
     detailed: bool,
     moe: bool,
 ) -> dict[str, Any]:
+    """
+    Build a custom post-MIP evaluation flow through interactive configuration.
+    
+    Parameters:
+        run_id (str): Identifier of the MIP run supplying candidate models.
+        runtime (Mapping[str, Any]): Runtime settings used by serving evaluations.
+        data (Mapping[str, Any]): Dataset settings used by evaluation nodes.
+        used_ids (set[str]): Node IDs already in use; newly configured IDs are added.
+        detailed (bool): Whether to collect detailed evaluation settings.
+        moe (bool): Whether to enable mixture-of-experts configuration options.
+    
+    Returns:
+        dict[str, Any]: A flow definition containing the MIP source and configured nodes.
+    """
     nodes: OrderedDict[str, Any] = OrderedDict()
     available_metrics = ["mip.score"]
     transformer_nodes = []
@@ -916,7 +1078,7 @@ def _custom_flow(
                 "global_kd",
                 "manual_filter",
                 ("PTQ (reserved; not executable yet)", "ptq"),
-                ("Downstream evaluation (reserved; not executable yet)", "downstream_evaluation"),
+                "downstream_evaluation",
             ],
             default="filter",
         )
@@ -963,9 +1125,17 @@ def _custom_flow(
                 runtime=runtime,
             )
             available_metrics.append(f"{node_id}.request_throughput")
+        elif node_type == "downstream_evaluation":
+            node["config"] = _ask_downstream_evaluation_config(
+                prompts,
+                detailed=detailed,
+                moe=moe,
+            )
+            for task_name in node["config"].get("tasks", []):
+                available_metrics.append(f"{node_id}.{task_name}.strict-match")
         elif node_type == "global_kd":
             node["config"] = {"max_steps": prompts.integer("Global KD steps:", default=128)}
-        elif node_type in {"ptq", "downstream_evaluation"}:
+        elif node_type == "ptq":
             print(
                 f"{node_type} records the reserved interface, but current orchestration "
                 "validation will report it as unimplemented."
@@ -1111,6 +1281,20 @@ def _resource_rows(
     gpus_per_node: int,
     workers: Mapping[str, int],
 ) -> list[dict[str, Any]]:
+    """
+    Calculate resource requirements for each campaign execution stage.
+    
+    Parameters:
+        state (AnswerState): Campaign configuration containing post-MIP flows and execution details.
+        common (Mapping[str, int]): Parallel mesh dimensions shared by common stages.
+        bypass (Mapping[str, int]): Parallel mesh dimensions for bypass processing.
+        global_kd (Mapping[str, int]): Parallel mesh dimensions for global knowledge distillation.
+        gpus_per_node (int): Number of GPUs available on each node.
+        workers (Mapping[str, int]): Worker limits for pool and sharded stages.
+    
+    Returns:
+        list[dict[str, Any]]: Resource rows containing each stage's name, instance count, GPUs per instance, and required node count.
+    """
     from .bundle import _post_mip_candidate_limits, _serving_parallel
 
     rows = []
@@ -1163,6 +1347,11 @@ def _resource_rows(
             "AIPerf",
             post_mip_gpus_per_instance("aiperf", 1),
             post_mip_instances("aiperf", sharded_workers, sharded_workers),
+        ),
+        (
+            "downstream eval",
+            post_mip_gpus_per_instance("downstream_evaluation", 1),
+            post_mip_instances("downstream_evaluation", sharded_workers, sharded_workers),
         ),
         (
             "evaluation",

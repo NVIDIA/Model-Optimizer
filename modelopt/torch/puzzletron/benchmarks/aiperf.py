@@ -114,7 +114,14 @@ def _canonical_topology(topology: dict[str, Any]) -> dict[str, Any]:
 
 
 def _topology_vllm_args(topology: dict[str, Any]) -> list[str]:
-    """Translate the canonical TP/PP/DP/EP/CP contract to vLLM CLI arguments."""
+    """Convert canonical parallelism settings into vLLM command-line arguments.
+    
+    Parameters:
+    	topology (dict[str, Any]): Topology configuration to normalize and convert.
+    
+    Returns:
+    	list[str]: vLLM command-line arguments for the configured tensor, pipeline, context, data, and expert parallelism.
+    """
 
     canonical = _canonical_topology(topology)
     args = [
@@ -143,10 +150,61 @@ def _topology_vllm_args(topology: dict[str, Any]) -> list[str]:
     return args
 
 
+def _extra_vllm_args(topology: dict[str, Any]) -> tuple[str, ...]:
+    """Return caller-provided vLLM args without treating a string as characters."""
+
+    raw = topology.get("extra_vllm_args", ())
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(str(arg) for arg in raw)
+
+
+def _has_vllm_option(args: Iterable[str], *options: str) -> bool:
+    """Return whether an option is present as ``--flag`` or ``--flag=value``."""
+
+    option_set = set(options)
+    return any(str(arg).split("=", 1)[0] in option_set for arg in args)
+
+
+def _server_vllm_args(
+    checkpoint_dir: Path, topology: dict[str, Any], concurrency_values: Iterable[int]
+) -> list[str]:
+    """
+    Build vLLM server arguments from checkpoint configuration, topology, and concurrency demand.
+    
+    Parameters:
+        checkpoint_dir (Path): Directory containing the model checkpoint.
+        topology (dict[str, Any]): Topology and extra vLLM argument configuration.
+        concurrency_values (Iterable[int]): Requested concurrency levels used to set the default maximum number of sequences.
+    
+    Returns:
+        list[str]: Command-line arguments for the vLLM server.
+    """
+
+    args = _topology_vllm_args(topology)
+    args.extend(_descriptor_vllm_args(checkpoint_dir))
+    extra_args = _extra_vllm_args(topology)
+    if not _has_vllm_option(extra_args, "--max-num-seqs", "--max_num_seqs"):
+        args.extend(("--max-num-seqs", str(max(concurrency_values))))
+    args.extend(extra_args)
+    return args
+
+
 def _exact_length_extra_inputs(
     extra_inputs: dict[str, Any] | None, output_tokens: int
 ) -> dict[str, Any]:
-    """Guarantee the measured OSL unless the caller chose an explicit policy."""
+    """
+    Configure extra input settings for exact output-length measurements.
+    
+    Parameters:
+        extra_inputs (dict[str, Any] | None): Optional caller-provided input settings.
+    
+    Returns:
+        dict[str, Any]: The input settings with ``ignore_eos`` enabled when neither
+        ``ignore_eos`` nor ``min_tokens`` was explicitly provided.
+    """
     resolved = dict(extra_inputs or {})
     if "ignore_eos" not in resolved and "min_tokens" not in resolved:
         resolved["ignore_eos"] = True
@@ -377,7 +435,33 @@ def run_aiperf_sweep(
     benchmark_timeout: float = 600,
     gpu_telemetry: str | None = "pynvml",
 ) -> list[BenchmarkResult]:
-    """Run multiple concurrencies against one persistent vLLM server."""
+    """
+    Run multiple concurrency benchmarks against a persistent vLLM server.
+    
+    Parameters:
+    	checkpoint_dir (str | Path): Model checkpoint directory.
+    	artifact_dir (str | Path): Directory for benchmark outputs and logs.
+    	concurrencies (Iterable[int]): Unique positive concurrency levels to benchmark.
+    	input_tokens (int): Synthetic input length for each request.
+    	output_tokens (int): Synthetic output length for each request.
+    	gpu_ids (str): GPU visibility specification for the benchmark processes.
+    	topology (dict[str, Any]): vLLM parallelism and environment configuration.
+    	request_counts (dict[int, int] | None): Optional request count for each concurrency level.
+    	solution_id (str): Identifier for the benchmark solution.
+    	profile_id (str): Identifier for the benchmark profile.
+    	topology_id (str | None): Optional topology identifier.
+    	executable (str | Path): AIPerf executable to run.
+    	endpoint_type (str): Endpoint type used by AIPerf.
+    	extra_inputs (dict[str, Any] | None): Additional AIPerf input settings.
+    	use_server_token_count (bool): Whether to use token counts reported by the server.
+    	seed (int): Seed for synthetic request generation.
+    	readiness_timeout (float): Maximum time to wait for vLLM readiness, in seconds.
+    	benchmark_timeout (float): Maximum time allowed for each benchmark, in seconds.
+    	gpu_telemetry (str | None): GPU telemetry backend, or None to disable telemetry.
+    
+    Returns:
+    	list[BenchmarkResult]: Benchmark results in the original concurrency order.
+    """
 
     checkpoint_dir = Path(checkpoint_dir).resolve()
     artifact_dir = Path(artifact_dir).resolve()
@@ -405,6 +489,8 @@ def run_aiperf_sweep(
     model_name = f"puzzletron-{architecture_id[:16]}"
     tokenizer_dir = _short_tokenizer_alias(checkpoint_dir, artifact_dir)
     server_log = artifact_dir / "vllm_server.log"
+    server_max_model_len = _server_max_model_len(input_tokens, output_tokens, topology)
+    server_vllm_args = _server_vllm_args(checkpoint_dir, topology, concurrency_values)
     server_cmd = [
         "vllm",
         "serve",
@@ -416,12 +502,10 @@ def run_aiperf_sweep(
         "--served-model-name",
         model_name,
         "--max-model-len",
-        str(_server_max_model_len(input_tokens, output_tokens, topology)),
+        str(server_max_model_len),
         "--trust-remote-code",
     ]
-    server_cmd.extend(_topology_vllm_args(topology))
-    server_cmd.extend(_descriptor_vllm_args(checkpoint_dir))
-    server_cmd.extend(str(arg) for arg in topology.get("extra_vllm_args", ()))
+    server_cmd.extend(server_vllm_args)
     executable = _resolve_executable(executable)
     env = _clean_subprocess_environment(
         gpu_ids,
@@ -463,6 +547,10 @@ def run_aiperf_sweep(
                 "endpoint_type": endpoint_type,
                 "extra_inputs": _exact_length_extra_inputs(extra_inputs, output_tokens),
                 "use_server_token_count": use_server_token_count,
+                "server": {
+                    "max_model_len": server_max_model_len,
+                    "vllm_args": tuple(server_vllm_args),
+                },
                 "revisions": revisions,
             },
             prefix="aiperf_result",

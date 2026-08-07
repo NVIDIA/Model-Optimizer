@@ -188,7 +188,12 @@ def _dataset_subset_issues(state: WizardState) -> list[ValidationIssue]:
 
 
 def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
-    """Return actionable authoring issues before canonical compilation."""
+    """
+    Validate wizard state and identify issues that prevent canonical compilation.
+    
+    Returns:
+    	tuple[ValidationIssue, ...]: Validation issues sorted by configuration section and path.
+    """
     issues: list[ValidationIssue] = []
     required = (
         "model.source",
@@ -298,7 +303,7 @@ def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
     for stage_id, node in post_mip_nodes.items():
         node_type = str(node.get("type", ""))
         config = _mapping(node.get("config"))
-        if node_type == "aiperf":
+        if node_type in {"aiperf", "downstream_evaluation"}:
             topology = _mapping(config.get("topology"))
             if topology:
                 issues.extend(

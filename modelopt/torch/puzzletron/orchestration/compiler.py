@@ -57,7 +57,17 @@ _DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
     "aiperf": ExecutionStrategy.SHARDED,
 }
 
+
 def _mapping(value: Any) -> dict[str, Any]:
+    """
+    Convert a mapping to a dictionary.
+    
+    Parameters:
+        value (Any): The value to convert.
+    
+    Returns:
+        dict[str, Any]: A dictionary containing the mapping's entries, or an empty dictionary for other values.
+    """
     return dict(value) if isinstance(value, Mapping) else {}
 
 
@@ -85,7 +95,6 @@ _POST_MIP_NODE_METADATA = {
     "downstream_evaluation": {
         "kind": "evaluator",
         "accepts": {"checkpoint"},
-        "implemented": False,
     },
 }
 
@@ -442,7 +451,22 @@ def compile_campaign_plan(
     overrides: list[str] | None = None,
     stage_filter: str | None = None,
 ) -> CampaignPlan:
-    """Compile one campaign plan from experiment + runner + execution configs."""
+    """
+    Compile a campaign plan from experiment, runner, and execution configurations.
+    
+    Parameters:
+        experiment_config_path: Path to the experiment configuration file.
+        runner: Runner environment used to execute the campaign.
+        execution: Execution defaults and per-stage settings.
+        overrides: Optional experiment configuration overrides.
+        stage_filter: Optional stage identifier limiting the plan to one enabled stage.
+    
+    Returns:
+        A compiled campaign plan containing stage meshes, dependencies, resources, and GPU allocations.
+    
+    Raises:
+        ValueError: If the selected stage is disabled, a CPU stage requests multiple instances, or a mesh override conflicts with its topology.
+    """
 
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
@@ -516,7 +540,7 @@ def compile_campaign_plan(
                         parallel[key] = node_config[key]
                     elif key in global_kd and key not in parallel:
                         parallel[key] = global_kd[key]
-            if dynamic["node_type"] == "aiperf":
+            if dynamic["node_type"] in {"aiperf", "downstream_evaluation"}:
                 topology = _mapping(node_config.get("topology"))
                 topology_mesh = vllm_topology_to_mesh(topology)
                 if override:
@@ -525,7 +549,7 @@ def compile_campaign_plan(
                     if ParallelMesh.from_mapping(overridden) != topology_mesh:
                         raise ValueError(
                             f"{stage_id} execution parallel override conflicts with "
-                            "its AIPerf topology"
+                            "its vLLM topology"
                         )
                 mesh = topology_mesh
             else:

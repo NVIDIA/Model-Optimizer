@@ -16,6 +16,7 @@ from typing import Any
 __all__ = [
     "build_post_mip_report_payloads",
     "render_aiperf_report",
+    "render_downstream_evaluation_report",
     "render_evaluation_report",
     "render_global_kd_report",
 ]
@@ -318,7 +319,17 @@ def render_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str
 
 
 def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:
-    """Render AIPerf throughput/latency observations and timeout evidence."""
+    """
+    Render AIPerf candidate status, performance metrics, selection markers, and errors.
+    
+    Parameters:
+        section_id (str): Identifier used to scope the throughput chart element.
+        payload (Mapping[str, Any]): AIPerf observations and status data.
+    
+    Returns:
+        str: HTML fragment containing the status summary, throughput chart placeholder,
+            and candidate metrics table.
+    """
 
     observations = list(payload.get("observations") or ())
     rows = []
@@ -356,8 +367,27 @@ def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:
     )
 
 
+def render_downstream_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str:
+    """Render lmms-eval task metrics for downstream-evaluation nodes."""
+
+    return render_evaluation_report(section_id, payload).replace(
+        "<h3>Candidate evaluation</h3>",
+        "<h3>Downstream evaluation</h3>",
+        1,
+    )
+
+
 def render_global_kd_report(section_id: str, payload: Mapping[str, Any]) -> str:
-    """Render several candidate KD histories on shared, lineage-colored plots."""
+    """
+    Render the Short KD comparison with candidate statuses, loss plots, and run summaries.
+    
+    Parameters:
+        section_id (str): Identifier used to generate unique plot element IDs.
+        payload (Mapping[str, Any]): Short KD runs and status data to display.
+    
+    Returns:
+        str: HTML fragment containing the comparison summary, plot placeholders, and run table.
+    """
 
     runs = list(payload.get("runs") or ())
     rows = []

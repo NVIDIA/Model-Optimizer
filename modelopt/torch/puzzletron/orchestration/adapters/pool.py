@@ -224,6 +224,20 @@ class PersistentPoolAdapter(WorkAdapter):
         runner,
         overrides: list[str] | None = None,
     ) -> AttemptSpec:
+        """
+        Build the execution command and resource allocation for a planned work item.
+        
+        Parameters:
+        	plan (CampaignPlan): Campaign configuration and execution context.
+        	node (StagePlanNode): Stage and resource configuration for the work item.
+        	item (WorkItem): Work item metadata, role, and local GPU assignments.
+        	attempt_id (str): Identifier for the execution attempt.
+        	runner: Runner context containing the repository location.
+        	overrides (list[str] | None): Optional configuration overrides to apply.
+        
+        Returns:
+        	AttemptSpec: Command, environment, resource allocation, and execution metadata for the work item.
+        """
         repo = Path(runner.contract.repository)
         role = item.metadata.get("role", "worker")
         log_dir = plan.puzzle_dir / "logs"
@@ -242,8 +256,8 @@ class PersistentPoolAdapter(WorkAdapter):
                 "CAMPAIGN_DIR": str(campaign_dir),
                 "CONFIG_PATH": plan.experiment_config_path,
                 "PUZZLE_DIR": str(replacement_puzzle_dir),
-                "WORLD_SIZE": str(node.gpus_per_instance),
                 "NPROC_PER_NODE": str(node.gpus_per_instance),
+                "WORKER_WORLD_SIZE": str(node.gpus_per_instance),
                 "WORKER_COUNT": str(worker_count),
             }
             if node.stage_id == "depth_importance":
@@ -317,7 +331,7 @@ class PersistentPoolAdapter(WorkAdapter):
             "CAMPAIGN_DIR": str(campaign_dir),
             "CONFIG_PATH": plan.experiment_config_path,
             "PUZZLE_DIR": str(replacement_puzzle_dir),
-            "WORLD_SIZE": str(node.gpus_per_instance),
+            "WORKER_WORLD_SIZE": str(node.gpus_per_instance),
             "WORKER_ID": str(item.metadata.get("worker_id", 0)),
             "WORKER_COUNT": str(node.instances),
         }

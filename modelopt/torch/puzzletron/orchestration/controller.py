@@ -63,6 +63,19 @@ __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
 
 
 def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
+    """
+    Create an executor for the campaign plan's configured runner.
+    
+    Parameters:
+        plan (CampaignPlan): Campaign plan containing runner configuration.
+        local (bool): Whether to use a local executor instead of the configured runner.
+    
+    Returns:
+        Executor: Executor configured for local, Slurm, or bare-metal SSH execution.
+    
+    Raises:
+        ValueError: If the configured runner kind is unsupported.
+    """
     if local:
         return LocalExecutor(plan.runner)
     if plan.runner.kind == "slurm":
@@ -72,6 +85,39 @@ def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
         executor.preflight()
         return executor
     raise ValueError(f"Unsupported runner kind: {plan.runner.kind}")
+
+
+def _stage_dashboard_display_name(
+    config: Mapping[str, Any],
+    stage_id: str,
+    *,
+    granularity: str | None = None,
+) -> str:
+    """Resolve the dashboard display name for a campaign stage.
+    
+    Parameters:
+    	config (Mapping[str, Any]): Campaign configuration containing post-MIP flow definitions.
+    	stage_id (str): Stage identifier to format.
+    	granularity (str | None): Optional naming granularity.
+    
+    Returns:
+    	str: ``"Downstream Evaluation"`` for downstream evaluation post-MIP stages; otherwise, the formatted stage name.
+    """
+    if stage_id.startswith("post."):
+        parts = stage_id.split(".", 2)
+        if len(parts) == 3:
+            _prefix, flow_id, node_id = parts
+            node = (
+                (config.get("post_mip") or {})
+                .get("flows", {})
+                .get(flow_id, {})
+                .get("nodes", {})
+                .get(node_id, {})
+            )
+            node_type = str(node.get("type") or "") if isinstance(node, Mapping) else ""
+            if node_type == "downstream_evaluation":
+                return "Downstream Evaluation"
+    return stage_display_name(stage_id, granularity=granularity)
 
 
 @dataclass
@@ -748,7 +794,8 @@ class CampaignController:
             views.append(
                 StageView(
                     stage_id=node.stage_id,
-                    display_name=stage_display_name(
+                    display_name=_stage_dashboard_display_name(
+                        self.plan.experiment_config,
                         node.stage_id,
                         granularity=str(granularity) if granularity is not None else None,
                     ),

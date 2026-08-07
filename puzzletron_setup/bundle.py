@@ -329,6 +329,19 @@ def _post_mip_flows(
     global_kd_mesh: Mapping[str, Any],
     default_serving_topology: Mapping[str, Any],
 ) -> dict[str, Any]:
+    """
+    Prepare post-MIP flow configurations with mesh settings, serving defaults, and smoke-run limits.
+    
+    Parameters:
+        state (Mapping[str, Any]): Campaign state containing post-MIP flow definitions.
+        smoke (bool): Whether to apply reduced settings for a smoke run.
+        common_mesh (Mapping[str, Any]): Mesh used by evaluation and materialization nodes.
+        global_kd_mesh (Mapping[str, Any]): Mesh used by global knowledge-distillation nodes.
+        default_serving_topology (Mapping[str, Any]): Default topology for serving-based nodes.
+    
+    Returns:
+        dict[str, Any]: The normalized post-MIP flow configurations.
+    """
     flows = deepcopy(_mapping(_answers(state, "post_mip").get("flows")))
     for flow in flows.values():
         for node in _mapping(flow.get("nodes")).values():
@@ -346,6 +359,13 @@ def _post_mip_flows(
                 if smoke:
                     config["minimum_request_count"] = 4
                     config["requests_per_concurrency"] = 1
+            elif node_type == "downstream_evaluation":
+                config.setdefault("model", "vllm")
+                config.setdefault("batch_size", 1)
+                config.setdefault("log_samples", True)
+                config.setdefault("topology", deepcopy(dict(default_serving_topology)))
+                if smoke:
+                    config["limit"] = min(int(config.get("limit", 8) or 8), 8)
             elif node_type == "global_kd":
                 config.setdefault("automodel", {})["parallel"] = _parallel(global_kd_mesh)
                 config["local_batch_size"] = _aligned_batch_size(
@@ -788,6 +808,21 @@ def _dynamic_stage_entries(
     *,
     pool_source_evaluations: bool,
 ) -> dict[str, Any]:
+    """
+    Builds scheduler entries for dynamic post-MIP stages.
+    
+    Parameters:
+        experiment (Mapping[str, Any]): Experiment configuration containing post-MIP flows.
+        workers (Mapping[str, Any]): Worker limits for pooled and sharded stages.
+        gpus_per_node (int): Number of GPUs assigned to each node.
+        common (Mapping[str, Any]): Parallel configuration for evaluation stages.
+        single_gpu (Mapping[str, Any]): Parallel configuration for materialization stages.
+        cpu_partition (str | None): CPU partition to assign to CPU stages.
+        pool_source_evaluations (bool): Whether source evaluations should use pooled workers.
+    
+    Returns:
+        dict[str, Any]: Scheduler entries keyed by post-MIP flow and node identifiers.
+    """
     entries = {}
     candidate_limits = _post_mip_candidate_limits(experiment)
     for flow_id, flow in _mapping(_mapping(experiment.get("post_mip")).get("flows")).items():
@@ -816,7 +851,7 @@ def _dynamic_stage_entries(
                 entry.update(resource="cpu", partition=cpu_partition)
             if node_type == "evaluation":
                 entry["parallel"] = dict(common)
-            elif node_type == "aiperf":
+            elif node_type in {"aiperf", "downstream_evaluation"}:
                 config = _mapping(node.get("config"))
                 entry["parallel"] = _serving_parallel(_mapping(config.get("topology")))
             elif node_type == "materialize":
