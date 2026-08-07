@@ -55,7 +55,9 @@ def normalize_config(config: DictConfig | dict[str, Any]) -> dict[str, Any]:
     return normalize_pipeline_config(config)
 
 
-def _get_nested(config: dict[str, Any], path: tuple[str, ...], default: Any = None) -> Any:
+def _get_nested(
+    config: dict[str, Any], path: tuple[str, ...], default: Any = None
+) -> Any:
     value: Any = config
     for key in path:
         if not isinstance(value, dict) or key not in value:
@@ -101,7 +103,9 @@ def _resolve_capabilities(config: dict[str, Any]) -> DescriptorResolution | None
     if descriptor_override and (not source or not Path(str(source)).exists()):
         return resolve_descriptor_by_name(descriptor_override)
     if not source:
-        raise ValueError("Puzzletron config must define model.source or model.descriptor_override")
+        raise ValueError(
+            "Puzzletron config must define model.source or model.descriptor_override"
+        )
     return resolve_descriptor_from_pretrained(
         source,
         trust_remote_code=bool(model_cfg.get("trust_remote_code", False)),
@@ -140,7 +144,9 @@ def _preflight(
             break
     model_cfg = config.get("model") or {}
     library_cfg = config.get("library") or {}
-    runtime_stats_cfg = (config.get("calc_subblock_stats") or {}).get("runtime_stats") or {}
+    runtime_stats_cfg = (config.get("calc_subblock_stats") or {}).get(
+        "runtime_stats"
+    ) or {}
     capability_validation = config.get("capability_validation") or {}
     require_vllm = (
         bool((config.get("vllm_stats") or {}).get("enabled", False))
@@ -194,7 +200,8 @@ def run_stage(
     config: DictConfig | dict[str, Any],
     stage: str,
     *,
-    handlers: dict[str, Callable[[dict[str, Any], StageManifest], StageResult]] | None = None,
+    handlers: dict[str, Callable[[dict[str, Any], StageManifest], StageResult]]
+    | None = None,
 ) -> StageResult:
     """Run a Puzzletron stage through the manifest and capability boundary.
 
@@ -203,7 +210,9 @@ def run_stage(
     """
     stage = canonical_stage_name(stage)
     if stage not in STAGES:
-        raise ValueError(f"Unknown Puzzletron stage '{stage}'. Expected one of {STAGES}")
+        raise ValueError(
+            f"Unknown Puzzletron stage '{stage}'. Expected one of {STAGES}"
+        )
 
     cfg = normalize_config(config)
     if not stage_is_enabled(stage, cfg):

@@ -363,11 +363,11 @@ only when intentionally invalidating and rerunning the selected work.
 
 Each rank-zero stage result also writes an immutable execution record under
 `<puzzle-dir>/manifests/executions/<stage>/<execution-identity>/`. The
-`resolved_config.json` file contains the exact effective hierarchical config,
-its semantic identities, authoring provenance, and a replay command that loads
-the immutable resolved file rather than recomposing the authored YAML. The
-`artifact_manifest.json` file binds that config to the stage's declared outputs
-as an explicit artifact contract. The current `manifests/<stage>.json` points to
+`resolved_config.json` file contains stage-relevant resolved configuration,
+semantic identities, and authoring provenance. The `artifact_manifest.json`
+separates mutable canonical output pointers from fingerprints of files that
+existed when the record was published; it does not copy stage outputs or claim
+later mutations are immutable. The current `manifests/<stage>.json` points to
 both files, and new acceptance markers require them when they are present. The
 acceptance marker remains the validated inventory of required files.
 

@@ -40,10 +40,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 import modelopt.torch.puzzletron as mtpz
-from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
     semantic_stage_config,
+    validate_stage_execution_record,
     write_stage_manifest,
 )
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import (
@@ -65,7 +65,12 @@ from modelopt.torch.puzzletron.stages.graph import (
 )
 
 if __package__:
-    from .acceptance_resume import build_payload, check_marker, marker_path, write_marker
+    from .acceptance_resume import (
+        build_payload,
+        check_marker,
+        marker_path,
+        write_marker,
+    )
 else:
     from acceptance_resume import build_payload, check_marker, marker_path, write_marker
 
@@ -150,37 +155,6 @@ def build_worker_command(
     return tuple(command)
 
 
-def _pipeline_config_from_path(
-    config_path: str | Path,
-    *,
-    overrides: Sequence[str] = (),
-) -> dict:
-    """Load authored Hydra config or an immutable resolved execution config."""
-
-    path = Path(config_path)
-    if path.suffix == ".json":
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            payload = None
-        if isinstance(payload, dict) and payload.get("schema") == "puzzletron.stage-execution/v1":
-            if overrides:
-                raise ValueError("resolved execution configs do not accept overrides")
-            stage = payload.get("stage")
-            config = payload.get("effective_config")
-            expected_identity = payload.get("resolved_config_identity")
-            if not isinstance(stage, str) or not isinstance(config, dict):
-                raise ValueError(f"invalid resolved execution config: {path}")
-            actual_identity = stable_hash(config, prefix=f"{stage}_resolved_cfg")
-            if actual_identity != expected_identity:
-                raise ValueError(f"resolved execution config identity mismatch: {path}")
-            runtime = dict(config.get("_runtime") or {})
-            runtime["resolved_config_path"] = str(path.resolve())
-            config["_runtime"] = runtime
-            return config
-    return mtpz.pipeline_config.pipeline_config_from_path(path, overrides=overrides)
-
-
 def refresh_campaign_report(config: dict, running_stage: str | None = None) -> None:
     """Refresh the stable campaign report from rank zero.
 
@@ -246,36 +220,30 @@ def _manifest_terminal_state(config: dict, stage: str):
 
 
 def _stage_execution_record_patterns(config: dict, stage: str) -> tuple[str, ...]:
-    """Return immutable execution-record paths referenced by a stage manifest."""
+    """Validate and return immutable records referenced by a stage manifest."""
 
-    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    puzzle_dir = Path(
+        config.get("puzzle_dir") or (config.get("experiment") or {})["dir"]
+    )
     manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
-    try:
-        payload = json.loads(manifest_path.read_text())
-    except (OSError, ValueError):
+    if not manifest_path.is_file():
         return ()
-    record = payload.get("execution_record") or {}
-    patterns = []
-    for key in ("resolved_config_path", "artifact_manifest_path"):
-        raw_path = record.get(key)
-        if not isinstance(raw_path, str) or not raw_path:
-            continue
-        relative = Path(raw_path)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"unsafe stage execution record path: {raw_path!r}")
-        patterns.append(relative.as_posix())
-    return tuple(patterns)
+    return validate_stage_execution_record(manifest_path, expected_stage=stage)
 
 
 def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
-    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    puzzle_dir = Path(
+        config.get("puzzle_dir") or (config.get("experiment") or {})["dir"]
+    )
     upstream = {
         parent: marker_path(puzzle_dir, parent, None, None)
         for parent in configured_parent_stage_ids(stage, config)
     }
     paths = config.get("paths") or {}
     repositories = tuple(
-        Path(paths[key]) for key in ("automodel_root", "vllm_root", "aiperf_root") if paths.get(key)
+        Path(paths[key])
+        for key in ("automodel_root", "vllm_root", "aiperf_root")
+        if paths.get(key)
     )
     return {
         "root": puzzle_dir,
@@ -376,7 +344,9 @@ def run_pipeline(
     is_complete: Callable[[str], bool],
     mark_complete: Callable[[str], None],
     refresh_report: Callable[[str | None], None],
-    command_runner: Callable[[Sequence[str]], subprocess.CompletedProcess] = subprocess.run,
+    command_runner: Callable[
+        [Sequence[str]], subprocess.CompletedProcess
+    ] = subprocess.run,
 ) -> None:
     """Run stage workers sequentially, stopping on the first failed worker."""
 
@@ -390,7 +360,9 @@ def run_pipeline(
             stage=stage,
             overrides=overrides,
             gpus_per_node=gpus_per_node,
-            force_single=bool((config.get("embedding_pruning") or {}).get("enabled", False))
+            force_single=bool(
+                (config.get("embedding_pruning") or {}).get("enabled", False)
+            )
             and stage == "replacement_scoring",
         )
         result = command_runner(command)
@@ -401,10 +373,14 @@ def run_pipeline(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Puzzletron compression pipeline.")
+    parser = argparse.ArgumentParser(
+        description="Run the Puzzletron compression pipeline."
+    )
     parser.add_argument("--config", required=True, help="Hydra YAML entrypoint.")
     parser.add_argument("--stage", choices=("full", *STAGES))
-    parser.add_argument("--force", action="store_true", help="Rerun the selected stage(s).")
+    parser.add_argument(
+        "--force", action="store_true", help="Rerun the selected stage(s)."
+    )
     parser.add_argument("--gpus-per-node", type=int, default=None)
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--worker-stage", choices=STAGES, help=argparse.SUPPRESS)
@@ -423,14 +399,17 @@ def _embedding_followup_stage(stage: str) -> bool:
 
 
 def _run_worker(args: argparse.Namespace) -> None:
-    cfg = _pipeline_config_from_path(
+    cfg = mtpz.pipeline_config.pipeline_config_from_path(
         args.config,
         overrides=args.override,
     )
     embedding_root = (
-        bool((cfg.get("embedding_pruning") or {}).get("enabled", False)) and not args.scenario_child
+        bool((cfg.get("embedding_pruning") or {}).get("enabled", False))
+        and not args.scenario_child
     )
-    gpus_per_node = int(args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8))
+    gpus_per_node = int(
+        args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8)
+    )
     runtime = dict(cfg.get("_runtime") or {})
     runtime["gpus_per_node"] = gpus_per_node
     cfg["_runtime"] = runtime
@@ -485,7 +464,9 @@ def _run_worker(args: argparse.Namespace) -> None:
 
 
 def _complete_composite_stage(config: dict, stage: str, outputs: dict):
-    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    puzzle_dir = Path(
+        config.get("puzzle_dir") or (config.get("experiment") or {})["dir"]
+    )
     manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
     manifest = StageManifest(stage=stage, inputs={"config": config}, config=config)
     manifest.complete(outputs=outputs)
@@ -504,7 +485,9 @@ def main() -> None:
         _run_worker(args)
         return
 
-    cfg = _pipeline_config_from_path(args.config, overrides=args.override)
+    cfg = mtpz.pipeline_config.pipeline_config_from_path(
+        args.config, overrides=args.override
+    )
     execution = cfg.get("execution") or {}
     gpus_per_node = int(args.gpus_per_node or execution.get("gpus_per_node", 8))
     stages = stage_sequence(args.stage, cfg)
