@@ -57,7 +57,7 @@ jobs:
     permissions:
       checks: read
     steps:
-      - uses: poseidon/wait-for-status-checks@v0.6.0
+      - uses: poseidon/wait-for-status-checks@v0.7.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           match_pattern: "^linux$" # Wait for Unit tests / linux

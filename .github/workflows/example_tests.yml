@@ -99,7 +99,7 @@ jobs:
           echo "any_changed=$any" | tee --append "$GITHUB_OUTPUT"
       - name: Wait for unit tests before spending GPU runners
         if: ${{ steps.lanes.outputs.any_changed == 'true' && startsWith(github.ref, 'refs/heads/pull-request/') }}
-        uses: poseidon/wait-for-status-checks@v0.6.0
+        uses: poseidon/wait-for-status-checks@v0.7.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           match_pattern: "^linux$" # Wait for Unit tests / linux
