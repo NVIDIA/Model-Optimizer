@@ -240,3 +240,9 @@ def build_text_to_image_multiresolution_dataloader(
         dp_world_size,
     )
     return dataloader, sampler
+
+
+__all__ = [
+    "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_text_to_image",
+]

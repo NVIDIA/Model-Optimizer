@@ -142,9 +142,16 @@ def _quantized_sdpa(self, *args, **kwargs):
     k_quantized_scale = self.k_bmm_quantizer._get_amax(key)
     v_quantized_scale = self.v_bmm_quantizer._get_amax(value)
 
-    # We don't need to calibrate the output of softmax
-    return self.bmm2_output_quantizer(
-        fp8_sdpa(
+    # We don't need to calibrate the output of softmax.
+    # ``FP8SDPA`` is an export-only autograd Function: it exists solely to attach the ONNX
+    # ``symbolic`` (export_fp8_mha), and its forward is just
+    # ``original_scaled_dot_product_attention``. It implements no ``backward``, so routing
+    # through it at runtime makes quantized attention non-differentiable and breaks training
+    # (QAT) -- ``loss.backward()`` raises "must implement either the backward or vjp method".
+    # Use it only during ONNX export; at runtime call SDPA directly (identical forward math,
+    # with q/k/v already fake-quantized above) so autograd works.
+    if torch.onnx.is_in_onnx_export():
+        attn_output = fp8_sdpa(
             query,
             key,
             value,
@@ -157,7 +164,19 @@ def _quantized_sdpa(self, *args, **kwargs):
             else "Half",
             self._disable_fp8_mha if hasattr(self, "_disable_fp8_mha") else True,
         )
-    )
+    else:
+        # Pass attn_mask/dropout_p/is_causal/scale as keywords (``scale`` is keyword-only in
+        # recent torch), mirroring FP8SDPA.forward's own call to SDPA.
+        attn_output = original_scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=param_dict["attn_mask"],
+            dropout_p=param_dict["dropout_p"],
+            is_causal=param_dict["is_causal"],
+            scale=param_dict["scale"],
+        )
+    return self.bmm2_output_quantizer(attn_output)
 
 
 class _QuantAttention(_QuantFunctionalMixin):

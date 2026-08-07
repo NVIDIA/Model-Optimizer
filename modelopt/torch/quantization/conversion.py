@@ -184,8 +184,13 @@ def create_and_replace_svdquant_linear_on_the_fly(model):
 
 
 def restore_svdquant_model(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
-    """Restore the svdquant states from the given state dict."""
+    """Restore SVDQuant and rebuild its PEFT adapter topology when present."""
     create_and_replace_svdquant_linear_on_the_fly(model)
+    peft_metadata = metadata.get("svdquant_peft")
+    if peft_metadata is not None:
+        from .plugins.svdquant_peft import _restore_svdquant_peft
+
+        _restore_svdquant_peft(model, peft_metadata)
     restore_quantizer_state(model, config, metadata)
     return model
 

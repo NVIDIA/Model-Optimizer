@@ -403,6 +403,7 @@ def test_postprocess_amax():
 
 
 def test_svdquant_lora_weights():
+    pytest.importorskip("peft", minversion="0.17.0")
     model = _SimpleMLP(64, 64, 64, 64)
 
     quant_config = mtq.INT8_SMOOTHQUANT_CFG.copy()
@@ -410,15 +411,17 @@ def test_svdquant_lora_weights():
 
     mtq.quantize(model, quant_config, partial(forward_loop, dataloader=[torch.randn(2, 64, 64)]))
 
-    for module in model.modules():
-        if isinstance(module, torch.nn.Linear):
-            assert module.weight_quantizer.svdquant_lora_a is not None
-            assert module.weight_quantizer.svdquant_lora_b is not None
-
-            lora_residual = (
-                module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a
-            )
-            assert lora_residual.shape == module.weight.shape
+    adapters = [
+        module for module in model.modules() if "modelopt_svdquant" in getattr(module, "lora_A", {})
+    ]
+    assert adapters
+    for adapter in adapters:
+        lora_a = adapter.lora_A["modelopt_svdquant"].weight
+        lora_b = adapter.lora_B["modelopt_svdquant"].weight
+        lora_residual = lora_b @ lora_a
+        assert lora_residual.shape == adapter.get_base_layer().weight.shape
+        assert adapter.get_base_layer().weight_quantizer.svdquant_lora_a is None
+        assert adapter.get_base_layer().weight_quantizer.svdquant_lora_b is None
 
 
 def test_layerwise_calibrate_support_gate():

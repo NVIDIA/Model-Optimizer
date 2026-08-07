@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Store SVDQuant low-rank residual factors as trainable Hugging Face PEFT adapter parameters on exactly the layers calibrated by SVDQuant. The forward remains ``Q(W_residual)x + B(Ax)``. Full ``mto.save`` / ``mto.restore`` checkpoints and the split ``modelopt_state`` + complete ``state_dict`` flow preserve the adapter topology and A/B values.
 - Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Plain ``max`` sets a tensor's global scale from the largest per-block amax seen during calibration, leaving no room above it, so any activation larger than the calibration max saturates. ``nvfp4_act_headroom`` instead anchors the global scale to a low percentile of the per-block amax distribution, ``amax = max(rho * anchor, upper)``, placing the calibrated blocks in the lower part of the FP8 block-scale range and leaving the rest as headroom. ``upper`` is the top of the range the scale commits to representing and defaults to the 99.99th percentile rather than the literal maximum: chasing a lone freak block would drag the global scale up until every other block's FP8 block scale falls below subnormal and flushes to zero, so the rarest blocks are clipped instead. Set ``upper_percentile=100`` to use the literal observed max, which guarantees no calibration data is clipped. The calibrator warns when the per-block range is too wide for ``rho`` to clear any headroom. Tunable via ``anchor_percentile`` (default 1), ``upper_percentile`` (default 99.99) and ``rho`` (default 16384). Applies only to NVFP4 dynamic-block input quantizers. Weight scales are an orthogonal axis, selected by a nested ``weight_scale_algorithm`` (``max`` by default, or ``mse`` / ``local_hessian`` with that algorithm's own options), so one recipe can combine a weight calibration with this activation policy in a single pass. ``SequentialQuantizer`` activation quantizers are not supported and raise. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` (dynamic NVFP4 W4A4 plus FP8 KV-cache cast) with only the calibration algorithm swapped, so it exports a standard NVFP4 checkpoint.
 
 *Misc*
@@ -16,6 +17,8 @@ Changelog
 - Add ``--mlflow <tracking-uri>`` to ``examples/hf_ptq/hf_ptq.py``, and honour MLflow's own ``MLFLOW_TRACKING_URI`` so a shell can opt in without changing the command. A tracked run records the invocation, the resolved recipe (``$import``\ s expanded), the run log and the quantization summaries, with every command-line argument as a searchable param. The run is opened before the model loads, so an unusable server fails there rather than after calibration, and a failed run is still recorded with its traceback attached. The experiment defaults to ``$USER/hf_ptq/<checkpoint basename>-<recipe name or --qformat>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
 
 **Backward Breaking Changes**
+
+- New SVDQuant checkpoints no longer expose low-rank factors through ``weight_quantizer.svdquant_lora_a/b``; Hugging Face PEFT owns them as trainable ``modelopt_svdquant`` adapter parameters. Code that directly inspected or optimized the quantizer buffers must use the PEFT parameters instead.
 
 **Deprecations**
 

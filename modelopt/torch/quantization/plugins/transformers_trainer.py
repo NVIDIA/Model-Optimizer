@@ -303,13 +303,23 @@ class QATTrainer(ModelOptHFTrainer):
 
     def evaluate(self, *args, **kwargs):
         """Evaluate the model."""
+        if self.quant_cfg is not None and not is_quantized(self.model):
+            self._quantize_model()
         if self.args.do_eval and not self.args.do_train and self.accelerator.is_fsdp2:
             # [Not related to ModelOpt] HF does not support eval only for FSDP2.
             self.model = self._prepare_model(self.model)
         return super().evaluate(*args, **kwargs)
 
+    def predict(self, *args, **kwargs):
+        """Run prediction."""
+        if self.quant_cfg is not None and not is_quantized(self.model):
+            self._quantize_model()
+        return super().predict(*args, **kwargs)
+
     def train(self, *args, **kwargs):
         """Train the model."""
+        if self.quant_cfg is not None and not is_quantized(self.model):
+            self._quantize_model()
         outputs = super().train(*args, **kwargs)
         print_rank_0(
             "Training completed. Please save the final model using `Trainer.save_model()` to preserve ModelOpt states."

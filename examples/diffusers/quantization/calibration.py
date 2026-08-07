@@ -21,6 +21,7 @@ from typing import Any
 from models_utils import MODEL_DEFAULTS, ModelType
 from pipeline_manager import PipelineManager
 from quantize_config import CalibrationConfig
+from qwen_image_dmd2_sampler import dmd2_sample
 from tqdm import tqdm
 from utils import load_calib_prompts
 
@@ -95,6 +96,9 @@ class Calibrator:
                 elif self.model_type in [ModelType.WAN22_T2V_14b, ModelType.WAN22_T2V_5b]:
                     # Special handling for WAN video models
                     self._run_wan_video_calibration(prompt_batch, extra_args)
+                elif self.model_type == ModelType.QWEN_IMAGE_DMD2:
+                    # DMD2 students use a custom few-step sampler, not the standard loop.
+                    self._run_qwen_image_dmd2_calibration(prompt_batch)
                 else:
                     common_args = {
                         "prompt": prompt_batch,
@@ -104,6 +108,22 @@ class Calibrator:
                 pbar.update(1)
                 self.logger.debug(f"Completed calibration batch {i + 1}/{self.config.num_batches}")
         self.logger.info("Calibration completed successfully")
+
+    def _run_qwen_image_dmd2_calibration(self, prompt_batch: list[str]) -> None:
+        """Calibrate a DMD2 Qwen-Image student via its few-step sampler.
+
+        Drives the same few-step DMD unroll the student was trained/served with
+        (NOT the standard denoising loop) so the collected activation statistics
+        are representative of inference. The VAE decode is skipped — calibration
+        only needs the transformer forwards.
+        """
+        cfg = self.pipeline_manager.dmd_sampler_cfg
+        if cfg is None:
+            raise RuntimeError(
+                "DMD2 sampler config is not set; the qwen-image-dmd2 pipeline must be created "
+                "via PipelineManager.create_pipeline() before calibration."
+            )
+        dmd2_sample(self.pipe, prompt_batch, decode=False, **cfg)
 
     def _run_wan_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
