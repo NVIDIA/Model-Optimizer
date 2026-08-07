@@ -92,6 +92,9 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
-          flags: examples
+          # One flag per example, not a shared `examples`: carryforward only applies to a flag
+          # with no upload, so a shared flag would replace every lane's coverage with the subset
+          # that ran once lanes are gated independently.
+          flags: examples-${{ inputs.example }}
           fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
           verbose: true
