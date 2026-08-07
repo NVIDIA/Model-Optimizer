@@ -127,10 +127,16 @@ class StageTerminalState:
         return self.skip_reason is StageSkipReason.OPTIONAL and not stage_spec(stage_id).required
 
 
-def stage_terminal_state(payload: Mapping[str, Any] | None) -> StageTerminalState | None:
+def stage_terminal_state(
+    payload: Mapping[str, Any] | None,
+    *,
+    expected_stage: str | None = None,
+) -> StageTerminalState | None:
     """Parse one manifest terminal state, returning ``None`` for invalid evidence."""
 
     if not isinstance(payload, Mapping):
+        return None
+    if expected_stage is not None and payload.get("stage") != expected_stage:
         return None
     try:
         status = StageStatus(payload.get("status"))
@@ -231,7 +237,7 @@ _stage(
 _stage(
     "tokenize_data",
     "Tokenize Data",
-    required=True,
+    default_enabled=False,
     parents=("convert",),
     completion_artifacts=("dataset_cache/*.tokens",),
 )

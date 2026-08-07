@@ -32,12 +32,6 @@ from puzzletron_orchestrator.logging import OrchestratorLogger
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
 
-def _write_terminal_manifest(root: Path, stage: str, **extra) -> None:
-    path = root / "manifests" / f"{stage}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"status": "success", **extra}))
-
-
 def test_lightweight_package_does_not_import_torch() -> None:
     result = subprocess.run(
         [
@@ -194,7 +188,9 @@ def test_load_experiment_config_composes_defaults_and_interpolation(
     assert config["_runtime"]["config_path"] == str(experiment)
 
 
-def test_convert_completeness_requires_runtime_subblock_library(tmp_path: Path) -> None:
+def test_convert_completeness_requires_runtime_subblock_library(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import (
         stage_is_complete,
         stage_output_patterns,
@@ -209,7 +205,7 @@ def test_convert_completeness_requires_runtime_subblock_library(tmp_path: Path) 
         "ckpts/teacher/config.json",
         "subblock_library.json",
     )
-    _write_terminal_manifest(tmp_path, "convert")
+    write_terminal_manifest(tmp_path, "convert")
     teacher = tmp_path / "ckpts" / "teacher"
     teacher.mkdir(parents=True)
     (teacher / "config.json").write_text("{}")
@@ -222,12 +218,12 @@ def test_convert_completeness_requires_runtime_subblock_library(tmp_path: Path) 
 
 
 def test_non_elastic_bypass_completeness_does_not_require_dp_observations(
-    tmp_path: Path,
+    tmp_path: Path, write_terminal_manifest
 ) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path), "bypass": {"elastic": False}}
-    _write_terminal_manifest(tmp_path, "bypass")
+    write_terminal_manifest(tmp_path, "bypass")
     history = tmp_path / "artifacts" / "bypass" / "local_kd_loss_history.json"
     history.parent.mkdir(parents=True)
     history.write_text("{}\n")
@@ -241,7 +237,7 @@ def test_non_elastic_bypass_completeness_does_not_require_dp_observations(
 
 
 def test_width_completeness_requires_success_manifest_and_complete_passes(
-    tmp_path: Path,
+    tmp_path: Path, write_terminal_manifest
 ) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
@@ -250,26 +246,19 @@ def test_width_completeness_requires_success_manifest_and_complete_passes(
     pass_dir = output / "attention"
     pass_dir.mkdir(parents=True)
     (pass_dir / "args.json").write_text("{}")
-    (output / "activation_passes_manifest.json").write_text(
-        json.dumps({"passes": ["attention"]})
-    )
+    (output / "activation_passes_manifest.json").write_text(json.dumps({"passes": ["attention"]}))
     assert not stage_is_complete(config, "width_importance")
 
-    manifests = tmp_path / "manifests"
-    manifests.mkdir()
-    (manifests / "width_importance.json").write_text(
-        json.dumps(
-            {
-                "status": "success",
-                "outputs": {"activations_log_dir": str(output)},
-            }
-        )
+    write_terminal_manifest(
+        tmp_path,
+        "width_importance",
+        outputs={"activations_log_dir": str(output)},
     )
     assert stage_is_complete(config, "width_importance")
 
 
 def test_sort_completeness_rejects_early_config_and_requires_final_outputs(
-    tmp_path: Path,
+    tmp_path: Path, write_terminal_manifest
 ) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
@@ -288,26 +277,24 @@ def test_sort_completeness_rejects_early_config_and_requires_final_outputs(
     (sorted_teacher / "parallel_sort_manifest.json").write_text('{"status": "complete"}')
     assert not stage_is_complete(config, "sort")
 
-    manifests = tmp_path / "manifests"
-    manifests.mkdir()
-    (manifests / "sort.json").write_text('{"status": "success"}')
+    write_terminal_manifest(tmp_path, "sort")
     assert stage_is_complete(config, "sort")
 
 
-def test_depth_completeness_requires_matching_complete_trajectory(tmp_path: Path) -> None:
+def test_depth_completeness_requires_matching_complete_trajectory(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {
         "puzzle_dir": str(tmp_path),
         "depth_importance": {"enabled": True, "max_removals": 2},
     }
-    _write_terminal_manifest(tmp_path, "depth_importance")
+    write_terminal_manifest(tmp_path, "depth_importance")
     output = tmp_path / "depth" / "iterative"
     output.mkdir(parents=True)
     trajectory = output / "trajectory.json"
-    trajectory.write_text(
-        json.dumps({"status": "running", "max_removals": 5, "selected": [{}]})
-    )
+    trajectory.write_text(json.dumps({"status": "running", "max_removals": 5, "selected": [{}]}))
     assert not stage_is_complete(config, "depth_importance")
 
     trajectory.write_text(
@@ -316,11 +303,13 @@ def test_depth_completeness_requires_matching_complete_trajectory(tmp_path: Path
     assert stage_is_complete(config, "depth_importance")
 
 
-def test_build_library_requires_its_own_complete_outputs(tmp_path: Path) -> None:
+def test_build_library_requires_its_own_complete_outputs(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path)}
-    _write_terminal_manifest(tmp_path, "build_library")
+    write_terminal_manifest(tmp_path, "build_library")
     (tmp_path / "subblock_stats.json").write_text("{}")
     assert not stage_is_complete(config, "build_library")
 
@@ -330,14 +319,16 @@ def test_build_library_requires_its_own_complete_outputs(tmp_path: Path) -> None
     assert stage_is_complete(config, "build_library")
 
 
-def test_embedding_build_library_requires_every_width_scenario(tmp_path: Path) -> None:
+def test_embedding_build_library_requires_every_width_scenario(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {
         "puzzle_dir": str(tmp_path),
         "embedding_pruning": {"enabled": True, "widths": [1024, 768]},
     }
-    _write_terminal_manifest(tmp_path, "build_library")
+    write_terminal_manifest(tmp_path, "build_library")
     for name in ("replacement_library.json", "candidate_library.json"):
         (tmp_path / name).write_text("{}")
     assert not stage_is_complete(config, "build_library")
@@ -353,9 +344,7 @@ def test_embedding_build_library_requires_every_width_scenario(tmp_path: Path) -
             "subblock_stats.json",
         ):
             (scenario / name).write_text("{}")
-        (scenario / "scenario_manifest.json").write_text(
-            json.dumps({"status": "complete"})
-        )
+        (scenario / "scenario_manifest.json").write_text(json.dumps({"status": "complete"}))
         (scenario / "manifests" / "build_library.json").write_text(
             json.dumps({"status": "success"})
         )
@@ -363,11 +352,13 @@ def test_embedding_build_library_requires_every_width_scenario(tmp_path: Path) -
     assert stage_is_complete(config, "build_library")
 
 
-def test_stage_completeness_requires_every_declared_output(tmp_path: Path) -> None:
+def test_stage_completeness_requires_every_declared_output(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path)}
-    _write_terminal_manifest(tmp_path, "tokenize_data")
+    write_terminal_manifest(tmp_path, "tokenize_data")
     cache = tmp_path / "dataset_cache"
     cache.mkdir()
     (cache / "train.tokens").write_text("tokens")
@@ -377,24 +368,29 @@ def test_stage_completeness_requires_every_declared_output(tmp_path: Path) -> No
     assert stage_is_complete(config, "tokenize_data")
 
 
-def test_stage_completeness_rejects_untyped_required_skip(tmp_path: Path) -> None:
+def test_stage_completeness_rejects_skip_without_reason(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path)}
-    manifests = tmp_path / "manifests"
-    manifests.mkdir()
-    (manifests / "tokenize_data.json").write_text(
-        json.dumps({"status": "skipped", "outputs": {"enabled": False}})
+    write_terminal_manifest(
+        tmp_path,
+        "tokenize_data",
+        status="skipped",
+        outputs={"enabled": False},
     )
 
     assert not stage_is_complete(config, "tokenize_data")
 
 
-def test_stage_completeness_accepts_only_current_disabled_skip(tmp_path: Path) -> None:
+def test_stage_completeness_accepts_only_current_disabled_skip(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path), "aiperf": {"enabled": False}}
-    _write_terminal_manifest(tmp_path, "aiperf", status="skipped", skip_reason="disabled")
+    write_terminal_manifest(tmp_path, "aiperf", status="skipped", skip_reason="disabled")
 
     assert stage_is_complete(config, "aiperf")
 
@@ -402,11 +398,13 @@ def test_stage_completeness_accepts_only_current_disabled_skip(tmp_path: Path) -
     assert not stage_is_complete(config, "aiperf")
 
 
-def test_vllm_completeness_requires_nonempty_canonical_stats(tmp_path: Path) -> None:
+def test_vllm_completeness_requires_nonempty_canonical_stats(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {"puzzle_dir": str(tmp_path), "vllm_stats": {"enabled": True}}
-    _write_terminal_manifest(tmp_path, "vllm_stats")
+    write_terminal_manifest(tmp_path, "vllm_stats")
     summary = tmp_path / "artifacts" / "vllm_stats" / "summary.json"
     summary.parent.mkdir(parents=True)
     summary.write_text("{}")
@@ -418,7 +416,7 @@ def test_vllm_completeness_requires_nonempty_canonical_stats(tmp_path: Path) -> 
     assert stage_is_complete(config, "vllm_stats")
 
 
-def test_legacy_mip_and_evaluation_completeness(tmp_path: Path) -> None:
+def test_legacy_mip_and_evaluation_completeness(tmp_path: Path, write_terminal_manifest) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
     config = {
@@ -426,8 +424,8 @@ def test_legacy_mip_and_evaluation_completeness(tmp_path: Path) -> None:
         "mip": {"profiles": {"params": {}, "runtime": {}}},
         "zero_shot_evaluation": {"profile_ids": ["params", "runtime"]},
     }
-    _write_terminal_manifest(tmp_path, "mip")
-    _write_terminal_manifest(tmp_path, "zero_shot_evaluation")
+    write_terminal_manifest(tmp_path, "mip")
+    write_terminal_manifest(tmp_path, "zero_shot_evaluation")
     params_grid = tmp_path / "mip" / "profiles" / "params" / "mip_grid.json"
     params_grid.parent.mkdir(parents=True)
     params_grid.write_text("{}")
@@ -467,8 +465,7 @@ def test_qwen_production_dry_run_uses_worker_python(tmp_path: Path) -> None:
                 sys.executable,
                 "examples/puzzletron/orchestrate.py",
                 "--experiment",
-                "examples/puzzletron/configs/families/qwen3_5/"
-                "qwen3p6_35b_a3b/runs/production.yaml",
+                "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/runs/production.yaml",
                 "--runner",
                 "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
                 "--execution",
@@ -487,10 +484,7 @@ def test_qwen_production_dry_run_uses_worker_python(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
     payload = yaml.safe_load(output.read_text())
-    assert all(
-        submission["argv"][0] in {"python", "bash"}
-        for submission in payload["submissions"]
-    )
+    assert all(submission["argv"][0] in {"python", "bash"} for submission in payload["submissions"])
     vllm = [item for item in payload["submissions"] if item["stage_id"] == "vllm_stats"]
     assert len(vllm) == 1
     assert all(item["gpus"] == 8 and item["nodes"] == 1 for item in vllm)

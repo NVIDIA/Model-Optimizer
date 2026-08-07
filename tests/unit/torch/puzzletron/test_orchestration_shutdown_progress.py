@@ -194,22 +194,16 @@ def _write_sanity_drain_configs(tmp_path: Path):
     return experiment, runner, execution, run_dir
 
 
-def _seed_terminal_manifest(run_dir: Path, stage_id: str) -> None:
-    manifests = run_dir / "manifests"
-    manifests.mkdir(parents=True, exist_ok=True)
-    (manifests / f"{stage_id}.json").write_text(json.dumps({"status": "success"}) + "\n")
-
-
-def _seed_convert_complete(run_dir: Path) -> None:
-    _seed_terminal_manifest(run_dir, "convert")
+def _seed_convert_complete(run_dir: Path, write_terminal_manifest) -> None:
+    write_terminal_manifest(run_dir, "convert")
     teacher = run_dir / "ckpts" / "teacher"
     teacher.mkdir(parents=True, exist_ok=True)
     (teacher / "config.json").write_text("{}\n")
     (run_dir / "subblock_library.json").write_text("[]\n")
 
 
-def _seed_sort_complete(run_dir: Path) -> None:
-    _seed_terminal_manifest(run_dir, "sort")
+def _seed_sort_complete(run_dir: Path, write_terminal_manifest) -> None:
+    write_terminal_manifest(run_dir, "sort")
     sorted_dir = run_dir / "ckpts" / "sorted_teacher"
     sorted_dir.mkdir(parents=True, exist_ok=True)
     (sorted_dir / "config.json").write_text("{}\n")
@@ -220,19 +214,19 @@ def _seed_sort_complete(run_dir: Path) -> None:
     (sorted_dir / "model.safetensors").write_text("weights\n")
 
 
-def _seed_sort_sanity_complete(run_dir: Path) -> None:
-    _seed_sanity_complete(run_dir, "sort_sanity")
+def _seed_sort_sanity_complete(run_dir: Path, write_terminal_manifest) -> None:
+    _seed_sanity_complete(run_dir, "sort_sanity", write_terminal_manifest)
 
 
-def _seed_sanity_complete(run_dir: Path, stage_id: str) -> None:
-    _seed_terminal_manifest(run_dir, stage_id)
+def _seed_sanity_complete(run_dir: Path, stage_id: str, write_terminal_manifest) -> None:
+    write_terminal_manifest(run_dir, stage_id)
     summary = run_dir / "artifacts" / stage_id / "summary.json"
     summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text(json.dumps({"passed": True}) + "\n")
 
 
-def _seed_vllm_stats_complete(run_dir: Path) -> None:
-    _seed_terminal_manifest(run_dir, "vllm_stats")
+def _seed_vllm_stats_complete(run_dir: Path, write_terminal_manifest) -> None:
+    write_terminal_manifest(run_dir, "vllm_stats")
     stats = run_dir / "subblock_stats.json"
     stats.write_text(json.dumps([{"args": {"runtime_stats": True, "n_embd": 1}}]) + "\n")
     summary = run_dir / "artifacts" / "vllm_stats" / "summary.json"
@@ -486,7 +480,7 @@ def test_controller_completed_retry_satisfies_work_plan(tmp_path: Path, monkeypa
     assert not controller._stage_has_active_or_completed_work(plan.stages[0])
 
 
-def test_controller_result_rejects_store_only_completion(tmp_path: Path, monkeypatch):
+def test_controller_completed_summary_excludes_store_only_completion(tmp_path: Path, monkeypatch):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
@@ -503,6 +497,7 @@ def test_controller_result_rejects_store_only_completion(tmp_path: Path, monkeyp
             aggregated=True,
         )
     )
+    # Suppress scheduling so the assertion isolates the controller's completed summary.
     monkeypatch.setattr(controller, "_ready_nodes", list)
 
     result = controller.run(once=True)
@@ -511,7 +506,9 @@ def test_controller_result_rejects_store_only_completion(tmp_path: Path, monkeyp
     assert "convert" not in result["completed"]
 
 
-def test_controller_aggregates_completed_work_before_resubmitting(tmp_path: Path, monkeypatch):
+def test_controller_aggregates_completed_work_before_resubmitting(
+    tmp_path: Path, monkeypatch, write_terminal_manifest
+):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
@@ -538,7 +535,7 @@ def test_controller_aggregates_completed_work_before_resubmitting(tmp_path: Path
             return getattr(delegate, name)
 
         def aggregate(self, *, plan, node, work_plan):
-            _seed_convert_complete(plan.puzzle_dir)
+            _seed_convert_complete(plan.puzzle_dir, write_terminal_manifest)
 
     aggregate_adapter = _AggregateAdapter()
     monkeypatch.setattr(
@@ -911,11 +908,14 @@ def test_controller_can_resume_quit_menu_then_detach_live_jobs(tmp_path: Path):
 
 
 def test_controller_fatal_failure_drains_without_cancelling_siblings(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
+    experiment_config = yaml.safe_load(experiment.read_text())
+    experiment_config["tokenize_data"] = {"enabled": True}
+    experiment.write_text(yaml.safe_dump(experiment_config))
     run_dir = tmp_path / "run"
-    _seed_convert_complete(run_dir)
+    _seed_convert_complete(run_dir, write_terminal_manifest)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -956,10 +956,9 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
             for status in statuses:
                 if (
                     status.state is JobState.COMPLETED
-                    and status.handle.metadata.get("work_id")
-                    == "vllm_stats:default:gang"
+                    and status.handle.metadata.get("work_id") == "vllm_stats:default:gang"
                 ):
-                    _seed_vllm_stats_complete(run_dir)
+                    _seed_vllm_stats_complete(run_dir, write_terminal_manifest)
             return statuses
 
     executor = _DrainingExecutor()
@@ -1020,15 +1019,15 @@ def test_controller_collects_failed_attempt_log_paths(tmp_path: Path):
         ),
     )
 
-    assert controller._failed_log_paths({"vllm_stats"}) == {
-        "vllm_stats": ["/logs/worker.log"]
-    }
+    assert controller._failed_log_paths({"vllm_stats"}) == {"vllm_stats": ["/logs/worker.log"]}
 
 
-def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(tmp_path: Path):
+def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(
+    tmp_path: Path, write_terminal_manifest
+):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     run_dir = tmp_path / "run"
-    _seed_convert_complete(run_dir)
+    _seed_convert_complete(run_dir, write_terminal_manifest)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -1061,16 +1060,15 @@ def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(tmp_path:
 
 
 def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir)
-    _seed_sort_sanity_complete(run_dir)
+    _seed_sort_complete(run_dir, write_terminal_manifest)
+    _seed_sort_sanity_complete(run_dir, write_terminal_manifest)
     upstream = {"convert", "tokenize_data", "width_importance", "sort", "sort_sanity"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda config, stage_id: stage_id in upstream
-        or artifacts_are_complete(config, stage_id),
+        lambda config, stage_id: stage_id in upstream or artifacts_are_complete(config, stage_id),
     )
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
@@ -1103,7 +1101,7 @@ def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
                     state = JobState.COMPLETED if self.poll_count > 1 else JobState.RUNNING
                     reason = None
                     if state is JobState.COMPLETED:
-                        _seed_sanity_complete(run_dir, "bypass_sanity")
+                        _seed_sanity_complete(run_dir, "bypass_sanity", write_terminal_manifest)
                 else:
                     state = JobState.COMPLETED
                     reason = None
@@ -1127,14 +1125,15 @@ def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
     )
 
 
-def test_controller_failed_ancestor_blocks_descendant_submit(tmp_path: Path, monkeypatch):
+def test_controller_failed_ancestor_blocks_descendant_submit(
+    tmp_path: Path, monkeypatch, write_terminal_manifest
+):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir)
+    _seed_sort_complete(run_dir, write_terminal_manifest)
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda config, stage_id: stage_id in upstream
-        or artifacts_are_complete(config, stage_id),
+        lambda config, stage_id: stage_id in upstream or artifacts_are_complete(config, stage_id),
     )
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
@@ -1173,7 +1172,7 @@ def test_controller_failed_ancestor_blocks_descendant_submit(tmp_path: Path, mon
                 and self._stage_id(status.handle) == "bypass_sanity"
                 for status in statuses
             ):
-                _seed_sanity_complete(run_dir, "bypass_sanity")
+                _seed_sanity_complete(run_dir, "bypass_sanity", write_terminal_manifest)
             return statuses
 
     executor = _SanityDrainExecutor()
@@ -1189,9 +1188,11 @@ def test_controller_failed_ancestor_blocks_descendant_submit(tmp_path: Path, mon
     assert "bypass_sanity" not in blocked
 
 
-def test_controller_multiple_failures_drain_both_sanity_branches(tmp_path: Path, monkeypatch):
+def test_controller_multiple_failures_drain_both_sanity_branches(
+    tmp_path: Path, monkeypatch, write_terminal_manifest
+):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir)
+    _seed_sort_complete(run_dir, write_terminal_manifest)
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",

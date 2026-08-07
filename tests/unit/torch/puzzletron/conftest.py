@@ -13,7 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Shared fixtures for Puzzletron CPU unit tests."""
+
+import json
 import platform
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def write_terminal_manifest():
+    """Return a dependency-light terminal-manifest writer with a success default."""
+
+    def write(root: Path, stage: str, **extra: object) -> None:
+        path = root / "manifests" / f"{stage}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"stage": stage, "status": "success", **extra}) + "\n")
+
+    return write
 
 
 # `import fcntl` fails on Windows

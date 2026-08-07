@@ -1,14 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tests for receipt-bound atomic imports of Puzzletron campaign artifacts."""
+
 import hashlib
 import json
 import os
 from pathlib import Path
 
 import pytest
+import yaml
 
-from examples.puzzletron.main import _completion_is_valid
+from examples.puzzletron.main import _completion_is_valid, _validate_worker_result
 from modelopt.torch.puzzletron.artifact_import import ArtifactImportError, import_campaign_artifacts
 from modelopt.torch.puzzletron.artifact_inventory import (
     inventory_campaign_artifacts,
@@ -16,6 +19,11 @@ from modelopt.torch.puzzletron.artifact_inventory import (
 )
 from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import StageManifest
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
+from modelopt.torch.puzzletron.stage_runner import StageResult
+from puzzletron_orchestrator.compiler import compile_campaign_plan
+from puzzletron_orchestrator.controller import CampaignController
+from puzzletron_orchestrator.schema import ExecutionContract, RunnerEnvironment
 
 _SOURCE_CONFIG = {
     "model": {"source": "/campaign/sorted-teacher", "family": "qwen"},
@@ -667,12 +675,311 @@ def test_imported_vllm_stats_is_recognized_complete_by_main(tmp_path):
         target_config_path=config_path,
     )
 
+    _validate_worker_result(
+        config,
+        StageResult(stage, "imported", destination / f"manifests/{stage}.json", "imported"),
+    )
+    assert stage_is_complete(config, stage)
     assert _completion_is_valid(config, config_path, stage)
     marker = json.loads((destination / f"manifests/completions/{stage}.json").read_text())
     assert marker["completion_kind"] == "imported"
     assert marker["receipt_identity"] == json.loads(receipt.read_text())["receipt_identity"]
     changed_config = {**config, stage: {"semantic-change": True}}
     assert not _completion_is_valid(changed_config, config_path, stage)
+
+
+@pytest.mark.parametrize("recorded_stage", [None, "depth"], ids=("missing", "mismatched"))
+def test_imported_terminal_consumers_reject_wrong_stage_identity(tmp_path, recorded_stage):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    manifest_path = destination / f"manifests/{stage}.json"
+    manifest = json.loads(manifest_path.read_text())
+    if recorded_stage is None:
+        manifest.pop("stage")
+    else:
+        manifest["stage"] = recorded_stage
+    _write_json(manifest_path, manifest)
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
+
+
+def test_imported_completion_rejects_internally_valid_truncated_inventory(tmp_path):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    manifest_path = destination / f"manifests/{stage}.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["output_inventory"] = manifest["output_inventory"][:1]
+    manifest["outputs"]["imported_files"] = [manifest["output_inventory"][0]["path"]]
+    _write_json(manifest_path, manifest)
+
+    marker_path = destination / f"manifests/completions/{stage}.json"
+    marker = json.loads(marker_path.read_text())
+    retained_paths = {
+        manifest["output_inventory"][0]["path"],
+        f"manifests/{stage}.json",
+    }
+    marker["required_artifacts"] = {
+        path: records
+        for path, records in marker["required_artifacts"].items()
+        if path in retained_paths
+    }
+    marker["required_artifacts"][f"manifests/{stage}.json"] = [
+        {
+            "path": f"manifests/{stage}.json",
+            "size": manifest_path.stat().st_size,
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
+    ]
+    marker["completion_identity"] = stable_hash(
+        {
+            key: marker[key]
+            for key in (
+                "completion_kind",
+                "mode",
+                "width",
+                "depth",
+                "receipt_identity",
+                "relevant_stage_config_identity",
+                "stage_manifest_semantic_identity",
+                "required_artifacts",
+                "upstream_identities",
+            )
+        },
+        prefix=f"{stage}_completion",
+    )
+    _write_json(marker_path, marker)
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
+
+
+def test_imported_completion_does_not_fall_back_when_embedded_receipt_is_removed(tmp_path):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    campaign_path = destination / "manifests/imports/campaign_artifacts.json"
+    campaign = json.loads(campaign_path.read_text())
+    assert campaign["receipt_version"] == 2
+    campaign.pop("receipt")
+    _write_json(campaign_path, campaign)
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
+
+
+def test_legacy_campaign_manifest_and_completion_marker_remain_retryable(tmp_path):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    campaign_path = destination / "manifests/imports/campaign_artifacts.json"
+    campaign = json.loads(campaign_path.read_text())
+    campaign.pop("receipt")
+    campaign.pop("receipt_version")
+    _write_json(campaign_path, campaign)
+
+    assert stage_is_complete(config, stage)
+    assert _completion_is_valid(config, config_path, stage)
+    assert json.loads((destination / f"manifests/completions/{stage}.json").read_text())[
+        "version"
+    ] == 3
+    assert (
+        import_campaign_artifacts(
+            source,
+            destination,
+            receipt,
+            bundles=(stage,),
+            target_config_path=config_path,
+        )["status"]
+        == "noop"
+    )
+
+
+def test_yaml_import_is_recognized_by_dependency_light_controller(tmp_path):
+    stage = "vllm_stats"
+    source, destination, _receipt_path = _setup(tmp_path)
+    source_config = {
+        "puzzle_dir": str(source),
+        "experiment": {"dir": str(source)},
+        "model": {"source": "/campaign/sorted-teacher", "family": "qwen"},
+        "data": {
+            "identity": "data-v1",
+            "modality": "text",
+            "layout": "fixed",
+            "max_sample_length": 16,
+            "sequence_length": 16,
+        },
+        "search_space": {"identity": "search-v1", "axes": {}},
+        "library": {},
+        stage: {"enabled": True},
+    }
+    for manifest_stage in ("activation", "depth", "vllm_stats", "scoring", "build_library"):
+        _write_json(
+            source / f"manifests/{manifest_stage}.json",
+            StageManifest(
+                stage=manifest_stage,
+                status="success",
+                config=source_config,
+            ).to_dict(),
+        )
+    receipt = _receipt(source, tmp_path / "yaml-receipt.json")
+    target_config = json.loads(json.dumps(source_config))
+    target_config["puzzle_dir"] = str(destination)
+    target_config["experiment"]["dir"] = str(destination)
+    config_path = tmp_path / "target-config.yaml"
+    config_path.write_text(yaml.safe_dump(target_config), encoding="utf-8")
+
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+    plan = compile_campaign_plan(
+        experiment_config_path=config_path,
+        runner=RunnerEnvironment(
+            kind="local",
+            contract=ExecutionContract(repository=str(Path.cwd()), venv=str(Path.cwd() / ".venv")),
+        ),
+        execution={"defaults": {"resource": "cpu"}},
+        stage_filter=stage,
+    )
+    controller = CampaignController(plan, local=True)
+
+    assert controller._ready_nodes() == []
+    assert controller._drain_complete()
+
+
+@pytest.mark.parametrize(
+    "path_kind",
+    ["parent-traversal", "absolute", "symlink-ancestor"],
+)
+def test_imported_completion_consumers_reject_unsafe_inventory_path(tmp_path, path_kind):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    campaign_path = destination / "manifests/imports/campaign_artifacts.json"
+    campaign = json.loads(campaign_path.read_text())
+    campaign.pop("receipt")
+    campaign.pop("receipt_version")
+    _write_json(campaign_path, campaign)
+
+    manifest_path = destination / f"manifests/{stage}.json"
+    manifest = json.loads(manifest_path.read_text())
+    original_path = Path(manifest["output_inventory"][0]["path"])
+    if path_kind == "parent-traversal":
+        unsafe_path = str(Path("..") / original_path)
+        external_artifact = destination.parent / original_path
+        external_artifact.parent.mkdir(parents=True, exist_ok=True)
+        external_artifact.write_bytes((destination / original_path).read_bytes())
+    elif path_kind == "absolute":
+        unsafe_path = str(destination / original_path)
+    else:
+        link = destination / "inventory-link"
+        link.symlink_to((destination / original_path).parent, target_is_directory=True)
+        unsafe_path = str(link.relative_to(destination) / original_path.name)
+    manifest["output_inventory"][0]["path"] = unsafe_path
+    manifest["outputs"]["imported_files"][0] = unsafe_path
+    _write_json(manifest_path, manifest)
+
+    marker_path = destination / f"manifests/completions/{stage}.json"
+    marker = json.loads(marker_path.read_text())
+    marker["required_artifacts"].pop(str(original_path))
+    marker["required_artifacts"][unsafe_path] = [dict(manifest["output_inventory"][0])]
+    marker["required_artifacts"][f"manifests/{stage}.json"] = [
+        {
+            "path": f"manifests/{stage}.json",
+            "size": manifest_path.stat().st_size,
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
+    ]
+    marker["completion_identity"] = stable_hash(
+        {
+            key: marker[key]
+            for key in (
+                "completion_kind",
+                "mode",
+                "width",
+                "depth",
+                "receipt_identity",
+                "relevant_stage_config_identity",
+                "stage_manifest_semantic_identity",
+                "required_artifacts",
+                "upstream_identities",
+            )
+        },
+        prefix=f"{stage}_completion",
+    )
+    _write_json(marker_path, marker)
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
+
+
+@pytest.mark.parametrize(
+    "binding",
+    ["manifests/imports/campaign_artifacts.json", "manifests/completions/vllm_stats.json"],
+    ids=("campaign", "completion-marker"),
+)
+def test_imported_completion_rejects_missing_atomic_import_binding(tmp_path, binding):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    (destination / binding).unlink()
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
 
 
 def test_deleted_imported_vllm_aggregate_stales_completion(tmp_path):

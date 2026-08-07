@@ -11,6 +11,7 @@ from pathlib import Path
 
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 from modelopt.torch.puzzletron.stage_runner import StageResult
+from modelopt.torch.puzzletron.stages.graph import StageSkipReason
 
 __all__ = ["tokenize_data_stage"]
 
@@ -23,10 +24,19 @@ def tokenize_data_stage(config: dict) -> StageResult:
     manifest_path = puzzle_dir / "manifests" / "tokenize_data.json"
     manifest = StageManifest(stage="tokenize_data", inputs={"config": config}, config=config)
     if not bool(stage_config.get("enabled", False)):
-        manifest.complete(outputs={"enabled": False}, status="skipped")
+        skip_reason = StageSkipReason.DISABLED
+        manifest.complete(
+            outputs={"enabled": False},
+            status="skipped",
+            skip_reason=skip_reason,
+        )
         write_stage_manifest(manifest_path, manifest)
         return StageResult(
-            "tokenize_data", "skipped", manifest_path, "Data tokenization is disabled."
+            "tokenize_data",
+            "skipped",
+            manifest_path,
+            "Data tokenization is disabled.",
+            skip_reason.value,
         )
 
     tool = Path(__file__).resolve().parent / "tools" / "build_packed_token_memmap.py"

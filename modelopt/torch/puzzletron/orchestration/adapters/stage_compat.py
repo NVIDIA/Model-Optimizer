@@ -17,12 +17,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..identity import artifact_snapshot_identity, hash_payload, mip_input_artifact_paths
+from ..identity import (
+    artifact_snapshot_identity,
+    hash_payload,
+    mip_input_artifact_paths,
+    stable_hash,
+)
+from ..import_contract import imported_stage_manifest_is_complete
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -168,50 +173,10 @@ def _read_mapping(path: Path) -> Mapping[str, Any] | None:
 
 def _stage_manifest_succeeded(puzzle_dir: Path, stage_id: str) -> Mapping[str, Any] | None:
     payload = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
-    state = stage_terminal_state(payload)
+    state = stage_terminal_state(payload, expected_stage=stage_id)
     if state is None or state.status not in {StageStatus.SUCCESS, StageStatus.IMPORTED}:
         return None
     return payload
-
-
-def _imported_manifest_is_complete(
-    config: Mapping[str, Any],
-    puzzle_dir: Path,
-    stage_id: str,
-    manifest: Mapping[str, Any],
-) -> bool:
-    """Validate an imported terminal state from immutable destination inventory."""
-
-    if manifest.get("stage") != stage_id:
-        return False
-    if manifest.get("semantic_config") != semantic_stage_config(config, stage_id):
-        return False
-    inventory = manifest.get("output_inventory")
-    if not isinstance(inventory, list) or not inventory:
-        return False
-    for record in inventory:
-        if not isinstance(record, Mapping):
-            return False
-        relative = Path(str(record.get("path", "")))
-        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
-            return False
-        artifact = puzzle_dir
-        for part in relative.parts:
-            artifact /= part
-            if artifact.is_symlink():
-                return False
-        try:
-            if not artifact.is_file() or artifact.stat().st_size != int(record["size"]):
-                return False
-            digest = hashlib.sha256()
-            with artifact.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != record.get("sha256"):
-                return False
-        except (KeyError, OSError, TypeError, ValueError):
-            return False
-    return True
 
 
 def _build_library_is_complete(config: Mapping[str, Any], puzzle_dir: Path) -> bool:
@@ -620,13 +585,19 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
             for checkpoint in summary.get("checkpoints") or ()
         )
     manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
-    state = stage_terminal_state(manifest)
+    state = stage_terminal_state(manifest, expected_stage=stage_id)
     if state is None or not state.allows_completion(stage_id, config):
         return False
     if state.status is StageStatus.SKIPPED:
         return True
     if state.status is StageStatus.IMPORTED:
-        return _imported_manifest_is_complete(config, puzzle_dir, stage_id, manifest)
+        return imported_stage_manifest_is_complete(
+            puzzle_dir,
+            stage_id,
+            manifest,
+            expected_semantic_config=semantic_stage_config(config, stage_id),
+            stable_hash=stable_hash,
+        )
     if stage_id == "depth_importance":
         return _depth_trajectory_is_complete(config, puzzle_dir)
     if stage_id == "width_importance":

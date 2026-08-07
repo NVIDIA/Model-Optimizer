@@ -236,7 +236,7 @@ def _manifest_terminal_state(config: dict, stage: str):
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    state = stage_terminal_state(payload)
+    state = stage_terminal_state(payload, expected_stage=stage)
     if state is None or not state.allows_completion(stage, config):
         return None
     return state
@@ -351,9 +351,8 @@ def _validate_worker_result(config: dict, result, *, expected_stage: str | None 
         raise RuntimeError(
             f"stage {expected_stage!r} manifest identifies stage {payload.get('stage')!r}"
         )
-
-    state = _manifest_terminal_state(config, expected_stage)
-    if state is None:
+    state = stage_terminal_state(payload, expected_stage=expected_stage)
+    if state is None or not state.allows_completion(expected_stage, config):
         raise RuntimeError(f"stage {expected_stage!r} wrote an invalid terminal manifest")
     if result.status != state.status.value:
         raise RuntimeError(
