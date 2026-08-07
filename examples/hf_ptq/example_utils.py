@@ -177,12 +177,6 @@ def _is_multimodal_config(config):
     """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
         or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
             "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
@@ -873,17 +867,40 @@ def get_model(
             hf_config, auto_model_module, ckpt_path, config_kwargs
         )
 
-        with init_empty_weights(include_buffers=True):
-            # When computing the device_map, assuming bfloat16 precision by default,
-            # unless specified by the hf_config.
-            config_dtype = _get_config_dtype(config_for_init)
-            model_kwargs2 = _apply_dtype_to_config(
-                model_kwargs, config_dtype, architecture, apply_config_dtype=True
+        # When computing the device_map, assuming bfloat16 precision by default,
+        # unless specified by the hf_config.
+        config_dtype = _get_config_dtype(config_for_init)
+        model_kwargs2 = _apply_dtype_to_config(
+            model_kwargs, config_dtype, architecture, apply_config_dtype=True
+        )
+        if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
+            model_kwargs2.pop("trust_remote_code", None)
+        model_kwargs2.pop("max_memory", None)
+
+        # This skeleton is only a sizing aid for ``infer_auto_device_map``; it is thrown
+        # away right after. ``include_buffers=True`` makes accelerate push a global
+        # ``torch.device("meta")`` context, so *every* tensor built in ``__init__`` lands
+        # on meta -- not just parameters and buffers. Remote-code checkpoints written
+        # before Transformers v5 often compute scalar hyperparameters from real tensors
+        # there (Phi-4-multimodal's conformer subsampling does ``int(torch.tensor(...))``),
+        # which raises on meta. Retry without the global context, then give up on the
+        # estimate rather than failing a load that ``from_pretrained`` can still do.
+        model = None
+        skeleton_errors = []
+        for include_buffers in (True, False):
+            try:
+                with init_empty_weights(include_buffers=include_buffers):
+                    model = from_config(config_for_init, **model_kwargs2)
+                break
+            except Exception as e:
+                skeleton_errors.append(f"include_buffers={include_buffers}: {e!r}")
+        if model is None:
+            warnings.warn(
+                f"Could not build a meta-device skeleton of {architecture} "
+                f"({'; '.join(skeleton_errors)}). Skipping the device-map memory estimate "
+                "and letting from_pretrained map the model; if you hit GPU OOM, pass "
+                "--use_seq_device_map or lower --gpu_max_memory_percentage."
             )
-            if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
-                model_kwargs2.pop("trust_remote_code", None)
-            model_kwargs2.pop("max_memory", None)
-            model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
 
@@ -903,7 +920,7 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
-        else:
+        elif model is not None:
             inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
             if "cpu" in inferred_device_map.values():
                 for _device in max_memory:
