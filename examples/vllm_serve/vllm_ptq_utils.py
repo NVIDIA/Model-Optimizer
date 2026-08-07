@@ -108,12 +108,20 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                 # Wrap in try/except so a cleanup error never masks the original exception.
                 try:
                     if hasattr(self.model_runner, "finish_requests"):
-                        cleanup_output = dataclasses.replace(
-                            scheduler_output,
+                        cleanup_output = _create_new_data_cls(
+                            type(scheduler_output),
                             scheduled_new_reqs=[],
+                            scheduled_cached_reqs=scheduler_output.scheduled_cached_reqs,
                             num_scheduled_tokens={},
                             total_num_scheduled_tokens=0,
+                            scheduled_spec_decode_tokens={},
+                            scheduled_encoder_inputs={},
+                            num_common_prefix_blocks=scheduler_output.num_common_prefix_blocks,
                             finished_req_ids=set(num_scheduled_tokens.keys()),
+                            free_encoder_mm_hashes=[],
+                            kv_connector_metadata=None,
+                            structured_output_request_ids={},
+                            grammar_bitmask=None,
                         )
                         self.model_runner.finish_requests(cleanup_output)
                     else:
