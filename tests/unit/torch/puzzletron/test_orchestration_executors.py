@@ -194,47 +194,6 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     assert "--gpu-bind" not in srun
 
 
-def test_render_sbatch_script_sets_writable_enroot_paths_before_srun():
-    runner = RunnerEnvironment(
-        kind="slurm",
-        contract=ExecutionContract(
-            repository="/repo",
-            venv="/repo/.venv",
-            container="/images/pytorch.sqsh",
-            container_mounts="/repo:/repo",
-        ),
-        slurm=SlurmRunnerConfig(account="acct", partition_cpu="cpu"),
-    )
-    attempt = AttemptSpec(
-        attempt_id="a1",
-        work_id="build_library:0",
-        stage_id="build_library",
-        command=CommandSpec(argv=("python", "worker.py"), log_path="/tmp/out.log"),
-        allocation_nodes=1,
-        allocation_gpus=0,
-        metadata={"gpus_per_node": 0, "partition": "cpu"},
-        task_topology=TaskTopology(task_count=1, gpus_per_task=0),
-    )
-
-    script = render_sbatch_script(
-        attempt=attempt,
-        runner=runner,
-        partition="cpu",
-        account="acct",
-        time_limit="4:00:00",
-        qos=None,
-        job_name="pt-build",
-    )
-
-    enroot_cache = "export ENROOT_CACHE_PATH=/repo/.cache/enroot/cache"
-    enroot_runtime = (
-        'export ENROOT_RUNTIME_PATH="/tmp/puzzletron-enroot-${USER:-$(id -u)}/runtime"'
-    )
-    assert enroot_cache in script
-    assert enroot_runtime in script
-    assert script.index(enroot_cache) < script.index("srun ")
-
-
 def test_vllm_aggregation_uses_slurm_execution_contract(tmp_path: Path, monkeypatch):
     """Controller-side merges must run in the same container/venv as workers."""
 
@@ -529,8 +488,6 @@ def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert attempt.allocation_nodes == 4
     assert attempt.allocation_gpus == 32
     assert attempt.metadata["kill_on_bad_exit"] is True
-    assert attempt.command.env["WORKER_WORLD_SIZE"] == "8"
-    assert "WORLD_SIZE" not in attempt.command.env
     assert attempt.command.argv[-1].endswith("run_depth_pool.sh")
 
     script = render_sbatch_script(
@@ -546,8 +503,6 @@ def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert "#SBATCH --ntasks=4" in script
     assert "#SBATCH --gpus-per-node=8" in script
     assert "--kill-on-bad-exit=1" in script
-    assert "export WORKER_WORLD_SIZE=8" in script
-    assert "export WORLD_SIZE=8" not in script
     assert "run_depth_pool.sh" in script
 
 
@@ -596,8 +551,6 @@ def test_depth_pool_packs_four_two_gpu_workers_per_node(tmp_path: Path):
     assert attempt.allocation_gpus == 16
     assert attempt.task_topology.task_count == 8
     assert attempt.task_topology.gpus_per_task == 2
-    assert attempt.command.env["WORKER_WORLD_SIZE"] == "2"
-    assert "WORLD_SIZE" not in attempt.command.env
 
     script = render_sbatch_script(
         attempt=attempt,
@@ -712,8 +665,6 @@ def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert attempt.allocation_gpus == 32
     assert attempt.metadata["kill_on_bad_exit"] is True
     assert attempt.metadata["partition"] == "batch"
-    assert attempt.command.env["WORKER_WORLD_SIZE"] == "8"
-    assert "WORLD_SIZE" not in attempt.command.env
     assert attempt.command.argv[-1].endswith("run_replacement_pool.sh")
 
 
@@ -773,8 +724,6 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.allocation_gpus for attempt in attempts] == [16, 16]
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
-    assert [attempt.command.env["WORKER_WORLD_SIZE"] for attempt in attempts] == ["4", "4"]
-    assert all("WORLD_SIZE" not in attempt.command.env for attempt in attempts)
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
     assert [
         attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts

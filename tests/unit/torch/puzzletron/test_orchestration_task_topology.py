@@ -156,56 +156,6 @@ def test_task_launcher_slices_full_node_visibility_for_packed_container_tasks(
     assert result == 0
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == expected
     assert captured["env"]["PUZZLETRON_TASK_LAUNCHER"] == "direct"
-    assert captured["env"]["RANK"] == "0"
-    assert captured["env"]["WORLD_SIZE"] == "1"
-    assert captured["env"]["LOCAL_RANK"] == "0"
-    assert captured["env"]["LOCAL_WORLD_SIZE"] == "1"
-    assert captured["env"]["MASTER_ADDR"] == "127.0.0.1"
-    assert captured["env"]["MASTER_PORT"].isdigit()
-
-
-def test_cpu_direct_task_launcher_sets_single_rank_env(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    monkeypatch.setenv("PUZZLETRON_TASK_INDEX", "0")
-    monkeypatch.setenv("PUZZLETRON_LOCAL_TASK_INDEX", "0")
-    monkeypatch.setenv("PUZZLETRON_TASK_HOSTS", "cpu-a")
-
-    def fake_execvpe(executable, command, env) -> None:
-        captured.update(executable=executable, command=command, env=env)
-
-    monkeypatch.setattr(task_launcher.os, "execvpe", fake_execvpe)
-
-    result = task_launcher.main(
-        [
-            "--attempt-id",
-            "attempt-a",
-            "--nodes",
-            "1",
-            "--gpus-per-node",
-            "0",
-            "--task-count",
-            "1",
-            "--gpus-per-task",
-            "0",
-            "--tasks-per-group",
-            "1",
-            "--launcher",
-            "direct",
-            "--",
-            "python",
-            "worker.py",
-        ]
-    )
-
-    assert result == 0
-    assert captured["env"]["CUDA_VISIBLE_DEVICES"] == ""
-    assert captured["env"]["RANK"] == "0"
-    assert captured["env"]["WORLD_SIZE"] == "1"
-    assert captured["env"]["LOCAL_RANK"] == "0"
-    assert captured["env"]["LOCAL_WORLD_SIZE"] == "1"
-    assert captured["env"]["MASTER_ADDR"] == "127.0.0.1"
-    assert captured["env"]["MASTER_PORT"].isdigit()
 
 
 def _task_binding(*, group_size: int) -> task_launcher.TaskBinding:

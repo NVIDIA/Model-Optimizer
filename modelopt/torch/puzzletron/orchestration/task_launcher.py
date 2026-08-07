@@ -29,17 +29,9 @@ __all__ = [
 TASK_IDENTITY_ENV_KEYS = frozenset(
     {
         "CUDA_VISIBLE_DEVICES",
-        "GROUP_RANK",
-        "GROUP_WORLD_SIZE",
-        "LOCAL_RANK",
-        "LOCAL_WORLD_SIZE",
-        "MASTER_ADDR",
-        "MASTER_PORT",
         "SLURM_LOCALID",
         "SLURM_NTASKS",
         "SLURM_PROCID",
-        "RANK",
-        "WORLD_SIZE",
         "PUZZLETRON_GROUP_INDEX",
         "PUZZLETRON_GROUP_RANK",
         "PUZZLETRON_GROUP_SIZE",
@@ -154,25 +146,6 @@ def build_task_command(
     )
 
 
-def _direct_distributed_env(binding: TaskBinding) -> dict[str, str]:
-    """Return torch.distributed env for direct payloads that initialize env://."""
-
-    master_addr = "127.0.0.1" if binding.group_size == 1 else binding.master_addr
-    return {
-        "RANK": str(binding.group_rank),
-        "WORLD_SIZE": str(binding.group_size),
-        # The launcher slices CUDA_VISIBLE_DEVICES per task, so every direct
-        # payload has a local single-process view even when multiple tasks share
-        # a physical host.
-        "LOCAL_RANK": "0",
-        "LOCAL_WORLD_SIZE": "1",
-        "GROUP_RANK": str(binding.group_index),
-        "GROUP_WORLD_SIZE": str(binding.group_size),
-        "MASTER_ADDR": master_addr,
-        "MASTER_PORT": str(binding.master_port),
-    }
-
-
 def _required_index(env: Mapping[str, str], primary: str, fallback: str) -> int:
     value = env.get(primary, env.get(fallback))
     if value is None:
@@ -263,8 +236,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         PUZZLETRON_MASTER_PORT=str(binding.master_port),
         PUZZLETRON_RENDEZVOUS_ID=binding.rendezvous_id,
     )
-    if TaskLauncher(args.launcher) is TaskLauncher.DIRECT:
-        env.update(_direct_distributed_env(binding))
     print(
         "puzzletron binding "
         f"host={binding.hostname} task={binding.task_index} "

@@ -3,8 +3,7 @@ set -Eeuo pipefail
 
 : "${CAMPAIGN_DIR:?set CAMPAIGN_DIR}"
 : "${CONFIG_PATH:?set CONFIG_PATH}"
-: "${WORKER_WORLD_SIZE:=${WORLD_SIZE:-}}"
-: "${WORKER_WORLD_SIZE:?set WORKER_WORLD_SIZE to one torchrun worker-group world size}"
+: "${WORLD_SIZE:?set WORLD_SIZE to one torchrun worker-group world size}"
 : "${SOLUTIONS_PATH:?set SOLUTIONS_PATH}"
 : "${OUTPUT_DIR:?set OUTPUT_DIR}"
 
@@ -43,7 +42,7 @@ if [[ ! -f "${CAMPAIGN_DIR}/manifest.json" ]]; then
   "${PYTHON_BIN}" -m modelopt.torch.puzzletron.distributed_eval.cli init \
     --campaign-dir "${CAMPAIGN_DIR}" \
     --config "${CONFIG_PATH}" \
-    --world-size "${WORKER_WORLD_SIZE}" \
+    --world-size "${WORLD_SIZE}" \
     --evaluator-revision "${EVALUATOR_REVISION}" \
     "${override_args[@]}"
 fi

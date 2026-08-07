@@ -6,8 +6,7 @@ set -Eeuo pipefail
 
 : "${CAMPAIGN_DIR:?set CAMPAIGN_DIR}"
 : "${CONFIG_PATH:?set CONFIG_PATH}"
-: "${WORKER_WORLD_SIZE:=${WORLD_SIZE:-}}"
-: "${WORKER_WORLD_SIZE:?set WORKER_WORLD_SIZE to one worker-group world size}"
+: "${WORLD_SIZE:?set WORLD_SIZE to one worker-group world size}"
 : "${WORKER_COUNT:?set WORKER_COUNT to the number of worker groups}"
 : "${PUZZLETRON_GROUP_INDEX:=${PUZZLETRON_TASK_INDEX:-${SLURM_PROCID:-}}}"
 : "${PUZZLETRON_GROUP_INDEX:?run this script as one orchestrator worker-group task}"
@@ -56,7 +55,7 @@ if [[ "${GROUP_INDEX}" == "0" && ! -f "${MANIFEST_PATH}" ]]; then
     -m modelopt.torch.puzzletron.distributed_eval.cli init \
     --campaign-dir "${CAMPAIGN_DIR}" \
     --config "${CONFIG_PATH}" \
-    --world-size "${WORKER_WORLD_SIZE}" \
+    --world-size "${WORLD_SIZE}" \
     --stage depth \
     --evaluator-revision "${EVALUATOR_REVISION:-puzzletron-depth-v1}" \
     "${override_args[@]}"
@@ -75,7 +74,7 @@ done
 # independent worker groups may share a node.
 export NNODES=1
 export NODE_RANK=0
-export NPROC_PER_NODE="${NPROC_PER_NODE:-${WORKER_WORLD_SIZE}}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-${WORLD_SIZE}}"
 export WORKER_GROUP_INDEX="${GROUP_INDEX}"
 export WORKER_ID="${WORKER_PREFIX}${GROUP_INDEX}"
 export WORKER_HOST="${WORKER_HOST:-$(hostname -f)}"

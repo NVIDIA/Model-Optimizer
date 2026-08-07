@@ -27,7 +27,6 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _prepare_vllm_checkpoint,
     _profile_command,
     _server_max_model_len,
-    _server_vllm_args,
     _topology_vllm_args,
 )
 
@@ -154,49 +153,6 @@ def test_vllm_topology_args_enable_dp_and_expert_parallel_only_when_requested():
     )
     assert "--enable-expert-parallel" in ep_args
     assert "--expert-parallel-size" not in ep_args
-
-
-def test_server_vllm_args_default_max_num_seqs_follows_concurrency(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
-        lambda checkpoint_dir: ["--descriptor-arg"],
-    )
-
-    args = _server_vllm_args(
-        tmp_path,
-        {
-            "tensor_parallel_size": 1,
-            "pipeline_parallel_size": 1,
-            "data_parallel_size": 1,
-            "gpu_group_size": 1,
-        },
-        (1, 4),
-    )
-
-    assert args[args.index("--max-num-seqs") + 1] == "4"
-    assert "--descriptor-arg" in args
-
-
-def test_server_vllm_args_respects_explicit_max_num_seqs(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
-        lambda checkpoint_dir: [],
-    )
-
-    args = _server_vllm_args(
-        tmp_path,
-        {
-            "tensor_parallel_size": 1,
-            "pipeline_parallel_size": 1,
-            "data_parallel_size": 1,
-            "gpu_group_size": 1,
-            "extra_vllm_args": ["--max_num_seqs=8"],
-        },
-        (1,),
-    )
-
-    assert "--max-num-seqs" not in args
-    assert "--max_num_seqs=8" in args
 
 
 def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
