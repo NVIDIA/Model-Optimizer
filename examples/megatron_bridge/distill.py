@@ -139,7 +139,9 @@ def get_args():
         type=str,
         default=None,
         help="Directory holding training.jsonl / validation.jsonl of "
-        '{"input": <prompt>, "output": <response>} records (used with --sft).',
+        '{"input": <prompt>, "output": <response>} records (used with --sft). Both fields are '
+        "tokenized verbatim: no chat template is applied and no BOS is prepended, so if the model "
+        "expects role/turn markers or a BOS token, bake them into the fields yourself.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -262,7 +264,7 @@ def get_args():
     args = parser.parse_args()
 
     # Sanity checks
-    if not args.use_mock_data and not args.data_paths:
+    if not args.sft and not args.use_mock_data and not args.data_paths:
         raise ValueError("Must provide either --data_paths or set --use_mock_data.")
 
     if args.student_hf_model is None:
@@ -400,6 +402,10 @@ def main(args: argparse.Namespace):
         # no separator); label_key="output" with answer_only_loss=True masks the loss to the
         # response only (answer_start_idx == len(context_ids)); truncation_field="input" truncates
         # the context when the pair exceeds seq_length.
+        #
+        # add_bos=False plus the placeholder-only prompt_template means the records are tokenized
+        # exactly as written -- no chat template, no BOS, no role markers. Callers whose model
+        # expects those must bake them into the "input" field; see --sft_dataset_root help.
         dataset_config = FinetuningDatasetConfig(
             seq_length=args.seq_length,
             dataset_root=args.sft_dataset_root,

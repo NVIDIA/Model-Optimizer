@@ -130,6 +130,13 @@ The distillation script expects pre-tokenized data in Megatron's binary format (
 See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megatron-frameworks)**
 for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
 
+Alternatively, pass `--sft --sft_dataset_root <dir>` to distill on **raw prompt-completion JSONL**
+with the loss masked to the completion. The directory must hold `training.jsonl` and
+`validation.jsonl` of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
+the model's own HuggingFace tokenizer. Both fields are tokenized **verbatim** — no chat template is
+applied and no BOS token is prepended — so if your model expects role/turn markers or a BOS token,
+include them in the `"input"` field yourself.
+
 ### Distillation with Real Data
 
 Example usage to distill a 4B student (HF) from an 8B teacher (HF) on 8 GPUs (TP=8, PP=1):
