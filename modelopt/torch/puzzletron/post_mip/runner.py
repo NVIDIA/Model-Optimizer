@@ -568,6 +568,14 @@ def _join_cli_values(value: Any, *, path: str) -> str:
     return ",".join(values)
 
 
+def _configured_lmms_eval_tasks(settings: Mapping[str, Any]) -> tuple[str, ...]:
+    tasks = _join_cli_values(settings.get("tasks"), path="downstream_evaluation.config.tasks")
+    values = tuple(task.strip() for task in tasks.split(","))
+    if not values or any(not task for task in values):
+        raise ValueError("downstream_evaluation.config.tasks must contain non-empty task names")
+    return values
+
+
 def _model_arg_string(values: Mapping[str, Any]) -> str:
     parts = []
     for key, value in values.items():
@@ -645,7 +653,7 @@ def _lmms_eval_command(
 ) -> tuple[list[str], dict[str, str], float | None]:
     """Build a deterministic lmms-eval CLI invocation for one realized checkpoint."""
 
-    tasks = _join_cli_values(settings.get("tasks"), path="downstream_evaluation.config.tasks")
+    tasks = ",".join(_configured_lmms_eval_tasks(settings))
     argv = [
         *_command_prefix(settings),
         "--model",
@@ -707,6 +715,18 @@ def _metric_key(value: Any) -> str:
     )
 
 
+def _numeric_metrics(task_payload: Mapping[str, Any]) -> dict[str, float]:
+    metrics = {}
+    for metric_name, value in task_payload.items():
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ):
+            metrics[str(metric_name)] = float(value)
+    return metrics
+
+
 def _flatten_lmms_eval_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
     results = payload.get("results")
     if not isinstance(results, Mapping):
@@ -715,14 +735,103 @@ def _flatten_lmms_eval_metrics(payload: Mapping[str, Any]) -> dict[str, float]:
     for task_name, task_payload in results.items():
         if not isinstance(task_payload, Mapping):
             continue
-        for metric_name, value in task_payload.items():
-            if (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-            ):
-                metrics[f"{_metric_key(task_name)}.{_metric_key(metric_name)}"] = float(value)
+        for metric_name, value in _numeric_metrics(task_payload).items():
+            metrics[f"{_metric_key(task_name)}.{_metric_key(metric_name)}"] = value
     return metrics
+
+
+def _resolved_lmms_eval_tasks(
+    payload: Mapping[str, Any], configured_tasks: Sequence[str]
+) -> tuple[str, ...]:
+    group_subtasks = payload.get("group_subtasks")
+    if not isinstance(group_subtasks, Mapping):
+        group_subtasks = {}
+
+    def expand(task: str, seen: frozenset[str]) -> tuple[str, ...]:
+        raw_subtasks = group_subtasks.get(task)
+        if (
+            isinstance(raw_subtasks, Sequence)
+            and not isinstance(raw_subtasks, str)
+            and raw_subtasks
+            and task not in seen
+        ):
+            expanded = []
+            for raw_subtask in raw_subtasks:
+                expanded.extend(expand(str(raw_subtask), seen | {task}))
+            return tuple(dict.fromkeys(expanded))
+        return (task,)
+
+    resolved = []
+    for task in configured_tasks:
+        resolved.extend(expand(task, frozenset()))
+    return tuple(dict.fromkeys(resolved))
+
+
+def _sample_count(payload: Mapping[str, Any], task: str) -> float | None:
+    samples = payload.get("n-samples", payload.get("n_samples"))
+    if not isinstance(samples, Mapping):
+        return None
+    value = samples.get(task)
+    if isinstance(value, Mapping):
+        if "effective" in value:
+            value = value["effective"]
+        elif "original" in value:
+            value = value["original"]
+        else:
+            return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _validate_lmms_eval_completion(
+    payload: Mapping[str, Any], configured_tasks: Sequence[str]
+) -> dict[str, float]:
+    results = payload.get("results")
+    if not isinstance(results, Mapping):
+        raise RuntimeError("lmms-eval result is missing the results mapping")
+
+    expected_tasks = _resolved_lmms_eval_tasks(payload, configured_tasks)
+    missing_results = [task for task in expected_tasks if task not in results]
+    if missing_results:
+        raise RuntimeError(
+            "lmms-eval result is missing configured task results: "
+            f"{sorted(missing_results)}"
+        )
+
+    missing_metrics = [
+        task
+        for task in expected_tasks
+        if not isinstance(results[task], Mapping) or not _numeric_metrics(results[task])
+    ]
+    if missing_metrics:
+        raise RuntimeError(
+            "lmms-eval result has no numeric metrics for configured tasks: "
+            f"{sorted(missing_metrics)}"
+        )
+
+    sample_counts = {}
+    missing_samples = []
+    zero_samples = []
+    for task in expected_tasks:
+        sample_count = _sample_count(payload, task)
+        if sample_count is None:
+            missing_samples.append(task)
+        elif sample_count <= 0:
+            zero_samples.append(task)
+        else:
+            sample_counts[task] = sample_count
+    if missing_samples:
+        raise RuntimeError(
+            "lmms-eval result is missing sample counts for configured tasks: "
+            f"{sorted(missing_samples)}"
+        )
+    if zero_samples:
+        raise RuntimeError(
+            "lmms-eval result has zero effective samples for configured tasks: "
+            f"{sorted(zero_samples)}"
+        )
+    return sample_counts
 
 
 def _lmms_eval_result_payload(output_path: Path) -> tuple[dict[str, Any], Path]:
@@ -817,6 +926,9 @@ def _downstream_evaluation(
     except FileNotFoundError as error:
         tail = _lmms_eval_output_tail(result)
         raise FileNotFoundError(str(error) + (f": {tail}" if tail else "")) from error
+    sample_counts = _validate_lmms_eval_completion(
+        payload, _configured_lmms_eval_tasks(settings)
+    )
     metrics = _flatten_lmms_eval_metrics(payload)
     if not metrics:
         raise RuntimeError(f"lmms-eval result has no numeric task metrics: {result_path}")
@@ -828,6 +940,7 @@ def _downstream_evaluation(
             "checkpoint": source.artifact["checkpoint"],
             "metrics": metrics,
             "result_path": str(result_path),
+            "sample_counts": sample_counts,
         },
     )
     return {

@@ -240,7 +240,12 @@ def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, 
                     "results": {
                         "ifeval": {"prompt_level_strict_acc,none": 0.5},
                         "gsm8k": {"exact_match,strict-match": 0.75},
-                    }
+                    },
+                    "group_subtasks": {"ifeval": [], "gsm8k": []},
+                    "n-samples": {
+                        "ifeval": {"original": 541, "effective": 4},
+                        "gsm8k": {"original": 1319, "effective": 4},
+                    },
                 }
             )
         )
@@ -280,6 +285,131 @@ def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, 
     }
     assert Path(result["result_path"]).is_file()
     assert Path(result["raw_result_path"]).name == "results.json"
+    summary = json.loads(Path(result["result_path"]).read_text())
+    assert summary["sample_counts"] == {"gsm8k": 4.0, "ifeval": 4.0}
+
+
+def test_lmms_eval_completion_validates_resolved_task_expansion():
+    sample_counts = runner._validate_lmms_eval_completion(
+        {
+            "results": {
+                "arc_challenge": {"acc,none": 0.25},
+                "hellaswag": {"acc_norm,none": 0.5},
+            },
+            "group_subtasks": {
+                "leaderboard": ["arc_challenge", "hellaswag"],
+                "arc_challenge": [],
+                "hellaswag": [],
+            },
+            "n-samples": {
+                "arc_challenge": {"original": 1172, "effective": 8},
+                "hellaswag": {"original": 10042, "effective": 8},
+            },
+        },
+        ("leaderboard",),
+    )
+
+    assert sample_counts == {"arc_challenge": 8.0, "hellaswag": 8.0}
+
+
+def test_downstream_evaluation_rejects_missing_configured_task(monkeypatch, tmp_path):
+    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
+        del env, capture_output, text, timeout, check
+        output = Path(cwd)
+        (output / "results.json").write_text(
+            json.dumps(
+                {
+                    "results": {"ifeval": {"prompt_level_strict_acc,none": 0.5}},
+                    "group_subtasks": {"ifeval": []},
+                    "n-samples": {"ifeval": {"original": 541, "effective": 4}},
+                }
+            )
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    node = SimpleNamespace(
+        node_id="lmms_eval",
+        flow_id="runtime",
+        stage_id="post.runtime.lmms_eval",
+        config={
+            "config": {
+                "command_prefix": ["python", "-m", "lmms_eval"],
+                "tasks": ["ifeval", "gsm8k"],
+                "topology": {"gpu_group_size": 1},
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    try:
+        runner._downstream_evaluation(
+            {"puzzle_dir": str(tmp_path)}, node, source, "execution"
+        )
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("expected incomplete lmms-eval result to fail")
+
+    assert "missing configured task results" in message
+    assert "gsm8k" in message
+
+
+def test_downstream_evaluation_rejects_zero_sample_task(monkeypatch, tmp_path):
+    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
+        del env, capture_output, text, timeout, check
+        output = Path(cwd)
+        (output / "results.json").write_text(
+            json.dumps(
+                {
+                    "results": {
+                        "ifeval": {"prompt_level_strict_acc,none": 0.5},
+                        "gsm8k": {"exact_match,strict-match": 0.75},
+                    },
+                    "group_subtasks": {"ifeval": [], "gsm8k": []},
+                    "n-samples": {
+                        "ifeval": {"original": 541, "effective": 4},
+                        "gsm8k": {"original": 1319, "effective": 0},
+                    },
+                }
+            )
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    node = SimpleNamespace(
+        node_id="lmms_eval",
+        flow_id="runtime",
+        stage_id="post.runtime.lmms_eval",
+        config={
+            "config": {
+                "command_prefix": ["python", "-m", "lmms_eval"],
+                "tasks": ["ifeval", "gsm8k"],
+                "topology": {"gpu_group_size": 1},
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    try:
+        runner._downstream_evaluation(
+            {"puzzle_dir": str(tmp_path)}, node, source, "execution"
+        )
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError("expected zero-sample lmms-eval result to fail")
+
+    assert "zero effective samples" in message
+    assert "gsm8k" in message
 
 
 def test_downstream_evaluation_reports_lmms_eval_output_when_results_are_missing(
