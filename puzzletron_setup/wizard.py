@@ -640,7 +640,18 @@ def _ask_aiperf_config(
     runtime: Mapping[str, Any],
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ask for one AIPerf node's independent Serving topology and workload."""
+    """
+    Configure an AIPerf serving node's parallel topology and workload settings.
+    
+    Parameters:
+        detailed (bool): Whether to prompt for workload and timeout values.
+        moe (bool): Whether to configure expert parallelism for a mixture-of-experts model.
+        runtime (Mapping[str, Any]): Runtime defaults for input length, output length, and concurrency.
+        defaults (Mapping[str, Any] | None): Previously saved configuration values.
+    
+    Returns:
+        dict[str, Any]: The configured AIPerf topology, workload, and timeout settings.
+    """
     defaults = dict(defaults or {})
     topology_defaults = dict(defaults.get("topology") or {})
     checkpoint = prompts.checkpoint()
@@ -740,7 +751,17 @@ def _ask_downstream_evaluation_config(
     moe: bool,
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ask for lmms-eval task and vLLM settings."""
+    """
+    Collect lmms-eval tasks, sampling settings, vLLM topology, and evaluation timeout.
+    
+    Parameters:
+        detailed (bool): Whether to prompt for the per-candidate timeout.
+        moe (bool): Whether to allow configuring expert parallelism.
+        defaults (Mapping[str, Any] | None): Previously saved settings used as prompt defaults.
+    
+    Returns:
+        dict[str, Any]: The configured downstream evaluation settings.
+    """
 
     defaults = defaults or {}
     tasks = prompts.text(
@@ -851,6 +872,21 @@ def _default_flow(
     objective: Mapping[str, Any] | None = None,
     include_initial_filter: bool = True,
 ) -> dict[str, Any]:
+    """
+    Build the standard post-MIP evaluation and selection flow.
+    
+    Parameters:
+        run_id (str): Identifier of the MIP run.
+        run (Mapping[str, Any]): MIP run configuration.
+        runtime (Mapping[str, Any]): Runtime settings for serving evaluation.
+        data (Mapping[str, Any]): Dataset settings, including sequence length.
+        prefix (str): Prefix applied to generated node identifiers.
+        objective (Mapping[str, Any] | None): Objective used to configure ranking; the run's first objective is used when omitted.
+        include_initial_filter (bool): Whether to include the initial MIP-score filter.
+    
+    Returns:
+        dict[str, Any]: Flow configuration containing the source metadata and ordered post-MIP nodes.
+    """
     def node_id(name: str) -> str:
         return f"{prefix}{name}"
 
@@ -1010,6 +1046,20 @@ def _custom_flow(
     detailed: bool,
     moe: bool,
 ) -> dict[str, Any]:
+    """
+    Build a custom post-MIP evaluation flow through interactive configuration.
+    
+    Parameters:
+        run_id (str): Identifier of the MIP run supplying candidate models.
+        runtime (Mapping[str, Any]): Runtime settings used by serving evaluations.
+        data (Mapping[str, Any]): Dataset settings used by evaluation nodes.
+        used_ids (set[str]): Node IDs already in use; newly configured IDs are added.
+        detailed (bool): Whether to collect detailed evaluation settings.
+        moe (bool): Whether to enable mixture-of-experts configuration options.
+    
+    Returns:
+        dict[str, Any]: A flow definition containing the MIP source and configured nodes.
+    """
     nodes: OrderedDict[str, Any] = OrderedDict()
     available_metrics = ["mip.score"]
     transformer_nodes = []
@@ -1226,6 +1276,20 @@ def _resource_rows(
     gpus_per_node: int,
     workers: Mapping[str, int],
 ) -> list[dict[str, Any]]:
+    """
+    Calculate resource requirements for each campaign execution stage.
+    
+    Parameters:
+        state (AnswerState): Campaign configuration containing post-MIP flows and execution details.
+        common (Mapping[str, int]): Parallel mesh dimensions shared by common stages.
+        bypass (Mapping[str, int]): Parallel mesh dimensions for bypass processing.
+        global_kd (Mapping[str, int]): Parallel mesh dimensions for global knowledge distillation.
+        gpus_per_node (int): Number of GPUs available on each node.
+        workers (Mapping[str, int]): Worker limits for pool and sharded stages.
+    
+    Returns:
+        list[dict[str, Any]]: Resource rows containing each stage's name, instance count, GPUs per instance, and required node count.
+    """
     from .bundle import _post_mip_candidate_limits, _serving_parallel
 
     rows = []

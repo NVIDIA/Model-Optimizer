@@ -108,6 +108,19 @@ class PostMIPAdapter(WorkAdapter):
     strategy = ExecutionStrategy.SHARDED
 
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
+        """
+        Plan sharded execution for a post-MIP node and mark aggregation as required.
+        
+        Parameters:
+        	plan (CampaignPlan): Campaign execution plan containing node configuration and candidate information.
+        	node (StagePlanNode): Post-MIP node to plan.
+        
+        Returns:
+        	WorkPlan: Work plan containing the node's work item and execution strategy.
+        
+        Raises:
+        	RuntimeError: If an evaluation node has no candidate architectures to evaluate.
+        """
         config = _node_config(plan, node.stage_id)
         node_type = str(config.get("type"))
         count = 1 if node_type in {"filter", "manual_filter"} else node.instances

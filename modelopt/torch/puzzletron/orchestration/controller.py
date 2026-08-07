@@ -63,6 +63,19 @@ __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
 
 
 def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
+    """
+    Create an executor for the campaign plan's configured runner.
+    
+    Parameters:
+        plan (CampaignPlan): Campaign plan containing runner configuration.
+        local (bool): Whether to use a local executor instead of the configured runner.
+    
+    Returns:
+        Executor: Executor configured for local, Slurm, or bare-metal SSH execution.
+    
+    Raises:
+        ValueError: If the configured runner kind is unsupported.
+    """
     if local:
         return LocalExecutor(plan.runner)
     if plan.runner.kind == "slurm":
@@ -80,6 +93,16 @@ def _stage_dashboard_display_name(
     *,
     granularity: str | None = None,
 ) -> str:
+    """Resolve the dashboard display name for a campaign stage.
+    
+    Parameters:
+    	config (Mapping[str, Any]): Campaign configuration containing post-MIP flow definitions.
+    	stage_id (str): Stage identifier to format.
+    	granularity (str | None): Optional naming granularity.
+    
+    Returns:
+    	str: ``"Downstream Evaluation"`` for downstream evaluation post-MIP stages; otherwise, the formatted stage name.
+    """
     if stage_id.startswith("post."):
         parts = stage_id.split(".", 2)
         if len(parts) == 3:

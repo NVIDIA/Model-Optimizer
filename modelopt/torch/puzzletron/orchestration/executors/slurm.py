@@ -91,7 +91,15 @@ def render_hook_lines(commands: Sequence[str]) -> str:
 
 
 def _render_host_container_env(repository: str) -> str:
-    """Render host-side container runtime defaults for Pyxis/Enroot."""
+    """
+    Render shell commands that configure default Pyxis/Enroot paths and create their directories.
+    
+    Parameters:
+        repository (str): Repository path used to derive default Enroot cache and data paths.
+    
+    Returns:
+        str: Shell commands for configuring and preparing the container runtime environment.
+    """
 
     cache_root = Path(repository) / ".cache" / "enroot"
     lines = [
@@ -125,7 +133,25 @@ def render_sbatch_script(
     qos: str | None,
     job_name: str,
 ) -> str:
-    """Render one sbatch script for an attempt."""
+    """
+    Render an executable Slurm batch script for an attempt, including resource
+    allocations, environment setup, hooks, logging, and optional container
+    configuration.
+    
+    Parameters:
+        attempt (AttemptSpec): Attempt specification containing the command and
+            requested task topology.
+        runner (RunnerEnvironment): Runner configuration used for repository,
+            environment, and container settings.
+        partition (str): Slurm partition for the job.
+        account (str): Slurm account for the job.
+        time_limit (str): Slurm time limit.
+        qos (str | None): Optional Slurm quality-of-service name.
+        job_name (str): Name assigned to the Slurm job.
+    
+    Returns:
+        str: The generated executable sbatch script.
+    """
 
     contract = runner.contract
     topology = resolve_task_topology(attempt)

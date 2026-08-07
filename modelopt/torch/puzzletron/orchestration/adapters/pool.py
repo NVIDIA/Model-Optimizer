@@ -224,6 +224,20 @@ class PersistentPoolAdapter(WorkAdapter):
         runner,
         overrides: list[str] | None = None,
     ) -> AttemptSpec:
+        """
+        Build the execution command and resource allocation for a planned work item.
+        
+        Parameters:
+        	plan (CampaignPlan): Campaign configuration and execution context.
+        	node (StagePlanNode): Stage and resource configuration for the work item.
+        	item (WorkItem): Work item metadata, role, and local GPU assignments.
+        	attempt_id (str): Identifier for the execution attempt.
+        	runner: Runner context containing the repository location.
+        	overrides (list[str] | None): Optional configuration overrides to apply.
+        
+        Returns:
+        	AttemptSpec: Command, environment, resource allocation, and execution metadata for the work item.
+        """
         repo = Path(runner.contract.repository)
         role = item.metadata.get("role", "worker")
         log_dir = plan.puzzle_dir / "logs"
