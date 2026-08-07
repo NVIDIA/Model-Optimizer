@@ -34,6 +34,7 @@ from puzzletron_setup.wizard import (
     _ask_mesh,
     _ask_mip,
     _default_flow,
+    _downstream_evaluation_metric_suggestions,
     _resource_rows,
 )
 
@@ -547,6 +548,23 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
         "sequence_parallel": False,
     }
     assert execution["post.run.materialized"]["instances"] == 1
+
+
+def test_downstream_evaluation_metric_suggestions_match_runner_keys() -> None:
+    assert _downstream_evaluation_metric_suggestions(
+        "lmms_eval",
+        {"tasks": ["ifeval", "gsm8k", "custom_task"]},
+    ) == [
+        "lmms_eval.ifeval.prompt_level_strict_acc_none",
+        "lmms_eval.gsm8k.exact_match_strict-match",
+    ]
+    assert _downstream_evaluation_metric_suggestions(
+        "lmms_eval",
+        {"tasks": "gsm8k,ifeval"},
+    ) == [
+        "lmms_eval.gsm8k.exact_match_strict-match",
+        "lmms_eval.ifeval.prompt_level_strict_acc_none",
+    ]
 
 
 def test_render_execution_uses_vllm_mesh_for_post_mip_downstream_evaluation() -> None:

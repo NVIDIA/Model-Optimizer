@@ -39,6 +39,10 @@ __all__ = ["run_wizard"]
 _MESH_KEYS = ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
 _DEFAULT_MIP_SOLUTION_COUNT = 3
 _DEFAULT_HOMOGENEOUS_SOLUTIONS_PER_SCENARIO = 8
+_DOWNSTREAM_EVALUATION_METRICS_BY_TASK = {
+    "gsm8k": ("exact_match_strict-match",),
+    "ifeval": ("prompt_level_strict_acc_none",),
+}
 
 
 def _default(state: AnswerState, section: str, key: str, fallback: Any) -> Any:
@@ -841,6 +845,20 @@ def _ask_downstream_evaluation_config(
     }
 
 
+def _downstream_evaluation_metric_suggestions(node_id: str, config: Mapping[str, Any]) -> list[str]:
+    """Return filter metric names produced by the downstream-evaluation runner."""
+
+    suggestions = []
+    tasks = config.get("tasks") or ()
+    if isinstance(tasks, str):
+        tasks = [item.strip() for item in tasks.split(",") if item.strip()]
+    for task in tasks:
+        task_name = str(task).strip()
+        for metric in _DOWNSTREAM_EVALUATION_METRICS_BY_TASK.get(task_name, ()):
+            suggestions.append(f"{node_id}.{task_name}.{metric}")
+    return suggestions
+
+
 def _default_flow(
     run_id: str,
     run: Mapping[str, Any],
@@ -1077,7 +1095,9 @@ def _custom_flow(
                 detailed=detailed,
                 moe=moe,
             )
-            available_metrics.append(f"{node_id}.gsm8k.exact_match")
+            available_metrics.extend(
+                _downstream_evaluation_metric_suggestions(node_id, node["config"])
+            )
         elif node_type == "global_kd":
             node["config"] = {"max_steps": prompts.integer("Global KD steps:", default=128)}
         elif node_type == "ptq":
