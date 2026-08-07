@@ -57,10 +57,14 @@ Minimum Framework Versions
 ===============  =================
 Framework        Minimum version
 ===============  =================
-TensorRT-LLM     v0.17.0
+TensorRT-LLM     v1.2.0
 vLLM             v0.10.1
 SGLang           v0.4.10
 ===============  =================
+
+These are the oldest versions expected to load a unified HF checkpoint. The matrix below is
+validated against the versions CI currently runs, which are newer — see the container tags in
+``.github/workflows/``.
 
 .. _unified-hf-support-matrix:
 
@@ -69,10 +73,10 @@ Model Support Matrix
 
 Legend:
 
-* ``Y`` — covered by the release deployment test suite
+* ✅ — covered by the release deployment test suite
   (`tests/examples/hf_ptq/test_deploy.py <https://github.com/NVIDIA/Model-Optimizer/blob/main/tests/examples/hf_ptq/test_deploy.py>`_),
   which loads the exported checkpoint in the framework and runs generation.
-* ``~`` — documented as working previously but not in the current test suite; expected to work, unvalidated.
+* ⚠ — documented as working previously but not in the current test suite; expected to work, unvalidated.
 * ``-`` — not currently covered. It may still work; see `Models not listed here`_.
 
 Language models
@@ -81,39 +85,39 @@ Language models
 ============================================  ==============  ============  ======  ========
 Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
 ============================================  ==============  ============  ======  ========
-Llama 3.1, 3.3                                FP8, NVFP4      Y             Y       Y
-Llama 4 Scout, Maverick                       FP8             Y             Y       Y
-Llama 4 Scout                                 NVFP4           Y             Y       Y
-Llama Nemotron Super 49B v1, v1.5             FP8             Y             Y       Y
-Llama Nemotron Ultra 253B v1                  FP8             Y             Y       Y
-Nemotron 3 Nano 30B-A3B                       FP8, NVFP4      Y             Y       Y
-Nemotron 3 Super 120B-A12B                    FP8, NVFP4      Y             Y       Y
-Nemotron 3 Ultra 550B-A55B                    NVFP4           Y             Y       Y
-DeepSeek R1, R1-0528                          NVFP4           Y             Y       Y
-DeepSeek V3, V3.1, V3.2                       NVFP4           Y             Y       Y
-DeepSeek V4 Flash                             NVFP4           Y             Y       Y
-DeepSeek V4 Pro                               NVFP4           \-            Y       Y
-Qwen 3 (8B, 14B, 32B)                         FP8, NVFP4      Y             Y       Y
-Qwen 3 MoE 235B-A22B                          FP8, NVFP4      Y             Y       Y
-Qwen 3 MoE 30B-A3B                            NVFP4           Y             Y       Y
-Qwen 3 Coder 480B-A35B                        NVFP4           Y             Y       Y
-Qwen 3-Next 80B-A3B                           NVFP4           Y             Y       Y
-Qwen 3.5 397B-A17B                            NVFP4           Y             Y       Y
-Qwen 3.5 122B-A10B, Qwen 3.6 35B-A3B          NVFP4           \-            Y       \-
-Qwen 2.5                                      FP8             ~             ~       ~
-Qwen 2.5                                      NVFP4           ~             ~       \-
-QwQ-32B                                       FP8             ~             ~       ~
-QwQ-32B                                       NVFP4           ~             ~       \-
-Phi-4 reasoning-plus                          FP8, NVFP4      Y             Y       Y
-Gemma 4 31B                                   NVFP4           Y             Y       Y
-Gemma 4 26B-A4B                               NVFP4           \-            Y       \-
-GLM-4.7, GLM-5, GLM-5.2                       NVFP4           Y             Y       Y
-GLM-5.1                                       NVFP4           \-            Y       Y
-Kimi K2-Thinking, K2.5                        NVFP4           Y             Y       Y
-Kimi K2.6                                     NVFP4           \-            Y       \-
-MiniMax M2.5, M3                              NVFP4           Y             Y       Y
-Mixtral 8x7B                                  FP8             ~             ~       ~
-Mixtral 8x7B                                  NVFP4           ~             \-      \-
+Llama 3.1, 3.3                                FP8, NVFP4      ✅             ✅       ✅
+Llama 4 Scout, Maverick                       FP8             ✅             ✅       ✅
+Llama 4 Scout                                 NVFP4           ✅             ✅       ✅
+Llama Nemotron Super 49B v1, v1.5             FP8             ✅             ✅       ✅
+Llama Nemotron Ultra 253B v1                  FP8             ✅             ✅       ✅
+Nemotron 3 Nano 30B-A3B                       FP8, NVFP4      ✅             ✅       ✅
+Nemotron 3 Super 120B-A12B                    FP8, NVFP4      ✅             ✅       ✅
+Nemotron 3 Ultra 550B-A55B                    NVFP4           ✅             ✅       ✅
+DeepSeek R1, R1-0528                          NVFP4           ✅             ✅       ✅
+DeepSeek V3, V3.1, V3.2                       NVFP4           ✅             ✅       ✅
+DeepSeek V4 Flash                             NVFP4           ✅             ✅       ✅
+DeepSeek V4 Pro                               NVFP4           \-            ✅       ✅
+Qwen 3 (8B, 14B, 32B)                         FP8, NVFP4      ✅             ✅       ✅
+Qwen 3 MoE 235B-A22B                          FP8, NVFP4      ✅             ✅       ✅
+Qwen 3 MoE 30B-A3B                            NVFP4           ✅             ✅       ✅
+Qwen 3 Coder 480B-A35B                        NVFP4           ✅             ✅       ✅
+Qwen 3-Next 80B-A3B                           NVFP4           ✅             ✅       ✅
+Qwen 3.5 397B-A17B                            NVFP4           ✅             ✅       ✅
+Qwen 3.5 122B-A10B, Qwen 3.6 35B-A3B          NVFP4           \-            ✅       \-
+Qwen 2.5                                      FP8             ⚠             ⚠       ⚠
+Qwen 2.5                                      NVFP4           ⚠             ⚠       \-
+QwQ-32B                                       FP8             ⚠             ⚠       ⚠
+QwQ-32B                                       NVFP4           ⚠             ⚠       \-
+Phi-4 reasoning-plus                          FP8, NVFP4      ✅             ✅       ✅
+Gemma 4 31B                                   NVFP4           ✅             ✅       ✅
+Gemma 4 26B-A4B                               NVFP4           \-            ✅       \-
+GLM-4.7, GLM-5, GLM-5.2                       NVFP4           ✅             ✅       ✅
+GLM-5.1                                       NVFP4           \-            ✅       ✅
+Kimi K2-Thinking, K2.5                        NVFP4           ✅             ✅       ✅
+Kimi K2.6                                     NVFP4           \-            ✅       \-
+MiniMax M2.5, M3                              NVFP4           ✅             ✅       ✅
+Mixtral 8x7B                                  FP8             ⚠             ⚠       ⚠
+Mixtral 8x7B                                  NVFP4           ⚠             \-      \-
 ============================================  ==============  ============  ======  ========
 
 Vision-language and multimodal models
@@ -127,10 +131,10 @@ architecture — see the
 ============================================  ==============  ============  ======  ========
 Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
 ============================================  ==============  ============  ======  ========
-Qwen 2.5-VL 7B                                FP8, NVFP4      Y             Y       Y
-Qwen 3-VL 235B-A22B                           NVFP4           Y             Y       Y
-Phi-4-multimodal                              FP8, NVFP4      Y             Y       Y
-Nemotron 3 Nano Omni 30B-A3B                  FP8, NVFP4      Y             Y       Y
+Qwen 2.5-VL 7B                                FP8, NVFP4      ✅             ✅       ✅
+Qwen 3-VL 235B-A22B                           NVFP4           ✅             ✅       ✅
+Phi-4-multimodal                              FP8, NVFP4      ✅             ✅       ✅
+Nemotron 3 Nano Omni 30B-A3B                  FP8, NVFP4      ✅             ✅       ✅
 ============================================  ==============  ============  ======  ========
 
 Speculative decoding drafters
@@ -138,15 +142,19 @@ Speculative decoding drafters
 
 Drafters are deployed on top of their base checkpoint. vLLM is not currently covered for these.
 
+Unlike the tables above, drafter coverage is conditional: the EAGLE3 tests run only when
+``MODELOPT_LOCAL_EAGLE_MODEL`` points at a directory containing the drafter, and skip otherwise.
+✅ below means "covered when that drafter is available locally".
+
 ============================================================  ============  ============  ======  ========
 Drafter                                                       Quant format  TensorRT-LLM  vLLM    SGLang
 ============================================================  ============  ============  ======  ========
-EAGLE3 for Llama 3.3 70B, Llama 4 Maverick                    FP8           Y             \-      Y
-EAGLE3 for Qwen 3 235B-A22B (incl. Thinking-2507, FP4)        BF16, NVFP4   Y             \-      Y
-EAGLE3 for Qwen 3 30B-A3B-Thinking-2507                       BF16          Y             \-      Y
-EAGLE3 for Kimi K2-Thinking, K2.5, K2.6                       NVFP4         Y             \-      Y
-EAGLE3 for gpt-oss-120b                                       BF16          Y             \-      Y
-Medusa for Llama 3.1 8B                                       FP8           Y             \-      Y
+EAGLE3 for Llama 3.3 70B, Llama 4 Maverick                    FP8           ✅             \-      ✅
+EAGLE3 for Qwen 3 235B-A22B (incl. Thinking-2507, FP4)        BF16, NVFP4   ✅             \-      ✅
+EAGLE3 for Qwen 3 30B-A3B-Thinking-2507                       BF16          ✅             \-      ✅
+EAGLE3 for Kimi K2-Thinking, K2.5, K2.6                       NVFP4         ✅             \-      ✅
+EAGLE3 for gpt-oss-120b                                       BF16          ✅             \-      ✅
+Medusa for Llama 3.1 8B                                       FP8           ✅             \-      ✅
 ============================================================  ============  ============  ======  ========
 
 Diffusion models
@@ -155,8 +163,8 @@ Diffusion models
 ============================================  ==============  ============  ======  ========
 Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
 ============================================  ==============  ============  ======  ========
-Wan 2.2 T2V A14B                              FP8, NVFP4      Y             \-      Y
-DiffusionGemma 26B-A4B                        NVFP4           Y             Y       Y
+Wan 2.2 T2V A14B                              FP8, NVFP4      ✅             \-      ✅
+DiffusionGemma 26B-A4B                        NVFP4           ✅             ✅       ✅
 ============================================  ==============  ============  ======  ========
 
 .. note::
@@ -186,7 +194,7 @@ Deployment with Selected Inference Frameworks
 
     Follow the `TensorRT-LLM installation instructions. <https://nvidia.github.io/TensorRT-LLM/quick-start-guide.html#installation>`_
 
-    Currently we support fp8 and nvfp4 quantized models for TensorRT-LLM deployment, you need v0.17.0 or later version of TensorRT-LLM.
+    FP8 and NVFP4 quantized models are supported; you need v1.2.0 or later version of TensorRT-LLM.
 
     To run modelopt quantized model from Huggingface model hub, e.g., `nvidia/Llama-3.1-8B-Instruct-FP8`_, refer to the sample code below:
 
