@@ -1,10 +1,9 @@
 schema_version: 1
 definition: >-
-  Reported with known slicing warnings means that a campaign executed the
-  listed pruning dimensions and settings through its stated stage boundary,
-  while its report also records unresolved slicing-equivalence warnings. A
-  completed stage status records execution and artifacts, not a successful
-  correctness gate or a model support claim.
+  These records describe checked-in reports from an earlier experimental
+  state. The metadata is checked statically against the reports and current
+  configuration files, but the campaigns have not been reproduced on current
+  code and do not establish model support.
 
 campaigns:
   - id: nemotron3_nano_30b_a3b
@@ -14,7 +13,8 @@ campaigns:
     current_config: >-
       examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
     report: examples/puzzletron/reports/nemotron3_nano_30b_a3b.html
-    classification: reported_with_known_slicing_warnings
+    classification: historical_unreproduced
+    reproduced_on_current_code: false
     support_claim: false
     known_slicing_warnings:
       equivalence_tolerance_findings: 176
@@ -97,7 +97,8 @@ campaigns:
     model_config: examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml
     current_config: examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml
     report: examples/puzzletron/reports/qwen3p5_9b.html
-    classification: reported_with_known_slicing_warnings
+    classification: historical_unreproduced
+    reproduced_on_current_code: false
     support_claim: false
     known_slicing_warnings:
       equivalence_tolerance_findings: 101

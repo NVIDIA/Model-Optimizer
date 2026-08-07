@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate the checked-in Puzzletron campaign support evidence."""
+"""Validate metadata for checked-in historical Puzzletron campaign reports."""
 
 import json
 from collections import Counter
@@ -40,30 +40,30 @@ LEGACY_MIP_GOAL_FIELDS = {
 
 
 @pytest.fixture(scope="module")
-def support_evidence(project_root_path: Path) -> dict:
-    evidence_path = project_root_path / "examples/puzzletron/docs/support_evidence.yaml"
-    return yaml.safe_load(evidence_path.read_text())
+def historical_campaigns(project_root_path: Path) -> dict:
+    manifest_path = project_root_path / "examples/puzzletron/reports/historical_campaigns.yaml"
+    return yaml.safe_load(manifest_path.read_text())
 
 
-def test_support_evidence_campaign_set(support_evidence: dict) -> None:
-    assert support_evidence["schema_version"] == 1
-    assert {campaign["id"] for campaign in support_evidence["campaigns"]} == set(CAMPAIGN_IDS)
+def test_historical_campaign_set(historical_campaigns: dict) -> None:
+    assert historical_campaigns["schema_version"] == 1
+    assert {campaign["id"] for campaign in historical_campaigns["campaigns"]} == set(CAMPAIGN_IDS)
 
 
-def test_support_matrix_campaign_set(project_root_path: Path, support_evidence: dict) -> None:
+def test_report_matrix_campaign_set(project_root_path: Path, historical_campaigns: dict) -> None:
     matrix_path = project_root_path / "examples/puzzletron/docs/support_matrix.md"
-    matrix_rows = _reported_campaign_rows(matrix_path.read_text())
+    matrix_rows = _historical_campaign_rows(matrix_path.read_text())
 
     assert Counter(name for name, _ in matrix_rows) == Counter(
-        campaign["display_name"] for campaign in support_evidence["campaigns"]
+        campaign["display_name"] for campaign in historical_campaigns["campaigns"]
     )
 
 
 @pytest.mark.parametrize("campaign_id", CAMPAIGN_IDS)
-def test_support_evidence_matches_current_config(
-    project_root_path: Path, support_evidence: dict, campaign_id: str
+def test_historical_campaign_matches_current_config(
+    project_root_path: Path, historical_campaigns: dict, campaign_id: str
 ) -> None:
-    campaign = _campaign_by_id(support_evidence, campaign_id)
+    campaign = _campaign_by_id(historical_campaigns, campaign_id)
     config_path = project_root_path / campaign["current_config"]
     model_config_path = project_root_path / campaign["model_config"]
     config = yaml.safe_load(config_path.read_text())
@@ -73,7 +73,8 @@ def test_support_evidence_matches_current_config(
     model_default = "/" + str(model_config_path.relative_to(config_root).with_suffix(""))
     model_default += "@_global_"
 
-    assert campaign["classification"] == "reported_with_known_slicing_warnings"
+    assert campaign["classification"] == "historical_unreproduced"
+    assert campaign["reproduced_on_current_code"] is False
     assert campaign["support_claim"] is False
     assert model_default in config["defaults"]
     assert model_config["model_info"]["hf_repo"] == campaign["model_repo"]
@@ -104,10 +105,10 @@ def test_support_evidence_matches_current_config(
 
 
 @pytest.mark.parametrize("campaign_id", CAMPAIGN_IDS)
-def test_support_evidence_matches_report_summary(
-    project_root_path: Path, support_evidence: dict, campaign_id: str
+def test_historical_campaign_matches_report_summary(
+    project_root_path: Path, historical_campaigns: dict, campaign_id: str
 ) -> None:
-    campaign = _campaign_by_id(support_evidence, campaign_id)
+    campaign = _campaign_by_id(historical_campaigns, campaign_id)
     report_path = project_root_path / campaign["report"]
     report = _load_report_summary(report_path)
     report_config = report["merged_config"]
@@ -157,12 +158,12 @@ def test_support_evidence_matches_report_summary(
 
 
 @pytest.mark.parametrize("campaign_id", CAMPAIGN_IDS)
-def test_support_matrix_row_matches_evidence(
-    project_root_path: Path, support_evidence: dict, campaign_id: str
+def test_report_matrix_row_matches_manifest(
+    project_root_path: Path, historical_campaigns: dict, campaign_id: str
 ) -> None:
-    campaign = _campaign_by_id(support_evidence, campaign_id)
+    campaign = _campaign_by_id(historical_campaigns, campaign_id)
     matrix_path = project_root_path / "examples/puzzletron/docs/support_matrix.md"
-    matrix_rows = _reported_campaign_rows(matrix_path.read_text())
+    matrix_rows = _historical_campaign_rows(matrix_path.read_text())
     row = next(row for name, row in matrix_rows if name == campaign["display_name"])
 
     puzzletron_root = project_root_path / "examples/puzzletron"
@@ -172,6 +173,7 @@ def test_support_matrix_row_matches_evidence(
     report_link = (Path("..") / report_path.relative_to(puzzletron_root)).as_posix()
     slicing_warnings = campaign["known_slicing_warnings"]
 
+    assert "Not reproduced on current code" in row
     assert f"[default.yaml]({config_link})" in row
     assert f"[Campaign report]({report_link})" in row
     assert (
@@ -246,9 +248,9 @@ def _report_goal_dimensions(report_config: dict) -> set[str]:
     return dimensions
 
 
-def _reported_campaign_rows(matrix: str) -> list[tuple[str, str]]:
-    section = matrix.split("## Reported campaign slices", maxsplit=1)[1]
-    section = section.split("### Nemotron-3 Nano 30B-A3B", maxsplit=1)[0]
+def _historical_campaign_rows(matrix: str) -> list[tuple[str, str]]:
+    section = matrix.split("## Report summary", maxsplit=1)[1]
+    section = section.split("## What this proves", maxsplit=1)[0]
     rows = [line for line in section.splitlines() if line.startswith("|")][2:]
     return [
         (cells[0], row)
