@@ -182,7 +182,7 @@ def test_counts_nemotron_mutually_exclusive_hybrid_pattern():
     assert counts.replacement_block_per_width == 10
 
 
-def test_formats_exact_candidate_counts_in_granularity_choices():
+def test_formats_exact_vllm_candidate_counts_in_granularity_choices():
     counts = CandidateCounts(
         vllm_subblock=14,
         vllm_block=24,
@@ -192,9 +192,20 @@ def test_formats_exact_candidate_counts_in_granularity_choices():
     )
 
     assert _vllm_granularity_choices(counts) == [
-        ("Sublayer — 14 unique configurations", "subblock"),
-        ("Whole block — 24 unique configurations", "block"),
+        ("Sublayer — 14 configurations/width, 28 total across 2 widths", "subblock"),
+        ("Whole block — 24 configurations/width, 48 total across 2 widths", "block"),
     ]
+
+
+def test_formats_exact_replacement_candidate_counts_in_granularity_choices():
+    counts = CandidateCounts(
+        vllm_subblock=14,
+        vllm_block=24,
+        replacement_subblock_per_width=168,
+        replacement_block_per_width=312,
+        width_count=2,
+    )
+
     assert _replacement_granularity_choices(counts) == [
         ("Subblock — 168 solutions/width, 336 total across 2 widths", "subblock"),
         ("Whole block — 312 solutions/width, 624 total across 2 widths", "block"),

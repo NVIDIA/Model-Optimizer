@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from . import SetupError
+from . import (
+    WORKER_REPOSITORY_PLACEHOLDER,
+    WORKER_VENV_PLACEHOLDER,
+    SetupError,
+    validate_worker_path,
+)
 from .inspection import (
     InspectedModel,
     infer_dataset_modality,
@@ -1395,18 +1400,43 @@ def _ask_infrastructure(
         [("Slurm", "slurm"), ("SSH bare metal", "baremetal")],
         default="slurm",
     )
-    repository = prompts.text("Repository path on workers:", default=str(Path.cwd()))
-    venv = prompts.text("Python virtual environment on workers:", default=".venv")
-    container = prompts.text("Container image/path (blank for none):", default="").strip()
+    repository = prompts.text(
+        "Repository path on workers:",
+        default=WORKER_REPOSITORY_PLACEHOLDER,
+        description=(
+            "Replace the default with the checkout path visible on every worker and inside "
+            "the container, if used."
+        ),
+        validate=validate_worker_path,
+    )
+    venv = prompts.text(
+        "Python virtual environment on workers:",
+        default=WORKER_VENV_PLACEHOLDER,
+        description="Replace the default with a worker-visible environment path containing "
+        "bin/activate.",
+        validate=validate_worker_path,
+    )
+    container = prompts.text(
+        "Container image/path (blank for none):",
+        default="",
+        description=(
+            "Use an image/path accepted by the cluster's srun container plugin, or leave "
+            "blank to run directly in the worker environment."
+        ),
+    ).strip()
     mounts = prompts.text(
         "Container mounts (blank for none):",
         default="",
         description=(
             "Use /host/path:/container/path; separate multiple mounts with commas, for "
-            "example /lustre:/lustre,/datasets:/datasets."
+            "example /data:/data,/models:/models."
         ),
     ).strip()
-    prerun = prompts.text("Pre-run commands separated by ';;' (blank for none):", default="")
+    prerun = prompts.text(
+        "Pre-run commands separated by ';;' (blank for none):",
+        default="",
+        description="Commands run in order before virtualenv activation.",
+    )
     gpus_per_node = prompts.integer("GPUs per node:", default=8)
     _print_mesh_guidance(model)
     mesh_checkpoint = prompts.checkpoint()

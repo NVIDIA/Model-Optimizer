@@ -57,6 +57,10 @@ def _result(index: int, kind: str, name: str, axis_value: int) -> dict:
 
 def test_nested_bypass_report_selects_exact_subblock_losses(tmp_path: Path):
     _write(
+        tmp_path / "manifests/bypass.json",
+        {"config": {"bypass": {"enabled": True, "granularity": "subblock"}}},
+    )
+    _write(
         tmp_path / "artifacts/bypass/local_kd_loss_history.json",
         {
             "max_steps": 2,
@@ -93,6 +97,10 @@ def test_nested_bypass_report_selects_exact_subblock_losses(tmp_path: Path):
 
 def test_nested_bypass_report_uses_dp_scatter_and_normalized_parameter_color(tmp_path: Path):
     bypass = tmp_path / "artifacts/bypass"
+    _write(
+        tmp_path / "manifests/bypass.json",
+        {"config": {"bypass": {"enabled": True, "granularity": "subblock"}}},
+    )
     _write(
         bypass / "local_kd_loss_history.json",
         {
@@ -230,6 +238,10 @@ def test_nested_bypass_attention_filters_use_query_heads_per_kv_head(tmp_path: P
 
 def test_nested_bypass_report_surfaces_invalid_parameter_metadata(tmp_path: Path):
     bypass = tmp_path / "artifacts/bypass"
+    _write(
+        tmp_path / "manifests/bypass.json",
+        {"config": {"bypass": {"enabled": True, "granularity": "subblock"}}},
+    )
     _write(
         bypass / "local_kd_loss_history.json",
         {

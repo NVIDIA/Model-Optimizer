@@ -23,11 +23,15 @@ from __future__ import annotations
 import json
 import signal
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
 
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
+from puzzletron_orchestrator.adapters.stage_compat import (
+    stage_is_complete as artifacts_are_complete,
+)
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -46,6 +50,7 @@ class _FakeExecutor(Executor):
     def __init__(self) -> None:
         self.cancelled: list[JobHandle] = []
         self._handles: dict[str, JobHandle] = {}
+        self._attempts: dict[str, AttemptSpec] = {}
 
     def submit(self, attempt: AttemptSpec) -> JobHandle:
         handle = JobHandle(
@@ -55,13 +60,27 @@ class _FakeExecutor(Executor):
             metadata={"log_paths": (attempt.command.log_path,) if attempt.command.log_path else ()},
         )
         self._handles[handle.handle_id] = handle
+        self._attempts[handle.handle_id] = attempt
         return handle
 
     def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
-        return [
-            JobStatus(handle=handle, state=JobState.RUNNING, log_paths=self.fetch_logs(handle))
-            for handle in handles
-        ]
+        statuses = []
+        for handle in handles:
+            attempt = self._attempts[handle.handle_id]
+            state = JobState.RUNNING
+            if attempt.stage_id == "final_report":
+                puzzle_dir = Path(
+                    attempt.command.argv[attempt.command.argv.index("--puzzle-dir") + 1]
+                )
+                report_dir = puzzle_dir / "artifacts" / "campaign_report"
+                report_dir.mkdir(parents=True, exist_ok=True)
+                (report_dir / "campaign_report.html").write_text("<html></html>\n")
+                (report_dir / "report_manifest.json").write_text("{}\n")
+                state = JobState.COMPLETED
+            statuses.append(
+                JobStatus(handle=handle, state=state, log_paths=self.fetch_logs(handle))
+            )
+        return statuses
 
     def cancel(self, handles: Sequence[JobHandle]) -> None:
         self.cancelled.extend(handles)
@@ -189,9 +208,23 @@ def _seed_sort_complete(run_dir: Path) -> None:
 
 
 def _seed_sort_sanity_complete(run_dir: Path) -> None:
-    summary = run_dir / "artifacts" / "sort_sanity" / "summary.json"
+    _seed_sanity_complete(run_dir, "sort_sanity")
+
+
+def _seed_sanity_complete(run_dir: Path, stage_id: str) -> None:
+    summary = run_dir / "artifacts" / stage_id / "summary.json"
     summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text(json.dumps({"passed": True}) + "\n")
+
+
+def _seed_vllm_stats_complete(run_dir: Path) -> None:
+    stats = run_dir / "subblock_stats.json"
+    stats.write_text(
+        json.dumps([{"args": {"runtime_stats": True, "n_embd": 1}}]) + "\n"
+    )
+    summary = run_dir / "artifacts" / "vllm_stats" / "summary.json"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text("{}\n")
 
 
 class _TrackingFakeExecutor(_FakeExecutor):
@@ -481,7 +514,7 @@ def test_controller_aggregates_completed_work_before_resubmitting(tmp_path: Path
     result = controller.run(once=True)
 
     assert result["halted"] is False
-    assert not executor._handles
+    assert not any(attempt.stage_id == "convert" for attempt in executor._attempts.values())
     assert controller.store.stage_is_complete("convert")
 
 
@@ -842,7 +875,9 @@ def test_controller_can_resume_quit_menu_then_detach_live_jobs(tmp_path: Path):
     assert controller.store.list_live_handles()
 
 
-def test_controller_fatal_failure_drains_without_cancelling_siblings(tmp_path: Path):
+def test_controller_fatal_failure_drains_without_cancelling_siblings(
+    tmp_path: Path, monkeypatch
+):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     run_dir = tmp_path / "run"
     teacher = run_dir / "ckpts" / "teacher"
@@ -853,6 +888,12 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(tmp_path: P
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
         execution=load_execution_config(execution_path),
+    )
+    plan = replace(
+        plan,
+        stages=tuple(
+            node for node in plan.stages if node.stage_id in {"tokenize_data", "vllm_stats"}
+        ),
     )
 
     class _DrainingExecutor(_FakeExecutor):
@@ -868,7 +909,7 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(tmp_path: P
         def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
             self.poll_count += 1
             if self.poll_count == 1:
-                return [
+                statuses = [
                     JobStatus(
                         handle=handle,
                         state=JobState.FAILED if index == 0 else JobState.RUNNING,
@@ -876,9 +917,24 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(tmp_path: P
                     )
                     for index, handle in enumerate(handles)
                 ]
-            return [JobStatus(handle=handle, state=JobState.COMPLETED) for handle in handles]
+            else:
+                statuses = [
+                    JobStatus(handle=handle, state=JobState.COMPLETED) for handle in handles
+                ]
+            for status in statuses:
+                if (
+                    status.state is JobState.COMPLETED
+                    and status.handle.metadata.get("work_id")
+                    == "vllm_stats:default:gang"
+                ):
+                    _seed_vllm_stats_complete(run_dir)
+            return statuses
 
     executor = _DrainingExecutor()
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.adapters.sharded._run_slurm_aggregate",
+        lambda **_kwargs: "fake-merge",
+    )
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
     result = controller.run()
 
@@ -984,12 +1040,21 @@ def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
     upstream = {"convert", "tokenize_data", "width_importance", "sort", "sort_sanity"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda _config, stage_id: stage_id in upstream,
+        lambda config, stage_id: stage_id in upstream
+        or artifacts_are_complete(config, stage_id),
     )
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
         execution=load_execution_config(execution_path),
+    )
+    plan = replace(
+        plan,
+        stages=tuple(
+            node
+            for node in plan.stages
+            if node.stage_id in {"width_sanity", "slicing_sanity", "bypass_sanity"}
+        ),
     )
 
     class _SanityDrainExecutor(_TrackingFakeExecutor):
@@ -1008,6 +1073,8 @@ def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
                 elif stage_id == "bypass_sanity":
                     state = JobState.COMPLETED if self.poll_count > 1 else JobState.RUNNING
                     reason = None
+                    if state is JobState.COMPLETED:
+                        _seed_sanity_complete(run_dir, "bypass_sanity")
                 else:
                     state = JobState.COMPLETED
                     reason = None
@@ -1037,17 +1104,26 @@ def test_controller_failed_ancestor_blocks_descendant_submit(tmp_path: Path, mon
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda _config, stage_id: stage_id in upstream,
+        lambda config, stage_id: stage_id in upstream
+        or artifacts_are_complete(config, stage_id),
     )
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
         execution=load_execution_config(execution_path),
     )
+    plan = replace(
+        plan,
+        stages=tuple(
+            node
+            for node in plan.stages
+            if node.stage_id in {"sort_sanity", "width_sanity", "bypass_sanity"}
+        ),
+    )
 
     class _SanityDrainExecutor(_TrackingFakeExecutor):
         def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
-            return [
+            statuses = [
                 JobStatus(
                     handle=handle,
                     state=(
@@ -1063,6 +1139,13 @@ def test_controller_failed_ancestor_blocks_descendant_submit(tmp_path: Path, mon
                 )
                 for handle in handles
             ]
+            if any(
+                status.state is JobState.COMPLETED
+                and self._stage_id(status.handle) == "bypass_sanity"
+                for status in statuses
+            ):
+                _seed_sanity_complete(run_dir, "bypass_sanity")
+            return statuses
 
     executor = _SanityDrainExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)

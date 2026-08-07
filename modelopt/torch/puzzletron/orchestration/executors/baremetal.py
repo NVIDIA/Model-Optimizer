@@ -141,6 +141,7 @@ class BareMetalSSHExecutor(Executor):
 
     def preflight(self) -> None:
         repository = self.runner.contract.repository
+        venv = self.runner.contract.venv
         for host in self.runner.baremetal.hosts if self.runner.baremetal else ():
             result = _run_command(
                 [
@@ -148,7 +149,9 @@ class BareMetalSSHExecutor(Executor):
                     "-o",
                     "BatchMode=yes",
                     host.hostname,
-                    f"hostname; test -d {shlex.quote(repository)}; nvidia-smi -L",
+                    f"hostname && test -d {shlex.quote(repository)} && "
+                    f"cd {shlex.quote(repository)} && "
+                    f"test -f {shlex.quote(venv)}/bin/activate && nvidia-smi -L",
                 ]
             )
             if result.returncode != 0:

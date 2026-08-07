@@ -24,8 +24,10 @@ Usage:
 """
 
 import glob
+import json
 import os
 import shutil
+from pathlib import Path
 
 import nox
 
@@ -46,6 +48,18 @@ TRANSFORMERS_VERSIONS = {
     "tf_min": "transformers~=4.56.0",
 }
 
+PUZZLETRON_V2_CI_ENVIRONMENT_PATH = (
+    Path(__file__).resolve().parent / "examples/puzzletron/ci_environment.json"
+)
+with PUZZLETRON_V2_CI_ENVIRONMENT_PATH.open(encoding="utf-8") as environment_file:
+    PUZZLETRON_V2_CI_ENVIRONMENT = json.load(environment_file)
+PUZZLETRON_V2_AUTOMODEL_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["nemo_automodel"]
+PUZZLETRON_V2_AUTOMODEL = (
+    "nemo-automodel @ git+"
+    f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['repository']}@"
+    f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['commit']}"
+)
+
 
 def _cov_args():
     """Return --cov when COVERAGE_PROCESS_START is set (CI only)."""
@@ -57,12 +71,75 @@ def _cov_args():
 @nox.parametrize("tf_ver", [nox.param(k, id=k) for k in TRANSFORMERS_VERSIONS])
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
-    """Unit tests — parametrized over torch and transformers versions."""
+    """Non-Puzzletron unit tests across the generic dependency matrix."""
     session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
     tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pin:
         session.install(tf_pin)
-    session.run("python", "-m", "pytest", "tests/unit", *_cov_args())
+    # Puzzletron v2 has an exact, independently tested runtime matrix.
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "tests/unit",
+        "--ignore=tests/unit/torch/puzzletron",
+        *_cov_args(),
+    )
+
+
+@nox.session(python=PUZZLETRON_V2_CI_ENVIRONMENT["python"])
+def puzzletron_v2(session):
+    """Run Puzzletron v2 CPU-eligible tests in its pinned Python runtime."""
+    session.install(
+        f"torch=={PUZZLETRON_V2_CI_ENVIRONMENT['torch']}",
+        f"torchvision=={PUZZLETRON_V2_CI_ENVIRONMENT['torchvision']}",
+        "--index-url",
+        "https://download.pytorch.org/whl/cpu",
+    )
+    session.install(
+        f"transformers=={PUZZLETRON_V2_CI_ENVIRONMENT['transformers']}",
+        "-r",
+        "examples/puzzletron/requirements.txt",
+        "-e",
+        ".[hf,puzzletron,dev-test]",
+        PUZZLETRON_V2_AUTOMODEL,
+    )
+    session.run("uv", "pip", "check")
+    expected_versions = {
+        "python": PUZZLETRON_V2_CI_ENVIRONMENT["python"],
+        "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
+        "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
+        "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
+        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
+    }
+    session.run(
+        "python",
+        "-c",
+        (
+            "import sys; "
+            "from importlib.metadata import version; "
+            "from packaging.version import Version; "
+            f"expected = {expected_versions!r}; "
+            "actual = {"
+            "'python': f'{sys.version_info.major}.{sys.version_info.minor}', "
+            "'torch': Version(version('torch')).base_version, "
+            "'torchvision': Version(version('torchvision')).base_version, "
+            "'transformers': Version(version('transformers')).base_version, "
+            "'nemo-automodel': Version(version('nemo-automodel')).base_version}; "
+            "mismatches = {name: (actual[name], expected_version) "
+            "for name, expected_version in expected.items() "
+            "if actual[name] != expected_version}; "
+            "assert not mismatches, "
+            "f'Pinned Puzzletron CI environment mismatch: {mismatches}'"
+        ),
+    )
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "tests/unit/torch/puzzletron",
+        *_cov_args(),
+    )
 
 
 @nox.session(python="3.12")

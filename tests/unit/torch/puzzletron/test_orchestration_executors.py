@@ -3,6 +3,7 @@
 
 """Tests for orchestration executors."""
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -15,10 +16,13 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.executors.baremetal import BareMetalSSHExecutor
 from puzzletron_orchestrator.executors.local import LocalExecutor
 from puzzletron_orchestrator.executors.slurm import SlurmExecutor, render_sbatch_script
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
+    BareMetalHost,
+    BareMetalRunnerConfig,
     CampaignPlan,
     CommandSpec,
     ExecutionContract,
@@ -54,6 +58,65 @@ def test_local_executor_runs_successful_command(tmp_path: Path):
         time.sleep(0.01)
     assert status.state is JobState.COMPLETED
     assert log_path.read_text().splitlines()[-1] == "ok"
+
+
+def test_baremetal_preflight_checks_repository_and_venv_on_every_host(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = []
+
+    def _fake_run(argv):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="worker\nGPU 0\n", stderr="")
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.baremetal._run_command", _fake_run)
+    executor = BareMetalSSHExecutor(_baremetal_runner(), state_dir=tmp_path)
+
+    executor.preflight()
+
+    assert calls == [
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            hostname,
+            "hostname && test -d /shared/modelopt && cd /shared/modelopt && "
+            "test -f /shared/puzzletron-venv/bin/activate && nvidia-smi -L",
+        ]
+        for hostname in ("node-a", "node-b")
+    ]
+
+
+def test_baremetal_submit_uses_one_execution_contract_on_every_host(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls = []
+
+    def _fake_run(argv):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.baremetal._run_command", _fake_run)
+    executor = BareMetalSSHExecutor(_baremetal_runner(), state_dir=tmp_path)
+    attempt = AttemptSpec(
+        attempt_id="a1",
+        work_id="vllm_stats:gang",
+        stage_id="vllm_stats",
+        command=CommandSpec(argv=("python", "-c", "print('ok')")),
+        allocation_nodes=2,
+        allocation_gpus=2,
+        metadata={"gpus_per_node": 1},
+        task_topology=TaskTopology(task_count=2, gpus_per_task=1),
+    )
+
+    handle = executor.submit(attempt)
+
+    assert [call[3] for call in calls] == ["node-a", "node-b"]
+    for call in calls:
+        remote_command = call[-1]
+        assert "cd /shared/modelopt; source /shared/puzzletron-venv/bin/activate;" in remote_command
+        assert "export PYTHONPATH=/shared/modelopt:${PYTHONPATH:-};" in remote_command
+    assert [task["hostname"] for task in handle.metadata["tasks"]] == ["node-a", "node-b"]
 
 
 def test_render_sbatch_script_requests_gpus_per_node():
@@ -805,3 +868,20 @@ def test_stage_partition_override_forces_batch(tmp_path: Path):
         runner=plan.runner,
     )
     assert attempt.metadata["partition"] == "batch"
+
+
+def _baremetal_runner() -> RunnerEnvironment:
+    return RunnerEnvironment(
+        kind="baremetal",
+        contract=ExecutionContract(
+            repository="/shared/modelopt",
+            venv="/shared/puzzletron-venv",
+        ),
+        baremetal=BareMetalRunnerConfig(
+            hosts=(
+                BareMetalHost(hostname="node-a", gpus=1),
+                BareMetalHost(hostname="node-b", gpus=1),
+            ),
+            rendezvous_host="node-a",
+        ),
+    )

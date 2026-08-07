@@ -179,12 +179,19 @@ def test_completed_scenario_resume_uses_full_depth_selection_identity(
 ) -> None:
     scenario_root = tmp_path / "scenario"
     scenario_root.mkdir()
+    solution_path = scenario_root / "solutions.json"
+    solution_path.write_text("[]")
+    solve_identity = "solve-v1"
     manifest = {
         "profile_id": "params-075",
         "hidden_width": 2688,
         "removed_sublayers": 3,
         "constraint_type": "named_profile",
         "status": "infeasible",
+        "solve_identity": solve_identity,
+        "solution_path": str(solution_path),
+        "solution_count": 0,
+        "solutions": [],
     }
     (scenario_root / "scenario_manifest.json").write_text(json.dumps(manifest))
 
@@ -195,6 +202,7 @@ def test_completed_scenario_resume_uses_full_depth_selection_identity(
         depth_selection=DepthSelection.total_prefix(3),
         constraint_type="named_profile",
         solve_only=True,
+        solve_identity=solve_identity,
     )
     assert resumed == manifest
 
@@ -211,6 +219,7 @@ def test_completed_scenario_resume_uses_full_depth_selection_identity(
             depth_selection=matching,
             constraint_type="named_profile",
             solve_only=True,
+            solve_identity=solve_identity,
         )
         == manifest
     )
@@ -222,6 +231,7 @@ def test_completed_scenario_resume_uses_full_depth_selection_identity(
             depth_selection=same_total_but_different,
             constraint_type="named_profile",
             solve_only=True,
+            solve_identity=solve_identity,
         )
         is None
     )

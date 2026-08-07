@@ -30,6 +30,27 @@ from modelopt.torch.puzzletron.replacement_library.library import ReplacementLib
 from modelopt.torch.puzzletron.scenarios import ScenarioKey
 
 
+def _write_scenario_manifest(
+    puzzle_dir: Path,
+    width: int,
+    *,
+    bypass_checkpoint: Path | None = None,
+) -> Path:
+    scenario = puzzle_dir / "scenarios" / f"width-{width:04d}" / "depth-00"
+    scenario.mkdir(parents=True, exist_ok=True)
+    (scenario / "scenario_manifest.json").write_text(
+        json.dumps(
+            {
+                "parent_checkpoint": str(scenario / "ckpts" / "sorted_teacher"),
+                "bypass_checkpoint": (
+                    str(bypass_checkpoint) if bypass_checkpoint is not None else None
+                ),
+            }
+        )
+    )
+    return scenario
+
+
 def test_depth_scenario_identity_includes_hidden_width():
     common = {
         "parent_checkpoint_identity": "teacher",
@@ -243,6 +264,7 @@ def test_embedding_pipeline_projects_root_vllm_stats_by_hidden_width(tmp_path):
 
 
 def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tmp_path):
+    _write_scenario_manifest(tmp_path, 768)
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
         config={
@@ -274,6 +296,7 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
 
 
 def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
+    _write_scenario_manifest(tmp_path, 768)
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
         config={
@@ -309,6 +332,11 @@ def test_embedding_pipeline_skips_composite_work_on_nonzero_rank(tmp_path, monke
 
 
 def test_embedding_pipeline_routes_width_local_bypass_overlay(tmp_path):
+    _write_scenario_manifest(
+        tmp_path,
+        768,
+        bypass_checkpoint=tmp_path / "accepted-bypass",
+    )
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
         config={
@@ -493,8 +521,9 @@ def test_width_scenarios_resolve_the_fingerprinted_scoring_parent(tmp_path):
 
     assert source == sorted_teacher.resolve()
     assert (tmp_path / "artifacts" / "scoring_parent.json").is_file()
+
+
 def test_embedding_pipeline_uses_task_visible_gpu_count(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,5")
 
     assert _visible_gpu_count(8) == 2
-

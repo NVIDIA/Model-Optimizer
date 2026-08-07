@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Example runner and execution configs for the v2 orchestrator."""
+# Example execution config for the v2 orchestrator.
 
 execution:
   defaults:

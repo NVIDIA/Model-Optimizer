@@ -1,9 +1,12 @@
 # @package _global_
 
 display_name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-input_hf_model_path: /lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_llm/users/ssameni/hf/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/snapshots/cbd3fa9f933d55ef16a84236559f4ee2a0526848
+# Runnable public Hugging Face repository ID; this is not a placeholder.
+# Setup-generated bundles replace it with the model source selected by the user.
+input_hf_model_path: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 
 model_info:
+  # Canonical public identity used for model metadata and revision checks.
   hf_repo: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
   hf_revision: cbd3fa9f933d55ef16a84236559f4ee2a0526848
   model_type: nemotron_h

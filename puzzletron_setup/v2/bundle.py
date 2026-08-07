@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from puzzletron_setup import SetupError
+from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, SetupError
 from puzzletron_setup.bundle import (
     BundleResult,
     dry_run_bundle,
@@ -352,7 +352,10 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
         }
         _write_yaml(temp_root / "resolved_defaults.yaml", resolved)
         repository = str(
-            state.get_field("infrastructure.execution_contract.repository", Path.cwd())
+            state.get_field(
+                "infrastructure.execution_contract.repository",
+                WORKER_REPOSITORY_PLACEHOLDER,
+            )
         )
         (temp_root / "README.md").write_text(
             _bundle_readme(

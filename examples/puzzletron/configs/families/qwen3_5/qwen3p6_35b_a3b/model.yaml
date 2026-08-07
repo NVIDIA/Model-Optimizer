@@ -1,12 +1,15 @@
 # @package _global_
 
 display_name: Qwen/Qwen3.6-35B-A3B
+# Runnable public Hugging Face repository ID; this is not a placeholder.
+# Setup-generated bundles replace it with the model source selected by the user.
 input_hf_model_path: Qwen/Qwen3.6-35B-A3B
 # Required by depth RPC / scoring stages; unlike dense Qwen configs this is not
 # inherited from a family-level descriptor key.
 descriptor: qwen3_5_moe
 
 model_info:
+  # Canonical public identity used for model metadata and revision checks.
   hf_repo: Qwen/Qwen3.6-35B-A3B
   hf_revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
   model_type: qwen3_5_moe

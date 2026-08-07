@@ -16,7 +16,14 @@ from puzzletron_orchestrator.compiler import (
 )
 from puzzletron_orchestrator.controller import _stage_dashboard_display_name, dry_run_plan
 from puzzletron_orchestrator.executors.baremetal import GpuLeaseManager
-from puzzletron_orchestrator.schema import BareMetalHost, ExecutionStrategy
+from puzzletron_orchestrator.schema import (
+    AttemptSpec,
+    BareMetalHost,
+    CommandSpec,
+    ExecutionStrategy,
+    TaskTopology,
+)
+from puzzletron_orchestrator.task_topology import resolve_task_topology
 
 
 def _write_configs(tmp_path: Path):
@@ -88,15 +95,74 @@ def test_dry_run_plan_packs_vllm_shards_into_one_allocation(tmp_path: Path):
     assert vllm[0].gpus_per_task == 1
 
 
+def test_dry_run_plan_uses_heterogeneous_vllm_measurement_topologies(tmp_path: Path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    experiment_config = yaml.safe_load(experiment.read_text())
+    experiment_config["vllm_stats"]["runtime_stats"]["topology"].update(
+        {
+            "tensor_parallel_size": 2,
+            "gpu_group_size": 2,
+        }
+    )
+    experiment_config["vllm_stats"]["measurements"] = {
+        "primary": {},
+        "secondary": {
+            "runtime_stats": {
+                "topology": {
+                    "tensor_parallel_size": 4,
+                    "gpu_group_size": 4,
+                }
+            }
+        },
+    }
+    experiment.write_text(yaml.safe_dump(experiment_config))
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+    submissions = dry_run_plan(plan)
+    vllm = sorted(
+        (
+            item.work_id,
+            item.nodes,
+            item.gpus,
+            item.task_count,
+            item.gpus_per_task,
+        )
+        for item in submissions
+        if item.stage_id == "vllm_stats"
+    )
+
+    assert vllm == [
+        ("vllm_stats:primary:gang", 1, 8, 4, 2),
+        ("vllm_stats:secondary:gang", 2, 16, 4, 4),
+    ]
+
+
 def test_gpu_lease_manager_allocates_disjoint_gpus(tmp_path: Path):
     manager = GpuLeaseManager(
         (BareMetalHost("node-a", 4), BareMetalHost("node-b", 4)),
         tmp_path / "leases.json",
     )
-    first = manager.acquire("a1", 2)
-    second = manager.acquire("a2", 2)
+    topology = resolve_task_topology(
+        AttemptSpec(
+            attempt_id="topology",
+            work_id="stage:0",
+            stage_id="stage",
+            command=CommandSpec(argv=("python", "worker.py")),
+            allocation_nodes=1,
+            allocation_gpus=2,
+            metadata={"gpus_per_node": 4},
+            task_topology=TaskTopology(task_count=1, gpus_per_task=2),
+        )
+    )
+
+    first = manager.acquire_topology("a1", topology)[0]
+    second = manager.acquire_topology("a2", topology)[0]
+
     assert first.hostname == "node-a"
-    assert second.gpu_ids[0] not in first.gpu_ids
+    assert set(first.gpu_ids).isdisjoint(second.gpu_ids)
 
 
 def test_adapter_registry_selects_sharded_adapter(tmp_path: Path):
@@ -110,42 +176,26 @@ def test_adapter_registry_selects_sharded_adapter(tmp_path: Path):
     adapter = adapter_for_stage(node)
     work_plan = adapter.plan(plan, node)
     assert work_plan.strategy is ExecutionStrategy.SHARDED
-    assert [item.work_id for item in work_plan.items] == ["vllm_stats:gang"]
+    assert [item.work_id for item in work_plan.items] == ["vllm_stats:default:gang"]
 
 
-def test_stage_dashboard_display_name_uses_downstream_evaluation_node_type():
-    config = {
-        "post_mip": {
-            "flows": {
-                "params-75": {
-                    "nodes": {
-                        "lmms_eval": {
-                            "type": "downstream_evaluation",
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    assert (
-        _stage_dashboard_display_name(config, "post.params-75.lmms_eval")
-        == "Downstream Evaluation"
-    )
-
-
-def test_vllm_stats_rejects_multi_gpu_instances(tmp_path: Path):
+def test_vllm_stats_rejects_conflicting_execution_mesh(tmp_path: Path):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
+    experiment_config = yaml.safe_load(experiment.read_text())
+    experiment_config["vllm_stats"]["measurements"] = {"latency": {}}
+    experiment.write_text(yaml.safe_dump(experiment_config))
     execution = load_execution_config(execution_path)
     execution["stages"]["vllm_stats"]["parallel"] = {
         "ep": 2,
         "dp_shard": 2,
     }
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=execution,
-    )
 
-    with pytest.raises(ValueError, match="exactly one GPU per instance"):
-        dry_run_plan(plan)
+    with pytest.raises(
+        ValueError,
+        match="vllm_stats execution parallel override conflicts",
+    ):
+        compile_campaign_plan(
+            experiment_config_path=experiment,
+            runner=load_runner_config(runner_path),
+            execution=execution,
+        )

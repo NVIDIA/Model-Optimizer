@@ -7,21 +7,36 @@ on:
         description: "Newline-separated list of file patterns to watch for changes"
         required: true
         type: string
+      skip_puzzletron_only:
+        description: "Skip test jobs for Puzzletron-only PRs targeting feature/puzzletron_v2"
+        required: false
+        type: boolean
+        default: false
     outputs:
       any_changed:
         description: "Whether any relevant files changed"
         value: ${{ jobs.check-file-changes.outputs.any_changed }}
+      run_tests:
+        description: "Whether this workflow's test jobs should run"
+        value: ${{ jobs.check-file-changes.outputs.run_tests }}
+      puzzletron_only:
+        description: "Whether all test-relevant changes are Puzzletron-scoped in a Puzzletron v2 feature PR"
+        value: ${{ jobs.check-file-changes.outputs.puzzletron_only }}
 
 jobs:
   check-file-changes:
     runs-on: ubuntu-latest
     outputs:
       any_changed: ${{ steps.changed-tests.outputs.any_changed || steps.non-pr.outputs.any_changed }}
+      run_tests: ${{ steps.scope-pr.outputs.run_tests || steps.non-pr.outputs.any_changed }}
+      puzzletron_only: ${{ steps.scope-pr.outputs.puzzletron_only || steps.non-pr.outputs.puzzletron_only }}
     steps:
       # For non-PR triggers (schedule, workflow_dispatch), always run tests
       - id: non-pr
         if: "!startsWith(github.ref, 'refs/heads/pull-request/')"
-        run: echo "any_changed=true" >> $GITHUB_OUTPUT
+        run: |
+          echo "any_changed=true" >> "$GITHUB_OUTPUT"
+          echo "puzzletron_only=false" >> "$GITHUB_OUTPUT"
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         uses: actions/checkout@v6
         with:
@@ -37,6 +52,7 @@ jobs:
         run: |
           echo "head_sha=$(echo "$PR_INFO" | jq -r '.head.sha')" >> $GITHUB_OUTPUT
           echo "base_sha=$(echo "$PR_INFO" | jq -r '.base.sha')" >> $GITHUB_OUTPUT
+          echo "base_ref=$(echo "$PR_INFO" | jq -r '.base.ref')" >> $GITHUB_OUTPUT
       # Get commit from main branch that is present in the PR to use as base for changed files
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: calculate-merge-base
@@ -51,11 +67,53 @@ jobs:
           sha: ${{ steps.pr-shas.outputs.head_sha }}
           files: ${{ inputs.files }}
           fail_on_initial_diff_error: true
+      - if: >-
+          startsWith(github.ref, 'refs/heads/pull-request/') &&
+          inputs.skip_puzzletron_only
+        name: Check for non-Puzzletron changes in test-relevant directories
+        id: changed-generic-tests
+        uses: step-security/changed-files@v46.0.5
+        with:
+          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
+          sha: ${{ steps.pr-shas.outputs.head_sha }}
+          files: ${{ inputs.files }}
+          files_ignore: |
+            examples/puzzletron/**
+            modelopt/torch/puzzletron/**
+            puzzletron_orchestrator/**
+            puzzletron_setup/**
+            tests/_test_utils/torch/puzzletron/**
+            tests/gpu/torch/puzzletron/**
+            tests/gpu_vllm/torch/puzzletron/**
+            tests/unit/torch/puzzletron/**
+          fail_on_initial_diff_error: true
+      - if: startsWith(github.ref, 'refs/heads/pull-request/')
+        name: Scope Puzzletron v2 feature PR tests
+        id: scope-pr
+        env:
+          ANY_CHANGED: ${{ steps.changed-tests.outputs.any_changed }}
+          BASE_REF: ${{ steps.pr-shas.outputs.base_ref }}
+          GENERIC_CHANGED: ${{ steps.changed-generic-tests.outputs.any_changed }}
+          SKIP_PUZZLETRON_ONLY: ${{ inputs.skip_puzzletron_only }}
+        run: |
+          run_tests="$ANY_CHANGED"
+          puzzletron_only=false
+
+          if [[ "$SKIP_PUZZLETRON_ONLY" == "true" &&
+                "$BASE_REF" == "feature/puzzletron_v2" &&
+                "$ANY_CHANGED" == "true" &&
+                "$GENERIC_CHANGED" != "true" ]]; then
+            run_tests=false
+            puzzletron_only=true
+          fi
+
+          echo "run_tests=$run_tests" >> "$GITHUB_OUTPUT"
+          echo "puzzletron_only=$puzzletron_only" >> "$GITHUB_OUTPUT"
   wait-checks:
     needs: [check-file-changes]
     if: >-
       startsWith(github.ref, 'refs/heads/pull-request/') &&
-      needs.check-file-changes.outputs.any_changed == 'true'
+      needs.check-file-changes.outputs.run_tests == 'true'
     uses: ./.github/workflows/_wait_for_checks.yml
     permissions:
       checks: read

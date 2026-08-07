@@ -1,19 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Example bare-metal runner config for the v2 orchestrator."""
+# Example bare-metal runner config for the v2 orchestrator.
 
 runner:
   kind: baremetal
   inventory:
-    rendezvous_host: node-a
+    # Required placeholders. Replace both host values with SSH hosts reachable
+    # from the controller; the rendezvous host must match one inventory hostname.
+    rendezvous_host: REPLACE_WITH_PRIMARY_HOST
     rendezvous_port_base: 29500
     hosts:
-      - hostname: node-a
+      - hostname: REPLACE_WITH_PRIMARY_HOST
         gpus: 8
-      - hostname: node-b
+      - hostname: REPLACE_WITH_SECONDARY_HOST
         gpus: 8
   execution_contract:
-    repository: /shared/modelopt
-    venv: /shared/modelopt/.venv
-    setup_env: ""
+    # Required. Use the same checkout path visible on every SSH host.
+    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
+    # Required. Sourced as <venv>/bin/activate on every SSH host.
+    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
+    # Optional script sourced before virtualenv activation on every host.
+    # Leave null when the worker login environment needs no additional setup.
+    setup_env: null

@@ -24,6 +24,7 @@ from modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descr
 )
 from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
     Qwen3P5TextModelDescriptor,
+    Qwen3P5VLModelDescriptor,
 )
 from modelopt.torch.puzzletron.anymodel.registry import infer_descriptor_name, resolve_descriptor
 from modelopt.torch.puzzletron.block_config import (
@@ -39,6 +40,55 @@ from modelopt.torch.puzzletron.stage_runner import (
     _resolve_capabilities,
     run_stage,
 )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architecture", "expected", "expected_descriptor"),
+    [
+        (
+            "qwen3_5",
+            "Qwen3_5ForConditionalGeneration",
+            "qwen3_5",
+            Qwen3P5VLModelDescriptor,
+        ),
+        (
+            "qwen3_5_text",
+            "Qwen3_5ForCausalLM",
+            "qwen3_5_text",
+            Qwen3P5TextModelDescriptor,
+        ),
+        (
+            "qwen3_6",
+            "Qwen3_6ForConditionalGeneration",
+            "qwen3_6",
+            Qwen3P5VLModelDescriptor,
+        ),
+        (
+            "qwen3_6_text",
+            "Qwen3_6ForCausalLM",
+            "qwen3_6_text",
+            Qwen3P5TextModelDescriptor,
+        ),
+    ],
+    ids=[
+        "qwen3.5-vlm",
+        "qwen3.5-text",
+        "qwen3.6-vlm",
+        "qwen3.6-text",
+    ],
+)
+def test_qwen_dense_architecture_matches_model_type(
+    model_type, architecture, expected, expected_descriptor
+) -> None:
+    config = SimpleNamespace(model_type=model_type, architectures=[architecture])
+
+    assert infer_descriptor_name(config) == (
+        expected,
+        f"architectures contains {architecture}",
+    )
+    resolution = resolve_descriptor(config)
+    assert resolution.name == expected
+    assert resolution.descriptor is expected_descriptor
 
 
 @pytest.mark.parametrize(
