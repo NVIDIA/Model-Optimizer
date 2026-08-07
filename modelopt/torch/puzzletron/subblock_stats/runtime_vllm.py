@@ -29,6 +29,7 @@ Usage:
 import json
 import subprocess  # nosec B404
 from pathlib import Path
+from types import SimpleNamespace
 
 from ..tools.logger import mprint
 from ..utils.vllm_adapter import convert_block_configs_to_per_layer_config
@@ -48,10 +49,11 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
     with open(model_path / "config.json") as f:
         config = json.load(f)
 
+    config = SimpleNamespace(**config)
     if convert_block_configs_to_per_layer_config(config):
         mprint("Converted block configs to per-layer config")
         with open(model_path / "config.json", "w") as f:
-            json.dump(config, f, indent=2)
+            json.dump(vars(config), f, indent=2)
     else:
         mprint("No block configs to convert")
 
@@ -83,6 +85,10 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "1",
         "--distributed-executor-backend",
         "external_launcher",
+        # Cap GPU memory so vLLM's startup free-memory check passes while the
+        # parent puzzletron process is co-resident on the same GPU.
+        "--gpu-memory-utilization",
+        str(runtime_config.gpu_memory_utilization),
         # Required for accurate per-block runtime stats.
         "--optimization-level",
         "0",

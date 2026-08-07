@@ -153,9 +153,16 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 import re
 import warnings
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -671,6 +678,43 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
+    constant_amax: float | None = ModeloptField(
+        default=None,
+        title="Pin the quantizer amax to a constant value and skip calibration.",
+        description="""If set, the quantizer ``amax`` is fixed to this constant value and no
+        activation calibration is performed (no forward statistics are collected). The constant
+        is stored on the ``_amax`` buffer, so it is used by both the fake-quant forward pass and
+        the exported scaling factor (e.g. ``input_scale``).
+
+        This differs from ``use_constant_amax``, which pins amax to the FP8 E4M3 range (448.0)
+        for KV-cache cast math and does not register an ``_amax`` buffer. For NVFP4 activations
+        the exported ``input_scale`` equals ``amax / (E2M1_MAX * E4M3_MAX) = amax / (6 * 448)``;
+        setting ``constant_amax`` to ``2688.0`` therefore yields an exported ``input_scale`` of
+        ``1.0``.
+        """,
+    )
+
+    @field_validator("constant_amax")
+    @classmethod
+    def validate_constant_amax(cls, v):
+        """Validate that constant_amax, when set, is a positive value."""
+        assert v is None or v > 0, "constant_amax must be a positive value."
+        return v
+
+    @model_validator(mode="after")
+    def validate_constant_amax_modes(self):
+        """Forbid combining ``use_constant_amax`` and ``constant_amax``.
+
+        Both pin the amax but disagree on the value: ``use_constant_amax`` uses the FP8 E4M3
+        range (448.0) for the fake-quant forward and registers no ``_amax`` buffer, while
+        ``constant_amax`` pins ``_amax`` to its configured value for both forward and export.
+        Setting both would make the simulated and exported scales silently diverge.
+        """
+        assert not (self.use_constant_amax and self.constant_amax is not None), (
+            "use_constant_amax and constant_amax are mutually exclusive; set only one."
+        )
+        return self
+
 
 class LayerwiseConfig(ModeloptBaseConfig):
     """Nested config for layer-by-layer calibration behavior."""
@@ -717,6 +761,17 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    calib_mutates_weights: bool = ModeloptField(
+        default=True,
+        title="Whether layerwise calibration mutates layer weights.",
+        description=(
+            "Set to False only for algorithms that update solely "
+            "``TensorQuantizer._amax`` (max, mse, local_hessian). Rejected for "
+            "weight-mutating algorithms (GPTQ, AWQ, SmoothQuant) where it would "
+            "silently lose updates on resume."
+        ),
+    )
+
 
 def _coerce_layerwise_input(value):
     """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
@@ -739,6 +794,11 @@ def _coerce_layerwise_input(value):
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
+
+    # Whether this algorithm mutates ``layer.weight`` during calibration. Amax-only
+    # algorithms (max/mse/local_hessian) set this False; it gates whether
+    # ``layerwise.calib_mutates_weights=False`` is allowed.
+    _mutates_weights: ClassVar[bool] = True
 
     method: Literal[None] = ModeloptField(
         None,
@@ -818,6 +878,17 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_non_mutating_layerwise_supported(self):
+        """Enforce the ``calib_mutates_weights=False`` whitelist."""
+        if not self.layerwise.calib_mutates_weights and self._mutates_weights:
+            raise ValueError(
+                f"Algorithm '{self.method}' mutates layer weights in-place; "
+                "calib_mutates_weights=False would lose those updates on resume. "
+                "Only max/mse/local_hessian (amax-only) support this flag."
+            )
+        return self
+
 
 class _SharedStatesConfig(ModeloptBaseConfig):
     """The ``shared_states`` grouping knob, shared by max / mse / local_hessian calibration."""
@@ -876,6 +947,8 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
 
+    _mutates_weights: ClassVar[bool] = False
+
     method: Literal["max"] = ModeloptField("max")
 
     distributed_sync: bool | None = ModeloptField(
@@ -895,6 +968,23 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         ),
     )
 
+    skip_forward_without_activation_calib: bool = ModeloptField(
+        default=False,
+        title="Skip the calibration forward when no activation quantizer needs data.",
+        description=(
+            "If True, max calibration skips the ``forward_loop`` entirely when no enabled "
+            "quantizer collects data-driven activation statistics — e.g. an experts-only recipe "
+            "whose activation quantizers all use ``constant_amax`` / ``use_constant_amax``, "
+            "dynamic, or MX (MXFP4/MXFP8) quantization. Weight calibration still runs on the "
+            "weight tensors directly, so the quantized weights are unchanged; only the wasted "
+            "forward is avoided. "
+            "Opt-in (default False) because the provided ``forward_loop`` can carry side "
+            "effects the caller relies on — most notably materializing sharded parameters under "
+            "DeepSpeed ZeRO-3 — so enable it per-recipe when the calibration data is known to be "
+            "unnecessary."
+        ),
+    )
+
 
 class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
@@ -906,6 +996,8 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
 
     When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
+
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["mse"] = ModeloptField("mse")
 
@@ -958,6 +1050,8 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
     """
+
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
@@ -1142,6 +1236,18 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         ),
     )
 
+    skip_layers: list[str] | None = ModeloptField(
+        default=None,
+        title="Module-name wildcard patterns excluded from the SVDQuant algorithm",
+        description=(
+            "Quantized linears whose module name matches any of these fnmatch-style wildcard "
+            "patterns (e.g. ``'*.attn.add_q_proj'``) keep their quantizer config but skip the "
+            "SVDQuant algorithm entirely: no AWQ smoothing (``pre_quant_scale``) and no "
+            "low-rank branch, leaving their weights unchanged. They are max-calibrated "
+            "instead, i.e. quantized like a plain max recipe."
+        ),
+    )
+
 
 class GPTQCalibConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ quantization.
@@ -1189,6 +1295,179 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
             self.layerwise = self.layerwise.model_copy(
                 update={"get_qdq_activations_from_prev_layer": True}
             )
+        return self
+
+
+_ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+
+
+class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
+    """Config for the ``nvfp4_act_headroom`` calibration algorithm.
+
+    Calibrates the per-tensor global scale of NVFP4 *activation* (input) quantizers so that
+    the calibrated range sits in the lower part of the FP8 block-scale range, leaving headroom
+    above it for activations larger than any seen during calibration. Weight quantizers and
+    all non-NVFP4 quantizers are calibrated with plain ``max``.
+
+    The top of the calibrated range is ``upper_percentile`` (default 99.99) rather than the
+    literal maximum, so rare blocks far above the rest are clipped instead of dragging the
+    global scale up until every other block flushes to zero.
+
+    See :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
+    """
+
+    _mutates_weights: ClassVar[bool] = False
+
+    method: Literal["nvfp4_act_headroom"] = ModeloptField("nvfp4_act_headroom")
+
+    anchor_percentile: float = ModeloptField(
+        default=1.0,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the anchor.",
+        description=(
+            "The global scale is anchored to this percentile of the per-block amax "
+            "distribution. Lower values anchor further into the low tail, which yields a "
+            "smaller global scale and less headroom."
+        ),
+    )
+
+    upper_percentile: float = ModeloptField(
+        default=99.99,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the top of the range.",
+        description=(
+            "The global scale is floored at this percentile, so per-block amaxes above it are "
+            "clipped. The default excludes the rarest blocks on purpose: chasing a lone outlier "
+            "pushes every other block's FP8 block scale below subnormal. Set to 100 to use the "
+            "literal observed max, which guarantees no calibration data is clipped."
+        ),
+    )
+
+    rho: float = ModeloptField(
+        default=16384.0,
+        gt=0.0,
+        lt=28672.0,
+        title="Headroom factor applied to the anchor (amax = rho * anchor).",
+        description=(
+            "Larger rho leaves more headroom above the calibrated range and less room below "
+            "it. Must stay below 28672, the FP8-E4M3 normal dynamic range."
+        ),
+    )
+
+    weight_scale_algorithm: _ScaleCalibConfig = ModeloptField(
+        default={"method": "max"},
+        title="Algorithm used to calibrate the weight scales.",
+        description=(
+            "Weight scales are set by an independent algorithm -- ``max`` (default), ``mse`` or "
+            "``local_hessian`` -- because this algorithm only decides the NVFP4 *activation* "
+            "global scale. Give the chosen algorithm's own options alongside ``method`` (for "
+            "example ``{'method': 'mse', 'fp8_scale_sweep': true}``); ``distributed_sync`` and "
+            "``shared_states`` belong to that weight calibration pass and are set there."
+        ),
+        validate_default=True,
+    )
+
+    @field_serializer("weight_scale_algorithm")
+    def _serialize_weight_scale_algorithm(self, value: _ScaleCalibConfig):
+        """Preserve the sparse public dict shape accepted by this field."""
+        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
+
+
+class LSQConfig(QuantizeAlgorithmConfig):
+    """Config for LSQ (Learnt Scale Quantization) and Dual-LSQ algorithms.
+
+    In LSQ, the scale used for quantization is learnt. ModelOpt's LSQ is similar to the
+    original `Learned Step Size Quantization paper <https://arxiv.org/pdf/1902.08153>`_.
+    Its forward pass is ``w_q = Q_STE(w / s) * s``, where ``s`` is learnt.
+
+    Dual-LSQ learns separate pre-quantization and post-quantization scales. Its forward
+    pass is ``w_q = Q_STE(w / s_pre) * s_post``, where ``s_pre`` and ``s_post`` are
+    learnt. Dual-LSQ generally performs better than LSQ for learning NVFP4 per-block
+    weight scales.
+
+    Currently, only NVFP4 per-block weight-scale learning is supported. Both LSQ and
+    Dual-LSQ use a reparameterization that learns ``amax`` instead of scale directly,
+    where ``scale = amax / max_bound``.
+
+    ``learnable_amax`` controls which amax parameters are learnable vs frozen:
+        - ``["pre", "post"]``: both learnable
+        - ``"post"`` or ``["post"]``: only post learnable, pre frozen
+        - ``"pre"`` or ``["pre"]``: only pre learnable, post frozen
+        - ``[]``: both frozen (static scales)
+
+    ``tied_amax`` makes pre and post share a single tensor (requires both to
+    have the same learnable state, i.e. ``learnable_amax`` must be
+    ``["pre", "post"]`` or ``[]``).
+
+    ``quantize_pre_scale=False`` leaves the pre-quantization scale unquantized
+    while preserving the existing post-scale quantization behavior.
+    """
+
+    ScaleCalibConfig: ClassVar[Any] = _ScaleCalibConfig
+
+    method: Literal["lsq"] = ModeloptField("lsq")
+
+    learnable_amax: list[Literal["pre", "post"]] | Literal["pre", "post"] = ModeloptField(
+        default=["post"],
+        title="Which amax parameters are learnable.",
+        description=(
+            "Which amax params are learnable. "
+            "'pre', 'post', ['pre', 'post'], or []. "
+            "Defaults to ['post'] (post-only learnable)."
+        ),
+    )
+
+    tied_amax: bool = ModeloptField(
+        default=False,
+        title="Tie pre and post amax into a single tensor.",
+        description=(
+            "If True, pre and post share one underlying tensor. "
+            "Requires both to have the same learnable state."
+        ),
+    )
+
+    quantize_pre_scale: bool = ModeloptField(
+        default=True,
+        title="FP8-quantize the LSQ pre-quantization scale.",
+        description=(
+            "If False, LSQ uses the raw pre-quantization scale while keeping post-scale "
+            "quantization controlled by the quantizer's block-scale settings."
+        ),
+    )
+
+    scale_algorithm: _ScaleCalibConfig | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
+        ),
+    )
+
+    @field_serializer("scale_algorithm")
+    def _serialize_scale_algorithm(self, value: _ScaleCalibConfig | None):
+        """Preserve the sparse public dict shape accepted by this field."""
+        if value is None:
+            return None
+        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
+
+    @model_validator(mode="after")
+    def _validate_tied_amax(self):
+        """Validate tied_amax is compatible with learnable_amax."""
+        learn = self.learnable_amax
+        if isinstance(learn, str):
+            learn = [learn]
+        learn_set = set(learn)
+        if self.tied_amax:
+            if learn_set not in (set(), {"pre", "post"}):
+                raise ValueError(
+                    f"tied_amax=True requires learnable_amax to be [] or ['pre', 'post'], "
+                    f"got {self.learnable_amax}"
+                )
         return self
 
 

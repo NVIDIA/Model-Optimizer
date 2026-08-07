@@ -39,11 +39,12 @@ TORCH_VERSIONS = {
     "torch_210": "torchvision~=0.25.0",
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
+    "torch_213": "torchvision~=0.28.0",
 }
 
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": "transformers~=5.12.0",
-    "tf_min": "transformers~=4.56.0",
+    "tf_latest": "transformers~=5.14.0",
+    "tf_min": "transformers~=4.57.0",
 }
 
 

@@ -2,6 +2,12 @@
 Autotune (ONNX)
 ===============================================
 
+.. warning::
+
+   Direct Autotune is an advanced ONNX quantization subtool for optimizing Q/DQ placement using TensorRT latency measurements. It does not replace the full calibrated ONNX quantization workflow.
+
+   To quantize an ONNX model taking into consideration accuracy, please use ``python -m modelopt.onnx.quantization ... --autotune=<quick|default|extensive>`` with representative calibration data. See the `ONNX quantization Autotune options <_onnx_quantization.html#python-m-modelopt.onnx.quantization-autotune-only-applicable-when-autotune-is-set>`_.
+
 .. contents:: Table of Contents
    :local:
    :depth: 2
@@ -22,9 +28,10 @@ The ``modelopt.onnx.quantization.autotune`` module automates Q/DQ (Quantize/Dequ
 
 **When to Use This Tool:**
 
-* Quantizing an ONNX model for TensorRT deployment
-* Optimizing Q/DQ placement for best performance
-* The model has repeating structures (e.g., transformer blocks, ResNet layers)
+* Debugging or developing the Q/DQ placement autotuning algorithm
+* Running the lower-level workflow without invoking the full quantization CLI
+* Programmatic experiments with direct Autotune classes and workflow functions
+* Expert workflows that intentionally start from already-quantized or pre-patterned Q/DQ models
 
 Quick Start
 ===========
@@ -53,6 +60,8 @@ The command will:
 3. Test different Q/DQ placement schemes for each region pattern
 4. Select the best scheme based on TensorRT latency measurements
 5. Export an optimized ONNX model with Q/DQ nodes
+
+Autotune searches for Q/DQ placement schemes that improve TensorRT runtime. It does not by itself define the full calibration and quantization policy for an accuracy-sensitive deployment. For end-to-end ONNX PTQ that starts from an unquantized model, run ONNX quantization with calibration data and enable ``--autotune`` there. See the `ONNX quantization Autotune options <_onnx_quantization.html#python-m-modelopt.onnx.quantization-autotune-only-applicable-when-autotune-is-set>`_.
 
 **Output Files:**
 

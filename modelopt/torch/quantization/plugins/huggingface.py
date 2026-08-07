@@ -873,6 +873,14 @@ class _QuantDbrxExpertGLU(QuantModule):
 
 
 class _QuantQwen3VLMoeTextExperts(QuantModule):
+    """Quantized wrapper for the pre-transformers-5.12 ``Qwen3VLMoeTextExperts`` layout.
+
+    That layout stores ``gate_up_proj`` as (num_experts, hidden_size, 2*expert_dim) and runs
+    the experts through ``torch.bmm``/``@``, so it is unrolled into ``nn.Linear`` modules here.
+    transformers>=5.12 moved this module to the standard fused layout handled by
+    :class:`_QuantFusedExperts`; see the registration site below.
+    """
+
     def _setup(self):
         """Modify the Qwen3VLMoeTextExperts by using nn.Linear layers."""
         from accelerate import init_empty_weights
@@ -1330,13 +1338,16 @@ class _QuantFP8Linear(QuantModule):
     def _setup(self):
         self.input_quantizer = TensorQuantizer()
         self.weight_quantizer = TensorQuantizer()
-        assert self.weight_scale_inv.ndim == 2, "Weight scale inverse must be 2D"
         assert self.weight.ndim == 2, "Weight must be 2D"
-        self.block_size = max(
-            self.weight.shape[0] // self.weight_scale_inv.shape[0],
-            self.weight.shape[1] // self.weight_scale_inv.shape[1],
-        )
-        assert self.block_size == 128, "Block size must be 128"
+        if self.weight_scale_inv.ndim == 0:
+            self.block_size = None
+        else:
+            assert self.weight_scale_inv.ndim == 2, "Weight scale inverse must be 0D or 2D"
+            self.block_size = max(
+                self.weight.shape[0] // self.weight_scale_inv.shape[0],
+                self.weight.shape[1] // self.weight_scale_inv.shape[1],
+            )
+            assert self.block_size == 128, "Block size must be 128"
 
     def _get_weight_and_scale_inv(self):
         if isinstance(self.weight, torch.distributed.tensor.DTensor):
@@ -1347,12 +1358,17 @@ class _QuantFP8Linear(QuantModule):
             scale_inv = self.weight_scale_inv.contiguous()
         return weight, scale_inv
 
-    def forward(self, input: Tensor) -> Tensor:
+    def _dequantize_weight(self, dtype: torch.dtype) -> Tensor:
+        weight, scale_inv = self._get_weight_and_scale_inv()
+        if self.block_size is None:
+            return weight.to(dtype) * scale_inv.to(dtype)
         assert weight_dequant is not None, "Triton is not available"
+        return weight_dequant(weight, scale_inv, self.block_size, dtype=dtype)
+
+    def forward(self, input: Tensor) -> Tensor:
         if self.weight.element_size() == 1:
             with torch.cuda.device(self.weight.device):
-                weight, scale_inv = self._get_weight_and_scale_inv()
-                weight = weight_dequant(weight, scale_inv, self.block_size, dtype=input.dtype)
+                weight = self._dequantize_weight(input.dtype)
         else:
             weight = self.weight
         return linear(
@@ -1362,11 +1378,9 @@ class _QuantFP8Linear(QuantModule):
         )
 
     def unpack_weight(self):
-        assert weight_dequant is not None, "Triton is not available"
         with torch.cuda.device(self.weight.device):
-            weight, scale_inv = self._get_weight_and_scale_inv()
             self.weight = nn.Parameter(
-                weight_dequant(weight, scale_inv, self.block_size, dtype=torch.get_default_dtype()),
+                self._dequantize_weight(torch.get_default_dtype()),
                 requires_grad=False,
             )
         if hasattr(self, "weight_scale_inv"):
@@ -1418,7 +1432,21 @@ except ImportError:
 try:
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
 
-    if Qwen3VLMoeTextExperts not in QuantModuleRegistry:
+    # transformers>=5.12 rewrote Qwen3VLMoeTextExperts onto the standard
+    # ``@use_experts_implementation`` fused layout: ``hidden_size``/``expert_dim`` became
+    # ``hidden_dim``/``intermediate_dim``, ``gate_up_proj`` was transposed to
+    # (num_experts, 2*intermediate_dim, hidden_dim), and the forward now calls ``F.linear``
+    # twice per expert. ``_QuantQwen3VLMoeTextExperts`` only understands the older layout,
+    # so registering it against the new one crashes on ``self.hidden_size`` (nvbug 6518551).
+    # The decorator sets ``_apply_gate`` on the class; use it to detect the new layout and
+    # leave those modules to ``register_fused_experts_on_the_fly``, which claims them with
+    # the generic ``_QuantFusedExperts``. The old layout must stay explicitly registered:
+    # it is structurally indistinguishable from a generic fused-experts module, yet its
+    # forward uses ``torch.bmm``/``@`` rather than ``F.linear``, so the generic wrapper
+    # would silently quantize nothing.
+    if Qwen3VLMoeTextExperts not in QuantModuleRegistry and not hasattr(
+        Qwen3VLMoeTextExperts, "_apply_gate"
+    ):
         QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
             _QuantQwen3VLMoeTextExperts
         )
@@ -1744,10 +1772,14 @@ def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
-    if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
-        layers = model.backbone.layers
-        if len(layers) > 0 and hasattr(layers[0], "block_type"):
-            return layers
+    # Custom remote-code checkpoint uses model.backbone.layers;
+    # native transformers NemotronHModel uses model.model.layers.
+    for container_attr in ("backbone", "model"):
+        container = getattr(model, container_attr, None)
+        if container is not None and hasattr(container, "layers"):
+            layers = container.layers
+            if layers and hasattr(layers[0], "block_type"):
+                return layers
 
     return None
 
@@ -1766,8 +1798,13 @@ def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
-        return model.model.layers
+    decoder = model
+    if hasattr(decoder, "model"):
+        decoder = decoder.model
+    if hasattr(decoder, "language_model"):
+        decoder = decoder.language_model
+    if hasattr(decoder, "layers"):
+        return decoder.layers
 
     return None
 

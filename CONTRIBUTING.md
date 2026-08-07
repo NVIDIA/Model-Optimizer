@@ -169,6 +169,11 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   in. Checked-in tests should document expected behavior, protect against regressions, or flag backward-incompatible
   behavior changes. Remove redundant lower-level tests when a higher-level test already covers the same behavior,
   keeping CI/CD fast and lean.
+- **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
+  replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
+  the actual implementation whenever the test claims backend or runtime behavior. For example, a test of
+  `torch.compile` execution must invoke the real `torch.compile`; if the call also needs to be counted or traced, wrap
+  and delegate to the original function instead of replacing it with a fake.
 - **Keep `tests/unit` offline — no HuggingFace Hub access.** Unit tests must be hermetic so they never flake on
   network/timeout issues. Do not call `from_pretrained("<org>/<model>")`, `load_dataset("<hub-id>")`,
   `snapshot_download(...)`, etc. with Hub IDs. Instead build dummy models, tokenizers, configs, and datasets locally —

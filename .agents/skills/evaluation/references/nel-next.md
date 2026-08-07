@@ -114,7 +114,7 @@ SKILL.md Step 3 (same vLLM). The 0.2.6 `command:` maps to structured `services.<
 | `--tensor/-data/-pipeline-parallel-size`, multi-node | `tensor_parallel_size`/`data_parallel_size`/`pipeline_parallel_size` + `num_nodes` (**not** in `extra_args`) |
 | all other serve flags (`--max-model-len`, `--max-num-seqs`, parsers, `--enable-*`, `--model-loader-extra-config`, …) | `extra_args:` |
 | `env_vars` (`VLLM_*`, NVFP4 MoE flags) | `extra_env:` |
-| `image:` (NVFP4: MiniMax-M2.7 ≥ v0.20.0; sm_103 → `-cu130`) | `image:` (serving image, ≠ `eval_image`) |
+| `image:` (bump to the model's recipe min; NVFP4 on sm_103 → CUDA-13 build, see Step 3) | `image:` (serving image, ≠ `eval_image`) |
 
 Size TP/DP + backend defaults (`--max-num-seqs = ceil(max_parallelism/DP)`, MoE
 `--enable-expert-parallel`, …) per `references/parallelism.md` + Step 3. **Sampling

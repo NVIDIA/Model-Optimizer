@@ -52,9 +52,9 @@ progress:
 - [ ] Step 0: Resolve inputs; confirm threshold and eval set
 - [ ] Step 1: Setup gate — creds present, cluster reachable
 - [ ] Step 2: PTQ (ptq skill) → gate_ptq.py
-- [ ] Step 3: Baseline eval (evaluation skill, deploys source) → gate_run.py   [skip if cached, see below]
+- [ ] Step 3: Baseline eval (evaluation skill, deploys source) → gate_run.py
 - [ ] Step 4: Quantized eval (evaluation skill, deploys candidate) → gate_run.py
-- [ ] Step 5: Compare (compare-results skill) → gate_compare.py → decision
+- [ ] Step 5: Compare (compare-results skill) → external sanity → gate_compare.py → decision
 - [ ] Step 6: Closeout — report + publish recommendation
 ```
 
@@ -83,10 +83,8 @@ unvalidated checkpoint.
 ### Step 3 — Baseline eval
 
 The baseline is the **source** (pre-quantization) model on the same task set and
-sampling params. **Look it up first** — if a matching baseline run already
-exists in MLflow (same model, task set, sampling params), reuse it and skip this
-stage. Otherwise run it via the **evaluation** skill (which deploys the source
-model itself). Gate with `gate_run.py`.
+sampling params. Always run a fresh baseline via the **evaluation** skill,
+which deploys the source model itself. Gate with `gate_run.py`.
 
 ### Step 4 — Quantized eval
 
@@ -110,7 +108,14 @@ dropped samples) — do **not** compare scores from it.
 
 ### Step 5 — Compare
 
-Invoke the **compare-results** skill to produce per-task deltas, then gate:
+Invoke the **compare-results** skill. It must perform the shared external
+baseline sanity check before the candidate-delta gate. A failed check is
+`ANOMALOUS` with failure class `EXTERNAL_BASELINE_MISMATCH`: investigate and
+rerun the baseline. If no credible comparable external score exists, record the
+baseline as externally unverified and continue using the validated measured
+baseline.
+
+After recording the external status, produce per-task deltas and run:
 
 ```bash
 python .agents/skills/day0-release/scripts/gate_compare.py \
@@ -125,22 +130,25 @@ normalizes the drop accordingly, so `--threshold 0.01` means "≤1 pt on a 0-100
 task / ≤0.01 on a 0-1 task" uniformly. Pass `--scales '{"task": max}'` to
 override inference if a task's scores happen to fall in an ambiguous range.
 
-Decision from `gate_compare.py`:
+`gate_compare.py` checks only the candidate delta; it cannot override a failed
+external baseline check. Combined decision:
 
-- **ACCEPT** — every task within threshold → go to Step 6.
+- **ACCEPT** — no external check failed and every task is within the candidate
+  threshold → go to Step 6. A missing comparable external score is not a
+  failure; report it as externally unverified.
 - **REGRESSION** — one or more tasks exceed threshold. **v1 stops here and
   reports** which tasks regressed by how much. (Picking the next recipe and
   re-running is deferred — see Scope.)
-- **ANOMALOUS** — scores present but implausible (e.g. baseline lower than
-  candidate by a large margin, or a task score outside its valid range) →
-  surface to the user.
+- **ANOMALOUS** — external baseline sanity failed, or scores are otherwise
+  implausible (e.g. baseline lower than candidate by a large margin, or a task
+  score is outside its valid range) → correct the baseline or surface it.
 
 ### Step 6 — Closeout
 
 Report the decision with: source vs output size + ratio, per-task baseline /
-candidate / delta / within-threshold, MLflow run IDs, and a publish
-recommendation (publish / do-not-publish / needs-human). Archive artifacts to
-the workspace.
+candidate / delta / within-threshold, external source and sanity status, MLflow
+run IDs, and a publish recommendation (publish / do-not-publish).
+Archive artifacts to the workspace.
 
 ## Triage (gate failure → decision)
 
@@ -154,8 +162,9 @@ Map a gate's `failure_class` to the next action:
 | `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
 | `EVAL_JUDGE_FAILED` | Usually transient (auth / rate limit) — wait and retry. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |
-| `USER_CONFIG_ERROR` | Stop and ask the user. |
-| `UNKNOWN` | Stop and surface to the user (`NEEDS_HUMAN`). |
+| `EXTERNAL_BASELINE_MISMATCH` | Investigate baseline configuration, correct it, rerun the baseline, and repeat external sanity before comparison. |
+| `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |
+| `UNKNOWN` | Investigate with the owning domain skill; if unresolved, return `ANOMALOUS` with the evidence and next automated retry or patch action. |
 
 `SYSTEMIC` (cluster down, dataset unavailable) aborts the whole run.
 `POINT_INFEASIBLE` means this (model, recipe) can't work as configured.
@@ -166,7 +175,7 @@ Return a decision, not a raw artifact:
 
 - `ACCEPT` + report + publish recommendation
 - `REGRESSION` + which tasks failed the threshold and by how much
-- `ANOMALOUS` / `INFEASIBLE` / `NEEDS_HUMAN` + reason
+- `ANOMALOUS` / `INFEASIBLE` + reason and next automated action
 - Always: workspace path + MLflow run IDs for traceability
 
 ## Scope (v1)

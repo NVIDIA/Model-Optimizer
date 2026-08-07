@@ -29,6 +29,23 @@ from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_
 
 ALL_SPEC_MODES = ["eagle", "dflash"]
 
+
+def _get_rope_theta(config, default=None):
+    """Get RoPE theta from either legacy or Transformers 5 config fields."""
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
+
+    # Transformers 5 stores this under rope_parameters (and exposes the same
+    # data through rope_scaling for backwards compatibility).
+    for attr in ("rope_parameters", "rope_scaling"):
+        rope_config = getattr(config, attr, None)
+        if isinstance(rope_config, dict) and rope_config.get("rope_theta") is not None:
+            return rope_config["rope_theta"]
+
+    return default
+
+
 LLAMA_EAGLE_SINGLE_LAYER = {
     "required": {
         "layers.0.self_attn.q_proj",
@@ -376,14 +393,10 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "initializer_range": getattr(base_config, "initializer_range", 0.02),
             "attention_bias": getattr(draft_config, "attention_bias", False),
             "attention_dropout": getattr(draft_config, "attention_dropout", 0.0),
-            # Inherit the target's rope_theta: DFlash injects the target's KV into every
-            # draft layer, so the draft's RoPE base must match the target's. (The draft
-            # arch config carries no rope_theta of its own.)
-            "rope_theta": (
-                getattr(base_config, "rope_theta", None)
-                if getattr(base_config, "rope_theta", None) is not None
-                else getattr(draft_config, "rope_theta", 1000000.0)
-            ),
+            # Inherit the target's RoPE base: DFlash injects target KV into every draft
+            # layer, so their RoPE bases must match. Transformers 5 stores rope_theta
+            # in rope_parameters rather than a top-level config attribute.
+            "rope_theta": _get_rope_theta(base_config, _get_rope_theta(draft_config, 1000000.0)),
             # YaRN long-context scaling is injected below (see the rope_scaling block).
             "rope_scaling": None,
             "tie_word_embeddings": False,
@@ -398,6 +411,21 @@ class DFlashExporter(SpeculativeDecodingExporter):
             config["layer_types"] = draft_config.layer_types
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
+
+        # Sliding-window attention: all draft layers use non-causal SWA (MiMo-style). vLLM's
+        # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
+        # layer_types left all "full_attention" it applies a non-causal sliding window to
+        # every draft layer (window from swa_window_size / top-level sliding_window).
+        swa_window = getattr(self.model, "dflash_swa_window_size", None)
+        if swa_window is not None:
+            config["sliding_window"] = swa_window
+            config["dflash_config"].update(
+                {
+                    "use_swa": True,
+                    "swa_window_size": swa_window,
+                    "causal": False,
+                }
+            )
 
         # Inject the export-time YaRN rope_scaling from the dflash_export_rope_scaling
         # config field (empty dict disables). Mirrors eagle's eagle_export_rope_scaling.

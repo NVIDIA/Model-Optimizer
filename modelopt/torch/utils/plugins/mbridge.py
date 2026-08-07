@@ -17,7 +17,6 @@
 from typing import Any
 
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.conversion.param_mapping import AutoMapping, GatedMLPMapping
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
@@ -33,52 +32,21 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
 
-from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
+from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec, get_te_mamba_stack_spec
 from modelopt.torch.utils import print_rank_0
 
+try:  # nemo:26.08+
+    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+
+    HAS_HYBRID = True
+except ImportError:
+    HAS_HYBRID = False
+    HybridModelProvider = None
+    HybridModel = None
+
+
 __all__ = ["load_mbridge_model_from_hf", "load_modelopt_megatron_checkpoint"]
-
-
-def _patch_qwen35_moe_sequential_expert_mappings() -> None:
-    """WAR: Add sequential (non-grouped) expert mappings to Megatron-Bridge's Qwen3.5 MoE bridge.
-
-    The shipped bridge only maps grouped experts (``experts.gate_up_proj``), but pruning disables
-    grouped GEMM and needs the sequential ``experts.local_experts.*`` layout. This also covers
-    Qwen3.5-VL MoE, whose bridge delegates to the same ``_get_moe_lm_mappings`` helper.
-
-    TODO: Remove once Megatron-Bridge maps sequential Qwen3.5 MoE experts natively (patched in 26.06.01).
-    """
-    try:
-        from megatron.bridge.models.qwen.qwen35_bridge import Qwen35MoEBridge
-    except ImportError:
-        return
-
-    orig = Qwen35MoEBridge._get_moe_lm_mappings
-    if getattr(orig, "_modelopt_sequential_experts", False):
-        return
-    # No-op if the installed bridge already maps sequential experts.
-    if any(
-        "local_experts" in str(getattr(m, "megatron_param", ""))
-        for m in orig(hf_prefix="model.", megatron_prefix="")
-    ):
-        return
-
-    def _get_moe_lm_mappings(hf_prefix="model.", megatron_prefix=""):
-        return [
-            *orig(hf_prefix=hf_prefix, megatron_prefix=megatron_prefix),
-            GatedMLPMapping(
-                megatron_param=f"{megatron_prefix}decoder.layers.*.mlp.experts.local_experts.*.linear_fc1.weight",
-                gate=f"{hf_prefix}layers.*.mlp.experts.*.gate_proj.weight",
-                up=f"{hf_prefix}layers.*.mlp.experts.*.up_proj.weight",
-            ),
-            AutoMapping(
-                megatron_param=f"{megatron_prefix}decoder.layers.*.mlp.experts.local_experts.*.linear_fc2.weight",
-                hf_param=f"{hf_prefix}layers.*.mlp.experts.*.down_proj.weight",
-            ),
-        ]
-
-    _get_moe_lm_mappings._modelopt_sequential_experts = True  # type: ignore[attr-defined]
-    Qwen35MoEBridge._get_moe_lm_mappings = staticmethod(_get_moe_lm_mappings)
 
 
 def load_mbridge_model_from_hf(
@@ -91,9 +59,9 @@ def load_mbridge_model_from_hf(
     load_weights: bool = True,
 ) -> tuple[
     AutoBridge,
-    GPTModelProvider | MambaModelProvider,
+    GPTModelProvider | MambaModelProvider | HybridModelProvider,
     list[MegatronModule],
-    GPTModel | MambaModel,
+    MegatronModule,
     AutoTokenizer,
 ]:
     """Load a Megatron-Bridge model from HF.
@@ -113,7 +81,6 @@ def load_mbridge_model_from_hf(
         A tuple of (bridge, provider, model, unwrapped_model, tokenizer).
     """
     print_rank_0(f"Loading Megatron-Bridge model from HF: {hf_model_name_or_path}")
-    _patch_qwen35_moe_sequential_expert_mappings()
     trust_remote_code = is_safe_repo(
         trust_remote_code=trust_remote_code,
         hf_path=hf_model_name_or_path,
@@ -128,12 +95,15 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    # Pruning does not support grouped GEMM yet, so disable it for MoE models. Set the flag on the
-    # provider (the bridge's native, possibly custom/hybrid spec reads it at build time) rather than
-    # replacing the whole layer spec -- overwriting it would drop custom layers (e.g. Qwen3.5's
-    # GatedDeltaNet + gated-attention or Gemma3's custom spec).
-    if isinstance(provider, MambaModelProvider):
+    # Set moe_grouped_gemm on the provider (the bridge's native, possibly custom/hybrid spec reads
+    # it at build time) rather than replacing the whole layer spec -- overwriting it would drop
+    # custom layers (e.g. Qwen3.5's GatedDeltaNet + gated-attention or Gemma3's custom spec).
+    if HAS_HYBRID and isinstance(provider, (HybridModelProvider)):
+        provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+        provider.moe_grouped_gemm = moe_grouped_gemm
+    elif isinstance(provider, (MambaModelProvider)):  # Deprecated in favor of HybridModelProvider
         provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+        provider.moe_grouped_gemm = moe_grouped_gemm
     elif (provider.num_moe_experts or 0) > 0:
         provider.moe_grouped_gemm = moe_grouped_gemm
     provider.finalize()
@@ -144,10 +114,11 @@ def load_mbridge_model_from_hf(
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
     # VLMs (e.g. Qwen3-VL) wrap the language model as ``.language_model``; the pruning target is the
-    # inner GPTModel/MambaModel, but we still return the full wrapper so callers can save the VLM.
+    # inner GPTModel/MambaModel/HybridModel, but we still return the full wrapper so callers can save the VLM.
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    assert isinstance(language_model, (GPTModel, MambaModel)), (
-        f"Expected a GPTModel/MambaModel (optionally wrapped as .language_model), "
+    model_types = (GPTModel, MambaModel, HybridModel) if HAS_HYBRID else (GPTModel, MambaModel)
+    assert isinstance(language_model, model_types), (
+        f"Expected a GPTModel/MambaModel/HybridModel (optionally wrapped as `.language_model`), "
         f"got {type(unwrapped_model)}"
     )
 
@@ -162,16 +133,21 @@ def load_mbridge_model_from_hf(
     return bridge, provider, model, unwrapped_model, tokenizer
 
 
-def load_modelopt_megatron_checkpoint(model: list[MegatronModule], megatron_path: str) -> None:
+def load_modelopt_megatron_checkpoint(
+    model: list[MegatronModule], megatron_path: str, restore_modelopt_state: bool = True
+) -> None:
     """Load Megatron checkpoint weights (with modelopt_state).
 
     Args:
         model: The (pre-built) Megatron model to load the checkpoint into.
         megatron_path: Path to the quantized Megatron checkpoint (produced by ``quantize.py``)
+        restore_modelopt_state: Whether to restore the ModelOpt state (e.g. quantizers) before loading
+            weights. Set ``False`` to load weights only -- e.g. to reload a full-precision distilled
+            student without reconstructing the ``kd_loss`` mode (which would require a teacher model).
     """
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
-    if has_modelopt_state(megatron_path):
+    if restore_modelopt_state and has_modelopt_state(megatron_path):
         load_modelopt_state(model, megatron_path)
     # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
     _load_model_weights_from_checkpoint(_get_modelopt_checkpoint_path(megatron_path), model)

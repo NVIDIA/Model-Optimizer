@@ -37,11 +37,17 @@ Hybrid pattern characters (from ``megatron.core.ssm.mamba_hybrid_layer_allocatio
 
 import io
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
-from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mamba.mamba_model import MambaModel
+
+try:  # nemo:26.08+
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+
+    _HYBRID_MODEL_TYPES: tuple[type, ...] = (MambaModel, HybridModel)
+except ImportError:  # nemo:26.06 and earlier
+    _HYBRID_MODEL_TYPES = (MambaModel,)
 from megatron.core.parallel_state import (
     get_expert_tensor_and_model_parallel_group,
     get_expert_tensor_parallel_rank,
@@ -55,6 +61,10 @@ from rich.table import Table
 
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import num2hrb, print_rank_0
+
+if TYPE_CHECKING:
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.models.hybrid.hybrid_model import HybridModel  # noqa: TC004
 
 __all__ = [
     "mcore_memory_footprint_mb",
@@ -149,12 +159,17 @@ def _moe_layer_params(
     normalization: str,
     moe_shared_expert_intermediate_size: int | None,
     moe_shared_expert_gate: bool = False,
+    moe_latent_size: int | None = None,
 ) -> tuple[int, int]:
     """Params for a MoE sublayer, returned as (total, active).
 
     ``pre_mlp_layernorm`` is a *separate* TENorm (not fused into expert fc1).
     Routed expert fc1/fc2 use ``TEColumnParallelLinear`` (no fused LN).
     Shared experts never carry bias regardless of ``add_bias_linear``.
+
+    With ``moe_latent_size`` (e.g. Nemotron-3 latent MoE), a shared ``fc1_latent_proj`` /
+    ``fc2_latent_proj`` compress hidden <-> latent and the routed experts run in the latent dim;
+    the router and shared experts still run on ``hidden_size``.
 
     ``total`` counts all ``num_moe_experts`` routed experts; ``active`` counts only
     ``moe_router_topk`` (the experts actually used in each forward pass).  The router,
@@ -166,16 +181,22 @@ def _moe_layer_params(
     if add_bias_linear:
         always += num_moe_experts  # router bias
 
-    # Shared expert (SharedExpertMLP always has add_bias_linear=False)
+    # Shared expert (SharedExpertMLP always has add_bias_linear=False), always on hidden_size
     if moe_shared_expert_intermediate_size:
         s_fc1_out = moe_shared_expert_intermediate_size * (2 if gated_linear_unit else 1)
         always += hidden_size * s_fc1_out + moe_shared_expert_intermediate_size * hidden_size
         if moe_shared_expert_gate:
             always += hidden_size  # gate_weight: 1 x hidden_size
 
+    # Latent MoE: shared hidden<->latent projections (always active); routed experts run in latent dim.
+    expert_io_size = hidden_size
+    if moe_latent_size:
+        always += hidden_size * moe_latent_size + moe_latent_size * hidden_size
+        expert_io_size = moe_latent_size
+
     # Per routed-expert params
     fc1_out = moe_ffn_hidden_size * (2 if gated_linear_unit else 1)
-    per_expert = hidden_size * fc1_out + moe_ffn_hidden_size * hidden_size
+    per_expert = expert_io_size * fc1_out + moe_ffn_hidden_size * expert_io_size
     if add_bias_linear:
         per_expert += fc1_out + moe_ffn_hidden_size
 
@@ -217,6 +238,82 @@ def _mamba_layer_params(
 
     # Internal RMSNorm on d_inner (always RMSNorm, 1 weight only)
     params += d_inner
+
+    return params
+
+
+def _gated_delta_net_layer_params(
+    hidden_size: int,
+    linear_num_key_heads: int,
+    linear_key_head_dim: int,
+    linear_num_value_heads: int,
+    linear_value_head_dim: int,
+    linear_conv_kernel_dim: int,
+    normalization: str,
+) -> int:
+    """Params for a single GatedDeltaNet (linear-attention) sublayer, e.g. Qwen3-Next / Qwen3.5.
+
+    ``in_proj`` (TELayerNormColumnParallelLinear with fused input LN) projects to q, k, v, the output
+    gate ``z``, and the per-value-head ``beta`` + ``alpha`` scalars; a depthwise ``conv1d`` (no bias)
+    runs over q/k/v; ``A_log`` + ``dt_bias`` are per value head; a gated RMSNorm over the value head
+    dim precedes ``out_proj``.
+    """
+    key_dim = linear_num_key_heads * linear_key_head_dim
+    value_dim = linear_num_value_heads * linear_value_head_dim
+
+    # in_proj: hidden -> (q + k + v + z-gate) + (beta + alpha), no bias, fused input LN
+    in_proj_out = 2 * key_dim + 2 * value_dim + 2 * linear_num_value_heads
+    params = hidden_size * in_proj_out
+    params += _norm_params(hidden_size, normalization)  # fused input_layernorm
+
+    # conv1d (depthwise, no bias) over q, k, v channels
+    params += (2 * key_dim + value_dim) * linear_conv_kernel_dim
+
+    # Per-value-head scalars: A_log + dt_bias
+    params += 2 * linear_num_value_heads
+
+    # Gated RMSNorm over the value head dim (always RMSNorm, 1 weight), then out_proj: value_dim -> hidden
+    params += linear_value_head_dim
+    params += value_dim * hidden_size
+
+    return params
+
+
+def _mla_layer_params(
+    hidden_size: int,
+    num_attention_heads: int,
+    q_lora_rank: int | None,
+    kv_lora_rank: int,
+    qk_head_dim: int,
+    qk_pos_emb_head_dim: int,
+    v_head_dim: int,
+    normalization: str,
+) -> int:
+    """Params for a single Multi-Latent Attention (MLA) sublayer, e.g. DeepSeek / Kimi.
+
+    The query is optionally low-rank compressed (``q_lora_rank``); the key/value share a low-rank
+    down-projection that also carries the MQA rope key, each up-projection fusing an RMSNorm on its
+    latent dim. A separate ``input_layernorm`` precedes the attention (not fused into a linear).
+    """
+    q_head_dim = qk_head_dim + qk_pos_emb_head_dim
+
+    params = _norm_params(hidden_size, normalization)  # input_layernorm
+
+    # Query: low-rank (down -> RMSNorm -> up) when q_lora_rank is set, else a single projection.
+    if q_lora_rank:
+        params += q_lora_rank * hidden_size  # q_down_proj
+        params += _norm_params(q_lora_rank, normalization)  # q up-proj fused RMSNorm
+        params += num_attention_heads * q_head_dim * q_lora_rank  # q_up_proj
+    else:
+        params += num_attention_heads * q_head_dim * hidden_size  # q_proj
+
+    # Key/Value: joint low-rank down-projection (+ shared rope key) -> RMSNorm -> up-projection.
+    params += (kv_lora_rank + qk_pos_emb_head_dim) * hidden_size  # kv_down_proj (with MQA rope)
+    params += _norm_params(kv_lora_rank, normalization)  # kv up-proj fused RMSNorm
+    params += num_attention_heads * (qk_head_dim + v_head_dim) * kv_lora_rank  # kv_up_proj
+
+    # Output projection: (num_heads * v_head_dim) -> hidden
+    params += num_attention_heads * v_head_dim * hidden_size
 
     return params
 
@@ -293,6 +390,7 @@ def mcore_param_count(
     moe_ffn_hidden_size: int | None = _get("moe_ffn_hidden_size")
     moe_shared_expert_intermediate_size: int | None = _get("moe_shared_expert_intermediate_size")
     moe_shared_expert_gate: bool = _get("moe_shared_expert_gate", False)
+    moe_latent_size: int | None = _get("moe_latent_size", None)
     mamba_num_heads: int | None = _get("mamba_num_heads")
     mamba_head_dim: int | None = _get("mamba_head_dim")
     mamba_num_groups: int | None = _get("mamba_num_groups")
@@ -303,6 +401,57 @@ def mcore_param_count(
     qk_layernorm: bool = _get("qk_layernorm", False)
     attention_output_gate: bool = _get("attention_output_gate", False)
     moe_layer_freq: int | list[int] = _get("moe_layer_freq", 1)
+    # GatedDeltaNet (linear-attention) hybrid, e.g. Qwen3-Next / Qwen3.5: every ``linear_attention_freq``-th
+    # layer keeps full attention, the rest use GatedDeltaNet linear attention.
+    experimental_attention_variant: str | None = _get("experimental_attention_variant", None)
+    # ``linear_attention_freq`` is either an int interval (every N-th layer is full attention) or an
+    # explicit per-layer pattern (list; 1 = linear_attention / GatedDeltaNet, 0 = full_attention).
+    linear_attention_freq: int | list[int] | None = _get("linear_attention_freq", None)
+    is_gdn = experimental_attention_variant == "gated_delta_net" and bool(linear_attention_freq)
+
+    def _is_linear_attention_layer(i: int) -> bool:
+        """Whether layer ``i`` uses GatedDeltaNet linear attention (vs full attention)."""
+        if isinstance(linear_attention_freq, (list, tuple)):
+            return bool(linear_attention_freq[i])
+        return (i + 1) % linear_attention_freq != 0
+
+    # Multi-Latent Attention (MLA), e.g. DeepSeek / Kimi: low-rank compressed q/kv projections.
+    multi_latent_attention: bool = _get("multi_latent_attention", False)
+
+    def _attn_params(i: int) -> int:
+        """Params for the attention sublayer of layer ``i`` (GatedDeltaNet / MLA / standard)."""
+        if is_gdn and _is_linear_attention_layer(i):
+            return _gated_delta_net_layer_params(
+                hidden_size,
+                _get("linear_num_key_heads"),
+                _get("linear_key_head_dim"),
+                _get("linear_num_value_heads"),
+                _get("linear_value_head_dim"),
+                _get("linear_conv_kernel_dim", 4),
+                normalization,
+            )
+        if multi_latent_attention:
+            return _mla_layer_params(
+                hidden_size,
+                num_attention_heads,
+                _get("q_lora_rank"),
+                _get("kv_lora_rank"),
+                _get("qk_head_dim", kv_channels),
+                _get("qk_pos_emb_head_dim", 0),
+                _get("v_head_dim", kv_channels),
+                normalization,
+            )
+        assert kv_channels is not None, "kv_channels must be set for GPT attention layers"
+        return _attn_layer_params(
+            hidden_size,
+            num_attention_heads,
+            num_query_groups or num_attention_heads,
+            kv_channels,
+            add_bias_linear,
+            normalization,
+            qk_layernorm,
+            attention_output_gate,
+        )
 
     # Fill in derived defaults
     if num_query_groups is None:
@@ -330,16 +479,7 @@ def mcore_param_count(
             moe_pattern = [1 if (i % moe_layer_freq == 0) else 0 for i in range(num_layers)]
 
         for i in range(num_layers):
-            layer_t = layer_a = _attn_layer_params(
-                hidden_size,
-                num_attention_heads,
-                num_query_groups,
-                kv_channels,
-                add_bias_linear,
-                normalization,
-                qk_layernorm,
-                attention_output_gate,
-            )
+            layer_t = layer_a = _attn_params(i)
             if moe_pattern[i] and num_moe_experts:
                 assert moe_ffn_hidden_size is not None, (
                     "moe_ffn_hidden_size must be set for MoE layers"
@@ -354,6 +494,7 @@ def mcore_param_count(
                     normalization,
                     moe_shared_expert_intermediate_size,
                     moe_shared_expert_gate,
+                    moe_latent_size,
                 )
                 layer_t += mt
                 layer_a += ma
@@ -376,7 +517,7 @@ def mcore_param_count(
         # ---- Hybrid / MambaModel: layer type is encoded in the pattern ----
         layer_chars = parse_main_layer_chars(hybrid_layer_pattern, num_layers)
 
-        for char in layer_chars:
+        for i, char in enumerate(layer_chars):
             if char == _HYBRID_MAMBA:
                 assert mamba_num_heads is not None, "mamba_num_heads must be set for Mamba layers"
                 assert mamba_head_dim is not None, "mamba_head_dim must be set for Mamba layers"
@@ -392,16 +533,7 @@ def mcore_param_count(
                 )
             elif char == _HYBRID_ATTN:
                 assert kv_channels is not None, "kv_channels must be set for attention layers"
-                t = a = _attn_layer_params(
-                    hidden_size,
-                    num_attention_heads,
-                    num_query_groups,
-                    kv_channels,
-                    add_bias_linear,
-                    normalization,
-                    qk_layernorm,
-                    attention_output_gate,
-                )
+                t = a = _attn_params(i)
             elif char == _HYBRID_MLP:
                 assert ffn_hidden_size is not None, "ffn_hidden_size must be set for MLP layers"
                 t = a = _dense_mlp_params(
@@ -426,6 +558,7 @@ def mcore_param_count(
                     normalization,
                     moe_shared_expert_intermediate_size,
                     moe_shared_expert_gate,
+                    moe_latent_size,
                 )
             else:
                 raise ValueError(f"Unsupported hybrid layer character: {char}")
@@ -435,8 +568,8 @@ def mcore_param_count(
     return total, active
 
 
-def mcore_param_count_live(model: GPTModel | MambaModel) -> int:
-    """Count parameters in a live MCore GPTModel or MambaModel (reduced across TP, EP, ETP, and PP ranks)."""
+def mcore_param_count_live(model: "GPTModel | MambaModel | HybridModel") -> int:
+    """Count parameters in a live MCore LLM model (reduced across TP, EP, ETP, and PP ranks)."""
     if isinstance(model, DynamicModule):
         raise RuntimeError(
             "mcore_param_count_live does not support DynamicModule. "
@@ -595,7 +728,7 @@ def mcore_memory_footprint_mb(
 
 
 def print_mcore_model_stats(
-    model: "GPTModel | MambaModel",
+    model: "GPTModel | MambaModel | HybridModel",
     label: str = "Model",
     seq_length: int = 4096,
     batch_size: int = 1,
@@ -604,7 +737,7 @@ def print_mcore_model_stats(
     """Print total params, active params, and memory footprint for an MCore model.
 
     Args:
-        model: GPTModel or MambaModel to print stats for.
+        model: MCore LLM model to print stats for.
         label: Label prefix for the output line (e.g. ``"Original"``, ``"Pruned"``).
         seq_length: Sequence length for KV-cache / Mamba-state memory estimate.
         batch_size: Batch size for KV-cache / Mamba-state memory estimate.
@@ -612,7 +745,7 @@ def print_mcore_model_stats(
     """
     hybrid_layer_pattern: str | None = None
     config_overrides: dict = {}
-    if isinstance(model, MambaModel):
+    if isinstance(model, _HYBRID_MODEL_TYPES):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(model, "hybrid_override_pattern")
@@ -621,8 +754,8 @@ def print_mcore_model_stats(
         hybrid_layer_pattern = getattr(model, hybrid_key)
         # mamba_num_heads may not be stored in config when derived from model architecture;
         # fall back to reading it from the actual layer.
-        if getattr(model.config, "mamba_num_heads", None) is None:
-            for layer in model.decoder.layers:
+        if getattr(model.config, "mamba_num_heads", None) is None:  # type: ignore[attr-defined]
+            for layer in model.decoder.layers:  # type: ignore[attr-defined]
                 if hasattr(layer, "mixer") and hasattr(layer.mixer, "nheads"):
                     config_overrides["mamba_num_heads"] = layer.mixer.nheads
                     break

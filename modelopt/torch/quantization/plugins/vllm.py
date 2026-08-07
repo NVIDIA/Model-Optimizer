@@ -17,26 +17,90 @@
 
 import contextvars
 import importlib
+import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from functools import partial
 from itertools import chain
+from types import ModuleType
 
 import torch
-
-# Try multiple import paths for vLLM compatibility across versions
-if importlib.util.find_spec("vllm.attention"):
-    import vllm.attention as vllm_attention  # vllm < 0.16.0
-else:
-    import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
-
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
+from ..conversion import set_quantizer_by_cfg
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from .custom import CUSTOM_MODEL_PLUGINS
+
+_NVFP4_ATTENTION_QUANTIZER_CFG = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+}
+_VLLM_NVFP4_ATTENTION_QUANT_CFG = [
+    {"quantizer_name": "*_bmm_quantizer", "enable": False},
+    *(
+        {
+            "quantizer_name": f"*{name}_bmm_quantizer",
+            "cfg": _NVFP4_ATTENTION_QUANTIZER_CFG,
+            "enable": True,
+        }
+        for name in ("q", "k", "p", "v")
+    ),
+]
+_FP8_ATTENTION_QUANTIZER_CFG = {"num_bits": (4, 3)}  # per-tensor E4M3, static scale amax/448
+_BMM2_FORMAT_CFGS = {"nvfp4": _NVFP4_ATTENTION_QUANTIZER_CFG, "fp8": _FP8_ATTENTION_QUANTIZER_CFG}
+
+
+def build_vllm_attention_quant_cfg(
+    *,
+    q_format: str = "nvfp4",
+    k_format: str = "nvfp4",
+    p_format: str = "nvfp4",
+    v_format: str = "nvfp4",
+) -> list:
+    """Build the attention BMM quantizer config with per-operand formats.
+
+    Each of Q/K/P/V takes "nvfp4" (dynamic block-16, two-level scale) or
+    "fp8" (per-tensor E4M3, static scale amax/448).
+    """
+    formats = {"q": q_format, "k": k_format, "p": p_format, "v": v_format}
+    for name, fmt in formats.items():
+        if fmt not in _BMM2_FORMAT_CFGS:
+            raise ValueError(
+                f"{name}_format must be one of {sorted(_BMM2_FORMAT_CFGS)}, got {fmt!r}"
+            )
+    return [
+        {"quantizer_name": "*_bmm_quantizer", "enable": False},
+        *(
+            {
+                "quantizer_name": f"*{name}_bmm_quantizer",
+                "cfg": _BMM2_FORMAT_CFGS[fmt],
+                "enable": True,
+            }
+            for name, fmt in formats.items()
+        ),
+    ]
+
+
+def _import_attention_module():
+    """Import a vLLM module that exports the concrete ``Attention`` class."""
+    for module_name in (
+        "vllm.attention.layer",
+        "vllm.model_executor.layers.attention",
+        "vllm.attention",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "Attention"):
+            return module
+    raise ImportError("No supported vLLM Attention module was found")
+
+
+vllm_attention = _import_attention_module()
 
 # Try multiple import paths for vLLM compatibility across versions
 vllm_shared_fused_moe_layer = None
@@ -49,6 +113,65 @@ for module_path in [
         break
     except ImportError:
         continue
+
+
+def _is_module_cls(obj) -> bool:
+    """Whether obj is an nn.Module class we can register a dynamic module for."""
+    return isinstance(obj, type) and issubclass(obj, torch.nn.Module)
+
+
+def _import_unquantized_fused_moe_method() -> type | None:
+    """Return vLLM's unquantized fused-MoE method class across module layouts."""
+    for module_path in (
+        "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method",  # 0.24+
+        "vllm.model_executor.layers.fused_moe.layer",
+    ):
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError:
+            continue
+        method_cls = getattr(module, "UnquantizedFusedMoEMethod", None)
+        if method_cls is not None:
+            return method_cls
+    return None
+
+
+UnquantizedFusedMoEMethod = _import_unquantized_fused_moe_method()
+
+try:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+except ImportError:
+    RoutedExperts = None
+
+# vLLM >= 0.24 turned ``FusedMoE`` into a factory function and moved the expert weights onto a
+# ``RoutedExperts`` submodule; register whichever module class this release provides.
+# The forward_* check keeps a future rename surfacing here (skip + warn) rather than as an
+# AttributeError at the first expert forward, i.e. at serving time.
+_has_routed_experts_cls = (
+    UnquantizedFusedMoEMethod is not None
+    and _is_module_cls(RoutedExperts)
+    and all(hasattr(RoutedExperts, n) for n in ("forward_modular", "forward_monolithic"))
+)
+# The two layouts are mutually exclusive on every release. Prefer RoutedExperts if a future one
+# ships both: it owns the expert weights, and registering its parent too would convert both and
+# leave the parent's fakequant unable to tell w13 from w2.
+_has_fused_moe_cls = (
+    not _has_routed_experts_cls
+    and UnquantizedFusedMoEMethod is not None
+    and _is_module_cls(getattr(vllm_fused_moe_layer, "FusedMoE", None))
+)
+if vllm_shared_fused_moe_layer is not None and not (
+    UnquantizedFusedMoEMethod is not None
+    and _is_module_cls(getattr(vllm_shared_fused_moe_layer, "SharedFusedMoE", None))
+):
+    vllm_shared_fused_moe_layer = None
+
+if not (_has_fused_moe_cls or _has_routed_experts_cls):
+    # Without a registration target, mtq.quantize() silently leaves experts in full precision.
+    warnings.warn(
+        "This vLLM release exposes no supported fused-MoE module; MoE layers will NOT be "
+        "quantized. Linear and attention quantization are unaffected."
+    )
 
 try:
     _has_attention_layers = importlib.util.find_spec("vllm.attention.layers") is not None
@@ -69,14 +192,6 @@ else:
         EncoderOnlyAttention = None
 
 try:
-    _has_attention_layer = importlib.util.find_spec("vllm.attention.layer") is not None
-except (ModuleNotFoundError, ValueError):
-    _has_attention_layer = False
-
-if _has_attention_layer:
-    import vllm.attention.layer as vllm_attention
-
-try:
     VllmMLAAttention = vllm_attention.MLAAttention
 except (AttributeError, ImportError):
     VllmMLAAttention = None
@@ -87,18 +202,37 @@ _ATTENTION_TYPES = tuple(
     if t is not None
 )
 
-vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
-# vLLM may call one entry (e.g. ``dispatch_fused_moe_kernel``) which then calls another on the same
-# module (e.g. ``invoke_fused_moe_triton_kernel``). Patching every name would otherwise apply fakequant
+# vLLM may call one entry (e.g. ``dispatch_fused_moe_kernel``) which then calls another
+# (e.g. ``invoke_fused_moe_triton_kernel``). Patching every name would otherwise apply fakequant
 # twice; see ``_moe_fakequant_active`` in ``invoke_fused_moe_quantized``.
 _FUSED_MOE_KERNEL_CANDIDATES = (
     "invoke_fused_moe_kernel",
     "invoke_fused_moe_triton_kernel",
     "dispatch_fused_moe_kernel",
 )
-_FUSED_MOE_KERNEL_FUNCS = tuple(
-    n for n in _FUSED_MOE_KERNEL_CANDIDATES if hasattr(vllm_fused_moe_package, n)
+# The launchers bind the kernels by name at import time, so patching only the defining module
+# would miss the call sites that vLLM >= 0.24 moved into ``experts.triton_moe``.
+_FUSED_MOE_KERNEL_MODULE_PATHS = (
+    "vllm.model_executor.layers.fused_moe.fused_moe",
+    "vllm.model_executor.layers.fused_moe.experts.triton_moe",
 )
+
+
+def _collect_fused_moe_kernel_targets() -> tuple[tuple[ModuleType, str], ...]:
+    """Return the ``(module, attribute)`` pairs holding fused-MoE kernel entry points."""
+    targets = []
+    for module_path in _FUSED_MOE_KERNEL_MODULE_PATHS:
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError:
+            continue
+        targets.extend(
+            (module, name) for name in _FUSED_MOE_KERNEL_CANDIDATES if hasattr(module, name)
+        )
+    return tuple(targets)
+
+
+_FUSED_MOE_KERNEL_TARGETS = _collect_fused_moe_kernel_targets()
 
 _moe_fakequant_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "moe_fakequant_active", default=False
@@ -162,7 +296,7 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
     # kv_cache is a list of tensors (v0) or a single tensor (v1).
     kv = getattr(module, "kv_cache", None)
     if kv is not None:
-        t0 = kv[0] if isinstance(kv, (list, tuple)) and len(kv) > 0 else kv
+        t0 = kv[0] if isinstance(kv, list | tuple) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
             spec = getattr(module, "kv_cache_dtype", t0.dtype)
             out_dtype = (
@@ -186,6 +320,82 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 
 
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
+
+
+def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
+    """Set a global-scale-one amax on uncalibrated block-16 NVFP4 K/V quantizers."""
+    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+        quantizer = getattr(module, name, None)
+        if (
+            not isinstance(quantizer, TensorQuantizer)
+            or not quantizer.is_enabled
+            or not quantizer.is_nvfp4_dynamic
+            or (quantizer.block_sizes or {}).get(-1) != 16
+            or hasattr(quantizer, "_amax")
+        ):
+            continue
+        quantizer.amax = torch.tensor(6.0 * 448.0, device=device, dtype=torch.float32)
+
+
+def _set_vllm_attention_fp8_bmm2_default_amax(module, device: torch.device) -> None:
+    """Set fixed amax on uncalibrated per-tensor FP8 BMM2 quantizers (P=1.0, V=448)."""
+    for name, default in (
+        ("q_bmm_quantizer", 448.0),
+        ("k_bmm_quantizer", 448.0),
+        ("p_bmm_quantizer", 1.0),
+        ("v_bmm_quantizer", 448.0),
+    ):
+        quantizer = getattr(module, name, None)
+        if (
+            not isinstance(quantizer, TensorQuantizer)
+            or not quantizer.is_enabled
+            or getattr(quantizer, "num_bits", None) != (4, 3)
+            or getattr(quantizer, "block_sizes", None)
+            or hasattr(quantizer, "_amax")
+        ):
+            continue
+        quantizer.amax = torch.tensor(default, device=device, dtype=torch.float32)
+
+
+def configure_vllm_nvfp4_attention_quantizers(
+    module: torch.nn.Module,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+    cfg: list | None = None,
+) -> torch.nn.Module:
+    """Configure one vLLM Attention module for fused NVFP4 fake quantization.
+
+    This attention-scoped entry point avoids recursively converting vLLM Linear and MoE
+    modules. It configures only quantizer state; the caller remains responsible for installing
+    the fused attention implementation and enabling its in-kernel Q/V carriers.
+
+    Args:
+        module: A vLLM ``Attention`` module to convert and configure in place.
+        device: Device on which the attention quantizer state should reside.
+        dtype: Model compute dtype associated with the attention module.
+
+    Returns:
+        The supplied module, converted in place to ``_QuantVLLMAttention``.
+    """
+    if not isinstance(module, vllm_attention.Attention):
+        raise TypeError(f"Expected vLLM Attention, got {type(module).__name__}")
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"Expected torch.dtype, got {type(dtype).__name__}")
+
+    device = torch.device(device)
+    module.device, module.dtype = device, dtype
+    if not isinstance(module, _QuantVLLMAttention):
+        module = QuantModuleRegistry.convert(module)
+    if not hasattr(module, "p_bmm_quantizer"):
+        module.p_bmm_quantizer = TensorQuantizer()
+
+    set_quantizer_by_cfg(module, _VLLM_NVFP4_ATTENTION_QUANT_CFG if cfg is None else cfg)
+    for name in ("q", "k", "p", "v"):
+        getattr(module, f"{name}_bmm_quantizer").to(device=device)
+    _set_vllm_attention_kv_default_amax(module, device)
+    _set_vllm_attention_fp8_bmm2_default_amax(module, device)
+    return module
 
 
 def _vllm_attention_modelopt_post_restore(self) -> None:
@@ -347,7 +557,7 @@ class _QuantFusedMoEBase(QuantModule):
         self.w2_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
         self.w13_output_quantizer.disable()
         self.w2_output_quantizer.disable()
-        assert type(self.quant_method) is vllm_fused_moe_layer.UnquantizedFusedMoEMethod, (
+        assert type(self.quant_method) is UnquantizedFusedMoEMethod, (
             f"quant_method is {type(self.quant_method)}"
         )
         self.parallel_state = create_parallel_state()
@@ -429,35 +639,35 @@ class _QuantFusedMoEBase(QuantModule):
         else:
             raise ValueError("Cannot determine first or second layer of expert")
 
-    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        # This is again due to the bad coding of vLLM
-        # fused_moe submodule is overwritten by the fused_moe function
-        # so we need to import the fused_moe module explicitly
-        assert _FUSED_MOE_KERNEL_FUNCS and all(
-            getattr(vllm_fused_moe_package, n, None) is not None for n in _FUSED_MOE_KERNEL_FUNCS
-        )
-        # This context manager will conflict with torch.compile
-        # with replace_function(
-        #     vllm_fused_moe_package,
-        #     "invoke_fused_moe_kernel",
-        #     self.invoke_fused_moe_quantized,
-        # ):
-        originals = {n: getattr(vllm_fused_moe_package, n) for n in _FUSED_MOE_KERNEL_FUNCS}
+    @contextmanager
+    def _fakequant_moe_kernels(self):
+        """Route vLLM's fused-MoE kernels through this module's quantizers.
+
+        They are module-level functions, so fakequant is installed by name for this forward.
+        Patching is process-wide: safe for the LIFO nesting vLLM does, but not thread-safe.
+        """
+        assert _FUSED_MOE_KERNEL_TARGETS, "No vLLM fused-MoE kernel entry point found to patch"
+        # Patch by hand rather than with ``replace_function``: that context manager conflicts
+        # with torch.compile (same reason ``_VLLMParallelLinear.forward`` swaps quant_method).
+        originals = [
+            (module, name, getattr(module, name)) for module, name in _FUSED_MOE_KERNEL_TARGETS
+        ]
         try:
-            for n in _FUSED_MOE_KERNEL_FUNCS:
+            for module, name, original_kernel in originals:
                 setattr(
-                    vllm_fused_moe_package,
-                    n,
-                    partial(
-                        self.invoke_fused_moe_quantized,
-                        original_kernel=originals[n],
-                    ),
+                    module,
+                    name,
+                    partial(self.invoke_fused_moe_quantized, original_kernel=original_kernel),
                 )
-            output = super().forward(hidden_states, router_logits)
-            return output
+            yield
         finally:
-            for n in _FUSED_MOE_KERNEL_FUNCS:
-                setattr(vllm_fused_moe_package, n, originals[n])
+            for module, name, original_kernel in originals:
+                setattr(module, name, original_kernel)
+
+    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        # This context manager will conflict with torch.compile
+        with self._fakequant_moe_kernels():
+            return super().forward(hidden_states, router_logits)
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
@@ -474,9 +684,11 @@ class _QuantFusedMoEBase(QuantModule):
             torch.cuda.empty_cache()
 
 
-@QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
-class _QuantVLLMFusedMoE(_QuantFusedMoEBase):
-    pass
+if _has_fused_moe_cls:
+
+    @QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
+    class _QuantVLLMFusedMoE(_QuantFusedMoEBase):
+        pass
 
 
 if vllm_shared_fused_moe_layer is not None:
@@ -488,6 +700,29 @@ if vllm_shared_fused_moe_layer is not None:
         pass
 
 
+if _has_routed_experts_cls:
+
+    @QuantModuleRegistry.register({RoutedExperts: "vllm_RoutedExperts"})
+    class _QuantVLLMRoutedExperts(_QuantFusedMoEBase):
+        """Expert-weight owner of the vLLM >= 0.24 ``MoERunner`` pipeline.
+
+        ``MoERunner`` calls ``forward_modular``/``forward_monolithic`` instead of ``__call__``.
+        """
+
+        def forward(self, *args, **kwargs):
+            # Keep vLLM's own "call forward_modular/forward_monolithic instead" error rather
+            # than the inherited (hidden_states, router_logits) signature.
+            return RoutedExperts.forward(self, *args, **kwargs)
+
+        def forward_modular(self, *args, **kwargs):
+            with self._fakequant_moe_kernels():
+                return super().forward_modular(*args, **kwargs)
+
+        def forward_monolithic(self, *args, **kwargs):
+            with self._fakequant_moe_kernels():
+                return super().forward_monolithic(*args, **kwargs)
+
+
 @QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})
 class _QuantVLLMAttention(QuantModule):
     def _setup(self):
@@ -497,9 +732,11 @@ class _QuantVLLMAttention(QuantModule):
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
-        query = self.q_bmm_quantizer(query)
+        if not getattr(self, "_query_quant_in_kernel", False):
+            query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        if not getattr(self, "_value_quant_in_kernel", False):
+            value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:

@@ -32,11 +32,19 @@ change is being measured, typically a further quantized version of the baseline.
 5. For each task, use the canonical score field from the matching
    `.agents/skills/evaluation/recipes/tasks/<task>.md` Score Extraction
    section.
-6. Compute exact deltas outside the chat context when there are multiple tasks
+6. Read and perform `.agents/skills/evaluation/references/run-validation.md`
+   **External Baseline Sanity Check**. Record each source URL, protocol
+   difference, and task status before applying the candidate-delta gate. A
+   failed baseline blocks a success verdict; correct and rerun it first. If no
+   credible comparable reference exists, label the baseline externally
+   unverified rather than claiming the check passed, then continue using the
+   validated measured baseline.
+7. Compute exact deltas outside the chat context when there are multiple tasks
    or repeated runs.
-7. Report comparability and quantized-feasibility verdicts before interpreting
-   the delta as model quality. If the user did not provide an acceptance
-   threshold, report feasibility as inconclusive instead of inventing one.
+8. Report comparability, external baseline sanity, and quantized-feasibility
+   verdicts before interpreting the delta as model quality. If the user did not
+   provide an acceptance threshold, report feasibility as inconclusive instead
+   of inventing one.
 
 ## Comparability Checklist
 
@@ -64,8 +72,16 @@ the validated runs are comparable:
    precision the baseline is**, and apply the gate relative to that baseline
    rather than to an assumed BF16.
 
+For SciCode, keep `num_repeats: 1` to limit sandbox workload. If variance is a
+concern, run multiple independent matched baseline/candidate pairs instead of
+increasing repeats within one run.
+
 If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
+
+These checks compare the baseline and candidate to each other. The external
+baseline check in `evaluation/references/run-validation.md` separately tests
+whether the baseline's absolute score is credible; both guards must be reported.
 
 ## Report Format
 
@@ -74,7 +90,13 @@ Include:
 - Baseline and candidate identifiers.
 - Per-task metric path, baseline score, candidate score, delta, and stderr if
   available.
+- Per-task external reference score, source URL, known protocol differences,
+  percentage-point difference, and sanity status (`verified`, `failed`, or
+  `externally unverified`).
 - Comparability status for prompt/template, generation settings, sample counts,
   reasoning handling, judge/simulator setup, and score field.
 - Comparability verdict: comparable, not comparable, or inconclusive.
 - Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
+  Never report `acceptable` when external baseline sanity failed. An externally
+  unverified baseline does not block `acceptable`; apply the candidate-delta
+  gate and report the missing external corroboration.

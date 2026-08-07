@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -391,7 +392,7 @@ def test_ensure_source_checkout_defaults_to_main(monkeypatch, tmp_path):
 
 
 def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
-    """Managed source routes launcher execution through uv --project <checkout>."""
+    """Managed source routes launcher execution through an editable checkout."""
     checkout_root = tmp_path / "checkout"
     yaml_dir = checkout_root / "tools" / "launcher" / "examples" / "fam" / "model"
     yaml_dir.mkdir(parents=True)
@@ -440,12 +441,10 @@ def test_submit_job_dry_run_uses_managed_source_checkout(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["source_ref"] == "feature/ref"
     assert result["source_sha"] == "b" * 40
-    assert captured["argv"][:7] == [
+    assert captured["argv"][:5] == [
         "uv",
         "run",
-        "--reinstall-package",
-        "modelopt-launcher",
-        "--project",
+        "--with-editable",
         str(checkout_root / "tools" / "launcher"),
         "modelopt-launcher",
     ]
@@ -664,6 +663,9 @@ def test_submit_job_slurm_parses_nemo_job_id(monkeypatch, tmp_path):
     yaml_path = yaml_dir / "config.yaml"
     yaml_path.write_text("job_name: t\npipeline: []\n")
     monkeypatch.setenv("MODELOPT_LAUNCHER_EXAMPLES_DIR", str(yaml_dir))
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    exp_dir = tmp_path / "experiments" / "cicd" / "cicd_1782173197"
+    exp_dir.mkdir(parents=True)
     monkeypatch.setattr(
         bridge,
         "verify_slurm_setup_impl",
@@ -698,6 +700,10 @@ def test_submit_job_slurm_parses_nemo_job_id(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["slurm_job_id"] == "13049989"
     assert result["experiment_id"] == "cicd_1782173197"
+    meta = json.loads((exp_dir / bridge._SLURM_STATUS_META).read_text())
+    assert meta["slurm_job_id"] == "13049989"
+    assert meta["cluster_host"] == "cluster.example.com"
+    assert meta["cluster_user"] == "user"
 
 
 def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
@@ -1127,6 +1133,149 @@ def test_job_status_nested_nemo_title_dir(tmp_path, monkeypatch):
     assert result["status"] == "running"
 
 
+def test_job_status_slurm_sidecar_overrides_local_done_marker(tmp_path, monkeypatch):
+    """Detached Slurm jobs are not done until Slurm says they are done."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_running"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_running",
+                "slurm_job_id": "12345",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    def fake_run(argv, **kwargs):
+        assert argv[:2] == ["ssh", "-o"]
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=("JobID|State|ExitCode|Elapsed|NodeList\n12345|RUNNING|0:0|00:00:30|node001\n"),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.job_status_impl("exp_slurm_running")
+
+    assert result["ok"] is True
+    assert result["status"] == "running"
+    assert result["has_done_marker"] is True
+    assert result["slurm_status"]["slurm_state"] == "RUNNING"
+
+
+def test_job_status_slurm_sidecar_reports_terminal_state(tmp_path, monkeypatch):
+    """Slurm terminal state becomes the MCP terminal status."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_done"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_done",
+                "slurm_job_id": "12346",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(
+                "JobID|State|ExitCode|Elapsed|NodeList\n12346|COMPLETED|0:0|00:02:42|node001\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    result = bridge.job_status_impl("exp_slurm_done")
+
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert result["slurm_status"]["slurm_exit_code"] == "0:0"
+
+
+def test_job_status_slurm_not_found_falls_back_to_local_done_marker(tmp_path, monkeypatch):
+    """Aged-out Slurm records should not make completed local experiments run forever."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_aged_out"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_aged_out",
+                "slurm_job_id": "12348",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge,
+        "_query_slurm_status",
+        lambda meta: {
+            "ok": False,
+            "reason": "slurm_status_not_found",
+            "slurm_job_id": meta["slurm_job_id"],
+        },
+    )
+
+    result = bridge.job_status_impl("exp_slurm_aged_out")
+
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert result["slurm_status"]["reason"] == "slurm_status_not_found"
+
+
+def test_job_status_slurm_not_found_falls_back_to_local_failed_marker(tmp_path, monkeypatch):
+    """Aged-out Slurm records still preserve local task failure status."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_aged_out_failed"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / "status_task_0.out").write_text("failed (rc=1)\n")
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_aged_out_failed",
+                "slurm_job_id": "12349",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge,
+        "_query_slurm_status",
+        lambda meta: {
+            "ok": False,
+            "reason": "slurm_status_not_found",
+            "slurm_job_id": meta["slurm_job_id"],
+        },
+    )
+
+    result = bridge.job_status_impl("exp_slurm_aged_out_failed")
+
+    assert result["ok"] is True
+    assert result["status"] == "failed"
+
+
 def test_job_status_launcher_experiments_fallback(tmp_path, monkeypatch):
     """Resolve experiments under the installed launcher's package directory."""
     launcher_dir = tmp_path / "launcher"
@@ -1269,6 +1418,49 @@ def test_wait_for_experiment_polls_until_done(tmp_path, monkeypatch):
     assert result["ok"] is True
     assert result["status"] == "done"
     assert call_count["n"] >= 2
+
+
+def test_wait_for_experiment_polls_slurm_despite_local_done_marker(tmp_path, monkeypatch):
+    """Detached Slurm local _DONE does not stop wait before Slurm is terminal."""
+    exp = tmp_path / "experiments" / "cicd" / "exp_slurm_wait"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    (exp / bridge._SLURM_STATUS_META).write_text(
+        json.dumps(
+            {
+                "executor": "slurm",
+                "experiment_id": "exp_slurm_wait",
+                "slurm_job_id": "12347",
+                "cluster_host": "cluster.example.com",
+                "cluster_user": "alice",
+            }
+        )
+    )
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+
+    calls = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        calls["n"] += 1
+        state = "RUNNING" if calls["n"] == 1 else "COMPLETED"
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=(f"JobID|State|ExitCode|Elapsed|NodeList\n12347|{state}|0:0|00:00:30|node001\n"),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.wait_for_experiment_impl(
+        "exp_slurm_wait",
+        timeout_sec=10,
+        poll_interval_sec=0,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert calls["n"] == 2
 
 
 def test_wait_for_experiment_timeout(tmp_path, monkeypatch):

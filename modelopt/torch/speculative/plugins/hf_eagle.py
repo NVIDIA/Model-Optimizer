@@ -26,7 +26,7 @@ from transformers import Cache, DynamicCache, PreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from transformers.utils import ModelOutput
 
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 
 from ...export.plugins.hf_spec_export import EagleExporter, SpeculativeDecodingExporter
 from ..eagle.conversion import EagleDMRegistry
@@ -66,6 +66,9 @@ def default_eagle_aux_layer_ids(num_layers: int) -> list[int]:
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFEagleModel(EagleModel):
     """Eagle Model Class for huggingface models."""
+
+    # Context-parallel degree, set by the training script when it launches with cp_size > 1.
+    eagle_cp_size: int = 1
 
     @property
     def _base_model(self):
@@ -192,7 +195,7 @@ class HFEagleModel(EagleModel):
 
     def _enable_cp_ttt(self):
         if self.training and not self.eagle_mix_hidden_states:
-            return enable_cp_ttt_patch()
+            return enable_cp_ttt_patch(self.eagle_cp_size)
         return contextlib.nullcontext()
 
     def _set_default_aux_hidden_state_layers(self):
@@ -762,12 +765,21 @@ class HFEagleModel(EagleModel):
         # ====Run eagle forward with extra training-time-test steps====
         num_ttt_steps = self.eagle_ttt_steps if self.training else 1
         for ttt_step in range(num_ttt_steps):
-            # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
             eagle_attention_mask = (
                 eagle_attn_mask_0
                 if self.eagle_mix_hidden_states or ttt_step == 0
                 else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
+            # Under CP the dense mask is unused and fatal (plain tensor vs DTensor scores);
+            # causal masking comes from is_causal and TTT masking from the ring-attention patch.
+            if self.eagle_cp_size > 1:
+                warn_rank_0(
+                    "Context-parallel EAGLE training does not mask padded positions: the dense "
+                    "mask cannot be applied to the sharded (DTensor) sequence, so the draft model "
+                    "attends to any pad tokens. Pack or truncate samples to a fixed length under "
+                    "cp_size > 1."
+                )
+                eagle_attention_mask = None
             with self._enable_cp_ttt(), self._nvtx_range("eagle_forward"):
                 _, eagle_output_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
                     eagle_input_hiddens,
@@ -820,7 +832,12 @@ class HFEagleModel(EagleModel):
             loss = None
             assert not self.training, "At least one loss must be computed for training."
         else:
-            loss = (base_outputs.loss or 0) + (eagle_loss or 0)
+            # Test for None, not truthiness: a 0.0 loss tensor is falsy, and `or 0` would
+            # replace it with an int and detach the graph.
+            loss = None
+            for term in (base_outputs.loss, eagle_loss):
+                if term is not None:
+                    loss = term if loss is None else loss + term
 
         return ModelOutput(
             loss=loss,

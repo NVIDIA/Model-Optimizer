@@ -18,6 +18,7 @@
 
 """Code that export quantized Megatron Core models for deployment."""
 
+import io
 import json
 import os
 import tempfile
@@ -85,6 +86,10 @@ with import_plugin("megatron"):
         HybridModel = MambaModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
+        get_data_parallel_rank,
+        get_expert_model_parallel_group,
+        get_expert_model_parallel_rank,
+        get_expert_model_parallel_world_size,
         get_pipeline_model_parallel_rank,
         get_pipeline_model_parallel_world_size,
         get_tensor_model_parallel_rank,
@@ -259,6 +264,15 @@ class GPTModelExporter:
 
         torch.distributed.barrier()
 
+    @staticmethod
+    def _is_sidecar_writer_rank(is_last_stage_main_rank: bool) -> bool:
+        """True only for the DP0/EP0 last-stage-main rank (single writer for save_directory)."""
+        return (
+            is_last_stage_main_rank
+            and get_data_parallel_rank() == 0
+            and get_expert_model_parallel_rank() == 0
+        )
+
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
@@ -279,6 +293,7 @@ class GPTModelExporter:
         # We use the last PP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         is_last_stage_main_rank = pp_rank == pp_size - 1 and tp_rank == 0
+        is_writer_rank = self._is_sidecar_writer_rank(is_last_stage_main_rank)
 
         # Main export process
         layer_state_dicts = self.layer_state_dicts
@@ -297,53 +312,47 @@ class GPTModelExporter:
         elif quantization_format == QUANTIZATION_W4A16_NVFP4:
             quantization = "W4A16_NVFP4"
 
-        # We use the last PP rank and the 1st EP rank to write the config because
-        # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
-            # Baseline: for a local source, copy every non-safetensors file
-            # (tokenizer, remote_code *.py, README, etc.); for a Hub-ID source,
-            # snapshot_download just the *.py sidecars (tokenizer comes via the
-            # AutoTokenizer fallback below). modelopt-owned files (config.json,
-            # generation_config.json, hf_quant_config.json, preprocessor_config.json)
-            # are overwritten below.
-            if self._hf_pretrained_model_name is not None:
-                if os.path.isdir(self._hf_pretrained_model_name):
-                    copy_non_safetensor_files_from_ckpt(
-                        self._hf_pretrained_model_name, save_directory
-                    )
-                else:
-                    copy_hf_ckpt_remote_code(self._hf_pretrained_model_name, save_directory)
-            self._hf_config.save_pretrained(save_directory)
-            try:
-                generation_config = transformers.GenerationConfig.from_pretrained(
-                    self._hf_pretrained_model_name,
-                    trust_remote_code=self.trust_remote_code,
-                )
-                generation_config.save_pretrained(save_directory)
-            except OSError:
-                pass
-            # Hub-ID / None source: fetch tokenizer files via AutoTokenizer.
-            if self._hf_pretrained_model_name is None or not os.path.isdir(
-                self._hf_pretrained_model_name
-            ):
+            if is_writer_rank:
+                if self._hf_pretrained_model_name is not None:
+                    if os.path.isdir(self._hf_pretrained_model_name):
+                        copy_non_safetensor_files_from_ckpt(
+                            self._hf_pretrained_model_name, save_directory
+                        )
+                    else:
+                        copy_hf_ckpt_remote_code(self._hf_pretrained_model_name, save_directory)
+                self._hf_config.save_pretrained(save_directory)
                 try:
-                    tokenizer = transformers.AutoTokenizer.from_pretrained(
+                    generation_config = transformers.GenerationConfig.from_pretrained(
                         self._hf_pretrained_model_name,
                         trust_remote_code=self.trust_remote_code,
                     )
-                    tokenizer.save_pretrained(save_directory)
-                except (OSError, TypeError, ValueError, ImportError):
+                    generation_config.save_pretrained(save_directory)
+                except OSError:
                     pass
-            try:
-                # Load and save preprocessor config from the original model
-                processor = AutoProcessor.from_pretrained(
-                    self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
-                )
-                if hasattr(processor, "image_processor"):
-                    processor.image_processor.save_pretrained(save_directory)
-            except (OSError, ValueError, ImportError):
-                pass
+                # Hub-ID / None source: fetch tokenizer files via AutoTokenizer.
+                if self._hf_pretrained_model_name is None or not os.path.isdir(
+                    self._hf_pretrained_model_name
+                ):
+                    try:
+                        tokenizer = transformers.AutoTokenizer.from_pretrained(
+                            self._hf_pretrained_model_name,
+                            trust_remote_code=self.trust_remote_code,
+                        )
+                        tokenizer.save_pretrained(save_directory)
+                    except (OSError, TypeError, ValueError, ImportError):
+                        pass
+                try:
+                    # Load and save preprocessor config from the original model
+                    processor = AutoProcessor.from_pretrained(
+                        self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
+                    )
+                    if hasattr(processor, "image_processor"):
+                        processor.image_processor.save_pretrained(save_directory)
+                except (OSError, ValueError, ImportError):
+                    pass
 
+            # MTP load mutates per-rank layer_state_dicts, so it runs on every last-stage main rank.
             mtp_state_dict = self._get_mtp_state_dict()
             if len(mtp_state_dict) > 0:
                 layer_state_dicts[self.model.config.num_layers].update(mtp_state_dict)
@@ -354,7 +363,7 @@ class GPTModelExporter:
         # kv_cache_dtype is only set on attention-owning ranks; writer rank may not be one.
         gathered_kv_cache_dtype = self._gather_kv_cache_dtype()
 
-        if is_last_stage_main_rank and quantization is not None:
+        if is_writer_rank and quantization is not None:
             if combined_layer_config_dict:
                 quantization_config = process_layer_quant_config(combined_layer_config_dict)
                 quantization_config["exclude_modules"] = combined_exclude_modules
@@ -397,12 +406,11 @@ class GPTModelExporter:
                 )
                 layer_state_dicts[first_layer_key].update(vision_state_dict)
 
-        # Barrier to ensure the export_dir has been created.
+        # Bracket the writer's config.json read-modify-write with barriers so peers
+        # never observe a truncated file (also ensures export_dir exists).
         torch.distributed.barrier()
-
-        # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
-        if self._hf_quant_config and os.path.exists(config_json_file):
+        if is_writer_rank and self._hf_quant_config and os.path.exists(config_json_file):
             with open(config_json_file) as f:
                 config_dict = json.load(f)
             config_dict["quantization_config"] = convert_hf_quant_config_format(
@@ -410,6 +418,7 @@ class GPTModelExporter:
             )
             with open(config_json_file, "w") as f:
                 json.dump(config_dict, f, indent=4)
+        torch.distributed.barrier()
 
         # save_safetensors(state_dict, save_directory)
         save_safetensors_by_layer_index(
@@ -614,7 +623,7 @@ class GPTModelExporter:
                 )
                 single_safetensors_file = None
             except EntryNotFoundError:
-                # Model uses a single unsharded safetensors file — check it for MTP weights.
+                # Model uses a single unsharded safetensors file -- check it for MTP weights.
                 safetensors_index_file = None
                 try:
                     single_safetensors_file = Path(
@@ -1035,14 +1044,13 @@ class GPTModelExporter:
                 self._state_dict[up_proj_key] = val.detach().clone()
 
     def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
-        """Export TEGroupedMLP weights by splitting per-expert weights into individual HF weights.
+        """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
 
-        TEGroupedMLP (via TEGroupedLinear) stores weights as weight0, weight1, ..., weight{N-1}
-        in its state_dict, where each weight{i} corresponds to one expert. This method extracts
-        quantization state from the module, then iterates over experts and saves each expert's
-        weight (and scales if quantized) under the HF-style per-expert prefix.
+        At EP>1, local ids are mapped to global via ``module.local_expert_indices``
+        and per-expert state is ``all_gather_object``-ed across the EP group. All EP ranks
+        MUST enter this method for the same layer in lockstep or the gather hangs.
 
-        This is the reverse of _grouped_mlp_merging in the importer.
+        Reverse of _grouped_mlp_merging in the importer.
         """
         num_experts = module.num_gemms
 
@@ -1064,37 +1072,117 @@ class GPTModelExporter:
 
         state_dict = module.state_dict()
 
-        for expert_id in range(num_experts):
-            expert_prefix = prefix.format(expert_id) + "."
-            self._record_layer_quant_config(expert_prefix, qformat, block_size)
-            weight_key = f"weight{expert_id}"
+        ep_size = (
+            get_expert_model_parallel_world_size() if torch.distributed.is_initialized() else 1
+        )
+        ep_rank = get_expert_model_parallel_rank() if torch.distributed.is_initialized() else 0
 
-            if weight_key not in state_dict:
-                raise ValueError(f"Missing expected TEGroupedMLP expert weight: {weight_key}")
+        # Prefer module.local_expert_indices; fall back to Megatron's contiguous layout.
+        # Normalize to list[int] since Megatron may expose this as a torch.Tensor.
+        indices = getattr(module, "local_expert_indices", None)
+        if indices is None and getattr(module, "experts", None) is not None:
+            indices = getattr(module.experts, "local_expert_indices", None)
+        if indices is None:
+            local_expert_indices = [ep_rank * num_experts + i for i in range(num_experts)]
+        elif isinstance(indices, torch.Tensor):
+            local_expert_indices = indices.detach().cpu().tolist()
+        else:
+            local_expert_indices = [int(i) for i in indices]
+        if len(local_expert_indices) != num_experts:
+            raise ValueError(
+                f"local_expert_indices length {len(local_expert_indices)} doesn't match "
+                f"module.num_gemms {num_experts}"
+            )
+
+        # Collective-safe missing-key check: all_reduce(MAX) over a local 0/1 flag
+        # so any rank's missing key surfaces everywhere. Flag lives on the current
+        # CUDA device -- NCCL has no CPU backend on the EP group.
+        local_missing = [
+            k for k in (f"weight{i}" for i in range(num_experts)) if k not in state_dict
+        ]
+        if ep_size > 1:
+            missing_flag = torch.tensor(
+                [1 if local_missing else 0],
+                dtype=torch.int32,
+                device=torch.cuda.current_device(),
+            )
+            torch.distributed.all_reduce(
+                missing_flag,
+                op=torch.distributed.ReduceOp.MAX,
+                group=get_expert_model_parallel_group(),
+            )
+            if missing_flag.item() != 0:
+                raise ValueError(
+                    f"TEGroupedMLP missing expert weights on at least one EP rank "
+                    f"(local missing on rank {ep_rank}: {local_missing})"
+                )
+        elif local_missing:
+            raise ValueError(f"TEGroupedMLP missing expert weights: {local_missing}")
+
+        # Move shared scales/aux to CPU once so the gather payload avoids GPU clones.
+        weight_scale_cpu = weight_scale.detach().cpu().clone() if weight_scale is not None else None
+        weight_scale_2_cpu = (
+            weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
+        )
+        name_to_value_cpu = {
+            k: v.detach().cpu().clone() for k, v in name_to_value.items() if k != "output_scale"
+        }
+
+        # Record quant config for ALL global experts on every rank; otherwise the writer's
+        # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
+        # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
+        num_total_experts = num_experts * ep_size
+        for global_id in range(num_total_experts):
+            self._record_layer_quant_config(prefix.format(global_id) + ".", qformat, block_size)
+
+        local_expert_state: dict[str, torch.Tensor] = {}
+
+        for local_id in range(num_experts):
+            global_id = local_expert_indices[local_id]
+            expert_prefix = prefix.format(global_id) + "."
+            weight_key = f"weight{local_id}"
 
             weight = state_dict[weight_key].to(self.dtype).cpu()
 
-            if weight_scale is None:
-                self._state_dict[expert_prefix + "weight"] = weight
+            if weight_scale_cpu is None:
+                local_expert_state[expert_prefix + "weight"] = weight
             else:
-                self._state_dict[expert_prefix + "weight"] = to_quantized_weight(
+                local_expert_state[expert_prefix + "weight"] = to_quantized_weight(
                     weight,
-                    weight_scale,
+                    weight_scale_cpu,
                     qformat,
-                    weight_scale_2,
+                    weight_scale_2_cpu,
                     block_size,
                 )
-                self._state_dict[expert_prefix + "weight_scale"] = weight_scale.detach().clone()
+                local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
 
-            if weight_scale_2 is not None:
-                self._state_dict[expert_prefix + "weight_scale_2"] = weight_scale_2.detach().clone()
+            if weight_scale_2_cpu is not None:
+                local_expert_state[expert_prefix + "weight_scale_2"] = weight_scale_2_cpu.clone()
 
-        for key, val in name_to_value.items():
-            if key == "output_scale":
-                continue
-            for expert_id in range(num_experts):
-                expert_prefix = prefix.format(expert_id) + "."
-                self._state_dict[expert_prefix + key] = val.detach().clone()
+            for key, val in name_to_value_cpu.items():
+                local_expert_state[expert_prefix + key] = val.clone()
+
+        if ep_size > 1:
+            # all_gather_object pickles trip on quantized uint8 tensors whose
+            # UntypedStorage has no dtype attr -- round-trip through torch.save bytes.
+            _buf = io.BytesIO()
+            torch.save(local_expert_state, _buf)
+            local_bytes = _buf.getvalue()
+            del _buf
+            gathered_bytes: list = [None] * ep_size
+            torch.distributed.all_gather_object(
+                gathered_bytes, local_bytes, group=get_expert_model_parallel_group()
+            )
+            del local_bytes
+            for b in gathered_bytes:
+                # weights_only=False: bytes are our own torch.save output from a sibling
+                # EP rank in this job's collective, not user-supplied. weights_only=True
+                # rejects quantized uint8 tensors (custom storage outside the allowlist).
+                s = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+                self._state_dict.update(s)
+            del gathered_bytes
+        else:
+            self._state_dict.update(local_expert_state)
 
     def _qkv_slicing(
         self,
