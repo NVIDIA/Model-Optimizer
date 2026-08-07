@@ -24,7 +24,8 @@ invoked. They cover:
 - Auto-injection of ``--safe`` and ``--skipInference`` for remote autotuning.
 - The ``run()`` pipeline: standard local invocation; remote scp + ssh
   ``trtexec_safe`` invocation; fallback to ``trtexec --safe`` when
-  ``trtexec_safe`` fails; ``sshpass`` prefix when a password is configured.
+  ``trtexec_safe`` is absent.
+- SSH key-based auth only: no sshpass prefixes in any subprocess command.
 - Latency parsing from both ``_STD_PATTERN`` (GPU Compute Time) and
   ``_SAFE_PATTERN`` (Average over N runs - GPU latency).
 - Error paths: non-zero trtexec returncode, scp failure, missing trtexec
@@ -57,24 +58,6 @@ def _make_proc(returncode=0, stdout="", stderr=""):
 # Standalone helper tests — these exercise the module-level functions in
 # isolation, with no TrtExecBenchmark construction or filesystem state.
 # ===========================================================================
-
-
-# --- _redact_url_password ---
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("ssh://alice:s3cret@host", "ssh://alice:******@host"),
-        ("ssh://alice:s3cret@host:22/path?q=1", "ssh://alice:******@host:22/path?q=1"),
-        ("ssh://alice@host", "ssh://alice@host"),  # no password
-        ("ssh://host", "ssh://host"),  # no userinfo
-        ("--flag=ssh://u:p@h", "--flag=ssh://u:******@h"),
-        ("https://user:secret@host", "https://user:******@host"),  # any scheme
-    ],
-)
-def test_redact_url_password(raw, expected):
-    assert bm._redact_url_password(raw) == expected
 
 
 # --- _build_base_trtexec_cmd ---
@@ -141,13 +124,13 @@ def test_extract_remote_config_value_returns_none_when_absent():
 
 
 def test_extract_remote_config_value_equals_form():
-    args = ["--fp16", "--remoteAutoTuningConfig=ssh://a:p@h?x=1"]
-    assert bm._extract_remote_config_value(args) == "ssh://a:p@h?x=1"
+    args = ["--fp16", "--remoteAutoTuningConfig=ssh://a@h?x=1"]
+    assert bm._extract_remote_config_value(args) == "ssh://a@h?x=1"
 
 
 def test_extract_remote_config_value_space_form():
-    args = ["--fp16", "--remoteAutoTuningConfig", "ssh://a:p@h?x=1"]
-    assert bm._extract_remote_config_value(args) == "ssh://a:p@h?x=1"
+    args = ["--fp16", "--remoteAutoTuningConfig", "ssh://a@h?x=1"]
+    assert bm._extract_remote_config_value(args) == "ssh://a@h?x=1"
 
 
 def test_extract_remote_config_value_empty_value_returned_verbatim():
@@ -157,8 +140,8 @@ def test_extract_remote_config_value_empty_value_returned_verbatim():
 
 def test_extract_remote_config_value_rejects_duplicates():
     args = [
-        "--remoteAutoTuningConfig=ssh://a:p@h?x=1",
-        "--remoteAutoTuningConfig=ssh://a:p@h?x=2",
+        "--remoteAutoTuningConfig=ssh://a@h?x=1",
+        "--remoteAutoTuningConfig=ssh://a@h?x=2",
     ]
     with pytest.raises(ValueError, match="Exactly one"):
         bm._extract_remote_config_value(args)
@@ -169,35 +152,15 @@ def test_extract_remote_config_value_missing_value_at_end_of_argv():
         bm._extract_remote_config_value(["--remoteAutoTuningConfig"])
 
 
-def test_extract_remote_config_value_malformed_redacts_password():
-    secret = "SuperSecret-2026"
-    malformed = f"--remoteAutoTuningConfigssh://alice:{secret}@10.0.0.5"
-    with pytest.raises(ValueError, match="Malformed") as exc_info:
-        bm._extract_remote_config_value([malformed])
-    assert secret not in str(exc_info.value)
-    assert "alice:******@" in str(exc_info.value)
-
-
-def test_extract_remote_config_value_malformed_redacts_in_debug_log():
-    secret = "SuperSecret-2026"
-    malformed = f"--remoteAutoTuningConfigssh://alice:{secret}@10.0.0.5"
-    log = MagicMock()
-    with pytest.raises(ValueError):
-        bm._extract_remote_config_value([malformed], log=log)
-    debug_msgs = [c.args[0] for c in log.debug.call_args_list]
-    assert all(secret not in m for m in debug_msgs)
-
-
 # --- _parse_remote_autotuning_url ---
 
 
 def test_parse_remote_autotuning_url_full():
     cfg = bm._parse_remote_autotuning_url(
-        "ssh://alice:s3cret@10.0.0.5:2222?"
+        "ssh://alice@10.0.0.5:2222?"
         "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
     )
     assert cfg.user == "alice"
-    assert cfg.password == "s3cret"
     assert cfg.ip == "10.0.0.5"
     assert cfg.port == 2222
     assert cfg.bin_path == "/opt/trt/bin"
@@ -213,13 +176,6 @@ def test_parse_remote_autotuning_url_defaults_port_to_22():
         "ssh://alice@host?remote_exec_path=/x/trtexec&remote_lib_path=/y"
     )
     assert cfg.port == 22
-
-
-def test_parse_remote_autotuning_url_empty_password_becomes_empty_string():
-    cfg = bm._parse_remote_autotuning_url(
-        "ssh://alice@host?remote_exec_path=/x/trtexec&remote_lib_path=/y"
-    )
-    assert cfg.password == ""
 
 
 @pytest.mark.parametrize(
@@ -260,7 +216,7 @@ def test_parse_remote_autotuning_url_rejects_user_starting_with_dash(evil_user):
         f"ssh://{evil_user}@10.0.0.5?"
         "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
     )
-    with pytest.raises(ValueError, match=re.escape("Remote user.*must not start with '-'")):
+    with pytest.raises(ValueError, match=r"Remote user.*must not start with '-'"):
         bm._parse_remote_autotuning_url(url)
 
 
@@ -271,7 +227,7 @@ def test_parse_remote_autotuning_url_rejects_host_starting_with_dash():
         "ssh://alice@-oproxycommand?"
         "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
     )
-    with pytest.raises(ValueError, match=re.escape("Remote host.*must not start with '-'")):
+    with pytest.raises(ValueError, match=r"Remote host.*must not start with '-'"):
         bm._parse_remote_autotuning_url(url)
 
 
@@ -385,8 +341,7 @@ def test_init_safe_flag_sets_is_safe(tmp_path):
 
 
 _REMOTE_URL = (
-    "ssh://alice:s3cret@10.0.0.5:2222?"
-    "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+    "ssh://alice@10.0.0.5:2222?remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
 )
 
 
@@ -409,7 +364,6 @@ def test_remote_config_equals_form_parses(tmp_path):
     )
     assert b.has_remote_config is True
     assert b.remote_user == "alice"
-    assert b.remote_password == "s3cret"
     assert b.remote_ip == "10.0.0.5"
     assert b.remote_port == 2222
     assert b.remote_bin_path == "/opt/trt/bin"
@@ -452,10 +406,7 @@ def test_remote_config_keeps_user_supplied_safe(tmp_path):
 @pytest.mark.usefixtures("trtexec_version_ok")
 def test_remote_config_default_port_is_22(tmp_path):
     """A URL with no explicit port falls back to SSH port 22."""
-    url = (
-        "ssh://alice:s3cret@10.0.0.5?"
-        "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
-    )
+    url = "ssh://alice@10.0.0.5?remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
     b = TrtExecBenchmark(
         timing_cache_file=str(tmp_path / "cache.bin"),
         trtexec_args=[f"--remoteAutoTuningConfig={url}"],
@@ -503,39 +454,6 @@ def test_remote_config_validation_errors(tmp_path, bad_args, match):
             timing_cache_file=str(tmp_path / "cache.bin"),
             trtexec_args=bad_args,
         )
-
-
-@pytest.mark.usefixtures("trtexec_version_ok")
-def test_malformed_remote_config_redacts_password(tmp_path, caplog):
-    """Malformed ``--remoteAutoTuningConfig`` ValueError + debug log must not leak the password.
-
-    The else branch in ``__init__`` fires when the flag is mis-separated
-    (e.g. ``--remoteAutoTuningConfig`` followed by ``ssh://...`` with no ``=``).
-    Both the raised ``ValueError`` and any debug log line about the arg must
-    mask the SSH password.
-    """
-    secret = "TopSecret-2026!"
-    malformed = (
-        f"--remoteAutoTuningConfigssh://alice:{secret}@10.0.0.5:22"
-        "/remote_exec_path=/x&remote_lib_path=/y"
-    )
-    with (
-        caplog.at_level("DEBUG", logger="modelopt.onnx"),
-        pytest.raises(ValueError, match="Malformed --remoteAutoTuningConfig") as exc_info,
-    ):
-        TrtExecBenchmark(
-            timing_cache_file=str(tmp_path / "cache.bin"),
-            trtexec_args=[malformed],
-        )
-
-    # The ValueError message must NOT contain the password — leaking it would
-    # surface secrets in stack traces and crash reports.
-    assert secret not in str(exc_info.value)
-    assert "alice:******@" in str(exc_info.value)
-
-    # The debug log line for the arg must also not contain the password.
-    for record in caplog.records:
-        assert secret not in record.getMessage()
 
 
 def test_remote_config_requires_trtexec_10_15(tmp_path):
@@ -673,15 +591,17 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     scp_proc = _make_proc()
     safe_stdout = "[01/15/2026-12:00:00] [I] Average over 10 runs - GPU latency: 3.42 ms\n"
     ssh_proc = _make_proc(stdout=safe_stdout)
+    cleanup_proc = _make_proc()
 
-    with patch("subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc]) as run_mock:
+    with patch(
+        "subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc, cleanup_proc]
+    ) as run_mock:
         latency = remote_bench.run(str(tmp_path / "m.onnx"))
 
     assert latency == pytest.approx(3.42)
     assert run_mock.call_count == 4
     trtexec_cmd, scp_cmd, ssh_cmd, cleanup_cmd = (c.args[0] for c in run_mock.call_args_list)
     assert trtexec_cmd[0] == "trtexec"
-    # The remote URL in this test carries a password, so scp/ssh are prefixed with sshpass.
     assert "scp" in scp_cmd
     assert "alice@10.0.0.5:" in scp_cmd[-1]
     assert "ssh" in ssh_cmd
@@ -690,23 +610,7 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     remote_cmd_str = ssh_cmd[-1]
     assert "trtexec_safe" in remote_cmd_str
     assert "--loadEngine=" in remote_cmd_str
-    print(cleanup_cmd)
-    assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd
-
-
-def test_remote_run_uses_sshpass_when_password_set(remote_bench, tmp_path):
-    """When the URL carries a password, both scp and ssh are prefixed with ``sshpass``."""
-    trtexec_proc = _make_proc(stdout="")
-    scp_proc = _make_proc()
-    ssh_proc = _make_proc(stdout="[I] Average over 5 runs - GPU latency: 2.0 ms")
-
-    with patch("subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc]) as run_mock:
-        remote_bench.run(str(tmp_path / "m.onnx"))
-
-    _, scp_cmd, ssh_cmd, cleanup_cmd = (c.args[0] for c in run_mock.call_args_list)
-    assert scp_cmd[:3] == ["sshpass", "-p", "s3cret"]
-    assert ssh_cmd[:3] == ["sshpass", "-p", "s3cret"]
-    assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd
+    assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd[-1]
 
 
 def test_remote_run_scp_failure_returns_inf(remote_bench, tmp_path):
@@ -884,8 +788,6 @@ def test_ssh_fallback_timeout_returns_inf(tmp_path):
 
 def test_std_pattern_matches_gpu_compute_time_line():
     """The std pattern matches a typical ``[I] GPU Compute Time: … median = X ms`` line."""
-    import re
-
     text = "[I] GPU Compute Time: min = 1 ms, max = 2 ms, median = 1.42 ms"
     match = re.search(bm._STD_PATTERN, text, re.IGNORECASE)
     assert match and match.group(1) == "1.42"
@@ -893,8 +795,75 @@ def test_std_pattern_matches_gpu_compute_time_line():
 
 def test_safe_pattern_matches_average_over_runs_line():
     """The safe pattern matches the trtexec_safe ``Average over N runs - GPU latency`` line."""
-    import re
-
     text = "[01/15/2026-12:00:00] [I] Average over 10 runs - GPU latency: 7.89 ms"
     match = re.search(bm._SAFE_PATTERN, text, re.IGNORECASE)
     assert match and match.group(1) == "7.89"
+
+
+# ===========================================================================
+# SSH key-based authentication tests.
+# ===========================================================================
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_remote_scp_and_ssh_commands_contain_no_sshpass(tmp_path):
+    """scp and ssh commands must not be prefixed with ``sshpass`` — key-based auth only."""
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={_REMOTE_URL}"],
+    )
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    safe_stdout = "[01/15/2026-12:00:00] [I] Average over 5 runs - GPU latency: 1.0 ms"
+    ssh_proc = _make_proc(stdout=safe_stdout)
+    cleanup_proc = _make_proc()
+
+    with patch(
+        "subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc, cleanup_proc]
+    ) as run_mock:
+        b.run(str(tmp_path / "m.onnx"))
+
+    for call in run_mock.call_args_list:
+        cmd = call.args[0]
+        assert cmd[0] != "sshpass", f"sshpass must not appear in command: {cmd}"
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_remote_config_url_with_password_is_ignored(tmp_path):
+    """A URL that still contains a password is accepted but the password is not used.
+
+    Users may supply an old-style ``ssh://user:pass@host/...`` URL during
+    migration to key-based auth.  The password component is silently ignored;
+    no sshpass prefix appears in any subprocess call.
+    """
+    url_with_password = (
+        "ssh://alice:old_password@10.0.0.5:2222?"
+        "remote_exec_path=/opt/trt/bin/trtexec&remote_lib_path=/opt/trt/lib"
+    )
+    b = TrtExecBenchmark(
+        timing_cache_file=str(tmp_path / "cache.bin"),
+        trtexec_args=[f"--remoteAutoTuningConfig={url_with_password}"],
+    )
+    # Parsed fields must not expose the password.
+    assert not hasattr(b, "remote_password")
+    assert b.remote_user == "alice"
+    assert b.remote_ip == "10.0.0.5"
+
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    safe_stdout = "[01/15/2026-12:00:00] [I] Average over 5 runs - GPU latency: 2.0 ms"
+    ssh_proc = _make_proc(stdout=safe_stdout)
+    cleanup_proc = _make_proc()
+
+    with patch(
+        "subprocess.run", side_effect=[trtexec_proc, scp_proc, ssh_proc, cleanup_proc]
+    ) as run_mock:
+        latency = b.run(str(tmp_path / "m.onnx"))
+
+    assert latency == pytest.approx(2.0)
+    # The trtexec invocation (call 0) receives ``--remoteAutoTuningConfig`` verbatim —
+    # that URL may contain the password and is trtexec's own business. Only the scp
+    # and ssh commands built by our Python code (calls 1 onwards) must not use sshpass.
+    for call in run_mock.call_args_list[1:]:
+        cmd = call.args[0]
+        assert "sshpass" not in cmd, f"sshpass must not appear in scp/ssh command: {cmd}"

@@ -155,17 +155,6 @@ _SAFE_PATTERN = (
 )
 _STD_PATTERN = r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
 
-_URL_PASSWORD_RE = re.compile(r"(://[^:/?#@]+):[^@/?#]+@")
-
-
-def _redact_url_password(s: str) -> str:
-    """Replace any ``scheme://user:password@host`` substring with ``user:******@host``.
-
-    Used so SSH passwords supplied via ``--remoteAutoTuningConfig`` don't leak
-    into log messages or exception strings.
-    """
-    return _URL_PASSWORD_RE.sub(r"\1:******@", s)
-
 
 def _build_base_trtexec_cmd(
     *,
@@ -224,8 +213,7 @@ def _extract_remote_config_value(trtexec_args: list[str], *, log: Any = None) ->
     Raises:
         ValueError: If the flag appears more than once, has no value at the
             end of the list, or is malformed (e.g. missing the ``=``
-            separator). SSH passwords in malformed args are redacted before
-            being included in the error or debug log.
+            separator).
     """
     matches = [a for a in trtexec_args if "--remoteAutoTuningConfig" in a]
     if not matches:
@@ -243,11 +231,10 @@ def _extract_remote_config_value(trtexec_args: list[str], *, log: Any = None) ->
         if arg.startswith("--remoteAutoTuningConfig="):
             return arg.split("=", 1)[1]
         # Malformed: starts with the flag name but neither uses ``=`` nor is
-        # the bare flag. Redact any embedded SSH password before surfacing.
-        redacted_arg = _redact_url_password(arg)
+        # the bare flag.
         if log is not None:
-            log.debug(f"Parsing remoteAutoTuningConfig arg: {redacted_arg}")
-        raise ValueError(f"Malformed --remoteAutoTuningConfig argument: {redacted_arg}")
+            log.debug(f"Parsing remoteAutoTuningConfig arg: {arg}")
+        raise ValueError(f"Malformed --remoteAutoTuningConfig argument: {arg}")
     return None  # pragma: no cover — unreachable; ``matches`` proved presence
 
 
@@ -256,7 +243,6 @@ class _RemoteAutotuningConfig:
     """Resolved remote-autotuning destination parsed from a ``ssh://`` URL."""
 
     user: str
-    password: str  # may be empty when no password was supplied
     ip: str
     port: int
     options: dict[str, str]
@@ -269,7 +255,7 @@ def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
 
     Required URL form::
 
-        ssh://user[:password]@host[:port]?remote_exec_path=PATH&remote_lib_path=PATH
+        ssh://user@host[:port]?remote_exec_path=PATH&remote_lib_path=PATH
 
     Raises:
         ValueError: If the scheme is not ``ssh://``; if user or host are
@@ -315,7 +301,6 @@ def _parse_remote_autotuning_url(url: str) -> _RemoteAutotuningConfig:
 
     return _RemoteAutotuningConfig(
         user=parsed.username,
-        password=parsed.password or "",
         ip=parsed.hostname,
         port=parsed.port if parsed.port is not None else 22,
         options=options,
@@ -396,7 +381,6 @@ class TrtExecBenchmark(Benchmark):
         self.remote_ip: str | None = None
         self.remote_port: int = 22
         self.remote_user: str = "root"
-        self.remote_password: str = ""
         self.remote_engine_path: str = "trtexec_benchmark_model.trt"
         self.remote_bin_path: str = "trtexec"
         self.remote_lib_path: str = ""
@@ -408,7 +392,6 @@ class TrtExecBenchmark(Benchmark):
                 raise ValueError("Could not parse --remoteAutoTuningConfig argument")
             config = _parse_remote_autotuning_url(remote_value)
             self.remote_user = config.user
-            self.remote_password = config.password
             self.remote_ip = config.ip
             self.remote_port = config.port
             self.remote_bin_path = config.bin_path
@@ -493,11 +476,6 @@ class TrtExecBenchmark(Benchmark):
                 return float("inf")
             latency_pattern = _STD_PATTERN
             if self.has_remote_config and self.is_safe:
-                ssh_pass = []
-                if self.remote_password:
-                    ssh_pass.append("sshpass")
-                    ssh_pass.append("-p")
-                    ssh_pass.append(self.remote_password)
                 # need to push the model to the device and use trtexec_safe to run
                 scp_cmd = [
                     "scp",
@@ -507,7 +485,6 @@ class TrtExecBenchmark(Benchmark):
                     self.engine_path,
                     f"{self.remote_user}@{self.remote_ip}:{shlex.quote(self.remote_engine_path)}",
                 ]
-                scp_cmd = ssh_pass + scp_cmd
                 result = subprocess.run(
                     scp_cmd, capture_output=True, text=True, timeout=self.network_timeout_seconds
                 )  # nosec B603
@@ -529,7 +506,7 @@ class TrtExecBenchmark(Benchmark):
                             f"{self.remote_user}@{self.remote_ip}",
                             f"rm -f {shlex.quote(self.remote_engine_path)}",
                         ]
-                        cleanup_cmd = ssh_pass + cleanup_cmd
+                        cleanup_cmd = cleanup_cmd
                         try:
                             subprocess.run(
                                 cleanup_cmd,
@@ -554,7 +531,7 @@ class TrtExecBenchmark(Benchmark):
                         f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                     ]
 
-                    trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
+                    trtexec_safe_cmd = trtexec_safe_cmd
                     result = subprocess.run(
                         trtexec_safe_cmd,
                         capture_output=True,
@@ -573,7 +550,7 @@ class TrtExecBenchmark(Benchmark):
                             f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
                             f"--loadEngine={shlex.quote(self.remote_engine_path)}",
                         ]
-                        trtexec_safe_cmd = ssh_pass + trtexec_safe_cmd
+                        trtexec_safe_cmd = trtexec_safe_cmd
 
                         result = subprocess.run(
                             trtexec_safe_cmd,
@@ -599,7 +576,7 @@ class TrtExecBenchmark(Benchmark):
         except FileNotFoundError as e:
             self.logger.error(
                 f"{e.filename} not found, please ensure system dependencies are installed and in the PATH: \n"
-                "ssh, scp, sshpass, trtexec"
+                "ssh, scp, trtexec"
             )
             return float("inf")
         except subprocess.TimeoutExpired as e:
