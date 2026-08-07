@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate metadata for checked-in historical Puzzletron campaign reports."""
+"""Validate metadata for retained historical Puzzletron campaign results."""
 
 import json
 from collections import Counter
@@ -50,13 +50,21 @@ def test_historical_campaign_set(historical_campaigns: dict) -> None:
     assert {campaign["id"] for campaign in historical_campaigns["campaigns"]} == set(CAMPAIGN_IDS)
 
 
-def test_report_matrix_campaign_set(project_root_path: Path, historical_campaigns: dict) -> None:
-    matrix_path = project_root_path / "examples/puzzletron/docs/support_matrix.md"
+def test_historical_result_matrix_campaign_set(
+    project_root_path: Path, historical_campaigns: dict
+) -> None:
+    matrix_path = project_root_path / "examples/puzzletron/docs/historical_results.md"
     matrix_rows = _historical_campaign_rows(matrix_path.read_text())
 
     assert Counter(name for name, _ in matrix_rows) == Counter(
         campaign["display_name"] for campaign in historical_campaigns["campaigns"]
     )
+
+
+def test_historical_results_are_linked_from_main_docs(project_root_path: Path) -> None:
+    readme = (project_root_path / "examples/puzzletron/README.md").read_text()
+
+    assert "(docs/historical_results.md)" in readme
 
 
 @pytest.mark.parametrize("campaign_id", CAMPAIGN_IDS)
@@ -158,11 +166,11 @@ def test_historical_campaign_matches_report_summary(
 
 
 @pytest.mark.parametrize("campaign_id", CAMPAIGN_IDS)
-def test_report_matrix_row_matches_manifest(
+def test_historical_result_matrix_row_matches_manifest(
     project_root_path: Path, historical_campaigns: dict, campaign_id: str
 ) -> None:
     campaign = _campaign_by_id(historical_campaigns, campaign_id)
-    matrix_path = project_root_path / "examples/puzzletron/docs/support_matrix.md"
+    matrix_path = project_root_path / "examples/puzzletron/docs/historical_results.md"
     matrix_rows = _historical_campaign_rows(matrix_path.read_text())
     row = next(row for name, row in matrix_rows if name == campaign["display_name"])
 
@@ -249,8 +257,8 @@ def _report_goal_dimensions(report_config: dict) -> set[str]:
 
 
 def _historical_campaign_rows(matrix: str) -> list[tuple[str, str]]:
-    section = matrix.split("## Report summary", maxsplit=1)[1]
-    section = section.split("## What this proves", maxsplit=1)[0]
+    section = matrix.split("## Historical result summary", maxsplit=1)[1]
+    section = section.split("## Evidence boundary", maxsplit=1)[0]
     rows = [line for line in section.splitlines() if line.startswith("|")][2:]
     return [
         (cells[0], row)

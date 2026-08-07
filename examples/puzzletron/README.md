@@ -8,7 +8,7 @@ campaign report.
 
 ## Table of Contents
 
-- [End-to-end tested models](#end-to-end-tested-models)
+- [Historical campaign results](#historical-campaign-results)
 - [Setup wizard](#setup-wizard)
 - [Installation](#installation)
 - [Run with an agent](#run-with-an-agent)
@@ -18,20 +18,24 @@ campaign report.
 - [Online evaluation and downstream stages](#online-evaluation-and-downstream-stages)
 - [Reports](#reports)
 
-## End-to-end tested models
+## Historical campaign results
 
-The configs below are the exact current-code entry points for the completed
-campaigns. Each verified report is a self-contained HTML file that embeds all
-sanity-check outputs, stage manifests, and evaluation results; they can be
-100s of MB. Download them to disk and open locally rather than previewing in a
-browser tab.
+The reports below retain results from earlier experimental work. They have not
+been reproduced on current code and are not current model-support claims. The
+[historical results summary](docs/historical_results.md) records their metadata,
+relationships to current configuration files, known gaps, and reproduction
+requirements.
+
+Each report is a self-contained HTML file that embeds sanity-check outputs,
+stage manifests, and evaluation results; it can be 100s of MB. Download it to
+disk and open it locally rather than previewing it in a browser tab.
 
 The most important section in every report is **Zero-shot Evaluation**, which
 compares the pruned candidate solutions directly against the full teacher model
 across multiple benchmarks. Use that section first to assess accuracy trade-offs
 before inspecting the serving-performance or sanity-check sections.
 
-| Model | Hugging Face model | Full experiment config | Verified report |
+| Model | Hugging Face model | Current configuration reference | Historical report |
 |---|---|---|---|
 | Nemotron-3 Nano 30B-A3B | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | [default.yaml](configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) | [HTML report](reports/nemotron3_nano_30b_a3b.html) |
 | Qwen3p5_9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |

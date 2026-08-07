@@ -1,9 +1,10 @@
 schema_version: 1
 definition: >-
-  These records describe checked-in reports from an earlier experimental
-  state. The metadata is checked statically against the reports and current
-  configuration files, but the campaigns have not been reproduced on current
-  code and do not establish model support.
+  This manifest catalogs campaign report artifacts retained from earlier
+  experimental work. Each entry records report metadata, its relationship to
+  current configuration files, and unresolved reproduction or correctness
+  gaps. The listed results have not been reproduced on current code and do not
+  establish model support.
 
 campaigns:
   - id: nemotron3_nano_30b_a3b

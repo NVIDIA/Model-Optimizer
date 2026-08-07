@@ -1,28 +1,29 @@
-# Historical Puzzletron Campaign Reports
+# Historical Puzzletron Campaign Results
 
-The two checked-in reports were produced in an earlier experimental state and
-have not been reproduced on current code. They preserve historical observations;
-they are not model-support claims. The
-[historical campaign manifest](../reports/historical_campaigns.yaml) records the
-fields checked against the reports and current configuration files.
+This page catalogs campaign results retained from earlier experimental work.
+The entries summarize report metadata, relationships to current configuration
+files, and open reproduction or correctness gaps. These results have not been
+reproduced on current code and are not model-support claims. The
+[historical campaign manifest](../reports/historical_campaigns.yaml) is the
+machine-readable source for the fields below.
 
-## Report summary
+## Historical result summary
 
-| Model | Historical report | Current configuration relationship | Static findings and reproduction status |
+| Model | Archived result | Current configuration relationship | Reproduction and correctness status |
 |---|---|---|---|
 | Nemotron-3 Nano 30B-A3B | [Campaign report](../reports/nemotron3_nano_30b_a3b.html): sequence length 8,192; parameter, runtime, and memory MIP profiles; stages marked complete through zero-shot evaluation plus global-distillation sanity | [default.yaml](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) is a current-code migration, not the executed configuration | Not reproduced on current code; the report contains 176 slicing-equivalence findings and 2 descriptor-realization-gate findings; AIPerf, full global distillation, and post-distillation evaluation remain pending |
 | Qwen3.5-9B | [Campaign report](../reports/qwen3p5_9b.html): sequence length 16,384; runtime MIP profile; stages marked complete through post-distillation evaluation | [default.yaml](../configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) is a reconstruction; the report used 23 overrides and embedding widths 4,096, 3,840, and 3,584, while the current entry retains only 4,096 | Not reproduced on current code; the report contains 101 slicing-equivalence findings |
 
-## What this proves
+## Evidence boundary
 
-| Question | Answer |
+| Record | Status |
 |---|---|
-| Do the checked-in reports contain the listed model, configuration, stage, and warning metadata? | Yes; a CPU test parses and checks those static fields. |
-| Do the current configurations reproduce the executed configurations? | No; one is a migration and one is a reconstruction. |
-| Have these campaigns been rerun on current code? | No. |
-| Do the reports establish physical-slicing correctness or model support? | No; unresolved slicing findings remain. |
+| Archived report metadata | Retained and checked statically against the manifest. |
+| Current-configuration relationship | Recorded as a migration or reconstruction, not an executed configuration match. |
+| Current-code reproduction | Not available for the listed results. |
+| Model-support status | Not established; unresolved slicing findings remain. |
 
-## Requirements for a future support claim
+## Reproduction requirements
 
 | Gate | Required evidence |
 |---|---|
