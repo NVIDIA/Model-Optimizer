@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Learner-semantics tests (T20.4) for modelopt.torch.quantization.rotation.learn.
+"""Learner-semantics tests for modelopt.torch.quantization.rotation.learn.
 
 Covers:
   1. steps=0 == fold_rotations seed draws, bitwise, seeds {0, 3, 7}, both archs.
@@ -488,7 +488,7 @@ def test_warm_start_continues_donor_loss_and_gate_rejects_corruption():
     # Ortho gate: corrupted warm start must be refused.
     bad = dict(donor.rotations)
     bad["R1"] = bad["R1"] * 1.01
-    with pytest.raises(AssertionError, match="not orthogonal"):
+    with pytest.raises(ValueError, match="not orthogonal"):
         learn_rotations(
             _tiny_qwen3(),
             batch,

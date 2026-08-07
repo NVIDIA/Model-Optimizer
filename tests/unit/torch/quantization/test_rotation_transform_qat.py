@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Transform-QAT tests (T22.3): jointly learned rotations R1/R2 + per-input-channel seam
+"""Transform-QAT tests: jointly learned rotations R1/R2 + per-input-channel seam
 diagonals (OSTQuant-style) in modelopt.torch.quantization.rotation.
 
 Covers:
@@ -186,7 +186,7 @@ def _assembled_logits(model, eff):
 
 
 def _assemble_pre_change(base, R1, R2s, n_layers, head_dim, objective, out_dtype):
-    """VERBATIM copy of the pre-T22.3 _assemble_effective_weights body — the bitwise
+    """Rotation-only reference assembly (no seam diagonals) — the bitwise
     oracle for the learn_seam_diag=False path."""
     compute = R1.dtype
     d = head_dim
@@ -627,7 +627,7 @@ def test_save_load_roundtrip_with_seam_diags_and_old_format():
         raw = torch.load(path, map_location="cpu", weights_only=True)
         assert set(raw) == set(rs.rotations), "legacy save format changed"
 
-        # Old-format file (flat rotation dict, e.g. a pre-T22.3 R.bin): loads fine,
+        # Old-format file (flat rotation dict, e.g. a legacy R.bin): loads fine,
         # seam_diags=None.
         torch.save(dict(rs.rotations), path)
         rs3 = RotationSet.load(path)

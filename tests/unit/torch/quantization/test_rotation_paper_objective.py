@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the paper-protocol objective extensions (T26): per-token ASYM min-max
+"""Tests for the paper-protocol objective extensions: per-token ASYM min-max
 activation fake-quant (``QuantObjective.a_asym``) and the training-graph-only online R4
 down_proj Hadamard (``QuantObjective.r4_in_graph``).
 

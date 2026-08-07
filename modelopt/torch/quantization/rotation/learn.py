@@ -25,8 +25,8 @@ ported self-contained in :mod:`.sgdg`), so every iterate stays orthogonal to num
 the result folds through :meth:`fold_rotations`'s validated path via its ``R1=`` / ``R2=``
 arguments.
 
-Design notes, hyperparameter lineage (official SpinQuant vs. our internal reference trainer vs. this
-module) and the objective-config table live in README.md next to this file. Architecture
+Design notes, hyperparameter lineage (official SpinQuant vs. our internal reference trainer
+vs. this module) and the objective-config table live in README.md next to this file. Architecture
 knowledge (norm-fusion edges, reader/writer orientation, Qwen3 q/k_norm exclusion,
 head_dim resolution, tied-embedding handling) is REUSED from ``fold.py`` — it is defined
 exactly once, in the fold module's ``_ARCH_REGISTRY``.
@@ -124,7 +124,7 @@ class QuantObjective:
             and o_proj input; at every norm-fed seam a folded diagonal is cancelled by
             norm fusion, so those seams have no surviving degree of freedom). The scales
             are parametrized as ``log s`` (init 0 = identity, positivity for free) and
-            applied in the effective-weight assembly exactly like the T14 SmoothQuant
+            applied in the effective-weight assembly exactly like the SmoothQuant
             prefold: ``up_proj`` rows ``/ s_down`` + ``down_proj`` cols ``* s_down``,
             and ``v_proj`` rows ``/ s_o`` (KV dim) + ``o_proj`` cols ``* s_o`` expanded
             per q-head group (GQA-exact) — a functional identity for ANY positive
@@ -143,7 +143,7 @@ class QuantObjective:
             (input hook ``x @ H`` before activation fake-quant + effective down_proj
             weight columns ``@ H`` — a functional-identity pair). The official trainer
             does this unconditionally, even for no-had deployment
-            (``train_utils/main.py``); T12's arm4 measured that training WITHOUT it
+            (``train_utils/main.py``); our ablation measured that training WITHOUT it
             (deployment-faithful) makes the no-had result worse. The deployed model
             folds R1/R2 only — no online op survives in the returned
             :class:`RotationSet` or the fold. Power-of-2 seam dimension only.
@@ -160,10 +160,17 @@ class QuantObjective:
     r4_in_graph: bool = False
 
     def __post_init__(self):
-        if self.a_bits is not None and self.a_mode not in (
-            "per_token_dynamic",
-            "per_tensor_static",
-        ):
+        # Bit-widths below 2 have no representable positive level: the symmetric scale is
+        # amax / (2**(b-1) - 1) = amax / 0 = inf, and the dequant multiply then yields
+        # 0 * inf = NaN for every value, silently NaN-ing the whole objective.
+        for field_name in ("w_bits", "a_bits"):
+            bits = getattr(self, field_name)
+            if bits is not None and bits < 2:
+                raise ValueError(
+                    f"{field_name}={bits}: bit-width must be >= 2 (b=1 gives a zero "
+                    "quantization range and an all-NaN fake-quant)"
+                )
+        if self.a_mode not in ("per_token_dynamic", "per_tensor_static"):
             raise ValueError(f"unknown a_mode: {self.a_mode!r}")
         if self.a_static_scope not in ("batch", "run"):
             raise ValueError(f"unknown a_static_scope: {self.a_static_scope!r}")
@@ -174,7 +181,7 @@ class QuantObjective:
 
 
 #: SpinQuant-paper-style W4A4 (per-group-128 sym weights + per-token dynamic sym int4
-#: activations). Comparison point for the internal reference runs / the paper's W4A4 rows.
+#: activations). Comparison point for the paper's W4A4 rows.
 W4A4_G128_OBJECTIVE = QuantObjective(
     name="w4a4_g128", w_bits=4, w_group=128, a_bits=4, a_mode="per_token_dynamic"
 )
@@ -191,7 +198,7 @@ INT8_DEFAULT_OBJECTIVE = QuantObjective(
 #: The official trainer's objective for GPTQ-deployed rows ("Cayley on 16-4-KV", paper
 #: Table 3): weights stay 16-bit in the loss, A4 per-token dynamic ASYM min-max (paper
 #: A.4), and the online R4 down_proj Hadamard lives in the TRAINING graph only — the
-#: official code keeps it there even when deploying no-had, and T12's arm4 measured that
+#: official code keeps it there even when deploying no-had, and our ablation measured that
 #: removing it (deployment-faithful training) makes the no-had result WORSE. The deployed
 #: model still folds R1/R2 only.
 W16A4_ASYM_R4G_OBJECTIVE = QuantObjective(
@@ -398,8 +405,11 @@ class RotationSet:
     def __post_init__(self):
         if "R1" not in self.rotations:
             raise ValueError("RotationSet requires an 'R1' entry")
+        # .clone() is load-bearing: the preceding conversions are no-ops for an already-
+        # float64 CPU input, so without it the stored rotations would alias the caller's
+        # buffers and could change after validation (and after save()).
         self.rotations = {
-            k: torch.as_tensor(v).detach().to(torch.float64).cpu()
+            k: torch.as_tensor(v).detach().to(torch.float64).cpu().clone()
             for k, v in self.rotations.items()
         }
         if self.seam_diags is not None:
@@ -409,8 +419,10 @@ class RotationSet:
                     raise ValueError(
                         f"seam_diags[{k!r}]: expected keys {{'down', 'o'}}, got {set(pair)}"
                     )
+                if int(k) in norm:
+                    raise ValueError(f"seam_diags names layer {int(k)} more than once")
                 norm[int(k)] = {
-                    kk: torch.as_tensor(vv).detach().to(torch.float64).cpu().flatten()
+                    kk: torch.as_tensor(vv).detach().to(torch.float64).cpu().flatten().clone()
                     for kk, vv in pair.items()
                 }
                 for kk, vv in norm[int(k)].items():
@@ -518,7 +530,7 @@ def _assemble_effective_weights(
 
     ``seam_diag_params`` (transform-QAT): optional per-layer ``{"down": log_s_down
     [intermediate], "o": log_s_o [n_kv_heads*head_dim]}`` graph leaves. Applied with the
-    T14-prefold structure BEFORE weight fake-quant, prefold-inside / rotation-outside
+    prefold structure BEFORE weight fake-quant, prefold-inside / rotation-outside
     (i.e. exactly the composition ``t14_sq_prefold`` -> ``fold_rotations``): up_proj
     rows ``/ s_down``; down_proj cols ``* s_down``; v_proj rows ``/ s_o`` before the
     per-KV-head R2 row step; o_proj cols ``* s_o`` expanded per q-head group before the
@@ -611,11 +623,19 @@ def _iter_batches(calib_loader: Iterable, steps: int):
         n += 1
 
 
-def _batch_input_ids(batch) -> torch.Tensor:
+def _batch_input_ids(batch) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Extract ``(input_ids, attention_mask)`` from a calibration batch.
+
+    The mask is returned (not dropped) so padded batches neither attend over padding nor
+    contribute pad positions to the cross-entropy; ``None`` means "no padding in this
+    batch".
+    """
+    mask = None
     if isinstance(batch, torch.Tensor):
         ids = batch
     elif isinstance(batch, Mapping) or hasattr(batch, "keys"):
         ids = batch["input_ids"]
+        mask = batch.get("attention_mask")
     else:
         raise TypeError(
             f"unsupported calib batch type {type(batch).__name__}: pass input_ids tensors "
@@ -624,7 +644,14 @@ def _batch_input_ids(batch) -> torch.Tensor:
     if ids.dim() == 1:
         ids = ids.unsqueeze(0)
     assert ids.dim() == 2, f"input_ids must be [bs, seq], got shape {tuple(ids.shape)}"
-    return ids
+    if mask is not None:
+        if mask.dim() == 1:
+            mask = mask.unsqueeze(0)
+        if mask.shape != ids.shape:
+            raise ValueError(
+                f"attention_mask shape {tuple(mask.shape)} != input_ids shape {tuple(ids.shape)}"
+            )
+    return ids, mask
 
 
 # --------------------------------------------------------------------------------------
@@ -671,7 +698,8 @@ def learn_rotations(
             models).
         calib_loader: Re-iterable of calibration batches — ``input_ids`` tensors
             ``[bs, seq]`` or dicts with an ``input_ids`` key. Cycled for ``steps`` steps.
-        steps: Number of Cayley-SGD steps (reference budget: 150). ``steps=0`` returns
+        steps: Number of Cayley-SGD steps (the paper reports quality saturating around
+            100; 150 is our reference budget). ``steps=0`` returns
             the untouched init (== ``fold_rotations(mode=mode, seed=seed)`` draws).
         lr: Peak learning rate, cosine-decayed to 0 (official SpinQuant default 1.5).
         mode: Rotation init family, ``"hadamard"`` (random-sign Hadamard) or ``"random"``
@@ -684,14 +712,14 @@ def learn_rotations(
         init_rotations: Optional warm start — a dict in the R.bin key convention
             (overrides mode/seed draws; gated at :data:`LEARNED_ORTHO_TOL`).
         log_every: Print a progress line every N steps (0 = silent).
-        teacher: Optional frozen reference model for a KD objective (T25): loss becomes
+        teacher: Optional frozen reference model for a KD objective: loss becomes
             ``(1-kd_alpha)*CE + kd_alpha*kd_temp^2*KL(student || teacher)`` with the
             teacher's logits computed under ``no_grad`` on the same batch. The teacher
             is NEVER reparametrized/fused/modified — pass a separate (typically bf16)
             copy, not the model being trained. ``teacher=None`` (default) is the plain
-            CE objective, bitwise-identical to the pre-T25 trainer.
-        kd_alpha: KD mixing weight (only with ``teacher``; T22's measured setting 0.5).
-        kd_temp: KD softmax temperature (only with ``teacher``; T22 setting 2.0).
+            CE objective, bitwise-identical to the plain-CE trainer.
+        kd_alpha: KD mixing weight in [0, 1] (only with ``teacher``).
+        kd_temp: KD softmax temperature > 0 (only with ``teacher``).
 
     Returns:
         :class:`RotationSet` with float64 CPU matrices (audited orthonormal to
@@ -712,6 +740,21 @@ def learn_rotations(
             f"supported: {sorted(_ARCH_REGISTRY)}"
         )
     spec: dict[str, Any] = _ARCH_REGISTRY[arch]
+
+    if teacher is not None:
+        # A teacher that IS the student is reparametrized and hooked along with it, so its
+        # logits equal the student's and the KD term is identically zero — a plain-CE run
+        # scaled by (1 - kd_alpha) while meta reports KD as active. Pass a separate copy.
+        if teacher is model:
+            raise ValueError(
+                "teacher must be a distinct module from the model being trained (it is "
+                "reparametrized in-place during each step, so a self-teacher gives KL == 0); "
+                "pass e.g. copy.deepcopy(model) frozen in the reference dtype"
+            )
+        if not 0.0 <= kd_alpha <= 1.0:
+            raise ValueError(f"kd_alpha must be in [0, 1], got {kd_alpha}")
+        if kd_temp <= 0.0:
+            raise ValueError(f"kd_temp must be > 0, got {kd_temp} (temperature divides logits)")
 
     decoder = model.model
     layers = decoder.layers
@@ -776,10 +819,19 @@ def learn_rotations(
             )
         for k, R64 in draws.items():
             eye = torch.eye(R64.shape[0], dtype=torch.float64)
-            err = (R64 @ R64.T - eye).abs().max().item()
-            assert err < LEARNED_ORTHO_TOL, (
-                f"init_rotations[{k!r}]: not orthogonal (max |R R^T - I| = {err:.3e})"
+            # BOTH residual forms: they share eigenvalues but not entries, and the fold
+            # consumes the R R^T form while the closing audit reports the max of the two.
+            # Gating on one alone lets a warm start pass here and fail the exit audit.
+            err = max(
+                (R64 @ R64.T - eye).abs().max().item(),
+                (R64.T @ R64 - eye).abs().max().item(),
             )
+            if err >= LEARNED_ORTHO_TOL:
+                raise ValueError(
+                    f"init_rotations[{k!r}]: not orthogonal (max |R R^T - I|, |R^T R - I| = "
+                    f"{err:.3e} >= {LEARNED_ORTHO_TOL}); pass "
+                    "RotationSet.load(..., orthogonalize=True) to retract a legacy matrix"
+                )
     R1 = nn.Parameter(draws["R1"].to(device=device, dtype=torch.float32))
     R2s = [
         nn.Parameter(draws[f"model.layers.{i}.self_attn.R2"].to(device=device, dtype=torch.float32))
@@ -836,20 +888,20 @@ def learn_rotations(
             "down_proj in_features != config.intermediate_size"
         )
 
+    # Built here but ATTACHED inside the try below: hooks registered before the guarded
+    # region would survive on the caller's model if any later setup step raised, silently
+    # fake-quantizing every subsequent forward.
     hooks = None
+    expected_hooks = 0
     if objective_cfg is not None and (objective_cfg.a_bits is not None or r4_had is not None):
         hooks = _ActQuantHooks(
             objective_cfg,
             r4_had=None if r4_had is None else r4_had.to(model_dtype),
         )
-        n_hooked = hooks.attach(model)
         expected_hooks = (
             n_layers * len(_ATTN_PROJS + _MLP_PROJS)
             if objective_cfg.a_bits is not None
             else n_layers
-        )
-        assert n_hooked == expected_hooks, (
-            f"activation hooks attached to {n_hooked} linears, expected {expected_hooks}"
         )
 
     if learn_seam_diag:
@@ -883,6 +935,11 @@ def learn_rotations(
 
     # 6. Training loop.
     try:
+        if hooks is not None:
+            n_hooked = hooks.attach(model)
+            assert n_hooked == expected_hooks, (
+                f"activation hooks attached to {n_hooked} linears, expected {expected_hooks}"
+            )
         for step, batch in enumerate(_iter_batches(calib_loader, steps)):
             cos_t = 0.5 * (1.0 + math.cos(math.pi * step / max(steps, 1)))
             lr_t = lr * cos_t
@@ -891,7 +948,14 @@ def learn_rotations(
             if opt_diag is not None:  # same cosine schedule, SEAM_DIAG_LR peak
                 for gp in opt_diag.param_groups:
                     gp["lr"] = SEAM_DIAG_LR * cos_t
-            ids = _batch_input_ids(batch).to(device)
+            ids, attn_mask = _batch_input_ids(batch)
+            ids = ids.to(device)
+            if attn_mask is not None:
+                attn_mask = attn_mask.to(device)
+                # Padding must not enter the loss: HF ignores label index -100.
+                labels = ids.masked_fill(attn_mask == 0, -100)
+            else:
+                labels = ids
             t0 = time.time()
             eff = _assemble_effective_weights(
                 base,
@@ -908,15 +972,24 @@ def learn_rotations(
             # recompute happens during backward and must still see the effective weights
             # (torch.func.functional_call would restore the originals first).
             with _stateless._reparametrize_module(model, eff):
-                out = model(input_ids=ids, labels=ids, use_cache=False)
+                out = model(input_ids=ids, attention_mask=attn_mask, labels=labels, use_cache=False)
                 loss = out.loss
-                if teacher is not None:  # KD objective (T25); teacher never touched
+                if teacher is not None:  # KD objective; teacher never touched
                     with torch.no_grad():
-                        tlogits = teacher(input_ids=ids).logits
+                        tlogits = teacher(
+                            input_ids=ids, attention_mask=attn_mask, use_cache=False
+                        ).logits
                     T = kd_temp
+                    # Flatten to [tokens, vocab] so "batchmean" divides by the TOKEN count:
+                    # on [bs, seq, vocab] it divides by bs alone, making the KD term seq_len
+                    # times the per-token KL and the CE:KD mix sequence-length-dependent.
+                    # Padding positions (label -100) are excluded from the KD term too.
+                    keep = (labels != -100).reshape(-1)
+                    s_logits = out.logits.reshape(-1, out.logits.shape[-1])[keep]
+                    t_logits = tlogits.reshape(-1, tlogits.shape[-1])[keep]
                     kd = torch.nn.functional.kl_div(
-                        torch.nn.functional.log_softmax(out.logits / T, dim=-1),
-                        torch.nn.functional.softmax(tlogits / T, dim=-1),
+                        torch.nn.functional.log_softmax(s_logits / T, dim=-1),
+                        torch.nn.functional.softmax(t_logits / T, dim=-1),
                         reduction="batchmean",
                     ) * (T * T)
                     loss = (1.0 - kd_alpha) * loss + kd_alpha * kd

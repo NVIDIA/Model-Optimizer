@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Extensive fold property tests (T20.1) for
+"""Extensive fold property tests for
 modelopt.torch.quantization.rotation.fold_rotations.
 
 Coverage beyond test_rotation_fold.py:

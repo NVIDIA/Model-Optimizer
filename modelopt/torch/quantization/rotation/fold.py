@@ -157,9 +157,11 @@ def _as_external_rotation(mat, size: int, name: str) -> torch.Tensor:
     """Validate one externally supplied rotation: shape [size, size], orthonormal.
 
     Orthonormality is gated at :data:`_EXTERNAL_ORTHO_TOL`. Returns a float64 CPU copy (all
-    fold math is float64).
+    fold math is float64). The copy is unconditional: ``as_tensor``/``to``/``cpu`` are
+    no-ops for an already-float64 CPU input, and without it the audited matrix would alias
+    the caller's buffer and could change after the gate passed.
     """
-    R = torch.as_tensor(mat).detach().to(torch.float64).cpu()
+    R = torch.as_tensor(mat).detach().to(torch.float64).cpu().clone()
     if R.shape != (size, size):
         raise ValueError(f"{name}: expected shape {(size, size)}, got {tuple(R.shape)}")
     err = (R @ R.T - torch.eye(size, dtype=torch.float64)).abs().max().item()
@@ -191,6 +193,11 @@ def _normalize_external_r2(R2, n_layers: int, head_dim: int) -> list[torch.Tenso
                         f"R2 dict key {k!r} not understood (want an int layer index or "
                         "'model.layers.{i}.self_attn.R2')"
                     ) from None
+            if idx in by_idx:
+                raise ValueError(
+                    f"R2 dict names layer {idx} more than once (e.g. the int key {idx} and "
+                    f"'model.layers.{idx}.self_attn.R2'); refusing to guess which matrix wins"
+                )
             by_idx[idx] = v
         if sorted(by_idx) != list(range(n_layers)):
             raise ValueError(
@@ -496,7 +503,7 @@ def fold_seam_diags(model: nn.Module, seam_diags, smax: float = 256.0) -> dict:
 
     The transform-QAT counterpart of :meth:`fold_rotations` for the diagonal half of the
     learned reparametrization (``RotationSet.seam_diags``): exactly the two
-    ROTATION-SURVIVING SmoothQuant seams of the T14 prefold, as exact per-seam
+    ROTATION-SURVIVING SmoothQuant-style prefold seams, as exact per-seam
     functional identities —
 
     - **down seam** (``s_down [intermediate_size]``): ``up_proj`` rows ``/= s_down``
@@ -522,7 +529,7 @@ def fold_seam_diags(model: nn.Module, seam_diags, smax: float = 256.0) -> dict:
             be int or int-like str). May cover a subset of layers — each layer's seams
             are independent identities.
         smax: fp16-safety ceiling: scales are clamped to ``[1e-4, smax]`` before folding
-            (T14 convention; default 256 — the fp16-endpoint-safe value from the T15
+            (default 256 — the fp16-endpoint-safe value from the
             activation-underflow finding, vs. 1e4 for bf16-only paths). A clamp that
             actually bites trades exactness for numeric safety and is reported in the
             returned evidence.
