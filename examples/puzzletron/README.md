@@ -22,9 +22,10 @@ campaign report.
 
 The reports below retain results from earlier experimental work. They have not
 been reproduced on current code and are not current model-support claims. The
-[historical results summary](docs/historical_results.md) records their metadata,
-relationships to current configuration files, known gaps, and reproduction
-requirements.
+[historical results summary](docs/historical_results.md) records their
+classification, relationships to current configuration files, known gaps, and
+future campaign-evidence considerations. Detailed run facts remain in the
+retained reports.
 
 Each report is a self-contained HTML file that embeds sanity-check outputs,
 stage manifests, and evaluation results; it can be 100s of MB. Download it to

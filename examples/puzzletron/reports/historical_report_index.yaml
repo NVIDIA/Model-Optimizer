@@ -1,0 +1,39 @@
+schema_version: 1
+purpose: >-
+  This curated index classifies reports retained from earlier experimental
+  work and records how their current configuration references relate to the
+  reported campaigns. Detailed run facts remain in the reports themselves.
+
+reports:
+  - id: nemotron3_nano_30b_a3b
+    display_name: Nemotron-3 Nano 30B-A3B
+    report: examples/puzzletron/reports/nemotron3_nano_30b_a3b.html
+    classification: historical_unreproduced
+    support_status: not_established
+    current_config:
+      path: >-
+        examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
+      relationship: migration
+      note: >-
+        This current-code entry is not a frozen copy of the configuration used
+        to produce the retained report.
+    known_limitations:
+      - The campaign has not been reproduced on current code.
+      - >-
+        The report contains unresolved slicing-equivalence and
+        descriptor-realization findings.
+
+  - id: qwen3p5_9b
+    display_name: Qwen3.5-9B
+    report: examples/puzzletron/reports/qwen3p5_9b.html
+    classification: historical_unreproduced
+    support_status: not_established
+    current_config:
+      path: examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml
+      relationship: reconstruction
+      note: >-
+        This current-code entry is not the executed configuration. The retained
+        report records additional overrides and width values.
+    known_limitations:
+      - The campaign has not been reproduced on current code.
+      - The report contains unresolved slicing-equivalence findings.
