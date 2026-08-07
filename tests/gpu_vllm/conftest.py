@@ -22,3 +22,5 @@ conftests before sibling test modules, so this beats the top-level
 import os
 
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+# ci gating probe
