@@ -608,6 +608,52 @@ def adjust_distillation_model_for_mcore(
 
     # HACK: Concatenate output tensors when PP>1 so they can be passed between ranks.
     def _forward(self, *args, **kwargs):
+        # Static-block NVFP4: promote the student's weight quantizers once, after the
+        # checkpoint amax/scales have been loaded, so the training forward takes the
+        # StaticBlockScaleQuantizer path rather than the generic FP8 (E4M3) path. Promotion
+        # cannot happen at build time because the scales only exist after the load.
+        #
+        # NOTE: in practice this converts exactly ONE module -- ``output_layer``. A measured run
+        # reports ``already promoted 460, converted 1, skipped 0``: every other quantizer is
+        # already a StaticBlockScaleQuantizer by the time training starts. So this is a workaround
+        # for output_layer being the one module the restore path does not promote (the same
+        # asymmetry behind its weight-quantizer scales not being restored). The better fix is to
+        # promote it on the normal path; until then, without this block the output projection
+        # would train through the generic FP8 path instead of static-block NVFP4.
+        if not getattr(self, "_modelopt_nvfp4_promoted", False):
+            from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+                StaticBlockScaleQuantizer,
+                TensorQuantizer,
+            )
+
+            n_promoted = n_skipped = 0
+            for name, module in self.named_modules():
+                if not isinstance(module, TensorQuantizer) or isinstance(
+                    module, StaticBlockScaleQuantizer
+                ):
+                    continue
+                block_sizes = getattr(module, "_block_sizes", None)
+                is_nvfp4 = getattr(module, "_num_bits", None) == (2, 1) and (
+                    isinstance(block_sizes, dict) and block_sizes.get("scale_bits") == (4, 3)
+                )
+                if not is_nvfp4:
+                    continue
+                amax = getattr(module, "_amax", None)
+                if amax is None:
+                    # Uncalibrated: leave it alone rather than silently changing precision.
+                    logger.warning(f"NVFP4 weight quantizer {name} has no _amax; not promoted.")
+                    n_skipped += 1
+                    continue
+                StaticBlockScaleQuantizer.from_tensor_quantizer(
+                    module, global_amax=amax.detach().float().abs().max()
+                )
+                n_promoted += 1
+            if n_promoted or n_skipped:
+                logger.info(
+                    f"Promoted {n_promoted} NVFP4 weight quantizer(s) to "
+                    f"StaticBlockScaleQuantizer ({n_skipped} skipped)."
+                )
+            self._modelopt_nvfp4_promoted = True
         with torch.no_grad():
             self._teacher_model.eval()
             teacher_output = self._teacher_model(*args, **kwargs)
