@@ -131,9 +131,14 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Rules & gotchas
 
-- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}`. `0.3.1.1-harbor` is multi-arch and is
-  the minimum for **TB 2.1**; older `0.17.x/0.18.x-harbor-<arch>` are arch-suffixed.
-  Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
+- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}`. The current internal source of
+  truth pins `0.5.0.1-harbor` (multi-arch) for TB 2.1 and SWE-bench. Do not use
+  `0.3.1.1-harbor` for OpenHands: although it accepts
+  `agent_kwargs.llm_kwargs.timeout`, the client still uses its 300-second
+  default. The runtime must include
+  [NVIDIA-NeMo/Evaluator#1083](https://github.com/NVIDIA-NeMo/Evaluator/pull/1083),
+  which propagates that setting into OpenHands. Private gitlab-master images
+  need enroot creds (SKILL Step 7.5).
 - **Mount sources must pre-exist** — pyxis won't create the host side of a bind
   mount (invisible to `--dry-run`, fails at canary). `ssh <login> 'mkdir -p
   <lustre>/<user>/.cache/{vllm,huggingface}'`.
@@ -159,6 +164,11 @@ $NEL eval run <cfg>.yaml --submit                                   # full
 $NEL eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
 $NEL mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
 ```
+
+For a SWE-bench canary, inspect the OpenHands startup/agent log before scaling
+out. The configured `agent_kwargs.llm_kwargs.timeout` must appear as the active
+LLM timeout (for the recipe below, `3600`); `timeout: 300` means the eval image
+does not contain the propagation fix and the canary is invalid.
 
 `eval run` on a slurm cluster scp's the sbatch + redacted `.secrets.env` and
 submits via SSH; a built-in afternotok chain auto-resumes across walltime windows;
