@@ -315,7 +315,9 @@ def region_pattern_autotuning_workflow(
         except RemoteConnectionError:
             logger.error("Remote board connection lost during baseline, saving state before exit")
             autotuner.save_state(str(state_path))
-            logger.info(f"State saved to {state_path}, use --resume to continue")
+            logger.info(
+                f"State saved to {state_path}, re-run the same command to resume from this checkpoint"
+            )
             raise
         autotuner.submit(baseline_latency)
         logger.info(f"Baseline: {baseline_latency:.2f} ms")
@@ -367,7 +369,9 @@ def region_pattern_autotuning_workflow(
             except RemoteConnectionError:
                 logger.error("Remote board connection lost, saving state before exit")
                 autotuner.save_state(str(state_path))
-                logger.info(f"State saved to {state_path}, use --resume to continue")
+                logger.info(
+                    f"State saved to {state_path}, re-run the same command to resume from this checkpoint"
+                )
                 raise
 
             autotuner.submit(latency, success=(latency != float("inf")))
@@ -410,7 +414,9 @@ def region_pattern_autotuning_workflow(
             "Remote board connection lost during final measurement, saving state before exit"
         )
         autotuner.save_state(str(state_path))
-        logger.info(f"State saved to {state_path}, use --resume to continue")
+        logger.info(
+            f"State saved to {state_path}, re-run the same command to resume from this checkpoint"
+        )
         raise
 
     if final_latency > 0 and final_latency != float("inf"):
