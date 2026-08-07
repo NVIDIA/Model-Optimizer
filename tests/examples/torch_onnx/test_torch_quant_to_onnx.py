@@ -23,7 +23,7 @@ from _test_utils.examples.run_command import extend_cmd_parts, run_example_comma
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
 _QUANT_MODES = ["fp8", "int8", "mxfp8", "nvfp4", "auto"]
-_RESNET_QUANT_MODES = {"fp8", "int8", "auto"}
+_RESNET_QUANT_MODES = {"fp8", "int8"}
 
 _MODELS = {
     "vit_tiny": ("vit_tiny_patch16_224", '{"depth": 1}'),
@@ -66,6 +66,9 @@ def _assert_residual_inputs_are_quantized(onnx_save_path):
 @pytest.mark.parametrize("quantize_mode", _QUANT_MODES)
 @pytest.mark.parametrize("model_key", list(_MODELS))
 def test_torch_onnx(model_key, quantize_mode):
+    if model_key == "resnet50" and quantize_mode == "auto":
+        pytest.skip("AutoQuantize is not supported for ResNet")
+
     timm_model_name, model_kwargs = _MODELS[model_key]
     onnx_save_path = f"{model_key}.{quantize_mode}.onnx"
 

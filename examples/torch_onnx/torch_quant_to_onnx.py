@@ -75,7 +75,6 @@ def load_quant_config(recipe: str) -> dict:
 _RESNET_RECIPES = {
     "fp8": "timm/resnet/ptq/fp8",
     "int8": "timm/resnet/ptq/int8",
-    "auto": "timm/resnet/auto_quantize/fp8_int8_at_8p0bits",
 }
 
 
