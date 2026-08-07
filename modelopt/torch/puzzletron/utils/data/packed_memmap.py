@@ -29,7 +29,10 @@ class PackedTokenMemmapDataset(Dataset):
         metadata_path = self.path.with_suffix(self.path.suffix + ".json")
         if not self.path.is_file() or not metadata_path.is_file():
             raise FileNotFoundError(
-                f"packed token cache is incomplete: data={self.path} metadata={metadata_path}"
+                f"packed token cache is incomplete: data={self.path} metadata={metadata_path}. "
+                "Run tokenize_data with caches that write these paths "
+                "(see train_token_cache_path / validation_token_cache_path), "
+                "or remove a stale manifests/tokenize_data.json with status=skipped."
             )
         self.metadata = json.loads(metadata_path.read_text())
         if self.metadata.get("status") != "complete":

@@ -14,8 +14,29 @@
 # limitations under the License.
 
 import pytest
+from omegaconf import OmegaConf
 
-from modelopt.torch.puzzletron.tools.hydra_utils import _warmup_steps_resolver, warmup_steps
+from modelopt.torch.puzzletron.tools.hydra_utils import (
+    _warmup_steps_resolver,
+    clone_hydra_config,
+    warmup_steps,
+)
+
+
+class _ToyPruningMixin:
+    """Stand-in for resolved Hydra ``_target_`` objects such as pruning mixins."""
+
+
+def test_clone_hydra_config_preserves_resolved_python_objects():
+    cfg = OmegaConf.create({"pruning": {"activation_passes": [{"name": "ffn"}]}})
+    cfg._set_flag("allow_objects", True)
+    cfg.pruning.activation_passes[0].pruning_mixin = _ToyPruningMixin()
+
+    cloned = clone_hydra_config(cfg)
+
+    assert isinstance(cloned.pruning.activation_passes[0].pruning_mixin, _ToyPruningMixin)
+    with pytest.raises(Exception, match="supported primitive type"):
+        OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
 
 
 def test_warmup_steps_casts_inputs_before_computing():

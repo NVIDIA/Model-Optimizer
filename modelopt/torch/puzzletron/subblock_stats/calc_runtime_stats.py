@@ -60,7 +60,7 @@ from .topology import RuntimeTopology
 
 _ATTENTION_LIKE_KINDS = frozenset(("attention", "mla", "mamba"))
 _FFN_LIKE_KINDS = frozenset(("ffn", "moe"))
-_RUNTIME_SHARD_RESULT_SCHEMA_VERSION = 3
+_RUNTIME_SHARD_RESULT_SCHEMA_VERSION = 4
 
 
 def enumerate_runtime_block_configs(
@@ -353,10 +353,49 @@ def _runtime_shard_results_complete(status_dir: Path, *, shard_count: int) -> bo
     )
 
 
+def _assigned_runtime_shard_indices(
+    ordered_items: list[tuple[tuple, Any]],
+    *,
+    shard_count: int,
+    shard_index: int,
+    measurement_pairs: list[tuple[tuple, tuple]] | None = None,
+) -> list[int]:
+    """Assign complete paired measurements to one distributed runtime shard."""
+
+    if measurement_pairs is None:
+        return [
+            index for index in range(len(ordered_items)) if index % shard_count == shard_index
+        ]
+
+    indices_by_key = {key: index for index, (key, _) in enumerate(ordered_items)}
+    paired_indices: list[tuple[int, int]] = []
+    assigned_indices: set[int] = set()
+    for short_key, long_key in measurement_pairs:
+        try:
+            pair = (indices_by_key[short_key], indices_by_key[long_key])
+        except KeyError as exc:
+            raise ValueError("runtime measurement pair is missing a benchmark spec") from exc
+        if pair[0] == pair[1] or assigned_indices.intersection(pair):
+            raise ValueError("runtime measurement pairs must be disjoint")
+        paired_indices.append(pair)
+        assigned_indices.update(pair)
+
+    expected_indices = set(range(len(ordered_items)))
+    if assigned_indices != expected_indices:
+        raise ValueError("runtime measurement pairs must cover every benchmark spec")
+    return [
+        index
+        for pair_index, pair in enumerate(paired_indices)
+        if pair_index % shard_count == shard_index
+        for index in pair
+    ]
+
+
 def _run_benchmarks(
     specs: dict[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]],
     gpu_ids: list[str | None],
     cache_dir: Path | None,
+    measurement_pairs: list[tuple[tuple, tuple]] | None = None,
 ) -> dict[tuple, RuntimeMeasurement]:
     """Benchmark each unique spec, fanning out across ``gpu_ids`` concurrently.
 
@@ -399,9 +438,12 @@ def _run_benchmarks(
         raise ValueError(
             f"invalid runtime shard {shard_index}/{shard_count}; expected 0 <= index < count"
         )
-    assigned_indices = [
-        index for index in range(len(ordered_items)) if index % shard_count == shard_index
-    ]
+    assigned_indices = _assigned_runtime_shard_indices(
+        ordered_items,
+        shard_count=shard_count,
+        shard_index=shard_index,
+        measurement_pairs=measurement_pairs,
+    )
     assigned = [ordered_items[index] for index in assigned_indices]
 
     status_dir = None
@@ -631,7 +673,10 @@ def calc_runtime_for_blocks(
         f"Computing block-level runtime for {len(block_config_set)} block configs "
         f"({len(specs)} unique benchmarks) across {len(gpu_ids)} GPU(s)"
     )
-    results = _run_benchmarks(specs, gpu_ids, cache_dir)
+    measurement_pairs = list(block_spec_keys.values())
+    if scaffold_overhead_keys is not None:
+        measurement_pairs.append(scaffold_overhead_keys)
+    results = _run_benchmarks(specs, gpu_ids, cache_dir, measurement_pairs)
 
     runtime_by_block_dict: dict = {}
     for block_config in sorted(block_config_set):
@@ -784,7 +829,10 @@ def calc_runtime_for_subblocks(
         f"Computing runtime for {len(subblock_config_set)} subblocks "
         f"({len(specs)} unique benchmarks) across {len(gpu_ids)} GPU(s)"
     )
-    results = _run_benchmarks(specs, gpu_ids, cache_dir)
+    measurement_pairs = list(subblock_spec_keys.values())
+    if scaffold_overhead_keys is not None:
+        measurement_pairs.append(scaffold_overhead_keys)
+    results = _run_benchmarks(specs, gpu_ids, cache_dir, measurement_pairs)
 
     runtime_by_subblock_dict = {}
     for subblock_config in sorted(subblock_config_set):

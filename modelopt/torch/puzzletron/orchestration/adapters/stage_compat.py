@@ -554,7 +554,10 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
     )
     manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
     if manifest is not None and manifest.get("status") == "skipped":
-        return True
+        # A historical skip must not hide a stage the user has since re-enabled.
+        stage_cfg = config.get(stage_id)
+        if not (isinstance(stage_cfg, Mapping) and bool(stage_cfg.get("enabled"))):
+            return True
     if stage_id.startswith("post."):
         node_id = stage_id.split(".", 2)[-1]
         summary = _read_mapping(

@@ -271,7 +271,6 @@ def run_embedding_stage(
             ),
             check=True,
         )
-        _project_vllm_stats_to_scenarios(config)
         _run_commands(
             scenario_worker_commands(
                 config_path=config_path,
@@ -280,6 +279,10 @@ def run_embedding_stage(
                 gpus_per_node=worker_gpus,
             )
         )
+        # Scenario workers rewrite local subblock_stats.json with static
+        # parameter inventories. Re-project the root vLLM aggregate afterward
+        # so MIP sees runtime_stats=True identities.
+        _project_vllm_stats_to_scenarios(config)
     elif stage in {
         "vllm_stats_diagnostic",
         "replacement_scoring",

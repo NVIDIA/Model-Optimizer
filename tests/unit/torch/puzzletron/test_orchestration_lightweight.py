@@ -366,6 +366,38 @@ def test_stage_completeness_accepts_successful_noop_manifest(tmp_path: Path) -> 
     assert stage_is_complete(config, "tokenize_data")
 
 
+def test_stage_completeness_ignores_stale_skip_when_stage_reenabled(tmp_path: Path) -> None:
+    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
+
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "tokenize_data": {"enabled": True, "caches": []},
+    }
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "tokenize_data.json").write_text(
+        json.dumps({"status": "skipped", "outputs": {"enabled": False}})
+    )
+
+    assert not stage_is_complete(config, "tokenize_data")
+
+
+def test_stage_completeness_keeps_skip_when_stage_still_disabled(tmp_path: Path) -> None:
+    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
+
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "tokenize_data": {"enabled": False},
+    }
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+    (manifests / "tokenize_data.json").write_text(
+        json.dumps({"status": "skipped", "outputs": {"enabled": False}})
+    )
+
+    assert stage_is_complete(config, "tokenize_data")
+
+
 def test_vllm_completeness_requires_nonempty_canonical_stats(tmp_path: Path) -> None:
     from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 

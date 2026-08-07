@@ -83,18 +83,31 @@ def _active_prefix_state(module: torch.nn.Module, width: int, hidden_size: int) 
     return state
 
 
+def _explicit_rms_norm_mode(module: torch.nn.Module) -> str | None:
+    """Return an explicit RMSNorm recipe when functional_call is unsafe.
+
+    ``Float32RMSNorm`` needs float32 accumulation before the affine scale.
+    ``Qwen3NextRMSNorm`` uses one-centered ``(1 + weight)`` and must slice the
+    affine term before the multiply; ``torch.func.functional_call`` can leave the
+    full-envelope weight bound and raise a 768-vs-1024 shape error under nested
+    width cycling.
+    """
+
+    weight = getattr(module, "weight", None)
+    if weight is None or not hasattr(module, "eps"):
+        return None
+    name = type(module).__name__
+    if name == "Float32RMSNorm":
+        return "scale"
+    if name == "Qwen3NextRMSNorm":
+        return "offset"
+    return None
+
+
 def _active_norm_forward(module: torch.nn.Module, width: int, hidden_size: int):
     """Run the module's native norm semantics at the physical active width."""
-    is_automodel_float32_rms_norm = (
-        type(module).__name__ == "Float32RMSNorm"
-        and hasattr(module, "eps")
-        and getattr(module, "weight", None) is not None
-    )
-    replica = (
-        None
-        if is_automodel_float32_rms_norm
-        else _functional_replica(module, width, hidden_size)
-    )
+    rms_mode = _explicit_rms_norm_mode(module)
+    replica = None if rms_mode is not None else _functional_replica(module, width, hidden_size)
 
     def forward(*args, **kwargs):
         if not args or not torch.is_tensor(args[0]):
@@ -107,13 +120,17 @@ def _active_norm_forward(module: torch.nn.Module, width: int, hidden_size: int):
                 f"nested normalization expected envelope width {hidden_size}, got {tuple(x.shape)}"
             )
         active_x = x[..., :width]
-        if is_automodel_float32_rms_norm:
+        if rms_mode is not None:
             input_dtype = active_x.dtype
             normalized = active_x.float()
             normalized = normalized * torch.rsqrt(
                 normalized.pow(2).mean(-1, keepdim=True) + float(module.eps)
             )
-            output = (module.weight[:width] * normalized).to(input_dtype)
+            weight = module.weight[:width].float()
+            if rms_mode == "offset":
+                output = (normalized * (1.0 + weight)).to(input_dtype)
+            else:
+                output = (weight * normalized).to(input_dtype)
         else:
             assert replica is not None
             replica._parameters = module._parameters.copy()

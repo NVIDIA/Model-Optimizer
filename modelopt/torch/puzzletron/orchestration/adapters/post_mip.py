@@ -181,7 +181,9 @@ class PostMIPAdapter(WorkAdapter):
         for override in overrides or ():
             argv.extend(["--override", override])
         log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_{item.shard_index}_{attempt_id}.log"
-        distributed_worker = node_type in {"evaluation", "global_kd"} and node.gpus_per_instance > 1
+        # evaluation/global_kd always call torch.distributed, so even 1-GPU
+        # workers need torchrun to export RANK/WORLD_SIZE.
+        distributed_worker = node_type in {"evaluation", "global_kd"}
         logical_count = int(item.metadata.get("logical_shard_count", 1))
         allocation_nodes, allocation_gpus, topology = packed_allocation(
             node,

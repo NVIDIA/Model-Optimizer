@@ -33,6 +33,7 @@ from ..pipeline_config import load_runtime_hydra_config
 from ..rpc_eval import EvaluationCache, EvaluationRequest, EvaluationResult
 from ..scoring_parent import ensure_scoring_parent
 from ..subblock_stats.measurements import apply_vllm_measurement, normalize_vllm_measurements
+from ..tools.hydra_utils import clone_hydra_config
 from .common import complete_stage, experiment_dir, stage_manifest_path
 
 if TYPE_CHECKING:
@@ -220,8 +221,7 @@ def _calculate_static_workload_stats(config: dict[str, Any], hydra_cfg: Any) -> 
         }
     for raw_workload in workloads.values():
         workload = dict(raw_workload or {})
-        selected = OmegaConf.create(OmegaConf.to_container(hydra_cfg, resolve=True))
-        OmegaConf.set_struct(selected, False)
+        selected = clone_hydra_config(hydra_cfg)
         stats_cfg = selected.calc_subblock_stats
         concurrency = int(workload.get("concurrency", workload.get("batch_size", 1)))
         stats_cfg.batch_sizes = [int(workload.get("batch_size", concurrency))]

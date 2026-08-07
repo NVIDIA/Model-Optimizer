@@ -375,6 +375,9 @@ class SlurmExecutor(Executor):
                 return JobStatus(
                     handle=handle, state=JobState.RUNNING, log_paths=self.fetch_logs(handle)
                 )
+        # squeue can briefly miss a live job (controller blips). Fall back to
+        # sacct, but keep non-terminal accounting states non-terminal — otherwise
+        # RUNNING is misclassified as FAILED and the orchestrator aborts.
         sacct = _run_command(["sacct", "-j", job_id, "-n", "-X", "--format=State,ExitCode", "-P"])
         if sacct.returncode != 0 or not sacct.stdout.strip():
             return JobStatus(handle=handle, state=JobState.UNKNOWN, reason="sacct unavailable")
@@ -387,6 +390,18 @@ class SlurmExecutor(Executor):
                 exit_code = int(exit_part.split(":")[0])
             except ValueError:
                 exit_code = None
+        if state_name.startswith(("PENDING", "CONFIGURING", "SUSPENDED")):
+            return JobStatus(
+                handle=handle, 
+                state=JobState.PENDING, 
+                log_paths=self.fetch_logs(handle)
+            )
+        if state_name.startswith(("RUNNING", "COMPLETING")):
+            return JobStatus(
+                handle=handle, 
+                state=JobState.RUNNING, 
+                log_paths=self.fetch_logs(handle)
+            )
         if state_name.startswith("COMPLETED") and (exit_code in (None, 0)):
             return JobStatus(
                 handle=handle,

@@ -579,6 +579,58 @@ def test_active_prefix_automodel_float32_rmsnorm_matches_physical_gradients():
     assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
 
 
+def test_active_prefix_qwen3_next_rmsnorm_matches_physical_gradients():
+    class Qwen3NextRMSNorm(torch.nn.Module):
+        def __init__(self, dim: int, eps: float = 1e-6):
+            super().__init__()
+            self.eps = eps
+            self.weight = torch.nn.Parameter(torch.zeros(dim, dtype=torch.bfloat16))
+
+        def _norm(self, x):
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+        def forward(self, x):
+            output = self._norm(x.float())
+            output = output * (1.0 + self.weight.float())
+            return output.type_as(x)
+
+    spec = EmbeddingPruningSpec(
+        hidden_size=4,
+        legal_widths=(4, 2),
+        alignment=2,
+        tensor_rules=(TensorAxisRule(r"^norm\.weight$", (0,), "normalization"),),
+    )
+    envelope = Qwen3NextRMSNorm(4)
+    envelope.weight.data.copy_(torch.linspace(0.0, 0.3, 4, dtype=torch.bfloat16))
+    physical = Qwen3NextRMSNorm(2)
+    physical.weight.data.copy_(envelope.weight[:2])
+    x = torch.tensor(
+        [[0.1015625, 0.205078125, 4.0, -3.0]],
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    with hidden_width_module_context(
+        envelope,
+        canonical_module_name="norm",
+        spec=spec,
+        width=2,
+        mask_boundary_input=True,
+    ):
+        actual = envelope(x)
+    physical_x = x.detach()[..., :2].clone().requires_grad_(True)
+    expected = physical(physical_x)
+
+    assert torch.equal(actual[..., :2], expected)
+    assert torch.count_nonzero(actual[..., 2:]) == 0
+    actual.float().sum().backward()
+    expected.float().sum().backward()
+    torch.testing.assert_close(x.grad[..., :2], physical_x.grad)
+    torch.testing.assert_close(envelope.weight.grad[:2], physical.weight.grad)
+    assert torch.count_nonzero(x.grad[..., 2:]) == 0
+    assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
+
+
 def _distributed_hidden_width_mask_job(rank: int, size: int) -> None:
     assert size == 4
     mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("cp", "tp"))
