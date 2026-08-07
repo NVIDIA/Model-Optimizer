@@ -21,11 +21,7 @@ Changelog
 
 **Bug Fixes**
 
-- Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before
-  residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through
-  ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8
-  and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other
-  quantization formats are no longer supported for ResNet.
+- Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before residual adds. The torch ONNX example now accepts PTQ and AutoQuantize recipes through ``--recipe`` and uses ``--qformat`` when no recipe is provided. ResNet supports only FP8 and INT8 because TensorRT has limited convolution kernel support; AutoQuantize and other quantization formats are no longer supported for ResNet.
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 
 0.46 (2026-08-17)
