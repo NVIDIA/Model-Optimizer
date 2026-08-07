@@ -1141,10 +1141,22 @@ def postprocess_state_dict(
                         f"canonical '{canonical_key}' is kept."
                     )
 
-    # Address backstop for undeclared genuine shares / coincidental duplicates. Device
-    # and size distinguish independent tensors whose allocator addresses happen to match;
-    # zero-pointer tensors are left for serialization to reject. Keys already marked for
-    # deletion (declared aliases) are skipped so they do not seed the first-wins map.
+    # Address backstop: collapse two keys that still point at the SAME storage.
+    #
+    # Scope — this only ever fires for *unquantized / unpacked* shared weights (e.g. a
+    # non-quantized tied embedding, or an embedding whose packing was skipped): those keep
+    # the single original shared Parameter, so two keys share one storage. A *quantized*
+    # tied weight cannot reach here: each side is packed into its own fresh Parameter, so
+    # the sides have DISTINCT storage (byte-identical, not shared) and are collapsed by the
+    # name-based pass above, not by address. The name-based pass is therefore the sole
+    # authority for quantized ties.
+    #
+    # Why it is still needed — safetensors ``save_file`` raises on any two keys that share
+    # storage, so a residual share (a tie the model did not declare) must be collapsed here
+    # or the export fails at write time. Device and size distinguish independent tensors
+    # whose addresses merely coincide (e.g. a view and its base); zero-pointer (meta)
+    # tensors are left for serialization to reject. Keys already marked (declared aliases)
+    # are skipped so they do not seed the first-wins map.
     already_marked = set(keys_to_delete)
     seen_tensors = {}
     for key, value in post_state_dict.items():
@@ -1155,8 +1167,11 @@ def postprocess_state_dict(
             if tensor_id in seen_tensors:
                 keys_to_delete.append(key)
                 logger.warning(
-                    f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "
-                    f"Removing duplicate '{key}' from the exported state dict."
+                    f"Shared-storage weight: '{key}' shares memory with "
+                    f"'{seen_tensors[tensor_id]}'; dropping '{key}'. This is expected only "
+                    f"for an unquantized/unpacked tied weight. If '{key}' is a quantized "
+                    f"weight, its tie was not declared in _tied_weights_keys / "
+                    f"tie_word_embeddings and was not caught by the name-based dedup."
                 )
             else:
                 seen_tensors[tensor_id] = key
