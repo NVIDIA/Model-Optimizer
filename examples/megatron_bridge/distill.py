@@ -34,6 +34,7 @@ from megatron.bridge.recipes.utils.optimizer_utils import (
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
+    FinetuningDatasetConfig,
     GPTDatasetConfig,
     LoggerConfig,
     MockGPTDatasetConfig,
@@ -124,6 +125,21 @@ def get_args():
     )
     parser.add_argument(
         "--use_mock_data", action="store_true", help="Use mock data instead of --data_paths"
+    )
+    parser.add_argument(
+        "--sft",
+        action="store_true",
+        help="SFT-masked distillation: read raw prompt-completion jsonl from --sft_dataset_root "
+        "and mask the loss to the completion (assistant response) tokens. Uses "
+        "FinetuningDatasetConfig and the real HuggingFace tokenizer instead of the pretraining "
+        "GPTDataset and NullTokenizer.",
+    )
+    parser.add_argument(
+        "--sft_dataset_root",
+        type=str,
+        default=None,
+        help="Directory holding training.jsonl / validation.jsonl of "
+        '{"input": <prompt>, "output": <response>} records (used with --sft).',
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -256,6 +272,11 @@ def get_args():
     if args.validate_only and args.eval_iters == 0:
         raise ValueError("--validate_only requires --eval_iters > 0.")
 
+    if args.sft and not args.sft_dataset_root:
+        raise ValueError(
+            "--sft requires --sft_dataset_root (a directory with training.jsonl / validation.jsonl)."
+        )
+
     print_args(args)
 
     return args
@@ -279,6 +300,10 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        if args.sft:
+            # The SFT loss mask covers only the response tokens, so the reduction must be
+            # per-token for it to combine correctly across context-parallel ranks.
+            provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
             provider.recompute_method = args.recompute_method
@@ -368,7 +393,30 @@ def main(args: argparse.Namespace):
         "dataloader_type": "single",
         "skip_getting_attention_mask_from_dataset": True,
     }
-    if args.use_mock_data:
+    if args.sft:
+        # SFT-masked distillation via Bridge's FinetuningDatasetConfig -> NeMo-style GPTSFTDataset.
+        # `dataset_root` holds training.jsonl / validation.jsonl of {"input", "output"} records.
+        # prompt_template="{input}{output}" tokenizes input+output verbatim (adjacent placeholders,
+        # no separator); label_key="output" with answer_only_loss=True masks the loss to the
+        # response only (answer_start_idx == len(context_ids)); truncation_field="input" truncates
+        # the context when the pair exceeds seq_length.
+        dataset_config = FinetuningDatasetConfig(
+            seq_length=args.seq_length,
+            dataset_root=args.sft_dataset_root,
+            seed=args.seed,
+            dataloader_type="batch",
+            do_validation=True,
+            do_test=False,
+            dataset_kwargs={
+                "prompt_template": "{input}{output}",
+                "label_key": "output",
+                "truncation_field": "input",
+                "answer_only_loss": True,
+                "add_bos": False,
+                "add_eos": True,
+            },
+        )
+    elif args.use_mock_data:
         dataset_config = MockGPTDatasetConfig(**dataset_kwargs)
     else:
         # Convert flat CLI list (e.g. ["1.0", "/path/data"]) to Megatron blend format
@@ -399,7 +447,7 @@ def main(args: argparse.Namespace):
             grad_reduce_in_fp32=True,
             overlap_grad_reduce=True,
             overlap_param_gather=True,
-            average_in_collective=True,
+            average_in_collective=not args.sft,  # per-token loss must not be pre-averaged
             use_distributed_optimizer=True,
         ),
         dataset=dataset_config,
@@ -412,8 +460,18 @@ def main(args: argparse.Namespace):
             wandb_entity=args.wandb_entity,  # optional
             wandb_exp_name=args.wandb_exp_name,
         ),
-        tokenizer=TokenizerConfig(
-            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+        tokenizer=(
+            # SFT reads raw text, so it needs the model's real tokenizer; the pretraining path
+            # consumes pre-tokenized data and keeps NullTokenizer.
+            TokenizerConfig(
+                tokenizer_type="HuggingFaceTokenizer",
+                tokenizer_model=args.student_hf_path,
+                hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+            )
+            if args.sft
+            else TokenizerConfig(
+                tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+            )
         ),
         checkpoint=CheckpointConfig(
             save_interval=(
