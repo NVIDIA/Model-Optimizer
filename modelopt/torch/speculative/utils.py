@@ -552,12 +552,17 @@ def get_ttt_msk_func(seq_length, ttt_step):
 
 
 @contextlib.contextmanager
-def enable_cp_ttt_patch():
+def enable_cp_ttt_patch(cp_size: int = 1):
     """Context manager to enable CP TTT patch."""
     import modelopt.torch.speculative.plugins.hf_eagle
 
     modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = True
-    with sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.MATH]):
+    # Under CP, restrict to cudnn: MATH decomposes SDPA and breaks on DTensors. Elsewhere keep
+    # MATH, since cudnn is unavailable on CPU and for some head dims.
+    backends = [SDPBackend.CUDNN_ATTENTION]
+    if cp_size == 1:
+        backends.append(SDPBackend.MATH)
+    with sdpa_kernel(backends):
         try:
             yield
         finally:

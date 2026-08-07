@@ -1,6 +1,9 @@
-# Flags partition coverage by test suite. carryforward ensures that if GPU tests are skipped
-# on a PR (no relevant file changes), their coverage from the last nightly run is reused so
-# the comparison is not penalized for the missing upload.
+# Flags partition coverage by test suite, and the example lanes carry one flag each
+# (examples-<name>) since they are gated independently. carryforward reuses the last run's
+# coverage for any flag with no upload on this commit, so a PR that skips a suite or a single
+# example lane is not penalized for the missing upload. A flag shared across independently
+# gated jobs would defeat this: the flag would be present but partial, and carryforward only
+# applies when a flag is absent.
 flag_management:
   default_rules:
     carryforward: true

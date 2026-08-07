@@ -1,7 +1,7 @@
 Changelog
 =========
 
-0.47 (2026-xx-xx)
+0.47 (2026-09-xx)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
@@ -21,7 +21,9 @@ Changelog
 
 **Bug Fixes**
 
-0.46 (2026-08-xx)
+- Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+
+0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
@@ -29,6 +31,7 @@ Changelog
 *Quantization*
 
 - Add NVFP4 and FP8 PTQ recipes with projection-output quantizers for Llama-Nemotron embedding and reranking models (``modelopt_recipes/huggingface/nemotron_llama/``) and an end-to-end HF embedding/reranking quantize-to-ONNX example (``examples/torch_onnx/hf_embedding_quant_to_onnx.py``). Quantizing the projection-Linear outputs keeps TensorRT inter-layer activations in FP4, roughly halving engine activation memory versus the plain ``nvfp4`` preset. NVFP4/MXFP8 output quantizers now export through the dynamic quantize path. ``examples/torch_onnx/torch_quant_to_onnx.py`` also gains a ``--recipe`` flag to load quantization configs from YAML recipes instead of the removed ``mtq.*_CFG`` module-constant table.
+- Add an end-to-end FAR3D ONNX PTQ example with calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and Argoverse 2 accuracy evaluation. See `examples/onnx_ptq/far3d/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/far3d>`_ for details.
 - Add Learned Scale Quantization (LSQ) and Dual-LSQ support for quantization-aware distillation, including learnable ``amax`` parameters, tied-scale and pre-scale options, focused NVFP4 recipes, and scale-only training.
 - Add a fused Triton fast path for ``local_hessian`` NVFP4 weight-scale search (the Hessian-weighted FP8-E4M3 scale sweep). For each NVFP4 block it minimizes ``dwᵀ H dw`` over the 126 candidate scales using the per-cin-block local Hessian on tensor cores, replacing the per-weight Python reference sweep — roughly **34x** faster on a single 8192x4096 weight and bit-exact with the reference for fp32/fp16 weights. Used automatically during ``local_hessian`` calibration for both dense and fused-MoE expert weights; falls back to the reference sweep on CPU, when Triton is unavailable, or via ``MODELOPT_NVFP4_TRITON_SWEEP=0``.
 - Add NVFP4 Four-Over-Six (4/6) weight quantization (``mtq.NVFP4_FOUR_OVER_SIX_CFG``): MSE weight calibration picks, per block, between an M=6 and an M=4 dynamic range (the choice is folded into the FP8 per-block scales), with the ``four_over_six: true`` flag normalizing those scales by 256 (vs 448) for M=4 headroom. Supported via ``mtq.quantize`` and HF / Megatron export only -- **not** ``mtq.compress``, which does not preserve the per-block M=4/M=6 choice
