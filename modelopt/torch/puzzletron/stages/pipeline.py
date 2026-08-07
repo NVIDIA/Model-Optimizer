@@ -275,16 +275,18 @@ def _has_runtime_measurement(
 ) -> bool:
     """
     Determine whether a statistics file contains a compatible runtime measurement.
-    
+
     Parameters:
     	path (Path): Statistics file to inspect.
     	hidden_width (int): Model hidden width expected by the measurement.
     	measurement (Any): Runtime measurement configuration to match.
     	allow_missing_workload_id (bool): Whether entries without a workload identifier may match.
-    
+
     Returns:
     	bool: `True` if a compatible runtime measurement is present, `False` otherwise.
     """
+    from ..subblock_stats.calc_subblock_stats import _runtime_reuse_key, _runtime_stats_identity
+
     try:
         payload = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -292,34 +294,27 @@ def _has_runtime_measurement(
     if not isinstance(payload, list):
         return False
     expected_backend = (measurement.runtime_stats or {}).get("backend")
+    requested_key = _runtime_reuse_key(
+        width=hidden_width,
+        batch_size=measurement.batch_size,
+        prefill_seq_len=measurement.prefill_seq_len,
+        generation_seq_len=measurement.generation_seq_len,
+        runtime_stats_config=measurement.runtime_stats or {},
+    )
     for entry in payload:
         if not isinstance(entry, dict):
             continue
         args = entry.get("args") or {}
         if not isinstance(args, dict) or args.get("runtime_stats") is not True:
             continue
-        if int(args.get("n_embd", -1)) != int(hidden_width):
+        persisted_key = _runtime_stats_identity(
+            args,
+            fallback_workload_id=measurement.measurement_id if allow_missing_workload_id else None,
+        )
+        if persisted_key is None:
             continue
-        if args.get("weights_dtype") != "torch.bfloat16":
-            continue
-        if int(args.get("batch_size", -1)) != int(measurement.batch_size):
-            continue
-        if int(args.get("prefill_seq_len", -1)) != int(measurement.prefill_seq_len):
-            continue
-        if int(args.get("generation_seq_len", -1)) != int(measurement.generation_seq_len):
-            continue
-        if int(args.get("max_num_seqs", -1)) != int(measurement.max_num_seqs):
-            continue
-        if args.get("runtime_granularity", "subblock") != measurement.granularity:
-            continue
-        if expected_backend is not None and args.get("runtime_backend") != expected_backend:
-            continue
-        workload_id = args.get("workload_id")
-        if workload_id is None and not allow_missing_workload_id:
-            continue
-        if workload_id is not None and workload_id != measurement.measurement_id:
-            continue
-        return True
+        if persisted_key == requested_key:
+            return True
     return False
 
 
