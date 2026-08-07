@@ -33,23 +33,20 @@ jobs:
         pyproject.toml
         tests/examples/**
 
-  ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
+  ##### PyTorch Example Tests #####
   torch:
     needs: [pr-gate]
     if: needs.pr-gate.outputs.any_changed == 'true'
     strategy:
       fail-fast: false
       matrix:
-        example: [gpt-oss, llm_distill, llm_qat, llm_sparsity, specdec_bench]
-        include:
-          - example: speculative_decoding
-            docker_image: "26.01"
+        example: [gpt-oss, llm_distill, llm_qat, llm_sparsity, specdec_bench, speculative_decoding]
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.06' }}-py3"
+      docker_image: "nvcr.io/nvidia/pytorch:26.06-py3"
       example: ${{ matrix.example }}
       timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"

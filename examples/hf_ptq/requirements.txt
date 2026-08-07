@@ -1,6 +1,7 @@
 compressed-tensors
 fire
 flash-attn>=2.6.0
+mlflow-skinny>=2.9
 psutil
 transformers_stream_generator
 zstandard

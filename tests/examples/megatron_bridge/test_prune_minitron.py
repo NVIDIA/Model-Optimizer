@@ -40,9 +40,15 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
         ),
         # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid. Saved in Megatron checkpoint
         # format because HF export of a pruned NemotronH requires transformers<5.
+        # MTP heads are enabled so the run covers dropping them during calibration and the
+        # hybrid pattern MCore builds for them.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_nemotron_h_dir(
-                tmp_path, with_tokenizer=True, return_model=True
+                tmp_path,
+                with_tokenizer=True,
+                return_model=True,
+                num_nextn_predict_layers=1,
+                mtp_hybrid_override_pattern="*E",
             ),
             True,
             id="nemotron_h",
@@ -70,6 +76,7 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
         seq_length=16,
         prune_target_params=prune_target_params,
         prune_score_func="mmlu_1pct_bs32",
+        score_lower_bound=0.0,  # exercise the score-gate path without coupling to the model's acc
         ss_channel_divisor=4,
         hparams_to_skip="num_attention_heads",
         top_k=1,
@@ -138,6 +145,7 @@ def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
         seq_length=1024,
         prune_target_params=prune_target_params,
         prune_score_func="mmlu_1pct_bs32",
+        score_lower_bound=0.0,  # exercise the score-gate path without coupling to the model's acc
         ss_channel_divisor=4,
         # Allow depth pruning (the primary param lever once hidden_size is fixed for VLMs).
         max_depth_pruning=0.6,

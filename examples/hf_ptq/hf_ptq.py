@@ -29,6 +29,7 @@ from cast_mxfp4_to_nvfp4 import apply_to_model as apply_cast_mxfp4_to_nvfp4
 from cast_mxfp4_to_nvfp4 import force_weight_quantizers_static
 from example_utils import (
     _resolve_model_path,
+    add_mlflow_args,
     build_quant_cfg,
     cleanup_distributed,
     copy_custom_model_files,
@@ -39,9 +40,11 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    mlflow_run,
     mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
     resolve_checkpoint_dir,
+    resolve_mlflow_args,
     run_nemotron_vl_preview,
     setup_distributed_args,
     validate_fsdp2_supported,
@@ -578,6 +581,9 @@ def load_model(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
+            offload_folder=args.offload_folder,
+            max_cpu_memory_gb=args.max_cpu_memory_gb,
+            max_gpu_memory_gb=args.max_gpu_memory_gb,
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -817,7 +823,9 @@ def export_quantized(
     default_padding_side,
     default_pad_token,
 ):
-    with torch.inference_mode():
+    # Not inference_mode: the FSDP2 path gathers full params in this context and
+    # inference tensors break the subsequent state_dict() -> param.detach().
+    with torch.no_grad():
         if model_type is None:
             print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
             model_type = f"unknown:{type(language_model).__name__}"
@@ -1621,8 +1629,44 @@ def parse_args() -> argparse.Namespace:
             "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
         ),
     )
+    parser.add_argument(
+        "--offload_folder",
+        type=str,
+        default=None,
+        help=(
+            "Path to a local folder for disk-offloaded model weights. "
+            "When set, activates disk-offload mode: model weights that exceed the GPU+CPU "
+            "budgets are streamed from disk during calibration and export. "
+            "Pair with --max_cpu_memory_gb to cap CPU RAM usage. "
+            "Incompatible with --low_memory_mode and --use_seq_device_map."
+        ),
+    )
+    parser.add_argument(
+        "--max_cpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum CPU RAM budget in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Weights beyond this limit are streamed from disk."
+        ),
+    )
+    parser.add_argument(
+        "--max_gpu_memory_gb",
+        type=float,
+        default=None,
+        help=(
+            "Maximum GPU memory budget per device in GiB for disk-offload model loading. "
+            "Only effective when --offload_folder is set. "
+            "Defaults to 80%% of available GPU memory when not specified."
+        ),
+    )
+
+    add_mlflow_args(parser)
 
     args = parser.parse_args()
+    resolve_mlflow_args(args, parser)
+
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
@@ -1655,9 +1699,36 @@ def parse_args() -> argparse.Namespace:
     if args.use_fsdp2 and args.cast_mxfp4_to_nvfp4:
         parser.error("--use_fsdp2 does not support --cast_mxfp4_to_nvfp4.")
 
+    if args.offload_folder is not None and args.low_memory_mode:
+        parser.error("--offload_folder (disk-offload) is not compatible with --low_memory_mode.")
+
+    if args.offload_folder is not None and args.use_seq_device_map:
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --use_seq_device_map; "
+            "device_map=auto is used for disk-offload to let accelerate place layers across "
+            "GPU, CPU, and disk."
+        )
+
+    if args.offload_folder is not None and args.device == "cpu":
+        parser.error(
+            "--offload_folder (disk-offload) is not compatible with --device cpu; "
+            "device_map=cpu makes accelerate ignore the memory budgets and offload folder, "
+            "loading the whole model into RAM."
+        )
+
+    if args.offload_folder is None and (
+        args.max_cpu_memory_gb is not None or args.max_gpu_memory_gb is not None
+    ):
+        parser.error(
+            "--max_cpu_memory_gb/--max_gpu_memory_gb only apply to disk-offload loading; "
+            "pass --offload_folder to enable it."
+        )
+
     return args
 
 
+# Derived state and the tracking settings themselves; everything else argparse parsed is a
+# parameter of the run. Deriving the list means a new flag is tracked without touching this.
 def main(args: argparse.Namespace):
     if not torch.cuda.is_available():
         raise OSError("GPU is required for inference.")
@@ -1668,31 +1739,17 @@ def main(args: argparse.Namespace):
     setup_distributed_args(args)
 
     try:
-        # launch a memory monitor to read the currently used GPU memory.
-        launch_memory_monitor()
+        # Entered inside the try: opening the run is fatal by design, and skipping
+        # cleanup_distributed would leave the other ranks blocked on the first collective
+        # until the NCCL timeout.
+        with mlflow_run(args):
+            # launch a memory monitor to read the currently used GPU memory.
+            launch_memory_monitor()
 
-        # Force eager execution for all model types.
-        torch.compiler.set_stance("force_eager")
+            # Force eager execution for all model types.
+            torch.compiler.set_stance("force_eager")
 
-        (
-            full_model,
-            language_model,
-            model_type,
-            calibration_only,
-            processor,
-            tokenizer,
-            default_padding_side,
-            default_pad_token,
-            device,
-        ) = load_model(args)
-
-        if args.sparsity_fmt != "dense":
-            # Sparse
-            sparsity_main(args, full_model, tokenizer, device)
-        else:
-            # Quantize
-            quantize_main(
-                args,
+            (
                 full_model,
                 language_model,
                 model_type,
@@ -1702,7 +1759,25 @@ def main(args: argparse.Namespace):
                 default_padding_side,
                 default_pad_token,
                 device,
-            )
+            ) = load_model(args)
+
+            if args.sparsity_fmt != "dense":
+                # Sparse
+                sparsity_main(args, full_model, tokenizer, device)
+            else:
+                # Quantize
+                quantize_main(
+                    args,
+                    full_model,
+                    language_model,
+                    model_type,
+                    calibration_only,
+                    processor,
+                    tokenizer,
+                    default_padding_side,
+                    default_pad_token,
+                    device,
+                )
     finally:
         cleanup_distributed(args)
 

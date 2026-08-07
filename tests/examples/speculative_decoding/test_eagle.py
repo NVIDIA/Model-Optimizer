@@ -20,7 +20,6 @@ import pytest
 import safetensors.torch
 import torch
 from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
-from packaging.version import Version
 from transformers import AutoConfig
 
 from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
@@ -127,8 +126,6 @@ def test_llama_eagle3(tiny_llama_path,
     """Test Eagle3 training with a tiny llama model, using different cp_size values."""
     if cp_size == 2 and num_gpus < 2:
         pytest.skip(f"cp_size=2 requires at least 2 GPUs, but only {num_gpus} found.")
-    if cp_size == 2 and not Version(torch.__version__) >= Version("2.10.0"):
-        pytest.skip("cp_size=2 requires torch 2.10.0")
 
     output_dir = str(eagle_output_dir / f"eagle-tinyllama-cp{cp_size}-mix{mix_hidden_states}")
     overrides = [

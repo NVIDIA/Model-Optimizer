@@ -24,9 +24,11 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed._composable.fsdp.fully_shard import fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy
 from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_calib as model_calib
 from modelopt.torch.opt.dynamic import _pytorch_managed
 from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils import (
@@ -34,6 +36,7 @@ from modelopt.torch.quantization.utils import (
     persistent_materialization,
 )
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+from modelopt.torch.utils.dataset_utils import _forward_loop
 
 
 def _test_fsdp2_simple_linear(rank, size):
@@ -214,8 +217,6 @@ class _SimpleTransformerModel(nn.Module):
 
 def _test_layerwise_calibrate_fsdp2(rank, size):
     """Layerwise calibration on FSDP2-wrapped model matches non-FSDP reference."""
-    import modelopt.torch.quantization.model_calib as model_calib
-
     dim = 32
     torch.manual_seed(1)
     model = _SimpleTransformerModel(n_layers=3, dim=dim).cuda()
@@ -342,8 +343,6 @@ def _test_writeback_root_unwrapped(rank, size):
     (``fsdp2_wrap`` now defaults to ``shard_root=True``, wrapping the root too). Regression guard
     for the old ``isinstance(root_model, FSDPModule)`` assert that wrongly required a wrapped root.
     """
-    from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
-
     dim = 32
     torch.manual_seed(1)
     # Root is a plain container; model[0] stands in for a decoder layer.
@@ -385,10 +384,6 @@ def _test_writeback_cpu_offload(rank, size):
     so the helper mirrors it to GPU for in-context mutation and must copy
     modifications back to the CPU shard on exit.
     """
-    from torch.distributed.fsdp import CPUOffloadPolicy
-
-    from modelopt.torch.quantization.utils import enable_weight_access_and_writeback
-
     dim = 32
     torch.manual_seed(1)
     model = nn.Sequential(nn.Sequential(nn.Linear(dim, dim), nn.Linear(dim, dim))).cuda(rank)
@@ -440,8 +435,6 @@ def _test_sharded_root_calibration(rank, size):
     unshard embed/norm for the forward and reshard them after — no manual materialization.
     With the old ``model.forward`` bypass this hit ``aten.embedding: mixed Tensor and DTensor``.
     """
-    from modelopt.torch.utils.dataset_utils import _forward_loop
-
     dim = 32
     torch.manual_seed(1)
     model = _EmbedRootModel(dim=dim).cuda(rank)

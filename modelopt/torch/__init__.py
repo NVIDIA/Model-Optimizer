@@ -49,9 +49,9 @@ if _Version(_torch_version) < _Version("2.9"):
 try:
     from transformers import __version__ as _transformers_version
 
-    if _Version(_transformers_version) < _Version("4.56") or _Version(
+    if _Version(_transformers_version) < _Version("4.57") or _Version(
         _transformers_version
-    ) >= _Version("5.13"):
+    ) >= _Version("5.15"):
         _warnings.warn(
             f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
             " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",

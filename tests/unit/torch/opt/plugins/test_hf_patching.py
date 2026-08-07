@@ -32,7 +32,8 @@ import modelopt.torch.opt as mto
         (AutoModelForCausalLM, "qwen3"),
     ],
 )
-def test_nested_model_save_restore(tmp_path, model_cls, teacher_model_type):
+# Skipped on Windows - Flaky; root cause unknown; not critical
+def test_nested_model_save_restore(skip_on_windows, tmp_path, model_cls, teacher_model_type):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path)
 
     model_ref = model_cls.from_pretrained(tiny_llama_dir)

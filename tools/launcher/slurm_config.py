@@ -48,6 +48,9 @@ class SlurmConfig:
     requeue: bool = False
     nodes: int = 1
     ntasks_per_node: int = 1
+    # Docker-only: user for local `docker run` (e.g. "root" to read root-owned image
+    # paths like /opt/Megatron-Bridge). None -> host uid:gid. Ignored on Slurm.
+    docker_user: Optional[str] = None
     # None means omit GPU GRES entirely. Some clusters expose GPU nodes without
     # Slurm GRES, so requesting --gpus-per-node would make valid jobs fail.
     gpus_per_node: Optional[int] = 1
@@ -71,6 +74,7 @@ def slurm_factory(
     nodes: int = 1,
     ntasks_per_node: int = 1,
     gpus_per_node: Optional[int] = 1,
+    docker_user: Optional[str] = None,
     container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc20",
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt",
     container_mounts: list[str] = [
@@ -92,6 +96,7 @@ def slurm_factory(
         nodes=nodes,
         ntasks_per_node=ntasks_per_node,
         gpus_per_node=gpus_per_node,
+        docker_user=docker_user,
         container=container,
         modelopt_install_path=modelopt_install_path,
         container_mounts=container_mounts,

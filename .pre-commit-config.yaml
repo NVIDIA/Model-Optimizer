@@ -57,13 +57,13 @@ repos:
     hooks:
       - id: normalize-yaml-ext
         name: normalize .yml to .yaml in required places, right now only yaml files in modelopt_recipes
-        entry: python tools/precommit/normalize_yaml_ext.py
+        entry: uv run --frozen --extra dev python tools/precommit/normalize_yaml_ext.py
         language: system
         files: ^modelopt_recipes/.*\.yml$
 
       - id: check-modelopt-recipes
         name: validate modelopt recipes
-        entry: python tools/precommit/check_modelopt_recipes.py
+        entry: uv run --frozen --extra dev python tools/precommit/check_modelopt_recipes.py
         language: system
         files: ^modelopt_recipes/
         # configs/ contains reusable snippets (not full recipes) — skip recipe validation
@@ -78,7 +78,7 @@ repos:
 
       - id: check-launcher-yaml
         name: validate launcher YAML references to recipes and templates
-        entry: python tools/precommit/check_launcher_yaml.py
+        entry: uv run --frozen --extra dev python tools/precommit/check_launcher_yaml.py
         language: system
         files: ^(tools/launcher/examples/.*\.yaml|tools/precommit/check_launcher_yaml\.py)$
 
@@ -158,7 +158,7 @@ repos:
     hooks:
       - id: generate-arguments-md
         name: Regenerate examples/llm_qat/ARGUMENTS.md
-        entry: bash -c 'python examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md'
+        entry: uv run --frozen --extra dev python examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md
         language: system
         files: >-
           (?x)^(
