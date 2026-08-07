@@ -19,9 +19,12 @@ Changelog
 
 **Deprecations**
 
+- Drop PTQ support for **Phi-3-vision** and **Phi-4-multimodal**. Their bundled remote code predates Transformers v5 and no longer loads on the versions this repo requires (``transformers>=4.57``): Phi-4-multimodal needs ``transformers<4.52`` because it reaches ``prepare_inputs_for_generation`` through ``peft``, which requires ``PreTrainedModel`` to still inherit ``GenerationMixin``, and both models declare ``_tied_weights_keys`` as a list, which Transformers 5.x rejects. Removes the ``phi4mm`` model type, its multimodal-detection heuristics (``vision_lora`` / ``audio_processor`` / ``embd_layer.image_embd_layer``), the ``Phi3Image`` / ``PhiImage`` embedding-export exclusions, and the ``modelopt_recipes/huggingface/phi4mm/`` recipes.
+
 **Bug Fixes**
 
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- ``examples/hf_ptq/hf_ptq.py`` no longer aborts the whole load when the throwaway meta-device skeleton it builds to size ``infer_auto_device_map`` cannot be constructed. ``init_empty_weights(include_buffers=True)`` pushes a global ``torch.device("meta")`` context, so remote-code checkpoints that derive scalar hyperparameters from real tensors in ``__init__`` raised ``Tensor.item() cannot be called on meta tensors``. The skeleton is now retried without the global meta context, and if that also fails the memory estimate is skipped with a warning instead of failing the run.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^

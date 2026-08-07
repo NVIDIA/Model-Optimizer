@@ -177,12 +177,6 @@ def _is_multimodal_config(config):
     """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
         or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
             "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])

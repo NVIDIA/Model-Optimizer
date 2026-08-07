@@ -119,12 +119,18 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Whisper<sup>9</sup> | ✅ | ❌ | ❌ | ❌ | - |
 | Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Llava (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | - |
-| Phi-3-vision, Phi-4-multimodal (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
 | Qwen2, 2.5-VL (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
 | Gemma 3 (VLM)<sup>11</sup> | ✅ | - | - | - | - |
 | Nemotron VL (VLM)<sup>11,13</sup> | ✅ | - | - | - | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
+
+> *Phi-3-vision and Phi-4-multimodal were dropped from this matrix: their bundled
+> remote code predates Transformers v5 and no longer loads on the versions this repo
+> requires (`transformers>=4.57`). Phi-4-multimodal needs `transformers<4.52` — it
+> reaches `prepare_inputs_for_generation` through `peft`, which requires
+> `PreTrainedModel` to still inherit `GenerationMixin` — and both models declare
+> `_tied_weights_keys` as a list, which Transformers 5.x rejects.*
 
 > *<sup>1.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.* \
 > *<sup>2.</sup>For some models, there is only support for exporting quantized checkpoints.* \

@@ -234,7 +234,7 @@ that baseline. The deviations come in four kinds:
 |------|-------------------------------------|----------|
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
-| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `phi4mm`, `diffusion_gemma` |
+| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
 | **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/nvidia/Mistral-Medium-3.5-128B-NVFP4` |
 
 The numerics and standard exclusions are still inherited from `configs/`
@@ -314,7 +314,7 @@ These quantize the **same layers** as the general recipes; only the
 *Why special:* identical scope/numerics to a general scheme, but a general
 recipe's default algorithm would overflow or regress here.
 
-### Extra exclusions — `nemotron_vl`, `phi4mm`, `diffusion_gemma`
+### Extra exclusions — `nemotron_vl`, `diffusion_gemma`
 
 Each of these is **numerically identical** to a general recipe. What makes them
 special is a model-local `disabled_quantizers.yaml` unit that *extends* the
@@ -324,8 +324,6 @@ standard exclusions so a model-specific branch stays in full precision:
   `nvfp4_default-kv_fp8_cast` numerics, adding `*vision*`, `*image*`, `*radio*`,
   `*visual*`, `*encoder*`, `*model_encoder*` so only the language decoder is
   quantized.
-- **`phi4mm`** (Phi-4-Multimodal) — general `nvfp4_default-kv_fp8_cast`
-  numerics, adding `*speech*`, `*audio*`, `*image*`, `*vision*`.
 - **`diffusion_gemma`** (block-diffusion encoder-decoder text LLM on a Gemma4
   MoE backbone) — general `nvfp4_experts_only-kv_fp8_cast` numerics, adding
   `*self_conditioning*`: the self-conditioning network is text-only and never
