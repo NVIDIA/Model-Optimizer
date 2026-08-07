@@ -276,7 +276,16 @@ def _runtime_reuse_key_from_args(
     *,
     fallback_workload_id: str | None = None,
 ) -> tuple | None:
-    """Return the exact runtime-reuse identity represented by persisted args."""
+    """
+    Builds the identity used to match reusable runtime measurements.
+    
+    Parameters:
+    	args (Mapping): Persisted calculation arguments containing runtime and workload settings.
+    	fallback_workload_id (str | None): Workload identifier to use when `args` does not provide one.
+    
+    Returns:
+    	tuple | None: Runtime-reuse identity, or `None` when runtime statistics are unavailable or the dtype is not bfloat16.
+    """
 
     if not args.get("runtime_stats") or args.get("weights_dtype") != str(torch.bfloat16):
         return None
@@ -307,7 +316,15 @@ def _runtime_reuse_key(
     generation_seq_len: int,
     runtime_stats_config: Mapping,
 ) -> tuple:
-    """Return the exact runtime-reuse identity requested by this calculation."""
+    """
+    Builds an exact identity for matching reusable runtime measurements.
+    
+    Parameters:
+        runtime_stats_config (Mapping): Runtime settings that determine measurement compatibility.
+    
+    Returns:
+        tuple: Identity containing model dimensions, runtime settings, vLLM arguments, and workload identity.
+    """
 
     return (
         int(width),
@@ -332,7 +349,21 @@ def _reuse_runtime_stats(
     source_path: str,
     fallback_workload_id: str | None = None,
 ) -> dict:
-    """Overlay immutable measured latency onto refreshed static statistics."""
+    """
+    Reuse measured runtime statistics from a compatible source entry in refreshed statistics.
+    
+    Parameters:
+        target (dict): Statistics entry to update with reusable runtime data.
+        source (dict): Statistics entry containing the measured runtime data.
+        source_path (str): Path identifying the source statistics entry.
+        fallback_workload_id (str | None): Workload identifier to use when the source does not provide one.
+    
+    Returns:
+        dict: The updated target statistics entry.
+    
+    Raises:
+        KeyError: If a target subblock has no matching runtime statistics in the source entry.
+    """
 
     # Synthetic vLLM timings are layer-independent: collection benchmarks the
     # set of unique subblock configs, while a post-scoring replacement library
@@ -826,6 +857,33 @@ def calculate_subblock_stats(
     runtime_selection_identity: str | None = None,
     parameter_inventory: Mapping | None = None,
 ) -> dict:
+    """
+    Compute parameter, memory, additive-metric, and optional runtime statistics for subblock configurations.
+    
+    Parameters:
+    	calc_subblock_stats_config (DictConfig): Runtime measurement and calculation settings.
+    	teacher_dir (Path): Directory containing the teacher model or checkpoint.
+    	model_config (PretrainedConfig): Model configuration used for metric calculations.
+    	descriptor (Type[ModelDescriptor]): Model descriptor defining architecture-specific behavior.
+    	master_puzzle_dir (Path): Puzzle directory used for runtime measurement caches.
+    	subblock_configs (list[immutabledict[str, SubblockConfig]]): Subblock configurations and their parent layer indices.
+    	batch_size (int): Number of sequences in the workload.
+    	prefill_seq_len (int): Input sequence length used for prefill calculations.
+    	generation_seq_len (int): Number of generated tokens used for decode calculations.
+    	n_embd (int): Model hidden size.
+    	n_head (int): Number of attention heads.
+    	vocab_size (int): Model vocabulary size.
+    	runtime_stats_enabled (bool): Whether to measure runtime statistics.
+    	use_cuda_graph (bool): Whether to use CUDA graphs during runtime measurement.
+    	weights_dtype (torch.dtype): Data type used for model weights.
+    	activations_dtype (torch.dtype): Data type used for activations.
+    	kv_cache_dtype (torch.dtype): Data type used for the key-value cache.
+    	runtime_selection_identity (str | None): Identity of the runtime subblock selection.
+    	parameter_inventory (Mapping | None): Precomputed parameter inventory to use for parameter counts.
+    
+    Returns:
+    	dict: Statistics for the requested workload, including calculation arguments, non-block statistics, and per-subblock metrics.
+    """
     runtime_granularity = "subblock"
     runtime_stats_config = (
         calc_subblock_stats_config.get("runtime_stats", {}) if runtime_stats_enabled else {}
@@ -1246,12 +1304,26 @@ def _subblock_stats_already_complete(
     prefill_seq_len: int = 2048,
     generation_seq_len: int = 2048,
 ) -> bool:
-    """Whether ``existing_stats`` already covers every configuration this run would compute.
-
-    When runtime benchmarking is enabled, the bf16 entries (the only ones for
-    which runtime is ever measured) must additionally already carry runtime
-    measurements **at the requested granularity** — switching subblock<->block must trigger a
-    recompute rather than silently reusing the other granularity's numbers.
+    """
+    Determine whether existing statistics cover all requested configurations.
+    
+    Parameters:
+        existing_stats (list): Previously calculated statistics entries.
+        subblock_configs (list): Subblock configurations required for coverage.
+        batch_sizes (Iterable[int]): Batch sizes to verify.
+        data_types (list): Weight, activation, and KV-cache dtype combinations.
+        model_hidden_sizes (Iterable[int]): Model widths to verify.
+        runtime_stats_enabled (bool): Whether runtime measurements are required.
+        runtime_granularity (str): Required runtime measurement granularity.
+        runtime_max_num_seqs (int | None): Required maximum number of runtime sequences.
+        runtime_workload_id (str | None): Required runtime workload identity.
+        runtime_selection_identity (str | None): Required runtime subblock-selection identity.
+        parameter_inventory_identities (Mapping[int, str] | None): Inventory identity required for each model width.
+        prefill_seq_len (int): Required prefill sequence length.
+        generation_seq_len (int): Required generation sequence length.
+    
+    Returns:
+        bool: True if every requested configuration and required measurement is present, False otherwise.
     """
     by_signature = {_arg_signature(entry["args"]): entry for entry in existing_stats}
     required_subblock_keys = {
@@ -1354,6 +1426,27 @@ def calculate_subblock_stats_for_puzzle_dir(
     # from attach_helper import debugging_setup
     # debugging_setup()  # You can optionally pass a name to identify the job (e.g. `debugging_setup(name="my_script")`)
     # ==== END === Setup for attach-helper ====
+    """
+    Compute and persist subblock statistics for all requested batch sizes, data types, and model widths.
+    
+    Parameters:
+        calc_subblock_stats_config (DictConfig): Configuration for statistics calculation and optional runtime measurement.
+        master_puzzle_dir (Path | str): Puzzle directory containing subblock configurations and output files.
+        teacher_dir (Path | str): Teacher checkpoint directory used for model metadata and parameter inventories.
+        descriptor (Type[ModelDescriptor]): Model descriptor defining architecture-specific behavior.
+        model_hidden_sizes (ListConfig): Hidden sizes to evaluate; the teacher hidden size is always included.
+        ffn_hidden_sizes (ListConfig): Additional FFN sizes to include in the subblock configurations.
+        batch_sizes (Iterable[int]): Batch sizes to evaluate.
+        prefill_seq_len (int): Number of prompt tokens used for runtime measurements.
+        generation_seq_len (int): Number of generated tokens used for runtime measurements.
+        runtime_stats_enabled (bool): Whether to compute or reuse runtime statistics.
+        merge_with_existing_stats (bool): Whether to update an existing incomplete statistics file.
+        subblock_stats_filename (str): Name of the JSON file used to persist statistics.
+    
+    Raises:
+        FileNotFoundError: If a configured runtime manifest or reusable runtime statistics file cannot be found.
+        ValueError: If runtime settings or reusable runtime statistics do not cover the requested configurations.
+    """
     if isinstance(batch_sizes, str):
         batch_sizes = [
             int(batch_size) for batch_size in batch_sizes.strip("[]").replace(" ", "").split(",")
