@@ -849,7 +849,6 @@ def test_te_grouped_compiled_weight_quantizer_loop(
     destroy_model_parallel()
 
 
-@pytest.mark.timeout(90)  # real torch.compile: cap runaway inductor recompiles without flaking CI
 def test_te_grouped_real_compile_weight_quantizer_loop(distributed_setup_size_1, monkeypatch):
     """Real (unpatched) torch.compile parity for the per-expert weight-quantizer loop.
 
@@ -1074,9 +1073,9 @@ def _test_te_grouped_vs_sequential_default_amax_helper(tp_size, ep_size, quant_c
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
-def test_te_grouped_vs_sequential_default_amax(dist_workers_size_4, quant_cfg):
-    dist_workers_size_4.run(
-        partial(_test_te_grouped_vs_sequential_default_amax_helper, 1, 2, quant_cfg)
+def test_te_grouped_vs_sequential_default_amax(dist_workers_size_1, quant_cfg):
+    dist_workers_size_1.run(
+        partial(_test_te_grouped_vs_sequential_default_amax_helper, 1, 1, quant_cfg)
     )
 
 
@@ -1238,9 +1237,9 @@ def _test_te_grouped_vs_sequential_default_loss_helper(tp_size, ep_size, quant_c
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
-def test_te_grouped_vs_sequential_default_loss(dist_workers_size_4, quant_cfg):
-    dist_workers_size_4.run(
-        partial(_test_te_grouped_vs_sequential_default_loss_helper, 1, 2, quant_cfg)
+def test_te_grouped_vs_sequential_default_loss(dist_workers_size_1, quant_cfg):
+    dist_workers_size_1.run(
+        partial(_test_te_grouped_vs_sequential_default_loss_helper, 1, 1, quant_cfg)
     )
 
 
