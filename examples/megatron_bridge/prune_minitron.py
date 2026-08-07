@@ -42,10 +42,20 @@ import argparse
 import json
 import os
 import re
+import sys
 
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
+
+try:  # nemo:26.08+
+    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
+
+    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
+    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
+except ImportError:  # nemo:26.06 and earlier
+    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
+
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -57,6 +67,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
+from modelopt.torch.nas.plugins.megatron_model_stats import parse_main_layer_chars
 from modelopt.torch.utils import (
     get_supported_datasets,
     num2hrb,
@@ -71,6 +82,11 @@ from modelopt.torch.utils.plugins.megatron_calibration import (
 )
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
 from modelopt.torch.utils.vlm_dataset_utils import get_supported_vlm_datasets
+
+# isort: off
+# Register Megatron-Bridge model-specific NAS/pruning plugins here to avoid a circular import
+import modelopt.torch.nas.plugins.mbridge  # noqa: F401
+# isort: on
 
 # Default calibration datasets when --calib_dataset_name is not set
 DEFAULT_TEXT_CALIB_DATASET = "nemotron-post-training-dataset-v2"
@@ -93,6 +109,14 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
+            "TEGroupedMLP (grouped GEMM). Only affects MoE models."
+        ),
+    )
 
     target_group = parser.add_mutually_exclusive_group(required=True)
     target_group.add_argument(
@@ -216,6 +240,12 @@ def get_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--score_lower_bound",
+        type=float,
+        default=None,
+        help="If set, fail the job when the NAS-based pruned model's score is below this bound.",
+    )
+    parser.add_argument(
         "--ss_channel_divisor",
         type=int,
         default=None,
@@ -274,6 +304,11 @@ def get_args() -> argparse.Namespace:
         parser.error(
             "At least one of --prune_export_config, --prune_target_params,"
             " --prune_target_active_params, or --prune_target_memory_mb is required."
+        )
+    if args.score_lower_bound is not None and args.prune_export_config:
+        parser.error(
+            "--score_lower_bound requires NAS-based scoring (--prune_score_func), "
+            "not --prune_export_config."
         )
 
     # Post-process arguments
@@ -368,7 +403,7 @@ def main(args: argparse.Namespace):
             "mtp_num_layers": 0,  # MTP is not supported during calibration
         },
         init_model_parallel=True,
-        moe_grouped_gemm=False,
+        moe_grouped_gemm=not args.no_moe_grouped_gemm,
     )
 
     # TODO: Support pruning with MTP heads enabled (e.g. Qwen3.5 mtp_num_hidden_layers=1).
@@ -489,18 +524,9 @@ def main(args: argparse.Namespace):
         )
 
         match = re.fullmatch(r"mmlu_(\d+)pct_bs(\d+)", args.prune_score_func)
-        legacy_match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
         if match:
             mmlu_frac = float(match.group(1)) / 100.0
             batch_size = int(match.group(2))
-        elif legacy_match:
-            warn_rank_0(
-                f"Score function '{args.prune_score_func}' uses the deprecated format "
-                "'mmlu_<N>pct'. Use 'mmlu_<N>pct_bs<bs>' to specify the evaluation batch size. "
-                "Falling back to batch_size=1."
-            )
-            mmlu_frac = float(legacy_match.group(1)) / 100.0
-            batch_size = 1
         else:
             raise ValueError(
                 f"Invalid score function: {args.prune_score_func}. "
@@ -536,7 +562,7 @@ def main(args: argparse.Namespace):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, MambaModelProvider):
+    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -544,22 +570,17 @@ def main(args: argparse.Namespace):
         )
         setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
 
-    if args.output_megatron_path is not None:
-        print_rank_0(
-            f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
-        )
+    # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR.
+    architectures = getattr(bridge.hf_pretrained.config, "architectures", None) or []
+    use_fast_tokenizer = "NemotronHForCausalLM" in architectures
+    tokenizer_kwargs = {"trust_remote_code": args.trust_remote_code, "use_fast": use_fast_tokenizer}
 
-        # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR.
-        architectures = getattr(bridge.hf_pretrained.config, "architectures", None) or []
-        use_fast_tokenizer = "NemotronHForCausalLM" in architectures
+    if args.output_megatron_path is not None:
         bridge.save_megatron_model(
             model,
             args.output_megatron_path,
             hf_tokenizer_path=args.hf_model_name_or_path,
-            hf_tokenizer_kwargs={
-                "trust_remote_code": args.trust_remote_code,
-                "use_fast": use_fast_tokenizer,
-            },
+            hf_tokenizer_kwargs=tokenizer_kwargs,
         )
         print_rank_0(
             f"Saved pruned model to {args.output_megatron_path} in Megatron checkpoint format"
@@ -567,7 +588,9 @@ def main(args: argparse.Namespace):
     else:
         print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
 
-        # [WAR] Hacky way to save pruned HF model until Megatron-Bridge natively supports it
+        # [WAR] Save the pruned HF model by hand until Megatron-Bridge natively supports it.
+        # TODO: Replace this whole block with ``AutoBridge.from_auto_config(...).save_hf_weights(...)``
+        #     once the Megatron-Bridge fix ships (nemo:26.08).
         bridge.hf_pretrained.save_artifacts(args.output_hf_path)
         hf_cfg = AutoConfig.from_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
@@ -613,6 +636,8 @@ def main(args: argparse.Namespace):
             if sorted_layers is not None
             else set(range(1, mcore_cfg.num_layers + 1))
         )
+        # layer_types is the HF per-layer attention-cadence field (mcore's linear_attention_freq /
+        # moe_layer_freq have no HF equivalent under those names, so only layer_types needs slicing).
         if hasattr(text_cfg, "layer_types"):
             text_cfg.layer_types = [
                 lt for i, lt in enumerate(text_cfg.layer_types) if i + 1 in kept_layer_nums
@@ -633,8 +658,13 @@ def main(args: argparse.Namespace):
                     "distillation cannot recover this vision-path change -- consider full VLM "
                     "training/distillation instead of LM-only to recover vision quality."
                 )
-        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
-            hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
+        if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
+            text_cfg, "hybrid_override_pattern"
+        ):
+            # MCore's pattern can carry an MTP suffix (``/...``) and PP boundaries (``|``) which we need to remove
+            text_cfg.hybrid_override_pattern = "".join(
+                parse_main_layer_chars(getattr(unwrapped_model, hybrid_key), mcore_cfg.num_layers)
+            )
         text_cfg.num_hidden_layers = mcore_cfg.num_layers
         # Mark MTP as disabled on the HF text config written after pruning
         for field in _MTP_HF_CONFIG_FIELDS:
@@ -653,6 +683,18 @@ def main(args: argparse.Namespace):
 
         copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
+
+    # Accuracy gate: exit non-zero if pruned model's score is below the bound
+    if args.score_lower_bound is not None:
+        best_score = pruning_scores["best"].get("score")
+        assert best_score is not None, "No scored best candidate in pruning_scores"
+        passed = best_score >= args.score_lower_bound
+        print_rank_0(
+            f"[score_gate] final pruned model {args.prune_score_func} score = {best_score:.4f} "
+            f"(lower_bound {args.score_lower_bound}) -> {'PASS' if passed else 'FAIL'}"
+        )
+        if not passed:
+            sys.exit(1)
 
     print_rank_0("Done!")
 

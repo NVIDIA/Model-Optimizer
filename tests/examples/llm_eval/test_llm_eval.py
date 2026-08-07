@@ -36,6 +36,9 @@ def test_lm_eval_hf(tmp_path):
         num_fewshot=5,
         limit=0.1,
         batch_size=8,
+        # Exercise the accuracy gate: reads the results file and enforces the bound
+        output_path=str(tmp_path / "results"),
+        accuracy_lower_bound=0.1,
     )
     run_example_command(cmd_parts, "llm_eval")
 

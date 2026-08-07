@@ -12,15 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 from copy import deepcopy
 
 import pytest
 import torch
 import transformers
+from _test_utils.torch.quantization.offload import make_cpu_offloaded_model, make_layerwise_cfg
 from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_moe_dir
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
@@ -130,36 +129,6 @@ def _test_hf_vllm_export(tmp_path, quant_cfg, model_dir):
             assert any("_amax" in k for k in state), f"input quantizer {name} should preserve _amax"
 
 
-def _make_cpu_offloaded_model(tmp_path, num_hidden_layers=3):
-    """Create a tiny LLaMA model with layer 0 offloaded to CPU via accelerate."""
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=num_hidden_layers)
-    config = AutoConfig.from_pretrained(tiny_llama_dir)
-
-    with init_empty_weights():
-        model = AutoModelForCausalLM.from_config(config)
-
-    device_map = {
-        n: 0
-        for n, m in model.named_modules()
-        if "layers" not in n or n.split("layers.")[-1].isdigit()
-    }
-    device_map["model.layers.0"] = "cpu"
-
-    model = load_checkpoint_and_dispatch(model, tiny_llama_dir, device_map=device_map)
-    return model, config, tiny_llama_dir
-
-
-def _make_layerwise_cfg(base_cfg):
-    """Add layerwise=True to a quant config's algorithm field."""
-    cfg = copy.deepcopy(base_cfg)
-    algo = cfg.get("algorithm", "max")
-    if isinstance(algo, str):
-        cfg["algorithm"] = {"method": algo, "layerwise": True}
-    else:
-        algo["layerwise"] = True
-    return cfg
-
-
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
 def test_hf_vllm_export_offload(tmp_path, quant_cfg):
     """Verifies the inplace_mem_efficient=True path mutates offloaded weights in place
@@ -169,12 +138,12 @@ def test_hf_vllm_export_offload(tmp_path, quant_cfg):
     """
     num_hidden_layers = 3
 
-    model, _config, _tiny_llama_dir = _make_cpu_offloaded_model(
+    model, _config, _tiny_llama_dir, _inputs = make_cpu_offloaded_model(
         tmp_path / "offloaded", num_hidden_layers=num_hidden_layers
     )
     model.eval()
 
-    seq_cfg = _make_layerwise_cfg(quant_cfg)
+    seq_cfg = make_layerwise_cfg(quant_cfg)
 
     def forward_loop(model):
         input_ids = torch.randint(0, model.config.vocab_size, (1, 128)).cuda()

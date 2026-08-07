@@ -223,6 +223,7 @@ the following copyright holders, licensed under the Apache License, Version 2.0
   Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
   Copyright (c) 2024 Heming Xia
   Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team
+  Copyright (c) OpenMMLab. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not
 use these files except in compliance with the License. You may obtain a copy
@@ -247,6 +248,7 @@ the following copyright holders, licensed under the MIT License:
   Copyright (c) 2023 Deep Cognition and Language Research (DeCLaRe) Lab
   Copyright (c) 2023 DeepSeek
   Copyright (c) 2025 sgl-project
+  Copyright (c) 2026 The DeepSpec Authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

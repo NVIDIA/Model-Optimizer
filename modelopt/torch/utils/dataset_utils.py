@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import random
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -496,6 +497,8 @@ def get_dataset_samples(
             "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
             f"its members: {DATASET_COMBOS[dataset_name]}"
         )
+    if num_samples < 0:
+        raise ValueError(f"``num_samples`` must be non-negative, got {num_samples}.")
 
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
@@ -614,7 +617,7 @@ def get_dataset_samples(
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print_rank_0(f"Loading dataset with {config=} and {splits=} {data_files_tmpl=}")
 
-    def _load_split(s: str):
+    def _load_split(s: str | None):
         if data_files_tmpl:
             # Raw files via the ``json`` builder: schema is inferred from data, and the
             # file-based builder labels everything as the ``train`` split.
@@ -627,14 +630,15 @@ def get_dataset_samples(
         return load_dataset(streaming=True, **config, split=s)
 
     try:
-        dataset_splits = [_load_split(s) for s in splits]
-
-        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+        num_per_split = [num_samples // len(splits)] * len(splits)
         num_per_split[-1] += num_samples - sum(num_per_split)
 
         samples: list[str] = []
-        for dataset, n in zip(dataset_splits, num_per_split):
-            for i, sample in enumerate(dataset):
+        for split_name, n in zip(splits, num_per_split):
+            # Skip zero-quota splits: starting a streamed split fetches its first record batch.
+            if n == 0:
+                continue
+            for i, sample in enumerate(_load_split(split_name)):
                 if i >= n:
                     break
                 text = _preprocess(sample)
@@ -762,7 +766,7 @@ def get_dataset_dataloader(
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset (interpreted as number of *output
             rows* in both ``pack=False`` and ``pack=True`` modes — in packed mode the
-            loader oversamples raw text 4x to ensure enough docs to fill all rows).
+            loader oversamples raw text 16x to ensure enough docs to fill all rows).
         max_sample_length: Maximum length of a sample (or per-row length under ``pack=True``).
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader (ignored when
@@ -836,9 +840,9 @@ def get_dataset_dataloader(
 
     # Sample count semantics:
     # - pack=False: gather exactly `num_sample` raw docs per source, one per output row.
-    # - pack=True:  oversample 8x per source to ensure enough raw docs to fill all rows,
+    # - pack=True:  oversample 16x per source to ensure enough raw docs to fill all rows,
     #               since each row greedily packs multiple docs.
-    sample_multiplier = 8 if pack else 1
+    sample_multiplier = 16 if pack else 1
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
         samples = get_dataset_samples(
@@ -861,10 +865,11 @@ def get_dataset_dataloader(
         )
         if input_ids.shape[0] < total_rows:
             warn_rank_0(
-                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} "
-                f"requested — raw text exhausted before filling all rows (8x oversample "
-                f"of num_samples was insufficient). Increase `num_samples` or shorten "
-                f"`max_sample_length`."
+                f"pack=True produced {input_ids.shape[0]} rows out of {total_rows} requested — "
+                f"raw text exhausted before filling all rows ({sample_multiplier}x oversample of "
+                "num_samples was insufficient). Shorten `max_sample_length` or supply longer, "
+                "more token-dense samples; increasing `num_samples` only helps if the source can "
+                "provide additional useful content."
             )
         if device:
             input_ids = input_ids.to(device)
@@ -1011,7 +1016,9 @@ def get_max_batch_size(
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is how
+    # FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+    infer_method = model.generate if is_enc_dec else model
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -1161,7 +1168,9 @@ def _forward_loop(
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # Call the module (not .forward) so nn.Module.__call__ runs pre/post-forward hooks — this is
+        # how FSDP2 unshards/reshards a sharded root. generate() also calls the module internally.
+        infer_method = model.generate if is_enc_dec else model
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):
@@ -1291,15 +1300,28 @@ def download_hf_dataset_as_jsonl(
         json_keys = [json_keys]
     jsonl_paths: list[str] = []
 
-    try:
-        response = requests.get(
-            f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}",
-            headers=build_hf_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
+    # The HF datasets-server /splits endpoint is intermittently unavailable
+    # (transient 5xx). Retry with backoff so a momentary outage doesn't fail the
+    # whole preprocess run; fail fast on client errors (e.g. 404 unknown dataset).
+    splits_url = f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}"
+    response = None
+    last_exc: Exception | None = None
+    for attempt in range(4):
+        try:
+            response = requests.get(splits_url, headers=build_hf_headers(), timeout=10)
+            response.raise_for_status()
+            break
+        except requests.RequestException as e:
+            last_exc = e
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and status < 500:
+                break  # client error — retrying won't help
+            if attempt < 3:
+                time.sleep(2**attempt)  # 1s, 2s, 4s
+    if response is None or not response.ok:
+        raise RuntimeError(
+            f"Failed to fetch dataset splits for {dataset_name}: {last_exc}"
+        ) from last_exc
 
     response_json = response.json()
     print_rank_0(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")

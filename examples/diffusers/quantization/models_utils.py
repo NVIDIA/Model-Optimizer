@@ -18,6 +18,7 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
+import torch
 from diffusers import (
     DiffusionPipeline,
     FluxPipeline,
@@ -30,11 +31,19 @@ try:
     from diffusers import Flux2Pipeline
 except ImportError:
     Flux2Pipeline = None
+
+# Qwen-Image classes were added in a recent diffusers release; import lazily so
+# this example still imports on older diffusers versions.
+try:
+    from diffusers import QwenImagePipeline
+except ImportError:
+    QwenImagePipeline = None
 from utils import (
     filter_func_default,
     filter_func_flux_dev,
     filter_func_ltx2_vae,
     filter_func_ltx_video,
+    filter_func_qwen_image,
     filter_func_wan_vae,
     filter_func_wan_video,
 )
@@ -54,6 +63,7 @@ class ModelType(str, Enum):
     LTX2 = "ltx-2"
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
+    QWEN_IMAGE = "qwen-image"
 
 
 _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
@@ -63,6 +73,7 @@ _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
     ModelType.LTX2: filter_func_ltx_video,
     ModelType.WAN22_T2V_14b: filter_func_wan_video,
     ModelType.WAN22_T2V_5b: filter_func_wan_video,
+    ModelType.QWEN_IMAGE: filter_func_qwen_image,
 }
 
 _VAE_FILTER_FUNC_MAP: dict[tuple[ModelType, str], Callable[[str], bool]] = {
@@ -95,6 +106,7 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.LTX2: "Lightricks/LTX-2",
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    ModelType.QWEN_IMAGE: "Qwen/Qwen-Image",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
@@ -109,6 +121,7 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.LTX2: None,
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
+    ModelType.QWEN_IMAGE: QwenImagePipeline,
 }
 
 # Shared dataset configurations
@@ -226,6 +239,38 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             ),
         },
     },
+    ModelType.QWEN_IMAGE: {
+        "backbone": "transformer",
+        "dataset": _SD_PROMPTS_DATASET,
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
+        },
+        # Quantize only ``transformer_blocks``; keep the first 2 and last 2 blocks
+        # (and everything outside ``transformer_blocks``) in original precision.
+        # Applied before calibration via ``build_block_range_quant_cfg`` so SVDQuant
+        # never mutates the excluded blocks' weights.
+        "block_range": {
+            "exclude_first_n": 2,
+            "exclude_last_n": 2,
+            "block_module": "transformer_blocks",
+        },
+        # The text-stream linears (joint-attention added-KV projections and the
+        # txt MLP) and the modulation linears cannot use the SVDQuant low-rank
+        # branch; they are exported as plain NVFP4 instead (no pre_quant_scale,
+        # no svdquant_lora_a/b). The remaining image-stream linears keep full
+        # SVDQuant.
+        "svdquant_skip_layers": [
+            "*.attn.add_q_proj",
+            "*.attn.add_k_proj",
+            "*.attn.add_v_proj",
+            "*.attn.to_add_out",
+            "*.txt_mlp.net.0.proj",
+            "*.txt_mlp.net.2",
+            "*.img_mod.1",
+            "*.txt_mod.1",
+        ],
+    },
 }
 
 
@@ -272,3 +317,72 @@ def parse_extra_params(
         i += 1
 
     return extra_params
+
+
+def build_block_range_quant_cfg(
+    backbone: torch.nn.Module,
+    exclude_first_n: int,
+    exclude_last_n: int,
+    block_module: str = "transformer_blocks",
+) -> list[dict[str, Any]]:
+    """Build ordered ``quant_cfg`` rules for a transformer-block-only recipe.
+
+    The rules quantize only the linears under ``block_module`` while keeping the
+    first ``exclude_first_n`` and last ``exclude_last_n`` blocks -- and everything
+    outside ``block_module`` -- in original precision.
+
+    The rules are meant to be appended to the ``quant_cfg`` list consumed by
+    ``mtq.quantize`` so the selection is applied BEFORE calibration. This is
+    required for SVDQuant, whose calibration subtracts a low-rank residual from
+    the weights of every *enabled* linear: disabling the excluded blocks only
+    after calibration would leave their weights mutated instead of bit-identical
+    to the original precision.
+
+    Rules are applied in order with later rules overriding earlier ones:
+    1. disable every linear weight/input quantizer,
+    2. re-enable only those under ``block_module`` (``enable`` is a top-level
+       QuantizerCfgEntry toggle; a ``None`` cfg keeps the base preset's quant params),
+    3. disable the first/last ``n`` blocks.
+
+    Raises:
+        ValueError: if the backbone has no ``block_module`` list, or it has fewer
+            than ``exclude_first_n + exclude_last_n + 2`` blocks (it requires at
+            least two quantized middle blocks).
+    """
+    blocks = getattr(backbone, block_module, None)
+    if blocks is None or not hasattr(blocks, "__len__"):
+        raise ValueError(
+            f"Backbone {type(backbone).__name__} has no '{block_module}' module list; "
+            "cannot build the transformer-block-range recipe."
+        )
+    num_blocks = len(blocks)
+    # Require at least two quantized middle blocks so the recipe actually
+    # quantizes something (excluding first/last alone could otherwise leave 0-1
+    # quantized blocks). For the default 2+2 recipe this means n >= 6.
+    min_blocks = exclude_first_n + exclude_last_n + 2
+    if num_blocks < min_blocks:
+        raise ValueError(
+            f"'{block_module}' has only {num_blocks} block(s); excluding the first "
+            f"{exclude_first_n} and last {exclude_last_n} requires at least {min_blocks} blocks "
+            f"(at least 2 quantized middle blocks)."
+        )
+
+    excluded = sorted(
+        set(range(exclude_first_n)) | set(range(num_blocks - exclude_last_n, num_blocks))
+    )
+    # `enable` is a top-level QuantizerCfgEntry field (independent of `cfg`); a `None`
+    # cfg leaves the base preset's quant params untouched, so disabling then
+    # re-enabling restores the original (FP8/NVFP4/...) attributes. Putting `enable`
+    # under `cfg` is rejected by the QuantizerAttributeConfig validator.
+    rules: list[dict[str, Any]] = [
+        {"quantizer_name": "*weight_quantizer", "enable": False},
+        {"quantizer_name": "*input_quantizer", "enable": False},
+        {"quantizer_name": f"*{block_module}.*weight_quantizer", "enable": True},
+        {"quantizer_name": f"*{block_module}.*input_quantizer", "enable": True},
+    ]
+    for idx in excluded:
+        rules.append(
+            {"quantizer_name": f"*{block_module}.{idx}.*weight_quantizer", "enable": False}
+        )
+        rules.append({"quantizer_name": f"*{block_module}.{idx}.*input_quantizer", "enable": False})
+    return rules

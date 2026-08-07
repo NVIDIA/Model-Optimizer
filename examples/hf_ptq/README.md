@@ -19,6 +19,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
+| Tracking runs with MLflow | Record a PTQ run on an MLflow server so it can be reproduced from its entry alone | \[[Link](#tracking-runs-with-mlflow)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -352,8 +353,9 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 `AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 `AutoQuantize` is driven by an **AutoQuantize recipe** passed with `--recipe`. The recipe defines the
-candidate formats, the `effective_bits` target, cost model, scoring method, search-disabled layers, and
-cost-excluded layers — see [`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
+candidate formats, optional fixed PTQ baseline, `effective_bits` target, cost model, scoring method,
+search-disabled layers, and cost-excluded layers — see
+[`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
@@ -382,12 +384,54 @@ The recipe quantizes the less accuracy-sensitive layers with the more aggressive
 keeps the more sensitive ones at higher precision (or unquantized), so the model meets the recipe's
 `effective_bits` target. To author your own, copy a shipped recipe and adjust `candidate_formats`,
 `constraints.effective_bits`, `auto_quantize_method` (`gradient` / `kl_div`), `score_size`,
-`disabled_layers` (excluded from the search), and `cost_excluded_layers` (kept out of the bit-budget
-accounting — e.g. VL vision towers). Recipes can splice a shared base `disabled_layers` set via
-`$import` (see `modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
+`module_search_spaces` (optional per-module candidate overrides), `disabled_layers` (excluded from
+the search), and `cost_excluded_layers` (kept out of the bit-budget accounting — e.g. VL vision
+towers). Recipes can splice a shared base `disabled_layers` set via `$import` (see
+`modelopt_recipes/configs/auto_quantize/units/base_disabled_layers`).
 
-bf16 (no quantization) is always an implicit per-layer choice, so `candidate_formats` need only list
-the quantized options — a single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search.
+AutoQuantize recipes support two mutually exclusive search-space styles:
+
+1. Set top-level `auto_quantize.candidate_formats` to search every unmatched quantizable module, with
+   optional `module_search_spaces` overrides.
+2. Set a normal top-level `quantize` config as the fixed PTQ baseline, omit top-level
+   `candidate_formats`, and use `module_search_spaces` to list only the modules AutoQuantize should
+   search. The fixed and searched modules still run through one integrated calibration, scoring, cost,
+   and export flow.
+
+For example, this keeps unmatched modules at the normal W4A16 NVFP4 PTQ setting while searching only
+attention between W4A16 and FP8:
+
+```yaml
+imports:
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+  fp8: configs/ptq/presets/model/fp8
+
+quantize:
+  $import: w4a16_nvfp4
+
+auto_quantize:
+  constraints:
+    effective_bits: 6.0
+  module_search_spaces:
+    - module_name_patterns: ["*self_attn*", "*linear_attn*"]
+      candidate_formats:
+        - $import: w4a16_nvfp4
+        - $import: fp8
+      allow_no_quant: false
+```
+
+bf16 (no quantization) is an implicit per-layer choice for the top-level `candidate_formats`, so a
+single format (e.g. `[fp8]`) gives a `{fp8, bf16}` per-layer search. A `module_search_spaces` rule can
+set `allow_no_quant: false` to exclude bf16 from the solver choices for matching modules. Use the
+top-level `quantize` baseline, rather than a one-candidate search rule, for modules that are fixed and
+not actually searched.
+
+The fixed baseline may also reuse a model-specific PTQ configuration. For example, the Qwen3.6 MoE
+AutoQuantize recipe imports the same model-specific `quant_cfg` used by
+`huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`, reproduces that recipe's `quantize`
+section, and lists only shared experts, attention, and `lm_head` under `module_search_spaces`. A
+loader test asserts that the inherited fixed baseline remains equal to the original PTQ recipe while
+leaving the original recipe unchanged.
 
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
@@ -428,33 +472,37 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ## Multi-Node Post-Training Quantization with FSDP2
 
-ModelOpt enables quantization of LLMs across multiple GPU nodes using various quantization formats. It leverages HuggingFace's Accelerate library and FSDP2 for distributed model sharding and calibration.
+ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
 ### Usage
 
-For distributed execution across multiple nodes, use the `accelerate` library. A template configuration file (`fsdp2.yaml`) is provided and can be customized for user specific requirements.
+#### Slurm (recommended)
 
-On each node run the following command:
+Slurm orchestrates launching the job on every node for you, so this is the easiest way to run a multi-node PTQ. A ready-to-run example that quantizes Nemotron-3-Super to NVFP4 is provided in [`slurm/multinode_fsdp2_ptq.slurm`](./slurm/multinode_fsdp2_ptq.slurm). Edit the `CONFIG` block (container image, model path, export path, recipe) and submit:
 
 ```bash
-accelerate launch --config_file fsdp2.yaml \
-    --num_machines=<num_nodes> \
-    --machine_rank=<current_node_rank> \
-    --main_process_ip=<node0_ip_addr> \
-    --main_process_port=<port> \
-    --fsdp_transformer_layer_cls_to_wrap=<decoder_layer_name>
-     multinode_ptq.py \
-    --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_experts_only/nvfp4_omlp_only/nvfp4_awq/int8> \
-    --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
-    --batch_size <calib_batch_size> \
-    --calib_size <num_calib_samples> \
-    --dataset <dataset> \
-    --export_path <export_path> \
-    --trust_remote_code
+sbatch --nodes=2 slurm/multinode_fsdp2_ptq.slurm
 ```
 
-The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
+#### Manual (run on each node)
+
+Without Slurm, start `torchrun` on every node yourself:
+
+```bash
+torchrun \
+    --nnodes=<num_nodes> --node_rank=<current_node_rank> \
+    --master_addr=<node0_ip_addr> --master_port=<port> \
+    --nproc_per_node=<num_gpus_per_node> \
+    hf_ptq.py \
+    --pyt_ckpt_path <path_to_model> \
+    --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+    --batch_size <calib_batch_size> \
+    --calib_size <num_calib_samples> \
+    --export_path <export_path> \
+    --use_fsdp2
+```
+
+See [Recipe-based Quantization](#recipe-based-quantization) for the recipe format and built-in recipe names. The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For more details refer to the [deployment section](#deployment) of this document.
 
 > *Performance Note: FSDP2 is designed for training workloads and may result in longer calibration and export times. For faster calibration, maximize the batch size based on available GPU memory and choose the right number of GPUs to avoid unnecessary communication.*
 
@@ -590,6 +638,61 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 - Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
+
+## Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ
+run on an MLflow server so it can be reproduced later from its MLflow entry alone:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+  --export_path <quantized_ckpt_path> \
+  --mlflow https://<your-mlflow-server>/
+```
+
+The run is opened *before* the model loads, so a bad URI or a missing token fails within
+seconds rather than after a full calibration.
+
+<details>
+<summary>Uploaded artifacts</summary>
+
+| Artifact | Contents |
+| --- | --- |
+| `command.txt` | The full invocation, copy-pasteable, with credentials masked |
+| `version.txt` | The ModelOpt version that ran |
+| `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
+| `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
+| `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
+| `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
+
+</details>
+
+Every command-line argument is also logged as a searchable param, alongside
+`user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
+still recorded, with status `FAILED` and its log attached.
+
+Other flags:
+
+- `--mlflow_experiment` — defaults to `$USER/hf_ptq/<checkpoint basename>-<recipe name>`,
+  falling back to `--qformat` when no `--recipe` is used.
+- `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
+- `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
+  from the environment is best-effort — if the client is missing or the server is
+  unreachable the run warns and continues untracked, since the variable is often exported
+  for other tooling. An explicit `--mlflow` fails loudly instead.
+
+Authentication uses MLflow's own environment variables (`MLFLOW_TRACKING_TOKEN`, or
+`MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`).
+
+The tracking itself lives in `modelopt.torch.utils.mlflow`
+([`MlflowRunLogger`](../../modelopt/torch/utils/mlflow.py)), so other example scripts can
+record runs the same way; `hf_ptq.py` only supplies the params and artifacts specific to PTQ.
+
+> Note: only the main rank uploads, so `--use_fsdp2` runs produce a single run. The log
+> captures Python output; output written directly by native libraries (NCCL, CUDA) goes to
+> the terminal only. On SLURM, keep the job's own `.out` file for those.
 
 ## Resources
 

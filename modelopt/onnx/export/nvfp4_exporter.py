@@ -331,6 +331,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         }
         value_info_map = {vi.name: vi for vi in graph.value_info}
         graph_inputs = {inp.name for inp in graph.input}
+        cast_output_cache: dict[tuple[str, str], str] = {}
 
         def _get_precision_dtype() -> str:
             # Check initializers to determine the precision of the weights
@@ -350,18 +351,22 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
             # Create Cast nodes for each input of the target node except bias
             for i, input_name in enumerate(node.input[:2]):
-                cast_output_name = input_name + "_f16"  # Unique name for the cast output
+                cast_output_name = cast_output_cache.get((input_name, precision_dtype))
+                if cast_output_name is None:
+                    cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
+                    cast_output_name = f"{input_name}_{cast_output_suffix}"
+                    cast_output_cache[(input_name, precision_dtype)] = cast_output_name
 
-                # Create a Cast node to convert the input to FP16/BF16
-                cast_node = onnx.helper.make_node(
-                    "Cast",
-                    inputs=[input_name],  # Original input of the target node
-                    outputs=[cast_output_name],
-                    to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
-                )
+                    # Create a Cast node to convert the input to FP16/BF16
+                    cast_node = onnx.helper.make_node(
+                        "Cast",
+                        inputs=[input_name],  # Original input of the target node
+                        outputs=[cast_output_name],
+                        to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
+                    )
 
-                # Insert the Cast node into the graph
-                graph.node.extend([cast_node])
+                    # Insert the Cast node into the graph
+                    graph.node.extend([cast_node])
 
                 # Update the target node input to use the cast node output
                 node.input[i] = cast_output_name
@@ -420,5 +425,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         graph.ClearField("initializer")
         graph.initializer.extend(new_initializers)
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
+
+        utils.topologically_sort_graph_nodes(graph)
 
         return onnx_model

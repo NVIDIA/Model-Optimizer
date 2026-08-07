@@ -24,6 +24,9 @@ jobs:
       - name: Secret Scanning
         uses: trufflesecurity/trufflehog@v3.90.5
         with:
-          extra_args: --results=verified,unknown
+          # Exclude lob: its `(live|test)_[a-zA-Z0-9_]{35}` pattern matches any pytest function
+          # whose name happens to be exactly 35 characters after `test_`, and it reports them as
+          # verified. Only nightly sees them, since it scans all history while PRs scan their diff.
+          extra_args: --results=verified,unknown --exclude-detectors=lob
       - name: Run code quality checks
         run: pip install nox uv && nox -s pre_commit_all

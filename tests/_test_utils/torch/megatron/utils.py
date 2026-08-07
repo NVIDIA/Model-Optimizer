@@ -43,6 +43,13 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
 )
 from modelopt.torch.utils import to_empty_if_meta_device
 
+try:  # nemo:26.08+: MambaModel is a HybridModel subclass; toy models build HybridModel directly.
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+
+    _MAMBA_HYBRID_TYPES: tuple[type, ...] = (MambaModel, HybridModel)
+except ImportError:
+    _MAMBA_HYBRID_TYPES = (MambaModel,)
+
 
 @torch.no_grad()
 def run_mcore_inference(
@@ -129,8 +136,8 @@ def get_forward(model, batch_size=2):
     input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model, batch_size)
 
     def forward(model):
-        # MambaModel doesn't accept loss_mask argument
-        if isinstance(model, MambaModel):
+        # Mamba/Hybrid forward doesn't accept loss_mask argument
+        if isinstance(model, _MAMBA_HYBRID_TYPES):
             return model.forward(
                 input_ids=input_ids,
                 position_ids=position_ids,
