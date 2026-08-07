@@ -24,6 +24,19 @@
     enable: false
   - quantizer_name: '*linear_attn.in_proj_b*'
     enable: false
+  # Hybrid linear-attention (GatedDeltaNet, Qwen3.5/3.6) packed projections.
+  # TRT-LLM's Qwen3.5 weight mapper repacks in_proj_qkv/in_proj_z into the fused
+  # in_proj_qkvz by splitting every checkpoint tensor along dim 0; the scalar
+  # per-tensor scales of quantized modules (input_scale, weight_scale_2) are
+  # 0-dim and crash the split with "IndexError: tuple index out of range"
+  # (GitHub issue #1933). The `in_proj_qkv` pattern also covers the fused
+  # `in_proj_qkvz` module name used by older transformers releases. A recipe
+  # that intentionally quantizes these (e.g. the curated Qwen3.5 FP8 recipes)
+  # must re-enable them after importing this unit.
+  - quantizer_name: '*linear_attn.in_proj_qkv*'
+    enable: false
+  - quantizer_name: '*linear_attn.in_proj_z*'
+    enable: false
   - quantizer_name: '*lm_head*'
     enable: false
   - quantizer_name: '*mixer.conv1d*'
