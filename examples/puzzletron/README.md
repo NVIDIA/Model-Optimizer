@@ -30,10 +30,10 @@ Each report is a self-contained HTML file that embeds sanity-check outputs,
 stage manifests, and evaluation results; it can be 100s of MB. Download it to
 disk and open it locally rather than previewing it in a browser tab.
 
-The most important section in every report is **Zero-shot Evaluation**, which
-compares the pruned candidate solutions directly against the full teacher model
-across multiple benchmarks. Use that section first to assess accuracy trade-offs
-before inspecting the serving-performance or sanity-check sections.
+Each report's **Zero-shot Evaluation** section compares the pruned candidate
+solutions directly against the full teacher model across multiple benchmarks.
+Interpret those results together with the unresolved correctness findings and
+other gaps recorded in the historical results summary.
 
 | Model | Hugging Face model | Current configuration reference | Historical report |
 |---|---|---|---|

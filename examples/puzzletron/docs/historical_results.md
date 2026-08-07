@@ -9,10 +9,10 @@ machine-readable source for the fields below.
 
 ## Historical result summary
 
-| Model | Archived result | Current configuration relationship | Reproduction and correctness status |
+| Model | Retained report metadata | Current configuration relationship | Reproduction and correctness status |
 |---|---|---|---|
-| Nemotron-3 Nano 30B-A3B | [Campaign report](../reports/nemotron3_nano_30b_a3b.html): sequence length 8,192; parameter, runtime, and memory MIP profiles; stages marked complete through zero-shot evaluation plus global-distillation sanity | [default.yaml](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) is a current-code migration, not the executed configuration | Not reproduced on current code; the report contains 176 slicing-equivalence findings and 2 descriptor-realization-gate findings; AIPerf, full global distillation, and post-distillation evaluation remain pending |
-| Qwen3.5-9B | [Campaign report](../reports/qwen3p5_9b.html): sequence length 16,384; runtime MIP profile; stages marked complete through post-distillation evaluation | [default.yaml](../configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) is a reconstruction; the report used 23 overrides and embedding widths 4,096, 3,840, and 3,584, while the current entry retains only 4,096 | Not reproduced on current code; the report contains 101 slicing-equivalence findings |
+| Nemotron-3 Nano 30B-A3B | [Campaign report](../reports/nemotron3_nano_30b_a3b.html); sequence length: 8,192; MIP profiles: `params-075`, `runtime-075`, `memory-075`; reported boundary: `zero_shot_evaluation` | [default.yaml](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) is a current-code migration, not the executed configuration | Not reproduced on current code; findings: 176 slicing-equivalence, 2 descriptor-realization-gate; pending: `aiperf`, `global_distillation`, `post_distillation_evaluation` |
+| Qwen3.5-9B | [Campaign report](../reports/qwen3p5_9b.html); sequence length: 16,384; MIP profile: `latency-095`; reported boundary: `post_distillation_evaluation` | [default.yaml](../configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) is a reconstruction; the report recorded 23 overrides and embedding widths 4,096, 3,840, and 3,584, while the current entry retains 4,096 | Not reproduced on current code; findings: 101 slicing-equivalence |
 
 ## Evidence boundary
 

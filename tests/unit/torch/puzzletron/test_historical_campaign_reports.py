@@ -56,7 +56,7 @@ def test_historical_result_matrix_campaign_set(
     matrix_path = project_root_path / "examples/puzzletron/docs/historical_results.md"
     matrix_rows = _historical_campaign_rows(matrix_path.read_text())
 
-    assert Counter(name for name, _ in matrix_rows) == Counter(
+    assert Counter(matrix_rows.keys()) == Counter(
         campaign["display_name"] for campaign in historical_campaigns["campaigns"]
     )
 
@@ -171,8 +171,8 @@ def test_historical_result_matrix_row_matches_manifest(
 ) -> None:
     campaign = _campaign_by_id(historical_campaigns, campaign_id)
     matrix_path = project_root_path / "examples/puzzletron/docs/historical_results.md"
-    matrix_rows = _historical_campaign_rows(matrix_path.read_text())
-    row = next(row for name, row in matrix_rows if name == campaign["display_name"])
+    matrix = matrix_path.read_text()
+    row = _historical_campaign_rows(matrix)[campaign["display_name"]]
 
     puzzletron_root = project_root_path / "examples/puzzletron"
     config_path = project_root_path / campaign["current_config"]
@@ -180,19 +180,39 @@ def test_historical_result_matrix_row_matches_manifest(
     config_link = (Path("..") / config_path.relative_to(puzzletron_root)).as_posix()
     report_link = (Path("..") / report_path.relative_to(puzzletron_root)).as_posix()
     slicing_warnings = campaign["known_slicing_warnings"]
+    report_metadata = row["Retained report metadata"]
+    config_relationship = row["Current configuration relationship"]
+    status = row["Reproduction and correctness status"]
 
-    assert "Not reproduced on current code" in row
-    assert f"[default.yaml]({config_link})" in row
-    assert f"[Campaign report]({report_link})" in row
-    assert (
-        f"contains {slicing_warnings['equivalence_tolerance_findings']} "
-        "slicing-equivalence findings"
-    ) in row
+    assert "not model-support claims" in matrix
+    assert f"[Campaign report]({report_link})" in report_metadata
+    assert f"sequence length: {campaign['reported_sequence_length']:,}" in report_metadata
+    for profile_id in campaign["reported_mip_profiles"]:
+        assert f"`{profile_id}`" in report_metadata
+    assert f"reported boundary: `{campaign['reported_boundary_stage']}`" in report_metadata
+
+    assert f"[default.yaml]({config_link})" in config_relationship
+    relationship_labels = {
+        "migrated_current_entry": "current-code migration",
+        "reconstructed_current_entry": "reconstruction",
+    }
+    assert relationship_labels[campaign["config_relationship"]] in config_relationship
+    if campaign["reported_embedding_widths"] != campaign["current_embedding_widths"]:
+        assert f"{campaign['report_config_override_count']} overrides" in config_relationship
+        for width in campaign["reported_embedding_widths"]:
+            assert f"{width:,}" in config_relationship
+        for width in campaign["current_embedding_widths"]:
+            assert f"retains {width:,}" in config_relationship
+
+    assert "Not reproduced on current code" in status
+    assert f"{slicing_warnings['equivalence_tolerance_findings']} slicing-equivalence" in status
     descriptor_findings = slicing_warnings["descriptor_realization_gate_findings"]
     if descriptor_findings:
-        assert f"and {descriptor_findings} descriptor-realization-gate findings" in row
+        assert f"{descriptor_findings} descriptor-realization-gate" in status
     else:
-        assert "descriptor-realization-gate findings" not in row
+        assert "descriptor-realization-gate" not in status
+    for stage in campaign["pending_enabled_stages"]:
+        assert f"`{stage}`" in status
 
 
 def _campaign_by_id(evidence: dict, campaign_id: str) -> dict:
@@ -256,12 +276,13 @@ def _report_goal_dimensions(report_config: dict) -> set[str]:
     return dimensions
 
 
-def _historical_campaign_rows(matrix: str) -> list[tuple[str, str]]:
+def _historical_campaign_rows(matrix: str) -> dict[str, dict[str, str]]:
     section = matrix.split("## Historical result summary", maxsplit=1)[1]
     section = section.split("## Evidence boundary", maxsplit=1)[0]
-    rows = [line for line in section.splitlines() if line.startswith("|")][2:]
-    return [
-        (cells[0], row)
-        for row in rows
+    table_rows = [line for line in section.splitlines() if line.startswith("|")]
+    headers = [cell.strip() for cell in table_rows[0].strip("|").split("|")]
+    return {
+        cells[0]: dict(zip(headers, cells, strict=True))
+        for row in table_rows[2:]
         if (cells := [cell.strip() for cell in row.strip("|").split("|")])
-    ]
+    }
