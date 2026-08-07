@@ -125,4 +125,5 @@ class DownstreamEvaluationNode(PostMIPNode):
 
     @classmethod
     def render_report(cls, node, payload):
+        """Render the downstream evaluation report for the payload's section."""
         return render_downstream_evaluation_report(str(payload["section_id"]), payload)

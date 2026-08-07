@@ -387,6 +387,17 @@ def _post_mip_progress(
     stage_id: str,
     config: Mapping[str, Any] | None,
 ) -> str | None:
+    """
+    Summarize post-MIP candidate processing progress for a configured node.
+    
+    Parameters:
+        puzzle_dir (Path): Root directory containing post-MIP artifacts.
+        stage_id (str): Identifier of the post-MIP stage and node.
+        config (Mapping[str, Any] | None): Configuration containing post-MIP flow and node definitions.
+    
+    Returns:
+        str | None: Progress summary with completed, failed, and timed-out candidate counts, or None when progress data is unavailable or the node is not applicable.
+    """
     parts = stage_id.split(".", 2)
     if len(parts) != 3:
         return None

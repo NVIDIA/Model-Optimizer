@@ -186,7 +186,12 @@ def _dataset_subset_issues(state: WizardState) -> list[ValidationIssue]:
 
 
 def validate_state(state: WizardState) -> tuple[ValidationIssue, ...]:
-    """Return actionable authoring issues before canonical compilation."""
+    """
+    Validate wizard state and identify issues that prevent canonical compilation.
+    
+    Returns:
+    	tuple[ValidationIssue, ...]: Validation issues sorted by configuration section and path.
+    """
     issues: list[ValidationIssue] = []
     required = (
         "model.source",
