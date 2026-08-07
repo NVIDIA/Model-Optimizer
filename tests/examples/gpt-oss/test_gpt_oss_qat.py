@@ -224,9 +224,6 @@ class GPTOSS:
             model_path_override: Optional path to the model to deploy (e.g., MXFP4 checkpoint).
                                 If None, uses self.model_path
         """
-        # Skip if tensorrt_llm is not available
-        pytest.importorskip("tensorrt_llm")
-
         # Use override path if provided, otherwise use original model path
         deploy_model_path = model_path_override or self.model_path
 

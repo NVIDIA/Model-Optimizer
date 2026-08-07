@@ -1,14 +1,14 @@
 Changelog
 =========
 
-0.47 (2026-xx-xx)
+0.47 (2026-09-xx)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
 
-*Quantization*
-
 - Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Plain ``max`` sets a tensor's global scale from the largest per-block amax seen during calibration, leaving no room above it, so any activation larger than the calibration max saturates. ``nvfp4_act_headroom`` instead anchors the global scale to a low percentile of the per-block amax distribution, ``amax = max(rho * anchor, upper)``, placing the calibrated blocks in the lower part of the FP8 block-scale range and leaving the rest as headroom. ``upper`` is the top of the range the scale commits to representing and defaults to the 99.99th percentile rather than the literal maximum: chasing a lone freak block would drag the global scale up until every other block's FP8 block scale falls below subnormal and flushes to zero, so the rarest blocks are clipped instead. Set ``upper_percentile=100`` to use the literal observed max, which guarantees no calibration data is clipped. The calibrator warns when the per-block range is too wide for ``rho`` to clear any headroom. Tunable via ``anchor_percentile`` (default 1), ``upper_percentile`` (default 99.99) and ``rho`` (default 16384). Applies only to NVFP4 dynamic-block input quantizers. Weight scales are an orthogonal axis, selected by a nested ``weight_scale_algorithm`` (``max`` by default, or ``mse`` / ``local_hessian`` with that algorithm's own options), so one recipe can combine a weight calibration with this activation policy in a single pass. ``SequentialQuantizer`` activation quantizers are not supported and raise. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` (dynamic NVFP4 W4A4 plus FP8 KV-cache cast) with only the calibration algorithm swapped, so it exports a standard NVFP4 checkpoint.
+- Add per-expert weight quantization for Transformer Engine ``TEGroupedMLP`` (fused MoE experts): each expert now has its own ``weight_quantizer`` (a ``GroupedQuantizer`` holding one ``TensorQuantizer`` per expert) with an independent ``amax``, instead of a single shared ``amax`` across all experts. Applies to ``mtq.quantize`` calibration, HF / Megatron export, and QAD.
+- Add opt-in ``torch.compile`` execution for Transformer Engine grouped-linear per-expert weight quantizers while preserving their native checkpoint amax shapes. Set ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP=1`` before quantized-module conversion; the default path remains eager.
 
 *Misc*
 
@@ -17,11 +17,15 @@ Changelog
 
 **Backward Breaking Changes**
 
+- Transformer Engine ``TEGroupedMLP`` (fused MoE experts) now uses **per-expert** weight quantization (one ``amax`` per expert) instead of a single shared ``amax`` across all experts. As a result, ModelOpt checkpoints containing quantized ``TEGroupedMLP`` modules saved before 0.47 are **not compatible** with 0.47: the per-expert ``weight_quantizer`` amax layout differs from the previous single-quantizer layout. Re-run PTQ (or re-quantize) with 0.47 to regenerate compatible checkpoints.
+
 **Deprecations**
 
 **Bug Fixes**
 
-0.46 (2026-08-xx)
+- Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+
+0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
@@ -29,6 +33,7 @@ Changelog
 *Quantization*
 
 - Add NVFP4 and FP8 PTQ recipes with projection-output quantizers for Llama-Nemotron embedding and reranking models (``modelopt_recipes/huggingface/nemotron_llama/``) and an end-to-end HF embedding/reranking quantize-to-ONNX example (``examples/torch_onnx/hf_embedding_quant_to_onnx.py``). Quantizing the projection-Linear outputs keeps TensorRT inter-layer activations in FP4, roughly halving engine activation memory versus the plain ``nvfp4`` preset. NVFP4/MXFP8 output quantizers now export through the dynamic quantize path. ``examples/torch_onnx/torch_quant_to_onnx.py`` also gains a ``--recipe`` flag to load quantization configs from YAML recipes instead of the removed ``mtq.*_CFG`` module-constant table.
+- Add an end-to-end FAR3D ONNX PTQ example with calibration data generation, INT8 and FP8 quantization, TensorRT engine building, and Argoverse 2 accuracy evaluation. See `examples/onnx_ptq/far3d/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/far3d>`_ for details.
 - Add Learned Scale Quantization (LSQ) and Dual-LSQ support for quantization-aware distillation, including learnable ``amax`` parameters, tied-scale and pre-scale options, focused NVFP4 recipes, and scale-only training.
 - Add a fused Triton fast path for ``local_hessian`` NVFP4 weight-scale search (the Hessian-weighted FP8-E4M3 scale sweep). For each NVFP4 block it minimizes ``dwᵀ H dw`` over the 126 candidate scales using the per-cin-block local Hessian on tensor cores, replacing the per-weight Python reference sweep — roughly **34x** faster on a single 8192x4096 weight and bit-exact with the reference for fp32/fp16 weights. Used automatically during ``local_hessian`` calibration for both dense and fused-MoE expert weights; falls back to the reference sweep on CPU, when Triton is unavailable, or via ``MODELOPT_NVFP4_TRITON_SWEEP=0``.
 - Add NVFP4 Four-Over-Six (4/6) weight quantization (``mtq.NVFP4_FOUR_OVER_SIX_CFG``): MSE weight calibration picks, per block, between an M=6 and an M=4 dynamic range (the choice is folded into the FP8 per-block scales), with the ``four_over_six: true`` flag normalizing those scales by 256 (vs 448) for M=4 headroom. Supported via ``mtq.quantize`` and HF / Megatron export only -- **not** ``mtq.compress``, which does not preserve the per-block M=4/M=6 choice
@@ -102,6 +107,8 @@ Changelog
 - Fix ``examples/vllm_serve`` serving shared experts uncalibrated: their ``gate_proj``/``up_proj`` quantizer keys were not merged into ``gate_up_proj`` on reload, so they matched no module and were dropped.
 - Fix Qwen3-VL MoE PTQ failing on ``transformers>=5.12`` with ``AttributeError: 'QuantQwen3VLMoeTextExperts' object has no attribute 'hidden_size'`` (NVBug 6518551). transformers 5.12 moved ``Qwen3VLMoeTextExperts`` onto the standard ``@use_experts_implementation`` fused layout (``hidden_size``/``expert_dim`` renamed to ``hidden_dim``/``intermediate_dim``, ``gate_up_proj`` transposed to ``(num_experts, 2*intermediate_dim, hidden_dim)``, two ``F.linear`` calls per expert), but the legacy ``_QuantQwen3VLMoeTextExperts`` wrapper stayed statically registered and shadowed on-the-fly detection. The new layout is now left to ``register_fused_experts_on_the_fly``, which claims it with the generic ``_QuantFusedExperts``; the legacy wrapper is still registered on ``transformers<5.12``, whose ``torch.bmm``-based forward the generic wrapper cannot intercept.
 - Fix ``examples/hf_ptq`` multi-node FSDP2 export (``--use_fsdp2``) failing with ``RuntimeError: Cannot set version_counter for inference tensor``. ``export_quantized`` wrapped its whole body in ``torch.inference_mode()``, so the full params gathered by ``get_model_state_dict(full_state_dict=True)`` were inference tensors and the subsequent ``state_dict()`` -> ``param.detach()`` could not set their version counter. The export context is now ``torch.no_grad()``, which still disables autograd but keeps the gathered params as normal tensors.
+- Fix HF checkpoint export failing with ``AttributeError: 'list' object has no attribute 'keys'`` for models whose modeling code still declares tied weights in the ``transformers<5`` list format (NVBug 6518665, observed on ``stepfun-ai/Step-3.7-Flash``). transformers 5.0 changed ``_tied_weights_keys`` to a ``{target: source}`` dict and ``save_pretrained`` calls ``.keys()`` on every submodule's declaration without a type check, so such models — common among ``trust_remote_code`` checkpoints — load fine but die at the end of PTQ, after calibration. ModelOpt's ``save_pretrained`` patch now normalizes a list-style declaration to the equivalent dict for the duration of the save (each entry mapped to itself, which is what the legacy list meant) and restores the original attribute afterwards.
+- Fix unified HF export of multimodal models whose vision tower carries its own ``PrefixChange`` conversion (``LlavaForConditionalGeneration`` on ``transformers>=5.12`` — NVBug 6525511). transformers collects conversion mappings recursively and scopes each sub-model's transforms to that sub-module via ``scope_prefix``, matching only keys under that prefix. ModelOpt's quant-aware reverse conversion read the raw patterns and ignored ``scope_prefix``, so the vision tower's "add a ``vision_model.`` prefix" rule was applied to *every* key in the state dict: an exported llava-1.5-13b checkpoint had all 758 tensors moved under a bogus top-level ``vision_model.`` namespace (``vision_model.language_model.*``, ``vision_model.lm_head.*``), and vLLM rejected it with ``ValueError: There is no module or parameter named 'vision_model' in LlavaForConditionalGeneration``. Reverse rename rules now carry their scope and are applied only to keys under it, matching transformers' own ``WeightTransform._scoped_match`` semantics. ``Gemma3ForConditionalGeneration`` was affected identically and is fixed by the same change.
 
 0.45 (2026-07-02)
 ^^^^^^^^^^^^^^^^^

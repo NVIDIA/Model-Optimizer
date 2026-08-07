@@ -16,6 +16,7 @@
 """Quantization utilities."""
 
 import copy
+import itertools
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -25,10 +26,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
-from torch.distributed.tensor import Replicate
+from torch.distributed.tensor import DTensor, Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
+from modelopt.torch.utils.distributed import is_fsdp2_model
 from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 
 if TYPE_CHECKING:
@@ -214,21 +216,25 @@ def reduce_sum(input, axis=None, keepdims=True):
 def representative_weight_quantizer(module: nn.Module, weight_name: str = "weight"):
     """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
-    Handles two layouts:
+    Handles three layouts:
 
     - singular ``<name>_weight_quantizer`` — standard ``nn.Linear`` / ``_QuantLinear``.
+    - singular ``<name>_weight_quantizer`` that is a ``GroupedQuantizer`` — TEGroupedLinear
+      fused experts (one quantizer per expert); the first is representative.
     - plural ``<name>_weight_quantizers`` (``nn.ModuleList``) — fused-experts modules
       (``_QuantFusedExperts``) hold one ``TensorQuantizer`` per expert. Per-expert
       formats are identical, so the first element is representative.
 
     Returns ``None`` if no matching quantizer is found.
     """
-    from ..nn import SequentialQuantizer, TensorQuantizer
+    from ..nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
 
     singular = quantizer_attr_names(weight_name).weight_quantizer
     q = getattr(module, singular, None)
     if isinstance(q, (TensorQuantizer, SequentialQuantizer)):
         return q
+    if isinstance(q, GroupedQuantizer) and len(q) > 0:
+        return q[0]
 
     plural = getattr(module, singular + "s", None)
     if isinstance(plural, nn.ModuleList) and len(plural) > 0:
@@ -617,6 +623,58 @@ def enable_weight_access_and_writeback(
 
     with context:
         yield
+
+
+def requires_weight_materialization(module, root_model, name_to_module: dict | None = None) -> bool:
+    """Whether ``module``'s own weights are currently unreadable and need a window.
+
+    Mirrors the dispatch in :func:`enable_weight_access_and_writeback`, so callers
+    deciding *whether* to open a window agree with what opening one would do. Two things
+    must hold: the module owns tensors that are not directly readable right now
+    (offloaded to meta, or a sharded ``DTensor``), and a context exists that can
+    materialize them. Modules already materialized are excluded -- re-entering a window
+    would re-run export handlers over already-packed weights.
+    """
+    if not any(
+        t is not None and (t.is_meta or isinstance(t, DTensor))
+        for t in itertools.chain(module._parameters.values(), module._buffers.values())
+    ):
+        return False
+    if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
+        return True
+    if is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+        return True
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None:
+        return False
+    from ..plugins.accelerate import _get_offload_hook
+
+    return _get_offload_hook(hook) is not None
+
+
+def has_accelerate_offload(module: nn.Module) -> bool:
+    """Return True if any module in ``module`` has a CPU- or disk-offload accelerate hook."""
+    try:
+        from ..plugins.accelerate import _get_offload_hook
+    except ImportError:
+        return False
+
+    return any(
+        _get_offload_hook(getattr(m, "_hf_hook", None)) is not None for m in module.modules()
+    )
+
+
+def has_non_resident_weights(module: nn.Module) -> bool:
+    """Whether any weight under ``module`` lives outside it for part of the export.
+
+    Structural (FSDP2 wrapping, accelerate offload hooks) rather than a snapshot of
+    current placement: offloaded weights come and go as materialization windows open and
+    close, so a point-in-time check answers differently depending on when it runs.
+
+    Callers use this for decisions that must hold for a whole export — notably
+    pointer-keyed dedup, which needs ``data_ptr()`` to identify a tensor throughout.
+    """
+    return has_accelerate_offload(module) or is_fsdp2_model(module)
 
 
 @contextmanager

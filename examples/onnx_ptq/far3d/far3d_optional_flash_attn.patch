@@ -1,0 +1,17 @@
+--- a/projects/mmdet3d_plugin/models/utils/petr_transformer.py
++++ b/projects/mmdet3d_plugin/models/utils/petr_transformer.py
+@@ -17,3 +17,6 @@
+ from torch.nn import ModuleList
+-from .attention import FlashMHA
++try:
++    from .attention import FlashMHA
++except ImportError:
++    FlashMHA = None
+ import torch.utils.checkpoint as cp
+@@ -65,3 +68,5 @@
+         self.batch_first = True
+-
++        if FlashMHA is None:
++            raise ImportError("flash-attn is required for PETRMultiheadFlashAttention")
++
+         self.attn = FlashMHA(embed_dims, num_heads, attn_drop, dtype=torch.float16, device='cuda',

@@ -43,7 +43,14 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 
 from .calib import MseCalibrator, NVFP4ActHeadroomCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from .utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -209,7 +216,7 @@ def _has_expert_parallelism(module: nn.Module) -> bool:
 
 
 def _iter_leaf_quantizers(quantizer):
-    if isinstance(quantizer, SequentialQuantizer):
+    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
         for _q in quantizer:
             yield from _iter_leaf_quantizers(_q)
         return
@@ -377,12 +384,12 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
         """Sync amax across DP (always) and EP (filtered — see _should_sync_amax_across_ep)."""
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_dp_ep(_q, parallel_state, parent_name, child_name)
             return
@@ -396,7 +403,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
@@ -418,7 +425,7 @@ def max_calibrate(
         parallel_state: ParallelState,
     ):
         # Syncing amax across TP for sequential quantizer
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_tp(
                     _q, linear_name, quantizer_type, axes_for_sync, parallel_state
