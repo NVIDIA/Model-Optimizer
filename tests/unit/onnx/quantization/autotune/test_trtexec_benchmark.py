@@ -33,6 +33,7 @@ invoked. They cover:
 """
 
 import re
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -347,7 +348,13 @@ _REMOTE_URL = (
 
 @pytest.fixture
 def trtexec_version_ok():
-    """Pretend trtexec >= 10.15 is available so --safe injection succeeds."""
+    """Pretend trtexec >= 10.15 is available so --safe injection succeeds.
+
+    Skipped on Windows: remote autotuning builds POSIX paths via ``os.path.join``
+    and constructs scp/ssh commands that are meaningless on Windows.
+    """
+    if sys.platform == "win32":
+        pytest.skip("Remote benchmarking tests are not supported on Windows")
     with patch(
         "modelopt.onnx.quantization.autotune.benchmark._check_for_trtexec",
         return_value="/usr/local/bin/trtexec",
