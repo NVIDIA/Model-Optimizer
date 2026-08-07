@@ -62,7 +62,7 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: python -m pip install nox && nox -s regression
       - name: Upload regression coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
