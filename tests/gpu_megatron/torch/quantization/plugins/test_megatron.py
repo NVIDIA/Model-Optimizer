@@ -1302,3 +1302,54 @@ def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
             {"transformer_impl": "transformer_engine"},
         ),
     )
+
+
+def test_resolve_output_layer_untied():
+    """The tiedness signal is read off the model, not from Megatron-LM global args."""
+    from modelopt.torch.quantization.plugins.megatron import _resolve_output_layer_untied
+
+    class _Flagged(torch.nn.Module):
+        def __init__(self, shared):
+            super().__init__()
+            self.share_embeddings_and_output_weights = shared
+
+    # No signal anywhere -> unknown.
+    assert _resolve_output_layer_untied(torch.nn.Module()) is None
+
+    # The root's own flag wins over any subtree.
+    root = _Flagged(False)
+    root.inner = _Flagged(True)
+    assert _resolve_output_layer_untied(root) is True
+
+    # Otherwise fall back to a subtree scan.
+    root = torch.nn.Module()
+    root.language_model = _Flagged(True)
+    assert _resolve_output_layer_untied(root) is False
+
+    # Subtrees that do not own the language model's output_layer are skipped: the vision tower
+    # and a distillation teacher, either of which may be tied differently from the student.
+    root = torch.nn.Module()
+    root.vision_model = _Flagged(True)
+    root._teacher_model = _Flagged(True)
+    root.language_model = _Flagged(False)
+    assert _resolve_output_layer_untied(root) is True
+
+
+def test_output_layer_untied_precedence_and_caching():
+    """The model-derived flag wins over Megatron-LM args, and the answer is cached."""
+    from modelopt.torch.quantization.plugins.megatron import _output_layer_untied
+
+    class _Config:
+        pass
+
+    config = _Config()
+    config.modelopt_output_layer_untied = True
+    assert _output_layer_untied(config) is True
+
+    # With no model-derived flag the args fallback runs, and its answer is cached back onto the
+    # config so a model carrying neither signal does not warn on every save and every load.
+    config = _Config()
+    resolved = _output_layer_untied(config)
+    assert isinstance(resolved, bool)
+    assert config.modelopt_output_layer_untied is resolved
+    assert _output_layer_untied(config) is resolved

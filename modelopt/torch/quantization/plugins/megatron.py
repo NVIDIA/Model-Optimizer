@@ -248,6 +248,52 @@ def _create_incompatible_method(method_name: str):
     return _incompatible_method
 
 
+def _resolve_output_layer_untied(model: torch.nn.Module) -> bool | None:
+    """Whether ``output_layer`` weights are untied from the input embeddings, or None if unknown.
+
+    Megatron-Core models carry ``share_embeddings_and_output_weights`` (Megatron-Bridge sets it
+    from the HF config, Megatron-LM from ``--untie-embeddings-and-output-weights``), so reading
+    it off the model works under both frameworks. ``megatron.training.get_args()`` does not:
+    Bridge has no global args store, and defaulting to "tied" there silently drops the
+    ``output_layer`` weight-quantizer state from the sharded checkpoint.
+    """
+    shared = getattr(model, "share_embeddings_and_output_weights", None)
+    if shared is not None:
+        return not bool(shared)
+    for name, module in model.named_modules():
+        # Skip subtrees that do not own the language model's output_layer: the vision tower (never
+        # quantized here) and a distillation teacher, which may be tied differently from the
+        # student it is wrapped with.
+        if "vision_model" in name or "_teacher_model" in name:
+            continue
+        shared = getattr(module, "share_embeddings_and_output_weights", None)
+        if shared is not None:
+            return not bool(shared)
+    return None
+
+
+def _output_layer_untied(config) -> bool:
+    """Whether ``output_layer`` is untied, for use from ``sharded_state_dict``.
+
+    Precedence: the model-derived flag recorded by ``megatron_replace_quant_module_hook`` (the only
+    source available under Megatron-Bridge, which has no global args store), then Megatron-LM's
+    ``--untie-embeddings-and-output-weights``. The answer is cached back onto ``config`` so a model
+    carrying neither signal warns once instead of on every save and every load.
+    """
+    untied = getattr(config, "modelopt_output_layer_untied", None)
+    if untied is not None:
+        return untied
+    try:
+        from megatron.training import get_args as _mlm_get_args
+
+        untied = bool(getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False))
+    except Exception as e:
+        warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
+        untied = False
+    config.modelopt_output_layer_untied = untied
+    return untied
+
+
 def megatron_replace_quant_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model quantization support.
 
@@ -260,6 +306,7 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
        typing-matching the QuantModuleRegistry.
     3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
+    untied = _resolve_output_layer_untied(model)
 
     def _configure_attention_for_kv_cache_quant(module: Attention):
         """Configure Attention module for KV cache quantization compatibility."""
@@ -287,11 +334,17 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
             if type(module) in QuantModuleRegistry:
-                # Skip output_layer w/o enabled weight_quantizer
-                if name.endswith("output_layer") and not getattr(
-                    getattr(module, "weight_quantizer", None), "is_enabled", False
-                ):
-                    continue
+                # Skip output_layer w/o enabled weight_quantizer. This hook also runs BEFORE
+                # QuantModule replacement (e.g. on restore), when ``weight_quantizer`` does not
+                # exist yet -- the old check then always skipped, so output_layer never received
+                # ModelOpt extra-state callbacks and its quantizer state (promotion to
+                # StaticBlockScaleQuantizer, ``_amax``, ``_global_amax``) was never restored.
+                # Fall back to the tying flag: an untied output_layer is quantizable.
+                if name.endswith("output_layer"):
+                    _wq = getattr(module, "weight_quantizer", None)
+                    _skip = not getattr(_wq, "is_enabled", False) if _wq is not None else not untied
+                    if _skip:
+                        continue
                 register_modelopt_extra_state_callbacks(
                     module,
                     quant_module_get_extra_state,
@@ -307,6 +360,10 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
             if "vision_model" not in name:
                 # We only enable hetereogenous_dist_checkpoint for language model, vision model is not quantized
                 module.config.hetereogenous_dist_checkpoint = True
+                if untied is not None:
+                    # Carried on the config so _MegatronParallelLinear.sharded_state_dict can read
+                    # it without Megatron-LM global args (absent under Megatron-Bridge).
+                    module.config.modelopt_output_layer_untied = untied
             _register_extra_state_callbacks(module)
 
 
@@ -374,17 +431,58 @@ class _MegatronParallelLinear(_ParallelLinear):
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
         if prefix.endswith("output_layer."):
-            try:
-                from megatron.training import get_args as _mlm_get_args
-
-                _untied = bool(
-                    getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False)
-                )
-            except Exception as e:
-                warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
-                _untied = False
-            if not _untied:
+            if not _output_layer_untied(self.config):
                 return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+
+            # Materialize missing weight-quantizer scale buffers so their keys appear in the load
+            # plan -- the dist-checkpoint loader SILENTLY SKIPS any checkpoint key the model does
+            # not advertise, which leaves output_layer uncalibrated and exports it as BF16.
+            # ``_amax`` must be allocated FLAT ``[numel // block, 1]``: that is the in-memory
+            # layout every other block-quantized layer uses, and ``_process_quantizer_amax`` below
+            # exposes it to the checkpoint as a ``[out_features, blocks]`` VIEW sharing the same
+            # storage, so the loader writes straight through. Allocating the viewed shape instead
+            # loads fine but leaves the wrong in-memory shape, which breaks the export scale math.
+            # Only STATIC block quant owns these buffers: a dynamic quantizer derives its scales
+            # per forward and deliberately never holds an ``_amax`` (its ``amax`` property asserts
+            # ``not self._dynamic``), so materializing one there would be actively wrong.
+            _wq = getattr(self, "weight_quantizer", None)
+            if (
+                _wq is not None
+                and getattr(_wq, "is_enabled", False)
+                and getattr(_wq, "is_static_block_quant", False)
+            ):
+                _block_sizes = getattr(_wq, "_block_sizes", None) or {}
+                _block = _block_sizes.get(-1) or _block_sizes.get(1)
+                # `_process_quantizer_amax` later does `v.view(weight.shape[0], -1)`, which
+                # requires in_features (not just numel) to divide evenly by the block size.
+                if _block and self.weight.shape[-1] % int(_block) == 0:
+                    if getattr(_wq, "_amax", None) is None:
+                        # Seed from the weights rather than zeros. For weight-only quantization
+                        # this is exactly what max calibration produces, so a checkpoint that
+                        # turns out not to carry these keys degrades to "recalibrated from
+                        # weights" instead of to scale=0 (or NaN) at export and forward.
+                        _wq.amax = (
+                            self.weight.detach()
+                            .reshape(-1, int(_block))
+                            .abs()
+                            .amax(dim=1, keepdim=True)
+                            .float()
+                        )
+                    # register_buffer directly: the ``global_amax`` property lives on
+                    # StaticBlockScaleQuantizer, and on restore this is still a plain
+                    # TensorQuantizer (promotion happens later), so the setter is unavailable.
+                    if getattr(_wq, "_global_amax", None) is None:
+                        _wq.register_buffer(
+                            "_global_amax", _wq._amax.detach().max().float().clone()
+                        )
+                else:
+                    # Leaving the buffers unallocated is the silent-drop failure this block exists
+                    # to prevent, so say so rather than proceeding quietly.
+                    warn_rank_0(
+                        f"{prefix}weight_quantizer: cannot materialize scale buffers "
+                        f"(block_size={_block}, in_features={self.weight.shape[-1]}); its "
+                        "calibrated scales will not be restored from the checkpoint."
+                    )
 
         quantizer_state_dict = {}
         for k, v in self.state_dict(prefix="", keep_vars=True).items():
