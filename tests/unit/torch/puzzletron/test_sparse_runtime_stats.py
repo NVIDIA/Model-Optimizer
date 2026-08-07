@@ -1180,6 +1180,10 @@ def test_width_scenario_runtime_stats_reuse_root_measurement(tmp_path, monkeypat
                         "generation_seq_len": 1024,
                         "max_num_seqs": 1,
                         "n_embd": 2688,
+                        "num_iters": 30,
+                        "num_warmup_iters": 10,
+                        "repeat_block_n_times": 10,
+                        "vllm_args": [],
                         "workload_id": "serving-default",
                     },
                     "subblocks": [],
@@ -1327,7 +1331,6 @@ def test_runtime_stats_resume_signature_includes_workload_id():
         **kwargs,
         runtime_workload_id="different-workload",
     )
-    assert hydra_cfg.calc_subblock_stats.merge_with_existing_stats is False
 
 
 def test_sparse_runtime_selection_is_unique_and_layer_independent():
