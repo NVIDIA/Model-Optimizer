@@ -278,6 +278,11 @@ def get_args():
         raise ValueError(
             "--sft requires --sft_dataset_root (a directory with training.jsonl / validation.jsonl)."
         )
+    if args.sft and (args.data_paths or args.use_mock_data):
+        raise ValueError(
+            "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
+            "the dataset selection, so those inputs would be silently ignored."
+        )
 
     print_args(args)
 
@@ -304,7 +309,11 @@ def main(args: argparse.Namespace):
         provider.seq_length = args.seq_length
         if args.sft:
             # The SFT loss mask covers only the response tokens, so the reduction must be
-            # per-token for it to combine correctly across context-parallel ranks.
+            # per-token for it to combine correctly across context-parallel ranks. This lands on
+            # both providers (harmless: the teacher's LM loss is zeroed in
+            # adjust_distillation_model_for_mcore) and must stay in sync with
+            # ``average_in_collective=not args.sft`` on the shared DistributedDataParallelConfig
+            # below -- a per-token loss must not be pre-averaged.
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
@@ -328,6 +337,16 @@ def main(args: argparse.Namespace):
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
     teacher_provider = _build_model_provider(args.teacher_hf_path)
+
+    if args.sft and student_provider.vocab_size != teacher_provider.vocab_size:
+        # The pretraining path is structurally immune to this: NullTokenizer plus pre-tokenized
+        # --data_paths means one tokenization feeds both models. SFT tokenizes raw text with the
+        # student's tokenizer, so a teacher from another family would score ids it never saw and
+        # silently produce a garbage KD target instead of an error.
+        raise ValueError(
+            "--sft tokenizes with the student's tokenizer, so student and teacher must share a "
+            f"vocabulary (got {student_provider.vocab_size} vs {teacher_provider.vocab_size})."
+        )
 
     kd_config = ModelOptDistillConfig(
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
@@ -411,7 +430,9 @@ def main(args: argparse.Namespace):
             dataset_root=args.sft_dataset_root,
             seed=args.seed,
             dataloader_type="batch",
-            do_validation=True,
+            # Honour --eval_iters 0 so a training-only dataset_root does not have to carry a
+            # dummy validation.jsonl just to satisfy the builder.
+            do_validation=args.eval_iters > 0,
             do_test=False,
             dataset_kwargs={
                 "prompt_template": "{input}{output}",
