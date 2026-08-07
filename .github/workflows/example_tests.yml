@@ -45,11 +45,6 @@ jobs:
           base_sha: ${{ steps.base.outputs.merge_base }}
           sha: ${{ steps.base.outputs.head_sha }}
           fail_on_initial_diff_error: true
-          files_ignore: |
-            **.ipynb
-            **.md
-            **.png
-            **.rst
           # `common` runs every lane. Each lane lists the example directories it covers, plus any
           # extra directory those tests reach into (e.g. hf_ptq's script runs lm_eval from
           # ../llm_eval, and the speculative_decoding test drives hf_ptq).
@@ -64,18 +59,23 @@ jobs:
               - tests/_test_utils/**
               - tests/conftest.py
               - tests/examples/conftest.py
+              - "!**/*.{md,rst,png,ipynb}"
             torch:
               - "{examples,tests/examples}/{llm_distill,llm_qat,llm_sparsity,specdec_bench,speculative_decoding}/**"
               - examples/dataset/** # data prep for llm_qat and speculative_decoding
               - examples/hf_ptq/** # the speculative_decoding test drives hf_ptq
+              - "!**/*.{md,rst,png,ipynb}"
             trtllm:
               - "{examples,tests/examples}/{gpt-oss,hf_ptq,llm_eval}/**"
               - examples/dataset/** # data prep for gpt-oss
+              - "!**/*.{md,rst,png,ipynb}"
             megatron:
               - "{examples,tests/examples}/megatron_bridge/**"
+              - "!**/*.{md,rst,png,ipynb}"
             onnx:
               - "{examples,tests/examples}/{diffusers,torch_onnx,torch_trt}/**"
               - examples/onnx_ptq/** # torch_trt reuses onnx_ptq
+              - "!**/*.{md,rst,png,ipynb}"
       - id: lanes
         env:
           # Nightly and on-demand runs have no diff to inspect, so they run everything.

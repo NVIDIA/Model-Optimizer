@@ -12,10 +12,10 @@ on:
         required: false
         type: string
         default: |
-          **.ipynb
-          **.md
-          **.png
-          **.rst
+          **/*.ipynb
+          **/*.md
+          **/*.png
+          **/*.rst
     outputs:
       any_changed:
         description: "Whether any relevant files changed"
