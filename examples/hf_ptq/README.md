@@ -129,7 +129,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>2.</sup>For some models, there is only support for exporting quantized checkpoints.* \
 > *<sup>3.</sup>W4A8_AWQ is only available on some models but not all* \
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
-> *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later* \
+> *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v1.2 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
