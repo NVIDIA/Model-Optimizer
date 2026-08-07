@@ -40,7 +40,7 @@ jobs:
         uses: ./.github/actions/pr-merge-base
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         id: changed
-        uses: step-security/changed-files@v46.0.5
+        uses: step-security/changed-files@v47.0.5
         with:
           base_sha: ${{ steps.base.outputs.merge_base }}
           sha: ${{ steps.base.outputs.head_sha }}

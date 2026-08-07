@@ -41,7 +41,7 @@ jobs:
       - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
-        uses: step-security/changed-files@v46.0.5
+        uses: step-security/changed-files@v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
