@@ -24,6 +24,7 @@ import copy
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 import traceback
@@ -538,6 +539,34 @@ _LMMS_EVAL_MODEL_ARG_FIELDS = frozenset(
         "reasoning_parser",
     }
 )
+_LMMS_EVAL_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS = frozenset(
+    {
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "data_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "enable_expert_parallel",
+        "distributed_executor_backend",
+        "expert_parallel_size",
+        "gpu_group_size",
+        "tp",
+        "pp",
+        "dp",
+        "prefill_cp",
+        "decode_cp",
+        "ep",
+    }
+)
+_LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS = frozenset(
+    {
+        "--model_args",
+        "--model-args",
+        "--output_path",
+        "--output-path",
+        "--tasks",
+    }
+)
 
 
 def _as_cli_bool(value: bool) -> str:
@@ -566,6 +595,63 @@ def _join_cli_values(value: Any, *, path: str) -> str:
     if not values or any(not item for item in values):
         raise ValueError(f"{path} must contain at least one non-empty value")
     return ",".join(values)
+
+
+def _lmms_eval_model_arg_keys(value: str) -> tuple[str, ...]:
+    keys: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    escaped = False
+
+    def append(segment: str) -> None:
+        key, separator, _ = segment.strip().partition("=")
+        if separator and key.strip():
+            keys.append(key.strip())
+
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if quote:
+            if char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}" and depth:
+            depth -= 1
+        elif char == "," and depth == 0:
+            append(value[start:index])
+            start = index + 1
+    append(value[start:])
+    return tuple(keys)
+
+
+def _lmms_eval_reserved_model_arg_fields(checkpoint_arg: str) -> frozenset[str]:
+    return frozenset(
+        key
+        for key in (
+            str(checkpoint_arg).strip(),
+            *_LMMS_EVAL_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS,
+        )
+        if key
+    )
+
+
+def _reject_reserved_lmms_eval_model_args(
+    keys: Sequence[Any], reserved_fields: frozenset[str]
+) -> None:
+    reserved = sorted({str(key).strip() for key in keys} & reserved_fields)
+    if reserved:
+        raise ValueError(
+            "downstream_evaluation.config.model_args must not set reserved "
+            f"lmms-eval model arguments: {', '.join(reserved)}"
+        )
 
 
 def _configured_lmms_eval_tasks(settings: Mapping[str, Any]) -> tuple[str, ...]:
@@ -601,6 +687,7 @@ def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) ->
     checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
     topology = dict(settings.get("topology") or {})
     canonical_topology = normalize_vllm_topology(topology) if topology else {}
+    reserved_fields = _lmms_eval_reserved_model_arg_fields(checkpoint_arg)
     derived = {
         checkpoint_arg: checkpoint,
     }
@@ -621,14 +708,17 @@ def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) ->
             derived[key] = settings[key]
 
     if isinstance(raw, str):
+        _reject_reserved_lmms_eval_model_args(
+            _lmms_eval_model_arg_keys(raw), reserved_fields
+        )
         prefix = raw.strip().strip(",")
         suffix = _model_arg_string(derived)
         return ",".join(part for part in (prefix, suffix) if part)
     if raw is not None and not isinstance(raw, Mapping):
         raise TypeError("downstream_evaluation.config.model_args must be a mapping or string")
+    _reject_reserved_lmms_eval_model_args(tuple((raw or {}).keys()), reserved_fields)
     merged = dict(raw or {})
-    for key, value in derived.items():
-        merged.setdefault(key, value)
+    merged.update(derived)
     return _model_arg_string(merged)
 
 
@@ -642,6 +732,33 @@ def _command_prefix(settings: Mapping[str, Any]) -> list[str]:
         values = [str(item) for item in raw]
     if not values or any(not value for value in values):
         raise ValueError("downstream_evaluation.config.command_prefix must not be empty")
+    return values
+
+
+def _lmms_eval_extra_args(settings: Mapping[str, Any]) -> list[str]:
+    raw = settings.get("extra_args")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = shlex.split(raw)
+    elif isinstance(raw, Sequence):
+        values = [str(item) for item in raw]
+    else:
+        raise TypeError("downstream_evaluation.config.extra_args must be a string or sequence")
+    if any(not value for value in values):
+        raise ValueError("downstream_evaluation.config.extra_args must not contain empty values")
+    reserved = sorted(
+        {
+            value.split("=", 1)[0]
+            for value in values
+            if value.split("=", 1)[0] in _LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS
+        }
+    )
+    if reserved:
+        raise ValueError(
+            "downstream_evaluation.config.extra_args must not set reserved "
+            f"lmms-eval flags: {', '.join(reserved)}"
+        )
     return values
 
 
@@ -692,7 +809,7 @@ def _lmms_eval_command(
         )
     if bool(settings.get("log_samples", False)):
         argv.append("--log_samples")
-    argv.extend(str(item) for item in settings.get("extra_args") or ())
+    argv.extend(_lmms_eval_extra_args(settings))
 
     env = os.environ.copy()
     for key, value in dict(settings.get("env") or {}).items():

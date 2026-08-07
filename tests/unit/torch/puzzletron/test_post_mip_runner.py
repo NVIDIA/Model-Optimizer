@@ -226,6 +226,57 @@ def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert timeout == 123
 
 
+def test_lmms_eval_command_rejects_reserved_model_args(tmp_path):
+    cases = (
+        ({"model": "/ckpts/wrong"}, "model"),
+        ("dtype=bfloat16,tensor_parallel_size=1", "tensor_parallel_size"),
+    )
+    for model_args, expected in cases:
+        try:
+            runner._lmms_eval_command(
+                {
+                    "tasks": ["ifeval"],
+                    "topology": {"gpu_group_size": 1},
+                    "model_args": model_args,
+                },
+                checkpoint="/ckpts/candidate",
+                output_path=tmp_path / "results",
+            )
+        except ValueError as error:
+            message = str(error)
+        else:
+            raise AssertionError("expected reserved lmms-eval model_args to fail")
+
+        assert "reserved lmms-eval model arguments" in message
+        assert expected in message
+
+
+def test_lmms_eval_command_rejects_reserved_extra_args(tmp_path):
+    cases = (
+        (["--tasks", "gsm8k"], "--tasks"),
+        ("--output_path /tmp/other", "--output_path"),
+        (["--model_args=model=/ckpts/wrong"], "--model_args"),
+    )
+    for extra_args, expected in cases:
+        try:
+            runner._lmms_eval_command(
+                {
+                    "tasks": ["ifeval"],
+                    "topology": {"gpu_group_size": 1},
+                    "extra_args": extra_args,
+                },
+                checkpoint="/ckpts/candidate",
+                output_path=tmp_path / "results",
+            )
+        except ValueError as error:
+            message = str(error)
+        else:
+            raise AssertionError("expected reserved lmms-eval extra_args to fail")
+
+        assert "reserved lmms-eval flags" in message
+        assert expected in message
+
+
 def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, tmp_path):
     captured = {}
 
