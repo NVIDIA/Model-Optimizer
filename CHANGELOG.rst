@@ -21,6 +21,8 @@ Changelog
 
 **Bug Fixes**
 
+- Add FP8 and INT8 recipes that quantize timm ResNet shortcut inputs immediately before
+  residual adds.
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 
 0.46 (2026-08-17)
@@ -95,8 +97,6 @@ Changelog
 
 **Bug Fixes**
 
-- Add FP8, INT8, and AutoQuantize recipes that quantize timm ResNet shortcut inputs
-  immediately before residual adds.
 - Fix ``ShapeInferenceError`` during ONNX INT8 + FP16 quantization (``--high_precision_dtype fp16``) of weakly-typed models (e.g. TensorFlow exports) that carry stale rank-0 ``graph.output`` shapes or ops such as ``TopK`` that ONNX's static shape inference cannot resolve. ``clear_stale_value_info`` now reconciles stale output shapes via symbolic shape inference (keeping every output's shape field populated), and AutoCast runs ONNX shape inference in strict mode and falls back to schema-based standalone type inference when it fails, so unresolved ops no longer leave tensors untyped.
 - Fused MoE expert auto-detection (``register_fused_experts_on_the_fly``) no longer requires an ``act_fn`` attribute. Some fused-expert modules (e.g. ``MiniMaxM3VLExperts``) apply a custom gated activation between the two ``F.linear`` calls instead of exposing ``act_fn``; they were silently skipped, leaving routed experts unquantized (an experts-only recipe matched nothing) and failing HF export with ``NotImplementedError``. ``_QuantFusedExperts`` is activation-agnostic (it only intercepts the two ``F.linear`` calls), so the requirement was unnecessary. This enables NVFP4/FP8 quantization and export for MiniMax-M2 / MiniMax-M3.
 - Fix unified HF export emitting transformers' *in-memory* (post-``conversion_mapping``) tensor names instead of the original model-hub names, breaking the unified-checkpoint contract (observed on MiniMax-M3: exported ``model.language_model.*`` / ``mlp.experts.*.gate_proj`` instead of hub ``language_model.model.*`` / ``block_sparse_moe.experts.*.w{1,2,3}``). transformers' own save-side ``revert_weight_conversion`` is disabled by ModelOpt because it raises ``RuntimeError`` on 0-d scalar scale tensors, so a new quant-aware reverse conversion (``modelopt/torch/export/quant_aware_conversion.py``) derives rename/split rules from the model's conversion mapping via transformers' ``reverse_transform()`` and carries each weight's companion scale tensors (``weight_scale``, ``weight_scale_2``, ``input_scale``, ``weight_scale_inv``, ``bias``) through the renames and un-fusions, so quantized exports round-trip to the hub names. Any mapping op that cannot be reversed quant-aware yet (e.g. still-stacked fused experts) falls back to the previous in-memory names instead of aborting the export.

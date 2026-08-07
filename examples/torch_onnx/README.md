@@ -54,7 +54,7 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 - Loads a pretrained timm torch model (default: ViT-Base).
 - Quantizes the torch model to FP8, MXFP8, INT8, NVFP4, or INT4_AWQ using ModelOpt.
 - For models with Conv2d layers (e.g., SwinTransformer), automatically overrides Conv2d quantization to FP8 (for MXFP8/NVFP4 modes) or INT8 (for INT4_AWQ mode) for TensorRT compatibility.
-- Uses ResNet FP8, INT8, and AutoQuantize recipes to quantize shortcut inputs immediately before residual adds.
+- Uses ResNet FP8 and INT8 recipes to quantize shortcut inputs immediately before residual adds.
 - Exports the quantized model to ONNX.
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.
@@ -74,9 +74,6 @@ Quantization configs are loaded from the YAML preset recipes under
 `modelopt_recipes/configs/ptq/presets/model/`, selected by `--quantize_mode`. Pass
 `--recipe=<preset basename or path to a QuantizeConfig YAML>` to use a different
 recipe (e.g. `--recipe=nvfp4_awq_lite` or `--recipe=/path/to/my_quant_cfg.yaml`).
-
-ResNet AutoQuantize searches FP8 and INT8 at eight effective bits and keeps its
-residual connections in FP8.
 
 ### Conv2d Quantization Override
 
@@ -373,7 +370,7 @@ python torch_quant_to_onnx.py \
 | [vit_base_patch16_224](https://huggingface.co/timm/vit_base_patch16_224.augreg_in21k_ft_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [swin_tiny_patch4_window7_224](https://huggingface.co/timm/swin_tiny_patch4_window7_224.ms_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [swinv2_tiny_window8_256](https://huggingface.co/timm/swinv2_tiny_window8_256.ms_in1k) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [resnet50](https://huggingface.co/timm/resnet50.a1_in1k) | ✅ | ✅ | ✅ | ✅ | | ✅ |
+| [resnet50](https://huggingface.co/timm/resnet50.a1_in1k) | ✅ | ✅ | ✅ | ✅ | | |
 
 ## Resources
 
