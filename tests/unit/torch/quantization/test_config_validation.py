@@ -23,6 +23,7 @@ from pydantic import ValidationError
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 from modelopt.torch.quantization.config import (
+    E5M2_DEFAULT_CFG,
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     FP8_DEFAULT_CFG,
     FP8_PER_CHANNEL_PER_TOKEN_CFG,
@@ -45,6 +46,7 @@ from modelopt.torch.quantization.config import (
 
 
 def test_need_calibration():
+    assert not need_calibration(E5M2_DEFAULT_CFG)
     assert need_calibration(FP8_DEFAULT_CFG)
     assert not need_calibration(FP8_PER_CHANNEL_PER_TOKEN_CFG)
     assert not need_calibration(FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG)

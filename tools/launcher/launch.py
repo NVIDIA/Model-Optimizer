@@ -104,6 +104,8 @@ if _has_modelopt_src:
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Megatron-LM/megatron"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Megatron-LM/examples"))
     _add_package_glob(os.path.join(LAUNCHER_DIR, "modules/Megatron-LM/*.py"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/pyproject.toml"))
+    _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/LICENSE_HEADER"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt_recipes"))
     _add_package_path(os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/examples"))

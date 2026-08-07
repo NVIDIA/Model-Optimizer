@@ -210,6 +210,20 @@ def _build_server() -> FastMCP:
                 description=("Container image override for pipeline.task_0.slurm_config.container.")
             ),
         ] = None,
+        container_mounts: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Slurm container mount overrides, usually from resolved cluster config."
+                )
+            ),
+        ] = None,
+        srun_args: Annotated[
+            list[str] | None,
+            Field(
+                description=("Slurm srun argument overrides, usually from resolved cluster config.")
+            ),
+        ] = None,
         gpus_per_node: Annotated[
             int | None,
             Field(
@@ -329,6 +343,8 @@ def _build_server() -> FastMCP:
             account=account,
             partition=partition,
             container=container,
+            container_mounts=container_mounts,
+            srun_args=srun_args,
             gpus_per_node=gpus_per_node,
             ntasks_per_node=ntasks_per_node,
             control_socket=control_socket,
@@ -399,7 +415,8 @@ def _build_server() -> FastMCP:
         description=(
             "Block until an experiment reaches a terminal status "
             "('done' or 'failed') or the timeout elapses. Returns the "
-            "same shape as job_status plus a `waited_seconds` field. "
+            "same shape as job_status plus a `waited_seconds` field "
+            "and, by default, the final remote task `log_tail`. "
             "Use this instead of writing your own polling while-loop "
             "around job_status."
         ),
@@ -432,11 +449,29 @@ def _build_server() -> FastMCP:
                 ),
             ),
         ] = 30,
+        include_log: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Include the final remote log tail when the experiment reaches "
+                    "a terminal state."
+                )
+            ),
+        ] = True,
+        log_job_idx: Annotated[
+            int,
+            Field(
+                ge=0,
+                description=("Zero-based job index whose final log should be returned."),
+            ),
+        ] = 0,
     ) -> dict:
         return bridge.wait_for_experiment_impl(
             experiment_id,
             timeout_sec,
             poll_interval_sec,
+            include_log,
+            log_job_idx,
         )
 
     @mcp.tool(

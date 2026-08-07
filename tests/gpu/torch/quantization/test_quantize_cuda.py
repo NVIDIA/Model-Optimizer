@@ -84,6 +84,7 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "config",
     [
         mtq.INT8_DEFAULT_CFG,
+        mtq.E5M2_DEFAULT_CFG,
         mtq.FP8_DEFAULT_CFG,
         mtq.W4A8_AWQ_BETA_CFG,
         mtq.INT8_SMOOTHQUANT_CFG,

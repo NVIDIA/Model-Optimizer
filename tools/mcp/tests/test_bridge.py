@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -745,6 +746,8 @@ def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
         account="project_account",
         partition="batch",
         container="ubuntu:24.04",
+        container_mounts=["/host/hf:/hf-local", "/host/hf:/models"],
+        srun_args=["--no-container-mount-home --mpi=pmix"],
         ntasks_per_node=1,
         control_socket="~/.ssh/mfa.sock",
         reconnect_command="ssh mfa-cluster",
@@ -757,6 +760,14 @@ def test_submit_job_slurm_accepts_nmm_cluster_fields(monkeypatch, tmp_path):
     assert "pipeline.task_0.slurm_config.account=project_account" in captured["argv"]
     assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
     assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
+    assert (
+        'pipeline.task_0.slurm_config.container_mounts=["/host/hf:/hf-local","/host/hf:/models"]'
+        in captured["argv"]
+    )
+    assert (
+        'pipeline.task_0.slurm_config.srun_args=["--no-container-mount-home --mpi=pmix"]'
+        in captured["argv"]
+    )
     assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
     assert captured["env"]["SLURM_ACCOUNT"] == "project_account"
     assert captured["env"]["SLURM_PARTITION"] == "batch"
@@ -916,6 +927,8 @@ def test_submit_job_dry_run_uses_slurm_inventory_fields(monkeypatch, tmp_path):
         account="project_account",
         partition="batch",
         container="ubuntu:24.04",
+        container_mounts=["/host/hf:/hf-local", "/host/hf:/models"],
+        srun_args=["--no-container-mount-home --mpi=pmix"],
         ntasks_per_node=1,
         control_socket="~/.ssh/mfa.sock",
         ssh_alias="mfa-cluster",
@@ -927,6 +940,14 @@ def test_submit_job_dry_run_uses_slurm_inventory_fields(monkeypatch, tmp_path):
     assert "pipeline.task_0.slurm_config.account=project_account" in captured["argv"]
     assert "pipeline.task_0.slurm_config.partition=batch" in captured["argv"]
     assert "pipeline.task_0.slurm_config.container=ubuntu:24.04" in captured["argv"]
+    assert (
+        'pipeline.task_0.slurm_config.container_mounts=["/host/hf:/hf-local","/host/hf:/models"]'
+        in captured["argv"]
+    )
+    assert (
+        'pipeline.task_0.slurm_config.srun_args=["--no-container-mount-home --mpi=pmix"]'
+        in captured["argv"]
+    )
     assert "pipeline.task_0.slurm_config.ntasks_per_node=1" in captured["argv"]
     assert captured["env"]["SLURM_HOST"] == "mfa-login.example.com"
     assert captured["env"]["SLURM_ACCOUNT"] == "project_account"
@@ -1294,6 +1315,76 @@ def test_job_status_launcher_experiments_fallback(tmp_path, monkeypatch):
     assert result["status"] == "running"
 
 
+def test_launcher_and_status_share_native_nemorun_home(tmp_path, monkeypatch):
+    """Without an override, submission and status use NeMo Run's native home."""
+    native_home = tmp_path / ".nemo_run"
+    monkeypatch.delenv("NEMORUN_HOME", raising=False)
+    monkeypatch.setattr(bridge, "_nemorun_home", lambda: native_home)
+    env = {}
+
+    bridge._apply_launcher_env(
+        env,
+        checkout=None,
+        executor="slurm",
+        cluster_host="cluster.example.com",
+        account=None,
+        partition=None,
+        control_socket=None,
+        reconnect_command=None,
+    )
+
+    assert env["NEMORUN_HOME"] == str(native_home)
+    assert bridge._experiment_search_roots()[0] == native_home / "experiments"
+
+
+def test_launcher_env_hydrates_credentials_from_pensieve_cache(tmp_path, monkeypatch):
+    """Carrier-backed credentials reach launcher subprocesses without entering argv."""
+    cache = tmp_path / "pensieve.env"
+    cache.write_text(
+        "export HF_TOKEN='carrier hf token'\n"
+        "SPECDEC_BENCH_S3_SECRET=carrier-s3-secret\n"
+        "UNRELATED_SECRET=do-not-forward\n"
+    )
+    monkeypatch.setenv("PENSIEVE_ENV_FILE", str(cache))
+    env = {}
+
+    bridge._apply_launcher_env(
+        env,
+        checkout=None,
+        executor="slurm",
+        cluster_host="cluster.example.com",
+        account=None,
+        partition=None,
+        control_socket=None,
+        reconnect_command=None,
+    )
+
+    assert env["HF_TOKEN"] == "carrier hf token"
+    assert env["SPECDEC_BENCH_S3_SECRET"] == "carrier-s3-secret"
+    assert "UNRELATED_SECRET" not in env
+
+
+def test_launcher_env_prefers_process_credentials(tmp_path, monkeypatch):
+    """An inherited non-empty credential takes precedence over the cache."""
+    cache = tmp_path / "pensieve.env"
+    cache.write_text("HF_TOKEN=cache-token\n")
+    monkeypatch.setenv("PENSIEVE_ENV_FILE", str(cache))
+    env = {"HF_TOKEN": "process-token"}
+
+    bridge._apply_launcher_env(
+        env,
+        checkout=None,
+        executor="slurm",
+        cluster_host="cluster.example.com",
+        account=None,
+        partition=None,
+        control_socket=None,
+        reconnect_command=None,
+    )
+
+    assert env["HF_TOKEN"] == "process-token"
+
+
 def test_job_status_rejects_unsafe_experiment_id():
     """Experiment ids are path tokens, not filesystem paths or globs."""
     result = bridge.job_status_impl("../exp_1781000008")
@@ -1390,6 +1481,29 @@ def test_wait_for_experiment_returns_terminal_immediately(tmp_path, monkeypatch)
     assert result["ok"] is True
     assert result["status"] == "done"
     assert result["waited_seconds"] < 1  # didn't actually wait
+
+
+def test_wait_for_experiment_includes_terminal_log(tmp_path, monkeypatch):
+    """The MCP wait surface can attach the final remote log tail."""
+    exp = tmp_path / "experiments" / "cicd" / "cicd_done"
+    exp.mkdir(parents=True)
+    (exp / "_DONE").touch()
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        bridge,
+        "read_cluster_artifact_impl",
+        lambda **_: {"ok": True, "content": "final output\n"},
+    )
+
+    result = bridge.wait_for_experiment_impl(
+        "cicd_done",
+        timeout_sec=10,
+        poll_interval_sec=1,
+        include_log=True,
+    )
+
+    assert result["status"] == "done"
+    assert result["log_tail"] == "final output\n"
 
 
 def test_wait_for_experiment_polls_until_done(tmp_path, monkeypatch):
@@ -1578,24 +1692,27 @@ def test_provision_ssh_explicit_identity_overrides_default(tmp_path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# read_cluster_artifact — logs mode (subprocess mocked)
+# read_cluster_artifact — logs mode
 # ---------------------------------------------------------------------------
 
 
-def test_read_cluster_artifact_logs_mode_ok(monkeypatch):
-    """path=None → wraps `nemo experiment logs <id> <job_idx>`."""
-    captured = {}
+def test_read_cluster_artifact_logs_mode_ok(tmp_path, monkeypatch):
+    """path=None reads the task log through the stored remote tunnel."""
+    exp = tmp_path / "experiments" / "cicd" / "cicd_42"
+    exp.mkdir(parents=True)
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    from nemo_run.run.experiment import Experiment
 
-    def fake_run(argv, **kwargs):
-        captured["argv"] = argv
-        return subprocess.CompletedProcess(
-            args=argv,
-            returncode=0,
-            stdout="line 1\nline 2\nline 3\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    tunnel = SimpleNamespace(
+        job_dir="/remote/cicd/cicd_42",
+        run=lambda command, warn: SimpleNamespace(stdout="line 1\nline 2\nline 3\n"),
+    )
+    job = SimpleNamespace(id="task_0", executor=SimpleNamespace(tunnel=tunnel))
+    monkeypatch.setattr(
+        Experiment,
+        "_from_config",
+        lambda _: SimpleNamespace(jobs=[job]),
+    )
     result = bridge.read_cluster_artifact_impl(
         experiment_id="cicd_42",
         path=None,
@@ -1604,25 +1721,25 @@ def test_read_cluster_artifact_logs_mode_ok(monkeypatch):
     assert result["ok"] is True
     assert result["mode"] == "logs"
     assert "line 1" in result["content"]
-    # Verify the wrapped command
-    assert "nemo" in captured["argv"]
-    assert "experiment" in captured["argv"]
-    assert "logs" in captured["argv"]
-    assert "cicd_42" in captured["argv"]
 
 
-def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch):
-    """Nemo cli non-zero → structured logs_fetch_failed."""
+def test_read_cluster_artifact_logs_mode_subprocess_failed(tmp_path, monkeypatch):
+    """Tunnel failures produce structured logs_fetch_failed."""
+    exp = tmp_path / "experiments" / "cicd" / "cicd_42"
+    exp.mkdir(parents=True)
+    monkeypatch.setenv("NEMORUN_HOME", str(tmp_path))
+    from nemo_run.run.experiment import Experiment
 
-    def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(
-            args=argv,
-            returncode=1,
-            stdout="",
-            stderr="experiment cicd_42 not found\n",
-        )
+    def fail_run(command, warn):
+        raise RuntimeError("experiment log unavailable")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    tunnel = SimpleNamespace(job_dir="/remote/cicd/cicd_42", run=fail_run)
+    job = SimpleNamespace(id="task_0", executor=SimpleNamespace(tunnel=tunnel))
+    monkeypatch.setattr(
+        Experiment,
+        "_from_config",
+        lambda _: SimpleNamespace(jobs=[job]),
+    )
     result = bridge.read_cluster_artifact_impl(
         experiment_id="cicd_42",
         path=None,
@@ -1630,23 +1747,6 @@ def test_read_cluster_artifact_logs_mode_subprocess_failed(monkeypatch):
     )
     assert result["ok"] is False
     assert result["reason"] == "logs_fetch_failed"
-    assert result["exit_code"] == 1
-
-
-def test_read_cluster_artifact_logs_mode_timeout(monkeypatch):
-    """Hanging tunnel → structured logs_fetch_timeout, no exception."""
-
-    def fake_run(argv, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=60)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    result = bridge.read_cluster_artifact_impl(
-        experiment_id="cicd_42",
-        path=None,
-        job_idx=0,
-    )
-    assert result["ok"] is False
-    assert result["reason"] == "logs_fetch_timeout"
 
 
 # ---------------------------------------------------------------------------

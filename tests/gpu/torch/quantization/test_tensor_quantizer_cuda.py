@@ -41,19 +41,30 @@ class TestBlockQuantCuda(BlockQuantTester):
 
 class TestTensorQuantizerE4M3:
     @pytest.mark.parametrize(
-        ("E", "M", "axis"), [(5, 2, None), (4, 3, None), (4, 3, 1), (7, 3, None)]
+        ("E", "M", "axis", "quant_type"),
+        [
+            (5, 2, None, "dynamic"),
+            (5, 2, None, "static"),
+            (5, 2, 1, "dynamic"),
+            (4, 3, None, "static"),
+            (4, 3, 1, "static"),
+            (7, 3, None, "static"),
+        ],
     )
-    def test_e4m3(self, E, M, axis):  # noqa: N803
-        is_error_expected = E != 4 or M != 3
+    def test_fp8(self, E, M, axis, quant_type):  # noqa: N803
+        is_e4m3 = (E, M) == (4, 3)
+        is_e5m2 = (E, M) == (5, 2) and axis is None and quant_type == "dynamic"
+        is_error_expected = not (is_e4m3 or is_e5m2)
         with pytest.raises(ValidationError) if is_error_expected else contextlib.nullcontext():
-            e4m3_desc = QuantizerAttributeConfig(num_bits=(E, M), axis=axis)
-            e4m3_quantizer = tensor_quantizer.TensorQuantizer(e4m3_desc).cuda()
+            fp8_desc = QuantizerAttributeConfig(num_bits=(E, M), axis=axis, type=quant_type)
+            fp8_quantizer = tensor_quantizer.TensorQuantizer(fp8_desc).cuda()
 
             x = torch.rand(3, 6, 7, 7).cuda()
 
-            e4m3_x = e4m3_quantizer(x)
-            ref = tensor_quant.scaled_e4m3(x, e4m3_quantizer._get_amax(x), None, E, M)
-            assert torch.allclose(e4m3_x, ref)
+            fp8_x = fp8_quantizer(x)
+            amax = None if is_e5m2 else fp8_quantizer._get_amax(x)
+            ref = tensor_quant.fake_fp8(x, amax, None, E, M)
+            assert torch.allclose(fp8_x, ref)
 
     def test_non_current_gpu(self, need_2_gpus):
         x = torch.randn(3, 4)

@@ -23,6 +23,7 @@ from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTe
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.nn.modules.tensor_quantizer as tensor_quantizer_module
+import modelopt.torch.quantization.tensor_quant as tensor_quant
 from modelopt.torch.quantization import QuantModuleRegistry
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, RotateConfig
 from modelopt.torch.quantization.nn import (
@@ -35,6 +36,15 @@ from modelopt.torch.quantization.nn import (
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
     device = "cpu"
+
+
+def test_unscaled_e5m2_matches_native_cast():
+    inputs = torch.tensor([-60000.0, -1.3, 0.0, 1.3, 60000.0], dtype=torch.float32)
+    expected = inputs.to(torch.float8_e5m2).to(inputs.dtype)
+
+    actual = tensor_quant.fake_fp8(inputs, None, None, 5, 2)
+
+    assert torch.equal(actual, expected)
 
 
 class TestQuantizerAttributeConfig:
@@ -109,6 +119,25 @@ class TestQuantizerAttributeConfig:
             match=r"num_bits must be a positive integer or a tuple of positive integers.",
         ):
             QuantizerAttributeConfig(enable=True, num_bits=(-1, 2))
+
+    def test_unscaled_e5m2_config(self):
+        config = QuantizerAttributeConfig(num_bits=(5, 2), axis=None, type="dynamic")
+        assert config.num_bits == (5, 2)
+
+        with pytest.raises(ValueError, match="requires type='dynamic' and axis=None"):
+            QuantizerAttributeConfig(num_bits=(5, 2), axis=None)
+
+        with pytest.raises(ValueError, match="requires type='dynamic' and axis=None"):
+            QuantizerAttributeConfig(num_bits=(5, 2), axis=0, type="dynamic")
+
+
+def test_unscaled_e5m2_tensor_quantizer():
+    quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(5, 2), axis=None, type="dynamic")
+    )
+    inputs = torch.tensor([-60000.0, -1.3, 0.0, 1.3, 60000.0], dtype=torch.float32)
+
+    assert torch.equal(quantizer(inputs), inputs.to(torch.float8_e5m2).to(inputs.dtype))
 
 
 def _run_rotated_backend(monkeypatch, rotate):

@@ -179,6 +179,17 @@ class TestScaledE4M3:
         assert torch.isfinite(xq).all()
 
 
+class TestUnscaledE5M2:
+    @pytest.mark.parametrize("device", ["cuda", "cpu"])
+    def test_matches_native_cast(self, device):
+        x = torch.randn(4, 4, device=device, dtype=torch.float32)
+        expected = x.to(torch.float8_e5m2).to(x.dtype)
+
+        actual = tensor_quant.fake_fp8(x, None, None, 5, 2)
+
+        assert torch.equal(actual, expected)
+
+
 class Testfp4:
     @pytest.mark.skipif(not NATIVE_E4M3_AVAILABLE, reason="Native E4M3 requires compute >= 8.9")
     def test_native_block_scale_underflows_to_zero(self):
