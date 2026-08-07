@@ -382,8 +382,8 @@ separate Puzzletron verdict. A qualification plan must declare its required
 controls, metrics, sample count, tolerances, axis and target coverage, and
 aggregation rule. It may reject a campaign for a ranking-quality warning
 without reclassifying that warning as a correctness error. The
-[Puzzletron README](../README.md#understand-sorting-width-ranking-and-slicing)
-provides definitions and a worked example for new users.
+[sanity validation guide](sanity_validation.md) provides definitions, the
+slicing mental model, and a worked example.
 
 ## Current implementation versus design direction
 
