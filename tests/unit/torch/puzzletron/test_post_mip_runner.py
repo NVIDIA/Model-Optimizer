@@ -17,6 +17,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import signal
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -277,11 +278,162 @@ def test_lmms_eval_command_rejects_reserved_extra_args(tmp_path):
         assert expected in message
 
 
+def test_lmms_eval_timeout_terminates_process_group(monkeypatch, tmp_path):
+    created = []
+    signals = []
+
+    class FakeProcess:
+        pid = 1234
+        returncode = None
+
+        def __init__(self):
+            self.communicate_timeouts = []
+
+        def communicate(self, timeout=None):
+            self.communicate_timeouts.append(timeout)
+            if len(self.communicate_timeouts) == 1:
+                raise subprocess.TimeoutExpired(
+                    ["python", "-m", "lmms_eval"],
+                    timeout,
+                    output="partial stdout",
+                    stderr="partial stderr",
+                )
+            self.returncode = -signal.SIGTERM
+            return "partial stdout", "partial stderr"
+
+    def fake_popen(argv, **kwargs):
+        process = FakeProcess()
+        created.append((argv, kwargs, process))
+        return process
+
+    def fake_killpg(pid, signal_number):
+        if signal_number == 0:
+            raise ProcessLookupError
+        signals.append((pid, signal_number))
+
+    monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runner.os, "killpg", fake_killpg)
+
+    try:
+        runner._run_lmms_eval_process(
+            ["python", "-m", "lmms_eval"],
+            cwd=str(tmp_path),
+            env={},
+            timeout=7.0,
+        )
+    except subprocess.TimeoutExpired as error:
+        assert error.timeout == 7.0
+        assert error.output == "partial stdout"
+        assert error.stderr == "partial stderr"
+    else:
+        raise AssertionError("expected lmms-eval timeout to be raised")
+
+    argv, kwargs, process = created[0]
+    assert argv == ["python", "-m", "lmms_eval"]
+    assert kwargs["start_new_session"] is True
+    assert process.communicate_timeouts == [
+        7.0,
+        runner._LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+    ]
+    assert signals == [(1234, signal.SIGTERM)]
+
+
+def test_lmms_eval_timeout_kills_remaining_process_group(monkeypatch, tmp_path):
+    signals = []
+
+    class FakeProcess:
+        pid = 3456
+        returncode = None
+
+        def communicate(self, timeout=None):
+            if timeout == 7.0:
+                raise subprocess.TimeoutExpired(
+                    ["python", "-m", "lmms_eval"],
+                    timeout,
+                    output="partial stdout",
+                    stderr="partial stderr",
+                )
+            self.returncode = -signal.SIGTERM
+            return "partial stdout", "partial stderr"
+
+    def fake_killpg(pid, signal_number):
+        if signal_number != 0:
+            signals.append((pid, signal_number))
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(runner.os, "killpg", fake_killpg)
+
+    try:
+        runner._run_lmms_eval_process(
+            ["python", "-m", "lmms_eval"],
+            cwd=str(tmp_path),
+            env={},
+            timeout=7.0,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("expected lmms-eval timeout to be raised")
+
+    assert signals == [(3456, signal.SIGTERM), (3456, signal.SIGKILL)]
+
+
+def test_lmms_eval_timeout_kills_stubborn_process_group(monkeypatch, tmp_path):
+    signals = []
+
+    class FakeProcess:
+        pid = 5678
+        returncode = None
+
+        def __init__(self):
+            self.communicate_timeouts = []
+
+        def communicate(self, timeout=None):
+            self.communicate_timeouts.append(timeout)
+            if len(self.communicate_timeouts) < 3:
+                raise subprocess.TimeoutExpired(
+                    ["python", "-m", "lmms_eval"],
+                    timeout,
+                    output="partial stdout",
+                    stderr="partial stderr",
+                )
+            self.returncode = -signal.SIGKILL
+            return "partial stdout", "partial stderr"
+
+    process = FakeProcess()
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        runner.os,
+        "killpg",
+        lambda pid, signal_number: signals.append((pid, signal_number)),
+    )
+
+    try:
+        runner._run_lmms_eval_process(
+            ["python", "-m", "lmms_eval"],
+            cwd=str(tmp_path),
+            env={},
+            timeout=7.0,
+        )
+    except subprocess.TimeoutExpired as error:
+        assert error.output == "partial stdout"
+        assert error.stderr == "partial stderr"
+    else:
+        raise AssertionError("expected lmms-eval timeout to be raised")
+
+    assert process.communicate_timeouts == [
+        7.0,
+        runner._LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+        None,
+    ]
+    assert signals == [(5678, signal.SIGTERM), (5678, signal.SIGKILL)]
+
+
 def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
-        del env, capture_output, text, timeout, check
+    def fake_run(argv, *, cwd, env, timeout):
+        del env, timeout
         captured["argv"] = argv
         output = Path(cwd) / "nested"
         output.mkdir(parents=True)
@@ -302,7 +454,7 @@ def test_downstream_evaluation_runs_lmms_eval_and_flattens_metrics(monkeypatch, 
         )
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_lmms_eval_process", fake_run)
     node = SimpleNamespace(
         node_id="lmms_eval",
         flow_id="runtime",
@@ -364,8 +516,8 @@ def test_lmms_eval_completion_validates_resolved_task_expansion():
 
 
 def test_downstream_evaluation_rejects_missing_configured_task(monkeypatch, tmp_path):
-    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
-        del env, capture_output, text, timeout, check
+    def fake_run(argv, *, cwd, env, timeout):
+        del env, timeout
         output = Path(cwd)
         (output / "results.json").write_text(
             json.dumps(
@@ -378,7 +530,7 @@ def test_downstream_evaluation_rejects_missing_configured_task(monkeypatch, tmp_
         )
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_lmms_eval_process", fake_run)
     node = SimpleNamespace(
         node_id="lmms_eval",
         flow_id="runtime",
@@ -411,8 +563,8 @@ def test_downstream_evaluation_rejects_missing_configured_task(monkeypatch, tmp_
 
 
 def test_downstream_evaluation_rejects_zero_sample_task(monkeypatch, tmp_path):
-    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
-        del env, capture_output, text, timeout, check
+    def fake_run(argv, *, cwd, env, timeout):
+        del env, timeout
         output = Path(cwd)
         (output / "results.json").write_text(
             json.dumps(
@@ -431,7 +583,7 @@ def test_downstream_evaluation_rejects_zero_sample_task(monkeypatch, tmp_path):
         )
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_lmms_eval_process", fake_run)
     node = SimpleNamespace(
         node_id="lmms_eval",
         flow_id="runtime",
@@ -466,8 +618,8 @@ def test_downstream_evaluation_rejects_zero_sample_task(monkeypatch, tmp_path):
 def test_downstream_evaluation_reports_lmms_eval_output_when_results_are_missing(
     monkeypatch, tmp_path
 ):
-    def fake_run(argv, *, cwd, env, capture_output, text, timeout, check):
-        del cwd, env, capture_output, text, timeout, check
+    def fake_run(argv, *, cwd, env, timeout):
+        del cwd, env, timeout
         return subprocess.CompletedProcess(
             argv,
             0,
@@ -475,7 +627,7 @@ def test_downstream_evaluation_reports_lmms_eval_output_when_results_are_missing
             stderr="",
         )
 
-    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "_run_lmms_eval_process", fake_run)
     node = SimpleNamespace(
         node_id="lmms_eval",
         flow_id="runtime",

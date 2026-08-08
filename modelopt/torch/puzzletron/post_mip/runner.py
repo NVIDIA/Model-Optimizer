@@ -25,6 +25,7 @@ import json
 import math
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import traceback
@@ -567,6 +568,7 @@ _LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS = frozenset(
         "--tasks",
     }
 )
+_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 
 def _as_cli_bool(value: bool) -> str:
@@ -989,6 +991,69 @@ def _lmms_eval_output_tail(result: subprocess.CompletedProcess[str], *, max_line
     return "\n".join(sections)
 
 
+def _signal_lmms_eval_process_group(
+    process: subprocess.Popen[str], signal_number: int
+) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal_number)
+        else:
+            process.send_signal(signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _lmms_eval_process_group_exists(process: subprocess.Popen[str]) -> bool:
+    if os.name != "posix":
+        return process.poll() is None
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _run_lmms_eval_process(
+    argv: list[str],
+    *,
+    cwd: str,
+    env: Mapping[str, str],
+    timeout: float | None,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name == "posix",
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _signal_lmms_eval_process_group(process, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(
+                timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            _signal_lmms_eval_process_group(process, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+        else:
+            if _lmms_eval_process_group_exists(process):
+                _signal_lmms_eval_process_group(process, signal.SIGKILL)
+        raise subprocess.TimeoutExpired(
+            argv,
+            timeout,
+            output=stdout if stdout is not None else error.output,
+            stderr=stderr if stderr is not None else error.stderr,
+        ) from error
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 def _downstream_evaluation(
     config: dict[str, Any],
     node: CompiledPostMIPNode,
@@ -1022,14 +1087,11 @@ def _downstream_evaluation(
     )
     # Campaign config controls the executable and arguments, but subprocess receives
     # an argv list directly; no shell parsing is involved.
-    result = subprocess.run(
+    result = _run_lmms_eval_process(
         argv,
         cwd=str(output),
         env=env,
-        capture_output=True,
-        text=True,
         timeout=timeout,
-        check=False,
     )
     stream_paths = _write_lmms_eval_streams(output, result)
     if result.returncode:
