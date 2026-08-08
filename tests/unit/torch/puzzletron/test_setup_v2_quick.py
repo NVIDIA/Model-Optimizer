@@ -40,6 +40,25 @@ _QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
 _NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
 
 
+def _qwen_inventory(
+    *,
+    num_layers,
+    hidden_size,
+    intermediate_size,
+    num_attention_heads,
+    num_key_value_heads,
+):
+    return SimpleNamespace(
+        num_layers=num_layers,
+        facts={
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_attention_heads": num_attention_heads,
+            "num_key_value_heads": num_key_value_heads,
+        },
+    )
+
+
 def _context():
     return {
         "model": SimpleNamespace(
@@ -87,6 +106,150 @@ def test_guided_profile_defaults_are_selected_by_model_family(tmp_path):
 
     assert preset.resolved_defaults(families["first"])["mip"]["num_solutions"] == 2
     assert preset.resolved_defaults(families["second"])["mip"]["num_solutions"] == 7
+
+
+def test_same_family_profile_uses_smaller_sample_counts_for_qwen_0p8b():
+    qwen_0p8b = _qwen_inventory(
+        num_layers=24,
+        hidden_size=1024,
+        intermediate_size=3584,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+    )
+    qwen_9b = _qwen_inventory(
+        num_layers=32,
+        hidden_size=4096,
+        intermediate_size=12288,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+    )
+
+    smoke = get_setup_preset("smoke")
+    small_defaults = smoke.resolved_defaults(_QWEN_FAMILY_CONFIG, qwen_0p8b)
+    large_defaults = smoke.resolved_defaults(_QWEN_FAMILY_CONFIG, qwen_9b)
+
+    assert small_defaults["pruning"]["width_importance_samples"] == 8
+    assert small_defaults["pruning"]["replacement_samples"] == 4
+    assert large_defaults["pruning"]["width_importance_samples"] == 512
+    assert large_defaults["pruning"]["replacement_samples"] == 32
+    assert small_defaults["pruning"]["depth_remove"] == 1
+    assert large_defaults["pruning"]["depth_remove"] == 1
+
+
+def test_model_override_changes_only_its_historical_qwen_9b_values():
+    qwen_9b = _qwen_inventory(
+        num_layers=32,
+        hidden_size=4096,
+        intermediate_size=12288,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+    )
+
+    defaults = get_setup_preset("high-confidence").resolved_defaults(
+        _QWEN_FAMILY_CONFIG,
+        qwen_9b,
+    )
+
+    assert defaults["pruning"]["depth_importance_samples"] == 128
+    assert defaults["pruning"]["replacement_samples"] == 128
+    assert defaults["pruning"]["bypass"]["enabled"] is False
+    assert defaults["mip"]["goal_value"] == "75%"
+    assert defaults["pruning"]["width_importance_samples"] == 65536
+    assert defaults["mip"]["num_solutions"] == 16
+
+
+def test_qwen_27b_balanced_profile_uses_its_historical_campaign_budgets():
+    qwen_27b = _qwen_inventory(
+        num_layers=64,
+        hidden_size=5120,
+        intermediate_size=17408,
+        num_attention_heads=24,
+        num_key_value_heads=4,
+    )
+
+    defaults = get_setup_preset("balanced").resolved_defaults(
+        _QWEN_FAMILY_CONFIG,
+        qwen_27b,
+    )
+
+    assert defaults["pruning"]["width_importance_samples"] == 16384
+    assert defaults["pruning"]["replacement_samples"] == 16
+    assert defaults["mip"]["goal_value"] == "85%"
+
+
+def test_nemotron_nano_profiles_use_model_specific_smoke_and_search_budgets():
+    nano = SimpleNamespace(
+        num_layers=52,
+        facts={
+            "hidden_size": 2688,
+            "intermediate_size": 1856,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 2,
+            "num_experts": 128,
+        },
+    )
+
+    smoke = get_setup_preset("smoke").resolved_defaults(_NEMOTRON_FAMILY_CONFIG, nano)
+    high_confidence = get_setup_preset("high-confidence").resolved_defaults(
+        _NEMOTRON_FAMILY_CONFIG,
+        nano,
+    )
+
+    assert smoke["pruning"]["width_importance_samples"] == 2
+    assert smoke["pruning"]["bypass"]["enabled"] is True
+    assert smoke["mip"]["num_solutions"] == 1
+    assert high_confidence["pruning"]["depth_remove"] == 5
+    assert high_confidence["pruning"]["width_importance_samples"] == 8192
+    assert high_confidence["mip"]["num_solutions"] == 5
+
+
+def test_explicit_defaults_still_override_model_specific_profile():
+    qwen_0p8b = _qwen_inventory(
+        num_layers=24,
+        hidden_size=1024,
+        intermediate_size=3584,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+    )
+    resolver = DefaultsResolver(
+        preset_defaults=get_setup_preset("smoke").resolved_defaults(
+            _QWEN_FAMILY_CONFIG,
+            qwen_0p8b,
+        ),
+        file_defaults={"pruning": {"width_importance_samples": 64}},
+    )
+
+    resolved = resolver.resolve_default("pruning.width_importance_samples")
+
+    assert resolved.value == 64
+    assert resolved.source == "defaults_file"
+
+
+def test_ambiguous_model_specific_defaults_fail_closed(tmp_path):
+    family_config = tmp_path / "family.yaml"
+    family_config.write_text("family: {}\n")
+    (tmp_path / "setup_v2_defaults.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 2,
+                "profiles": {"smoke": {"mip": {"num_solutions": 2}}},
+                "model_overrides": {
+                    "first": {
+                        "match": {"num_layers": 24},
+                        "profiles": {"smoke": {"mip": {"num_solutions": 3}}},
+                    },
+                    "second": {
+                        "match": {"facts": {"hidden_size": 1024}},
+                        "profiles": {"smoke": {"mip": {"num_solutions": 4}}},
+                    },
+                },
+            }
+        )
+    )
+    inventory = SimpleNamespace(num_layers=24, facts={"hidden_size": 1024})
+
+    with pytest.raises(SetupError, match="matches multiple guided setup overrides"):
+        get_setup_preset("smoke").resolved_defaults(family_config, inventory)
 
 
 def test_guided_profile_defaults_fail_closed_when_family_profile_is_missing(tmp_path):
@@ -380,14 +543,14 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         architectures=("Qwen3_5ForCausalLM",),
         multimodal=False,
         moe=False,
-        num_layers=4,
-        num_sublayers=8,
-        layer_counts={"full_attention": 4},
+        num_layers=24,
+        num_sublayers=48,
+        layer_counts={"full_attention": 6, "linear_attention": 18},
         facts={
             "hidden_size": 1024,
-            "num_attention_heads": 16,
-            "num_key_value_heads": 4,
-            "intermediate_size": 4096,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 2,
+            "intermediate_size": 3584,
         },
         axes=(
             AxisInventory(
@@ -407,8 +570,8 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         config={
             "model_type": "qwen3_5_text",
             "text_config": {
-                "num_hidden_layers": 4,
-                "layer_types": ["full_attention"] * 4,
+                "num_hidden_layers": 24,
+                "layer_types": ["linear_attention"] * 18 + ["full_attention"] * 6,
             },
         },
         inventory=inventory,
@@ -445,9 +608,15 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     assert (campaign / "resolved_defaults.yaml").is_file()
     generated = WizardState.resume(campaign)
     assert generated.collection("pruning")["depth_remove"] == 1
+    assert generated.collection("pruning")["width_importance_samples"] == 8
+    assert generated.collection("pruning")["replacement_samples"] == 4
     assert generated.collection("default_resolutions")["pruning.depth_remove"] == {
         "value": 1,
         "source": "preset",
+    }
+    assert generated.collection("default_resolutions")["pruning.width_importance_samples"] == {
+        "value": 8,
+        "source": "model_profile",
     }
 
 

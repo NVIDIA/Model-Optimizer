@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 profiles:
   smoke:
@@ -50,3 +50,35 @@ profiles:
     mip:
       goal_value: 70%
       num_solutions: 16
+
+# Model-specific values are seeded from historical campaign configurations.
+# Unspecified fields continue to inherit the family profile above.
+model_overrides:
+  nano_30b_a3b_bf16:
+    match:
+      num_layers: 52
+      facts:
+        hidden_size: 2688
+        intermediate_size: 1856
+        num_attention_heads: 32
+        num_key_value_heads: 2
+        num_experts: 128
+    profiles:
+      smoke:
+        pruning:
+          depth_importance_samples: 2
+          width_importance_samples: 2
+          replacement_samples: 2
+          bypass:
+            enabled: true
+        mip:
+          num_solutions: 1
+      high-confidence:
+        pruning:
+          depth_remove: 5
+          depth_importance_samples: 128
+          width_importance_samples: 8192
+          replacement_samples: 128
+        mip:
+          goal_value: 75%
+          num_solutions: 5

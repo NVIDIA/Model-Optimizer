@@ -409,15 +409,20 @@ def _resolver(
     defaults_path: Path | None,
     preset: SetupPreset | None = None,
     family_config: str | Path | None = None,
+    model_inventory: Any | None = None,
 ) -> DefaultsResolver:
+    preset_defaults = {}
+    model_profile_defaults = {}
+    if preset is not None and family_config is not None:
+        preset_defaults, model_profile_defaults = preset.resolved_default_layers(
+            family_config,
+            model_inventory,
+        )
     return DefaultsResolver(
         builtins=BUILTINS,
         model_derived={},
-        preset_defaults=(
-            preset.resolved_defaults(family_config)
-            if preset is not None and family_config is not None
-            else {}
-        ),
+        preset_defaults=preset_defaults,
+        model_profile_defaults=model_profile_defaults,
         file_defaults=load_defaults(defaults_path),
         preserved=_nested_records(state),
     )
@@ -4879,7 +4884,8 @@ def run_wizard_v2(
         saved = state.payload["model"]
         context["model"] = inspect_model(str(saved["source"]))
     family_config = context["model"].inventory.family_config if "model" in context else None
-    resolver = _resolver(state, selected_defaults, preset, family_config)
+    model_inventory = context["model"].inventory if "model" in context else None
+    resolver = _resolver(state, selected_defaults, preset, family_config, model_inventory)
 
     index = 0
     while index < len(SECTION_BUILDERS):
@@ -4897,6 +4903,7 @@ def run_wizard_v2(
                     selected_defaults,
                     preset,
                     context["model"].inventory.family_config,
+                    context["model"].inventory,
                 )
             index += 1
         else:
@@ -4912,7 +4919,14 @@ def run_wizard_v2(
                     family_config = (
                         context["model"].inventory.family_config if "model" in context else None
                     )
-                    resolver = _resolver(state, selected_defaults, preset, family_config)
+                    model_inventory = context["model"].inventory if "model" in context else None
+                    resolver = _resolver(
+                        state,
+                        selected_defaults,
+                        preset,
+                        family_config,
+                        model_inventory,
+                    )
                     print(f"  Profile changed to: {preset.choice_title}")
                 continue
             index = SECTION_NAMES.index(target.section) if target is not None else index

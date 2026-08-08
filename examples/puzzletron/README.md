@@ -82,9 +82,13 @@ The schema-driven wizard now starts with a guided setup profile:
 - **High-confidence search** spends more runtime on scoring and sanity checks.
 
 The selected profile supplies nested pruning and MIP defaults from the detected
-model family's `setup_v2_defaults.yaml`. Setup then asks for the model and
-dataset, and requires explicit acceptance or customization of the
-infrastructure-specific worker and cluster defaults:
+model family's `setup_v2_defaults.yaml`. A family file can refine those values
+for an exact model geometry, so a small and large model in the same family do
+not need to share scoring budgets. Unspecified model values inherit the family
+profile, while an explicitly selected defaults file still has the highest
+default precedence. Setup then asks for the model and dataset, and requires
+explicit acceptance or customization of infrastructure-specific worker and
+cluster defaults:
 
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py \

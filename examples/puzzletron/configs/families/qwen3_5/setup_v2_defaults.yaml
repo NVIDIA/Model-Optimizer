@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 profiles:
   smoke:
@@ -50,3 +50,56 @@ profiles:
     mip:
       goal_value: 70%
       num_solutions: 16
+
+# Model-specific values are seeded from historical campaign configurations.
+# Unspecified fields continue to inherit the family profile above.
+model_overrides:
+  qwen3p5_0p8b:
+    match:
+      num_layers: 24
+      facts:
+        hidden_size: 1024
+        intermediate_size: 3584
+        num_attention_heads: 8
+        num_key_value_heads: 2
+    profiles:
+      smoke:
+        pruning:
+          width_importance_samples: 8
+          replacement_samples: 4
+        mip:
+          goal_value: 85%
+
+  qwen3p5_9b:
+    match:
+      num_layers: 32
+      facts:
+        hidden_size: 4096
+        intermediate_size: 12288
+        num_attention_heads: 16
+        num_key_value_heads: 4
+    profiles:
+      high-confidence:
+        pruning:
+          depth_importance_samples: 128
+          replacement_samples: 128
+          bypass:
+            enabled: false
+        mip:
+          goal_value: 75%
+
+  qwen3p6_27b:
+    match:
+      num_layers: 64
+      facts:
+        hidden_size: 5120
+        intermediate_size: 17408
+        num_attention_heads: 24
+        num_key_value_heads: 4
+    profiles:
+      balanced:
+        pruning:
+          width_importance_samples: 16384
+          replacement_samples: 16
+        mip:
+          goal_value: 85%
