@@ -133,13 +133,19 @@ from the original candidate.
 
 ## Downstream evaluation
 
-`downstream_evaluation` shells out to `python -m lmms_eval` from the GPU worker
-environment. Install `examples/puzzletron/requirements.txt` in that environment;
-it pins the evaluator package used by the checked-in example:
+`downstream_evaluation` shells out to `python -m lmms_eval` through
+`command_prefix`. Install the pinned evaluator into an isolated environment
+rather than the Puzzletron runtime environment, because `lmms-eval==0.7.2` pins
+`wandb==0.25.0` and the pinned AutoModel build requires a newer `wandb`:
 
 ```bash
-python -m pip install -r examples/puzzletron/requirements.txt
+python3 -m venv /workspace/.venv-lmms-eval
+source /workspace/.venv-lmms-eval/bin/activate
+python -m pip install -r examples/puzzletron/requirements-lmms-eval.txt
 python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.2"'
+deactivate
+
+export PUZZLETRON_LMMS_EVAL_PYTHON=/workspace/.venv-lmms-eval/bin/python
 ```
 
 The runner derives the realized checkpoint path, vLLM topology arguments, task

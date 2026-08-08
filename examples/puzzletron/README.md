@@ -284,7 +284,6 @@ import os
 from packaging.version import Version
 
 import aiperf
-import lmms_eval
 import modelopt
 import nemo_automodel
 import torch
@@ -299,7 +298,6 @@ for package in (
     "vllm",
     "nemo-automodel",
     "aiperf",
-    "lmms-eval",
     "nvidia-modelopt",
 ):
     print(package, metadata.version(package))
@@ -314,7 +312,6 @@ assert Version(metadata.version("torchvision")).release == Version(
     ci_environment["torchvision"]
 ).release
 assert transformers.__version__ == ci_environment["transformers"]
-assert metadata.version("lmms-eval") == ci_environment["lmms_eval"]
 assert Version(metadata.version("nemo-automodel")).base_version == (
     ci_environment["nemo_automodel"]["base_version"]
 )
@@ -555,11 +552,25 @@ After `mip`, prepare one deduplicated online-evaluation plan. Repeat
 `--profile-id` for every configured profile; aliases ensure that an identical
 architecture is evaluated once while remaining visible in every profile.
 
-Downstream `lmms-eval` nodes require the same GPU worker environment as vLLM and
-the Puzzletron example requirements. The reproducible example path is pinned to
-`lmms-eval==0.7.2` by `examples/puzzletron/requirements.txt` and verified
-against `ci_environment.json`; do not run the checked-in `lmms_eval.yaml`
-example against an unpinned evaluator install.
+Downstream `lmms-eval` nodes use a separate evaluator Python. The reproducible
+example path is pinned to `lmms-eval==0.7.2` by
+`examples/puzzletron/requirements-lmms-eval.txt` and recorded in
+`ci_environment.json`. Keep this separate from the Puzzletron runtime
+environment because `lmms-eval==0.7.2` pins `wandb==0.25.0`, while the pinned
+AutoModel build requires a newer `wandb`.
+
+```bash
+python3 -m venv /workspace/.venv-lmms-eval
+source /workspace/.venv-lmms-eval/bin/activate
+python -m pip install --upgrade pip "setuptools>=80,<81" wheel packaging
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
+  python -m pip install --no-build-isolation -e "${VLLM_ROOT}"
+python -m pip install -r "${MODEL_OPT_ROOT}/examples/puzzletron/requirements-lmms-eval.txt"
+python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.2"'
+deactivate
+
+export PUZZLETRON_LMMS_EVAL_PYTHON=/workspace/.venv-lmms-eval/bin/python
+```
 
 ```bash
 python examples/puzzletron/run_profile_online_evaluation.py \

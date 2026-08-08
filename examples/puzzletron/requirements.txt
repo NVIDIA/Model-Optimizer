@@ -1,5 +1,4 @@
 aiohttp>=3.9,<4
-lmms-eval==0.7.2
 math-verify
 ray
 # Transformers comes from nvidia-modelopt[hf]; CPU CI overlays the exact

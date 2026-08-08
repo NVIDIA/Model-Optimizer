@@ -110,7 +110,6 @@ def puzzletron_v2(session):
         "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
         "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
         "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
-        "lmms-eval": PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"],
         "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
     }
     session.run(
@@ -126,7 +125,6 @@ def puzzletron_v2(session):
             "'torch': Version(version('torch')).base_version, "
             "'torchvision': Version(version('torchvision')).base_version, "
             "'transformers': Version(version('transformers')).base_version, "
-            "'lmms-eval': Version(version('lmms-eval')).base_version, "
             "'nemo-automodel': Version(version('nemo-automodel')).base_version}; "
             "mismatches = {name: (actual[name], expected_version) "
             "for name, expected_version in expected.items() "

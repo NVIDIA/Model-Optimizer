@@ -5,7 +5,7 @@ defaults:
   - _self_
 
 # Opt-in downstream lmms-eval workflow for the realized runtime-075 candidate.
-# Install examples/puzzletron/requirements.txt to use the pinned lmms-eval version.
+# Use PUZZLETRON_LMMS_EVAL_PYTHON to point at the isolated pinned evaluator env.
 # Non-empty post_mip.flows replaces the legacy post-MIP tail in the v2 orchestrator.
 zero_shot_evaluation:
   enabled: false
@@ -39,6 +39,10 @@ post_mip:
           type: downstream_evaluation
           input: materialized
           config:
+            command_prefix:
+              - ${oc.env:PUZZLETRON_LMMS_EVAL_PYTHON}
+              - -m
+              - lmms_eval
             model: vllm
             checkpoint_arg: model
             tasks:
