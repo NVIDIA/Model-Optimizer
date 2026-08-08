@@ -24,12 +24,18 @@ pinned via a vendored registry override in nemo-evaluator-next.
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
 | `max_concurrent` / `sandbox.concurrency` | `50` (canonical bench.yaml) |
 | timeout_strategy | `max` (canonical bench.yaml) + `agent_kwargs.llm_kwargs.timeout: 3600`; use `task` for leaderboard-comparable |
-| `cluster.eval_image` requirement | **≥ `0.3.1.1-harbor`** — TB 2.1's task set is pinned via a vendored registry override in that image (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) |
+| `cluster.eval_image` | **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) |
+| `proxy.request_timeout` | `3600` — must be **≥** `agent_kwargs.llm_kwargs.timeout` |
+| `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` |
+| `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` |
+| `http_pairs_dump` | **last** in the interceptor chain |
+| scope | 89 tasks × `repeats: 8` |
 
 These values mirror the canonical TB2.1 config — re-check it before a scored run:
-`configs/benchmarks/nel_next/terminal_bench_21/bench.yaml` in
-nvidia-eval-factory-benchmarking (see `references/nel-next.md` + the eval-config
-"source of truth" note). The `benchmarks:` block (drop into the example template):
+`configs/benchmarks/terminal-bench-2.1/bench.yaml` (+ `manifest.yaml`) in
+nvidia-eval-factory-benchmarking (`dl/JoC/competitive_evaluation/…`), with the image pin in
+`configs/shared/nel_next_containers.yaml`. See `references/nel-next.md` + the eval-config
+"source of truth" note. The `benchmarks:` block (drop into the example template):
 
 ```yaml
 benchmarks:
@@ -50,8 +56,14 @@ benchmarks:
       log_stream_prefix: terminalbench21-<model>-<cluster>
 ```
 
-`cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (≥ `0.3.1.1-harbor`) and the AWS creds
+`cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (`0.5.0.1-harbor`) and the AWS creds
 come from `modelopttools:eval-config` (run it first) + the workspace `.env`.
+
+**Sharding.** `max_concurrent`/`sandbox.concurrency` are **per shard**, and each shard runs
+its own vLLM on its own node — `shards: N` multiplies both serving capacity and live Fargate
+sandboxes (`N × concurrency`). Trials are partitioned and merged, so the score is unaffected;
+it is purely a wall-clock lever. `shards: 4` suits 89 × r8 = 712 trials. Check
+`N × concurrency` against the Fargate quota and `N × gpus_per_node` against your allocation.
 
 ## Score Extraction
 

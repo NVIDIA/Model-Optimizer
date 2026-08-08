@@ -27,8 +27,10 @@ Installing 0.3.x into the 0.2.6 env clobbers `nel`, so it lives in its own venv:
 .agents/scripts/nel-next.sh eval run <cfg> --dry-run | --submit | …
 ```
 
-Default install is public PyPI `nemo-evaluator[harbor]==0.3.*`; set
-`NEL_NEXT_ORIGIN`/`NEL_NEXT_REF` for the internal git build (see script header).
+Default install is a git build from `github.com/NVIDIA-NeMo/Evaluator` via `NEL_NEXT_ORIGIN`
+(default branch → **0.4.0**). PyPI `nemo-evaluator` stops at **0.3.0**, so a version pin
+can't reach 0.4.x. No `v0.4.0` tag exists — pin `NEL_NEXT_REF` to a commit SHA for
+reproducibility. Set `NEL_NEXT_ORIGIN` in `.env` to build from a mirror.
 
 ## Credentials + internal infra (`.env`)
 
@@ -75,7 +77,7 @@ services:
     extra_env: {...}            # VLLM_* backend env (e.g. NVFP4 MoE flags)
     container_mounts: [<lustre>/.cache/vllm:/cache/vllm, ...]
     generation: {temperature: 1.0, top_p: 0.95}
-    proxy: {request_timeout: 1800, extra_body: {...}, interceptors: [...]}
+    proxy: {request_timeout: 3600, extra_body: {...}, interceptors: [...]}   # >= llm_kwargs.timeout
     node_pool: gpu
 benchmarks:                     # EXACTLY ONE entry — one benchmark per config (see "One benchmark per config")
   - playbook: <benchmark>       # per recipe
@@ -131,9 +133,20 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Rules & gotchas
 
-- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}`. `0.3.1.1-harbor` is multi-arch and is
-  the minimum for **TB 2.1**; older `0.17.x/0.18.x-harbor-<arch>` are arch-suffixed.
+- **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
+  against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
+  pin and does move. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
   Private gitlab-master image → cluster needs enroot creds (SKILL Step 7.5).
+- **`proxy.request_timeout` must be >= `agent_kwargs.llm_kwargs.timeout`** (both 3600). A
+  smaller proxy timeout silently truncates long agent turns.
+- **`drop_params`** for harbor agentic benchmarks: `max_tokens`, `max_completion_tokens`,
+  `max_input_tokens_per_task`, `no_rebuild`. The last two are sent by the 0.5.x eval image;
+  vLLM 400s on them if they aren't stripped.
+- **`exclude_patterns`** = `["shard*", "model_traffic.jsonl"]` — captured request bodies
+  stay in the run dir, never MLflow.
+- **`http_pairs_dump`** — `config: {dump_path: $${NEL_OUTPUT_DIR}/http_pairs_metrics.json,
+  first_n: 50}`. The `$$` defers expansion to run time. Chain position is per benchmark
+  (last for TB2.1, first for SWE-bench). Diagnostics only.
 - **Mount sources must pre-exist** — pyxis won't create the host side of a bind
   mount (invisible to `--dry-run`, fails at canary). `ssh <login> 'mkdir -p
   <lustre>/<user>/.cache/{vllm,huggingface}'`.

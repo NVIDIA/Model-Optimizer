@@ -43,12 +43,15 @@ services:
       - ???:/cache/huggingface
     generation: {temperature: 1.0, top_p: 0.95}   # from model card (reasoning mode); adjust per card — mandatory lookup (references/model-card-research.md), same as 0.2.6
     proxy:
-      request_timeout: 1800
+      request_timeout: 3600                      # canonical; MUST be >= benchmarks[].solver.agent_kwargs.llm_kwargs.timeout
       extra_body: {skip_special_tokens: false}   # add model-card sampling extras here if the card specifies them; mirror them in the export tags below
       interceptors:
         - name: drop_params                        # agents send max_tokens; many servers reject it
-          config: {params: [max_tokens, max_completion_tokens]}
+          # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
+          config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}
         # SWE-bench (OpenHands, multi-turn) adds turn_counter + consolidate_system + a system_message — see swebench_verified.md
+        - name: http_pairs_dump                    # FEP-1104/1120 diagnostics; canonical LAST in the chain
+          config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}   # $$ defers expansion to run time
     node_pool: gpu
 
 benchmarks:
@@ -72,7 +75,7 @@ cluster:
   account: ???
   walltime: "04:00:00"               # auto_resume chains across windows
   shards: 1                          # N = N nodes (each redeploys vLLM)
-  eval_image: ${NEL_NEXT_EVAL_IMAGE}  # from eval-config (TB2.1 needs ≥0.3.1.1-harbor, multi-arch; enroot creds per SKILL Step 7.5)
+  eval_image: ${NEL_NEXT_EVAL_IMAGE}  # from eval-config (0.5.0.1-harbor, multi-arch; enroot creds per SKILL Step 7.5)
   sbatch_comment: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"480","reason":"benchmarking","description":"nel-next agentic eval"}}'
   sbatch_extra_flags: {switches: 1, exclusive: true}
   container_env:                     # AWS creds reach the eval container ONLY via here
@@ -100,7 +103,7 @@ output:
       experiment_name: ???           # <user>/<model>-<benchmark> (hardcode; ${USER}=root in-container)
       log_config_params: true
       copy_logs: true
-      exclude_patterns: ["shard*"]
+      exclude_patterns: ["shard*", "model_traffic.jsonl"]   # captured request bodies (FEA-224) stay in the run dir
       description: ???               # '<model> | T=1.0 top_p=0.95 | <benchmark> (timeout_strategy=…) | r8'
       # model/checkpoint_path/benchmark drive dashboard attribution (engine logs only a generic metric key); temperature/top_p mirror generation above.
       tags: {framework: vllm, model: "???", checkpoint_path: "???", benchmark: "???", temperature: '1.0', top_p: '0.95'}
