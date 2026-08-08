@@ -95,9 +95,7 @@ def _scenario_grid_kd_configs(config: dict[str, Any]) -> list[dict[str, Any]]:
         kd = dict(candidate.get("distillation") or {})
         kd["student_dir"] = str(checkpoint)
         kd["teacher_dir"] = teacher_dir
-        kd["output_dir"] = str(
-            puzzle_dir / "artifacts" / "global_kd" / "scenarios" / scenario
-        )
+        kd["output_dir"] = str(puzzle_dir / "artifacts" / "global_kd" / "scenarios" / scenario)
         kd.pop("tournament", None)
         candidate["distillation"] = kd
         resolution = resolve_descriptor_from_pretrained(
@@ -183,10 +181,7 @@ def _select_evaluated_candidates(
         ):
             if current is not None:
                 normalized["selection_reasons"] = list(
-                    dict.fromkeys(
-                        normalized["selection_reasons"]
-                        + current[1]["selection_reasons"]
-                    )
+                    dict.fromkeys(normalized["selection_reasons"] + current[1]["selection_reasons"])
                 )
             candidates[key] = (loss, normalized)
         else:
@@ -227,14 +222,11 @@ def _profile_solution_checkpoints(
             profile_ids = [
                 str(row["id"])
                 for row in index.get("profiles", ())
-                if (
-                    profiles_root / str(row.get("id")) / "selected_solutions.json"
-                ).is_file()
+                if (profiles_root / str(row.get("id")) / "selected_solutions.json").is_file()
             ]
         else:
             profile_ids = [
-                path.parent.name
-                for path in profiles_root.glob("*/selected_solutions.json")
+                path.parent.name for path in profiles_root.glob("*/selected_solutions.json")
             ]
         if len(profile_ids) != 1:
             return []
@@ -389,9 +381,7 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
         for index in range(0, len(visible), group_size)
     ]
     output_dir = Path(stage_cfg.get("output_dir", puzzle_dir / "artifacts" / "aiperf"))
-    work = _aiperf_checkpoint_work(
-        checkpoints, list(stage_cfg.get("concurrency", [1, 2, 4, 8]))
-    )
+    work = _aiperf_checkpoint_work(checkpoints, list(stage_cfg.get("concurrency", [1, 2, 4, 8])))
     pool: Queue[str] = Queue()
     for gpu_group in gpu_groups:
         pool.put(gpu_group)
@@ -495,9 +485,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     teacher_dir = Path(teacher_dir)
     descriptor = _resolve_evaluation_descriptor(config, checkpoint_entries[0][1])
     hydra_cfg = load_runtime_hydra_config(config)
-    root = Path(
-        stage_cfg.get("output_dir", puzzle_dir / "artifacts" / "zero_shot_evaluation")
-    )
+    root = Path(stage_cfg.get("output_dir", puzzle_dir / "artifacts" / "zero_shot_evaluation"))
     summaries = []
 
     with _distributed(hydra_cfg):
@@ -524,7 +512,11 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
                 "block_configs": [block.to_dict() for block in blocks],
                 "hidden_width": int(lm.hidden_size),
             }
-            relative = checkpoint.relative_to(puzzle_dir) if checkpoint.is_relative_to(puzzle_dir) else Path(checkpoint.name)
+            relative = (
+                checkpoint.relative_to(puzzle_dir)
+                if checkpoint.is_relative_to(puzzle_dir)
+                else Path(checkpoint.name)
+            )
             output_dir = root / relative.parent
             solutions_path = output_dir / "identity_solution.json"
             if dist.is_master():
@@ -584,7 +576,9 @@ def post_distillation_evaluation_stage(config: dict[str, Any], manifest: StageMa
     stage_cfg = dict(candidate.get("post_distillation_evaluation") or {})
     puzzle_dir = Path((candidate.get("experiment") or {})["dir"])
     stage_cfg.setdefault("checkpoint_source", "global_kd")
-    stage_cfg.setdefault("output_dir", str(puzzle_dir / "artifacts" / "post_distillation_evaluation"))
+    stage_cfg.setdefault(
+        "output_dir", str(puzzle_dir / "artifacts" / "post_distillation_evaluation")
+    )
     candidate["zero_shot_evaluation"] = stage_cfg
     return evaluation_stage(candidate, manifest)
 
@@ -600,9 +594,7 @@ def _select_best_evaluated_checkpoint(summary_path: str | Path) -> Path:
     return Path(candidates[0]["checkpoint"])
 
 
-def _write_global_distillation_summary(
-    kd_config: GlobalKDConfig, result: GlobalKDResult
-) -> Path:
+def _write_global_distillation_summary(kd_config: GlobalKDConfig, result: GlobalKDResult) -> Path:
     """Publish the canonical final summary from the durable training log."""
 
     records_by_step: dict[int, dict[str, Any]] = {}
@@ -631,9 +623,7 @@ def _write_global_distillation_summary(
         except (IndexError, ValueError):
             continue
         consolidated.append((step, checkpoint))
-    post_kd_checkpoint = (
-        max(consolidated, key=lambda item: item[0])[1] if consolidated else None
-    )
+    post_kd_checkpoint = max(consolidated, key=lambda item: item[0])[1] if consolidated else None
     consolidation_requested = str(kd_config.save_consolidated).strip().lower() not in {
         "false",
         "0",
@@ -718,9 +708,7 @@ def distillation_stage(config: dict[str, Any], manifest: StageManifest):
         )
         if dist.is_master():
             summary_path.parent.mkdir(parents=True, exist_ok=True)
-            summary_path.write_text(
-                json.dumps(results, indent=2, sort_keys=True) + "\n"
-            )
+            summary_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
         dist.barrier()
         return complete_stage(
             config,
@@ -740,26 +728,16 @@ def distillation_stage(config: dict[str, Any], manifest: StageManifest):
         )
         return complete_stage(config, manifest, outputs=result)
     kd_config = build_global_kd_config(config)
-    try:
-        result = run_global_kd(kd_config, recipe_runner=config.get("_global_kd_runner"))
-        summary_path = kd_config.output_dir / "global_distillation_summary.json"
-        if int(os.environ.get("RANK", "0")) == 0:
-            summary_path = _write_global_distillation_summary(kd_config, result)
-        _distributed_barrier("global distillation publication")
-        return complete_stage(
-            config,
-            manifest,
-            outputs={**result.to_dict(), "summary_path": str(summary_path)},
-        )
-    except NotImplementedError as exc:
-        return complete_stage(
-            config,
-            manifest,
-            outputs={"global_kd_config": kd_config.to_dict(), "implemented": False},
-            status="skipped",
-            skip_reason="optional",
-            message=str(exc),
-        )
+    result = run_global_kd(kd_config, recipe_runner=config.get("_global_kd_runner"))
+    summary_path = kd_config.output_dir / "global_distillation_summary.json"
+    if int(os.environ.get("RANK", "0")) == 0:
+        summary_path = _write_global_distillation_summary(kd_config, result)
+    _distributed_barrier("global distillation publication")
+    return complete_stage(
+        config,
+        manifest,
+        outputs={**result.to_dict(), "summary_path": str(summary_path)},
+    )
 
 
 def _distillation_dataset_source(
@@ -775,9 +753,7 @@ def _distillation_dataset_source(
     )
     packed_token_cache_path = str(stage_cfg.get("packed_token_cache_path") or "")
     if not dataset_path and not packed_token_cache_path:
-        raise ValueError(
-            "distillation overfit requires dataset_path or packed_token_cache_path"
-        )
+        raise ValueError("distillation overfit requires dataset_path or packed_token_cache_path")
     return dataset_path, packed_token_cache_path
 
 
@@ -809,9 +785,7 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             and (not configured_ids or row.get("solution_id") in configured_ids)
         ),
         key=lambda row: (str(row.get("solution_id", "")), str(row.get("checkpoint", ""))),
-    )[
-        : int((config.get("global_distillation") or {}).get("num_best_to_distill", 1))
-    ]
+    )[: int((config.get("global_distillation") or {}).get("num_best_to_distill", 1))]
     if not solutions:
         raise ValueError(f"distillation overfit selected no candidates from {registry_path}")
 
@@ -827,9 +801,7 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
     max_steps = int(stage_cfg.get("max_steps", 64))
     local_batch_size = int(stage_cfg.get("local_batch_size", 4))
     seed = int(stage_cfg.get("seed", 444))
-    dataset_path, packed_token_cache_path = _distillation_dataset_source(
-        stage_cfg, config
-    )
+    dataset_path, packed_token_cache_path = _distillation_dataset_source(stage_cfg, config)
 
     root = (
         puzzle_dir
@@ -837,10 +809,7 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
         / "global_distillation_sanity"
         / "profiles"
         / profile_id
-        / (
-            f"text-n{sample_count}-l{sequence_length}-s{max_steps}"
-            f"-b{local_batch_size}-seed{seed}"
-        )
+        / (f"text-n{sample_count}-l{sequence_length}-s{max_steps}-b{local_batch_size}-seed{seed}")
     )
     summaries = []
     global_rank = int(os.environ.get("RANK", "0"))
@@ -867,8 +836,7 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
         )
         dataset_config = {
             "_target_": (
-                "modelopt.torch.puzzletron.distillation.dataset."
-                "make_puzzletron_llm_overfit_dataset"
+                "modelopt.torch.puzzletron.distillation.dataset.make_puzzletron_llm_overfit_dataset"
             ),
             "dataset_path": dataset_path,
             "split": str(stage_cfg.get("dataset_split", "train")),
@@ -945,9 +913,7 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
         result = run_global_kd(build_global_kd_config(candidate))
         training_log = output_dir / "checkpoints" / "training.jsonl"
         records = [
-            json.loads(line)
-            for line in training_log.read_text().splitlines()
-            if line.strip()
+            json.loads(line) for line in training_log.read_text().splitlines() if line.strip()
         ]
         if len(records) != max_steps:
             raise RuntimeError(

@@ -22,6 +22,11 @@ import sys
 from pathlib import Path
 
 __all__ = [
+    "EXECUTION_STRATEGY_VALUES",
+    "SHARED_SEMANTIC_CONFIG_SECTIONS",
+    "STAGE_REGISTRY",
+    "STAGE_SPECS",
+    "StageSpec",
     "configured_parent_stage_ids",
     "configured_stage_ids",
     "distributed_stage_ids",
@@ -32,6 +37,7 @@ __all__ = [
     "selected_parent_stage_ids",
     "semantic_stage_config",
     "stage_display_name",
+    "stage_ids",
     "stage_is_enabled",
     "stage_spec",
     "stage_terminal_state",
@@ -48,15 +54,11 @@ _GRAPH = importlib.util.module_from_spec(_SPEC)
 sys.modules.setdefault(_MODULE_NAME, _GRAPH)
 _SPEC.loader.exec_module(_GRAPH)
 
-_SEMANTICS_MODULE_NAME = "_puzzletron_orchestrator_stage_semantics"
-_SEMANTICS_PATH = Path(__file__).resolve().parents[1] / "stage_semantics.py"
-_SEMANTICS_SPEC = importlib.util.spec_from_file_location(_SEMANTICS_MODULE_NAME, _SEMANTICS_PATH)
-if _SEMANTICS_SPEC is None or _SEMANTICS_SPEC.loader is None:
-    raise ImportError(f"Unable to load Puzzletron stage semantics from {_SEMANTICS_PATH}")
-_SEMANTICS = importlib.util.module_from_spec(_SEMANTICS_SPEC)
-sys.modules.setdefault(_SEMANTICS_MODULE_NAME, _SEMANTICS)
-_SEMANTICS_SPEC.loader.exec_module(_SEMANTICS)
-
+EXECUTION_STRATEGY_VALUES = _GRAPH.EXECUTION_STRATEGY_VALUES
+SHARED_SEMANTIC_CONFIG_SECTIONS = _GRAPH.SHARED_SEMANTIC_CONFIG_SECTIONS
+STAGE_REGISTRY = _GRAPH.STAGE_REGISTRY
+STAGE_SPECS = _GRAPH.STAGE_SPECS
+StageSpec = _GRAPH.StageSpec
 configured_stage_ids = _GRAPH.configured_stage_ids
 configured_parent_stage_ids = _GRAPH.configured_parent_stage_ids
 distributed_stage_ids = _GRAPH.distributed_stage_ids
@@ -65,7 +67,7 @@ StageSkipReason = _GRAPH.StageSkipReason
 StageStatus = _GRAPH.StageStatus
 StageTerminalState = _GRAPH.StageTerminalState
 selected_parent_stage_ids = _GRAPH.selected_parent_stage_ids
-semantic_stage_config = _SEMANTICS.semantic_stage_config
+semantic_stage_config = _GRAPH.semantic_stage_config
 
 
 def stage_display_name(stage_id: str, *, granularity: str | None = None) -> str:
@@ -75,6 +77,7 @@ def stage_display_name(stage_id: str, *, granularity: str | None = None) -> str:
 
 
 stage_spec = _GRAPH.stage_spec
+stage_ids = _GRAPH.stage_ids
 stage_is_enabled = _GRAPH.stage_is_enabled
 stage_terminal_state = _GRAPH.stage_terminal_state
 topological_mapping_items = _GRAPH.topological_mapping_items

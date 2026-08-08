@@ -37,6 +37,7 @@ from .stages import (
     configured_parent_stage_ids,
     configured_stage_ids,
     distributed_stage_ids,
+    stage_spec,
     topological_mapping_items,
 )
 from .vllm_measurements import normalize_vllm_measurements
@@ -49,16 +50,26 @@ __all__ = [
     "resolve_stage_execution_specs",
 ]
 
-_DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
-    "vllm_stats": ExecutionStrategy.SHARDED,
-    "replacement_scoring": ExecutionStrategy.PERSISTENT_POOL,
-    "depth_importance": ExecutionStrategy.PERSISTENT_POOL,
-    "zero_shot_evaluation": ExecutionStrategy.SHARDED,
-    "aiperf": ExecutionStrategy.SHARDED,
-}
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _default_execution_strategy(
+    stage_id: str,
+    dynamic_defaults: Mapping[str, ExecutionStrategy],
+) -> ExecutionStrategy:
+    """Resolve a public registry default or a dynamic post-MIP default."""
+
+    if stage_id in dynamic_defaults:
+        return ExecutionStrategy(dynamic_defaults[stage_id])
+    try:
+        strategy = stage_spec(stage_id).default_execution_strategy
+    except ValueError:
+        # Non-public stages are expected to supply a dynamic default. Preserve
+        # the historical single-worker fallback for third-party dynamic nodes.
+        strategy = ExecutionStrategy.SINGLE.value
+    return ExecutionStrategy(strategy)
 
 
 _POST_MIP_NODE_METADATA = {
@@ -110,8 +121,7 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
     global_node_ids: set[str] = set()
     for flow_id, flow_value in flows.items():
         if not str(flow_id) or any(
-            character
-            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
             for character in str(flow_id)
         ):
             raise ValueError(f"invalid post-MIP flow ID {flow_id!r}")
@@ -125,8 +135,7 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
         mip_runs = _mapping(_mapping(config.get("mip")).get("runs"))
         if source["run"] not in mip_runs or mip_runs[source["run"]] is False:
             raise ValueError(
-                f"post-MIP flow {flow_id!r} selects unknown or disabled MIP run "
-                f"{source['run']!r}"
+                f"post-MIP flow {flow_id!r} selects unknown or disabled MIP run {source['run']!r}"
             )
         if set(source) - {"run", "variants", "objectives"}:
             raise ValueError(f"unknown source fields in post-MIP flow {flow_id!r}")
@@ -136,8 +145,7 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
         prepared_nodes: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for node_id, node_value in nodes.items():
             if not str(node_id) or any(
-                character
-                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
                 for character in str(node_id)
             ):
                 raise ValueError(f"invalid post-MIP node ID {node_id!r}")
@@ -228,9 +236,7 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
                     if owner != "mip":
                         dependency_stages.append(stage_by_node[owner])
             output_artifacts = (
-                {metadata["output"]}
-                if metadata.get("output")
-                else set(artifact_by_node[input_id])
+                {metadata["output"]} if metadata.get("output") else set(artifact_by_node[input_id])
             )
             stage_id = f"post.{flow_id}.{node_id}"
             compiled.append(
@@ -361,14 +367,10 @@ def _parse_mesh_override(payload: Mapping[str, Any] | None) -> ParallelMeshOverr
     )
 
 
-def _vllm_stage_mesh(
-    config: Mapping[str, Any], override: Mapping[str, Any] | None
-) -> ParallelMesh:
+def _vllm_stage_mesh(config: Mapping[str, Any], override: Mapping[str, Any] | None) -> ParallelMesh:
     """Resolve the primary measurement mesh and reject a conflicting duplicate."""
 
-    measurement_id, measurement = next(
-        iter(normalize_vllm_measurements(config).items())
-    )
+    measurement_id, measurement = next(iter(normalize_vllm_measurements(config).items()))
     topology_mesh = vllm_topology_to_mesh(measurement.topology)
     if override:
         overridden = topology_mesh.as_dict()
@@ -400,12 +402,7 @@ def resolve_stage_execution_specs(
         payload = _mapping(stage_payload.get(stage_id))
         strategy_name = payload.get("strategy")
         if strategy_name is None:
-            if stage_id in dynamic_defaults:
-                strategy = dynamic_defaults[stage_id]
-            else:
-                strategy = _DEFAULT_STAGE_STRATEGIES.get(
-                    stage_id, ExecutionStrategy.SINGLE
-                )
+            strategy = _default_execution_strategy(stage_id, dynamic_defaults)
         else:
             strategy = ExecutionStrategy(str(strategy_name))
         instances = int(payload.get("instances", 1))
@@ -460,12 +457,13 @@ def compile_campaign_plan(
         if stage_filter not in enabled:
             raise ValueError(f"Stage {stage_filter!r} is not enabled in the experiment config")
         enabled = (stage_filter,)
+    dynamic_execution_defaults = {
+        row["stage_id"]: row["default_strategy"] for row in post_mip_stages
+    }
     execution_specs = resolve_stage_execution_specs(
         execution,
         enabled,
-        dynamic_defaults={
-            row["stage_id"]: row["default_strategy"] for row in post_mip_stages
-        },
+        dynamic_defaults=dynamic_execution_defaults,
     )
     distributed = set(distributed_stage_ids())
     default_gpus_per_node = int(_mapping(execution.get("defaults")).get("gpus_per_node", 8))
@@ -478,11 +476,7 @@ def compile_campaign_plan(
     for stage_id in enabled:
         spec = execution_specs.get(stage_id)
         if spec is None:
-            strategy = (
-                ExecutionStrategy.SINGLE
-                if stage_id not in _DEFAULT_STAGE_STRATEGIES
-                else _DEFAULT_STAGE_STRATEGIES[stage_id]
-            )
+            strategy = _default_execution_strategy(stage_id, dynamic_execution_defaults)
             spec = StageExecutionSpec(
                 stage_id=stage_id,
                 strategy=strategy,
@@ -493,9 +487,7 @@ def compile_campaign_plan(
         override = None
         if spec.mesh_override is not None:
             override = {
-                key: value
-                for key, value in asdict(spec.mesh_override).items()
-                if value is not None
+                key: value for key, value in asdict(spec.mesh_override).items() if value is not None
             }
         dynamic = post_mip_by_stage.get(stage_id)
         if dynamic is None:

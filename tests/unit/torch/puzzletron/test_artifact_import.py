@@ -35,10 +35,43 @@ _SOURCE_CONFIG = {
     "scoring": {},
 }
 
+_COMPLETION_IDENTITY_FIELDS = (
+    "completion_kind",
+    "mode",
+    "width",
+    "depth",
+    "receipt_identity",
+    "relevant_stage_config_identity",
+    "stage_manifest_semantic_identity",
+    "required_artifacts",
+    "upstream_identities",
+)
+
 
 def _write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_rehashed_completion_marker(
+    marker_path: Path,
+    manifest_path: Path,
+    stage: str,
+    marker: dict,
+) -> None:
+    manifest_relative_path = f"manifests/{stage}.json"
+    marker["required_artifacts"][manifest_relative_path] = [
+        {
+            "path": manifest_relative_path,
+            "size": manifest_path.stat().st_size,
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
+    ]
+    marker["completion_identity"] = stable_hash(
+        {key: marker[key] for key in _COMPLETION_IDENTITY_FIELDS},
+        prefix=f"{stage}_completion",
+    )
+    _write_json(marker_path, marker)
 
 
 def _score_index_entry(result_path: Path, request_id: str) -> dict:
@@ -662,7 +695,9 @@ def test_bypass_evidence_does_not_complete_the_bypass_execution_node(tmp_path):
     assert not (destination / "manifests/completions/bypass.json").exists()
 
 
-def test_imported_vllm_stats_is_recognized_complete_by_main(tmp_path):
+def test_imported_vllm_stats_is_recognized_by_worker_orchestration_and_resume_consumers(
+    tmp_path,
+):
     stage = "vllm_stats"
     source, destination, receipt = _setup(tmp_path)
     config, config_path = _target_config(destination, tmp_path / "target-config.json")
@@ -742,31 +777,7 @@ def test_imported_completion_rejects_internally_valid_truncated_inventory(tmp_pa
         for path, records in marker["required_artifacts"].items()
         if path in retained_paths
     }
-    marker["required_artifacts"][f"manifests/{stage}.json"] = [
-        {
-            "path": f"manifests/{stage}.json",
-            "size": manifest_path.stat().st_size,
-            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        }
-    ]
-    marker["completion_identity"] = stable_hash(
-        {
-            key: marker[key]
-            for key in (
-                "completion_kind",
-                "mode",
-                "width",
-                "depth",
-                "receipt_identity",
-                "relevant_stage_config_identity",
-                "stage_manifest_semantic_identity",
-                "required_artifacts",
-                "upstream_identities",
-            )
-        },
-        prefix=f"{stage}_completion",
-    )
-    _write_json(marker_path, marker)
+    _write_rehashed_completion_marker(marker_path, manifest_path, stage, marker)
 
     assert not stage_is_complete(config, stage)
     assert not _completion_is_valid(config, config_path, stage)
@@ -874,15 +885,21 @@ def test_yaml_import_is_recognized_by_dependency_light_controller(tmp_path):
         experiment_config_path=config_path,
         runner=RunnerEnvironment(
             kind="local",
-            contract=ExecutionContract(repository=str(Path.cwd()), venv=str(Path.cwd() / ".venv")),
+            contract=ExecutionContract(
+                repository=str(tmp_path / "repository"),
+                venv=str(tmp_path / "venv"),
+            ),
         ),
         execution={"defaults": {"resource": "cpu"}},
         stage_filter=stage,
     )
     controller = CampaignController(plan, local=True)
 
-    assert controller._ready_nodes() == []
-    assert controller._drain_complete()
+    result = controller.run(once=True)
+
+    assert result["completed"] == [stage]
+    assert result["failed_stages"] == []
+    assert result["halted"] is False
 
 
 @pytest.mark.parametrize(
@@ -929,31 +946,7 @@ def test_imported_completion_consumers_reject_unsafe_inventory_path(tmp_path, pa
     marker = json.loads(marker_path.read_text())
     marker["required_artifacts"].pop(str(original_path))
     marker["required_artifacts"][unsafe_path] = [dict(manifest["output_inventory"][0])]
-    marker["required_artifacts"][f"manifests/{stage}.json"] = [
-        {
-            "path": f"manifests/{stage}.json",
-            "size": manifest_path.stat().st_size,
-            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        }
-    ]
-    marker["completion_identity"] = stable_hash(
-        {
-            key: marker[key]
-            for key in (
-                "completion_kind",
-                "mode",
-                "width",
-                "depth",
-                "receipt_identity",
-                "relevant_stage_config_identity",
-                "stage_manifest_semantic_identity",
-                "required_artifacts",
-                "upstream_identities",
-            )
-        },
-        prefix=f"{stage}_completion",
-    )
-    _write_json(marker_path, marker)
+    _write_rehashed_completion_marker(marker_path, manifest_path, stage, marker)
 
     assert not stage_is_complete(config, stage)
     assert not _completion_is_valid(config, config_path, stage)

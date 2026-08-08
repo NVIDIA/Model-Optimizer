@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from .identity import canonicalize, stable_hash
-from .stage_semantics import semantic_stage_config
 
 __all__ = [
     "StageManifest",
@@ -144,3 +143,8 @@ def read_stage_manifest(path: str | Path) -> dict[str, Any]:
     """Read a stage manifest while preserving compatibility with older schemas."""
 
     return json.loads(Path(path).read_text())
+
+
+# Import after defining the manifest API because the stages package registers
+# handlers that import StageManifest while its graph submodule is initialized.
+from .stages.graph import semantic_stage_config as semantic_stage_config  # noqa: E402

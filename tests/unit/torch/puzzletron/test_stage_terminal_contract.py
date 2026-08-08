@@ -16,13 +16,13 @@
 """Tests for fail-closed Puzzletron stage terminal states."""
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import modelopt.torch.puzzletron.stage_runner as stage_runner
 import modelopt.torch.puzzletron.stages.convert as convert_stages
+import modelopt.torch.puzzletron.stages.future as future_stages
 from examples.puzzletron import main as puzzletron_main
 from examples.puzzletron import tokenize_data as tokenize_data_module
 from examples.puzzletron.main import _completion_is_valid, _validate_worker_result
@@ -31,49 +31,63 @@ from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_
 from modelopt.torch.puzzletron.stage_runner import StageResult, run_stage
 
 
-def test_required_stage_missing_handler_fails_without_manifest(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("stage", "sections"),
+    [("convert", {}), ("aiperf", {"aiperf": {"enabled": True}})],
+)
+def test_enabled_stage_missing_handler_fails_without_manifest(
+    tmp_path, monkeypatch, stage, sections
+):
     monkeypatch.setattr(stage_runner, "_resolve_capabilities", lambda _config: None)
 
-    with pytest.raises(RuntimeError, match="required stage 'convert' has no registered handler"):
-        run_stage(_config(tmp_path), "convert", handlers={})
+    with pytest.raises(RuntimeError, match=rf"enabled stage '{stage}' has no registered handler"):
+        run_stage(_config(tmp_path, **sections), stage, handlers={})
 
-    assert not (tmp_path / "manifests" / "convert.json").exists()
+    assert not (tmp_path / "manifests" / f"{stage}.json").exists()
 
 
-def test_optional_missing_handler_skip_is_accepted_by_terminal_consumers(tmp_path, monkeypatch):
+def test_legacy_optional_skip_is_rejected_by_terminal_consumers(tmp_path, write_terminal_manifest):
+    config = _config(tmp_path, aiperf={"enabled": True})
+    write_terminal_manifest(
+        tmp_path,
+        "aiperf",
+        config=config,
+        status="skipped",
+        skip_reason="optional",
+    )
+
+    assert not stage_is_complete(config, "aiperf")
+    assert not _completion_is_valid(config, tmp_path / "config.yaml", "aiperf")
+
+
+def test_enabled_handler_not_implemented_fails_without_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(stage_runner, "_resolve_capabilities", lambda _config: None)
     config = _config(tmp_path, aiperf={"enabled": True})
 
-    result = run_stage(
-        config,
-        "aiperf",
-        handlers={},
-    )
-    payload = json.loads(result.manifest_path.read_text())
-    _validate_worker_result(config, result)
-    completion_is_valid = _completion_is_valid(config, tmp_path / "config.yaml", "aiperf")
+    def not_implemented(_config, _manifest):
+        raise NotImplementedError("not implemented")
 
-    assert result.status == payload["status"] == "skipped"
-    assert result.skip_reason == payload["skip_reason"] == "optional"
-    assert stage_is_complete(config, "aiperf")
-    assert completion_is_valid
+    with pytest.raises(NotImplementedError, match="not implemented"):
+        run_stage(config, "aiperf", handlers={"aiperf": not_implemented})
+
+    assert not (tmp_path / "manifests" / "aiperf.json").exists()
 
 
-def test_required_stage_optional_skip_is_rejected_by_terminal_consumers(tmp_path):
-    config = _config(tmp_path)
-    manifest = StageManifest(
-        stage="convert",
-        status="skipped",
-        skip_reason="optional",
-        config=config,
-    )
-    manifest_path = tmp_path / "manifests" / "convert.json"
-    write_stage_manifest(manifest_path, manifest)
-    result = StageResult("convert", "skipped", manifest_path, "done", "optional")
+def test_global_distillation_not_implemented_fails_without_manifest(tmp_path, monkeypatch):
+    config = _config(tmp_path, global_distillation={"enabled": True})
+    manifest = StageManifest(stage="global_distillation", config=config)
+    kd_config = SimpleNamespace(output_dir=tmp_path / "global_distillation")
 
-    with pytest.raises(RuntimeError, match="invalid terminal manifest"):
-        _validate_worker_result(config, result)
-    assert not _completion_is_valid(config, tmp_path / "config.yaml", "convert")
+    def not_implemented(*_args, **_kwargs):
+        raise NotImplementedError("global KD")
+
+    monkeypatch.setattr(future_stages, "build_global_kd_config", lambda _config: kd_config)
+    monkeypatch.setattr(future_stages, "run_global_kd", not_implemented)
+
+    with pytest.raises(NotImplementedError, match="global KD"):
+        future_stages.distillation_stage(config, manifest)
+
+    assert not (tmp_path / "manifests" / "global_distillation.json").exists()
 
 
 def test_explicitly_disabled_stage_does_not_call_handler(tmp_path):
@@ -123,7 +137,7 @@ def test_direct_tokenize_data_stage_emits_typed_disabled_skip(tmp_path):
     assert result.skip_reason == payload["skip_reason"] == "disabled"
 
 
-def test_direct_tokenize_data_stage_runs_when_enabled(tmp_path, monkeypatch):
+def test_direct_tokenize_data_stage_runs_when_enabled(tmp_path, monkeypatch, write_token_cache):
     output = tmp_path / "dataset_cache" / "train.tokens"
     config = _config(
         tmp_path,
@@ -145,10 +159,20 @@ def test_direct_tokenize_data_stage_runs_when_enabled(tmp_path, monkeypatch):
 
     def build_cache(command, *, check):
         assert check
-        cache = Path(command[command.index("--output") + 1])
-        cache.parent.mkdir(parents=True)
-        cache.write_text("tokens")
-        cache.with_suffix(cache.suffix + ".json").write_text("{}")
+        configured_cache = config["tokenize_data"]["caches"][0]
+        expected_options = {
+            "--dataset-path": config["dataset_path"],
+            "--tokenizer-path": config["convert"]["teacher_dir"],
+            "--output": configured_cache["output"],
+            "--split": configured_cache["split"],
+            "--num-samples": str(configured_cache["num_samples"]),
+            "--seq-length": str(configured_cache["seq_length"]),
+            "--shuffle-seed": str(configured_cache["shuffle_seed"]),
+        }
+        assert {
+            option: command[command.index(option) + 1] for option in expected_options
+        } == expected_options
+        write_token_cache(config, configured_cache)
 
     monkeypatch.setattr(tokenize_data_module.subprocess, "run", build_cache)
 
@@ -182,7 +206,7 @@ def test_terminal_consumers_reject_wrong_stage_identity(
     recorded_stage,
 ):
     config = _config(tmp_path, **config_sections)
-    write_terminal_manifest(tmp_path, stage, **manifest_fields)
+    write_terminal_manifest(tmp_path, stage, config=config, **manifest_fields)
     if stage == "convert":
         artifact = tmp_path / "ckpts" / "teacher" / "config.json"
         artifact.parent.mkdir(parents=True)
@@ -336,9 +360,9 @@ def test_worker_rejects_skip_reason_disagreement(tmp_path):
     )
     manifest_path = tmp_path / "manifests" / "aiperf.json"
     write_stage_manifest(manifest_path, manifest)
-    result = StageResult("aiperf", "skipped", manifest_path, "done", "optional")
+    result = StageResult("aiperf", "skipped", manifest_path, "done")
 
-    with pytest.raises(RuntimeError, match="result skip reason 'optional' disagrees"):
+    with pytest.raises(RuntimeError, match="result skip reason None disagrees"):
         _validate_worker_result(config, result)
 
 

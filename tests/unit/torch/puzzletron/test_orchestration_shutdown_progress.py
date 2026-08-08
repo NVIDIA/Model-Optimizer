@@ -194,16 +194,18 @@ def _write_sanity_drain_configs(tmp_path: Path):
     return experiment, runner, execution, run_dir
 
 
-def _seed_convert_complete(run_dir: Path, write_terminal_manifest) -> None:
-    write_terminal_manifest(run_dir, "convert")
+def _seed_convert_complete(
+    run_dir: Path, write_terminal_manifest, config: dict
+) -> None:
+    write_terminal_manifest(run_dir, "convert", config=config)
     teacher = run_dir / "ckpts" / "teacher"
     teacher.mkdir(parents=True, exist_ok=True)
     (teacher / "config.json").write_text("{}\n")
     (run_dir / "subblock_library.json").write_text("[]\n")
 
 
-def _seed_sort_complete(run_dir: Path, write_terminal_manifest) -> None:
-    write_terminal_manifest(run_dir, "sort")
+def _seed_sort_complete(run_dir: Path, write_terminal_manifest, config: dict) -> None:
+    write_terminal_manifest(run_dir, "sort", config=config)
     sorted_dir = run_dir / "ckpts" / "sorted_teacher"
     sorted_dir.mkdir(parents=True, exist_ok=True)
     (sorted_dir / "config.json").write_text("{}\n")
@@ -214,19 +216,28 @@ def _seed_sort_complete(run_dir: Path, write_terminal_manifest) -> None:
     (sorted_dir / "model.safetensors").write_text("weights\n")
 
 
-def _seed_sort_sanity_complete(run_dir: Path, write_terminal_manifest) -> None:
-    _seed_sanity_complete(run_dir, "sort_sanity", write_terminal_manifest)
+def _seed_sort_sanity_complete(
+    run_dir: Path, write_terminal_manifest, config: dict
+) -> None:
+    _seed_sanity_complete(run_dir, "sort_sanity", write_terminal_manifest, config)
 
 
-def _seed_sanity_complete(run_dir: Path, stage_id: str, write_terminal_manifest) -> None:
-    write_terminal_manifest(run_dir, stage_id)
+def _seed_sanity_complete(
+    run_dir: Path,
+    stage_id: str,
+    write_terminal_manifest,
+    config: dict,
+) -> None:
+    write_terminal_manifest(run_dir, stage_id, config=config)
     summary = run_dir / "artifacts" / stage_id / "summary.json"
     summary.parent.mkdir(parents=True, exist_ok=True)
     summary.write_text(json.dumps({"passed": True}) + "\n")
 
 
-def _seed_vllm_stats_complete(run_dir: Path, write_terminal_manifest) -> None:
-    write_terminal_manifest(run_dir, "vllm_stats")
+def _seed_vllm_stats_complete(
+    run_dir: Path, write_terminal_manifest, config: dict
+) -> None:
+    write_terminal_manifest(run_dir, "vllm_stats", config=config)
     stats = run_dir / "subblock_stats.json"
     stats.write_text(json.dumps([{"args": {"runtime_stats": True, "n_embd": 1}}]) + "\n")
     summary = run_dir / "artifacts" / "vllm_stats" / "summary.json"
@@ -535,7 +546,9 @@ def test_controller_aggregates_completed_work_before_resubmitting(
             return getattr(delegate, name)
 
         def aggregate(self, *, plan, node, work_plan):
-            _seed_convert_complete(plan.puzzle_dir, write_terminal_manifest)
+            _seed_convert_complete(
+                plan.puzzle_dir, write_terminal_manifest, plan.experiment_config
+            )
 
     aggregate_adapter = _AggregateAdapter()
     monkeypatch.setattr(
@@ -915,7 +928,7 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
     experiment_config["tokenize_data"] = {"enabled": True}
     experiment.write_text(yaml.safe_dump(experiment_config))
     run_dir = tmp_path / "run"
-    _seed_convert_complete(run_dir, write_terminal_manifest)
+    _seed_convert_complete(run_dir, write_terminal_manifest, experiment_config)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -958,7 +971,9 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
                     status.state is JobState.COMPLETED
                     and status.handle.metadata.get("work_id") == "vllm_stats:default:gang"
                 ):
-                    _seed_vllm_stats_complete(run_dir, write_terminal_manifest)
+                    _seed_vllm_stats_complete(
+                        run_dir, write_terminal_manifest, plan.experiment_config
+                    )
             return statuses
 
     executor = _DrainingExecutor()
@@ -1027,7 +1042,9 @@ def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(
 ):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     run_dir = tmp_path / "run"
-    _seed_convert_complete(run_dir, write_terminal_manifest)
+    _seed_convert_complete(
+        run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text())
+    )
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -1063,8 +1080,9 @@ def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir, write_terminal_manifest)
-    _seed_sort_sanity_complete(run_dir, write_terminal_manifest)
+    experiment_config = yaml.safe_load(experiment.read_text())
+    _seed_sort_complete(run_dir, write_terminal_manifest, experiment_config)
+    _seed_sort_sanity_complete(run_dir, write_terminal_manifest, experiment_config)
     upstream = {"convert", "tokenize_data", "width_importance", "sort", "sort_sanity"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
@@ -1101,7 +1119,12 @@ def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
                     state = JobState.COMPLETED if self.poll_count > 1 else JobState.RUNNING
                     reason = None
                     if state is JobState.COMPLETED:
-                        _seed_sanity_complete(run_dir, "bypass_sanity", write_terminal_manifest)
+                        _seed_sanity_complete(
+                            run_dir,
+                            "bypass_sanity",
+                            write_terminal_manifest,
+                            plan.experiment_config,
+                        )
                 else:
                     state = JobState.COMPLETED
                     reason = None
@@ -1129,7 +1152,9 @@ def test_controller_failed_ancestor_blocks_descendant_submit(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir, write_terminal_manifest)
+    _seed_sort_complete(
+        run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text())
+    )
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
@@ -1172,7 +1197,12 @@ def test_controller_failed_ancestor_blocks_descendant_submit(
                 and self._stage_id(status.handle) == "bypass_sanity"
                 for status in statuses
             ):
-                _seed_sanity_complete(run_dir, "bypass_sanity", write_terminal_manifest)
+                _seed_sanity_complete(
+                    run_dir,
+                    "bypass_sanity",
+                    write_terminal_manifest,
+                    plan.experiment_config,
+                )
             return statuses
 
     executor = _SanityDrainExecutor()
@@ -1192,7 +1222,9 @@ def test_controller_multiple_failures_drain_both_sanity_branches(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir, write_terminal_manifest)
+    _seed_sort_complete(
+        run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text())
+    )
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",

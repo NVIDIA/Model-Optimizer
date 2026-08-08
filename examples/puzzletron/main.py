@@ -72,30 +72,6 @@ STAGES = stage_ids()
 PIPELINE_STAGE_ORDER = topological_stage_ids()
 REQUIRED_STAGES = frozenset(required_stage_ids())
 DISTRIBUTED_STAGES = frozenset(distributed_stage_ids())
-REQUIRED_OUTPUT_PATTERNS = {
-    "convert": ("ckpts/teacher/config.json",),
-    "tokenize_data": ("dataset_cache/*.tokens", "dataset_cache/*.tokens.json"),
-    "sort": ("ckpts/sorted_teacher/config.json",),
-    "slicing_sanity": (
-        "artifacts/width_slice_equivalence/manifest.json",
-        "artifacts/width_slice_equivalence/summary.json",
-        "artifacts/width_slice_equivalence/cases/**/*.json",
-        "artifacts/width_slice_equivalence/comparisons/*.safetensors",
-    ),
-    "depth_importance": ("depth/iterative/trajectory.json",),
-    "build_library": (
-        "replacement_library.json",
-        "candidate_library.json",
-        "subblock_stats.json",
-    ),
-    "vllm_stats": ("artifacts/vllm_stats/summary.json",),
-    "replacement_scoring": ("artifacts/replacement_scoring/summary.json",),
-    "mip": ("mip/**/*.json",),
-    "zero_shot_evaluation": ("artifacts/**/evaluation_summary.json",),
-    "aiperf": ("artifacts/aiperf/**/*.json",),
-    "global_distillation_sanity": ("artifacts/global_distillation_sanity/**/*.json",),
-    "global_distillation": ("artifacts/global_distillation/**/*.json",),
-}
 
 
 def _register_faulthandler() -> None:
@@ -242,42 +218,6 @@ def _manifest_terminal_state(config: dict, stage: str):
     return state
 
 
-def _runtime_stats_filename(config: dict) -> str:
-    stats = config.get("vllm_stats") or {}
-    return str(stats.get("subblock_stats_filename", "subblock_stats.json"))
-
-
-def _stage_output_patterns(config: dict, stage: str) -> tuple[str, ...]:
-    if stage == "vllm_stats":
-        return (_runtime_stats_filename(config),)
-    if stage == "slicing_sanity":
-        slicing_cfg = config.get("slicing_sanity") or {}
-        if slicing_cfg.get("backend") == "distributed_parent_sweep":
-            return ("artifacts/slicing_sanity/summary.json",)
-    patterns = REQUIRED_OUTPUT_PATTERNS.get(stage, ())
-    if stage == "build_library":
-        resolved = [
-            _runtime_stats_filename(config) if pattern == "subblock_stats.json" else pattern
-            for pattern in patterns
-        ]
-        embedding = config.get("embedding_pruning") or {}
-        if bool(embedding.get("enabled", False)):
-            resolved.append("scenarios/width_scenarios.json")
-            for configured_width in embedding.get("widths", ()):
-                scenario = f"scenarios/width-{int(configured_width):04d}/depth-00"
-                resolved.extend(
-                    (
-                        f"{scenario}/scenario_manifest.json",
-                        f"{scenario}/replacement_library.json",
-                        f"{scenario}/candidate_library.json",
-                        f"{scenario}/{_runtime_stats_filename(config)}",
-                        f"{scenario}/manifests/build_library.json",
-                    )
-                )
-        return tuple(resolved)
-    return patterns
-
-
 def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     upstream = {
@@ -296,7 +236,7 @@ def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
         "depth": None,
         "required_patterns": (
             f"manifests/{stage}.json",
-            *_stage_output_patterns(config, stage),
+            *canonical_stage_output_patterns(config, stage),
         ),
         "upstream_markers": upstream,
         "stage_config": semantic_stage_config(config, stage),
