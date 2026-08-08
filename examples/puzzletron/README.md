@@ -57,14 +57,14 @@ overrides:
 python examples/puzzletron/puzzletron_setup.py --detailed
 ```
 
-Every answer is saved atomically. A new invocation starts fresh; resume is always
-explicit:
+Every answer is saved atomically. Invocations without `--resume` start a campaign;
+resuming an existing campaign requires its path:
 
 ```bash
 python examples/puzzletron/puzzletron_setup.py --resume /path/to/campaign
 ```
 
-The initial profiles support Nemotron 3 and Qwen 3.5/3.6 dense, MoE, text, and
+The supported profiles cover Nemotron 3 and Qwen 3.5/3.6 dense, MoE, text, and
 multimodal configurations. Unsupported configs exit with detected metadata and
 point to `.agents/skills/running-puzzletron/SKILL.md` for descriptor onboarding.
 
@@ -75,7 +75,7 @@ with `localhost` for a single local host.
 
 ### Setup wizard v2
 
-The schema-driven wizard now starts with a guided setup profile:
+The setup wizard v2 offers three guided profiles:
 
 - **Quick smoke** is the fastest way to verify that the campaign shape is valid.
 - **Balanced pruning** is recommended for a first real campaign.
@@ -85,7 +85,7 @@ The selected profile supplies nested pruning and MIP defaults from the detected
 model family's `setup_v2_defaults.yaml`. A family file can refine those values
 for an exact model geometry, so a small and large model in the same family do
 not need to share scoring budgets. Unspecified model values inherit the family
-profile, while an explicitly selected defaults file still has the highest
+profile, while an explicitly selected defaults file has the highest
 default precedence. Setup then asks for the model and dataset, and requires
 explicit acceptance or customization of infrastructure-specific worker and
 cluster defaults:
@@ -105,8 +105,8 @@ the advanced flow explicitly:
 python examples/puzzletron/puzzletron_setup_v2.py --full
 ```
 
-Press **Esc** to go back from any prompt. Selection prompts also show a visible
-**← Back** action, and text or numeric prompts continue to accept `:back`.
+Press **Esc** to go back from any prompt. Selection prompts show a visible
+**← Back** action, and text or numeric prompts accept `:back`.
 Every accepted answer and the exact navigation frame are saved in
 `answers_v2.yaml`, so an interrupted session can resume with:
 
