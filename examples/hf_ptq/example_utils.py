@@ -660,31 +660,36 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
 def _build_meta_skeleton(from_config, config_for_init, model_kwargs, architecture):
     """Build a throwaway meta-device model used only to size ``infer_auto_device_map``.
 
-    ``include_buffers=True`` makes accelerate push a global ``torch.device("meta")``
-    context, so *every* tensor built in ``__init__`` lands on meta -- not just parameters
-    and buffers. Remote-code checkpoints written before Transformers v5 routinely derive
-    scalar hyperparameters from real tensors there, which raises on meta, so fall back to
-    the parameter-only patching of ``include_buffers=False``.
+    ``compute_module_sizes`` needs shapes and dtypes, never values or storage, so this
+    probe only has to reproduce the module tree. It must also be *no stricter than the
+    loader it predicts*, or it kills runs ``from_pretrained`` would have completed:
 
-    Returns ``None`` (after warning) when neither attempt works; the caller then skips the
-    memory estimate rather than failing a load ``from_pretrained`` can still do.
+    - Transformers 4.x builds under ``init_empty_weights()``, i.e. ``include_buffers=False``.
+    - Transformers 5.x builds under ``torch.device("meta")`` plus
+      ``meta_device_safe_creation_ops()``, which redirects ``torch.linspace`` to CPU so
+      remote code that derives scalars from it in ``__init__`` keeps working.
+
+    ``include_buffers=True`` is stricter than both: accelerate implements it as a bare
+    global ``torch.device("meta")`` context, so *every* tensor built in ``__init__`` lands
+    on meta and any ``int(torch.tensor(...))`` raises. ``include_buffers=False`` patches
+    only ``nn.Module.register_parameter``, leaving ``__init__`` arithmetic on a real
+    device; buffers stay materialized, which costs nothing here because their shape and
+    dtype size the same either way.
+
+    Returns ``None`` (after warning) if the model cannot be built at all; the caller then
+    skips the estimate rather than failing a load ``from_pretrained`` can still do.
     """
-    skeleton_errors = []
-    for include_buffers in (True, False):
-        try:
-            with init_empty_weights(include_buffers=include_buffers):
-                return from_config(config_for_init, **model_kwargs)
-        except Exception as e:  # noqa: PERF203 -- at most two attempts, error path only
-            skeleton_errors.append(f"include_buffers={include_buffers}: {e!r}")
-
-    warnings.warn(
-        f"Could not build a meta-device skeleton of {architecture} "
-        f"({'; '.join(skeleton_errors)}). Skipping the device-map memory estimate and "
-        "letting from_pretrained map the model. If you hit GPU OOM, rerun with "
-        "--use_seq_device_map (which applies --gpu_max_mem_percentage) or lower "
-        "--batch_size."
-    )
-    return None
+    try:
+        with init_empty_weights(include_buffers=False):
+            return from_config(config_for_init, **model_kwargs)
+    except Exception as e:
+        warnings.warn(
+            f"Could not build a meta-device skeleton of {architecture} ({e!r}). "
+            "Skipping the device-map memory estimate and letting from_pretrained map the "
+            "model. If you hit GPU OOM, rerun with --use_seq_device_map (which applies "
+            "--gpu_max_mem_percentage) or lower --batch_size."
+        )
+        return None
 
 
 def _get_config_dtype(config):

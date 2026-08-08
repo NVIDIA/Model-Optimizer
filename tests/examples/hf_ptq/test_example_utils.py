@@ -471,3 +471,93 @@ def test_get_model_deepseek_honors_trust_remote_code(
     example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
+
+
+# ---------- _build_meta_skeleton ----------------------------------------------
+
+
+def test_build_meta_skeleton_uses_permissive_patching():
+    """The probe must be no stricter than the loader it predicts.
+
+    ``include_buffers=True`` is a bare global ``torch.device("meta")`` context, which
+    also captures scratch arithmetic in ``__init__``; ``from_pretrained`` never does
+    that, so the probe must not either.
+    """
+    seen = {}
+
+    def fake_init_empty_weights(include_buffers):
+        seen["include_buffers"] = include_buffers
+        return nullcontext()
+
+    sentinel = object()
+    with patch.object(example_utils, "init_empty_weights", fake_init_empty_weights):
+        out = example_utils._build_meta_skeleton(
+            lambda cfg, **kw: sentinel, "cfg", {"dtype": torch.bfloat16}, "Arch"
+        )
+
+    assert out is sentinel
+    assert seen["include_buffers"] is False
+
+
+def test_build_meta_skeleton_survives_meta_hostile_init():
+    """Remote code that reads a real scalar in ``__init__`` must still build."""
+
+    def from_config(cfg, **kwargs):
+        # Mirrors Phi-4-multimodal's conformer: int() on a freshly built tensor. This
+        # raises under a global meta context but works with parameter-only patching.
+        return SimpleNamespace(width=int(torch.tensor(80.0)))
+
+    model = example_utils._build_meta_skeleton(from_config, "cfg", {}, "Arch")
+
+    assert model.width == 80
+
+
+def test_build_meta_skeleton_returns_none_and_warns_on_failure():
+    def from_config(cfg, **kwargs):
+        raise RuntimeError("boom")
+
+    with pytest.warns(UserWarning, match="Could not build a meta-device skeleton of Arch"):
+        assert example_utils._build_meta_skeleton(from_config, "cfg", {}, "Arch") is None
+
+
+def test_get_model_skips_device_map_estimate_when_skeleton_fails(monkeypatch):
+    """A failed probe must not abort the load: skip sizing, still call from_pretrained."""
+    calls = {}
+    hf_config = SimpleNamespace(
+        architectures=["LlamaForCausalLM"],
+        dtype=torch.float16,
+        model_type="llama",
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
+
+    class FakeLlamaForCausalLM:
+        @staticmethod
+        def _from_config(config, **kwargs):
+            raise RuntimeError("Tensor.item() cannot be called on meta tensors")
+
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            return FakeModel()
+
+    def _boom_infer(model, max_memory):
+        raise AssertionError("infer_auto_device_map must be skipped without a skeleton")
+
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **kw: hf_config)
+    monkeypatch.setattr(example_utils.transformers, "LlamaForCausalLM", FakeLlamaForCausalLM)
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", _boom_infer)
+
+    with pytest.warns(UserWarning, match="Skipping the device-map memory estimate"):
+        model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+
+    assert isinstance(model, FakeModel)
+    assert calls["eval"]
+    # The estimate is the only thing lost; no memory cap is invented for the load.
+    assert "max_memory" not in calls["from_pretrained"]
