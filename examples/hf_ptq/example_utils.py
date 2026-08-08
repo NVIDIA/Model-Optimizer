@@ -657,6 +657,36 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
         return hf_config
 
 
+def _build_meta_skeleton(from_config, config_for_init, model_kwargs, architecture):
+    """Build a throwaway meta-device model used only to size ``infer_auto_device_map``.
+
+    ``include_buffers=True`` makes accelerate push a global ``torch.device("meta")``
+    context, so *every* tensor built in ``__init__`` lands on meta -- not just parameters
+    and buffers. Remote-code checkpoints written before Transformers v5 routinely derive
+    scalar hyperparameters from real tensors there, which raises on meta, so fall back to
+    the parameter-only patching of ``include_buffers=False``.
+
+    Returns ``None`` (after warning) when neither attempt works; the caller then skips the
+    memory estimate rather than failing a load ``from_pretrained`` can still do.
+    """
+    skeleton_errors = []
+    for include_buffers in (True, False):
+        try:
+            with init_empty_weights(include_buffers=include_buffers):
+                return from_config(config_for_init, **model_kwargs)
+        except Exception as e:  # noqa: PERF203 -- at most two attempts, error path only
+            skeleton_errors.append(f"include_buffers={include_buffers}: {e!r}")
+
+    warnings.warn(
+        f"Could not build a meta-device skeleton of {architecture} "
+        f"({'; '.join(skeleton_errors)}). Skipping the device-map memory estimate and "
+        "letting from_pretrained map the model. If you hit GPU OOM, rerun with "
+        "--use_seq_device_map (which applies --gpu_max_mem_percentage) or lower "
+        "--batch_size."
+    )
+    return None
+
+
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -877,30 +907,9 @@ def get_model(
             model_kwargs2.pop("trust_remote_code", None)
         model_kwargs2.pop("max_memory", None)
 
-        # This skeleton is only a sizing aid for ``infer_auto_device_map``; it is thrown
-        # away right after. ``include_buffers=True`` makes accelerate push a global
-        # ``torch.device("meta")`` context, so *every* tensor built in ``__init__`` lands
-        # on meta -- not just parameters and buffers. Remote-code checkpoints written
-        # before Transformers v5 often compute scalar hyperparameters from real tensors
-        # there (Phi-4-multimodal's conformer subsampling does ``int(torch.tensor(...))``),
-        # which raises on meta. Retry without the global context, then give up on the
-        # estimate rather than failing a load that ``from_pretrained`` can still do.
-        model = None
-        skeleton_errors = []
-        for include_buffers in (True, False):
-            try:
-                with init_empty_weights(include_buffers=include_buffers):
-                    model = from_config(config_for_init, **model_kwargs2)
-                break
-            except Exception as e:
-                skeleton_errors.append(f"include_buffers={include_buffers}: {e!r}")
-        if model is None:
-            warnings.warn(
-                f"Could not build a meta-device skeleton of {architecture} "
-                f"({'; '.join(skeleton_errors)}). Skipping the device-map memory estimate "
-                "and letting from_pretrained map the model; if you hit GPU OOM, pass "
-                "--use_seq_device_map or lower --gpu_max_memory_percentage."
-            )
+        # Only a sizing aid for ``infer_auto_device_map`` below; ``None`` when the model
+        # cannot be built on meta, in which case the estimate is skipped.
+        model = _build_meta_skeleton(from_config, config_for_init, model_kwargs2, architecture)
 
         max_memory = get_max_memory()
 
