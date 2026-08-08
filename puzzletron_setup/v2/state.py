@@ -54,6 +54,7 @@ class FieldRecord:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> FieldRecord:
+        """Restore a field record from serialized state."""
         return cls(
             value=payload.get("value"),
             source=str(payload.get("source", "user")),
@@ -65,6 +66,7 @@ class FieldRecord:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the field record to plain Python values."""
         return _plain(asdict(self))
 
 
@@ -80,6 +82,7 @@ class PromptFrame:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> PromptFrame:
+        """Restore a prompt frame from serialized state."""
         return cls(
             section=str(payload["section"]),
             prompt_id=str(payload["prompt_id"]),
@@ -103,7 +106,10 @@ class WizardState:
         campaign_dir: Path,
         *,
         defaults_path: Path | None,
+        setup_mode: str = "full",
+        preset: str | None = None,
     ) -> WizardState:
+        """Create and persist a new setup-v2 campaign state."""
         campaign_dir = Path(campaign_dir).expanduser().resolve()
         if campaign_dir.exists() and any(campaign_dir.iterdir()):
             raise SetupError(
@@ -111,7 +117,7 @@ class WizardState:
                 "Choose a new directory or use --resume."
             )
         campaign_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "wizard_version": WIZARD_VERSION,
             "defaults_path": (
@@ -119,6 +125,10 @@ class WizardState:
                 if defaults_path is not None
                 else None
             ),
+            "setup": {
+                "mode": str(setup_mode),
+                "preset": str(preset) if preset is not None else None,
+            },
             "fields": {},
             "navigation": {"frames": [], "cursor": None},
             "collections": {},
@@ -132,6 +142,7 @@ class WizardState:
 
     @classmethod
     def resume(cls, path: Path) -> WizardState:
+        """Load a compatible setup-v2 campaign state."""
         candidate = Path(path).expanduser().resolve()
         state_path = candidate / "answers_v2.yaml" if candidate.is_dir() else candidate
         if not state_path.is_file():
@@ -158,24 +169,61 @@ class WizardState:
 
     @property
     def campaign_dir(self) -> Path:
+        """Return the campaign directory containing this state."""
         return self.path.parent
 
     @property
     def defaults_path(self) -> Path | None:
+        """Return the persisted defaults-file path, if configured."""
         value = self.payload.get("defaults_path")
         return Path(str(value)) if value else None
 
+    @property
+    def setup_mode(self) -> str:
+        """Return the persisted guided or full interaction mode."""
+        setup = self.payload.get("setup")
+        if not isinstance(setup, Mapping):
+            return "full"
+        return str(setup.get("mode", "full"))
+
+    @property
+    def preset(self) -> str | None:
+        """Return the persisted guided preset name, if any."""
+        setup = self.payload.get("setup")
+        if not isinstance(setup, Mapping):
+            return None
+        value = setup.get("preset")
+        return str(value) if value else None
+
+    def set_setup_mode(self, mode: str) -> None:
+        """Persist an explicit guided or full mode transition."""
+        self.payload.setdefault("setup", {})["mode"] = str(mode)
+        self.save()
+
+    def set_preset(self, preset: str) -> None:
+        """Persist a replacement guided profile selection."""
+        self.payload.setdefault("setup", {})["preset"] = str(preset)
+        self.save()
+
+    def set_defaults_path(self, path: Path) -> None:
+        """Persist an explicitly accepted replacement defaults file."""
+        self.payload["defaults_path"] = str(Path(path).expanduser().resolve())
+        self.save()
+
     def field(self, path: str) -> FieldRecord:
+        """Return one required authored field record."""
         try:
             return self._fields[path]
         except KeyError as error:
             raise KeyError(f"Unknown setup field: {path}") from error
 
     def get_field(self, path: str, default: Any = None) -> Any:
+        """Return one effective field value or a fallback."""
         record = self._fields.get(path)
         return default if record is None else record.effective
 
     def records(self) -> Mapping[str, FieldRecord]:
+        """Return a copy of all authored field records."""
         return dict(self._fields)
 
     def set_field(
@@ -188,6 +236,7 @@ class WizardState:
         requested: Any = None,
         effective: Any = None,
     ) -> FieldRecord:
+        """Persist a field value and invalidate downstream dependents."""
         previous = self._fields.get(path)
         resolved_effective = value if effective is None else effective
         changed = previous is None or previous.effective != resolved_effective
@@ -207,6 +256,7 @@ class WizardState:
         return record
 
     def mark_dependents_stale(self, changed_path: str, *, save: bool = True) -> tuple[str, ...]:
+        """Mark transitive dependents of a changed field as stale."""
         reverse: dict[str, set[str]] = {}
         for field_path, record in self._fields.items():
             for dependency in record.dependencies:
@@ -233,6 +283,7 @@ class WizardState:
         self,
         validators: Mapping[str, Callable[[Any, WizardState], str | None]],
     ) -> Mapping[str, str]:
+        """Revalidate stale fields and return unresolved issues."""
         issues: dict[str, str] = {}
         for path, record in self._fields.items():
             if not record.stale:
@@ -251,14 +302,17 @@ class WizardState:
         return issues
 
     def collection(self, path: str) -> Any:
+        """Return a named collection from persisted state."""
         return self.payload.setdefault("collections", {}).get(path)
 
     def set_collection(self, path: str, value: Any) -> None:
+        """Persist a named collection."""
         self.payload.setdefault("collections", {})[path] = _plain(value)
         self.save()
 
     @property
     def frames(self) -> tuple[PromptFrame, ...]:
+        """Return the persisted prompt-navigation stack."""
         return tuple(
             PromptFrame.from_dict(item)
             for item in self.payload.setdefault("navigation", {}).get("frames", ())
@@ -276,6 +330,7 @@ class WizardState:
         )
 
     def push_frame(self, frame: PromptFrame) -> None:
+        """Push a prompt frame onto the navigation stack."""
         frames = self.payload.setdefault("navigation", {}).setdefault("frames", [])
         if not frames or frames[-1] != asdict(frame):
             frames.append(_plain(asdict(frame)))
@@ -291,6 +346,7 @@ class WizardState:
         self.save()
 
     def pop_frame(self) -> PromptFrame | None:
+        """Pop the active frame and return the new active frame."""
         navigation = self.payload.setdefault("navigation", {})
         frames = navigation.setdefault("frames", [])
         if frames:
@@ -308,6 +364,7 @@ class WizardState:
         self.save()
 
     def replace_frames(self, frames: Sequence[PromptFrame]) -> None:
+        """Replace the complete prompt-navigation stack."""
         rendered = [_plain(asdict(frame)) for frame in frames]
         self.payload["navigation"] = {
             "frames": rendered,
@@ -316,11 +373,13 @@ class WizardState:
         self.save()
 
     def set_model(self, model: Mapping[str, Any], inventory: Mapping[str, Any]) -> None:
+        """Persist inspected model metadata and inventory."""
         self.payload["model"] = _plain(model)
         self.payload["inventory"] = _plain(inventory)
         self.save()
 
     def save(self) -> None:
+        """Atomically write the current state to disk."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.payload["fields"] = {
             path: record.to_dict() for path, record in sorted(self._fields.items())

@@ -30,7 +30,7 @@ import yaml
 
 from puzzletron_setup import SetupError
 
-__all__ = ["DefaultsResolver", "ResolvedDefault", "load_defaults"]
+__all__ = ["DefaultsResolver", "ResolvedDefault", "load_defaults", "validate_defaults"]
 
 
 class _AnyMapping:
@@ -125,6 +125,16 @@ def _validate_mapping(value: Any, schema: Any, path: str) -> None:
         _validate_mapping(item, schema[key], child_path)
 
 
+def validate_defaults(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and isolate one versioned setup-defaults mapping."""
+    if payload.get("schema_version") != 1:
+        raise SetupError(
+            f"Unsupported defaults schema {payload.get('schema_version')!r}; expected 1."
+        )
+    _validate_mapping(payload, _SCHEMA, "")
+    return deepcopy(dict(payload))
+
+
 def load_defaults(path: Path | None) -> dict[str, Any]:
     """Load an explicitly selected versioned defaults file."""
     if path is None:
@@ -138,12 +148,7 @@ def load_defaults(path: Path | None) -> dict[str, Any]:
         raise SetupError(f"Cannot read defaults file {resolved}: {error}") from error
     if not isinstance(payload, Mapping):
         raise SetupError(f"Defaults file must contain a YAML mapping: {resolved}")
-    if payload.get("schema_version") != 1:
-        raise SetupError(
-            f"Unsupported defaults schema {payload.get('schema_version')!r}; expected 1."
-        )
-    _validate_mapping(payload, _SCHEMA, "")
-    return deepcopy(dict(payload))
+    return validate_defaults(payload)
 
 
 def _lookup(mapping: Mapping[str, Any], dotted_path: str) -> tuple[bool, Any]:
@@ -163,13 +168,18 @@ class DefaultsResolver:
         *,
         builtins: Mapping[str, Any] | None = None,
         model_derived: Mapping[str, Any] | None = None,
+        preset_defaults: Mapping[str, Any] | None = None,
+        model_profile_defaults: Mapping[str, Any] | None = None,
         file_defaults: Mapping[str, Any] | None = None,
         preserved: Mapping[str, Any] | None = None,
     ) -> None:
-        """Build the ordered builtin, model, file, and preserved default layers."""
+        """Build the ordered builtin, model, profile, file, and preserved layers."""
+        self._resolutions: dict[str, ResolvedDefault] = {}
         self._default_layers = (
             ("builtin", dict(builtins or {})),
             ("model", dict(model_derived or {})),
+            ("preset", dict(preset_defaults or {})),
+            ("model_profile", dict(model_profile_defaults or {})),
             ("defaults_file", dict(file_defaults or {})),
         )
         self._file_defaults = dict(file_defaults or {})
@@ -193,15 +203,25 @@ class DefaultsResolver:
 
     def resolve(self, path: str, fallback: Any = None) -> ResolvedDefault:
         """Return the suggested value, including preserved wizard answers."""
-        return self._resolve_layers(self._layers, path, fallback)
+        resolved = self._resolve_layers(self._layers, path, fallback)
+        self._resolutions[path] = deepcopy(resolved)
+        return resolved
 
     def resolve_default(self, path: str, fallback: Any = None) -> ResolvedDefault:
         """Return built-in, model-derived, or explicit-file defaults."""
-        return self._resolve_layers(self._default_layers, path, fallback)
+        resolved = self._resolve_layers(self._default_layers, path, fallback)
+        self._resolutions[path] = deepcopy(resolved)
+        return resolved
 
     def file_default(self, path: str) -> ResolvedDefault | None:
         """Return an explicitly supplied file default, if present."""
         found, value = _lookup(self._file_defaults, path)
         if not found:
             return None
-        return ResolvedDefault(deepcopy(value), "defaults_file")
+        resolved = ResolvedDefault(deepcopy(value), "defaults_file")
+        self._resolutions[path] = deepcopy(resolved)
+        return resolved
+
+    def resolutions(self) -> Mapping[str, ResolvedDefault]:
+        """Return every default decision resolved during this wizard run."""
+        return deepcopy(self._resolutions)

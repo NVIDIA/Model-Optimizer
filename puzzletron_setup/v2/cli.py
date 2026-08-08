@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING
 
 from puzzletron_setup import SetupError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = ["main"]
 
@@ -28,10 +31,19 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Explicit versioned defaults YAML; never discovered automatically.",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "Expose every advanced section and nested setting. "
+            "Without this flag, setup uses a guided profile."
+        ),
+    )
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the setup-v2 command-line interface."""
     args = _parser().parse_args(argv)
     from .wizard import run_wizard_v2
 
@@ -39,6 +51,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         campaign = run_wizard_v2(
             resume=args.resume,
             defaults_path=args.defaults,
+            full=args.full,
         )
     except KeyboardInterrupt:
         target = args.resume or "<campaign>"

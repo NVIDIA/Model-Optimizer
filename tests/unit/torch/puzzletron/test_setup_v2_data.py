@@ -17,6 +17,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+from puzzletron_setup import SetupError
 from puzzletron_setup.v2.bundle import _bundle_readme
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.hf_datasets import HfSubsetCatalog, HfSubsetInfo
@@ -84,8 +87,7 @@ def _nemotron_catalog():
         ("external", 400, 8192, "external media required"),
     ]
     entries.extend(
-        (f"subset_{index:02d}", index + 1, (index + 1) * 1000, None)
-        for index in range(42)
+        (f"subset_{index:02d}", index + 1, (index + 1) * 1000, None) for index in range(42)
     )
     return _catalog(_NEMOTRON_VLM_DATA_SOURCE, entries)
 
@@ -97,8 +99,8 @@ def test_data_choices_include_first_class_sources_and_deduplicate_default():
 
     assert [choice.title for choice in choices] == [
         f"Default — {_PUZZLE_KD_DATA_SOURCE}",
-        "NVIDIA Nemotron-VLM v2 (image-text)",
-        "Custom local path or Hugging Face dataset",
+        "NVIDIA Nemotron-VLM v2: recommended image-text dataset",
+        "Custom dataset: choose a local path or Hugging Face dataset",
     ]
 
 
@@ -292,6 +294,36 @@ def test_generic_hugging_face_dataset_uses_dynamic_subset_checkbox(
     assert backend.checkbox_calls[0][2] == ("small",)
 
 
+def test_guided_explicit_invalid_subset_fails_instead_of_falling_back(
+    tmp_path,
+    monkeypatch,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    backend = ScriptedBackend([_CUSTOM_DATA_SOURCE, "owner/generic"])
+    catalog = _catalog(
+        "owner/generic",
+        [("small", 10, 100, None), ("disabled", 20, 200, "media unavailable")],
+        default="small",
+    )
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.wizard.infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="test catalog"),
+    )
+
+    with pytest.raises(SetupError, match=r"typo.*Choose from: small"):
+        data_section(
+            WizardSession(state, backend, guided=True),
+            DefaultsResolver(file_defaults={"data": {"subsets": ["typo"]}}),
+            _context(multimodal=False),
+            catalog_loader=lambda source, **kwargs: catalog,
+        )
+
+
 def test_resume_reuses_the_revision_locked_subset_catalog(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     answers = [
@@ -408,7 +440,7 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
             return rules
 
         @staticmethod
-        def checkbox(message, choices, instruction, style):
+        def checkbox(message, choices, *, instruction, style):
             assert message == "Subsets:"
             assert choices[:2] == rendered
             assert choices[2] == {"separator": "  ← Back (press Esc)"}
@@ -419,6 +451,10 @@ def test_interactive_checkbox_passes_disabled_reason_to_questionary(monkeypatch)
     monkeypatch.setattr(
         "puzzletron_setup.v2.prompts._questionary",
         lambda: _Questionary(),
+    )
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.prompts._bind_escape_back",
+        lambda question: question,
     )
 
     selected = InteractiveBackend().checkbox(

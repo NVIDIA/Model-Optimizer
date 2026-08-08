@@ -257,10 +257,7 @@ def _bundle_readme(
                 acquisition_command.extend(
                     [
                         "--subset-rows",
-                        *[
-                            f"{name}={rows}"
-                            for name, rows in subset_rows.items()
-                        ],
+                        *[f"{name}={rows}" for name, rows in subset_rows.items()],
                     ]
                 )
             acquisition_command.extend(
@@ -342,14 +339,20 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
             (bundle / "dry-run-plan.txt").write_text(dry_run_bundle(bundle))
 
         resolved = {
-            path: {
-                "value": record.value,
-                "requested": record.requested,
-                "effective": record.effective,
-                "source": record.source,
-            }
-            for path, record in state.records().items()
+            str(path): dict(record)
+            for path, record in dict(state.collection("default_resolutions") or {}).items()
         }
+        resolved.update(
+            {
+                path: {
+                    "value": record.value,
+                    "requested": record.requested,
+                    "effective": record.effective,
+                    "source": record.source,
+                }
+                for path, record in state.records().items()
+            }
+        )
         _write_yaml(temp_root / "resolved_defaults.yaml", resolved)
         repository = str(
             state.get_field(

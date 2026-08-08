@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from puzzletron_setup import SetupError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = [
     "BACK",
@@ -42,6 +44,7 @@ class PromptBackend(Protocol):
     """Minimal backend used by the navigable wizard session."""
 
     def text(self, message: str, default: str) -> Any:
+        """Request a text value."""
         raise NotImplementedError
 
     def select(
@@ -50,6 +53,7 @@ class PromptBackend(Protocol):
         choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
+        """Request one value from a list of choices."""
         raise NotImplementedError
 
     def checkbox(
@@ -58,6 +62,7 @@ class PromptBackend(Protocol):
         choices: Sequence[PromptChoice],
         defaults: Sequence[Any],
     ) -> Any:
+        """Request multiple values from a list of choices."""
         raise NotImplementedError
 
 
@@ -87,14 +92,36 @@ def _choice_style(questionary: Any) -> Any:
     )
 
 
+def _bind_escape_back(question: Any) -> Any:
+    """Make Escape return the same sentinel for every interactive widget."""
+    key_bindings = question.application.key_bindings
+    if not hasattr(key_bindings, "add"):
+        from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+
+        escape_bindings = KeyBindings()
+        question.application.key_bindings = merge_key_bindings([key_bindings, escape_bindings])
+        key_bindings = escape_bindings
+
+    @key_bindings.add("escape", eager=True)
+    def go_back(event):
+        event.app.exit(result=BACK)
+
+    return question
+
+
 class InteractiveBackend:
     """Questionary-backed prompts with visible Back controls."""
 
     _BACK_TITLE = "← Back"
 
     def text(self, message: str, default: str) -> Any:
-        print("  Type :back to return to the previous question.")
-        value = str(_answer(_questionary().text(message, default=default)))
+        """Request text while supporting semantic Back navigation."""
+        print("  Press Esc to go back (or type :back).")
+        question = _bind_escape_back(_questionary().text(message, default=default))
+        value = _answer(question)
+        if value is BACK:
+            return BACK
+        value = str(value)
         return BACK if value.strip().lower() == ":back" else value
 
     def select(
@@ -103,6 +130,7 @@ class InteractiveBackend:
         choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
+        """Request one choice while exposing semantic Back navigation."""
         questionary = _questionary()
         rendered = [
             questionary.Choice(
@@ -114,11 +142,13 @@ class InteractiveBackend:
         ]
         rendered.append(questionary.Choice(title=self._BACK_TITLE, value=BACK))
         return _answer(
-            questionary.select(
-                message,
-                choices=rendered,
-                default=default,
-                style=_choice_style(questionary),
+            _bind_escape_back(
+                questionary.select(
+                    message,
+                    choices=rendered,
+                    default=default,
+                    style=_choice_style(questionary),
+                )
             )
         )
 
@@ -128,6 +158,7 @@ class InteractiveBackend:
         choices: Sequence[PromptChoice],
         defaults: Sequence[Any],
     ) -> Any:
+        """Request multiple choices while supporting semantic Back navigation."""
         questionary = _questionary()
         selected = set(defaults)
         rendered = [
@@ -140,19 +171,17 @@ class InteractiveBackend:
             for choice in choices
         ]
         rendered.append(questionary.Separator(f"  {self._BACK_TITLE} (press Esc)"))
-        question = questionary.checkbox(
-            message,
-            choices=rendered,
-            instruction=(
-                "(Use arrow keys to move, <space> to select, <a> to toggle, "
-                "<i> to invert, <esc> to go back)"
-            ),
-            style=_choice_style(questionary),
+        question = _bind_escape_back(
+            questionary.checkbox(
+                message,
+                choices=rendered,
+                instruction=(
+                    "(Use arrow keys to move, <space> to select, <a> to toggle, "
+                    "<i> to invert, <esc> to go back)"
+                ),
+                style=_choice_style(questionary),
+            )
         )
-
-        @question.application.key_bindings.add("escape", eager=True)
-        def go_back(event):
-            event.app.exit(result=BACK)
 
         values = _answer(question)
         if values is BACK:
@@ -164,10 +193,12 @@ class ScriptedBackend:
     """Deterministic non-interactive backend for embedding and automation."""
 
     def __init__(self, answers: Sequence[Any]) -> None:
+        """Initialize the backend with deterministic answers."""
         self._answers = deque(answers)
 
     @property
     def remaining(self) -> int:
+        """Return the number of unconsumed answers."""
         return len(self._answers)
 
     def _next(self) -> Any:
@@ -177,6 +208,7 @@ class ScriptedBackend:
         return BACK if value == ":back" else value
 
     def text(self, message: str, default: str) -> Any:
+        """Return the next scripted text answer."""
         del message, default
         return self._next()
 
@@ -186,6 +218,7 @@ class ScriptedBackend:
         choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
+        """Return the next scripted single-choice answer."""
         del message, choices, default
         return self._next()
 
@@ -195,5 +228,6 @@ class ScriptedBackend:
         choices: Sequence[PromptChoice],
         defaults: Sequence[Any],
     ) -> Any:
+        """Return the next scripted multiple-choice answer."""
         del message, choices, defaults
         return self._next()
