@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for the dependency-light orchestration entrypoint."""
 
@@ -230,9 +242,7 @@ def test_width_completeness_requires_success_manifest_and_complete_passes(
     pass_dir = output / "attention"
     pass_dir.mkdir(parents=True)
     (pass_dir / "args.json").write_text("{}")
-    (output / "activation_passes_manifest.json").write_text(
-        json.dumps({"passes": ["attention"]})
-    )
+    (output / "activation_passes_manifest.json").write_text(json.dumps({"passes": ["attention"]}))
     assert not stage_is_complete(config, "width_importance")
 
     manifests = tmp_path / "manifests"
@@ -284,9 +294,7 @@ def test_depth_completeness_requires_matching_complete_trajectory(tmp_path: Path
     output = tmp_path / "depth" / "iterative"
     output.mkdir(parents=True)
     trajectory = output / "trajectory.json"
-    trajectory.write_text(
-        json.dumps({"status": "running", "max_removals": 5, "selected": [{}]})
-    )
+    trajectory.write_text(json.dumps({"status": "running", "max_removals": 5, "selected": [{}]}))
     assert not stage_is_complete(config, "depth_importance")
 
     trajectory.write_text(
@@ -330,9 +338,7 @@ def test_embedding_build_library_requires_every_width_scenario(tmp_path: Path) -
             "subblock_stats.json",
         ):
             (scenario / name).write_text("{}")
-        (scenario / "scenario_manifest.json").write_text(
-            json.dumps({"status": "complete"})
-        )
+        (scenario / "scenario_manifest.json").write_text(json.dumps({"status": "complete"}))
         (scenario / "manifests" / "build_library.json").write_text(
             json.dumps({"status": "success"})
         )
@@ -460,8 +466,7 @@ def test_qwen_production_dry_run_uses_worker_python(tmp_path: Path) -> None:
                 sys.executable,
                 "examples/puzzletron/orchestrate.py",
                 "--experiment",
-                "examples/puzzletron/configs/families/qwen3_5/"
-                "qwen3p6_35b_a3b/runs/production.yaml",
+                "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/runs/production.yaml",
                 "--runner",
                 "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
                 "--execution",
@@ -480,10 +485,7 @@ def test_qwen_production_dry_run_uses_worker_python(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
     payload = yaml.safe_load(output.read_text())
-    assert all(
-        submission["argv"][0] in {"python", "bash"}
-        for submission in payload["submissions"]
-    )
+    assert all(submission["argv"][0] in {"python", "bash"} for submission in payload["submissions"])
     vllm = [item for item in payload["submissions"] if item["stage_id"] == "vllm_stats"]
     assert len(vllm) == 1
     assert all(item["gpus"] == 8 and item["nodes"] == 1 for item in vllm)

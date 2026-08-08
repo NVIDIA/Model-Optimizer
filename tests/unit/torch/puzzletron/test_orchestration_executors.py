@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for orchestration executors."""
 
@@ -803,22 +815,20 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
-    assert [
-        attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts
-    ] == ["2", "2"]
-    assert [
-        attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in attempts
-    ] == ["width-2048", "width-1792"]
+    assert [attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts] == [
+        "2",
+        "2",
+    ]
+    assert [attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in attempts] == [
+        "width-2048",
+        "width-1792",
+    ]
     assert (
         attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
         == attempts[1].command.env["FINALIZE_COMPLETION_DIR"]
     )
-    assert attempts[0].command.env["PUZZLE_DIR"].endswith(
-        "scenarios/width-2048/depth-00"
-    )
-    assert attempts[1].command.env["PUZZLE_DIR"].endswith(
-        "scenarios/width-1792/depth-00"
-    )
+    assert attempts[0].command.env["PUZZLE_DIR"].endswith("scenarios/width-2048/depth-00")
+    assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")
 
 
 def test_stage_partition_override_forces_batch(tmp_path: Path):

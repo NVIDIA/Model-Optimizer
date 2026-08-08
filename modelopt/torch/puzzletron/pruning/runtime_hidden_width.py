@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Differentiable full-envelope execution for a nested residual width."""
 
@@ -8,11 +20,12 @@ from __future__ import annotations
 from collections import OrderedDict
 from contextlib import contextmanager
 from copy import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from .embedding_pruning import EmbeddingPruningSpec
+if TYPE_CHECKING:
+    from .embedding_pruning import EmbeddingPruningSpec
 
 __all__ = [
     "hidden_width_layer_context",
@@ -38,9 +51,7 @@ def _mask_last_dim(value: Any, width: int, hidden_size: int):
 
 def retained_hidden_prefix(value: torch.Tensor, width: int) -> torch.Tensor:
     if value.ndim == 0 or int(value.shape[-1]) < int(width):
-        raise ValueError(
-            f"cannot retain hidden width {width} from shape {tuple(value.shape)}"
-        )
+        raise ValueError(f"cannot retain hidden width {width} from shape {tuple(value.shape)}")
     return value[..., : int(width)]
 
 
@@ -70,12 +81,14 @@ def _functional_replica(module: torch.nn.Module, width: int, hidden_size: int) -
     replica._forward_hooks = OrderedDict()
     replica._backward_hooks = OrderedDict()
     normalized_shape = getattr(replica, "normalized_shape", None)
-    if normalized_shape == hidden_size or normalized_shape == (hidden_size,):
+    if normalized_shape in {hidden_size, (hidden_size,)}:
         replica.normalized_shape = (width,)
     return replica
 
 
-def _active_prefix_state(module: torch.nn.Module, width: int, hidden_size: int) -> dict[str, torch.Tensor]:
+def _active_prefix_state(
+    module: torch.nn.Module, width: int, hidden_size: int
+) -> dict[str, torch.Tensor]:
     state = {}
     for name, value in (*module.named_parameters(), *module.named_buffers()):
         if value.ndim == 1 and int(value.shape[0]) == hidden_size:
@@ -184,13 +197,17 @@ def hidden_width_module_context(
                 continue
             axes = tuple(axis if axis >= 0 else weight.ndim + axis for axis in rule.axes)
             if 1 in axes:
-                handles.append(child.register_forward_pre_hook(_input_prefix_hook(width, hidden_size)))
+                handles.append(
+                    child.register_forward_pre_hook(_input_prefix_hook(width, hidden_size))
+                )
             if 0 in axes:
                 if weight.ndim == 1:
                     restored_forwards.append((child, child.forward))
                     child.forward = _active_norm_forward(child, width, hidden_size)
                 else:
-                    handles.append(child.register_forward_hook(_output_prefix_hook(width, hidden_size)))
+                    handles.append(
+                        child.register_forward_hook(_output_prefix_hook(width, hidden_size))
+                    )
         yield
     finally:
         for handle in reversed(handles):

@@ -383,9 +383,7 @@ def _prepare_sparse_runtime_selection(
     sampled = sample_subblock_configs(
         candidates,
         policy=SparseSamplingPolicy(
-            max_pairwise_per_family=int(
-                _get(sparse_cfg, "max_pairwise_per_family", 4)
-            ),
+            max_pairwise_per_family=int(_get(sparse_cfg, "max_pairwise_per_family", 4)),
             seed=int(_get(sparse_cfg, "seed", 42)),
         ),
     )
@@ -1091,9 +1089,7 @@ def scoring_stage(config: dict[str, Any], manifest: StageManifest):
                 ),
                 default_layer_count=int(report_config.get("default_layer_count", 5)),
                 anchor_count=int(report_config.get("anchor_count", 3)),
-                trend_relative_tolerance=float(
-                    report_config.get("trend_relative_tolerance", 0.02)
-                ),
+                trend_relative_tolerance=float(report_config.get("trend_relative_tolerance", 0.02)),
             )
         dist.barrier()
     return complete_stage(

@@ -96,10 +96,10 @@ def enumerate_runtime_block_configs(
     )
 
 
-def _subblocks_with_kinds(block_config: BlockConfig, kinds: frozenset[str]) -> tuple[SubblockConfig, ...]:
-    return tuple(
-        subblock for subblock in block_config.subblock_configs if subblock.kind in kinds
-    )
+def _subblocks_with_kinds(
+    block_config: BlockConfig, kinds: frozenset[str]
+) -> tuple[SubblockConfig, ...]:
+    return tuple(subblock for subblock in block_config.subblock_configs if subblock.kind in kinds)
 
 
 def _mark_noop_kinds(block_config: BlockConfig, kinds: frozenset[str]) -> BlockConfig:
@@ -170,9 +170,7 @@ def _block_config_for_subblock(
             runtime_config
         )
         return _mark_noop_kinds(
-            base_block_config.with_subblock(
-                subblock_config, replace_kinds=_FFN_LIKE_KINDS
-            ),
+            base_block_config.with_subblock(subblock_config, replace_kinds=_FFN_LIKE_KINDS),
             _ATTENTION_LIKE_KINDS,
         )
     if isinstance(subblock_config, AttentionConfig | MLAConfig | MambaConfig):
@@ -180,9 +178,7 @@ def _block_config_for_subblock(
             runtime_config
         )
         return _mark_noop_kinds(
-            base_block_config.with_subblock(
-                subblock_config, replace_kinds=_ATTENTION_LIKE_KINDS
-            ),
+            base_block_config.with_subblock(subblock_config, replace_kinds=_ATTENTION_LIKE_KINDS),
             _FFN_LIKE_KINDS,
         )
     raise Exception(f"Runtime stats: Not supported subblock type: {subblock_config}")
@@ -197,9 +193,7 @@ def _validate_marginal_runtime(
     """Reject derived timings that cannot represent additive operator work."""
 
     if measurement.total_ms <= 0.0:
-        message = (
-            f"non-positive marginal runtime for {label}: {measurement.total_ms:.6g} ms"
-        )
+        message = f"non-positive marginal runtime for {label}: {measurement.total_ms:.6g} ms"
         if not ignore_negatives or measurement.total_ms == 0.0:
             raise ValueError(message)
         warnings.warn(f"Ignoring {message}", RuntimeWarning)
@@ -261,10 +255,7 @@ def _resolve_gpu_ids(group_size: int = 1) -> list[str | None]:
                 raise ValueError(
                     f"{len(ids)} detected GPUs cannot be divided into groups of {group_size}"
                 )
-            return [
-                ",".join(ids[i : i + group_size])
-                for i in range(0, len(ids), group_size)
-            ]
+            return [",".join(ids[i : i + group_size]) for i in range(0, len(ids), group_size)]
     except Exception:  # pragma: no cover - torch optional / no CUDA
         pass
     return [None]
@@ -306,22 +297,16 @@ def _merge_runtime_shard_results(
                 raise ValueError(f"duplicate runtime result index {index}")
             measurement = RuntimeMeasurement.from_dict(raw_measurement)
             if not all(
-                math.isfinite(value)
-                for value in (measurement.total_ms, measurement.prefill_ms)
+                math.isfinite(value) for value in (measurement.total_ms, measurement.prefill_ms)
             ):
-                raise ValueError(
-                    f"non-finite runtime result at index {index}: {measurement}"
-                )
+                raise ValueError(f"non-finite runtime result at index {index}: {measurement}")
             results_by_index[index] = measurement
 
     expected_indices = set(range(len(ordered_items)))
     missing = sorted(expected_indices - results_by_index.keys())
     if missing:
         raise ValueError(f"missing runtime result indices: {missing}")
-    return {
-        ordered_items[index][0]: results_by_index[index]
-        for index in range(len(ordered_items))
-    }
+    return {ordered_items[index][0]: results_by_index[index] for index in range(len(ordered_items))}
 
 
 def _runtime_shard_spec_identity(
@@ -363,9 +348,7 @@ def _assigned_runtime_shard_indices(
     """Assign complete paired measurements to one distributed runtime shard."""
 
     if measurement_pairs is None:
-        return [
-            index for index in range(len(ordered_items)) if index % shard_count == shard_index
-        ]
+        return [index for index in range(len(ordered_items)) if index % shard_count == shard_index]
 
     indices_by_key = {key: index for index, (key, _) in enumerate(ordered_items)}
     paired_indices: list[tuple[int, int]] = []
@@ -423,8 +406,7 @@ def _run_benchmarks(
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    f"vLLM runtime benchmark failed on gpu={gpu} "
-                    f"with block_layout={block_layout}"
+                    f"vLLM runtime benchmark failed on gpu={gpu} with block_layout={block_layout}"
                 ) from exc
         finally:
             gpu_pool.put(gpu)
@@ -526,10 +508,7 @@ def _run_benchmarks(
                 f"runtime shard barrier timed out: {completed}/{shard_count} complete in {status_dir}"
             )
         if now - last_report >= 30:
-            mprint(
-                f"Waiting for runtime shards: {completed}/{shard_count} complete "
-                f"({status_dir})"
-            )
+            mprint(f"Waiting for runtime shards: {completed}/{shard_count} complete ({status_dir})")
             last_report = now
         time.sleep(2)
 
@@ -570,9 +549,7 @@ def calc_runtime_for_blocks(
     Returns ``(runtime_by_block_dict, no_block_runtime_ms)`` analogous to
     :func:`calc_runtime_for_subblocks`.
     """
-    configured_repeat_count = max(
-        1, int(runtime_stats_config.get("repeat_block_n_times", 4))
-    )
+    configured_repeat_count = max(1, int(runtime_stats_config.get("repeat_block_n_times", 4)))
     topology = RuntimeTopology.from_config(runtime_stats_config.get("topology", None))
     repeat_block_n_times = effective_repeat_count(
         configured_repeat_count, topology.pipeline_parallel_size
@@ -606,9 +583,7 @@ def calc_runtime_for_blocks(
 
     specs: dict[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]] = {}
 
-    def _add_spec(
-        block_layout: tuple[BlockConfig, ...], scaffold_policy: str
-    ) -> tuple:
+    def _add_spec(block_layout: tuple[BlockConfig, ...], scaffold_policy: str) -> tuple:
         spec_runtime = replace(runtime_config, scaffold_policy=scaffold_policy)
         key = (spec_runtime, block_layout)
         specs.setdefault(key, (spec_runtime, block_layout))
@@ -726,9 +701,7 @@ def calc_runtime_for_subblocks(
     then the per-subblock runtimes are derived from the cached measurements using
     the same differencing the sequential version used.
     """
-    configured_repeat_count = max(
-        1, int(runtime_stats_config.get("repeat_block_n_times", 4))
-    )
+    configured_repeat_count = max(1, int(runtime_stats_config.get("repeat_block_n_times", 4)))
     topology = RuntimeTopology.from_config(runtime_stats_config.get("topology", None))
     repeat_block_n_times = effective_repeat_count(
         configured_repeat_count, topology.pipeline_parallel_size
@@ -761,9 +734,7 @@ def calc_runtime_for_subblocks(
     base_block_config = descriptor.runtime_benchmark_base_block_config(runtime_config)
     specs: dict[tuple, tuple[RuntimeConfig, tuple[BlockConfig, ...]]] = {}
 
-    def _add_spec(
-        block_layout: tuple[BlockConfig, ...], scaffold_policy: str
-    ) -> tuple:
+    def _add_spec(block_layout: tuple[BlockConfig, ...], scaffold_policy: str) -> tuple:
         spec_runtime = replace(runtime_config, scaffold_policy=scaffold_policy)
         key = (spec_runtime, block_layout)
         specs.setdefault(key, (spec_runtime, block_layout))
@@ -863,9 +834,7 @@ def calc_runtime_for_subblocks(
         for short_key, long_key in fixed_overhead_keys
     ]
     no_block_runtime_ms = median_measurement(overhead_estimates)
-    relative_tolerance = float(
-        runtime_stats_config.get("fixed_overhead_relative_tolerance", 0.5)
-    )
+    relative_tolerance = float(runtime_stats_config.get("fixed_overhead_relative_tolerance", 0.5))
     denominator = max(abs(no_block_runtime_ms.total_ms), 1.0e-12)
     relative_spread = max(
         abs(value.total_ms - no_block_runtime_ms.total_ms) / denominator

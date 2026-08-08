@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Compatibility adapter for canonical single-stage Puzzletron execution."""
 
@@ -93,9 +105,7 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
     if stage_id == "aiperf":
         return ("artifacts/aiperf/**/aiperf_results.json",)
     if stage_id == "global_distillation_sanity":
-        return (
-            "artifacts/global_distillation_sanity/**/global_distillation_sanity_summary.json",
-        )
+        return ("artifacts/global_distillation_sanity/**/global_distillation_sanity_summary.json",)
     if stage_id == "global_distillation":
         return ("artifacts/global_distillation/**/global_distillation_summary.json",)
     if stage_id == "post_distillation_evaluation":
@@ -130,9 +140,7 @@ def _vllm_stats_are_complete(config: Mapping[str, Any], puzzle_dir: Path) -> boo
     measurements = normalize_vllm_measurements(config)
     if len(measurements) == 1 and next(iter(measurements.values())).legacy:
         return True
-    index = _read_mapping(
-        puzzle_dir / "artifacts" / "vllm_stats" / "measurements" / "index.json"
-    )
+    index = _read_mapping(puzzle_dir / "artifacts" / "vllm_stats" / "measurements" / "index.json")
     if index is None:
         return False
     recorded = index.get("measurements")
@@ -203,7 +211,10 @@ def _sort_is_complete(puzzle_dir: Path) -> bool:
     if _stage_manifest_succeeded(puzzle_dir, "sort") is None:
         return False
     width_manifest = puzzle_dir / "manifests" / "width_importance.json"
-    if width_manifest.is_file() and width_manifest.stat().st_mtime > stage_manifest_path.stat().st_mtime:
+    if (
+        width_manifest.is_file()
+        and width_manifest.stat().st_mtime > stage_manifest_path.stat().st_mtime
+    ):
         return False
     sorted_teacher = puzzle_dir / "ckpts" / "sorted_teacher"
     sort_manifest = _read_mapping(sorted_teacher / "parallel_sort_manifest.json")
@@ -241,9 +252,7 @@ def _depth_trajectory_is_complete(config: Mapping[str, Any], puzzle_dir: Path) -
     target = int(depth.get("max_removals", depth.get("max_subblocks_to_remove", 10)))
     configured_output = depth.get("output_dir")
     output_dir = (
-        Path(str(configured_output))
-        if configured_output
-        else puzzle_dir / "depth" / "iterative"
+        Path(str(configured_output)) if configured_output else puzzle_dir / "depth" / "iterative"
     )
     try:
         payload = json.loads((output_dir / "trajectory.json").read_text())
@@ -275,19 +284,12 @@ def _post_input_candidate_set(
     flow = config["post_mip"]["flows"][flow_id]
     node = flow["nodes"][node_id]
     input_id = str(node.get("input", "source"))
-    registry = _read_mapping(
-        puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json"
-    )
+    registry = _read_mapping(puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json")
     if registry is None:
         raise RuntimeError("post-MIP candidate registry is unavailable")
     if input_id != "source":
         current = _read_mapping(
-            puzzle_dir
-            / "artifacts"
-            / "post_mip"
-            / "nodes"
-            / input_id
-            / "current.json"
+            puzzle_dir / "artifacts" / "post_mip" / "nodes" / input_id / "current.json"
         )
         if current is None:
             raise RuntimeError(f"post-MIP input node {input_id!r} has no current execution")
@@ -312,9 +314,7 @@ def _post_input_candidate_set(
                 "producer_execution_identity",
             )
         }
-        if candidate_set.get("identity") != _prefixed_hash(
-            "candidate_set", identity_payload
-        ):
+        if candidate_set.get("identity") != _prefixed_hash("candidate_set", identity_payload):
             raise RuntimeError(f"post-MIP input node {input_id!r} has an invalid candidate set")
         return candidate_set, registry
 
@@ -344,10 +344,7 @@ def _post_input_candidate_set(
             and origin.get("mip_execution_identity") == active_execution
             and origin.get("run_id") == source["run"]
             and (variants == "all" or origin.get("variant_id") in variants)
-            and (
-                objectives == "all"
-                or (origin.get("objective") or {}).get("metric") in objectives
-            )
+            and (objectives == "all" or (origin.get("objective") or {}).get("metric") in objectives)
         ]
         if origins:
             origins.sort(
@@ -397,12 +394,7 @@ def post_mip_summary_is_current(
         dependency_executions = {}
         for owner in sorted(owners):
             current = _read_mapping(
-                puzzle_dir
-                / "artifacts"
-                / "post_mip"
-                / "nodes"
-                / owner
-                / "current.json"
+                puzzle_dir / "artifacts" / "post_mip" / "nodes" / owner / "current.json"
             )
             if current is None:
                 return False
@@ -419,9 +411,7 @@ def post_mip_summary_is_current(
                     current = str(revisions[current]["parent_revision_id"])
                 source_revisions[value] = current
         else:
-            recorded = (summary.get("execution_contract") or {}).get(
-                "source_revisions"
-            ) or {}
+            recorded = (summary.get("execution_contract") or {}).get("source_revisions") or {}
             if set(recorded) != set(revision_ids):
                 return False
             source_revisions = dict(recorded)
@@ -431,9 +421,7 @@ def post_mip_summary_is_current(
             "dependency_executions": dependency_executions,
             "source_revisions": source_revisions,
         }
-        return summary.get("execution_identity") == _prefixed_hash(
-            "post_mip_execution", contract
-        )
+        return summary.get("execution_identity") == _prefixed_hash("post_mip_execution", contract)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError):
         return False
 
@@ -479,9 +467,7 @@ def _mip_profiles_are_complete(config: Mapping[str, Any], puzzle_dir: Path) -> b
     if not profile_ids or set(profile_ids) != set(identities):
         return False
     for profile_id in profile_ids:
-        grid = _read_mapping(
-            puzzle_dir / "mip" / "profiles" / str(profile_id) / "mip_grid.json"
-        )
+        grid = _read_mapping(puzzle_dir / "mip" / "profiles" / str(profile_id) / "mip_grid.json")
         if (
             grid is None
             or grid.get("status") != "success"
@@ -532,9 +518,7 @@ def _mip_profiles_are_complete(config: Mapping[str, Any], puzzle_dir: Path) -> b
 def _zero_shot_profiles_are_complete(config: Mapping[str, Any], puzzle_dir: Path) -> bool:
     profile_ids = (config.get("zero_shot_evaluation") or {}).get("profile_ids") or ()
     if not profile_ids:
-        return _patterns_present(
-            puzzle_dir, stage_output_patterns(config, "zero_shot_evaluation")
-        )
+        return _patterns_present(puzzle_dir, stage_output_patterns(config, "zero_shot_evaluation"))
     return all(
         bool(
             list(
@@ -549,9 +533,7 @@ def _zero_shot_profiles_are_complete(config: Mapping[str, Any], puzzle_dir: Path
 
 
 def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
-    puzzle_dir = Path(
-        config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir", ".")
-    )
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir", "."))
     manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
     if manifest is not None and manifest.get("status") == "skipped":
         # A historical skip must not hide a stage the user has since re-enabled.
@@ -565,9 +547,7 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
         )
         if summary is None or summary.get("status") != "success":
             return False
-        return post_mip_summary_is_current(
-            config, puzzle_dir, stage_id, summary
-        ) and all(
+        return post_mip_summary_is_current(config, puzzle_dir, stage_id, summary) and all(
             _hf_checkpoint_is_complete(Path(str(checkpoint)))
             for checkpoint in summary.get("checkpoints") or ()
         )

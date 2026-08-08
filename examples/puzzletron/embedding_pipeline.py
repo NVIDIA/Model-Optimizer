@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Embedding-width fan-out used by the one-command Puzzletron runner."""
 
@@ -77,9 +89,7 @@ def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
         if granularity == "subblock"
         else "single_sequence_replacement_solutions--validation"
     )
-    widths = [
-        int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())
-    ]
+    widths = [int(width) for width in (config.get("embedding_pruning") or {}).get("widths", ())]
     children = []
     for width in widths:
         scenario = _scenario_dir(puzzle_dir, width)
@@ -94,9 +104,7 @@ def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
                 ),
                 default_layer_count=int(scoring.get("default_layer_count", 5)),
                 anchor_count=int(scoring.get("anchor_count", 3)),
-                trend_relative_tolerance=float(
-                    scoring.get("trend_relative_tolerance", 0.02)
-                ),
+                trend_relative_tolerance=float(scoring.get("trend_relative_tolerance", 0.02)),
             )
         )
 
@@ -108,9 +116,7 @@ def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
         "scenario_count": len(children),
         "record_count": sum(int(child.get("record_count", 0)) for child in children),
         "warning_count": sum(int(child.get("warning_count", 0)) for child in children),
-        "axes": list(
-            dict.fromkeys(axis for child in children for axis in child.get("axes", ()))
-        ),
+        "axes": list(dict.fromkeys(axis for child in children for axis in child.get("axes", ()))),
         "metrics": list(
             dict.fromkeys(metric for child in children for metric in child.get("metrics", ()))
         ),
@@ -127,9 +133,7 @@ def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
 def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
     teacher = scenario / "ckpts" / "sorted_teacher"
     scenario_manifest = json.loads((scenario / "scenario_manifest.json").read_text())
-    subblock = (
-        str((config.get("replacement_scoring") or {}).get("granularity")) == "subblock"
-    )
+    subblock = str((config.get("replacement_scoring") or {}).get("granularity")) == "subblock"
     stem = (
         "single_subblock_replacement_solutions"
         if subblock
@@ -158,15 +162,12 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
     ]
     if scenario_manifest.get("bypass_checkpoint") is not None:
         overrides.append(
-            "replacement_scoring.bypass_checkpoint_dir="
-            f"{scenario / 'ckpts' / 'bypass_overlay'}"
+            f"replacement_scoring.bypass_checkpoint_dir={scenario / 'ckpts' / 'bypass_overlay'}"
         )
     return tuple(overrides)
 
 
-def scenario_preparation_commands(
-    *, config: dict, stage: str
-) -> tuple[tuple[str, ...], ...]:
+def scenario_preparation_commands(*, config: dict, stage: str) -> tuple[tuple[str, ...], ...]:
     """Return width-local input preparation commands for a composite stage."""
 
     replacement = config.get("replacement_scoring") or {}

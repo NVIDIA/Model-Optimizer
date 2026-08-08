@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Slurm executor using stdlib subprocess only."""
 
@@ -392,15 +404,11 @@ class SlurmExecutor(Executor):
                 exit_code = None
         if state_name.startswith(("PENDING", "CONFIGURING", "SUSPENDED")):
             return JobStatus(
-                handle=handle, 
-                state=JobState.PENDING, 
-                log_paths=self.fetch_logs(handle)
+                handle=handle, state=JobState.PENDING, log_paths=self.fetch_logs(handle)
             )
         if state_name.startswith(("RUNNING", "COMPLETING")):
             return JobStatus(
-                handle=handle, 
-                state=JobState.RUNNING, 
-                log_paths=self.fetch_logs(handle)
+                handle=handle, state=JobState.RUNNING, log_paths=self.fetch_logs(handle)
             )
         if state_name.startswith("COMPLETED") and (exit_code in (None, 0)):
             return JobStatus(

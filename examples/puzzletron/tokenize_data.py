@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tokenize the fixed data caches consumed by Puzzletron stages."""
 
@@ -8,7 +20,10 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 from modelopt.torch.puzzletron.stage_runner import StageResult
@@ -27,14 +42,11 @@ def resolve_tokenize_caches(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     data_cfg = config.get("data") or {}
     calibration = data_cfg.get("calibration") or {}
     train_samples = int(calibration.get("num_samples") or 32768)
-    train_seq = int(
-        calibration.get("seq_len")
-        or data_cfg.get("max_sample_length")
-        or 4096
-    )
+    train_seq = int(calibration.get("seq_len") or data_cfg.get("max_sample_length") or 4096)
     scoring = data_cfg.get("replacement_scoring") or {}
     val_samples = int(scoring.get("num_samples") or 128)
-    train_seed = int((config.get("pruning") or {}).get("shuffle_seed") or 444)
+    configured_seed = (config.get("pruning") or {}).get("shuffle_seed")
+    train_seed = 444 if configured_seed is None else int(configured_seed)
 
     defaults: list[dict[str, Any]] = []
     train_path = config.get("train_token_cache_path")

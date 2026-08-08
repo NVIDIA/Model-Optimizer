@@ -1,10 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from torch.distributed.device_mesh import init_device_mesh
@@ -71,8 +84,12 @@ def test_permutation_covers_both_residual_axes_and_preserves_ties():
 
     expected_residual = state["layer.residual.weight"].index_select(0, order).index_select(1, order)
     assert torch.equal(permuted["layer.residual.weight"], expected_residual)
-    assert torch.equal(permuted["layer.qkv.weight"], state["layer.qkv.weight"].index_select(1, order))
-    assert torch.equal(permuted["projector.weight"], state["projector.weight"].index_select(0, order))
+    assert torch.equal(
+        permuted["layer.qkv.weight"], state["layer.qkv.weight"].index_select(1, order)
+    )
+    assert torch.equal(
+        permuted["projector.weight"], state["projector.weight"].index_select(0, order)
+    )
     assert permuted["embed.weight"] is permuted["lm_head.weight"]
     assert permuted["visual.block.weight"] is state["visual.block.weight"]
 
@@ -169,12 +186,8 @@ def test_audit_rejects_unhandled_hidden_sensitive_tensor_but_allows_vit_exemptio
     state = _state_dict()
     state["unknown.weight"] = torch.ones(7, 4)
 
-    try:
+    with pytest.raises(ValueError, match="unknown.weight"):
         _spec().audit_state_dict(state)
-    except ValueError as exc:
-        assert "unknown.weight" in str(exc)
-    else:
-        raise AssertionError("unhandled hidden tensor was accepted")
 
 
 def test_width_validation_and_nested_config_update():
@@ -186,12 +199,8 @@ def test_width_validation_and_nested_config_update():
     assert updated["hidden_size"] == 2
     assert updated["text_config"]["hidden_size"] == 2
     assert config["hidden_size"] == 4
-    try:
+    with pytest.raises(ValueError, match="legal|alignment"):
         spec.validate_width(3, tp_size=1)
-    except ValueError as exc:
-        assert "legal" in str(exc) or "alignment" in str(exc)
-    else:
-        raise AssertionError("illegal hidden width was accepted")
 
     object_config = SimpleNamespace(
         hidden_size=4,
@@ -205,9 +214,7 @@ def test_width_validation_and_nested_config_update():
 
 def test_packed_minitron_metric_matches_per_sample_mean_l2_then_site_sum():
     scorer = PackedMinitronImportance(hidden_size=2)
-    activations_a = torch.tensor(
-        [[[1.0, 2.0], [3.0, 4.0], [2.0, 8.0], [4.0, 12.0], [6.0, 16.0]]]
-    )
+    activations_a = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [2.0, 8.0], [4.0, 12.0], [6.0, 16.0]]])
     activations_b = activations_a * 0.5
     cu = torch.tensor([0, 2, 5], dtype=torch.int32)
 
@@ -370,9 +377,7 @@ def test_hidden_width_site_scorer_restores_zero_cp_peer_from_exact_checkpoint():
         hidden_size=2,
         name="model.layers.0.input_layernorm",
     )
-    scorer.load_checkpoint_state(
-        {"_squared_sum": None, "_sample_count": 0}
-    )
+    scorer.load_checkpoint_state({"_squared_sum": None, "_sample_count": 0})
 
     result = scorer.finalize()
 
@@ -413,7 +418,13 @@ def test_nested_width_envelope_matches_physical_prefix_and_zeros_inactive_gradie
             self.variance_epsilon = 1.0e-6
 
         def forward(self, x):
-            return x * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + self.variance_epsilon).to(x.dtype) * self.weight
+            return (
+                x
+                * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + self.variance_epsilon).to(
+                    x.dtype
+                )
+                * self.weight
+            )
 
     class ToyLayer(torch.nn.Module):
         def __init__(self):
@@ -464,7 +475,9 @@ def test_active_prefix_uses_native_rmsnorm_semantics_before_bfloat16_rounding():
             self.eps = 3.0e-5
 
         def forward(self, x):
-            normalized = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + self.eps)
+            normalized = x.float() * torch.rsqrt(
+                x.float().square().mean(-1, keepdim=True) + self.eps
+            )
             return normalized.to(x.dtype) * (1 + self.weight)
 
     spec = EmbeddingPruningSpec(
@@ -530,9 +543,7 @@ def test_active_prefix_automodel_float32_rmsnorm_matches_physical_gradients():
     class Float32RMSNorm(torch.nn.Module):
         def __init__(self, width):
             super().__init__()
-            self.weight = torch.nn.Parameter(
-                torch.linspace(0.75, 1.5, width, dtype=torch.bfloat16)
-            )
+            self.weight = torch.nn.Parameter(torch.linspace(0.75, 1.5, width, dtype=torch.bfloat16))
             self.eps = 3.0e-5
 
         def forward(self, x):
