@@ -28,6 +28,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 NEMOTRON3_NANO_30B_MODEL_CONFIG = (
     "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml"
 )
+QWEN3P5_0P8B_MODEL_CONFIG = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/model.yaml"
 QWEN3P5_9B_MODEL_CONFIG = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_9b/model.yaml"
 QWEN3P6_35B_A3B_MODEL_CONFIG = (
     "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/model.yaml"
@@ -113,6 +114,7 @@ def test_setup_defaults_example_is_portable() -> None:
 def test_model_examples_use_public_hugging_face_identities() -> None:
     paths = (
         NEMOTRON3_NANO_30B_MODEL_CONFIG,
+        QWEN3P5_0P8B_MODEL_CONFIG,
         QWEN3P5_9B_MODEL_CONFIG,
         QWEN3P6_35B_A3B_MODEL_CONFIG,
     )
