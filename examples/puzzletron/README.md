@@ -8,7 +8,7 @@ campaign report.
 
 ## Table of Contents
 
-- [Historical campaign results](#historical-campaign-results)
+- [Campaign reports](#campaign-reports)
 - [Setup wizard](#setup-wizard)
 - [Installation](#installation)
 - [Run with an agent](#run-with-an-agent)
@@ -18,14 +18,14 @@ campaign report.
 - [Online evaluation and downstream stages](#online-evaluation-and-downstream-stages)
 - [Reports](#reports)
 
-## Historical campaign results
+## Campaign reports
 
-The reports below retain results from earlier experimental work. They have not
-been reproduced on current code and are not current model-support claims. The
-[historical results summary](docs/historical_results.md) records their
-classification, relationships to current configuration files, known gaps, and
-future campaign-evidence considerations. Detailed run facts remain in the
-retained reports.
+The reports below retain their original run data from development snapshots.
+The [campaign report catalog](docs/campaign_reports.md) records each report's
+producer state, reproduction and support status, metadata origin, relationship
+to current configuration files, and known limitations. An entry marked as not
+reproduced is not a current model-support claim. Detailed run facts remain in
+the retained reports.
 
 Each report is a self-contained HTML file that embeds sanity-check outputs,
 stage manifests, and evaluation results; it can be 100s of MB. Download it to
@@ -33,13 +33,13 @@ disk and open it locally rather than previewing it in a browser tab.
 
 Each report's **Zero-shot Evaluation** section compares the pruned candidate
 solutions directly against the full teacher model across multiple benchmarks.
-Interpret those results together with the unresolved correctness findings and
-other gaps recorded in the historical results summary.
+Interpret those results together with the reproduction status and unresolved
+correctness findings recorded in the campaign report catalog.
 
-| Model | Hugging Face model | Current configuration reference | Historical report |
+| Model | Hugging Face model | Current configuration reference | Campaign report |
 |---|---|---|---|
 | Nemotron-3 Nano 30B-A3B | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | [default.yaml](configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) | [HTML report](reports/nemotron3_nano_30b_a3b.html) |
-| Qwen3p5_9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
+| Qwen3.5-9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
 
 ## Setup wizard
 
