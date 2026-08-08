@@ -3177,6 +3177,203 @@ def _complete_sort_equivalence_stage(
     )
 
 
+def _write_sort_equivalence_summary(
+    *,
+    teacher_dir: Path,
+    sorted_dir: Path,
+    reverse_dir: Path,
+    scoring_output_dir: Path,
+    reverse_output_dir: Path | None,
+    summary_path: Path,
+    table_path: Path,
+    metric: str,
+    include_reverse: bool,
+    tolerance: float,
+    reverse_tolerance: float,
+) -> None:
+    """Persist the canonical sort-equivalence evidence from rank zero."""
+
+    teacher_raw = json.loads((scoring_output_dir / "teacher.json").read_text())
+    sorted_result_path = scoring_output_dir / "sliced_teacher.json"
+    sorted_raw = json.loads(sorted_result_path.read_text())
+    reverse_raw = (
+        json.loads((reverse_output_dir / "sliced_teacher.json").read_text())
+        if reverse_output_dir is not None
+        else None
+    )
+    teacher_value = _metric_avg(teacher_raw, metric)
+    sorted_value = _metric_avg(sorted_raw, metric)
+    if teacher_value is None or sorted_value is None:
+        raise RuntimeError(
+            f"Could not find metric {metric!r}; teacher={teacher_raw} sorted={sorted_raw}"
+        )
+    delta = float(sorted_value) - float(teacher_value)
+    reverse_value = _metric_avg(reverse_raw, metric) if reverse_raw is not None else None
+    if include_reverse and reverse_value is None:
+        raise RuntimeError(
+            f"Could not find metric {metric!r} for reverse-sorted checkpoint: {reverse_raw}"
+        )
+    reverse_delta = (
+        float(reverse_value) - float(teacher_value) if reverse_value is not None else None
+    )
+    decision = _sort_equivalence_decision(
+        delta=delta,
+        reverse_delta=reverse_delta,
+        tolerance=tolerance,
+        reverse_tolerance=reverse_tolerance,
+    )
+    sorted_passed = decision["sorted_passed"]
+    reverse_passed = decision["reverse_passed"]
+    passed = decision["passed"]
+    findings = []
+    if not sorted_passed:
+        findings.append(
+            finding_from_message(
+                stage="sort_sanity",
+                message=(
+                    f"sorted teacher {metric} drift too large: delta={delta:.6g} "
+                    f"tolerance={tolerance:.6g}"
+                ),
+                evidence={"metric": metric, "delta": delta, "tolerance": tolerance},
+                severity="error",
+            )
+        )
+    if include_reverse and not reverse_passed:
+        findings.append(
+            finding_from_message(
+                stage="sort_sanity",
+                message=(
+                    f"reverse-sorted teacher {metric} drift too large: "
+                    f"reverse_delta={reverse_delta:.6g} "
+                    f"tolerance={reverse_tolerance:.6g}"
+                ),
+                evidence={
+                    "metric": metric,
+                    "reverse_delta": reverse_delta,
+                    "tolerance": reverse_tolerance,
+                },
+                severity="error",
+            )
+        )
+    summary = {
+        "metric": metric,
+        "teacher_dir": str(teacher_dir),
+        "sorted_teacher_dir": str(sorted_dir),
+        "teacher": {
+            key: _metric_avg(teacher_raw, key)
+            for key in _PRIMARY_METRICS
+            if _metric_avg(teacher_raw, key) is not None
+        },
+        "sorted_teacher": {
+            key: _metric_avg(sorted_raw, key)
+            for key in _PRIMARY_METRICS
+            if _metric_avg(sorted_raw, key) is not None
+        },
+        "reverse_sorted": (
+            {
+                key: _metric_avg(reverse_raw, key)
+                for key in _PRIMARY_METRICS
+                if _metric_avg(reverse_raw, key) is not None
+            }
+            if reverse_raw is not None
+            else None
+        ),
+        "delta": delta,
+        "abs_delta": abs(delta),
+        "sorted_passed": sorted_passed,
+        "reverse_delta": reverse_delta,
+        "reverse_abs_delta": abs(reverse_delta) if reverse_delta is not None else None,
+        "reverse_passed": reverse_passed if include_reverse else None,
+        "max_abs_delta": tolerance,
+        "max_abs_reverse_delta": reverse_tolerance,
+        "passed": passed,
+        "findings": findings,
+        "verdict": "passed" if passed else "failed",
+        "teacher_result": str(scoring_output_dir / "teacher.json"),
+        "sorted_result": str(sorted_result_path),
+        "reverse_sorted_dir": str(reverse_dir) if include_reverse else None,
+        "reverse_result": (
+            str(reverse_output_dir / "sliced_teacher.json")
+            if reverse_output_dir is not None
+            else None
+        ),
+    }
+    summary_path.write_text(json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n")
+    table_path.write_text(
+        "\n".join(
+            [
+                f"# Sorted Teacher Equivalence ({metric})",
+                "",
+                "| checkpoint | value | delta_vs_teacher |",
+                "| --- | --- | --- |",
+                f"| teacher | {teacher_value:.8g} | 0 |",
+                f"| sorted_teacher | {sorted_value:.8g} | {delta:.8g} |",
+                *(
+                    [
+                        f"| reverse_sorted_teacher | {reverse_value:.8g} | "
+                        f"{reverse_delta:.8g} |"
+                    ]
+                    if reverse_value is not None and reverse_delta is not None
+                    else []
+                ),
+                "",
+                f"pass: {'yes' if passed else 'no'} "
+                f"(max_abs_delta={tolerance:.3g}, "
+                f"max_abs_reverse_delta={reverse_tolerance:.3g})",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mprint(table_path.read_text(encoding="utf-8"))
+
+
+def _finalize_sort_equivalence_stage(
+    config: dict[str, Any],
+    manifest: StageManifest,
+    *,
+    teacher_dir: Path,
+    sorted_dir: Path,
+    reverse_dir: Path,
+    scoring_output_dir: Path,
+    reverse_output_dir: Path | None,
+    summary_path: Path,
+    table_path: Path,
+    metric: str,
+    include_reverse: bool,
+    tolerance: float,
+    reverse_tolerance: float,
+):
+    """Publish and consume one verdict before distributed teardown."""
+
+    if not dist.is_initialized():
+        raise RuntimeError("sort-equivalence finalization requires an active process group")
+    if dist.is_master():
+        _write_sort_equivalence_summary(
+            teacher_dir=teacher_dir,
+            sorted_dir=sorted_dir,
+            reverse_dir=reverse_dir,
+            scoring_output_dir=scoring_output_dir,
+            reverse_output_dir=reverse_output_dir,
+            summary_path=summary_path,
+            table_path=table_path,
+            metric=metric,
+            include_reverse=include_reverse,
+            tolerance=tolerance,
+            reverse_tolerance=reverse_tolerance,
+        )
+    dist.barrier()
+    result = _complete_sort_equivalence_stage(
+        config,
+        manifest,
+        summary_path=summary_path,
+        table_path=table_path,
+        fallback_metric=metric,
+    )
+    dist.barrier()
+    return result
+
+
 def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     """Evaluate teacher and sorted teacher with the chunked AutoModel scorer."""
 
@@ -3294,155 +3491,23 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             launch_score_solutions_automodel(reverse_scoring_cfg)
             dist.barrier()
 
-    summary_path = artifacts_dir / "summary.json"
-    md_path = artifacts_dir / "table.md"
-    if dist.is_master():
-        teacher_raw = json.loads((scoring_output_dir / "teacher.json").read_text())
-        sorted_result_path = scoring_output_dir / "sliced_teacher.json"
-        sorted_raw = json.loads(sorted_result_path.read_text())
-        reverse_raw = (
-            json.loads((reverse_output_dir / "sliced_teacher.json").read_text())
-            if reverse_output_dir is not None
-            else None
-        )
-        teacher_value = _metric_avg(teacher_raw, metric)
-        sorted_value = _metric_avg(sorted_raw, metric)
-        if teacher_value is None or sorted_value is None:
-            raise RuntimeError(
-                f"Could not find metric {metric!r}; teacher={teacher_raw} sorted={sorted_raw}"
-            )
-        delta = float(sorted_value) - float(teacher_value)
-        reverse_value = _metric_avg(reverse_raw, metric) if reverse_raw is not None else None
-        if include_reverse and reverse_value is None:
-            raise RuntimeError(
-                f"Could not find metric {metric!r} for reverse-sorted checkpoint: {reverse_raw}"
-            )
-        reverse_delta = (
-            float(reverse_value) - float(teacher_value) if reverse_value is not None else None
-        )
-        decision = _sort_equivalence_decision(
-            delta=delta,
-            reverse_delta=reverse_delta,
+        summary_path = artifacts_dir / "summary.json"
+        table_path = artifacts_dir / "table.md"
+        return _finalize_sort_equivalence_stage(
+            config,
+            manifest,
+            teacher_dir=teacher_dir,
+            sorted_dir=sorted_dir,
+            reverse_dir=reverse_dir,
+            scoring_output_dir=scoring_output_dir,
+            reverse_output_dir=reverse_output_dir,
+            summary_path=summary_path,
+            table_path=table_path,
+            metric=metric,
+            include_reverse=include_reverse,
             tolerance=tolerance,
             reverse_tolerance=reverse_tolerance,
         )
-        sorted_passed = decision["sorted_passed"]
-        reverse_passed = decision["reverse_passed"]
-        passed = decision["passed"]
-        summary = {
-            "metric": metric,
-            "teacher_dir": str(teacher_dir),
-            "sorted_teacher_dir": str(sorted_dir),
-            "teacher": {
-                key: _metric_avg(teacher_raw, key)
-                for key in _PRIMARY_METRICS
-                if _metric_avg(teacher_raw, key) is not None
-            },
-            "sorted_teacher": {
-                key: _metric_avg(sorted_raw, key)
-                for key in _PRIMARY_METRICS
-                if _metric_avg(sorted_raw, key) is not None
-            },
-            "reverse_sorted": (
-                {
-                    key: _metric_avg(reverse_raw, key)
-                    for key in _PRIMARY_METRICS
-                    if _metric_avg(reverse_raw, key) is not None
-                }
-                if reverse_raw is not None
-                else None
-            ),
-            "delta": delta,
-            "abs_delta": abs(delta),
-            "sorted_passed": sorted_passed,
-            "reverse_delta": reverse_delta,
-            "reverse_abs_delta": abs(reverse_delta) if reverse_delta is not None else None,
-            "reverse_passed": reverse_passed if include_reverse else None,
-            "max_abs_delta": tolerance,
-            "max_abs_reverse_delta": reverse_tolerance,
-            "passed": passed,
-            "findings": [],
-            "verdict": "passed" if passed else "failed",
-            "teacher_result": str(scoring_output_dir / "teacher.json"),
-            "sorted_result": str(sorted_result_path),
-            "reverse_sorted_dir": str(reverse_dir) if include_reverse else None,
-            "reverse_result": (
-                str(reverse_output_dir / "sliced_teacher.json")
-                if reverse_output_dir is not None
-                else None
-            ),
-        }
-        summary_path.write_text(json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n")
-        md_path.write_text(
-            "\n".join(
-                [
-                    f"# Sorted Teacher Equivalence ({metric})",
-                    "",
-                    "| checkpoint | value | delta_vs_teacher |",
-                    "| --- | --- | --- |",
-                    f"| teacher | {teacher_value:.8g} | 0 |",
-                    f"| sorted_teacher | {sorted_value:.8g} | {delta:.8g} |",
-                    *(
-                        [
-                            f"| reverse_sorted_teacher | {reverse_value:.8g} | "
-                            f"{reverse_delta:.8g} |"
-                        ]
-                        if reverse_value is not None and reverse_delta is not None
-                        else []
-                    ),
-                    "",
-                    f"pass: {'yes' if passed else 'no'} "
-                    f"(max_abs_delta={tolerance:.3g}, "
-                    f"max_abs_reverse_delta={reverse_tolerance:.3g})",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        mprint(md_path.read_text(encoding="utf-8"))
-        findings = []
-        if not passed:
-            if not sorted_passed:
-                findings.append(
-                    finding_from_message(
-                        stage="sort_sanity",
-                        message=(
-                            f"sorted teacher {metric} drift too large: delta={delta:.6g} "
-                            f"tolerance={tolerance:.6g}"
-                        ),
-                        evidence={"metric": metric, "delta": delta, "tolerance": tolerance},
-                        severity="error",
-                    )
-                )
-            if include_reverse and not reverse_passed:
-                findings.append(
-                    finding_from_message(
-                        stage="sort_sanity",
-                        message=(
-                            f"reverse-sorted teacher {metric} drift too large: "
-                            f"reverse_delta={reverse_delta:.6g} "
-                            f"tolerance={reverse_tolerance:.6g}"
-                        ),
-                        evidence={
-                            "metric": metric,
-                            "reverse_delta": reverse_delta,
-                            "tolerance": reverse_tolerance,
-                        },
-                        severity="error",
-                    )
-                )
-            summary["findings"] = findings
-            summary_path.write_text(
-                json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
-            )
-    dist.barrier()
-    return _complete_sort_equivalence_stage(
-        config,
-        manifest,
-        summary_path=summary_path,
-        table_path=md_path,
-        fallback_metric=metric,
-    )
 
 
 def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifest):

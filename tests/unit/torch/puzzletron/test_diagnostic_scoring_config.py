@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 import examples.puzzletron.run_axis_diagnostic_worker as axis_worker
@@ -96,7 +97,40 @@ def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separa
     )["passed"]
 
 
-def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(tmp_path: Path):
+def test_sort_equivalence_summary_records_blocking_drift(tmp_path: Path):
+    scoring_output_dir = tmp_path / "scoring"
+    scoring_output_dir.mkdir()
+    (scoring_output_dir / "teacher.json").write_text(
+        json.dumps({"lm_loss": {"avg": 1.0}}), encoding="utf-8"
+    )
+    (scoring_output_dir / "sliced_teacher.json").write_text(
+        json.dumps({"lm_loss": {"avg": 1.25}}), encoding="utf-8"
+    )
+    summary_path = tmp_path / "summary.json"
+
+    diagnostics._write_sort_equivalence_summary(
+        teacher_dir=tmp_path / "teacher",
+        sorted_dir=tmp_path / "sorted",
+        reverse_dir=tmp_path / "reverse",
+        scoring_output_dir=scoring_output_dir,
+        reverse_output_dir=None,
+        summary_path=summary_path,
+        table_path=tmp_path / "table.md",
+        metric="lm_loss",
+        include_reverse=False,
+        tolerance=0.01,
+        reverse_tolerance=0.01,
+    )
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["passed"] is False
+    assert summary["delta"] == 0.25
+    assert summary["findings"][0]["stage"] == "sort_sanity"
+
+
+def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(
+    monkeypatch, tmp_path: Path
+):
     config = {"experiment": {"dir": str(tmp_path)}}
     manifest = StageManifest(stage="sort_sanity", config=config)
     summary_path = tmp_path / "artifacts" / "sort_sanity" / "summary.json"
@@ -119,19 +153,60 @@ def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(tmp_path: Pa
         ),
         encoding="utf-8",
     )
+    barriers = []
+    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(diagnostics.dist, "is_master", lambda: False)
+    monkeypatch.setattr(diagnostics.dist, "barrier", lambda: barriers.append("barrier"))
+    monkeypatch.setattr(
+        diagnostics,
+        "_write_sort_equivalence_summary",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("non-master wrote summary")),
+    )
 
-    result = diagnostics._complete_sort_equivalence_stage(
+    result = diagnostics._finalize_sort_equivalence_stage(
         config,
         manifest,
+        teacher_dir=tmp_path / "teacher",
+        sorted_dir=tmp_path / "sorted",
+        reverse_dir=tmp_path / "reverse",
+        scoring_output_dir=tmp_path / "scoring",
+        reverse_output_dir=None,
         summary_path=summary_path,
         table_path=summary_path.with_name("table.md"),
-        fallback_metric="unused",
+        metric="lm_loss",
+        include_reverse=False,
+        tolerance=0.01,
+        reverse_tolerance=0.01,
     )
 
     assert result.status == "failed"
+    assert barriers == ["barrier", "barrier"]
     assert manifest.outputs["verdict"] == "failed"
     assert manifest.outputs["delta"] == 0.25
     assert manifest.outputs["findings"] == [finding]
+
+
+def test_sort_equivalence_rejects_finalization_after_distributed_cleanup(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: False)
+
+    with pytest.raises(RuntimeError, match="active process group"):
+        diagnostics._finalize_sort_equivalence_stage(
+            {"experiment": {"dir": str(tmp_path)}},
+            StageManifest(stage="sort_sanity"),
+            teacher_dir=tmp_path / "teacher",
+            sorted_dir=tmp_path / "sorted",
+            reverse_dir=tmp_path / "reverse",
+            scoring_output_dir=tmp_path / "scoring",
+            reverse_output_dir=None,
+            summary_path=tmp_path / "summary.json",
+            table_path=tmp_path / "table.md",
+            metric="lm_loss",
+            include_reverse=False,
+            tolerance=0.01,
+            reverse_tolerance=0.01,
+        )
 
 
 def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: Path):
