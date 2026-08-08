@@ -105,9 +105,11 @@ metric lists or cases. Later filters reference metrics as `mip.<metric>` or
 - `evaluation`: evaluates either a config-only candidate or a checkpoint and
   publishes all result metrics.
 - `aiperf`: benchmarks a checkpoint and publishes all result metrics.
+- `downstream_evaluation`: runs `lmms-eval` against a materialized checkpoint
+  and publishes task metrics.
 - `global_kd`: produces a new checkpoint revision.
-- `ptq` and `downstream_evaluation`: reserved interfaces; configuring either
-  currently fails plan compilation with a clear not-implemented error.
+- `ptq`: reserved interface; configuring it currently fails plan compilation
+  with a clear not-implemented error.
 
 Nodes that require checkpoints never materialize implicitly. Add a `materialize`
 node where the transition is needed.
@@ -128,6 +130,22 @@ later transformations.
 Selection still follows `input`; `model_source` only chooses the artifact operated
 on. This supports a long KD run selected using short-KD/PTQ results but restarted
 from the original candidate.
+
+## Downstream evaluation
+
+`downstream_evaluation` shells out to `python -m lmms_eval` from the GPU worker
+environment. Install `examples/puzzletron/requirements.txt` in that environment;
+it pins the evaluator package used by the checked-in example:
+
+```bash
+python -m pip install -r examples/puzzletron/requirements.txt
+python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.2"'
+```
+
+The runner derives the realized checkpoint path, vLLM topology arguments, task
+list, and output path from the campaign config. Use `model_args` only for
+non-derived model options such as dtype or maximum model length, and `extra_args`
+only for non-reserved `lmms-eval` flags.
 
 ## Filters
 

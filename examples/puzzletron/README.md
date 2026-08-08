@@ -284,6 +284,7 @@ import os
 from packaging.version import Version
 
 import aiperf
+import lmms_eval
 import modelopt
 import nemo_automodel
 import torch
@@ -293,7 +294,14 @@ import vllm
 with open(os.environ["PUZZLETRON_CI_ENVIRONMENT"], encoding="utf-8") as stream:
     ci_environment = json.load(stream)
 
-for package in ("torch", "vllm", "nemo-automodel", "aiperf", "nvidia-modelopt"):
+for package in (
+    "torch",
+    "vllm",
+    "nemo-automodel",
+    "aiperf",
+    "lmms-eval",
+    "nvidia-modelopt",
+):
     print(package, metadata.version(package))
 
 print("torch CUDA", torch.version.cuda)
@@ -306,6 +314,7 @@ assert Version(metadata.version("torchvision")).release == Version(
     ci_environment["torchvision"]
 ).release
 assert transformers.__version__ == ci_environment["transformers"]
+assert metadata.version("lmms-eval") == ci_environment["lmms_eval"]
 assert Version(metadata.version("nemo-automodel")).base_version == (
     ci_environment["nemo_automodel"]["base_version"]
 )
@@ -545,6 +554,12 @@ export PROFILE=runtime-075
 After `mip`, prepare one deduplicated online-evaluation plan. Repeat
 `--profile-id` for every configured profile; aliases ensure that an identical
 architecture is evaluated once while remaining visible in every profile.
+
+Downstream `lmms-eval` nodes require the same GPU worker environment as vLLM and
+the Puzzletron example requirements. The reproducible example path is pinned to
+`lmms-eval==0.7.2` by `examples/puzzletron/requirements.txt` and verified
+against `ci_environment.json`; do not run the checked-in `lmms_eval.yaml`
+example against an unpinned evaluator install.
 
 ```bash
 python examples/puzzletron/run_profile_online_evaluation.py \

@@ -5,6 +5,7 @@ defaults:
   - _self_
 
 # Opt-in downstream lmms-eval workflow for the realized runtime-075 candidate.
+# Install examples/puzzletron/requirements.txt to use the pinned lmms-eval version.
 # Non-empty post_mip.flows replaces the legacy post-MIP tail in the v2 orchestrator.
 zero_shot_evaluation:
   enabled: false
