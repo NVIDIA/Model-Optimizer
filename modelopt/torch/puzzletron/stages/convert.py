@@ -179,9 +179,7 @@ def _recover_conversion_transaction(path: Path) -> None:
     if backup_dir.exists():
         if path.exists():
             if transaction_dir.exists():
-                raise RuntimeError(
-                    f"ambiguous conversion transaction state for checkpoint: {path}"
-                )
+                raise RuntimeError(f"ambiguous conversion transaction state for checkpoint: {path}")
             _remove_conversion_directory(backup_dir)
         else:
             backup_dir.replace(path)
@@ -409,7 +407,9 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
                 teacher_dir, resolution.descriptor, teacher_config
             )
         if teacher_complete and untie_word_embeddings:
-            teacher_config = AutoConfig.from_pretrained(teacher_dir, trust_remote_code=trust_remote_code)
+            teacher_config = AutoConfig.from_pretrained(
+                teacher_dir, trust_remote_code=trust_remote_code
+            )
             teacher_tied = bool(_get(teacher_config, "tie_word_embeddings", False))
             if teacher_tied:
                 teacher_complete = False
@@ -422,7 +422,9 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
             else:
                 source_path = None
             source_path = Path(dist.broadcast(str(source_path), src=0))
-            source_config = AutoConfig.from_pretrained(source_path, trust_remote_code=trust_remote_code)
+            source_config = AutoConfig.from_pretrained(
+                source_path, trust_remote_code=trust_remote_code
+            )
             source_identity = model_identity(source_config).value
             if dist.is_master():
                 transaction_dir = _prepare_conversion_transaction(teacher_dir)

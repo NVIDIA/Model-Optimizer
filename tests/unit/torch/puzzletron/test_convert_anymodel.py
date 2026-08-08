@@ -90,9 +90,7 @@ def test_conversion_resume_requires_matching_source_revision(tmp_path):
     teacher_dir = tmp_path / "teacher"
     teacher_dir.mkdir()
 
-    assert _conversion_source_matches(
-        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision=None
-    )
+    assert _conversion_source_matches(teacher_dir, source="Qwen/Qwen3.5-0.8B", revision=None)
     assert not _conversion_source_matches(
         teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="new-sha"
     )
@@ -104,9 +102,7 @@ def test_conversion_resume_requires_matching_source_revision(tmp_path):
         source_identity="source_model_abc",
     )
 
-    assert _conversion_source_matches(
-        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="old-sha"
-    )
+    assert _conversion_source_matches(teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="old-sha")
     assert not _conversion_source_matches(
         teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="new-sha"
     )
@@ -175,9 +171,7 @@ def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, mo
     monkeypatch.setattr(
         convert_stage_module,
         "_is_complete_checkpoint",
-        lambda path, **kwargs: (
-            path / convert_stage_module._CONVERSION_SOURCE_METADATA
-        ).is_file(),
+        lambda path, **kwargs: (path / convert_stage_module._CONVERSION_SOURCE_METADATA).is_file(),
     )
     monkeypatch.setattr(
         convert_stage_module.AutoConfig,
@@ -234,9 +228,7 @@ def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, mo
         "source_identity": "source_model_abc",
         "version": 1,
     }
-    assert resolve_calls == [
-        {"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"}
-    ]
+    assert resolve_calls == [{"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"}]
     assert first["status"] == "success"
     assert first["outputs"]["skipped"] is False
     assert second["status"] == "skipped"
@@ -310,7 +302,7 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
     )
     source_config = SimpleNamespace(architectures=["Qwen3ForCausalLM"])
 
-    class ConversionFailed(RuntimeError):
+    class ConversionError(RuntimeError):
         pass
 
     class Resolution:
@@ -328,7 +320,7 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
             self.attempts += 1
             (output_dir / "new-shard.bin").write_text("new")
             if self.attempts == 1:
-                raise ConversionFailed
+                raise ConversionError
 
     converter = RetryConverter()
 
@@ -371,16 +363,14 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
             "status": status,
         },
     )
-    monkeypatch.setattr(
-        convert_stage_module.ConverterFactory, "get", lambda name: converter
-    )
+    monkeypatch.setattr(convert_stage_module.ConverterFactory, "get", lambda name: converter)
 
     config = {
         "model": {"source": "Qwen/Qwen3.5-0.8B", "revision": "new-sha"},
         "convert": {"teacher_dir": str(teacher_dir)},
     }
 
-    with pytest.raises(ConversionFailed):
+    with pytest.raises(ConversionError):
         convert_stage_module.convert_stage(config, manifest=object())
 
     old_metadata = json.loads(
@@ -476,9 +466,7 @@ def test_conversion_resume_rejects_unmigrated_descriptor_checkpoint_layout(tmp_p
                 )
             )
 
-    assert not _descriptor_checkpoint_layout_complete(
-        checkpoint, Descriptor, SimpleNamespace()
-    )
+    assert not _descriptor_checkpoint_layout_complete(checkpoint, Descriptor, SimpleNamespace())
 
 
 def test_conversion_resume_skips_generic_layout_check_when_descriptor_has_no_contract(tmp_path):
