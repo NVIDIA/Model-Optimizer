@@ -1,0 +1,310 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ONNX Quantization - Windows &mdash; Model Optimizer 0.0.1.dev1+gffdad9b8c</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="Saving &amp; Restoring" href="../2_save_load.html" />
+    <link rel="prev" title="ONNX Quantization - Linux (Beta)" href="../_onnx_quantization.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_quantization.html">Quantization</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">ONNX Quantization - Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#modelopt-windows-quantization">ModelOpt-Windows Quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#preparing-and-optimizing-base-models-for-onnx-ptq">Preparing and Optimizing Base Models for ONNX PTQ</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#apply-post-training-quantization-ptq">Apply Post Training Quantization (PTQ)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#deploy-quantized-onnx-model">Deploy Quantized ONNX Model</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../reference/0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_quantization.html">Quantization</a></li>
+      <li class="breadcrumb-item active">ONNX Quantization - Windows</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/guides/windows_guides/_ONNX_PTQ_guide.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="onnx-quantization-windows">
+<span id="onnx-ptq-guide-windows"></span><h1>ONNX Quantization - Windows<a class="headerlink" href="#onnx-quantization-windows" title="Link to this heading"></a></h1>
+<p>Quantization is a powerful method to reduce model size and boost computational efficiency. By converting model weights to low-precision formats, significant storage and memory savings are achieved. Quantization applies lower-precision data types to model parameters; for example:</p>
+<ul class="simple">
+<li><p>FP16 uses 2 bytes per value.</p></li>
+<li><p>INT4 requires only 4 bits (0.5 bytes) per value.</p></li>
+</ul>
+<p>This transformation reduces model size and allows deployment on systems with limited memory.</p>
+<p><strong>Quantization Techniques</strong>:</p>
+<ol class="arabic simple">
+<li><p><strong>Post-Training Quantization (PTQ)</strong>: Quantization is applied after model training.</p></li>
+<li><p><strong>Quantization-Aware Training (QAT)</strong>: Quantization is integrated during model training.</p></li>
+</ol>
+<section id="modelopt-windows-quantization">
+<h2>ModelOpt-Windows Quantization<a class="headerlink" href="#modelopt-windows-quantization" title="Link to this heading"></a></h2>
+<p>The Model Optimizer - Windows is designed to create optimized ONNX models for DirectML and TensorRT* backends.</p>
+<p><strong>Supported Techniques</strong>:</p>
+<ul class="simple">
+<li><p>PTQ: Supported in ONNX</p></li>
+<li><p>QAT: Experimental for PyTorch</p></li>
+</ul>
+<p>Refer <a class="reference internal" href="../0_support_matrix.html#support-matrix"><span class="std std-ref">Support Matrix</span></a> for details about supported features and models.</p>
+</section>
+<section id="preparing-and-optimizing-base-models-for-onnx-ptq">
+<h2>Preparing and Optimizing Base Models for ONNX PTQ<a class="headerlink" href="#preparing-and-optimizing-base-models-for-onnx-ptq" title="Link to this heading"></a></h2>
+<p>ModelOpt-Windows’s ONNX PTQ API requires a base ONNX model, which can be obtained from Hugging Face or various ONNX exporter tools such as:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://pytorch.org/docs/stable/onnx.html" rel="noopener noreferrer" target="_blank">torch.onnx.export</a></p></li>
+<li><p><a class="reference external" href="https://huggingface.co/docs/optimum/en/exporters/onnx/usage_guides/export_a_model/" rel="noopener noreferrer" target="_blank">HuggingFace-Optimum</a></p></li>
+<li><p><a class="reference external" href="https://github.com/microsoft/onnxruntime-genai/" rel="noopener noreferrer" target="_blank">GenAI</a></p></li>
+<li><p><a class="reference external" href="https://github.com/microsoft/Olive/" rel="noopener noreferrer" target="_blank">Olive</a></p></li>
+</ul>
+<p>Each tool offers unique features and options for conversion from PyTorch or other frameworks to the ONNX format.</p>
+<p><strong>Opset requirements of different data-types</strong>: ModelOpt-Windows uses ONNX’s <a class="reference external" href="https://onnx.ai/onnx/operators/onnx__QuantizeLinear.html" rel="noopener noreferrer" target="_blank">Q</a>/<a class="reference external" href="https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html" rel="noopener noreferrer" target="_blank">DQ</a> nodes for applying quantization and dequantization operations in the ONNX model. The INT4 datatype support in Q/DQ node came in opset-21 and, FP8 datatype support in Q/DQ node came in opset-19. So, ensure that model’s opset is 19+ for FP8 quantization, and it is 21+ for INT4 quantization. This is needed for deployment of the quantized model on onnxruntime framework (e.g. ORT-DirectML backend). Different ONNX exporter tools usually have option or argument for target ‘opset’ field. See their documentation for details about its usage and max-supported opset limit.</p>
+<p><strong>Base Model Precision</strong>: ModelOpt-Windows supports base models in both FP16 and FP32 formats. Choosing FP16 over FP32 can help reduce memory usage and improve speed, especially on hardware optimized for lower precision, such as NVIDIA GPUs with Tensor Cores. However, FP16’s smaller dynamic range may require careful tuning.</p>
+<p><strong>ONNX FP16 Conversion Tools</strong>: Some popular FP32 to FP16 ONNX conversion tools include:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://onnxruntime.ai/docs/performance/model-optimizations/float16.html" rel="noopener noreferrer" target="_blank">ONNX Converter Tool</a></p></li>
+<li><p>Hugging Face <em>Optimum</em> tool with a <em>dtype</em> argument for FP16 generation - Refer to optimum’s <a class="reference external" href="https://huggingface.co/docs/optimum/en/exporters/onnx/usage_guides/export_a_model/" rel="noopener noreferrer" target="_blank">CLI</a>, and <a class="reference external" href="https://github.com/huggingface/optimum/blob/main/optimum/exporters/onnx/convert.py/" rel="noopener noreferrer" target="_blank">API</a> usage.</p></li>
+<li><p>Microsoft Olive, which supports FP16 via configuration files. Refer <em>float16</em> option in this example <a class="reference external" href="https://github.com/microsoft/Olive/blob/main/examples/directml/llm/config_llm.json/" rel="noopener noreferrer" target="_blank">config</a>.</p></li>
+</ul>
+<p>Once base model is obtained, ModelOpt-Windows’s PTQ can be applied to get the quantized mode. The resulting quantized model can be deployed on backends like DirectML, CUDA and TensorRT*.</p>
+</section>
+<section id="apply-post-training-quantization-ptq">
+<span id="apply-onnx-ptq"></span><h2>Apply Post Training Quantization (PTQ)<a class="headerlink" href="#apply-post-training-quantization-ptq" title="Link to this heading"></a></h2>
+<p>Applying PTQ on a model involves preparing calibration-data (if needed), invoking quantization API, saving the quantized model, and any additional post-processing like opset upgrade as needed.</p>
+<p><strong>Prepare calibration data</strong></p>
+<p>Quantization algorithms like SmoothQuant (SQ), Activation-Aware-Quantization (AWQ), and static quantization of activations often require calibration data. If the <em>quantize</em> API’s calibration-data argument is not provided (i.e., set to <em>None</em>), ModelOpt-Windows will internally use randomly generated model inputs for calibration.</p>
+<p>As an example, preparing calibration data for INT4 AWQ quantization of LLMs may involve following major steps:</p>
+<ol class="arabic simple">
+<li><p><strong>Generate Token Encodings</strong>: Use a dataset like <em>cnn-dailymail</em> or <em>pile</em> with the model’s tokenizer to generate token encodings and related data from the representative dataset</p></li>
+<li><p><strong>Format for Model Input</strong>: Convert encodings into model-compatible formats.</p></li>
+</ol>
+<p>Please refer the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/" rel="noopener noreferrer" target="_blank">example scripts</a> for details about preparing calibration-data of various supported ONNX models.</p>
+<p><strong>Call Quantization API</strong></p>
+<p>The example below demonstrates how to apply INT4 AWQ quantization on a LLM ONNX model.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">modelopt.onnx.quantization.int4</span><span class="w"> </span><span class="kn">import</span> <span class="n">quantize</span> <span class="k">as</span> <span class="n">quantize_int4</span>
+<span class="c1"># import other packages as needed</span>
+<span class="n">calib_inputs</span> <span class="o">=</span> <span class="n">get_calib_inputs</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="n">model_name</span><span class="p">,</span> <span class="n">cache_dir</span><span class="p">,</span> <span class="n">calib_size</span><span class="p">,</span> <span class="n">batch_size</span><span class="p">,</span><span class="o">...</span><span class="p">)</span>
+<span class="n">quantized_onnx_model</span> <span class="o">=</span> <span class="n">quantize_int4</span><span class="p">(</span>
+    <span class="n">onnx_path</span><span class="p">,</span>
+    <span class="n">calibration_method</span><span class="o">=</span><span class="s2">&quot;awq_lite&quot;</span><span class="p">,</span>
+    <span class="n">calibration_data_reader</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">use_random_calib</span> <span class="k">else</span> <span class="n">calib_inputs</span><span class="p">,</span>
+    <span class="n">calibration_eps</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;dml&quot;</span><span class="p">,</span> <span class="s2">&quot;cpu&quot;</span><span class="p">]</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Check <a class="reference internal" href="../../reference/generated/modelopt.onnx.quantization.int4.html#modelopt.onnx.quantization.int4.quantize" title="modelopt.onnx.quantization.int4.quantize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">modelopt.onnx.quantization.quantize_int4</span></code></a> for details about quantization API.</p>
+<p><strong>Upgrade opset of the model</strong></p>
+<p>Opset requirement for different data-types is already explained in the section describing ways to obtain base model. To summarize, the opset requirements stems from the fact that support for different types in ONNX <a class="reference external" href="https://onnx.ai/onnx/operators/onnx__QuantizeLinear.html" rel="noopener noreferrer" target="_blank">Q</a>/<a class="reference external" href="https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html" rel="noopener noreferrer" target="_blank">DQ</a> nodes is gradually added in different opsets. For instance, the INT4 data-type support in Q/DQ node came in opset-21 and, FP8 data-type support in Q/DQ node came in opset-19. So, ensure that model’s opset is 19+ for FP8 quantization, and it is 21+ for INT4 quantization. This is needed for deployment of the quantized model on onnxruntime framework (e.g. ORT-DirectML backend).</p>
+<p>Generally, different ONNX exporter tools have option or argument for providing the desired or target opset. It is possible that the desired opset is greater than the max-opset user’s ONNX exporter tool supports. In that case, user would need to manually ‘patch’ the opset of the ONNX model. This would require updating the ONNX metadata that stores opset field of the graph, and it may additionally require updating some nodes in the graph as per new opset (if they have changed in later opsets). Alternatively, one can try using the ONNX exporter tool which already supports the desired opset (if exists any).</p>
+<p>A few sample code snippets to inspect the opset of the given ONNX model, and to update the opset field in the ONNX model’s meta-data, are provided below.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Example steps to check opset</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_onnx_opset</span><span class="p">(</span><span class="n">model_path</span><span class="p">):</span>
+  <span class="c1"># Load the ONNX model</span>
+  <span class="n">model</span> <span class="o">=</span> <span class="n">onnx</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">model_path</span><span class="p">)</span>
+
+  <span class="c1"># Get the opset import information</span>
+  <span class="n">opset_imports</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">opset_import</span>
+
+  <span class="c1"># Print opset information</span>
+  <span class="k">for</span> <span class="n">opset</span> <span class="ow">in</span> <span class="n">opset_imports</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Domain: </span><span class="si">{</span><span class="n">opset</span><span class="o">.</span><span class="n">domain</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Version: </span><span class="si">{</span><span class="n">opset</span><span class="o">.</span><span class="n">version</span><span class="si">}</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Use the above steps to inspect the ONNX model’s opset version.</p>
+<blockquote>
+<div><dl class="simple">
+<dt><em>ONNX Opset Upgrade Tools</em>:</dt><dd><ul class="simple">
+<li><p><a class="reference external" href="https://github.com/onnx/onnx/blob/main/onnx/version_converter.py" rel="noopener noreferrer" target="_blank">ONNX opset conversion utility</a></p></li>
+<li><p><a class="reference external" href="https://huggingface.co/docs/optimum/en/exporters/onnx/usage_guides/export_a_model" rel="noopener noreferrer" target="_blank">Optimum-CLI</a></p></li>
+</ul>
+</dd>
+</dl>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Example steps for updating opset metadata of default (onnx) domain</span>
+<span class="c1"># Update opsets for other domains as needed for your requirement (or exclude them as suitable).</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">onnx</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">onnx_path</span><span class="p">)</span>
+
+<span class="n">op</span> <span class="o">=</span> <span class="n">onnx</span><span class="o">.</span><span class="n">OperatorSetIdProto</span><span class="p">()</span>
+<span class="n">op</span><span class="o">.</span><span class="n">version</span> <span class="o">=</span> <span class="mi">21</span>
+<span class="n">new_opset_imports</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="n">helper</span><span class="o">.</span><span class="n">make_opsetid</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="mi">21</span><span class="p">),</span>  <span class="c1"># Default domain with opset version 15</span>
+    <span class="c1">#helper.make_opsetid(&quot;ai.onnx.ml&quot;, 2)  # ai.onnx.ml domain with opset version 2</span>
+    <span class="n">helper</span><span class="o">.</span><span class="n">make_opsetid</span><span class="p">(</span><span class="s2">&quot;com.microsoft&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+<span class="p">]</span>
+
+<span class="n">updated_quantized_onnx_model</span> <span class="o">=</span> <span class="n">onnx</span><span class="o">.</span><span class="n">helper</span><span class="o">.</span><span class="n">make_model</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">graph</span><span class="p">,</span> <span class="n">opset_imports</span><span class="o">=</span><span class="n">new_opset_imports</span><span class="p">)</span>
+</pre></div>
+</div>
+</div></blockquote>
+<p>The ONNX models produced using <a class="reference external" href="https://github.com/microsoft/onnxruntime-genai/" rel="noopener noreferrer" target="_blank">GenAI</a> are generally seen to work fine with above opset upgrade patch. ONNX models produced using other ONNX exporter tool might require further post-processing on case-by-case basis for nodes that have changed in later opsets.</p>
+<p><strong>Save Quantized Model</strong></p>
+<p>To save a quantized ONNX model with external data, use the following code:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">onnx</span><span class="o">.</span><span class="n">save_model</span><span class="p">(</span>
+    <span class="n">updated_quantized_onnx_model</span><span class="p">,</span>
+    <span class="n">output_path</span><span class="p">,</span>
+    <span class="n">save_as_external_data</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">location</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">basename</span><span class="p">(</span><span class="n">output_path</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;_data&quot;</span><span class="p">,</span>
+    <span class="n">size_threshold</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="deploy-quantized-onnx-model">
+<h2>Deploy Quantized ONNX Model<a class="headerlink" href="#deploy-quantized-onnx-model" title="Link to this heading"></a></h2>
+<p>Inference of the quantized models can be done using tools like <a class="reference external" href="https://github.com/microsoft/onnxruntime-genai/" rel="noopener noreferrer" target="_blank">GenAI</a>, <a class="reference external" href="https://onnxruntime.ai//" rel="noopener noreferrer" target="_blank">OnnxRunTime (ORT)</a>. These APIs can do inference on backends like DML, CUDA, TensorRT-RTX. For details about onnxruntime deployment of quantized models, see <a class="reference internal" href="../../deployment/2_onnxruntime.html#onnxruntime-deployment"><span class="std std-ref">Onnxruntime</span></a> deployment guide. Also, refer <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/" rel="noopener noreferrer" target="_blank">example scripts</a> for any possible model-specific inference guidance or script (if any).</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../_onnx_quantization.html" class="btn btn-neutral float-left" title="ONNX Quantization - Linux (Beta)" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="../2_save_load.html" class="btn btn-neutral float-right" title="Saving &amp; Restoring" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

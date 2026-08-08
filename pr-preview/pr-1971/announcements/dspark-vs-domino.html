@@ -1,0 +1,278 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DSpark vs Domino: Same DFlash Backbone, Different Correction Heads &mdash; Model Optimizer 0.0.1.dev1+g68203050c</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+      <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=93ef59b3" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../_static/announcements.js?v=d94b986f"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">DSpark vs Domino: Same DFlash Backbone, Different Correction Heads</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/announcements/dspark-vs-domino.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="dspark-vs-domino-same-dflash-backbone-different-correction-heads">
+<h1>DSpark vs Domino: Same DFlash Backbone, Different Correction Heads<a class="headerlink" href="#dspark-vs-domino-same-dflash-backbone-different-correction-heads" title="Link to this heading"></a></h1>
+<dl class="field-list simple">
+<dt class="field-odd">Author<span class="colon">:</span></dt>
+<dd class="field-odd"><p>ModelOpt Team</p>
+</dd>
+<dt class="field-even">Date<span class="colon">:</span></dt>
+<dd class="field-even"><p>July 13, 2026</p>
+</dd>
+<dt class="field-odd">Tags<span class="colon">:</span></dt>
+<dd class="field-odd"><p>speculative-decoding, dflash, dspark, domino, architecture</p>
+</dd>
+</dl>
+<p>DSpark (DeepSpec) and Domino both build on block-parallel DFlash draft generation but diverge sharply in their token-level correction heads. DSpark uses a stateless VanillaMarkov head that is fast and parallelizable during training; Domino uses a GRU that is more expressive but sequential at inference.
+See the DSpark and Domino papers in <a class="reference internal" href="#dspark-domino-references"><span class="std std-ref">References</span></a> for the original method descriptions.</p>
+<section id="highlights">
+<h2>Highlights<a class="headerlink" href="#highlights" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Both systems share the DFlash block-parallel backbone, so their parallel draft throughput starts from a similar foundation.</p></li>
+<li><p>DSpark defaults to VanillaMarkov: stateless <code class="docutils literal notranslate"><span class="pre">W1</span></code> and <code class="docutils literal notranslate"><span class="pre">W2</span></code> embedding lookups with no hidden state to thread through.</p></li>
+<li><p>Domino uses <code class="docutils literal notranslate"><span class="pre">nn.GRU</span></code> and carries recurrent state across draft positions.</p></li>
+<li><p>Both correction heads are sequential at inference because <code class="docutils literal notranslate"><span class="pre">x_{k-1}</span></code> must be sampled before step <code class="docutils literal notranslate"><span class="pre">k</span></code>.</p></li>
+<li><p>DSpark adds a hardware-aware prefix scheduler through <code class="docutils literal notranslate"><span class="pre">confidence_head</span></code>; Domino does not include this mechanism.</p></li>
+</ul>
+</section>
+<section id="shared-foundation-dflash-block-parallel-backbone">
+<h2>Shared Foundation: DFlash Block-Parallel Backbone<a class="headerlink" href="#shared-foundation-dflash-block-parallel-backbone" title="Link to this heading"></a></h2>
+<p>Both systems use DFlash: a draft backbone that runs a single causal attention forward pass over all draft positions in parallel, producing per-position hidden states and base draft logits. This is the expensive step; the correction head adds token-level adjustment on top of those outputs.</p>
+<a class="reference internal image-reference" href="../_images/dspark_fig1.png"><img alt="DSpark overall architecture and decoding cycle" src="../_images/dspark_fig1.png" style="width: 100%;" />
+</a>
+</section>
+<section id="where-they-diverge-the-correction-head">
+<h2>Where They Diverge: The Correction Head<a class="headerlink" href="#where-they-diverge-the-correction-head" title="Link to this heading"></a></h2>
+<p>DSpark uses a first-order Markov transition. For each draft position <code class="docutils literal notranslate"><span class="pre">k</span></code>:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>e_{k-1} = W1[x_{k-1}]
+bias_k  = W2 * e_{k-1}
+p_k     = softmax(U_k + bias_k)
+x_k     ~ p_k
+</pre></div>
+</div>
+<p>The correction at position <code class="docutils literal notranslate"><span class="pre">k</span></code> depends only on <code class="docutils literal notranslate"><span class="pre">x_{k-1}</span></code>; no RNN hidden state threads across steps. The dominant work is a table lookup and projection rather than a recurrent rollout.</p>
+<p>Domino uses a GRU correction head. A recurrent hidden state accumulates information about the draft prefix and is concatenated at readout:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>gru_h_k = GRU(input_k, gru_h_{k-1})
+p_k     = softmax(U_k + W * [h_k; gru_h_k])
+x_k     ~ p_k
+</pre></div>
+</div>
+<a class="reference internal image-reference" href="../_images/domino_fig.png"><img alt="Domino pipeline with a DFlash backbone and GRU causal correction head" src="../_images/domino_fig.png" style="width: 100%;" />
+</a>
+<p>The figure below compares training acceptance length on Qwen3-8B across the DFlash baseline, Domino GRU, and a DSpark implementation.</p>
+<a class="reference internal image-reference" href="../_images/dspark_domino_al_qwen3_8b.png"><img alt="Training acceptance length on Qwen3-8B: DFlash baseline vs Domino GRU vs DSpark" src="../_images/dspark_domino_al_qwen3_8b.png" style="width: 100%;" />
+</a>
+</section>
+<section id="correction-head-overhead">
+<h2>Correction Head Overhead<a class="headerlink" href="#correction-head-overhead" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>System</p></th>
+<th class="head"><p>Per-step compute</p></th>
+<th class="head"><p>State carried</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>DSpark VanillaMarkov</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">W1[x_{k-1}]</span></code> plus transition projection</p></td>
+<td><p>None</p></td>
+</tr>
+<tr class="row-odd"><td><p>Domino GRU</p></td>
+<td><p>Full GRU cell over a high-dimensional input</p></td>
+<td><p>Recurrent hidden state</p></td>
+</tr>
+</tbody>
+</table>
+<p>Both heads must unroll left-to-right at inference. The practical difference is per-step cost: VanillaMarkov is much lighter, while the GRU can condition on a richer prefix history.</p>
+</section>
+<section id="additional-dspark-machinery">
+<h2>Additional DSpark Machinery<a class="headerlink" href="#additional-dspark-machinery" title="Link to this heading"></a></h2>
+<p>DSpark includes a hardware-aware prefix scheduler through a confidence head. The scheduler estimates acceptance probability and selects how many draft tokens to submit for verification. It is a serving-time throughput optimization, not a draft-quality feature.</p>
+<p>For MoE models, DSpark checkpoints also include manifold-constrained Hyper-Connections. Dense models use the simpler backbone plus Markov-head path.</p>
+<a class="reference internal image-reference" href="../_images/dspark_fig7.png"><img alt="DSpark throughput and TPS Pareto frontier" src="../_images/dspark_fig7.png" style="width: 100%;" />
+</a>
+</section>
+<section id="takeaways">
+<h2>Takeaways<a class="headerlink" href="#takeaways" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p>DFlash draft generation is shared; the correction head is the main differentiator.</p></li>
+<li><p>VanillaMarkov is cheaper per step than GRU, although both are sequential at inference.</p></li>
+<li><p>GRU is more expressive, but the extra recurrence may not translate into a large acceptance-rate gain.</p></li>
+<li><p>DSpark’s design is broader: VanillaMarkov, GatedMarkov, and RNN-style heads all fit the same family.</p></li>
+<li><p>The prefix scheduler affects serving throughput decisions, not correctness.</p></li>
+</ol>
+</section>
+<section id="references">
+<span id="dspark-domino-references"></span><h2>References<a class="headerlink" href="#references" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Xin Cheng et al., <a class="reference external" href="https://arxiv.org/abs/2607.05147" rel="noopener noreferrer" target="_blank">DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation</a>,
+arXiv:2607.05147, 2026.</p></li>
+<li><p>Jianuo Huang et al., <a class="reference external" href="https://arxiv.org/abs/2605.29707" rel="noopener noreferrer" target="_blank">Domino: Decoupling Causal Modeling from Autoregressive Drafting in Speculative Decoding</a>,
+arXiv:2605.29707, 2026.</p></li>
+</ul>
+</section>
+<section id="links">
+<h2>Links<a class="headerlink" href="#links" title="Link to this heading"></a></h2>
+<p>These public references were checked during review.</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://github.com/deepseek-ai/DeepSpec" rel="noopener noreferrer" target="_blank">DeepSpec / DSpark repo</a></p></li>
+<li><p><a class="reference external" href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-DSpark" rel="noopener noreferrer" target="_blank">DeepSeek-V4-Pro-DSpark checkpoint</a></p></li>
+<li><p><a class="reference external" href="https://github.com/jianuo-huang/Domino" rel="noopener noreferrer" target="_blank">Domino repo</a></p></li>
+<li><p><a class="reference external" href="https://huggingface.co/Huang2020/Qwen3-8B-Domino-b16" rel="noopener noreferrer" target="_blank">Domino checkpoint: Qwen3-8B-Domino-b16</a></p></li>
+<li><p><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/pull/1710" rel="noopener noreferrer" target="_blank">ModelOpt PR #1710</a></p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

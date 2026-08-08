@@ -1,0 +1,118 @@
+export
+======
+
+.. List the submodules
+
+
+
+.. rubric:: Modules
+
+.. autosummary::
+   :toctree:
+   :recursive:
+
+
+
+   modelopt.torch.export.convert_hf_config
+
+
+
+   modelopt.torch.export.diffusers_utils
+
+
+
+   modelopt.torch.export.distribute
+
+
+
+   modelopt.torch.export.hf_config_map
+
+
+
+   modelopt.torch.export.layer_utils
+
+
+
+   modelopt.torch.export.mcore_config_map
+
+
+
+   modelopt.torch.export.model_config
+
+
+
+   modelopt.torch.export.model_config_export
+
+
+
+   modelopt.torch.export.model_config_utils
+
+
+
+   modelopt.torch.export.model_utils
+
+
+
+   modelopt.torch.export.moe_utils
+
+
+
+   modelopt.torch.export.plugins
+
+
+
+   modelopt.torch.export.postprocess
+
+
+
+   modelopt.torch.export.quant_utils
+
+
+
+   modelopt.torch.export.tensorrt_llm_type
+
+
+
+   modelopt.torch.export.tensorrt_llm_utils
+
+
+
+   modelopt.torch.export.transformer_engine
+
+
+
+   modelopt.torch.export.unified_export_hf
+
+
+
+   modelopt.torch.export.unified_export_megatron
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.export
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   
