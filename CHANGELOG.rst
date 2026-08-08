@@ -26,6 +26,7 @@ Changelog
 **Bug Fixes**
 
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- Fix ONNX Autotune remote autotuning to pre-check board connectivity (configurable retries via ``--remote_connection_retries``) before each trtexec invocation. If unreachable, the autotuner saves state and exits cleanly instead of running trtexec and permanently marking schemes as errored.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
