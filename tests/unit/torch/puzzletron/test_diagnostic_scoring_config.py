@@ -126,6 +126,8 @@ def test_sort_equivalence_summary_records_blocking_drift(tmp_path: Path):
     assert summary["passed"] is False
     assert summary["delta"] == 0.25
     assert summary["findings"][0]["stage"] == "sort_sanity"
+    assert summary["findings"][0]["severity"] == "error"
+    assert summary["verdict"] == "failed"
 
 
 def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(
@@ -157,6 +159,7 @@ def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(
     monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(diagnostics.dist, "is_master", lambda: False)
     monkeypatch.setattr(diagnostics.dist, "barrier", lambda: barriers.append("barrier"))
+    monkeypatch.setattr(diagnostics.dist, "broadcast", lambda value, src=0: value)
     monkeypatch.setattr(
         diagnostics,
         "_write_sort_equivalence_summary",
@@ -184,6 +187,55 @@ def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(
     assert manifest.outputs["verdict"] == "failed"
     assert manifest.outputs["delta"] == 0.25
     assert manifest.outputs["findings"] == [finding]
+
+
+@pytest.mark.parametrize("is_master", [True, False])
+def test_sort_equivalence_propagates_master_write_failure(
+    monkeypatch, tmp_path: Path, is_master: bool
+):
+    barriers = []
+    write_calls = []
+    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(diagnostics.dist, "is_master", lambda: is_master)
+    monkeypatch.setattr(diagnostics.dist, "barrier", lambda: barriers.append("barrier"))
+    monkeypatch.setattr(
+        diagnostics.dist,
+        "broadcast",
+        lambda value, src=0: value or {"type": "ValueError", "message": "missing metric"},
+    )
+
+    def fail_write(**_kwargs):
+        write_calls.append("write")
+        raise ValueError("missing metric")
+
+    monkeypatch.setattr(
+        diagnostics,
+        "_write_sort_equivalence_summary",
+        fail_write,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="summary write failed on the master rank: ValueError: missing metric",
+    ):
+        diagnostics._finalize_sort_equivalence_stage(
+            {"experiment": {"dir": str(tmp_path)}},
+            StageManifest(stage="sort_sanity"),
+            teacher_dir=tmp_path / "teacher",
+            sorted_dir=tmp_path / "sorted",
+            reverse_dir=tmp_path / "reverse",
+            scoring_output_dir=tmp_path / "scoring",
+            reverse_output_dir=None,
+            summary_path=tmp_path / "summary.json",
+            table_path=tmp_path / "table.md",
+            metric="lm_loss",
+            include_reverse=False,
+            tolerance=0.01,
+            reverse_tolerance=0.01,
+        )
+
+    assert barriers == ["barrier"]
+    assert write_calls == (["write"] if is_master else [])
 
 
 def test_sort_equivalence_rejects_finalization_after_distributed_cleanup(

@@ -3348,21 +3348,31 @@ def _finalize_sort_equivalence_stage(
 
     if not dist.is_initialized():
         raise RuntimeError("sort-equivalence finalization requires an active process group")
+    write_error = None
     if dist.is_master():
-        _write_sort_equivalence_summary(
-            teacher_dir=teacher_dir,
-            sorted_dir=sorted_dir,
-            reverse_dir=reverse_dir,
-            scoring_output_dir=scoring_output_dir,
-            reverse_output_dir=reverse_output_dir,
-            summary_path=summary_path,
-            table_path=table_path,
-            metric=metric,
-            include_reverse=include_reverse,
-            tolerance=tolerance,
-            reverse_tolerance=reverse_tolerance,
-        )
+        try:
+            _write_sort_equivalence_summary(
+                teacher_dir=teacher_dir,
+                sorted_dir=sorted_dir,
+                reverse_dir=reverse_dir,
+                scoring_output_dir=scoring_output_dir,
+                reverse_output_dir=reverse_output_dir,
+                summary_path=summary_path,
+                table_path=table_path,
+                metric=metric,
+                include_reverse=include_reverse,
+                tolerance=tolerance,
+                reverse_tolerance=reverse_tolerance,
+            )
+        except Exception as exc:
+            write_error = {"type": type(exc).__name__, "message": str(exc)}
     dist.barrier()
+    write_error = dist.broadcast(write_error, src=0)
+    if write_error is not None:
+        raise RuntimeError(
+            "sort-equivalence summary write failed on the master rank: "
+            f"{write_error['type']}: {write_error['message']}"
+        )
     result = _complete_sort_equivalence_stage(
         config,
         manifest,
