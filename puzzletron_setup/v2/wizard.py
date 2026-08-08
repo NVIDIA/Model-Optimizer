@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
 from puzzletron_orchestrator.mesh import vllm_topology_to_mesh
 from puzzletron_setup import (
     WORKER_REPOSITORY_PLACEHOLDER,
