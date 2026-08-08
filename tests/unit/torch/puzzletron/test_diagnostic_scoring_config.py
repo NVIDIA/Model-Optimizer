@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from examples.puzzletron.run_axis_diagnostic_worker import (
     _validate_worker_topology,
     _worker_config,
 )
+from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.stages import diagnostics
 from modelopt.torch.puzzletron.stages.diagnostics import _scoring_cfg_for_method
 
@@ -92,6 +94,44 @@ def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separa
         tolerance=1.0e-3,
         reverse_tolerance=1.0e-3,
     )["passed"]
+
+
+def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(tmp_path: Path):
+    config = {"experiment": {"dir": str(tmp_path)}}
+    manifest = StageManifest(stage="sort_sanity", config=config)
+    summary_path = tmp_path / "artifacts" / "sort_sanity" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    (tmp_path / "manifests").mkdir()
+    finding = {
+        "stage": "sort_sanity",
+        "message": "sorted teacher drift too large",
+        "severity": "error",
+    }
+    summary_path.write_text(
+        json.dumps(
+            {
+                "passed": False,
+                "metric": "lm_loss",
+                "delta": 0.25,
+                "reverse_delta": 0.0,
+                "findings": [finding],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = diagnostics._complete_sort_equivalence_stage(
+        config,
+        manifest,
+        summary_path=summary_path,
+        table_path=summary_path.with_name("table.md"),
+        fallback_metric="unused",
+    )
+
+    assert result.status == "failed"
+    assert manifest.outputs["verdict"] == "failed"
+    assert manifest.outputs["delta"] == 0.25
+    assert manifest.outputs["findings"] == [finding]
 
 
 def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: Path):

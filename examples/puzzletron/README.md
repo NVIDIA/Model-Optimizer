@@ -468,7 +468,7 @@ The authoritative dependencies and enabled-stage rules live in
 | `width_importance` | Collect activation-based rankings for every enabled width axis. |
 | `sort` | Reorder the teacher so nested prefixes implement ranked width choices. |
 | `sort_sanity` | Check that sorting preserves teacher outputs. |
-| `width_sanity` | Compare ranked, random, and reverse slices on representative layers. |
+| `width_sanity` | Compare ranked, original-order, and reverse slices on representative layers. |
 | `slicing_sanity` | Verify dynamic slicing against physical materialization. |
 | `bypass_sanity` | Overfit small local-distillation cases before production bypass. |
 | `bypass` | Train nested replacement blocks across the configured search space. |

@@ -39,7 +39,7 @@ The width sanity stages compare four views of one target width:
 | View | Meaning |
 |---|---|
 | Activation-sorted | Keep the prefix that the importance scores rank highest. This is the candidate whose ranking quality is being tested. |
-| Original or unsorted | Keep the same-sized prefix in the teacher's original order. Some older paths call this the random control, although the original prefix is deterministic. |
+| Original-order | Keep the same-sized prefix in the teacher's original order. Some artifacts retain the legacy method key `random`, but this control is deterministic and is not a seeded-random permutation. |
 | Reverse-sorted | Keep the prefix ranked least important. This is a negative control for the importance ordering. |
 | Physical | Rewrite the config and tensors as a smaller standalone model using the same target geometry as the activation-sorted candidate. |
 

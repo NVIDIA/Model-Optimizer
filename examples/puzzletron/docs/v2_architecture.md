@@ -138,7 +138,7 @@ flowchart TB
 - **Granularity is explicit.** Bypass, replacement scoring, vLLM statistics,
   and depth decisions can operate at block or subblock granularity.
 - **Correctness and quality are separate.** Sort and slice equivalence are
-  correctness gates. Ranking against reverse and unsorted/random controls is a
+  correctness gates. Ranking against original-order and reverse controls is a
   quality check whose warning remains visible.
 - **Artifacts are APIs.** Stages communicate through versioned, hashed,
   transactionally published artifacts rather than in-memory coupling. This
@@ -284,7 +284,7 @@ flowchart LR
     width["Multi-axis width<br/>importance hooks"]
     sort["Sort teacher once"]
     sortcheck["Sort equivalence"]
-    widthcheck["Ranking quality<br/>sorted vs reverse vs unsorted"]
+    widthcheck["Ranking quality<br/>sorted vs original vs reverse"]
     slicecheck["Dynamic vs physical<br/>slicing equivalence"]
     bypasscheck["Bypass overfit checks"]
     bypass["Nested bypass"]
@@ -358,7 +358,7 @@ durable manual decision gate.
 |---|---|---|
 | Capability validation | Does the model support every requested axis, backend, and parallel mode? | Invalid campaign configuration fails before expensive work |
 | Sort sanity | Does full-width sorting or reverse sorting preserve teacher behavior? | Difference beyond dtype-aware tolerance is a correctness failure |
-| Width sanity | Does the proposed ranking outperform reverse and unsorted/random controls at reduced width? | Poor ranking is a quality finding; warning policy determines whether it also fails the stage |
+| Width sanity | Does the proposed ranking outperform original-order and reverse controls at reduced width? | Poor ranking is a quality finding; warning policy determines whether it also fails the stage |
 | Slicing sanity | Does dynamic slicing agree with physical materialization? | Disagreement is a correctness failure |
 | Bypass sanity | Can a fixed small candidate and a sampled nested search overfit one batch? | Validates boundaries, gradients, and sampling mechanics |
 | Depth evaluation | Are removal scores recomputed after every selected removal? | Produces a conditional trajectory rather than independent linear scores |

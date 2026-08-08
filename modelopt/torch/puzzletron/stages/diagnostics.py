@@ -40,6 +40,7 @@ from ..block_config import (
     maybe_cast_block_configs,
 )
 from ..diagnostics.campaign_findings import MetricSpec
+from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage, finding_from_message
 from ..diagnostics.width_sanity import aggregate_parent_sweep_sanity
 from ..diagnostics.width_slice_equivalence import (
     evaluate_width_slice_equivalence,
@@ -1612,8 +1613,6 @@ def _parent_sweep_sanity_verdict(
 ):
     """Combine advisory width quality with blocking reused-sort correctness."""
 
-    from ..diagnostics.sanity_verdict import SanityVerdict
-
     width_findings = list(width_summary.get("findings") or ())
     sort_findings = [
         {**finding, "stage": "sort_sanity", "severity": "error"}
@@ -2740,7 +2739,6 @@ def _activation_diagnostic_parent_sweep(
     width_verdict = json.loads(width_summary_path.read_text(encoding="utf-8"))
     sort_summary_path = puzzle_dir / "artifacts" / "sort_sanity" / "summary.json"
     sort_verdict = json.loads(sort_summary_path.read_text(encoding="utf-8"))
-    from ..diagnostics.sanity_verdict import complete_sanity_stage
 
     return complete_sanity_stage(
         config,
@@ -3151,6 +3149,34 @@ def _sort_equivalence_tolerances(
     return tolerance, reverse_tolerance
 
 
+def _complete_sort_equivalence_stage(
+    config: dict[str, Any],
+    manifest: StageManifest,
+    *,
+    summary_path: Path,
+    table_path: Path,
+    fallback_metric: str,
+):
+    """Complete one rank from the verdict persisted by the master rank."""
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    return complete_sanity_stage(
+        config,
+        manifest,
+        outputs={
+            "summary_path": str(summary_path),
+            "table_path": str(table_path),
+            "metric": summary.get("metric", fallback_metric),
+            "delta": summary.get("delta"),
+            "reverse_delta": summary.get("reverse_delta"),
+        },
+        verdict=SanityVerdict(
+            passed=summary.get("passed") is True,
+            findings=list(summary.get("findings") or ()),
+        ),
+    )
+
+
 def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
     """Evaluate teacher and sorted teacher with the chunked AutoModel scorer."""
 
@@ -3270,8 +3296,6 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
 
     summary_path = artifacts_dir / "summary.json"
     md_path = artifacts_dir / "table.md"
-    delta_value = None
-    reverse_delta_value = None
     if dist.is_master():
         teacher_raw = json.loads((scoring_output_dir / "teacher.json").read_text())
         sorted_result_path = scoring_output_dir / "sliced_teacher.json"
@@ -3288,7 +3312,6 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
                 f"Could not find metric {metric!r}; teacher={teacher_raw} sorted={sorted_raw}"
             )
         delta = float(sorted_value) - float(teacher_value)
-        delta_value = delta
         reverse_value = _metric_avg(reverse_raw, metric) if reverse_raw is not None else None
         if include_reverse and reverse_value is None:
             raise RuntimeError(
@@ -3297,7 +3320,6 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
         reverse_delta = (
             float(reverse_value) - float(teacher_value) if reverse_value is not None else None
         )
-        reverse_delta_value = reverse_delta
         decision = _sort_equivalence_decision(
             delta=delta,
             reverse_delta=reverse_delta,
@@ -3380,12 +3402,6 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
         mprint(md_path.read_text(encoding="utf-8"))
         findings = []
         if not passed:
-            from ..diagnostics.sanity_verdict import (
-                SanityVerdict,
-                complete_sanity_stage,
-                finding_from_message,
-            )
-
             if not sorted_passed:
                 findings.append(
                     finding_from_message(
@@ -3419,33 +3435,13 @@ def sort_equivalence_stage(config: dict[str, Any], manifest: StageManifest):
             summary_path.write_text(
                 json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
             )
-            dist.barrier()
-            return complete_sanity_stage(
-                config,
-                manifest,
-                outputs={
-                    "summary_path": str(summary_path),
-                    "table_path": str(md_path),
-                    "metric": metric,
-                    "delta": delta_value,
-                    "reverse_delta": reverse_delta_value,
-                },
-                verdict=SanityVerdict(passed=False, findings=findings),
-            )
     dist.barrier()
-    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
-
-    return complete_sanity_stage(
+    return _complete_sort_equivalence_stage(
         config,
         manifest,
-        outputs={
-            "summary_path": str(summary_path),
-            "table_path": str(md_path),
-            "metric": metric,
-            "delta": delta_value,
-            "reverse_delta": reverse_delta_value,
-        },
-        verdict=SanityVerdict(passed=True),
+        summary_path=summary_path,
+        table_path=md_path,
+        fallback_metric=metric,
     )
 
 
@@ -3469,8 +3465,6 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
             raise RuntimeError(f"distributed slicing summary has no evidence: {summary_path}")
         findings = list(summary.get("findings") or ())
         passed = bool(summary.get("passed", not findings))
-        from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
-
         return complete_sanity_stage(
             config,
             manifest,
@@ -3597,8 +3591,6 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
         for case in summary.get("cases", ())
         if not case.get("passed", True)
     ]
-    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
-
     return complete_sanity_stage(
         config,
         manifest,
@@ -4163,8 +4155,6 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
                     json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
                 )
         dist.barrier()
-
-    from ..diagnostics.sanity_verdict import SanityVerdict, complete_sanity_stage
 
     findings = list((summary or {}).get("findings") or ())
     return complete_sanity_stage(

@@ -672,6 +672,22 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
     assert "unadjusted hidden-state mean squared error" in document
 
 
+def test_activation_diagnostic_empty_metrics_keep_gate_outcomes_visible():
+    section = report_module._activation_diagnostic_section(
+        {
+            "rows": [{"axis": "ffn_intermediate", "method": "sorted"}],
+            "width_present": True,
+            "width_passed": False,
+            "slicing_present": True,
+            "slicing_passed": False,
+        }
+    )
+
+    assert "Width ranking: quality warning" in section
+    assert "Dynamic/physical equivalence: failed (blocking correctness)" in section
+    assert "no plottable numeric metrics" in section
+
+
 def test_progress_report_recovers_sort_table_from_compact_reuse_summary(tmp_path: Path):
     _write(
         tmp_path / "manifests/sort_sanity.json",

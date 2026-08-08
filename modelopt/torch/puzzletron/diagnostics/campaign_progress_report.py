@@ -525,7 +525,9 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
         for metric in metrics
     )
     if not axes or not metrics:
-        return "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
+        return gate_summary + (
+            "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
+        )
     first_axis = axes[0]
     first_metric = metrics[0]
     cases: dict[tuple[Any, Any, Any], dict[str, dict[str, Any]]] = {}
