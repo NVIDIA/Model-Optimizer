@@ -162,6 +162,16 @@ def _write_conversion_source_metadata(
     tmp_path.replace(metadata_path)
 
 
+def _raise_on_master_failure(error: BaseException | None, *, action: str) -> None:
+    failure = f"{type(error).__name__}: {error}" if error is not None else None
+    failure = dist.broadcast(failure, src=0)
+    if failure is None:
+        return
+    if error is not None:
+        raise error
+    raise RuntimeError(f"rank 0 failed during {action}: {failure}")
+
+
 def _conversion_sibling(path: Path, suffix: str) -> Path:
     return path.with_name(f".{path.name}{suffix}")
 
@@ -384,8 +394,13 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
     skipped = False
 
     with _distributed_if_needed():
+        recovery_error = None
         if dist.is_master():
-            _recover_conversion_transaction(teacher_dir)
+            try:
+                _recover_conversion_transaction(teacher_dir)
+            except BaseException as error:
+                recovery_error = error
+        _raise_on_master_failure(recovery_error, action="conversion transaction recovery")
         dist.barrier()
         teacher_complete = _is_complete_checkpoint(teacher_dir, trust_remote_code=trust_remote_code)
         if teacher_complete:
@@ -417,59 +432,70 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
         if teacher_complete:
             skipped = True
         else:
+            source_error = None
             if dist.is_master():
-                source_path = _resolve_source_path(str(source), revision=revision)
+                try:
+                    source_path = _resolve_source_path(str(source), revision=revision)
+                except BaseException as error:
+                    source_path = None
+                    source_error = error
             else:
                 source_path = None
+            _raise_on_master_failure(source_error, action="source checkpoint resolution")
             source_path = Path(dist.broadcast(str(source_path), src=0))
             source_config = AutoConfig.from_pretrained(
                 source_path, trust_remote_code=trust_remote_code
             )
             source_identity = model_identity(source_config).value
+            conversion_error = None
             if dist.is_master():
-                transaction_dir = _prepare_conversion_transaction(teacher_dir)
-                if _is_anymodel_config(source_config):
-                    shutil.copytree(source_path, transaction_dir, dirs_exist_ok=True)
-                    already_anymodel = True
-                else:
-                    source_resolution = resolve_descriptor_from_pretrained(
-                        str(source_path),
-                        trust_remote_code=trust_remote_code,
-                        descriptor_override=model_cfg.get("descriptor_override"),
-                    )
-                    converter = ConverterFactory.get(source_resolution.name)
-                    converter.convert(
-                        descriptor=source_resolution.descriptor,
-                        input_dir=source_path,
-                        output_dir=transaction_dir,
-                    )
-                    descriptor_payload = source_resolution.to_dict()
-                    already_anymodel = False
-                if untie_word_embeddings:
-                    target_resolution = resolve_descriptor_from_pretrained(
-                        str(transaction_dir),
-                        trust_remote_code=trust_remote_code,
-                        descriptor_override=model_cfg.get("descriptor_override"),
-                    )
-                    _ensure_untied_word_embeddings(
+                try:
+                    transaction_dir = _prepare_conversion_transaction(teacher_dir)
+                    if _is_anymodel_config(source_config):
+                        shutil.copytree(source_path, transaction_dir, dirs_exist_ok=True)
+                        already_anymodel = True
+                    else:
+                        source_resolution = resolve_descriptor_from_pretrained(
+                            str(source_path),
+                            trust_remote_code=trust_remote_code,
+                            descriptor_override=model_cfg.get("descriptor_override"),
+                        )
+                        converter = ConverterFactory.get(source_resolution.name)
+                        converter.convert(
+                            descriptor=source_resolution.descriptor,
+                            input_dir=source_path,
+                            output_dir=transaction_dir,
+                        )
+                        descriptor_payload = source_resolution.to_dict()
+                        already_anymodel = False
+                    if untie_word_embeddings:
+                        target_resolution = resolve_descriptor_from_pretrained(
+                            str(transaction_dir),
+                            trust_remote_code=trust_remote_code,
+                            descriptor_override=model_cfg.get("descriptor_override"),
+                        )
+                        _ensure_untied_word_embeddings(
+                            transaction_dir,
+                            descriptor=target_resolution.descriptor,
+                            trust_remote_code=trust_remote_code,
+                        )
+                    _write_conversion_source_metadata(
                         transaction_dir,
-                        descriptor=target_resolution.descriptor,
-                        trust_remote_code=trust_remote_code,
+                        source=str(source),
+                        revision=revision,
+                        source_identity=source_identity,
                     )
-                _write_conversion_source_metadata(
-                    transaction_dir,
-                    source=str(source),
-                    revision=revision,
-                    source_identity=source_identity,
-                )
-                _validate_converted_checkpoint(
-                    transaction_dir,
-                    source=str(source),
-                    revision=revision,
-                    trust_remote_code=trust_remote_code,
-                    descriptor_override=model_cfg.get("descriptor_override"),
-                )
-                _publish_conversion_transaction(teacher_dir, transaction_dir)
+                    _validate_converted_checkpoint(
+                        transaction_dir,
+                        source=str(source),
+                        revision=revision,
+                        trust_remote_code=trust_remote_code,
+                        descriptor_override=model_cfg.get("descriptor_override"),
+                    )
+                    _publish_conversion_transaction(teacher_dir, transaction_dir)
+                except BaseException as error:
+                    conversion_error = error
+            _raise_on_master_failure(conversion_error, action="teacher conversion")
             dist.barrier()
 
     teacher_config = AutoConfig.from_pretrained(teacher_dir, trust_remote_code=trust_remote_code)

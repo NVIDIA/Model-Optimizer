@@ -52,9 +52,42 @@ def _weight_map(checkpoint_dir):
 def _patch_single_rank_convert(monkeypatch):
     monkeypatch.setattr(convert_stage_module, "_register_automodel_config_aliases", lambda: None)
     monkeypatch.setattr(convert_stage_module, "_distributed_if_needed", nullcontext)
-    monkeypatch.setattr(convert_stage_module.dist, "is_master", lambda: True)
-    monkeypatch.setattr(convert_stage_module.dist, "broadcast", lambda value, src: value)
-    monkeypatch.setattr(convert_stage_module.dist, "barrier", lambda: None)
+
+
+def test_nonmaster_raises_broadcast_conversion_failure(monkeypatch):
+    monkeypatch.setattr(
+        convert_stage_module.dist,
+        "broadcast",
+        lambda value, src: "ConversionError: failed conversion",
+    )
+
+    with pytest.raises(RuntimeError, match="rank 0 failed during teacher conversion"):
+        convert_stage_module._raise_on_master_failure(None, action="teacher conversion")
+
+
+def test_master_broadcasts_failure_before_reraising(monkeypatch):
+    events = []
+
+    class ConversionError(RuntimeError):
+        pass
+
+    error = ConversionError("failed conversion")
+
+    def broadcast(value, src):
+        events.append(("broadcast", value))
+        return value
+
+    monkeypatch.setattr(convert_stage_module.dist, "broadcast", broadcast)
+
+    with pytest.raises(ConversionError) as raised:
+        convert_stage_module._raise_on_master_failure(error, action="teacher conversion")
+    events.append(("raised", str(raised.value)))
+
+    assert raised.value is error
+    assert events == [
+        ("broadcast", "ConversionError: failed conversion"),
+        ("raised", "failed conversion"),
+    ]
 
 
 @pytest.mark.parametrize("revision", ["pinned-sha", None], ids=["pinned", "default"])
@@ -101,7 +134,6 @@ def test_conversion_resume_requires_matching_source_revision(tmp_path):
         revision="old-sha",
         source_identity="source_model_abc",
     )
-
     assert _conversion_source_matches(teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="old-sha")
     assert not _conversion_source_matches(
         teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="new-sha"
@@ -124,22 +156,34 @@ def test_conversion_resume_requires_matching_source_revision(tmp_path):
 def test_convert_stage_reconverts_teacher_from_different_revision(tmp_path, monkeypatch):
     teacher_dir = tmp_path / "teacher"
     teacher_dir.mkdir()
+    (teacher_dir / "old-shard.bin").write_text("old")
     _write_conversion_source_metadata(
         teacher_dir,
         source="Qwen/Qwen3.5-0.8B",
         revision="old-sha",
         source_identity="source_model_abc",
     )
+    metadata_path = teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA
+    metadata_before = metadata_path.read_bytes()
     resolved = []
+    events = []
 
     class SourceResolvedError(RuntimeError):
         pass
 
     def resolve_source(source, *, revision):
         resolved.append({"source": source, "revision": revision})
-        raise SourceResolvedError
+        raise SourceResolvedError("source failed")
+
+    def broadcast(value, src):
+        events.append(("broadcast", value))
+        return value
 
     _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(convert_stage_module.dist, "broadcast", broadcast)
+    monkeypatch.setattr(
+        convert_stage_module.dist, "barrier", lambda: events.append(("barrier", None))
+    )
     monkeypatch.setattr(
         convert_stage_module, "_is_complete_checkpoint", lambda *args, **kwargs: True
     )
@@ -155,6 +199,19 @@ def test_convert_stage_reconverts_teacher_from_different_revision(tmp_path, monk
         )
 
     assert resolved == [{"source": "Qwen/Qwen3.5-0.8B", "revision": "new-sha"}]
+    assert events == [
+        ("broadcast", None),
+        ("barrier", None),
+        ("broadcast", "SourceResolvedError: source failed"),
+    ]
+    assert metadata_path.read_bytes() == metadata_before
+    assert (teacher_dir / "old-shard.bin").read_text() == "old"
+    assert not convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_TRANSACTION_SUFFIX
+    ).exists()
+    assert not convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_BACKUP_SUFFIX
+    ).exists()
 
 
 def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, monkeypatch):
@@ -323,8 +380,10 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
                 raise ConversionError
 
     converter = RetryConverter()
+    barriers = []
 
     _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(convert_stage_module.dist, "barrier", lambda: barriers.append(None))
     monkeypatch.setattr(
         convert_stage_module,
         "_is_complete_checkpoint",
@@ -373,6 +432,8 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
     with pytest.raises(ConversionError):
         convert_stage_module.convert_stage(config, manifest=object())
 
+    assert len(barriers) == 1
+
     old_metadata = json.loads(
         (teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA).read_text()
     )
@@ -386,6 +447,7 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
     result = convert_stage_module.convert_stage(config, manifest=object())
 
     assert result["status"] == "success"
+    assert len(barriers) == 3
     assert converter.attempts == 2
     assert not (teacher_dir / "old-shard.bin").exists()
     assert (teacher_dir / "new-shard.bin").read_text() == "new"
@@ -396,7 +458,7 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
     assert not transaction_dir.exists()
 
 
-def test_conversion_transaction_recovers_interrupted_swap(tmp_path):
+def test_conversion_transaction_recovers_interrupted_swap(tmp_path, monkeypatch):
     teacher_dir = tmp_path / "teacher"
     teacher_dir.mkdir()
     (teacher_dir / "old-shard.bin").write_text("old")
@@ -424,6 +486,41 @@ def test_conversion_transaction_recovers_interrupted_swap(tmp_path):
 
     assert (teacher_dir / "published-shard.bin").read_text() == "published"
     assert not backup_dir.exists()
+
+    backup_dir.mkdir()
+    (backup_dir / "backup-shard.bin").write_text("backup")
+    transaction_dir.mkdir()
+    (transaction_dir / "transaction-shard.bin").write_text("transaction")
+    events = []
+
+    _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(
+        convert_stage_module.dist,
+        "broadcast",
+        lambda value, src: events.append(("broadcast", value)) or value,
+    )
+    monkeypatch.setattr(
+        convert_stage_module.dist, "barrier", lambda: events.append(("barrier", None))
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous conversion transaction state"):
+        convert_stage_module.convert_stage(
+            {
+                "model": {"source": "Qwen/Qwen3.5-0.8B"},
+                "convert": {"teacher_dir": str(teacher_dir)},
+            },
+            manifest=object(),
+        )
+
+    assert events == [
+        (
+            "broadcast",
+            f"RuntimeError: ambiguous conversion transaction state for checkpoint: {teacher_dir}",
+        )
+    ]
+    assert (teacher_dir / "published-shard.bin").read_text() == "published"
+    assert (backup_dir / "backup-shard.bin").read_text() == "backup"
+    assert (transaction_dir / "transaction-shard.bin").read_text() == "transaction"
 
 
 def test_convert_anymodel(tmp_path):
