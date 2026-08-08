@@ -1004,6 +1004,34 @@ def infrastructure_section(
     if action == "defaults":
         for path, fallback in paths:
             _record_default(session.state, resolver, path, fallback)
+        worker_paths = (
+            (
+                "infrastructure.execution_contract.repository",
+                "Repository path on workers:",
+                WORKER_REPOSITORY_PLACEHOLDER,
+            ),
+            (
+                "infrastructure.execution_contract.venv",
+                "Python environment:",
+                WORKER_VENV_PLACEHOLDER,
+            ),
+        )
+        if any(
+            validate_worker_path(str(session.state.get_field(path))) is not True
+            for path, _, _ in worker_paths
+        ):
+            print("  Enter the worker-visible repository and Python environment paths.")
+            for path, label, fallback in worker_paths:
+                value = _text_field(
+                    session,
+                    resolver,
+                    path,
+                    label,
+                    fallback,
+                    validate=validate_worker_path,
+                )
+                if value is BACK:
+                    return False
         commands = resolver.resolve_default("infrastructure.execution_contract.prerun_commands", [])
         session.state.set_field(
             "infrastructure.execution_contract.prerun_commands",

@@ -591,6 +591,8 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
             _CUSTOM_DATA_SOURCE,
             str(dataset),
             "defaults",
+            "/worker/modelopt",
+            "/worker/venv",
             True,
         ]
     )
@@ -641,14 +643,14 @@ def test_guided_section_uses_profile_without_action_prompt(tmp_path):
     assert backend.remaining == 0
 
 
-def test_guided_infrastructure_requires_explicit_default_acceptance(tmp_path):
+def test_guided_infrastructure_prompts_for_unresolved_worker_paths(tmp_path):
     state = WizardState.start(
         tmp_path / "campaign",
         defaults_path=None,
         setup_mode="quick",
         preset="balanced",
     )
-    backend = ScriptedBackend(["defaults"])
+    backend = ScriptedBackend(["defaults", "/worker/modelopt", "/worker/venv"])
 
     assert infrastructure_section(
         WizardSession(state, backend, guided=True),
@@ -656,7 +658,8 @@ def test_guided_infrastructure_requires_explicit_default_acceptance(tmp_path):
         {},
     )
 
-    assert state.get_field("infrastructure.execution_contract.venv") == ".venv"
+    assert state.get_field("infrastructure.execution_contract.repository") == "/worker/modelopt"
+    assert state.get_field("infrastructure.execution_contract.venv") == "/worker/venv"
     assert state.get_field("infrastructure.runner.kind") == "slurm"
     assert backend.remaining == 0
 
