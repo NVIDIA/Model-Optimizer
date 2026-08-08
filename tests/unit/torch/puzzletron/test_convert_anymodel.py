@@ -32,8 +32,10 @@ from transformers import AutoModelForCausalLM
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.puzzletron.stages.convert as convert_stage_module
 from modelopt.torch.puzzletron.stages.convert import (
+    _conversion_source_matches,
     _descriptor_checkpoint_layout_complete,
     _is_complete_checkpoint,
+    _write_conversion_source_metadata,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 
@@ -47,6 +49,14 @@ def _weight_map(checkpoint_dir):
         return dict.fromkeys(handle.keys(), weights_path.name)
 
 
+def _patch_single_rank_convert(monkeypatch):
+    monkeypatch.setattr(convert_stage_module, "_register_automodel_config_aliases", lambda: None)
+    monkeypatch.setattr(convert_stage_module, "_distributed_if_needed", nullcontext)
+    monkeypatch.setattr(convert_stage_module.dist, "is_master", lambda: True)
+    monkeypatch.setattr(convert_stage_module.dist, "broadcast", lambda value, src: value)
+    monkeypatch.setattr(convert_stage_module.dist, "barrier", lambda: None)
+
+
 @pytest.mark.parametrize("revision", ["pinned-sha", None], ids=["pinned", "default"])
 def test_convert_stage_pins_optional_hugging_face_revision(tmp_path, monkeypatch, revision):
     calls = []
@@ -58,12 +68,10 @@ def test_convert_stage_pins_optional_hugging_face_revision(tmp_path, monkeypatch
         calls.append({"repo_id": repo_id, "revision": revision})
         raise SourceResolvedError
 
-    monkeypatch.setattr(convert_stage_module, "_register_automodel_config_aliases", lambda: None)
-    monkeypatch.setattr(convert_stage_module, "_distributed_if_needed", nullcontext)
+    _patch_single_rank_convert(monkeypatch)
     monkeypatch.setattr(
         convert_stage_module, "_is_complete_checkpoint", lambda *args, **kwargs: False
     )
-    monkeypatch.setattr(convert_stage_module.dist, "is_master", lambda: True)
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
     model = {"source": "Qwen/Qwen3.5-0.8B"}
     if revision is not None:
@@ -76,6 +84,356 @@ def test_convert_stage_pins_optional_hugging_face_revision(tmp_path, monkeypatch
         )
 
     assert calls == [{"repo_id": "Qwen/Qwen3.5-0.8B", "revision": revision}]
+
+
+def test_conversion_resume_requires_matching_source_revision(tmp_path):
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+
+    assert _conversion_source_matches(
+        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision=None
+    )
+    assert not _conversion_source_matches(
+        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="new-sha"
+    )
+
+    _write_conversion_source_metadata(
+        teacher_dir,
+        source="Qwen/Qwen3.5-0.8B",
+        revision="old-sha",
+        source_identity="source_model_abc",
+    )
+
+    assert _conversion_source_matches(
+        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="old-sha"
+    )
+    assert not _conversion_source_matches(
+        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="new-sha"
+    )
+    assert not _conversion_source_matches(
+        teacher_dir, source="Qwen/Another-Model", revision="old-sha"
+    )
+
+    metadata_path = teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA
+    metadata_path.write_text("not-json")
+    assert not _conversion_source_matches(
+        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="old-sha"
+    )
+    metadata_path.write_text("[]")
+    assert not _conversion_source_matches(
+        teacher_dir, source="Qwen/Qwen3.5-0.8B", revision="old-sha"
+    )
+
+
+def test_convert_stage_reconverts_teacher_from_different_revision(tmp_path, monkeypatch):
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+    _write_conversion_source_metadata(
+        teacher_dir,
+        source="Qwen/Qwen3.5-0.8B",
+        revision="old-sha",
+        source_identity="source_model_abc",
+    )
+    resolved = []
+
+    class SourceResolvedError(RuntimeError):
+        pass
+
+    def resolve_source(source, *, revision):
+        resolved.append({"source": source, "revision": revision})
+        raise SourceResolvedError
+
+    _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(
+        convert_stage_module, "_is_complete_checkpoint", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(convert_stage_module, "_resolve_source_path", resolve_source)
+
+    with pytest.raises(SourceResolvedError):
+        convert_stage_module.convert_stage(
+            {
+                "model": {"source": "Qwen/Qwen3.5-0.8B", "revision": "new-sha"},
+                "convert": {"teacher_dir": str(teacher_dir)},
+            },
+            manifest=object(),
+        )
+
+    assert resolved == [{"source": "Qwen/Qwen3.5-0.8B", "revision": "new-sha"}]
+
+
+def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "tokenizer.json").write_text("{}")
+    teacher_dir = tmp_path / "teacher"
+    source_config = SimpleNamespace(architectures=["AnyModel"])
+    resolution = SimpleNamespace(descriptor=object())
+    resolve_calls = []
+    completions = []
+
+    _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(
+        convert_stage_module,
+        "_is_complete_checkpoint",
+        lambda path, **kwargs: (
+            path / convert_stage_module._CONVERSION_SOURCE_METADATA
+        ).is_file(),
+    )
+    monkeypatch.setattr(
+        convert_stage_module.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: source_config,
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "resolve_descriptor_from_pretrained",
+        lambda *args, **kwargs: resolution,
+    )
+    monkeypatch.setattr(
+        convert_stage_module, "_descriptor_checkpoint_layout_complete", lambda *args: True
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "model_identity",
+        lambda config: SimpleNamespace(value="source_model_abc"),
+    )
+
+    def resolve_source(source, *, revision):
+        resolve_calls.append({"source": source, "revision": revision})
+        return source_dir
+
+    def complete_stage(config, manifest, *, outputs, status, message=None):
+        completions.append({"outputs": outputs, "status": status, "message": message})
+        return completions[-1]
+
+    monkeypatch.setattr(convert_stage_module, "_resolve_source_path", resolve_source)
+    monkeypatch.setattr(convert_stage_module, "complete_stage", complete_stage)
+    config = {
+        "model": {"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"},
+        "convert": {"teacher_dir": str(teacher_dir)},
+    }
+
+    first = convert_stage_module.convert_stage(config, manifest=object())
+    transaction_dir = convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_TRANSACTION_SUFFIX
+    )
+    backup_dir = convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_BACKUP_SUFFIX
+    )
+    assert not transaction_dir.exists()
+    assert not backup_dir.exists()
+
+    second = convert_stage_module.convert_stage(config, manifest=object())
+
+    metadata = json.loads(
+        (teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA).read_text()
+    )
+    assert metadata == {
+        "revision": "pinned-sha",
+        "source": "Qwen/Qwen3.5-0.8B",
+        "source_identity": "source_model_abc",
+        "version": 1,
+    }
+    assert resolve_calls == [
+        {"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"}
+    ]
+    assert first["status"] == "success"
+    assert first["outputs"]["skipped"] is False
+    assert second["status"] == "skipped"
+    assert second["outputs"]["skipped"] is True
+
+
+def test_convert_stage_reuses_legacy_unpinned_teacher(tmp_path, monkeypatch):
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+    teacher_config = SimpleNamespace(architectures=["AnyModel"])
+
+    _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(
+        convert_stage_module, "_is_complete_checkpoint", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(
+        convert_stage_module.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: teacher_config,
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "resolve_descriptor_from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(descriptor=object()),
+    )
+    monkeypatch.setattr(
+        convert_stage_module, "_descriptor_checkpoint_layout_complete", lambda *args: True
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "model_identity",
+        lambda config: SimpleNamespace(value="teacher_model_abc"),
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "_resolve_source_path",
+        lambda *args, **kwargs: pytest.fail("legacy unpinned teacher should be reused"),
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "complete_stage",
+        lambda config, manifest, *, outputs, status, message=None: {
+            "outputs": outputs,
+            "status": status,
+        },
+    )
+
+    result = convert_stage_module.convert_stage(
+        {
+            "model": {"source": "Qwen/Qwen3.5-0.8B"},
+            "convert": {"teacher_dir": str(teacher_dir)},
+        },
+        manifest=object(),
+    )
+
+    assert result["status"] == "skipped"
+    assert result["outputs"]["skipped"] is True
+
+
+def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+    (teacher_dir / "old-shard.bin").write_text("old")
+    _write_conversion_source_metadata(
+        teacher_dir,
+        source="Qwen/Qwen3.5-0.8B",
+        revision="old-sha",
+        source_identity="source_model_old",
+    )
+    source_config = SimpleNamespace(architectures=["Qwen3ForCausalLM"])
+
+    class ConversionFailed(RuntimeError):
+        pass
+
+    class Resolution:
+        name = "qwen3"
+        descriptor = object()
+
+        @staticmethod
+        def to_dict():
+            return {"name": "qwen3"}
+
+    class RetryConverter:
+        attempts = 0
+
+        def convert(self, *, output_dir, **kwargs):
+            self.attempts += 1
+            (output_dir / "new-shard.bin").write_text("new")
+            if self.attempts == 1:
+                raise ConversionFailed
+
+    converter = RetryConverter()
+
+    _patch_single_rank_convert(monkeypatch)
+    monkeypatch.setattr(
+        convert_stage_module,
+        "_is_complete_checkpoint",
+        lambda path, **kwargs: path == teacher_dir
+        or (
+            (path / "new-shard.bin").is_file()
+            and (path / convert_stage_module._CONVERSION_SOURCE_METADATA).is_file()
+        ),
+    )
+    monkeypatch.setattr(
+        convert_stage_module, "_resolve_source_path", lambda *args, **kwargs: source_dir
+    )
+    monkeypatch.setattr(
+        convert_stage_module.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: source_config,
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "model_identity",
+        lambda config: SimpleNamespace(value="source_model_new"),
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "resolve_descriptor_from_pretrained",
+        lambda *args, **kwargs: Resolution(),
+    )
+    monkeypatch.setattr(
+        convert_stage_module, "_descriptor_checkpoint_layout_complete", lambda *args: True
+    )
+    monkeypatch.setattr(
+        convert_stage_module,
+        "complete_stage",
+        lambda config, manifest, *, outputs, status, message=None: {
+            "outputs": outputs,
+            "status": status,
+        },
+    )
+    monkeypatch.setattr(
+        convert_stage_module.ConverterFactory, "get", lambda name: converter
+    )
+
+    config = {
+        "model": {"source": "Qwen/Qwen3.5-0.8B", "revision": "new-sha"},
+        "convert": {"teacher_dir": str(teacher_dir)},
+    }
+
+    with pytest.raises(ConversionFailed):
+        convert_stage_module.convert_stage(config, manifest=object())
+
+    old_metadata = json.loads(
+        (teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA).read_text()
+    )
+    assert old_metadata["revision"] == "old-sha"
+    assert (teacher_dir / "old-shard.bin").read_text() == "old"
+    transaction_dir = convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_TRANSACTION_SUFFIX
+    )
+    assert (transaction_dir / "new-shard.bin").read_text() == "new"
+
+    result = convert_stage_module.convert_stage(config, manifest=object())
+
+    assert result["status"] == "success"
+    assert converter.attempts == 2
+    assert not (teacher_dir / "old-shard.bin").exists()
+    assert (teacher_dir / "new-shard.bin").read_text() == "new"
+    new_metadata = json.loads(
+        (teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA).read_text()
+    )
+    assert new_metadata["revision"] == "new-sha"
+    assert not transaction_dir.exists()
+
+
+def test_conversion_transaction_recovers_interrupted_swap(tmp_path):
+    teacher_dir = tmp_path / "teacher"
+    teacher_dir.mkdir()
+    (teacher_dir / "old-shard.bin").write_text("old")
+    transaction_dir = convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_TRANSACTION_SUFFIX
+    )
+    transaction_dir.mkdir()
+    (transaction_dir / "new-shard.bin").write_text("new")
+    backup_dir = convert_stage_module._conversion_sibling(
+        teacher_dir, convert_stage_module._CONVERSION_BACKUP_SUFFIX
+    )
+    teacher_dir.replace(backup_dir)
+
+    convert_stage_module._recover_conversion_transaction(teacher_dir)
+
+    assert (teacher_dir / "old-shard.bin").read_text() == "old"
+    assert not transaction_dir.exists()
+    assert not backup_dir.exists()
+
+    teacher_dir.replace(backup_dir)
+    teacher_dir.mkdir()
+    (teacher_dir / "published-shard.bin").write_text("published")
+
+    convert_stage_module._recover_conversion_transaction(teacher_dir)
+
+    assert (teacher_dir / "published-shard.bin").read_text() == "published"
+    assert not backup_dir.exists()
 
 
 def test_convert_anymodel(tmp_path):

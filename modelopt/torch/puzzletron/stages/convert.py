@@ -27,6 +27,11 @@ from .common import complete_stage, experiment_dir
 __all__ = ["convert_stage"]
 
 
+_CONVERSION_SOURCE_METADATA = "puzzletron_conversion_source.json"
+_CONVERSION_TRANSACTION_SUFFIX = ".puzzletron-convert-tmp"
+_CONVERSION_BACKUP_SUFFIX = ".puzzletron-convert-backup"
+
+
 def _register_automodel_config_aliases() -> None:
     """Backward-compatible stage wrapper around the shared config registry."""
 
@@ -108,6 +113,131 @@ def _is_complete_checkpoint(path: Path, *, trust_remote_code: bool) -> bool:
         if expected_layers is not None and len(block_configs) != int(expected_layers):
             return False
     return True
+
+
+def _conversion_source_matches(
+    path: Path,
+    *,
+    source: str,
+    revision: str | None,
+) -> bool:
+    """Return whether a converted checkpoint belongs to the configured source revision."""
+    metadata_path = path / _CONVERSION_SOURCE_METADATA
+    if not metadata_path.is_file():
+        # Preserve resume compatibility for legacy unpinned checkpoints. Pinned
+        # runs must convert once to establish an auditable source revision.
+        return revision is None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    return metadata.get("source") == source and metadata.get("revision") == revision
+
+
+def _write_conversion_source_metadata(
+    path: Path,
+    *,
+    source: str,
+    revision: str | None,
+    source_identity: str,
+) -> None:
+    metadata_path = path / _CONVERSION_SOURCE_METADATA
+    tmp_path = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(
+            {
+                "source": source,
+                "revision": revision,
+                "source_identity": source_identity,
+                "version": 1,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(metadata_path)
+
+
+def _conversion_sibling(path: Path, suffix: str) -> Path:
+    return path.with_name(f".{path.name}{suffix}")
+
+
+def _remove_conversion_directory(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        raise RuntimeError(f"conversion transaction path is not a directory: {path}")
+    shutil.rmtree(path)
+
+
+def _recover_conversion_transaction(path: Path) -> None:
+    """Restore the last published checkpoint after an interrupted directory swap."""
+    transaction_dir = _conversion_sibling(path, _CONVERSION_TRANSACTION_SUFFIX)
+    backup_dir = _conversion_sibling(path, _CONVERSION_BACKUP_SUFFIX)
+    if backup_dir.exists():
+        if path.exists():
+            if transaction_dir.exists():
+                raise RuntimeError(
+                    f"ambiguous conversion transaction state for checkpoint: {path}"
+                )
+            _remove_conversion_directory(backup_dir)
+        else:
+            backup_dir.replace(path)
+    if transaction_dir.exists():
+        _remove_conversion_directory(transaction_dir)
+
+
+def _prepare_conversion_transaction(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _recover_conversion_transaction(path)
+    transaction_dir = _conversion_sibling(path, _CONVERSION_TRANSACTION_SUFFIX)
+    transaction_dir.mkdir()
+    return transaction_dir
+
+
+def _publish_conversion_transaction(path: Path, transaction_dir: Path) -> None:
+    """Publish a validated checkpoint while retaining the prior version until the swap."""
+    backup_dir = _conversion_sibling(path, _CONVERSION_BACKUP_SUFFIX)
+    if backup_dir.exists():
+        raise RuntimeError(f"conversion backup already exists: {backup_dir}")
+    moved_existing = False
+    try:
+        if path.exists():
+            path.replace(backup_dir)
+            moved_existing = True
+        transaction_dir.replace(path)
+    except Exception:
+        if moved_existing and not path.exists() and backup_dir.exists():
+            backup_dir.replace(path)
+        raise
+    if backup_dir.exists():
+        _remove_conversion_directory(backup_dir)
+
+
+def _validate_converted_checkpoint(
+    path: Path,
+    *,
+    source: str,
+    revision: str | None,
+    trust_remote_code: bool,
+    descriptor_override: str | None,
+) -> None:
+    if not _is_complete_checkpoint(path, trust_remote_code=trust_remote_code):
+        raise RuntimeError(f"conversion did not produce a complete checkpoint: {path}")
+    if not _conversion_source_matches(path, source=source, revision=revision):
+        raise RuntimeError(f"conversion source metadata does not match checkpoint: {path}")
+    converted_config = AutoConfig.from_pretrained(path, trust_remote_code=trust_remote_code)
+    converted_resolution = resolve_descriptor_from_pretrained(
+        str(path),
+        trust_remote_code=trust_remote_code,
+        descriptor_override=descriptor_override,
+    )
+    if not _descriptor_checkpoint_layout_complete(
+        path, converted_resolution.descriptor, converted_config
+    ):
+        raise RuntimeError(f"conversion produced an incompatible checkpoint layout: {path}")
 
 
 def _checkpoint_weight_map(path: Path) -> tuple[dict[str, str], str | None]:
@@ -246,6 +376,7 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
         raise ValueError("model.source is required for the convert stage")
 
     trust_remote_code = bool(model_cfg.get("trust_remote_code", False))
+    revision = model_cfg.get("revision")
     convert_cfg = config.get("convert") or {}
     untie_word_embeddings = bool(convert_cfg.get("untie_word_embeddings", False))
     teacher_dir = _teacher_dir(config)
@@ -255,7 +386,16 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
     skipped = False
 
     with _distributed_if_needed():
+        if dist.is_master():
+            _recover_conversion_transaction(teacher_dir)
+        dist.barrier()
         teacher_complete = _is_complete_checkpoint(teacher_dir, trust_remote_code=trust_remote_code)
+        if teacher_complete:
+            teacher_complete = _conversion_source_matches(
+                teacher_dir,
+                source=str(source),
+                revision=revision,
+            )
         if teacher_complete:
             teacher_config = AutoConfig.from_pretrained(
                 teacher_dir, trust_remote_code=trust_remote_code
@@ -278,44 +418,56 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
             skipped = True
         else:
             if dist.is_master():
-                source_path = _resolve_source_path(str(source), revision=model_cfg.get("revision"))
+                source_path = _resolve_source_path(str(source), revision=revision)
             else:
                 source_path = None
             source_path = Path(dist.broadcast(str(source_path), src=0))
             source_config = AutoConfig.from_pretrained(source_path, trust_remote_code=trust_remote_code)
             source_identity = model_identity(source_config).value
             if dist.is_master():
+                transaction_dir = _prepare_conversion_transaction(teacher_dir)
                 if _is_anymodel_config(source_config):
-                    teacher_dir.parent.mkdir(parents=True, exist_ok=True)
-                    if source_path.resolve() != teacher_dir.resolve():
-                        shutil.copytree(source_path, teacher_dir, dirs_exist_ok=True)
+                    shutil.copytree(source_path, transaction_dir, dirs_exist_ok=True)
                     already_anymodel = True
                 else:
-                    resolution = resolve_descriptor_from_pretrained(
+                    source_resolution = resolve_descriptor_from_pretrained(
                         str(source_path),
                         trust_remote_code=trust_remote_code,
                         descriptor_override=model_cfg.get("descriptor_override"),
                     )
-                    converter = ConverterFactory.get(resolution.name)
+                    converter = ConverterFactory.get(source_resolution.name)
                     converter.convert(
-                        descriptor=resolution.descriptor,
+                        descriptor=source_resolution.descriptor,
                         input_dir=source_path,
-                        output_dir=teacher_dir,
+                        output_dir=transaction_dir,
                     )
-                    descriptor_payload = resolution.to_dict()
+                    descriptor_payload = source_resolution.to_dict()
                     already_anymodel = False
                 if untie_word_embeddings:
-                    if "resolution" not in locals():
-                        resolution = resolve_descriptor_from_pretrained(
-                            str(teacher_dir),
-                            trust_remote_code=trust_remote_code,
-                            descriptor_override=model_cfg.get("descriptor_override"),
-                        )
+                    target_resolution = resolve_descriptor_from_pretrained(
+                        str(transaction_dir),
+                        trust_remote_code=trust_remote_code,
+                        descriptor_override=model_cfg.get("descriptor_override"),
+                    )
                     _ensure_untied_word_embeddings(
-                        teacher_dir,
-                        descriptor=resolution.descriptor,
+                        transaction_dir,
+                        descriptor=target_resolution.descriptor,
                         trust_remote_code=trust_remote_code,
                     )
+                _write_conversion_source_metadata(
+                    transaction_dir,
+                    source=str(source),
+                    revision=revision,
+                    source_identity=source_identity,
+                )
+                _validate_converted_checkpoint(
+                    transaction_dir,
+                    source=str(source),
+                    revision=revision,
+                    trust_remote_code=trust_remote_code,
+                    descriptor_override=model_cfg.get("descriptor_override"),
+                )
+                _publish_conversion_transaction(teacher_dir, transaction_dir)
             dist.barrier()
 
     teacher_config = AutoConfig.from_pretrained(teacher_dir, trust_remote_code=trust_remote_code)
