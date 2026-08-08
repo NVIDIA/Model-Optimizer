@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,7 @@ from _test_utils.torch.transformers_models import (
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.puzzletron as mtpz
+import modelopt.torch.puzzletron.stages.convert as convert_stage_module
 from modelopt.torch.puzzletron.stages.convert import (
     _descriptor_checkpoint_layout_complete,
     _is_complete_checkpoint,
@@ -43,6 +45,37 @@ def _weight_map(checkpoint_dir):
     weights_path = checkpoint_dir / "model.safetensors"
     with safe_open(weights_path, framework="pt") as handle:
         return dict.fromkeys(handle.keys(), weights_path.name)
+
+
+@pytest.mark.parametrize("revision", ["pinned-sha", None], ids=["pinned", "default"])
+def test_convert_stage_pins_optional_hugging_face_revision(tmp_path, monkeypatch, revision):
+    calls = []
+
+    class SourceResolvedError(RuntimeError):
+        pass
+
+    def snapshot_download(*, repo_id, revision):
+        calls.append({"repo_id": repo_id, "revision": revision})
+        raise SourceResolvedError
+
+    monkeypatch.setattr(convert_stage_module, "_register_automodel_config_aliases", lambda: None)
+    monkeypatch.setattr(convert_stage_module, "_distributed_if_needed", nullcontext)
+    monkeypatch.setattr(
+        convert_stage_module, "_is_complete_checkpoint", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(convert_stage_module.dist, "is_master", lambda: True)
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+    model = {"source": "Qwen/Qwen3.5-0.8B"}
+    if revision is not None:
+        model["revision"] = revision
+
+    with pytest.raises(SourceResolvedError):
+        convert_stage_module.convert_stage(
+            {"model": model, "convert": {"teacher_dir": str(tmp_path / "teacher")}},
+            manifest=object(),
+        )
+
+    assert calls == [{"repo_id": "Qwen/Qwen3.5-0.8B", "revision": revision}]
 
 
 def test_convert_anymodel(tmp_path):

@@ -224,7 +224,7 @@ def _ensure_untied_word_embeddings(
     return True
 
 
-def _resolve_source_path(source: str) -> Path:
+def _resolve_source_path(source: str, *, revision: str | None = None) -> Path:
     source_path = Path(source)
     if source_path.exists():
         return source_path
@@ -234,7 +234,7 @@ def _resolve_source_path(source: str) -> Path:
         model_id = "/".join(source.rstrip("/").split("/")[-2:])
     else:
         model_id = source
-    return Path(snapshot_download(repo_id=model_id))
+    return Path(snapshot_download(repo_id=model_id, revision=revision))
 
 
 def convert_stage(config: dict[str, Any], manifest: StageManifest):
@@ -278,7 +278,7 @@ def convert_stage(config: dict[str, Any], manifest: StageManifest):
             skipped = True
         else:
             if dist.is_master():
-                source_path = _resolve_source_path(str(source))
+                source_path = _resolve_source_path(str(source), revision=model_cfg.get("revision"))
             else:
                 source_path = None
             source_path = Path(dist.broadcast(str(source_path), src=0))

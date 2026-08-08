@@ -84,7 +84,6 @@ def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
         "q_heads_per_group": (4, [2]),
         "ffn_intermediate": (3584, [3072, 2560, 2048, 1792, 1536]),
         "gdn_key_groups": (16, [12, 8]),
-        "gdn_key_head_dim": (128, [96]),
         "gdn_value_head_dim": (128, [96]),
     }
     enabled_domains = {
@@ -98,21 +97,35 @@ def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
         "attn_heads_list": [[2, 1], [4, 1], [4, 2], [8, 2]],
     }
     assert enabled_domains == expected_enabled_domains
-    assert axes["gdn_value_heads_per_group"] == {
-        "enabled": False,
-        "teacher_value": 1,
-        "values": [],
+    assert {
+        axis_id: axes[axis_id] for axis_id in ("gdn_value_heads_per_group", "gdn_key_head_dim")
+    } == {
+        "gdn_value_heads_per_group": {
+            "enabled": False,
+            "teacher_value": 1,
+            "values": [],
+        },
+        "gdn_key_head_dim": {
+            "enabled": False,
+            "teacher_value": 128,
+            "values": [],
+        },
     }
-    assert set(axes) == {*expected_enabled_domains, "gdn_value_heads_per_group"}
+    assert set(axes) == {
+        *expected_enabled_domains,
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+    }
 
 
 def test_qwen3p5_0p8b_advanced_search_composes_the_pinned_model() -> None:
     with initialize_config_dir(version_base=None, config_dir=str(CONFIG_ROOT)):
         config = compose(config_name="families/qwen3_5/qwen3p5_0p8b/advanced")
-    config = OmegaConf.to_container(config, resolve=False)
+    config = OmegaConf.to_container(config, resolve=True)
 
     assert config["input_hf_model_path"] == "Qwen/Qwen3.5-0.8B"
     assert config["model_info"]["hf_revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
+    assert config["model"]["revision"] == config["model_info"]["hf_revision"]
     assert config["search_space"]["axes"]["ffn_intermediate"]["values"] == [
         3072,
         2560,

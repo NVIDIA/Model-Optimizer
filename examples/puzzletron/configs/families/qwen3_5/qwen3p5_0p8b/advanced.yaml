@@ -42,12 +42,12 @@ search_space:
       enabled: false
       teacher_value: 1
       values: []
-    # Physical realization of the 128 -> 96 target remains blocked on runtime
-    # equivalence evidence; selecting this overlay does not clear that blocker.
+    # The proposed 128 -> 96 target remains blocked on runtime-equivalence
+    # evidence. Keep it documented but non-executable until that gate passes.
     gdn_key_head_dim:
-      enabled: true
+      enabled: false
       teacher_value: 128
-      values: [96]
+      values: []
     gdn_value_head_dim:
       enabled: true
       teacher_value: 128

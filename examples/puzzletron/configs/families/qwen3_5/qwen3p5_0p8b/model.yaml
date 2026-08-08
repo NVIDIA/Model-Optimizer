@@ -30,6 +30,9 @@ model_info:
     linear_value_head_dim: 128
     linear_conv_kernel_dim: 4
 
+model:
+  revision: ${model_info.hf_revision}
+
 # Keep the default search aligned with the tracked Qwen 3.5 0.8B runtime
 # campaign. Candidate construction adds the teacher value for the enabled axis.
 pruning:
