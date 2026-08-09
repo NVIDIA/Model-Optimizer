@@ -28,7 +28,7 @@ try:
 except Exception:
     warn("Cannot find transformers package. Hugginface modules cannot be exported.")
 
-from modelopt.models import get_spec, hf_model_type, match_moe_block
+from modelopt.torch.models import get_spec, hf_model_type, list_all_possible, match_moe_block
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import import_plugin
 
@@ -311,7 +311,7 @@ def is_moe(module: nn.Module, model_type: str | None = None) -> bool:
     # Auto-detect common MoE patterns
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
-    # Non-standard MoE block names are per-model data (modelopt/models/*).
+    # Non-standard MoE block names are per-model data (modelopt/torch/models/*).
     if match_moe_block(module, model_type) is not None:
         return True
     # Structural detection: modules with router + experts (e.g. Gemma4TextDecoderLayer)
@@ -997,7 +997,7 @@ def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[s
     raise NotImplementedError(
         f"Cannot resolve expert linear names for MoE block {type(module).__name__!r} "
         f"(model type: {model_type!r}). Register a ModelSpec with moe_variants for "
-        "this model under modelopt/models/."
+        "this model under modelopt/torch/models/."
     )
 
 
@@ -1184,59 +1184,59 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
     """
     model_type = hf_model_type(model)
     synced = 0
-    unmatched_block_names: set[str] = set()
     for _, sub_module in model.named_modules():
-        if not (is_moe(sub_module) and hasattr(sub_module, "experts")):
+        if not (is_moe(sub_module, model_type) and hasattr(sub_module, "experts")):
             continue
         if not hasattr(sub_module.experts, "__iter__"):
             continue
-        # The gate/up pair comes from the model's own spec; a variant with no pair
-        # (non-gated or already-fused experts) needs no sync.
+        # The model's own spec gives the exact pair, and a variant that declares no
+        # pair (non-gated or already-fused experts) needs no sync at all.
+        #
+        # Blocks of unregistered families still reach this loop: quantization admits
+        # MoE blocks structurally (see _is_sparse_sequaential_moe_block), so models
+        # like Olmoe/Jamba/MiniMax get here without a ModelSpec. Those fall back to
+        # every declared gate/up naming, which is what this function did before the
+        # registry existed. Skipping them instead would silently leave the two halves
+        # of the fused gate_up_proj on inconsistent weight_scale_2 -- exactly the
+        # corruption this function exists to prevent.
         variant = match_moe_block(sub_module, model_type)
-        if variant is None:
-            unmatched_block_names.add(type(sub_module).__name__)
+        if variant is not None and variant.gate_up_pair is None:
             continue
-        if variant.gate_up_pair is None:
-            continue
-        gate_name, up_name = variant.gate_up_pair
-        for expert in sub_module.experts:
-            gate_linear = getattr(expert, gate_name, None)
-            up_linear = getattr(expert, up_name, None)
-            if gate_linear is None or up_linear is None:
-                continue
-            gate_wq = getattr(gate_linear, "weight_quantizer", None)
-            up_wq = getattr(up_linear, "weight_quantizer", None)
-            if gate_wq is None or up_wq is None:
-                continue
-            gate_amax = getattr(gate_wq, "amax", None)
-            up_amax = getattr(up_wq, "amax", None)
-            if gate_amax is None or up_amax is None:
-                continue
-            # Meta tensors have no storage (e.g. CPU-offloaded experts that
-            # were never activated during calibration). Skip — there is no
-            # real amax data to sync.
-            if gate_amax.is_meta or up_amax.is_meta:
-                warn(
-                    f"Skipping gate/up amax sync for expert with meta tensors "
-                    f"(gate_amax.is_meta={gate_amax.is_meta}, "
-                    f"up_amax.is_meta={up_amax.is_meta}). "
-                    f"This typically means the expert was CPU-offloaded and "
-                    f"not activated during calibration."
-                )
-                continue
-            if not torch.equal(gate_amax, up_amax):
-                shared_amax = torch.max(gate_amax, up_amax)
-                gate_wq.amax = shared_amax
-                up_wq.amax = shared_amax.clone()
-                synced += 1
-    if unmatched_block_names:
-        warn(
-            f"MoE blocks {sorted(unmatched_block_names)} have no registered MoESpec; "
-            "gate/up weight amax sync was skipped for them. If these models have "
-            "gated experts with separate gate/up projections, register a MoESpec "
-            "with gate_up_pair under modelopt/models/ so the fused "
-            "gate_up_proj weight scales stay consistent when serving."
+        candidate_pairs = (
+            (variant.gate_up_pair,) if variant is not None else list_all_possible("gate_up_pairs")
         )
+        for expert in sub_module.experts:
+            for gate_name, up_name in candidate_pairs:
+                gate_linear = getattr(expert, gate_name, None)
+                up_linear = getattr(expert, up_name, None)
+                if gate_linear is None or up_linear is None:
+                    continue
+                gate_wq = getattr(gate_linear, "weight_quantizer", None)
+                up_wq = getattr(up_linear, "weight_quantizer", None)
+                if gate_wq is None or up_wq is None:
+                    break
+                gate_amax = getattr(gate_wq, "amax", None)
+                up_amax = getattr(up_wq, "amax", None)
+                if gate_amax is None or up_amax is None:
+                    break
+                # Meta tensors have no storage (e.g. CPU-offloaded experts that
+                # were never activated during calibration). Skip — there is no
+                # real amax data to sync.
+                if gate_amax.is_meta or up_amax.is_meta:
+                    warn(
+                        f"Skipping gate/up amax sync for expert with meta tensors "
+                        f"(gate_amax.is_meta={gate_amax.is_meta}, "
+                        f"up_amax.is_meta={up_amax.is_meta}). "
+                        f"This typically means the expert was CPU-offloaded and "
+                        f"not activated during calibration."
+                    )
+                    break
+                if not torch.equal(gate_amax, up_amax):
+                    shared_amax = torch.max(gate_amax, up_amax)
+                    gate_wq.amax = shared_amax
+                    up_wq.amax = shared_amax.clone()
+                    synced += 1
+                break
     return synced
 
 

@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
-from modelopt.models import hf_model_type
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
 from modelopt.torch.quantization.nn import (

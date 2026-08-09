@@ -13,12 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the per-model spec registry (modelopt.models)."""
+"""Unit tests for the per-model spec registry (modelopt.torch.models)."""
+
+from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.nn as nn
 
-from modelopt.models import (
+from modelopt.torch.export.layer_utils import (
+    get_expert_linear_names,
+    get_experts_list,
+    is_moe,
+    sync_moe_gate_up_amax,
+)
+from modelopt.torch.export.quant_utils import _layernorm_uses_weight_plus_one
+from modelopt.torch.models import (
     ModelSpec,
     MoEVariant,
     get_spec,
@@ -27,14 +37,7 @@ from modelopt.models import (
     list_all_possible,
     match_moe_block,
 )
-from modelopt.models.registry import _SPECS
-from modelopt.torch.export.layer_utils import (
-    get_expert_linear_names,
-    get_experts_list,
-    is_moe,
-    sync_moe_gate_up_amax,
-)
-from modelopt.torch.export.quant_utils import _layernorm_uses_weight_plus_one
+from modelopt.torch.models.registry import _SPECS
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
@@ -181,6 +184,20 @@ def test_list_all_possible_rejects_unknown_attr():
         list_all_possible("no_such_field")
 
 
+def test_list_all_possible_rejects_scalar_attr():
+    # model_type is a str: iterating it would yield characters, not values.
+    with pytest.raises(ValueError, match="expects a tuple-valued attribute"):
+        list_all_possible("model_type")
+
+
+def test_list_all_possible_handles_unhashable_items():
+    # MoEVariant is a mutable dataclass and therefore unhashable; deduplication must
+    # not go through set()/dict.fromkeys().
+    variants = list_all_possible("moe_variants")
+    assert variants
+    assert all(isinstance(v, MoEVariant) for v in variants)
+
+
 def test_weight_plus_one_norm_names_cover_legacy():
     names = set(list_all_possible("weight_plus_one_norm_names"))
     assert {"GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm", "LayerNorm1P"} <= names
@@ -212,8 +229,6 @@ class _FakeQuantizer:
 
 
 def _make_gated_block(block_cls, gate_name, up_name, gate_amax, up_amax):
-    import torch
-
     class _Expert(nn.Module):
         def __init__(self):
             super().__init__()
@@ -228,8 +243,6 @@ def _make_gated_block(block_cls, gate_name, up_name, gate_amax, up_amax):
 
 
 def test_sync_moe_gate_up_amax_uses_own_spec():
-    import torch
-
     class Qwen3MoeSparseMoeBlock(nn.Module):
         pass
 
@@ -243,15 +256,46 @@ def test_sync_moe_gate_up_amax_uses_own_spec():
     assert torch.equal(expert.up_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
 
 
-def test_sync_moe_gate_up_amax_warns_on_unmatched_block():
+def test_sync_moe_gate_up_amax_falls_back_for_unmatched_block():
     class UnknownSparseMoeBlock(nn.Module):
         """Passes is_moe by naming convention but has no MoESpec."""
 
+    # Quantization admits MoE blocks structurally, so unregistered families reach
+    # this function. They must still sync: skipping them would leave the two halves
+    # of the fused gate_up_proj on inconsistent weight_scale_2, which is exactly the
+    # corruption this function exists to prevent. Pre-registry behavior tried every
+    # known gate/up naming; that fallback is preserved.
     model = nn.Module()
-    model.moe = _make_gated_block(UnknownSparseMoeBlock, "gate_proj", "up_proj", [1.0], [2.0])
-    # No spec -> no cross-model guessing: nothing synced, one warning.
-    with pytest.warns(UserWarning, match="no registered MoESpec"):
-        assert sync_moe_gate_up_amax(model) == 0
+    model.moe = _make_gated_block(
+        UnknownSparseMoeBlock, "gate_proj", "up_proj", [1.0, 3.0], [2.0, 2.0]
+    )
+    assert sync_moe_gate_up_amax(model) == 1
+    expert = model.moe.experts[0]
+    assert torch.equal(expert.gate_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
+    assert torch.equal(expert.up_proj.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
+
+
+def test_sync_moe_gate_up_amax_fallback_covers_w1_w3_naming():
+    class UnknownSparseMoeBlock(nn.Module):
+        pass
+
+    # The fallback vocabulary is every declared pair, not just gate_proj/up_proj.
+    model = nn.Module()
+    model.moe = _make_gated_block(UnknownSparseMoeBlock, "w1", "w3", [1.0, 3.0], [2.0, 2.0])
+    assert sync_moe_gate_up_amax(model) == 1
+    assert torch.equal(model.moe.experts[0].w1.weight_quantizer.amax, torch.tensor([2.0, 3.0]))
+
+
+def test_sync_moe_gate_up_amax_skips_variant_without_gate_up_pair():
+    # A registered variant that declares no pair (non-gated or already-fused experts)
+    # must NOT fall back to the global vocabulary -- its spec already says "no sync".
+    class NemotronHMOE(nn.Module):
+        pass
+
+    model = nn.Module()
+    model.moe = _make_gated_block(NemotronHMOE, "gate_proj", "up_proj", [1.0, 3.0], [2.0, 2.0])
+    model.config = SimpleNamespace(model_type="nemotron_h")
+    assert sync_moe_gate_up_amax(model) == 0
 
 
 def test_match_moe_block_scope_prefers_own_model_type():
@@ -336,8 +380,6 @@ def test_gemma4_both_root_types_resolve():
 
 
 def test_hf_model_type_accepts_model_or_config():
-    from types import SimpleNamespace
-
     config = SimpleNamespace(model_type="qwen3_moe")
     model = SimpleNamespace(config=config)
     assert hf_model_type(model) == "qwen3_moe"
@@ -461,7 +503,7 @@ EXPECTED_MOE_VARIANTS = [
     (
         # has_iterable_experts is False to match pre-refactor behavior: the legacy
         # get_experts_list keyed off the root class name and "qwen3_5moeforcausallm"
-        # matched none of its qwen substrings. See modelopt/models/qwen3_5_moe.py.
+        # matched none of its qwen substrings. See modelopt/torch/models/qwen3_5_moe.py.
         "qwen3_5_moe",
         ("Qwen3_5MoeSparseMoeBlock",),
         ("gate_proj", "down_proj", "up_proj"),

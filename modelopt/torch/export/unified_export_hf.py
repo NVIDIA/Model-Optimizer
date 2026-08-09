@@ -30,7 +30,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from modelopt.models import hf_model_type
+from modelopt.torch.models import hf_model_type
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 

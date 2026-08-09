@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from modelopt.models import list_all_possible
+from modelopt.torch.models import list_all_possible
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
