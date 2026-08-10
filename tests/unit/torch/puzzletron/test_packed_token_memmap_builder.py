@@ -28,7 +28,8 @@ from examples.puzzletron.tools import build_packed_token_memmap
     "option",
     ["--num-samples", "--seq-length", "--workers", "--tokenize-batch-size"],
 )
-def test_cli_rejects_non_positive_numeric_inputs(tmp_path, monkeypatch, option):
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_cli_rejects_non_positive_numeric_inputs(tmp_path, monkeypatch, option, invalid_value):
     arguments = [
         "build_packed_token_memmap.py",
         "--dataset-path",
@@ -46,7 +47,7 @@ def test_cli_rejects_non_positive_numeric_inputs(tmp_path, monkeypatch, option):
         "--tokenize-batch-size",
         "1",
     ]
-    arguments[arguments.index(option) + 1] = "0"
+    arguments[arguments.index(option) + 1] = invalid_value
     monkeypatch.setattr(sys, "argv", arguments)
 
     with pytest.raises(SystemExit) as error:
