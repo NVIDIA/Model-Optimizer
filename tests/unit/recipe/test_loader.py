@@ -1881,3 +1881,75 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
+
+
+# ---------------------------------------------------------------------------
+# AutoQuantize latency cost-model schema
+# ---------------------------------------------------------------------------
+
+
+def test_autoquantize_constraints_latency_to_mtq():
+    from modelopt.recipe.config import AutoQuantizeConstraints
+
+    c = AutoQuantizeConstraints(
+        cost_model="latency",
+        latency={"relative_to_min": 1.2},
+        cost={"lut_path": "/tmp/lut.csv", "deployment_profile": "b100_tp1_ep1_decode", "m": 1},
+    )
+    out = c.to_mtq_constraints()
+    assert out["cost_model"] == "latency"
+    assert "effective_bits" not in out
+    assert out["latency"] == {"relative_to_min": 1.2}
+    assert out["cost"] == {
+        "lut_path": "/tmp/lut.csv",
+        "deployment_profile": "b100_tp1_ep1_decode",
+        "m": 1,
+    }
+
+
+def test_autoquantize_constraints_effective_bits_to_mtq_unchanged():
+    from modelopt.recipe.config import AutoQuantizeConstraints
+
+    c = AutoQuantizeConstraints(
+        effective_bits=6.0, cost_model="active_moe", cost={"active_moe_expert_ratio": 0.03125}
+    )
+    out = c.to_mtq_constraints()
+    assert out == {
+        "effective_bits": 6.0,
+        "cost_model": "active_moe",
+        "cost": {"active_moe_expert_ratio": 0.03125},
+    }
+    assert "latency" not in out
+
+
+def test_autoquantize_constraints_latency_requires_fields():
+    import pytest
+
+    from modelopt.recipe.config import AutoQuantizeConstraints
+
+    with pytest.raises(ValueError, match="latency"):
+        AutoQuantizeConstraints(cost_model="latency")  # no latency block, no cost
+    with pytest.raises(ValueError, match=r"lut_path|deployment_profile|m"):
+        AutoQuantizeConstraints(cost_model="latency", latency={"relative_to_min": 1.2})
+
+
+def test_autoquantize_constraints_latency_block_rejected_for_other_cost_models():
+    import pytest
+
+    from modelopt.recipe.config import AutoQuantizeConstraints
+
+    with pytest.raises(ValueError, match="only valid with cost_model: latency"):
+        AutoQuantizeConstraints(cost_model="weight", latency={"relative_to_min": 1.2})
+
+
+def test_autoquantize_constraints_relative_to_min_lower_bound():
+    import pytest
+
+    from modelopt.recipe.config import AutoQuantizeConstraints
+
+    with pytest.raises(ValueError, match="relative_to_min"):
+        AutoQuantizeConstraints(
+            cost_model="latency",
+            latency={"relative_to_min": 0.9},
+            cost={"lut_path": "/tmp/lut.csv", "deployment_profile": "p", "m": 1},
+        )

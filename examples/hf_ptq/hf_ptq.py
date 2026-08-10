@@ -348,7 +348,7 @@ def _mtq_inputs_from_auto_quantize_config(
     and candidate cost come entirely from the recipe (no model introspection). KV cache falls back
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
-    constraints = aq_config.constraints.model_dump(exclude_none=True)
+    constraints = aq_config.constraints.to_mtq_constraints()
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
     # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
     # disabled_layers, which removes them from the search.
