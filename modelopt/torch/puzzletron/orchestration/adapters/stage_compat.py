@@ -65,6 +65,8 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
             patterns.append("subblock_library.json")
         return tuple(patterns)
     if stage_id == "tokenize_data":
+        if not (config.get("tokenize_data") or {}).get("caches"):
+            return ()
         return ("dataset_cache/*.tokens", "dataset_cache/*.tokens.json")
     if stage_id == "slicing_sanity":
         slicing = config.get("slicing_sanity") or {}

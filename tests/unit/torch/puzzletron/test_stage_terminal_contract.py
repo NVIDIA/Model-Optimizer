@@ -231,12 +231,18 @@ def test_enabled_tokenize_data_stage_accepts_empty_cache_set(tmp_path):
         convert={"teacher_dir": str(tmp_path / "ckpts" / "teacher")},
         tokenize_data={"enabled": True, "caches": []},
     )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("{}\n")
+    _write_successful_convert_result(tmp_path, config)
+    puzzletron_main._mark_completion(config, config_path, "convert")
 
     result = tokenize_data_module.tokenize_data_stage(config)
     _validate_worker_result(config, result)
+    puzzletron_main._mark_completion(config, config_path, "tokenize_data")
 
     assert result.status == "success"
     assert stage_is_complete(config, "tokenize_data")
+    assert _completion_is_valid(config, config_path, "tokenize_data")
 
 
 @pytest.mark.parametrize(
