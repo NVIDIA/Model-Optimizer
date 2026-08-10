@@ -128,6 +128,47 @@ def test_default_worker_emits_accepted_disabled_tokenize_data_skip(tmp_path, mon
     assert _completion_is_valid(config, args.config, "tokenize_data")
 
 
+def test_worker_refreshes_report_before_rejecting_failed_result(tmp_path, monkeypatch):
+    config = _config(tmp_path, sort_sanity={"enabled": True})
+    manifest_path = tmp_path / "manifests" / "sort_sanity.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "stage": "sort_sanity",
+                "status": "failed",
+                "config": config,
+            }
+        )
+        + "\n"
+    )
+    result = StageResult("sort_sanity", "failed", manifest_path, "failed")
+    refreshed = []
+    monkeypatch.setattr(
+        puzzletron_main.mtpz.pipeline_config,
+        "pipeline_config_from_path",
+        lambda *_args, **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        puzzletron_main.mtpz.stage_runner,
+        "run_stage",
+        lambda *_args, **_kwargs: result,
+    )
+    monkeypatch.setattr(puzzletron_main, "refresh_campaign_report", refreshed.append)
+    args = SimpleNamespace(
+        config=tmp_path / "config.yaml",
+        override=(),
+        scenario_child=False,
+        gpus_per_node=None,
+        worker_stage="sort_sanity",
+    )
+
+    with pytest.raises(RuntimeError, match="invalid terminal manifest"):
+        puzzletron_main._run_worker(args)
+
+    assert refreshed == [config]
+
+
 def test_direct_tokenize_data_stage_emits_typed_disabled_skip(tmp_path):
     result = tokenize_data_module.tokenize_data_stage(_config(tmp_path))
 

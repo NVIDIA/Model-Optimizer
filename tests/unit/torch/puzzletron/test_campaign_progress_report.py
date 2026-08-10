@@ -70,6 +70,35 @@ def test_pipeline_state_uses_artifacts_and_completed_takes_precedence(tmp_path: 
     assert _pipeline_state(tmp_path, bypass, {"bypass": {"enabled": False}}) == "completed"
 
 
+def test_pipeline_state_uses_registry_enablement(tmp_path: Path):
+    tokenize_data = STAGE_REGISTRY["tokenize_data"]
+    width_sanity = STAGE_REGISTRY["width_sanity"]
+
+    assert _pipeline_state(tmp_path, tokenize_data, {}) == "disabled"
+    assert (
+        _pipeline_state(
+            tmp_path,
+            width_sanity,
+            {
+                "sort_sanity": {"enabled": False},
+                "width_sanity": {"enabled": True},
+            },
+        )
+        == "disabled"
+    )
+    assert (
+        _pipeline_state(
+            tmp_path,
+            width_sanity,
+            {
+                "sort_sanity": {"enabled": True},
+                "width_sanity": {"enabled": True},
+            },
+        )
+        == "pending"
+    )
+
+
 def _disabled_bypass_report(tmp_path: Path) -> str:
     config = {
         "display_name": "Example Experiment",

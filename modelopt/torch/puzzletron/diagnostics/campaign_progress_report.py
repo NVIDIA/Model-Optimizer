@@ -32,6 +32,7 @@ from ..stages.graph import (
     configured_parent_stage_ids,
     configured_stage_ids,
     stage_display_name,
+    stage_is_enabled,
 )
 from .report_section_cache import (
     ReportSectionCache,
@@ -186,12 +187,7 @@ def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
         return "disabled"
     if _stage_artifact_present(root, spec):
         return "completed"
-    section = config.get(spec.stage_id)
-    if (
-        not spec.required
-        and isinstance(section, dict)
-        and section.get("enabled") is False
-    ):
+    if not stage_is_enabled(spec.stage_id, config):
         return "disabled"
     return "pending"
 

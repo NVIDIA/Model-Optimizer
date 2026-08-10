@@ -416,6 +416,8 @@ def _run_worker(args: argparse.Namespace) -> None:
             outputs["base_manifest"] = str(result.manifest_path)
             result = _complete_composite_stage(cfg, args.worker_stage, outputs)
     if int(os.environ.get("RANK", "0")) == 0:
+        if result.status == "failed":
+            refresh_campaign_report(cfg)
         _validate_worker_result(cfg, result, expected_stage=args.worker_stage)
     refresh_campaign_report(cfg)
     mtpz.tools.mprint(
