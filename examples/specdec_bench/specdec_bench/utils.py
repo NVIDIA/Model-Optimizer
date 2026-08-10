@@ -17,9 +17,11 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+from warnings import warn as _warn
 
 from transformers import AutoTokenizer
 
@@ -32,13 +34,18 @@ _SENSITIVE_SUBSTRINGS = ("token", "key", "secret", "password")
 _SENSITIVE_KEY_ALLOWLIST = frozenset(
     {"tokenizer", "tokenizer_path", "tokenizer_mode", "tokenizer_revision"}
 )
-# A bare substring match over `token` also swallows engine config: the serving
-# config alone contributes num_speculative_tokens, max_num_batched_tokens,
+# Names that are credentials outright, whatever they hold. These redact on the
+# name alone: a numeric or boolean value is no proof of safety, and treating one
+# as such would persist e.g. an all-digit token.
+_ALWAYS_SENSITIVE_SUBSTRINGS = ("hf_token", "api_key", "access_key", "secret", "password")
+# The remaining substrings are ambiguous rather than damning: a bare match over
+# `token` also swallows engine config, where the serving config alone
+# contributes num_speculative_tokens, max_num_batched_tokens,
 # skip_tokenizer_init and a dozen similar knobs, none of them credentials.
-# Enumerating them doesn't hold — the set grows with every engine release — so
-# redact on VALUE SHAPE instead: a credential is a non-trivial string, whereas
-# these knobs are ints, bools, and None. `hf_token` still redacts because its
-# value is a string.
+# Enumerating those doesn't hold — the set grows with every engine release — so
+# for the ambiguous names only, a scalar value (int / bool / None) is taken as
+# evidence the field is a knob and kept. A string still redacts, because that is
+# the shape a credential takes.
 _NON_SECRET_VALUE_TYPES = (bool, int, float, type(None))
 
 
@@ -218,19 +225,44 @@ def _checkpoint_provenance(model_dir):
 
 _UNSET = object()
 
+# `<org>/<name>`, the shape of a Hub repo id. Deliberately excludes `:@?#` and
+# whitespace so a URL with embedded credentials (`https://user:tok@host/...`)
+# can't reach configuration.json through the environment.
+_HUB_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
+
+
+def _hub_model_id(env_var):
+    """Return `$env_var` if it looks like a Hub repo id, else None.
+
+    These ids are copied verbatim into configuration.json and published, so an
+    unset or malformed value is dropped rather than recorded. A rejected value
+    warns instead of raising: provenance metadata should never fail a benchmark
+    that has already run.
+    """
+    raw = (os.environ.get(env_var) or "").strip()
+    if not raw:
+        return None
+    if not _HUB_MODEL_ID_RE.match(raw):
+        _warn(f"{env_var} is not an <org>/<name> Hub id; omitting it from configuration.json")
+        return None
+    return raw
+
 
 def _is_sensitive_key(key, value=_UNSET):
     """Whether `key` names a secret.
 
-    Pass `value` when it is available: a name that looks sensitive but holds an
-    int / bool / None is engine config, not a credential. Callers that only
-    have the name (e.g. argv scanning) omit it and get the name-only verdict.
+    Names in `_ALWAYS_SENSITIVE_SUBSTRINGS` redact unconditionally. For the
+    merely ambiguous ones, pass `value` when it is available: a scalar rules the
+    field an engine knob rather than a credential. Callers that only have the
+    name (e.g. argv scanning) omit it and every match redacts.
     """
     # Engine configs can carry non-string dict keys (e.g. int layer ids in a
     # serving_config); those are never sensitive field *names*, so skip them.
     if not isinstance(key, str):
         return False
     klow = key.lower()
+    if any(s in klow for s in _ALWAYS_SENSITIVE_SUBSTRINGS):
+        return True
     if klow in _SENSITIVE_KEY_ALLOWLIST:
         return False
     if not any(s in klow for s in _SENSITIVE_SUBSTRINGS):
@@ -304,14 +336,18 @@ def dump_env(args, save_dir, overrides=None):
     if overrides:
         config.update(_redact_config(overrides))
 
-    # Effective speculation width, resolved from whichever flag the algorithm
-    # uses. DFLASH takes --block_size (= draft_length + 1) and leaves
-    # --draft_length at its default, so recording the raw args makes a
-    # block_size=8 DFLASH run look like draft_length=3. Consumers should read
-    # this field rather than re-deriving it from the two flags.
+    # The speculation width the engine was actually given, resolved from
+    # whichever flag the algorithm reads. DFLASH is configured by --block_size
+    # and ignores --draft_length, which stays at its default, so recording the
+    # raw args makes a block_size=8 DFLASH run look like draft_length=3.
+    #
+    # The value is the engine's `num_speculative_tokens` verbatim, not the
+    # count of draft tokens: models/vllm.py passes block_size straight through
+    # for DFLASH, and draft_length straight through otherwise. Consumers should
+    # read this field rather than re-deriving it from the two flags.
     block_size = getattr(args, "block_size", None)
     config["num_speculative_tokens"] = (
-        block_size - 1 if block_size is not None else getattr(args, "draft_length", None)
+        block_size if block_size is not None else getattr(args, "draft_length", None)
     )
 
     config["engine_version"] = _get_engine_version(config.get("engine"))
@@ -348,13 +384,13 @@ def dump_env(args, save_dir, overrides=None):
     # runs. The harness sets JIRA_TICKET only after verifying the checkpoint
     # resolves on Hub; standalone runs leave both empty.
     config["jira_ticket"] = os.environ.get("JIRA_TICKET") or None
-    config["huggingface_model_id"] = os.environ.get("HUGGINGFACE_MODEL_ID") or None
+    config["huggingface_model_id"] = _hub_model_id("HUGGINGFACE_MODEL_ID")
     # Hub id of the external draft checkpoint, for algorithms that use one
     # (EAGLE3 / DRAFT_TARGET / DFLASH / DSPARK). `draft_model_dir` only records
     # a local path, which says nothing about which published drafter ran — two
     # drafters for the same verifier are otherwise indistinguishable. Empty for
     # in-model drafts (MTP heads).
-    config["draft_huggingface_model_id"] = os.environ.get("DRAFT_HUGGINGFACE_MODEL_ID") or None
+    config["draft_huggingface_model_id"] = _hub_model_id("DRAFT_HUGGINGFACE_MODEL_ID")
 
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "configuration.json"), "w") as f:

@@ -70,6 +70,21 @@ class TestIsSensitiveKey:
     def test_string_and_container_values_still_redact(self, value):
         assert _is_sensitive_key("hf_token", value) is True
 
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("hf_token", 1234),
+            ("api_key", 99),
+            ("aws_secret_access_key", 0),
+            ("password", True),
+            ("hf_token", None),
+        ],
+    )
+    def test_credential_names_ignore_value_shape(self, key, value):
+        """An all-digit token is still a token. The scalar exception applies
+        only to names that are ambiguous, never to outright credentials."""
+        assert _is_sensitive_key(key, value) is True
+
     def test_name_only_call_keeps_legacy_verdict(self):
         """Callers with no value in hand (argv scanning) must still redact."""
         assert _is_sensitive_key("hf_token") is True
