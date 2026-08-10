@@ -78,7 +78,7 @@ pipeline:
       - --micro-batch-size 1 --global-batch-size 16
       - --train-samples 6400
       - --lr-decay-samples 6400
-      - --lr-warmup-samples 320
+      - --lr-warmup-samples 0
       - --split 99,1,0
       - --finetune-data-split chat
       - --finetune-data-files data/chat-00000-of-00012.parquet
@@ -93,8 +93,8 @@ pipeline:
       - --sequence-parallel
       - --ckpt-fully-parallel-load --ckpt-fully-parallel-save
       # Optimizer
-      - --lr 1.0e-5 --min-lr 1.0e-6
-      - --lr-decay-style cosine
+      - --lr 5.0e-6
+      - --lr-decay-style constant
       - --clip-grad 1.0 --weight-decay 0.0
       - --adam-beta1 0.9 --adam-beta2 0.95
       - --init-method-std 0.010
