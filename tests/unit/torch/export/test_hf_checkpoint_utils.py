@@ -313,6 +313,80 @@ def test_sanitize_hf_config_for_deployment_ignores_broad_mtp_prefix_only():
     assert config_data["layer_types"] == ["full_attention", "linear_attention", "nextn_predict"]
 
 
+def test_sanitize_hf_config_for_deployment_restores_nemotron_h_legacy_schema():
+    """Reconstruct hybrid_override_pattern/num_hidden_layers from layers_block_type.
+
+    transformers' native NemotronHConfig (registered as model_type "nemotron_h")
+    stores layer types as a list and derives hybrid_override_pattern/num_hidden_layers
+    as read-only properties, so plain to_dict() serialization drops both. Many
+    NemotronH checkpoints on the Hub still ship their own older, bundled
+    trust_remote_code configuration_nemotron_h.py that expects the opposite schema
+    (hybrid_override_pattern/num_hidden_layers as real fields, layers_block_type as a
+    computed property with no setter) -- loading such a checkpoint's config.json back
+    through its own bundled class then fails. Reproduced on a real
+    nvidia/Nemotron-Cascade-2-30B-A3B NVFP4 export three times in a row.
+    """
+    config_data = {
+        "model_type": "nemotron_h",
+        "layers_block_type": [
+            "linear_attention",
+            "moe",
+            "full_attention",
+            "mlp",
+        ],
+        "mtp_layers_block_type": ["full_attention", "moe"],
+    }
+
+    sanitize_hf_config_for_deployment(config_data, model=SimpleNamespace())
+
+    assert config_data["hybrid_override_pattern"] == "ME*-"
+    assert config_data["num_hidden_layers"] == 4
+    assert "layers_block_type" not in config_data
+    assert "mtp_layers_block_type" not in config_data
+
+
+def test_sanitize_hf_config_for_deployment_ignores_non_nemotron_h_layers_block_type():
+    """Only NemotronH's specific legacy-schema gap is patched, not other models."""
+    config_data = {
+        "model_type": "some_other_model",
+        "layers_block_type": ["full_attention", "mlp"],
+    }
+
+    sanitize_hf_config_for_deployment(config_data, model=SimpleNamespace())
+
+    assert "hybrid_override_pattern" not in config_data
+    assert config_data["layers_block_type"] == ["full_attention", "mlp"]
+
+
+def test_sanitize_hf_config_for_deployment_leaves_nemotron_h_alone_if_already_legacy():
+    """No-op when config.json already carries hybrid_override_pattern (nothing dropped)."""
+    config_data = {
+        "model_type": "nemotron_h",
+        "hybrid_override_pattern": "M-*",
+        "num_hidden_layers": 3,
+    }
+
+    sanitize_hf_config_for_deployment(config_data, model=SimpleNamespace())
+
+    assert config_data["hybrid_override_pattern"] == "M-*"
+    assert config_data["num_hidden_layers"] == 3
+    assert "layers_block_type" not in config_data
+
+
+def test_sanitize_hf_config_for_deployment_warns_on_unrecognized_nemotron_h_layer_type():
+    """Unknown layer-type strings should warn and leave config.json in the new schema."""
+    config_data = {
+        "model_type": "nemotron_h",
+        "layers_block_type": ["full_attention", "some_future_block_type"],
+    }
+
+    with pytest.warns(UserWarning, match="Cannot reconstruct"):
+        sanitize_hf_config_for_deployment(config_data, model=SimpleNamespace())
+
+    assert "hybrid_override_pattern" not in config_data
+    assert config_data["layers_block_type"] == ["full_attention", "some_future_block_type"]
+
+
 def test_sanitize_hf_config_for_deployment_keeps_unexplained_layer_type_mismatch():
     """Do not rewrite config when extra layer types are not explained by nextn metadata."""
     config_data = {

@@ -106,6 +106,63 @@ def _sanitize_llama3_rope_config(config_data: dict[str, Any], model: Any) -> Non
             rope_config["rope_theta"] = rope_theta
 
 
+# transformers' native NemotronHConfig (registered as model_type "nemotron_h") stores
+# layer types as a list and derives ``hybrid_override_pattern``/``num_hidden_layers`` as
+# read-only properties (transformers/models/nemotron_h/configuration_nemotron_h.py).
+# Plain ``to_dict()`` serialization -- used by ``save_pretrained`` -- only captures
+# ``__dict__``, so neither property makes it into the exported config.json. Many
+# NemotronH checkpoints on the Hub (e.g. nvidia/Nemotron-Cascade-2-30B-A3B) still ship
+# their own older, bundled trust_remote_code configuration_nemotron_h.py written against
+# the *opposite* schema: ``hybrid_override_pattern``/``num_hidden_layers`` as real
+# fields, with ``layers_block_type`` as a computed property that has no setter. Loading
+# such a checkpoint's exported config.json back through its own bundled class then fails
+# (or, if it doesn't fail outright, silently loses the pattern/layer-count metadata).
+# Reproduced three times in a row on real nvidia/Nemotron-Cascade-2-30B-A3B NVFP4
+# exports. This mapping is the exact inverse of transformers' own
+# ``NemotronHConfig._list_to_pattern``, so it reconstructs precisely what a native
+# transformers load would have derived.
+_NEMOTRON_H_PATTERN_CHAR_BY_LAYER_TYPE = {
+    "linear_attention": "M",
+    "moe": "E",
+    "full_attention": "*",
+    "mlp": "-",
+}
+
+
+def _restore_nemotron_h_legacy_schema_if_dropped(config_data: dict[str, Any]) -> None:
+    """Reconstruct NemotronH's legacy ``hybrid_override_pattern``/``num_hidden_layers``.
+
+    No-op for anything but a NemotronH export (``model_type == "nemotron_h"``), and a
+    no-op if ``hybrid_override_pattern`` is already present (nothing was dropped). If
+    ``layers_block_type`` contains a value outside the four known block types, this
+    warns and leaves ``config.json`` in the new schema rather than guessing.
+    """
+    if config_data.get("model_type") != "nemotron_h":
+        return
+    layer_types = config_data.get("layers_block_type")
+    if not isinstance(layer_types, list) or "hybrid_override_pattern" in config_data:
+        return
+
+    try:
+        pattern = "".join(
+            _NEMOTRON_H_PATTERN_CHAR_BY_LAYER_TYPE[layer_type] for layer_type in layer_types
+        )
+    except KeyError as e:
+        warnings.warn(
+            f"Cannot reconstruct NemotronH's legacy hybrid_override_pattern: unrecognized "
+            f"layers_block_type entry {e}. Leaving config.json in the new schema; a "
+            "bundled trust_remote_code configuration_nemotron_h.py written against the "
+            "legacy schema may fail to load it.",
+            stacklevel=2,
+        )
+        return
+
+    config_data["hybrid_override_pattern"] = pattern
+    config_data["num_hidden_layers"] = len(layer_types)
+    del config_data["layers_block_type"]
+    config_data.pop("mtp_layers_block_type", None)
+
+
 def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -> None:
     """Sanitize exported Hugging Face config metadata for deployment runtimes.
 
@@ -113,9 +170,13 @@ def sanitize_hf_config_for_deployment(config_data: dict[str, Any], model: Any) -
 
     * add missing llama3 ``rope_theta`` metadata when available;
     * trim trailing MTP/next-token-prediction ``layer_types`` entries only when
-      the mismatch is exactly explained by next-token-prediction metadata.
+      the mismatch is exactly explained by next-token-prediction metadata;
+    * reconstruct NemotronH's legacy ``hybrid_override_pattern``/``num_hidden_layers``
+      when a native-transformers export dropped them (see
+      :func:`_restore_nemotron_h_legacy_schema_if_dropped`).
     """
     _sanitize_llama3_rope_config(config_data, model)
+    _restore_nemotron_h_legacy_schema_if_dropped(config_data)
 
     num_hidden_layers = _as_nonnegative_int(config_data.get("num_hidden_layers"))
     layer_types = config_data.get("layer_types")
