@@ -260,9 +260,10 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
                 # Remove None values
                 call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
 
-                # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
-                # For other VLMs (like Nemotron-Parse), use standard forward
-                if hasattr(full_model, "img_context_token_id"):
+                # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style, which
+                # exposes `extract_feature`). Newer Nemotron omni models do the vision merge inside
+                # their own (device-safe) `forward` and have no `extract_feature` — call it directly.
+                if hasattr(full_model, "img_context_token_id") and hasattr(full_model, "extract_feature"):
                     safe_nemotron_vl_forward(full_model, call_kwargs)
                 else:
                     full_model(**call_kwargs)
