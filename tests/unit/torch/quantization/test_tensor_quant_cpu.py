@@ -332,6 +332,25 @@ def test_fold_weight_keep_attrs_keeps_amax(monkeypatch):
         unregister_quant_backend(backend_name)
 
 
+def test_fold_weight_skips_none_weight():
+    """A weight quantizer with no stored weight is skipped instead of crashing.
+
+    Megatron-Core tied-embedding output layers are built with
+    ``skip_weight_param_allocation``: the module stores ``weight = None`` and borrows the
+    embedding weight at forward time, while still carrying a ``weight_quantizer``.
+    ``fold_weight`` must skip the pair, leaving the quantizer intact for forward-time use.
+    """
+    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3))
+    qlinear.weight_quantizer.amax = torch.tensor(1.0)
+    expected_amax = qlinear.weight_quantizer.amax.detach().clone()
+    qlinear.register_parameter("weight", None)
+
+    qlinear.fold_weight()  # must not raise
+
+    assert qlinear.weight_quantizer.is_enabled
+    assert torch.equal(qlinear.weight_quantizer.amax, expected_amax)
+
+
 WINT4INT8_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},

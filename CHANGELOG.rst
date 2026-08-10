@@ -25,6 +25,7 @@ Changelog
 
 **Bug Fixes**
 
+- Fix ``mtq.fold_weight`` crashing with ``AttributeError: 'NoneType' object has no attribute 'data'`` on Megatron-Core models with tied word embeddings: the tied ``output_layer`` (built with ``skip_weight_param_allocation``) stores ``weight = None`` and borrows the embedding weight at forward time, yet still carries a ``weight_quantizer``. Weight-quantizer pairs whose weight is not a stored tensor are now skipped and left untouched.
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 
 0.46 (2026-08-17)
