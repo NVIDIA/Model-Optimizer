@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Qwen3.6 MoE hardware-aware AutoQuantize (HAQ) — M=32 variant of
+# w4a16_nvfp4_fp8_latency-trtllm_m1.yaml. Identical disabled/cost-excluded layers and
+# candidates; only the latency lookup M changes (M=32 = larger flattened token count,
+# more compute-bound than the M=1 decode point), against the SAME TRT-LLM LUT. Comparing
+# M=1 vs M=32 shows how the latency-optimal allocation shifts as the workload leaves the
+# weight-memory-bound regime.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  fp8: configs/ptq/presets/model/fp8
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Qwen3.6 MoE HAQ: FP8 + NVFP4-weight-only + BF16 per-layer search minimizing accounted
+    TRT-LLM kernel latency at the M=32 profile (same LUT as the M=1 recipe).
+
+auto_quantize:
+  constraints:
+    cost_model: latency
+    latency:
+      relative_to_min: 1.2
+    cost:
+      lut_path: /home/scratch.juhim_coreai/code/dev_notes/Autoquant_research/outputs/qwen36_sm100_tp1_ep1_haq_latency_v1.csv
+      deployment_profile: qwen36_sm100_tp1_ep1_decode
+      m: 32
+
+  candidate_formats:
+    - $import: fp8
+    - $import: w4a16_nvfp4
+
+  auto_quantize_method: gradient
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+    - "*shared_expert_gate*"
+
+  cost_excluded_layers:
+    - "*visual*"
+    - "*mtp*"
+    - "*vision_tower*"
+    - "*linear_attn.conv1d*"
+    - "*shared_expert_gate*"
+    - "*lm_head*"
