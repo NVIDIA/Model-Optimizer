@@ -56,7 +56,10 @@ class TestIsSensitiveKey:
             ("max_num_batched_tokens", 8192),
             ("dbo_decode_token_threshold", 32),
             ("skip_tokenizer_init", False),
-            ("encoder_cudagraph_token_budgets", None),
+            ("spec_tokens", None),
+            # Real vLLM configs hold a list here, not a scalar.
+            ("encoder_cudagraph_token_budgets", [256, 512]),
+            ("encoder_cudagraph_token_budgets", []),
         ],
     )
     def test_engine_knobs_survive(self, key, value):
@@ -142,6 +145,16 @@ class TestRedactValue:
         assert spec["num_speculative_tokens"] == 8
         assert spec["target_model_config"]["skip_tokenizer_init"] is False
         assert spec["target_model_config"]["hf_token"] == REDACTED
+
+    def test_list_valued_knob_survives(self):
+        """A sensitive-key hit replaces the whole subtree, so a knob holding a
+        list of ints has to clear on its contents or it never recurses."""
+        out = _redact_value({"encoder_cudagraph_token_budgets": [256, 512]})
+        assert out["encoder_cudagraph_token_budgets"] == [256, 512]
+
+    def test_list_of_strings_under_credential_name_redacts(self):
+        out = _redact_value({"hf_token": ["abc", "def"]})
+        assert out["hf_token"] == REDACTED
 
 
 class TestRedactArgv:

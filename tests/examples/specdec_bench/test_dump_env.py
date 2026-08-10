@@ -32,6 +32,7 @@ def _args(**kw):
     base = {
         "engine": "VLLM",
         "model_dir": None,
+        "speculative_algorithm": "EAGLE3",
         "draft_length": 3,
         "block_size": None,
     }
@@ -46,9 +47,11 @@ def _dump(tmp_path, **kw):
 
 
 class TestNumSpeculativeTokens:
-    def test_draft_length_path(self, tmp_path):
-        """Algorithms that take --draft_length record it directly."""
-        assert _dump(tmp_path, draft_length=7)["num_speculative_tokens"] == 7
+    @pytest.mark.parametrize("algorithm", ["EAGLE3", "EAGLE", "MTP", "DRAFT_TARGET"])
+    def test_draft_length_path(self, tmp_path, algorithm):
+        """Algorithms configured by --draft_length record it directly."""
+        cfg = _dump(tmp_path, speculative_algorithm=algorithm, draft_length=7)
+        assert cfg["num_speculative_tokens"] == 7
 
     def test_block_size_path(self, tmp_path):
         """DFLASH takes --block_size and leaves --draft_length at its default,
@@ -56,15 +59,25 @@ class TestNumSpeculativeTokens:
 
         The recorded value matches what the engine receives: models/vllm.py
         passes block_size through as num_speculative_tokens unchanged."""
-        cfg = _dump(tmp_path, draft_length=3, block_size=8)
+        cfg = _dump(tmp_path, speculative_algorithm="DFLASH", draft_length=3, block_size=8)
         assert cfg["num_speculative_tokens"] == 8
         # The raw flags stay for provenance; only the derived field is
         # authoritative.
         assert cfg["draft_length"] == 3
         assert cfg["block_size"] == 8
 
-    def test_block_size_wins_over_draft_length(self, tmp_path):
-        assert _dump(tmp_path, draft_length=3, block_size=4)["num_speculative_tokens"] == 4
+    def test_none_algorithm_records_zero(self, tmp_path):
+        """--speculative_algorithm NONE speculates nothing, but --draft_length
+        still defaults to 3. Baselines are the rows most often joined against
+        specdec rows, so a phantom width there is worse than no width."""
+        cfg = _dump(tmp_path, speculative_algorithm="NONE", draft_length=3)
+        assert cfg["num_speculative_tokens"] == 0
+
+    def test_block_size_ignored_for_non_dflash(self, tmp_path):
+        """Only the DFLASH branches consume block_size as the width. Passing it
+        alongside EAGLE3 must not override the flag the engine actually read."""
+        cfg = _dump(tmp_path, speculative_algorithm="EAGLE3", draft_length=5, block_size=8)
+        assert cfg["num_speculative_tokens"] == 5
 
     def test_missing_attrs_do_not_raise(self, tmp_path):
         """dump_env is called from harnesses that build their own namespace."""
@@ -74,19 +87,20 @@ class TestNumSpeculativeTokens:
 
 
 class TestDraftHuggingfaceModelId:
-    def test_absent_by_default(self, tmp_path):
+    def test_absent_by_default(self, tmp_path, monkeypatch):
+        # Cleared explicitly: exporting this var is the documented way to run a
+        # benchmark, so reading the ambient environment would fail for anyone
+        # who does.
+        monkeypatch.delenv("DRAFT_HUGGINGFACE_MODEL_ID", raising=False)
         assert _dump(tmp_path)["draft_huggingface_model_id"] is None
 
     def test_read_from_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DRAFT_HUGGINGFACE_MODEL_ID", "org/Drafter-A")
         assert _dump(tmp_path)["draft_huggingface_model_id"] == "org/Drafter-A"
 
-    @pytest.mark.parametrize("value", ["", None, "   "])
+    @pytest.mark.parametrize("value", ["", "   "])
     def test_blank_normalizes_to_none(self, tmp_path, monkeypatch, value):
-        if value is None:
-            monkeypatch.delenv("DRAFT_HUGGINGFACE_MODEL_ID", raising=False)
-        else:
-            monkeypatch.setenv("DRAFT_HUGGINGFACE_MODEL_ID", value)
+        monkeypatch.setenv("DRAFT_HUGGINGFACE_MODEL_ID", value)
         assert _dump(tmp_path)["draft_huggingface_model_id"] is None
 
 

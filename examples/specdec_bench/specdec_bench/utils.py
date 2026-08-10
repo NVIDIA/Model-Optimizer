@@ -269,7 +269,20 @@ def _is_sensitive_key(key, value=_UNSET):
         return False
     if value is _UNSET:
         return True
-    return not isinstance(value, _NON_SECRET_VALUE_TYPES)
+    return not _is_non_secret_value(value)
+
+
+def _is_non_secret_value(value):
+    """Whether `value`'s shape rules out a credential.
+
+    Engine knobs are scalars or containers of them (a token-budget list is
+    `[256, 512]`). A credential is a non-trivial string, so a container is only
+    cleared when every leaf is itself non-secret; an empty one has nothing to
+    leak.
+    """
+    if isinstance(value, (list, tuple, set)):
+        return all(_is_non_secret_value(v) for v in value)
+    return isinstance(value, _NON_SECRET_VALUE_TYPES)
 
 
 def _redact_value(value):
@@ -336,19 +349,24 @@ def dump_env(args, save_dir, overrides=None):
     if overrides:
         config.update(_redact_config(overrides))
 
-    # The speculation width the engine was actually given, resolved from
-    # whichever flag the algorithm reads. DFLASH is configured by --block_size
-    # and ignores --draft_length, which stays at its default, so recording the
-    # raw args makes a block_size=8 DFLASH run look like draft_length=3.
+    # The speculation width the engine was actually given. Which flag carries
+    # it depends on the algorithm: DFLASH is configured by --block_size and
+    # ignores --draft_length (which stays at its default), so recording the raw
+    # args makes a block_size=8 DFLASH run look like draft_length=3.
     #
-    # The value is the engine's `num_speculative_tokens` verbatim, not the
-    # count of draft tokens: models/vllm.py passes block_size straight through
-    # for DFLASH, and draft_length straight through otherwise. Consumers should
-    # read this field rather than re-deriving it from the two flags.
-    block_size = getattr(args, "block_size", None)
-    config["num_speculative_tokens"] = (
-        block_size if block_size is not None else getattr(args, "draft_length", None)
-    )
+    # Keyed on the algorithm rather than on flag precedence so this stays in
+    # step with the engine branches in models/vllm.py, which forward exactly
+    # one flag per algorithm. The value is the engine's `num_speculative_tokens`
+    # verbatim. Consumers should read this field rather than re-deriving it.
+    algorithm = getattr(args, "speculative_algorithm", None)
+    if algorithm == "NONE":
+        # Measured with speculation off. 0 rather than None, which means the
+        # harness never passed a width at all.
+        config["num_speculative_tokens"] = 0
+    elif algorithm == "DFLASH":
+        config["num_speculative_tokens"] = getattr(args, "block_size", None)
+    else:
+        config["num_speculative_tokens"] = getattr(args, "draft_length", None)
 
     config["engine_version"] = _get_engine_version(config.get("engine"))
     config["gpu"] = _get_gpu_name()
