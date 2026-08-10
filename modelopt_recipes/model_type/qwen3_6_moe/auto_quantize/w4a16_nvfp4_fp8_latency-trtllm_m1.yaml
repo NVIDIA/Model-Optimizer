@@ -63,3 +63,10 @@ auto_quantize:
     - "*visual*"
     - "*mtp*"
     - "*vision_tower*"
+    # Latency-only: disabled ops the batch-size-1 kernel benchmark does not measure
+    # (small/fixed BF16, not part of the searched GEMM/MoE set). Excluded from the
+    # latency budget rather than requiring LUT rows, per the design's "explicit
+    # exclusions for groups not represented by the benchmark script".
+    - "*linear_attn.conv1d*"
+    - "*shared_expert_gate*"
+    - "*lm_head*"
