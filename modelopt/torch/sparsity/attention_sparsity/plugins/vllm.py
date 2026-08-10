@@ -47,6 +47,19 @@ from modelopt.torch.kernels.common.attention.triton_fa import attention as trito
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
 
 
+@functools.cache
+def _flash_attention_kv_cache_layout() -> str:
+    """Return the installed vLLM backend's K/V packing contract."""
+    cache_shape = FlashAttentionBackend.get_kv_cache_shape(3, 16, 1, 16)
+    if cache_shape == (2, 3, 16, 1, 16):
+        return "kv-first"
+    if cache_shape == (3, 2, 16, 1, 16):
+        return "blocks-first"
+    if cache_shape == (3, 1, 16, 32):
+        return "packed"
+    raise RuntimeError(f"Unsupported vLLM FlashAttention KV cache shape {cache_shape}")
+
+
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
     """Return target sparsity for a phase, defaulting old checkpoint metadata."""
     if isinstance(target_sparse_ratio, float | int):
@@ -514,7 +527,13 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         if resolved is None:
             return native_forward()
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        cache_layout = _flash_attention_kv_cache_layout()
+        if cache_layout == "kv-first":
+            key_cache, value_cache = kv_cache.unbind(0)
+        elif cache_layout == "blocks-first":
+            key_cache, value_cache = kv_cache.unbind(1)
+        else:
+            key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         is_decode_only = attn_metadata.max_query_len <= 1
         common_kw = {
             "layer": layer,
