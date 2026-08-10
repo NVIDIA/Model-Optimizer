@@ -271,6 +271,32 @@ def test_postprocess_name_based_keeps_alias_when_canonical_absent():
     assert "encoder.weight" in out
 
 
+def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
+    """A bidirectional map (A->B and B->A) must not delete BOTH sides (missing tensor).
+
+    Only an alias whose canonical is a *terminal* canonical (not itself an alias) is
+    dropped; a pathological bidirectional declaration keeps both keys so the loader is
+    never left without a tensor.
+    """
+
+    class _Bi(torch.nn.Module):
+        _tied_weights_keys = {r"^a\.weight$": "b.weight", r"^b\.weight$": "a.weight"}
+
+        def __init__(self):
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4, bias=False)
+            self.b = torch.nn.Linear(4, 4, bias=False)
+
+    resolver = TiedGroupResolver(_Bi())
+    # sanity: the map really is bidirectional at the prefix level
+    assert resolver.alias_prefix_pairs() == {"a": "b", "b": "a"}
+
+    sd = {"a.weight": torch.randn(4, 4), "b.weight": torch.randn(4, 4)}
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+
+    assert "a.weight" in out and "b.weight" in out  # neither side dropped
+
+
 def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
     """A container-level declared expert tie drops every per-expert alias key by name,
     keeping only the canonical subtree -- across distinct addresses (FSDP-safe)."""

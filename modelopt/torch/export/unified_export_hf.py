@@ -841,13 +841,20 @@ def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.
     return dtype
 
 
-def _prepare_moe_inputs(model: nn.Module, dtype: torch.dtype, is_modelopt_qlora: bool) -> None:
+def _prepare_moe_inputs(
+    model: nn.Module,
+    dtype: torch.dtype,
+    is_modelopt_qlora: bool,
+    resolver: "TiedGroupResolver | None" = None,
+) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
     Each MoE block is dispatched by its experts container to the matching preparation
     handler.
     """
-    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    prepare_ctx = ExportContext(
+        model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora, resolver=resolver
+    )
     for name, sub_module in model.named_modules():
         if is_moe(sub_module) and hasattr(sub_module, "experts"):
             handler = PrepareMoEInputsRegistry.match(sub_module.experts)
@@ -911,9 +918,9 @@ def _process_quantized_modules(
         resolver: Optional pre-built :class:`TiedGroupResolver` to reuse; built fresh
             from ``model`` when not provided.
     """
-    # Per-call MoE tied-weight dedup cache inside the context. Created fresh on
-    # every invocation so cache state is scoped to one export and cannot leak
-    # into a later call (see ExportContext).
+    # ExportContext carries the name-based TiedGroupResolver (reused when passed in, else
+    # built fresh per invocation). There is no per-module dedup cache; tied-weight
+    # duplicates are dropped by name in postprocess_state_dict.
     ctx = ExportContext(
         model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora, resolver=resolver
     )
@@ -960,7 +967,12 @@ def _export_transformers_checkpoint(
         NotImplementedError: if the model has accelerate offload hooks.
     """
     dtype = _resolve_export_dtype(model, dtype)
-    _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
+    # One name-based tied-weight resolver for the whole export, built once and reused by the
+    # MoE-input prep, every ExportContext, the amax sync, and the final dedup in
+    # postprocess_state_dict. It resolves ties from the model's declarations (stable across
+    # FSDP resharding / offload / packing).
+    resolver = TiedGroupResolver(model)
+    _prepare_moe_inputs(model, dtype, is_modelopt_qlora, resolver)
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
@@ -987,12 +999,6 @@ def _export_transformers_checkpoint(
     _add_mtp_exclusions(model, quant_config)
 
     _warn_on_unsynced_moe_gate_up(model)
-
-    # One name-based tied-weight resolver for the whole export: resolves ties from the
-    # model's own declarations (stable across FSDP resharding / offload / packing).
-    # Shared by the amax sync, the per-module MoE cache, and the final name-based dedup
-    # in postprocess_state_dict.
-    resolver = TiedGroupResolver(model)
 
     # Merge per-side input_quantizer amaxes BEFORE _process_quantized_modules, so the
     # merged value flows into input_scale derivation. Still required with name-based
