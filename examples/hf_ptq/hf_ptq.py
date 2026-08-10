@@ -699,9 +699,6 @@ def load_model(args: argparse.Namespace):
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
 
-    if model_type == "phi4mm":
-        warnings.warn("Please set the default input_mode to InputMode.LANGUAGE before quantizing.")
-
     return (
         full_model,
         language_model,
