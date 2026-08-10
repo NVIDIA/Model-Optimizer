@@ -58,12 +58,22 @@ run dir. The built-in in the `nemo_evaluator/templates/` venv directory is a **d
 prompt** (`swebench-instruction.md`, hyphen) — it runs, but results are not comparable. Keep
 whichever you use fixed across both sides of a comparison.
 
+**Both sides of a BF16-vs-quantized comparison must mount the same file**, or the delta
+includes a prompt change. The prompt is internal — there is no public download. Two ways to
+obtain it:
+
 ```bash
+# (a) From a reference run dir — the exact file a scored run mounted. Read that run's
+#     full_config.yaml `cluster.container_mounts` entry for swebench_instruction.md, then:
+scp <ref-cluster>:<path-from-that-config> ./swebench_instruction.md
+# (b) From the eval-factory repo — the path `_swebench_verified.instruction_template` points at
+#     in configs/benchmarks/swe-bench-verified/bench.yaml
+#     (dl/JoC/competitive_evaluation/nvidia-eval-factory-benchmarking).
+
+sha256sum ./swebench_instruction.md          # record this next to the score
 ssh <login> 'mkdir -p <lustre>/<user>/prompts'
-# Source: the prompt referenced by configs/benchmarks/swe-bench-verified/bench.yaml
-# (_swebench_verified.instruction_template); a reference run dir carries the exact file used.
-scp swebench_instruction.md <login>:<lustre>/<user>/prompts/
-ssh <login> 'sha256sum <lustre>/<user>/prompts/swebench_instruction.md'   # must match the source
+scp ./swebench_instruction.md <login>:<lustre>/<user>/prompts/
+ssh <login> 'sha256sum <lustre>/<user>/prompts/swebench_instruction.md'   # must match the line above
 ```
 
 ```yaml

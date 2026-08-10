@@ -36,6 +36,12 @@ for dev/canary work only; to move the pin, canary against the new SHA and bump t
 `nel-next.sh`. Record `nel-next.sh --version` (prints version + resolved spec) with scored
 results. Set `NEL_NEXT_ORIGIN` in `.env` to build from a mirror.
 
+**`NEL_NEXT_SPEC` overrides everything.** If it is set (e.g. a leftover
+`nemo-evaluator[harbor,export]==0.3.*` in `.env`) the git origin and its pin are ignored and
+you silently get a 0.3.x PyPI install — which cannot reach 0.4.x and lacks the vendored TB 2.1
+registry override. Unset it unless you deliberately want the older toolchain; `--version`
+prints the resolved spec, so check there if a run behaves unexpectedly.
+
 ## Credentials + internal infra (`.env`)
 
 - **AWS creds** (sandboxes run in AWS ECS Fargate, shared NVIDIA acct `463701203462`)

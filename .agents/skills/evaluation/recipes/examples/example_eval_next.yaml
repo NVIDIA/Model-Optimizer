@@ -9,7 +9,7 @@
 #   ... --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 #   ... --submit                                                                                             # full
 # Internal harbor infra (eval_image + ECR) comes from .env via ${VAR}; all blocks
-# validate against 0.3.0 (extra="forbid"). `???` = fill.
+# validate against the pinned nel-next build (extra="forbid"). `???` = fill.
 
 services:
   model:                             # any name; referenced by benchmarks[].solver.service

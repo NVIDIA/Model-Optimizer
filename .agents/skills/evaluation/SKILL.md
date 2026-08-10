@@ -36,12 +36,12 @@ If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md
 
 A few **agentic** AA benchmarks do **not** run on the default
 `nemo-evaluator-launcher` 0.2.6 (Steps 1–9 don't apply). They run on **nel-next**
-(`nemo-evaluator[harbor]` 0.3.x) — a separate package, CLI (`nel eval run`), `-O`
+(`nemo-evaluator[harbor]` 0.4.x) — a separate package, CLI (`nel eval run`), `-O`
 overrides, and `services`/`benchmarks`/`cluster`/`output` schema. If the user asks
 for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
-2. Isolated 0.3.x venv: `.agents/scripts/nel-next.sh --setup-only` (keeps 0.2.6 `nel` untouched).
+2. Isolated nel-next venv: `.agents/scripts/nel-next.sh --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
@@ -89,7 +89,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
 - AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
-- **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require nemo-evaluator-next (0.3.x); `aa/` is the 0.2.6 suite.
+- **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require nemo-evaluator-next (0.4.x); `aa/` is the 0.2.6 suite.
 - **GDPVal (NeMo Gym / agentic)** — **part of the AA suite** but a 0.2.6 `nemo_gym` task on a different harness, so it's **standalone** (see the GDPVal branch above): recipe `recipes/tasks/aa_gym/gdpval.md` + shared reference `references/gym-gdpval.md` + self-contained example `recipes/examples/gym_gdpval/`. Generated as its **own config** from the example, **never merged into the `aa/` multi-task `tasks` list**. The `aa_gym/` dir holds the NeMo Gym Stirrup-agent tasks.
 
 **AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/aa_gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
