@@ -637,40 +637,6 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
-def _checkpoint_size_bytes(ckpt_path) -> int | None:
-    """Total on-disk size of a checkpoint's weights, or ``None`` if it cannot be read.
-
-    Used to decide whether the weights will fit on the GPUs. The obvious alternative --
-    building a meta-device model and summing ``numel * dtype_size`` -- runs the
-    checkpoint's ``__init__``, which for remote-code models can fail outright and abort a
-    load that would otherwise have succeeded (NVBug 6563509). The safetensors index
-    already carries that sum: ``metadata.total_size`` matched ``compute_module_sizes``
-    exactly on Qwen3-8B (15.256 GiB) and DeepSeek-R1-Distill-Llama-70B (131.417 GiB).
-
-    On-disk size is the checkpoint's own dtype, which is what gets loaded under the
-    default ``dtype="auto"``.
-    """
-    path = Path(ckpt_path)
-    if not path.is_dir():
-        return None
-
-    index_file = path / "model.safetensors.index.json"
-    if index_file.is_file():
-        try:
-            with open(index_file) as f:
-                total_size = json.load(f).get("metadata", {}).get("total_size")
-            if isinstance(total_size, int):
-                return total_size
-        except (OSError, ValueError):
-            pass  # fall through to summing the shards
-
-    shards = sorted(path.glob("*.safetensors")) or sorted(path.glob("*.bin"))
-    try:
-        return sum(shard.stat().st_size for shard in shards) or None
-    except OSError:
-        return None
-
-
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -878,9 +844,13 @@ def get_model(
         # Assume bfloat16 precision by default, unless specified by the hf_config.
         config_dtype = _get_config_dtype(hf_config)
 
-        max_memory = get_max_memory()
-
+        # device_map="auto" is left to size itself. Capping it here needs to know whether
+        # the weights fit, which needs a constructed model, whose __init__ some remote-code
+        # checkpoints cannot survive on a meta device (NVBug 6563509) -- and capping when
+        # they *do* fit would introduce CPU offload that was not there. --use_seq_device_map
+        # is the supported answer to GPU OOM, and --gpu_max_mem_percentage applies there.
         if _disk_offload:
+            max_memory = get_max_memory()
             for _k in max_memory:
                 if isinstance(_k, int):
                     if max_gpu_memory_gb is not None:
@@ -896,25 +866,6 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
-        else:
-            # Weights that do not fit on the GPUs leave no room for calibration
-            # activations, because device_map="auto" packs them to ~100% of free memory.
-            # Cap the budget in that case. Sized from the checkpoint on disk rather than
-            # from a constructed model, so no checkpoint ``__init__`` runs here.
-            checkpoint_bytes = _checkpoint_size_bytes(ckpt_path)
-            gpu_budget = sum(size for dev, size in max_memory.items() if isinstance(dev, int))
-            if checkpoint_bytes is not None and checkpoint_bytes > gpu_budget:
-                for _device in max_memory:
-                    if isinstance(_device, int):
-                        max_memory[_device] *= gpu_mem_percentage
-
-                print(
-                    "Model does not fit to the GPU mem. "
-                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                    "reduce the calibration `batch_size` manually."
-                )
-                model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
         if _disk_offload:
