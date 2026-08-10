@@ -946,7 +946,7 @@ def test_stage_selects_generic_multimodal_processor_collator_loader(
     assert selected["data_layout"] == "fixed"
 
 
-def test_distributed_slicing_verdict_warns_without_failing_stage(
+def test_distributed_slicing_verdict_fails_closed_and_normalizes_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     summary_path = tmp_path / "artifacts" / "slicing_sanity" / "summary.json"
@@ -982,7 +982,9 @@ def test_distributed_slicing_verdict_warns_without_failing_stage(
         manifest,
     )
 
-    assert result.status == "success"
-    assert manifest.status == "success"
+    assert result.status == "failed"
+    assert manifest.status == "failed"
     assert manifest.outputs["passed"] is False
-    assert manifest.outputs["findings"] == [finding]
+    assert manifest.outputs["verdict"] == "failed"
+    assert manifest.outputs["blocking"] is True
+    assert manifest.outputs["findings"] == [{**finding, "severity": "error"}]
