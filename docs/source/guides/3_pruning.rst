@@ -5,11 +5,7 @@ Pruning
 .. tip::
 
     Checkout `Megatron-Bridge Minitron Pruning & Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ and
-    `Puzzletron v2 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for heterogeneous pruning campaigns, or the
-    `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
-    for a dated, end-to-end computer-vision example. The notebook uses the still-supported ``fastnas`` mode,
-    but its long-running workflow is not covered by automated notebook execution tests. Treat its environment setup,
-    runtime estimate, and recorded metrics as illustrative unless you revalidate them with the current release.
+    `Puzzletron v2 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for heterogeneous pruning campaigns.
     Retained Puzzletron campaign reports and their reproduction status are summarized in the
     `campaign report catalog <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/puzzletron/docs/campaign_reports.md>`_.
 
@@ -74,6 +70,13 @@ Prerequisites
 
 Below we show an example using :class:`"fastnas" <modelopt.torch.prune.fastnas.FastNASModeDescriptor>`.
 For Minitron pruning, please refer to the `example snippet <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#getting-started>`_ in the pruning readme.
+
+.. note::
+
+    The `ResNet20 on CIFAR-10 notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
+    is a dated, end-to-end FastNAS example. It uses the still-supported ``fastnas`` mode, but its long-running
+    workflow is not covered by automated notebook execution tests. Treat its environment setup, runtime estimate,
+    and recorded metrics as illustrative unless you revalidate them with the current release.
 
 Perform pruning
 ---------------
