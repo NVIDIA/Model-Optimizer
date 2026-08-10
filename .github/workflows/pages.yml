@@ -30,11 +30,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
       - name: Build docs
-        if: github.event_name != 'pull_request' || github.base_ref != 'feature/puzzletron_v2'
         run: pip install nox uv && nox -s docs
-      - name: Build docs against the Puzzletron v2 warning baseline
-        if: github.event_name == 'pull_request' && github.base_ref == 'feature/puzzletron_v2'
-        run: pip install nox uv && nox -s docs_puzzletron_v2
       - name: Upload docs artifact
         uses: actions/upload-artifact@v4
         with:

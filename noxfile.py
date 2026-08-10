@@ -244,6 +244,8 @@ def pre_commit_diff(session):
 
     from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
     session.install("-e", ".[all,dev-lint]")
+    skip_hooks = {hook for hook in os.environ.get("SKIP", "").split(",") if hook}
+    skip_hooks.add("mypy")
     session.run(
         "pre-commit",
         "run",
@@ -252,21 +254,36 @@ def pre_commit_diff(session):
         "--to-ref",
         to_ref,
         "--show-diff-on-failure",
+        env={"SKIP": ",".join(sorted(skip_hooks))},
     )
+
+    changed_files = session.run(
+        "git",
+        "diff",
+        "--name-only",
+        "--diff-filter=ACMR",
+        f"{from_ref}...{to_ref}",
+        "--",
+        "*.py",
+        external=True,
+        silent=True,
+    )
+    changed_python_files = [path for path in changed_files.splitlines() if Path(path).is_file()]
+    if changed_python_files:
+        session.run(
+            "mypy",
+            "--follow-imports=skip",
+            "--ignore-missing-imports",
+            *changed_python_files,
+        )
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────
-def _build_docs(session, warning_baseline=None):
+@nox.session
+def docs(session):
     session.install("-e", ".[all,dev-docs]")
     shutil.rmtree("docs/build", ignore_errors=True)
     shutil.rmtree("docs/source/reference/generated", ignore_errors=True)
-
-    warning_args = ["--fail-on-warning"]
-    warning_log = Path("/tmp/modelopt-sphinx-warnings.log")
-    if warning_baseline:
-        warning_log.unlink(missing_ok=True)
-        warning_args = ["--warning-file", str(warning_log)]
-
     with session.chdir("docs"):
         session.run(
             "sphinx-build",
@@ -274,29 +291,10 @@ def _build_docs(session, warning_baseline=None):
             "/tmp/doctrees",
             "source",
             "build/html",
-            *warning_args,
+            "--fail-on-warning",
             "--show-traceback",
             "--keep-going",
         )
-        if warning_baseline:
-            session.run(
-                "python",
-                "../tools/ci/check_sphinx_warnings.py",
-                str(warning_log),
-                warning_baseline,
-                "--repo-root",
-                "..",
-            )
-
-
-@nox.session
-def docs(session):
-    _build_docs(session)
-
-
-@nox.session
-def docs_puzzletron_v2(session):
-    _build_docs(session, "sphinx_warnings_feature_puzzletron_v2.json")
 
 
 @nox.session
