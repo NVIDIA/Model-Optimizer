@@ -117,6 +117,11 @@ class TestHubModelIdValidation:
             "not-an-id",  # no org
             "org/model/extra",  # too many segments
             "org / model",  # whitespace
+            # Non-canonical repo names: harmless, but validate_repo_id rejects
+            # them, so they should not be recorded as if they resolved.
+            "org/foo..bar",
+            "org/foo--bar",
+            "org/foo.git",
         ],
     )
     @pytest.mark.parametrize("env_var", ["DRAFT_HUGGINGFACE_MODEL_ID", "HUGGINGFACE_MODEL_ID"])

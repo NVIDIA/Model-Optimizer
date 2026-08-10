@@ -81,6 +81,12 @@ class TestIsSensitiveKey:
             ("aws_secret_access_key", 0),
             ("password", True),
             ("hf_token", None),
+            # Separator-free and hyphenated spellings of the same names.
+            ("hfToken", 1234),
+            ("apiKey", 99),
+            ("accessKey", 0),
+            ("hf-token", 1234),
+            ("api-key", 99),
         ],
     )
     def test_credential_names_ignore_value_shape(self, key, value):

@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from warnings import warn as _warn
 
+from huggingface_hub.errors import HFValidationError
+from huggingface_hub.utils import validate_repo_id
 from transformers import AutoTokenizer
 
 from . import __version__ as specdec_bench_version
@@ -36,8 +38,9 @@ _SENSITIVE_KEY_ALLOWLIST = frozenset(
 )
 # Names that are credentials outright, whatever they hold. These redact on the
 # name alone: a numeric or boolean value is no proof of safety, and treating one
-# as such would persist e.g. an all-digit token.
-_ALWAYS_SENSITIVE_SUBSTRINGS = ("hf_token", "api_key", "access_key", "secret", "password")
+# as such would persist e.g. an all-digit token. Matched against the key with
+# separators stripped, so hf_token / hfToken / hf-token are all covered.
+_ALWAYS_SENSITIVE_SUBSTRINGS = ("hftoken", "apikey", "accesskey", "secret", "password")
 # The remaining substrings are ambiguous rather than damning: a bare match over
 # `token` also swallows engine config, where the serving config alone
 # contributes num_speculative_tokens, max_num_batched_tokens,
@@ -232,18 +235,30 @@ _HUB_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*$")
 
 
 def _hub_model_id(env_var):
-    """Return `$env_var` if it looks like a Hub repo id, else None.
+    """Return `$env_var` if it is a well-formed Hub repo id, else None.
 
     These ids are copied verbatim into configuration.json and published, so an
     unset or malformed value is dropped rather than recorded. A rejected value
     warns instead of raising: provenance metadata should never fail a benchmark
     that has already run.
+
+    Both checks are needed. The local pattern is the security boundary: it
+    excludes `:@?#` and whitespace, so a URL carrying an embedded credential
+    cannot get through, whereas `validate_repo_id` alone would also accept a
+    single-component name. `validate_repo_id` then adds canonicality, rejecting
+    `foo..bar`, `foo--bar` and `foo.git`.
     """
     raw = (os.environ.get(env_var) or "").strip()
     if not raw:
         return None
-    if not _HUB_MODEL_ID_RE.match(raw):
-        _warn(f"{env_var} is not an <org>/<name> Hub id; omitting it from configuration.json")
+    rejected = not _HUB_MODEL_ID_RE.match(raw)
+    if not rejected:
+        try:
+            validate_repo_id(raw)
+        except HFValidationError:
+            rejected = True
+    if rejected:
+        _warn(f"{env_var} is not a valid <org>/<name> Hub id; omitting it from configuration.json")
         return None
     return raw
 
@@ -261,7 +276,7 @@ def _is_sensitive_key(key, value=_UNSET):
     if not isinstance(key, str):
         return False
     klow = key.lower()
-    if any(s in klow for s in _ALWAYS_SENSITIVE_SUBSTRINGS):
+    if any(s in klow.replace("_", "").replace("-", "") for s in _ALWAYS_SENSITIVE_SUBSTRINGS):
         return True
     if klow in _SENSITIVE_KEY_ALLOWLIST:
         return False
