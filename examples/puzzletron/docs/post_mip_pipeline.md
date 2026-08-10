@@ -141,21 +141,15 @@ from the original candidate.
 
 ## Downstream evaluation
 
-`downstream_evaluation` runs `python -m lmms_eval` as a subprocess through
-`command_prefix`. The runner passes an argument list directly and does not invoke
-a shell. Values in `command_prefix` and `extra_args` are arguments; shell syntax
-is not interpreted. Install the pinned evaluator into an isolated environment
-rather than the Puzzletron runtime environment, because `lmms-eval==0.7.2` pins
-`wandb==0.25.0` and the pinned AutoModel build requires a newer `wandb`:
+`downstream_evaluation` runs `python -m lmms_eval` as a subprocess from the
+Puzzletron worker environment. The runner passes an argument list directly and
+does not invoke a shell. Values in `command_prefix` and `extra_args` are arguments;
+shell syntax is not interpreted. The standard example requirements pin a snapshot
+compatible with the newer `wandb` required by the pinned AutoModel build:
 
 ```bash
-python3 -m venv /workspace/.venv-lmms-eval
-source /workspace/.venv-lmms-eval/bin/activate
-python -m pip install -r examples/puzzletron/requirements-lmms-eval.txt
-python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.2"'
-deactivate
-
-export PUZZLETRON_LMMS_EVAL_PYTHON=/workspace/.venv-lmms-eval/bin/python
+python -m pip install -r examples/puzzletron/requirements.txt
+python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.0"'
 ```
 
 The runner derives the realized checkpoint path, vLLM topology arguments, task

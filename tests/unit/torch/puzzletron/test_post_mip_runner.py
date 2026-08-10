@@ -19,6 +19,7 @@
 import json
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -194,7 +195,6 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
 def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
     argv, env, timeout = runner._lmms_eval_command(
         {
-            "command_prefix": ["python", "-m", "lmms_eval"],
             "tasks": ["ifeval", "gsm8k"],
             "batch_size": 2,
             "limit": 8,
@@ -216,7 +216,7 @@ def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
     )
 
     model_args = argv[argv.index("--model_args") + 1]
-    assert argv[:5] == ["python", "-m", "lmms_eval", "--model", "vllm"]
+    assert argv[:5] == [sys.executable, "-m", "lmms_eval", "--model", "vllm"]
     assert argv[argv.index("--tasks") + 1] == "ifeval,gsm8k"
     assert argv[argv.index("--batch_size") + 1] == "2"
     assert argv[argv.index("--limit") + 1] == "8"
