@@ -32,6 +32,14 @@ _SENSITIVE_SUBSTRINGS = ("token", "key", "secret", "password")
 _SENSITIVE_KEY_ALLOWLIST = frozenset(
     {"tokenizer", "tokenizer_path", "tokenizer_mode", "tokenizer_revision"}
 )
+# A bare substring match over `token` also swallows engine config: the serving
+# config alone contributes num_speculative_tokens, max_num_batched_tokens,
+# skip_tokenizer_init and a dozen similar knobs, none of them credentials.
+# Enumerating them doesn't hold — the set grows with every engine release — so
+# redact on VALUE SHAPE instead: a credential is a non-trivial string, whereas
+# these knobs are ints, bools, and None. `hf_token` still redacts because its
+# value is a string.
+_NON_SECRET_VALUE_TYPES = (bool, int, float, type(None))
 
 
 def get_tokenizer(path, trust_remote_code=False):
@@ -208,7 +216,16 @@ def _checkpoint_provenance(model_dir):
         return {"path": str(model_dir)}
 
 
-def _is_sensitive_key(key):
+_UNSET = object()
+
+
+def _is_sensitive_key(key, value=_UNSET):
+    """Whether `key` names a secret.
+
+    Pass `value` when it is available: a name that looks sensitive but holds an
+    int / bool / None is engine config, not a credential. Callers that only
+    have the name (e.g. argv scanning) omit it and get the name-only verdict.
+    """
     # Engine configs can carry non-string dict keys (e.g. int layer ids in a
     # serving_config); those are never sensitive field *names*, so skip them.
     if not isinstance(key, str):
@@ -216,7 +233,11 @@ def _is_sensitive_key(key):
     klow = key.lower()
     if klow in _SENSITIVE_KEY_ALLOWLIST:
         return False
-    return any(s in klow for s in _SENSITIVE_SUBSTRINGS)
+    if not any(s in klow for s in _SENSITIVE_SUBSTRINGS):
+        return False
+    if value is _UNSET:
+        return True
+    return not isinstance(value, _NON_SECRET_VALUE_TYPES)
 
 
 def _redact_value(value):
@@ -229,7 +250,7 @@ def _redact_value(value):
     """
     if isinstance(value, dict):
         return {
-            k: ("***REDACTED***" if _is_sensitive_key(k) else _redact_value(v))
+            k: ("***REDACTED***" if _is_sensitive_key(k, v) else _redact_value(v))
             for k, v in value.items()
         }
     if isinstance(value, list):
@@ -283,6 +304,16 @@ def dump_env(args, save_dir, overrides=None):
     if overrides:
         config.update(_redact_config(overrides))
 
+    # Effective speculation width, resolved from whichever flag the algorithm
+    # uses. DFLASH takes --block_size (= draft_length + 1) and leaves
+    # --draft_length at its default, so recording the raw args makes a
+    # block_size=8 DFLASH run look like draft_length=3. Consumers should read
+    # this field rather than re-deriving it from the two flags.
+    block_size = getattr(args, "block_size", None)
+    config["num_speculative_tokens"] = (
+        block_size - 1 if block_size is not None else getattr(args, "draft_length", None)
+    )
+
     config["engine_version"] = _get_engine_version(config.get("engine"))
     config["gpu"] = _get_gpu_name()
     config["python_version"] = sys.version
@@ -318,6 +349,12 @@ def dump_env(args, save_dir, overrides=None):
     # resolves on Hub; standalone runs leave both empty.
     config["jira_ticket"] = os.environ.get("JIRA_TICKET") or None
     config["huggingface_model_id"] = os.environ.get("HUGGINGFACE_MODEL_ID") or None
+    # Hub id of the external draft checkpoint, for algorithms that use one
+    # (EAGLE3 / DRAFT_TARGET / DFLASH / DSPARK). `draft_model_dir` only records
+    # a local path, which says nothing about which published drafter ran — two
+    # drafters for the same verifier are otherwise indistinguishable. Empty for
+    # in-model drafts (MTP heads).
+    config["draft_huggingface_model_id"] = os.environ.get("DRAFT_HUGGINGFACE_MODEL_ID") or None
 
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "configuration.json"), "w") as f:
