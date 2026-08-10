@@ -239,16 +239,34 @@ def pre_commit_all(session):
 
 @nox.session
 def pre_commit_diff(session):
+    if len(session.posargs) not in (0, 2):
+        session.error("pre_commit_diff expects optional FROM_REF and TO_REF arguments")
+
+    from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
     session.install("-e", ".[all,dev-lint]")
-    session.run("pre-commit", "run", "--from-ref", "origin/main", "--to-ref", "HEAD")
+    session.run(
+        "pre-commit",
+        "run",
+        "--from-ref",
+        from_ref,
+        "--to-ref",
+        to_ref,
+        "--show-diff-on-failure",
+    )
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────
-@nox.session
-def docs(session):
+def _build_docs(session, warning_baseline=None):
     session.install("-e", ".[all,dev-docs]")
     shutil.rmtree("docs/build", ignore_errors=True)
     shutil.rmtree("docs/source/reference/generated", ignore_errors=True)
+
+    warning_args = ["--fail-on-warning"]
+    warning_log = Path("/tmp/modelopt-sphinx-warnings.log")
+    if warning_baseline:
+        warning_log.unlink(missing_ok=True)
+        warning_args = ["--warning-file", str(warning_log)]
+
     with session.chdir("docs"):
         session.run(
             "sphinx-build",
@@ -256,10 +274,29 @@ def docs(session):
             "/tmp/doctrees",
             "source",
             "build/html",
-            "--fail-on-warning",
+            *warning_args,
             "--show-traceback",
             "--keep-going",
         )
+        if warning_baseline:
+            session.run(
+                "python",
+                "../tools/ci/check_sphinx_warnings.py",
+                str(warning_log),
+                warning_baseline,
+                "--repo-root",
+                "..",
+            )
+
+
+@nox.session
+def docs(session):
+    _build_docs(session)
+
+
+@nox.session
+def docs_puzzletron_v2(session):
+    _build_docs(session, "sphinx_warnings_feature_puzzletron_v2.json")
 
 
 @nox.session
