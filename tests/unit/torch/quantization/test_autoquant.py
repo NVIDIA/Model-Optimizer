@@ -26,10 +26,12 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
 from modelopt.torch.quantization._auto_quantize_cost import (
+    DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS,
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
+    normalize_auto_quantize_constraints,
 )
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
@@ -1536,3 +1538,100 @@ def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persis
     assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.weight_quantizer" not in quantizer_names
+
+
+# ---------------------------------------------------------------------------
+# Latency cost-model constraint validation
+# ---------------------------------------------------------------------------
+
+
+def _latency_constraints(**overrides):
+    constraints = {
+        "cost_model": "latency",
+        "latency": {"relative_to_min": 1.2},
+        "cost": {
+            "lut_path": "/tmp/haq_latency_v1.csv",
+            "deployment_profile": "b100_tp1_ep1_decode",
+            "m": 1,
+        },
+    }
+    constraints.update(overrides)
+    return constraints
+
+
+def test_latency_constraints_normalize_ok():
+    model = torch.nn.Module()
+    out = normalize_auto_quantize_constraints(model, _latency_constraints())
+    assert out["cost_model"] == "latency"
+    assert out["latency"] == {"relative_to_min": 1.2}
+    assert out["cost"]["m"] == 1
+    assert out["cost"]["deployment_profile"] == "b100_tp1_ep1_decode"
+    assert "effective_bits" not in out
+
+
+def test_latency_and_effective_bits_mutually_exclusive():
+    model = torch.nn.Module()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        normalize_auto_quantize_constraints(model, _latency_constraints(effective_bits=6.0))
+
+
+def test_latency_requires_relative_to_min_block():
+    model = torch.nn.Module()
+    bad = _latency_constraints()
+    del bad["latency"]
+    with pytest.raises(ValueError, match="latency"):
+        normalize_auto_quantize_constraints(model, bad)
+
+
+@pytest.mark.parametrize("rel", [0.9, 0.0, -1.0])
+def test_latency_relative_to_min_must_be_at_least_one(rel):
+    model = torch.nn.Module()
+    with pytest.raises(ValueError, match="relative_to_min"):
+        normalize_auto_quantize_constraints(
+            model, _latency_constraints(latency={"relative_to_min": rel})
+        )
+
+
+@pytest.mark.parametrize("bad_m", [0, -1, 1.5, True])
+def test_latency_m_must_be_positive_int(bad_m):
+    model = torch.nn.Module()
+    c = _latency_constraints()
+    c["cost"]["m"] = bad_m
+    with pytest.raises(ValueError, match="positive integer"):
+        normalize_auto_quantize_constraints(model, c)
+
+
+def test_latency_requires_lut_path_and_profile():
+    model = torch.nn.Module()
+    c = _latency_constraints()
+    del c["cost"]["lut_path"]
+    with pytest.raises(ValueError, match="lut_path"):
+        normalize_auto_quantize_constraints(model, c)
+    c = _latency_constraints()
+    del c["cost"]["deployment_profile"]
+    with pytest.raises(ValueError, match="deployment_profile"):
+        normalize_auto_quantize_constraints(model, c)
+
+
+def test_latency_block_rejected_for_non_latency_cost_model():
+    model = torch.nn.Module()
+    with pytest.raises(ValueError, match="only valid with cost_model: latency"):
+        normalize_auto_quantize_constraints(
+            model, {"effective_bits": 6.0, "latency": {"relative_to_min": 1.2}}
+        )
+
+
+def test_latency_rejects_unknown_cost_keys():
+    model = torch.nn.Module()
+    c = _latency_constraints()
+    c["cost"]["active_moe_expert_ratio"] = 0.25
+    with pytest.raises(ValueError, match="Unsupported auto_quantize cost constraints"):
+        normalize_auto_quantize_constraints(model, c)
+
+
+def test_default_constraints_unchanged_for_effective_bits():
+    model = torch.nn.Module()
+    out = normalize_auto_quantize_constraints(model, None)
+    assert out["effective_bits"] == DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS
+    assert out["cost_model"] == "weight"
+    assert "latency" not in out
