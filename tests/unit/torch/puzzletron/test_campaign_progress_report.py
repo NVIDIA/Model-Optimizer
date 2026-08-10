@@ -101,7 +101,7 @@ def test_report_has_clean_header_and_completed_required_artifacts(tmp_path: Path
     assert "<span class='required-node'>Required</span>" in document
     assert "<span class='optional-node'>Optional</span>" in document
     assert "dagre.min.js" in document
-    assert 'data-source="convert" data-target="tokenize_data"' in document
+    assert 'data-source="convert" data-target="vllm_stats"' in document
 
 
 def test_pipeline_dag_only_contains_configured_stages(tmp_path: Path):

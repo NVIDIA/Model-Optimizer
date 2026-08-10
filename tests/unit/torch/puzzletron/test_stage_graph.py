@@ -6,7 +6,6 @@
 import pytest
 
 from modelopt.torch.puzzletron.stages.graph import (
-    EXECUTION_STRATEGY_VALUES,
     SHARED_SEMANTIC_CONFIG_SECTIONS,
     STAGE_REGISTRY,
     STAGE_SPECS,
@@ -124,23 +123,6 @@ def test_dynamic_stage_semantic_projection_keeps_stage_id_fallback() -> None:
     config = {"model": {"name": "teacher"}, "post.custom": {"threshold": 0.5}}
 
     assert semantic_stage_config(config, "post.custom") == config
-
-
-def test_registry_default_execution_strategies_are_valid() -> None:
-    non_single_defaults = {
-        "vllm_stats": "sharded",
-        "depth_importance": "persistent_pool",
-        "replacement_scoring": "persistent_pool",
-        "zero_shot_evaluation": "sharded",
-        "aiperf": "sharded",
-    }
-
-    assert all(spec.default_execution_strategy in EXECUTION_STRATEGY_VALUES for spec in STAGE_SPECS)
-    assert {
-        spec.stage_id: spec.default_execution_strategy
-        for spec in STAGE_SPECS
-        if spec.default_execution_strategy != "single"
-    } == non_single_defaults
 
 
 def test_registry_uses_the_approved_fixed_dependencies():

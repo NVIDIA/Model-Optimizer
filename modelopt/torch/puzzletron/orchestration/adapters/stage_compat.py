@@ -66,8 +66,6 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
         return tuple(patterns)
     if stage_id == "tokenize_data":
         return ("dataset_cache/*.tokens", "dataset_cache/*.tokens.json")
-    if stage_id == "sort":
-        return ("ckpts/sorted_teacher/config.json",)
     if stage_id == "slicing_sanity":
         slicing = config.get("slicing_sanity") or {}
         if slicing.get("backend") == "distributed_parent_sweep":
@@ -78,8 +76,6 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
             "artifacts/width_slice_equivalence/cases/**/*.json",
             "artifacts/width_slice_equivalence/comparisons/*.safetensors",
         )
-    if stage_id == "depth_importance":
-        return ("depth/iterative/trajectory.json",)
     if stage_id == "build_library":
         stats_name = (config.get("vllm_stats") or {}).get(
             "subblock_stats_filename", "subblock_stats.json"
@@ -110,25 +106,13 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
             patterns.append("artifacts/vllm_stats/measurements/index.json")
             patterns.extend(str(item.relative_stats_path) for item in measurements.values())
         return tuple(patterns)
-    if stage_id == "replacement_scoring":
-        return ("artifacts/replacement_scoring/summary.json",)
     if stage_id == "bypass":
         patterns = ["artifacts/bypass/local_kd_loss_history.json"]
         if bool((config.get("bypass") or {}).get("elastic", False)):
             patterns.append("artifacts/bypass/dp_observations.jsonl")
         return tuple(patterns)
-    if stage_id == "mip":
-        return ("mip/profiles/*/mip_grid.json",)
     if stage_id == "zero_shot_evaluation":
         return ("artifacts/zero_shot_evaluation/**/evaluation_summary.json",)
-    if stage_id == "aiperf":
-        return ("artifacts/aiperf/**/aiperf_results.json",)
-    if stage_id == "global_distillation_sanity":
-        return ("artifacts/global_distillation_sanity/**/global_distillation_sanity_summary.json",)
-    if stage_id == "global_distillation":
-        return ("artifacts/global_distillation/**/global_distillation_summary.json",)
-    if stage_id == "post_distillation_evaluation":
-        return ("artifacts/post_distillation_evaluation/**/evaluation_summary.json",)
     spec = stage_spec(stage_id)
     return spec.completion_artifacts
 

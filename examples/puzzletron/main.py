@@ -200,11 +200,6 @@ def _report_model_name(config: dict) -> str:
     )
 
 
-def _manifest_is_complete(config: dict, stage: str) -> bool:
-    state = _manifest_terminal_state(config, stage)
-    return state is not None and state.produced_artifacts and artifacts_are_complete(config, stage)
-
-
 def _manifest_terminal_state(config: dict, stage: str):
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     path = puzzle_dir / "manifests" / f"{stage}.json"

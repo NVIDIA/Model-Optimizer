@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 __all__ = [
     "IMPORT_CAMPAIGN_MANIFEST",
     "canonical_receipt_identity",
+    "imported_completion_payload",
     "imported_stage_manifest_is_complete",
 ]
 
@@ -38,6 +39,42 @@ def canonical_receipt_identity(receipt: Mapping[str, Any]) -> str:
     payload = {key: value for key, value in receipt.items() if key != "receipt_identity"}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def imported_completion_payload(
+    *,
+    stage_id: str,
+    target_config: str,
+    receipt_identity: str,
+    expected_semantic_config: Mapping[str, Any],
+    semantic_identity: str,
+    required_artifacts: Mapping[str, Any],
+    stable_hash: Callable[..., str],
+) -> dict[str, Any]:
+    """Build the canonical version-3 completion marker for one imported stage."""
+
+    relevant_stage_config_identity = stable_hash(
+        expected_semantic_config,
+        prefix=f"{stage_id}_resume_cfg",
+    )
+    identity_payload = {
+        "completion_kind": "imported",
+        "mode": stage_id,
+        "width": None,
+        "depth": None,
+        "receipt_identity": receipt_identity,
+        "relevant_stage_config_identity": relevant_stage_config_identity,
+        "stage_manifest_semantic_identity": semantic_identity,
+        "required_artifacts": dict(required_artifacts),
+        "upstream_identities": {},
+    }
+    return {
+        "version": 3,
+        **identity_payload,
+        "config": target_config,
+        "implementation_provenance": {"imported": True},
+        "completion_identity": stable_hash(identity_payload, prefix=f"{stage_id}_completion"),
+    }
 
 
 def _read_mapping(path: Path) -> Mapping[str, Any] | None:
@@ -223,39 +260,19 @@ def imported_stage_manifest_is_complete(
     marker_relative = f"manifests/completions/{stage_id}.json"
     marker_path = _safe_artifact_path(root, marker_relative)
     marker = _read_mapping(marker_path) if marker_path is not None else None
-    relevant_stage_config_identity = stable_hash(
-        expected_semantic_config,
-        prefix=f"{stage_id}_resume_cfg",
+    expected_marker = imported_completion_payload(
+        stage_id=stage_id,
+        target_config=campaign["target_config"],
+        receipt_identity=receipt_identity,
+        expected_semantic_config=expected_semantic_config,
+        semantic_identity=semantic_identity,
+        required_artifacts=expected_required_artifacts,
+        stable_hash=stable_hash,
     )
     if (
         manifest_record is None
         or marker is None
-        or marker.get("version") != 3
-        or marker.get("completion_kind") != "imported"
-        or marker.get("mode") != stage_id
-        or marker.get("width") is not None
-        or marker.get("depth") is not None
-        or marker.get("config") != campaign["target_config"]
-        or marker.get("receipt_identity") != receipt_identity
-        or marker.get("relevant_stage_config_identity") != relevant_stage_config_identity
-        or marker.get("stage_manifest_semantic_identity") != semantic_identity
-        or marker.get("required_artifacts") != expected_required_artifacts
-        or marker.get("upstream_identities") != {}
-        or marker.get("implementation_provenance") != {"imported": True}
+        or any(marker.get(key) != value for key, value in expected_marker.items())
     ):
         return False
-    completion_identity = stable_hash(
-        {
-            "completion_kind": "imported",
-            "mode": stage_id,
-            "width": None,
-            "depth": None,
-            "receipt_identity": receipt_identity,
-            "relevant_stage_config_identity": relevant_stage_config_identity,
-            "stage_manifest_semantic_identity": semantic_identity,
-            "required_artifacts": expected_required_artifacts,
-            "upstream_identities": {},
-        },
-        prefix=f"{stage_id}_completion",
-    )
-    return marker.get("completion_identity") == completion_identity
+    return True

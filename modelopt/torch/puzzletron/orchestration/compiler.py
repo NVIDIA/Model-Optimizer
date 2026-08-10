@@ -37,7 +37,6 @@ from .stages import (
     configured_parent_stage_ids,
     configured_stage_ids,
     distributed_stage_ids,
-    stage_spec,
     topological_mapping_items,
 )
 from .vllm_measurements import normalize_vllm_measurements
@@ -55,21 +54,13 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _default_execution_strategy(
-    stage_id: str,
-    dynamic_defaults: Mapping[str, ExecutionStrategy],
-) -> ExecutionStrategy:
-    """Resolve a public registry default or a dynamic post-MIP default."""
-
-    if stage_id in dynamic_defaults:
-        return ExecutionStrategy(dynamic_defaults[stage_id])
-    try:
-        strategy = stage_spec(stage_id).default_execution_strategy
-    except ValueError:
-        # Non-public stages are expected to supply a dynamic default. Preserve
-        # the historical single-worker fallback for third-party dynamic nodes.
-        strategy = ExecutionStrategy.SINGLE.value
-    return ExecutionStrategy(strategy)
+_DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
+    "vllm_stats": ExecutionStrategy.SHARDED,
+    "replacement_scoring": ExecutionStrategy.PERSISTENT_POOL,
+    "depth_importance": ExecutionStrategy.PERSISTENT_POOL,
+    "zero_shot_evaluation": ExecutionStrategy.SHARDED,
+    "aiperf": ExecutionStrategy.SHARDED,
+}
 
 
 _POST_MIP_NODE_METADATA = {
@@ -402,7 +393,10 @@ def resolve_stage_execution_specs(
         payload = _mapping(stage_payload.get(stage_id))
         strategy_name = payload.get("strategy")
         if strategy_name is None:
-            strategy = _default_execution_strategy(stage_id, dynamic_defaults)
+            strategy = dynamic_defaults.get(
+                stage_id,
+                _DEFAULT_STAGE_STRATEGIES.get(stage_id, ExecutionStrategy.SINGLE),
+            )
         else:
             strategy = ExecutionStrategy(str(strategy_name))
         instances = int(payload.get("instances", 1))
@@ -466,24 +460,11 @@ def compile_campaign_plan(
         dynamic_defaults=dynamic_execution_defaults,
     )
     distributed = set(distributed_stage_ids())
-    default_gpus_per_node = int(_mapping(execution.get("defaults")).get("gpus_per_node", 8))
-    default_policy = FailurePolicy(
-        str(_mapping(execution.get("defaults")).get("failure_policy", FailurePolicy.STRICT.value))
-    )
     nodes: list[StagePlanNode] = []
     post_mip_by_stage = {row["stage_id"]: row for row in post_mip_stages}
 
     for stage_id in enabled:
-        spec = execution_specs.get(stage_id)
-        if spec is None:
-            strategy = _default_execution_strategy(stage_id, dynamic_execution_defaults)
-            spec = StageExecutionSpec(
-                stage_id=stage_id,
-                strategy=strategy,
-                instances=1,
-                failure_policy=default_policy,
-                gpus_per_node=default_gpus_per_node,
-            )
+        spec = execution_specs[stage_id]
         override = None
         if spec.mesh_override is not None:
             override = {

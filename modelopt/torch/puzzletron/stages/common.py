@@ -25,7 +25,7 @@ __all__ = ["experiment_dir", "stage_manifest_path", "complete_stage"]
 
 
 def experiment_dir(config: dict[str, Any]) -> Path:
-    exp = ((config.get("experiment") or {}).get("dir"))
+    exp = (config.get("experiment") or {}).get("dir")
     if exp is None:
         raise ValueError("Puzzletron config must define experiment.dir")
     return Path(exp)
@@ -49,10 +49,8 @@ def complete_stage(
     write_stage_manifest(path, manifest)
     return StageResult(
         stage=manifest.stage,
-        status=status,
+        status=manifest.status,
         manifest_path=path,
         message=message or f"Stage '{manifest.stage}' completed.",
-        skip_reason=(
-            str(getattr(skip_reason, "value", skip_reason)) if skip_reason is not None else None
-        ),
+        skip_reason=manifest.skip_reason,
     )

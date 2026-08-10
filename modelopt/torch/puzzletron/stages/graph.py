@@ -24,7 +24,6 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 __all__ = [
-    "EXECUTION_STRATEGY_VALUES",
     "LEGACY_POST_MIP_STAGE_IDS",
     "SHARED_SEMANTIC_CONFIG_SECTIONS",
     "STAGE_REGISTRY",
@@ -49,8 +48,6 @@ __all__ = [
     "topological_mapping_items",
     "topological_stage_ids",
 ]
-
-EXECUTION_STRATEGY_VALUES = frozenset({"single", "sharded", "persistent_pool"})
 
 SHARED_SEMANTIC_CONFIG_SECTIONS = (
     "model",
@@ -104,7 +101,6 @@ class StageSpec:
     report_order: int = 0
     topology_order: int = 0
     semantic_config_sections: tuple[str, ...] = ()
-    default_execution_strategy: str = "single"
 
 
 class StageStatus(str, Enum):
@@ -214,7 +210,6 @@ def _stage(
     display_name: str,
     *,
     semantic_config_sections: tuple[str, ...],
-    default_execution_strategy: str = "single",
     required: bool = False,
     default_enabled: bool = False,
     enabled_when: tuple[str, bool] | None = None,
@@ -232,7 +227,6 @@ def _stage(
             stage_id=stage_id,
             display_name=display_name,
             semantic_config_sections=semantic_config_sections,
-            default_execution_strategy=default_execution_strategy,
             completion_artifacts=completion_artifacts,
             granularity_label=granularity_label,
             required=required,
@@ -274,7 +268,6 @@ _stage(
     "vllm_stats",
     "{unit} vLLM Stats",
     semantic_config_sections=("vllm_stats", "build_library", "library"),
-    default_execution_strategy="sharded",
     parents=("convert",),
     completion_artifacts=("artifacts/vllm_stats/summary.json",),
     granularity_label=True,
@@ -283,7 +276,6 @@ _stage(
     "depth_importance",
     "Depth Importance Estimation",
     semantic_config_sections=("depth_importance", "pruning", "replacement_scoring"),
-    default_execution_strategy="persistent_pool",
     parents=("tokenize_data",),
     completion_artifacts=("depth/iterative/trajectory.json",),
     distributed=True,
@@ -382,7 +374,6 @@ _stage(
         "library",
         "pruning",
     ),
-    default_execution_strategy="persistent_pool",
     required=True,
     parents=("build_library",),
     completion_artifacts=("artifacts/replacement_scoring/summary.json",),
@@ -408,7 +399,6 @@ _stage(
     "zero_shot_evaluation",
     "Zero-shot Evaluation",
     semantic_config_sections=("zero_shot_evaluation", "convert", "replacement_scoring"),
-    default_execution_strategy="sharded",
     parents=("mip",),
     completion_artifacts=("artifacts/zero_shot_evaluation",),
     distributed=True,
@@ -417,7 +407,6 @@ _stage(
     "aiperf",
     "AIPerf",
     semantic_config_sections=("aiperf", "zero_shot_evaluation"),
-    default_execution_strategy="sharded",
     parents=("mip",),
     completion_artifacts=("artifacts/aiperf/**/aiperf_results.json",),
 )
@@ -474,11 +463,6 @@ def _registry_for(specs: Iterable[StageSpec]) -> dict[str, StageSpec]:
         if spec.stage_id not in spec.semantic_config_sections:
             raise ValueError(
                 f"stage {spec.stage_id!r} must explicitly include its own semantic config section"
-            )
-        if spec.default_execution_strategy not in EXECUTION_STRATEGY_VALUES:
-            raise ValueError(
-                f"unknown default execution strategy {spec.default_execution_strategy!r} "
-                f"for stage {spec.stage_id!r}"
             )
         unknown_requirements = set(spec.enabled_requires) - set(registry)
         if unknown_requirements:

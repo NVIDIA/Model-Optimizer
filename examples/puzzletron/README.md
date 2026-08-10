@@ -456,11 +456,7 @@ python examples/puzzletron/main.py \
   --gpus-per-node 8
 ```
 
-The dependency-free [`StageSpec` registry](../../modelopt/torch/puzzletron/stages/graph.py)
-is the authoritative contract for every public stage's identity, dependencies,
-enablement, semantic config sections, and default execution strategy. Add or
-change those properties there; handlers, scheduler adapters, mesh resolution,
-and heavyweight artifact validators remain separate runtime concerns.
+The dependency-free [`StageSpec` registry](../../modelopt/torch/puzzletron/stages/graph.py) is the authoritative contract for every public stage's identity, dependencies, enablement, semantic config sections, and static completion artifacts. Add or change those properties there. Default execution strategies remain scheduler-specific and live in the [orchestration compiler](../../modelopt/torch/puzzletron/orchestration/compiler.py); handlers, scheduler adapters, mesh resolution, and heavyweight artifact validators remain separate runtime concerns.
 
 | Stage | Purpose |
 |---|---|
