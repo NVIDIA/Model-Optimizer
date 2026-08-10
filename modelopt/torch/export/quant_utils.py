@@ -18,7 +18,7 @@
 import logging
 from collections.abc import Generator
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from warnings import warn
 
 import torch
@@ -70,6 +70,9 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
+
+if TYPE_CHECKING:
+    from .model_utils import TiedGroupResolver
 
 logger = logging.getLogger(__name__)
 
@@ -1054,7 +1057,7 @@ def postprocess_state_dict(
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
-    resolver=None,
+    resolver: "TiedGroupResolver | None" = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -1137,25 +1140,50 @@ def postprocess_state_dict(
     if resolver is not None:
         alias_prefixes = resolver.alias_prefix_pairs()
         if alias_prefixes:
+            # Group every candidate alias key by the alias module-prefix it falls under and
+            # dedup the tie ATOMICALLY (all-or-nothing). Two tied sides can carry different
+            # quant state -- e.g. the alias is quantized but the canonical is not -- so
+            # dropping only the keys that happen to have a canonical twin (``weight``) while
+            # leaving those that don't (``weight_scale`` / ``input_scale``) would orphan
+            # scales on a weight that's gone. A group is dropped only when EVERY one of its
+            # keys has a canonical counterpart present; otherwise the sides differ and
+            # nothing is dropped (both kept -- larger but loadable). This also keeps an
+            # untied sibling sharing an alias prefix from being dropped.
+            alias_groups: dict[str, list[tuple[str, str | None]]] = {}
             for key in post_state_dict:
-                canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
-                if canonical_key is None or canonical_key not in post_state_dict:
+                a_base = resolver.matched_alias_prefix(key, alias_prefixes)
+                if a_base is None:
                     continue
-                # Guard against a (pathological) bidirectional map A<->B: only drop an alias
-                # whose canonical is a *terminal* canonical (not itself an alias). Otherwise
-                # both sides would be marked and the exported checkpoint would contain neither,
-                # leaving the loader with a missing tensor.
-                if resolver.canonical_state_dict_key(canonical_key, alias_prefixes) is not None:
+                canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
+                alias_groups.setdefault(a_base, []).append((key, canonical_key))
+
+            for a_base, members in alias_groups.items():
+                # Bidirectional tie A<->B: the canonical side is itself a declared alias, so
+                # both sides would be marked and the checkpoint would contain neither. Keep both.
+                if any(
+                    ck is not None
+                    and resolver.canonical_state_dict_key(ck, alias_prefixes) is not None
+                    for _, ck in members
+                ):
                     logger.warning(
-                        f"Skipping name-based dedup of '{key}': its canonical "
-                        f"'{canonical_key}' is itself a declared alias (bidirectional tie); "
-                        f"keeping both to avoid dropping the only copy."
+                        f"Skipping name-based dedup of alias prefix '{a_base}': its canonical "
+                        f"is itself a declared alias (bidirectional tie); keeping both sides."
                     )
                     continue
-                keys_to_delete.append(key)
+                # Atomic completeness: every alias key must have its canonical counterpart present.
+                missing = [k for k, ck in members if ck is None or ck not in post_state_dict]
+                if missing:
+                    logger.warning(
+                        f"Skipping name-based dedup of alias prefix '{a_base}': tied sides have "
+                        f"mismatched keys (e.g. '{missing[0]}' has no canonical counterpart, likely "
+                        f"differing quantization state); keeping both sides to avoid orphaned tensors."
+                    )
+                    continue
+                for k, _ in members:
+                    keys_to_delete.append(k)
                 logger.warning(
-                    f"Tied weight (declared): dropping alias '{key}'; "
-                    f"canonical '{canonical_key}' is kept."
+                    f"Tied weight (declared): dropping {len(members)} alias key(s) under "
+                    f"'{a_base}'; canonical '{alias_prefixes[a_base]}' kept."
                 )
 
     # Address backstop: collapse two keys that still point at the SAME storage.
@@ -1644,7 +1672,7 @@ def has_quantized_modules(model: nn.Module) -> bool:
     )
 
 
-def sync_tied_input_amax(model: nn.Module, resolver=None) -> int:
+def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" = None) -> int:
     """Max-merge input_quantizer amaxes across modules in the same declared tie.
 
     Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
@@ -1666,6 +1694,14 @@ def sync_tied_input_amax(model: nn.Module, resolver=None) -> int:
     by the canonical experts-container name). A ``resolver`` may be passed to reuse
     an existing one; otherwise it is built from ``model``. Returns the number of
     tied groups merged.
+
+    Dense weights that are *physically shared but not declared* (no entry in
+    ``_tied_weights_keys`` and not the ``tie_word_embeddings`` pair) are grouped by
+    the weight's object identity as a fallback: the postprocess address backstop
+    collapses such shares, so their input amaxes must be merged here too or the
+    surviving ``input_scale`` would not cover the dropped side. Object identity is
+    consulted only here, before packing while all weights are resident, so it cannot
+    collide the way a freed-then-reused ``data_ptr`` can.
     """
     from collections import defaultdict
 
@@ -1698,6 +1734,16 @@ def sync_tied_input_amax(model: nn.Module, resolver=None) -> int:
             gk = resolver.group_key(f"{name}.weight" if name else "weight")
             if gk is not None:
                 by_group[("dense", gk)].append(m)
+            else:
+                # Undeclared physical share: the weight is not a declared tie, so the
+                # name-based grouping above misses it, yet the postprocess address
+                # backstop will still collapse two keys pointing at the same storage.
+                # Group by object identity so their input amaxes are max-merged here —
+                # otherwise the surviving side's input_scale would not cover the dropped
+                # side (silent activation clipping). Object identity is consulted only
+                # here, before packing, while every weight is resident, so it cannot
+                # collide the way a freed-then-reused data_ptr can.
+                by_group[("dense_shared", id(m.weight))].append(m)
 
     def _merge(quantizers: list) -> bool:
         """Max-merge amaxes across the quantizer list. Returns True on merge."""
