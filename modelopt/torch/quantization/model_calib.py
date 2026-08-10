@@ -2064,12 +2064,20 @@ def layerwise_calibrate(
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
 
+    If ``export_dir`` is passed, each layer is additionally written to a quantized HF
+    checkpoint shard as soon as it is calibrated, leaving a complete checkpoint when the
+    last layer lands and removing the need for a separate ``export_hf_checkpoint()`` pass.
+    Those shards then serve as the resume artifact, so the per-layer weight and quantizer
+    files are not written and finished layers are skipped rather than restored -- which
+    also means a resumed run leaves the in-memory model unusable for inference.
+
     ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
     whether the cached inputs handed to layer N+1 come from a forward through
     the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
     temporarily disabled (False; matches non-layerwise max-calib semantics).
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
@@ -2090,13 +2098,24 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
+    # Before any calibration, so unsupported models fail immediately rather than after
+    # hours of work with nothing exportable.
+    exporter = None
+    if export_dir is not None:
+        from modelopt.torch.export.layerwise_export import LayerwiseExporter
+
+        exporter = LayerwiseExporter(model, export_dir)
+
     ckpt = _CheckpointState.from_folder(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
         calib_mutates_weights=calib_mutates_weights,
+        save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
+    if exporter is not None and start_layer > 0:
+        exporter.assert_shards_present(start_layer)
 
     layer_pbar = tqdm(
         total=num_layers,
@@ -2171,6 +2190,17 @@ def layerwise_calibrate(
                 elif is_last:
                     next_inputs = None
 
+                # After the next-layer capture in both orderings, so the shard reflects
+                # the layer's final state.
+                if exporter is not None:
+                    # One real batch, so a fusing format can rediscover which modules share
+                    # an input without the whole-model forward this path never runs.
+                    def _fusion_probe(m, _inputs=layer_inputs):
+                        args, kwargs_input = _inputs[0]
+                        m(*args, **kwargs_input)
+
+                    exporter.export_layer(layer_idx, layer, _fusion_probe)
+
                 if ckpt:
                     ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
@@ -2184,6 +2214,16 @@ def layerwise_calibrate(
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
+
+    if exporter is not None:
+        exporter.finalize()
+        print_rank_0(f"Layerwise export: wrote quantized checkpoint to {export_dir}")
+        if start_layer > 0:
+            warn_rank_0(
+                f"This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} "
+                "were never re-calibrated: the exported checkpoint is complete, but the "
+                "in-memory model is not and must not be used for inference."
+            )
 
     print_rank_0("Layerwise calibration completed")
 

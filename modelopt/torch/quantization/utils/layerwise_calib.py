@@ -494,6 +494,7 @@ def _write_manifest(
     num_layers: int,
     save_every: int,
     calib_mutates_weights: bool,
+    save_layer_state: bool,
 ) -> None:
     """Atomically write manifest.json. Config keys are persisted so resume can detect drift."""
     path = os.path.join(checkpoint_dir, "manifest.json")
@@ -505,6 +506,7 @@ def _write_manifest(
                 "num_layers": num_layers,
                 "save_every": save_every,
                 "calib_mutates_weights": calib_mutates_weights,
+                "save_layer_state": save_layer_state,
             },
             f,
         )
@@ -519,7 +521,7 @@ def _save_layer_files(
     checkpoint_dir: str,
     idx: int,
     weights: dict | None,
-    qstate: dict,
+    qstate: dict | None,
     quantizer_buffers: dict | None,
     output_meta: tuple,
 ) -> None:
@@ -527,7 +529,9 @@ def _save_layer_files(
 
     Exactly one of ``weights`` (full layer state_dict) or ``quantizer_buffers``
     (just the TensorQuantizer state_dict slice, used when calibration does not mutate weights)
-    is written; ``full_restore`` falls back to whichever is present.
+    is written; ``full_restore`` falls back to whichever is present. Both may be None,
+    along with ``qstate``, when per-layer export already captured the layer durably and
+    resume will skip it rather than restore it.
     ``next_inputs.pt`` and ``manifest.json`` are deferred to window boundaries
     in :meth:`_CheckpointState.save`.
     """
@@ -539,7 +543,8 @@ def _save_layer_files(
         torch.save(weights, os.path.join(d, "weights.pt"))
     elif quantizer_buffers is not None:
         torch.save(quantizer_buffers, os.path.join(d, "quantizer_buffers.pt"))
-    torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
+    if qstate is not None:
+        torch.save(qstate, os.path.join(d, "quantizer_state.pt"))
     torch.save(output_meta, os.path.join(d, "output_meta.pt"))
 
 
@@ -580,6 +585,7 @@ class _CheckpointState:
         start_layer: int = 0,
         save_every: int = 1,
         calib_mutates_weights: bool = True,
+        save_layer_state: bool = True,
     ):
         if dist.is_initialized() and dist.size() > 1:
             raise RuntimeError(
@@ -593,6 +599,9 @@ class _CheckpointState:
         self.start_layer = start_layer
         self.save_every = save_every
         self.calib_mutates_weights = calib_mutates_weights
+        # False when per-layer export runs alongside: its shards already hold each layer's
+        # result, so resume skips the layer instead of restoring it.
+        self.save_layer_state = save_layer_state
         # Tracks the most recent saved layer so save() can window-save the layers
         # since the last save event. Initialized to start_layer - 1 so the first
         # save event after resume covers the new work only.
@@ -605,6 +614,7 @@ class _CheckpointState:
         num_layers: int,
         save_every: int = 1,
         calib_mutates_weights: bool = True,
+        save_layer_state: bool = True,
     ) -> _CheckpointState | None:
         """Create from folder. Detects resume point. Returns None if no checkpoint_dir."""
         if not checkpoint_dir:
@@ -617,6 +627,9 @@ class _CheckpointState:
                 ("num_layers", num_layers),
                 ("save_every", save_every),
                 ("calib_mutates_weights", calib_mutates_weights),
+                # Else resuming an export-mode checkpoint without export_dir recalibrates
+                # everything, then fails in full_restore on files that were never written.
+                ("save_layer_state", save_layer_state),
             ):
                 ckpt_value = manifest.get(key)
                 if ckpt_value is not None and ckpt_value != new_value:
@@ -635,6 +648,7 @@ class _CheckpointState:
             start_layer=start,
             save_every=save_every,
             calib_mutates_weights=calib_mutates_weights,
+            save_layer_state=save_layer_state,
         )
 
     def setup_resume(self, layers: nn.ModuleList) -> list | None:
@@ -675,7 +689,7 @@ class _CheckpointState:
             set_quantizer_state_dict,
         )
 
-        if self.start_layer == 0:
+        if self.start_layer == 0 or not self.save_layer_state:
             return
 
         dummy_config = QuantizeConfig()
@@ -747,14 +761,14 @@ class _CheckpointState:
 
         _cpu = torch.device("cpu")
         layer = layers[layer_idx]
-        with enable_weight_access_and_writeback(layer, model, writeback=False):
-            qstate = _move_to_device(quantizer_state(layer), _cpu)
-            if self.calib_mutates_weights:
-                weights = _move_to_device(layer.state_dict(), _cpu)
-                quantizer_buffers = None
-            else:
-                weights = None
-                quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
+        qstate = weights = quantizer_buffers = None
+        if self.save_layer_state:
+            with enable_weight_access_and_writeback(layer, model, writeback=False):
+                qstate = _move_to_device(quantizer_state(layer), _cpu)
+                if self.calib_mutates_weights:
+                    weights = _move_to_device(layer.state_dict(), _cpu)
+                else:
+                    quantizer_buffers = _move_to_device(get_quantizer_state_dict(layer), _cpu)
 
         output_meta = getattr(layer._layerwise_calib, "output_meta", None)
         if output_meta is None:
@@ -787,6 +801,7 @@ class _CheckpointState:
             self.num_layers,
             save_every=self.save_every,
             calib_mutates_weights=self.calib_mutates_weights,
+            save_layer_state=self.save_layer_state,
         )
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx

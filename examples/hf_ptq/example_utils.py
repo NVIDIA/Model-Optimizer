@@ -1166,6 +1166,18 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     return quant_cfg, resolved
 
 
+def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
+    """Retarget layerwise per-layer export at ``export_path``.
+
+    The recipe opts in by setting ``layerwise.export_dir``; its value is a placeholder,
+    since the destination is per-run rather than per-recipe. Mirrors how
+    :func:`resolve_checkpoint_dir` rewrites ``layerwise.checkpoint_dir``.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    quant_cfg["algorithm"]["layerwise"]["export_dir"] = export_path
+    return quant_cfg
+
+
 def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
     """Add the MLflow tracking flags."""
     parser.add_argument(

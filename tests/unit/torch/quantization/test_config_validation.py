@@ -694,6 +694,7 @@ class TestLayerwiseNestedConfig:
             "get_qdq_activations_from_prev_layer": False,
             "checkpoint_dir": None,
             "save_every": 1,
+            "export_dir": None,
             "calib_mutates_weights": True,
         }
         assert "layerwise_checkpoint_dir" not in dumped
