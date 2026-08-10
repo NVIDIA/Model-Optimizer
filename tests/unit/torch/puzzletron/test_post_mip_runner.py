@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.post_mip import runner
@@ -265,9 +266,32 @@ def test_lmms_eval_command_rejects_reserved_model_args(tmp_path):
         assert expected in message
 
 
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        ({"model": "hf"}, "config.model must be 'vllm'"),
+        ({"checkpoint_arg": "pretrained"}, "config.checkpoint_arg must be 'model'"),
+    ],
+)
+def test_lmms_eval_command_rejects_non_vllm_managed_settings(tmp_path, settings, expected):
+    with pytest.raises(ValueError, match=expected):
+        runner._lmms_eval_command(
+            {
+                "tasks": ["ifeval"],
+                "topology": {"gpu_group_size": 1},
+                **settings,
+            },
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
+
+
 def test_lmms_eval_command_rejects_reserved_extra_args(tmp_path):
     cases = (
+        (["--model", "hf"], "--model"),
         (["--tasks", "gsm8k"], "--tasks"),
+        (["--batch_size=99"], "--batch_size"),
+        ("--batch-size 99", "--batch-size"),
         ("--output_path /tmp/other", "--output_path"),
         (["--model_args=model=/ckpts/wrong"], "--model_args"),
     )

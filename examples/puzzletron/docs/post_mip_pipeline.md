@@ -91,9 +91,10 @@ post_mip:
             max_steps: 2048
 ```
 
-Evaluation nodes publish every finite metric they produce. They do not declare
-metric lists or cases. Later filters reference metrics as `mip.<metric>` or
-`<node_id>.<metric>`.
+Evaluation nodes publish every finite metric they produce. Downstream lmms-eval
+nodes publish results only after every configured task, or every leaf of a
+configured task group, has numeric metrics and positive effective sample counts.
+Later filters reference metrics as `mip.<metric>` or `<node_id>.<metric>`.
 
 ## Node types
 
