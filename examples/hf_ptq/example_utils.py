@@ -33,6 +33,7 @@ from typing import Any
 import torch
 import transformers
 import yaml
+from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
 from transformers import (
@@ -637,6 +638,25 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
+def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs):
+    """Re-derive a built-in config when a remote-code config is used with a built-in model
+    class, so it matches the model definition's version; fall back to hf_config otherwise.
+    """
+    if auto_model_module in [AutoModelForCausalLM, AutoModel]:
+        return hf_config
+    if not type(hf_config).__module__.startswith("transformers_modules"):
+        return hf_config
+    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    try:
+        return AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
+    except Exception as e:
+        warnings.warn(
+            f"Could not re-derive a built-in config for {ckpt_path} ({e}); using the "
+            "remote-code config for device-map inference."
+        )
+        return hf_config
+
+
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -838,19 +858,30 @@ def get_model(
                 auto_model_module = AutoModel
             else:
                 auto_model_module = AutoModelForCausalLM
+            from_config = auto_model_module.from_config
         else:
             auto_model_module = getattr(transformers, architecture)
+            from_config = auto_model_module._from_config
 
-        # Assume bfloat16 precision by default, unless specified by the hf_config.
-        config_dtype = _get_config_dtype(hf_config)
+        config_for_init = _resolve_init_config(
+            hf_config, auto_model_module, ckpt_path, config_kwargs
+        )
 
-        # device_map="auto" is left to size itself. Capping it here needs to know whether
-        # the weights fit, which needs a constructed model, whose __init__ some remote-code
-        # checkpoints cannot survive on a meta device (NVBug 6563509) -- and capping when
-        # they *do* fit would introduce CPU offload that was not there. --use_seq_device_map
-        # is the supported answer to GPU OOM, and --gpu_max_mem_percentage applies there.
+        with init_empty_weights(include_buffers=True):
+            # When computing the device_map, assuming bfloat16 precision by default,
+            # unless specified by the hf_config.
+            config_dtype = _get_config_dtype(config_for_init)
+            model_kwargs2 = _apply_dtype_to_config(
+                model_kwargs, config_dtype, architecture, apply_config_dtype=True
+            )
+            if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
+                model_kwargs2.pop("trust_remote_code", None)
+            model_kwargs2.pop("max_memory", None)
+            model = from_config(config_for_init, **model_kwargs2)
+
+        max_memory = get_max_memory()
+
         if _disk_offload:
-            max_memory = get_max_memory()
             for _k in max_memory:
                 if isinstance(_k, int):
                     if max_gpu_memory_gb is not None:
@@ -866,6 +897,20 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
+        else:
+            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+            if "cpu" in inferred_device_map.values():
+                for _device in max_memory:
+                    if isinstance(_device, int):
+                        max_memory[_device] *= gpu_mem_percentage
+
+                print(
+                    "Model does not fit to the GPU mem. "
+                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                    "reduce the calibration `batch_size` manually."
+                )
+                model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
         if _disk_offload:
