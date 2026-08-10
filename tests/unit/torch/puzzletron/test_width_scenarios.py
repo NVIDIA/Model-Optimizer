@@ -263,6 +263,69 @@ def test_embedding_pipeline_projects_root_vllm_stats_by_hidden_width(tmp_path):
         assert {entry["args"]["n_embd"] for entry in scenario_stats} == {width}
 
 
+def test_embedding_pipeline_rejects_vllm_stats_missing_a_configured_width(tmp_path):
+    (tmp_path / "subblock_stats.json").write_text(
+        json.dumps([{"args": {"n_embd": 1024, "runtime_stats": True}}])
+    )
+
+    with pytest.raises(ValueError, match="hidden width 768"):
+        _project_vllm_stats_to_scenarios(
+            {
+                "puzzle_dir": str(tmp_path),
+                "embedding_pruning": {"widths": [1024, 768]},
+            }
+        )
+
+
+def test_embedding_build_library_reprojects_vllm_stats_after_workers(tmp_path, monkeypatch):
+    widths = (1024, 768)
+    root_stats = [
+        {"args": {"n_embd": width, "runtime_stats": True}, "subblocks": []} for width in widths
+    ]
+    (tmp_path / "subblock_stats.json").write_text(json.dumps(root_stats))
+    for width in widths:
+        _write_scenario_manifest(tmp_path, width)
+
+    monkeypatch.setattr(
+        "examples.puzzletron.embedding_pipeline.subprocess.run",
+        lambda *args, **kwargs: None,
+    )
+    worker_calls = []
+
+    def _run_workers(commands):
+        worker_calls.append(commands)
+        for width in widths:
+            scenario_stats = (
+                tmp_path / "scenarios" / f"width-{width:04d}" / "depth-00" / "subblock_stats.json"
+            )
+            scenario_stats.write_text(
+                json.dumps([{"args": {"n_embd": width, "runtime_stats": False}}])
+            )
+
+    monkeypatch.setattr("examples.puzzletron.embedding_pipeline._run_commands", _run_workers)
+
+    run_embedding_stage(
+        config_path="experiment.yaml",
+        config={
+            "puzzle_dir": str(tmp_path),
+            "embedding_pruning": {"widths": list(widths)},
+        },
+        stage="build_library",
+        gpus_per_node=1,
+    )
+
+    assert len(worker_calls) == 1
+    for width in widths:
+        scenario_stats = json.loads(
+            (
+                tmp_path / "scenarios" / f"width-{width:04d}" / "depth-00" / "subblock_stats.json"
+            ).read_text()
+        )
+        assert scenario_stats == [
+            {"args": {"n_embd": width, "runtime_stats": True}, "subblocks": []}
+        ]
+
+
 def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tmp_path):
     _write_scenario_manifest(tmp_path, 768)
     (command,) = scenario_worker_commands(

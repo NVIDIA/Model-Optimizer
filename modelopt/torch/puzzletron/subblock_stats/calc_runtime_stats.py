@@ -353,15 +353,21 @@ def _assigned_runtime_shard_indices(
     indices_by_key = {key: index for index, (key, _) in enumerate(ordered_items)}
     paired_indices: list[tuple[int, int]] = []
     assigned_indices: set[int] = set()
+    seen_pairs: set[tuple[int, int]] = set()
     for short_key, long_key in measurement_pairs:
         try:
             pair = (indices_by_key[short_key], indices_by_key[long_key])
         except KeyError as exc:
             raise ValueError("runtime measurement pair is missing a benchmark spec") from exc
-        if pair[0] == pair[1] or assigned_indices.intersection(pair):
+        if pair[0] == pair[1]:
+            raise ValueError("runtime measurement pairs must be disjoint")
+        if pair in seen_pairs:
+            continue
+        if assigned_indices.intersection(pair):
             raise ValueError("runtime measurement pairs must be disjoint")
         paired_indices.append(pair)
         assigned_indices.update(pair)
+        seen_pairs.add(pair)
 
     expected_indices = set(range(len(ordered_items)))
     if assigned_indices != expected_indices:

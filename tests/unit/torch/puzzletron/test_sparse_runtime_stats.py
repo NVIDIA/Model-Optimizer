@@ -752,6 +752,65 @@ def test_scaffolded_ffn_slope_cancels_one_attention_per_pp_stage(monkeypatch):
     assert non_block == RuntimeMeasurement(total_ms=6.0, prefill_ms=2.0)
 
 
+def test_block_runtime_deduplicates_base_scaffold_measurement_pair(monkeypatch):
+    attention = AttentionConfig(num_query_heads=8, num_kv_heads=2)
+    base_block = BlockConfig(subblock_configs=(attention, FFNConfig(no_op=True)))
+    scaffolded_block = BlockConfig(subblock_configs=(FFNConfig(intermediate_size=16),))
+
+    class Descriptor:
+        @staticmethod
+        def runtime_benchmark_config_fields(_config):
+            return {}
+
+        @staticmethod
+        def runtime_benchmark_base_block_config(_runtime_config):
+            return base_block
+
+        @staticmethod
+        def runtime_benchmark_scaffold_policy(candidate):
+            if candidate == scaffolded_block:
+                return "attention_scaffold_per_pp_stage"
+            return "none"
+
+    benchmarked_layouts = []
+
+    def _benchmark_spec(_runtime_config, block_layout, *, gpu_id, cache_dir):
+        assert gpu_id == "0"
+        assert cache_dir is None
+        benchmarked_layouts.append(block_layout)
+        base_count = sum(block == base_block for block in block_layout)
+        scaffolded_count = sum(block == scaffolded_block for block in block_layout)
+        return RuntimeMeasurement(
+            total_ms=10.0 + 5.0 * base_count + 2.0 * scaffolded_count,
+            prefill_ms=3.0 + 1.0 * base_count + 0.5 * scaffolded_count,
+        )
+
+    monkeypatch.setattr(runtime_stats_module, "_benchmark_spec", _benchmark_spec)
+    monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0"])
+    monkeypatch.setenv("PUZZLETRON_RUNTIME_SHARD_COUNT", "1")
+    monkeypatch.setenv("PUZZLETRON_RUNTIME_SHARD_INDEX", "0")
+
+    runtime, non_block = calc_runtime_for_blocks(
+        {base_block, scaffolded_block},
+        OmegaConf.create({"repeat_block_n_times": 2}),
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=8,
+        num_key_value_heads=2,
+        descriptor=Descriptor,
+        lm_config=SimpleNamespace(),
+        tokenizer_path="tokenizer",
+        prefill_seq_len=16,
+        generation_seq_len=4,
+        batch_size=1,
+    )
+
+    assert len(benchmarked_layouts) == 4
+    assert runtime[base_block] == RuntimeMeasurement(total_ms=5.0, prefill_ms=1.0)
+    assert runtime[scaffolded_block] == RuntimeMeasurement(total_ms=2.0, prefill_ms=0.5)
+    assert non_block == RuntimeMeasurement(total_ms=10.0, prefill_ms=3.0)
+
+
 def test_block_runtime_uses_homogeneous_n_and_2n_layouts(monkeypatch):
     block = BlockConfig(
         subblock_configs=(

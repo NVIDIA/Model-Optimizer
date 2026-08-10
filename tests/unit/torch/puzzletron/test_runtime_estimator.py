@@ -101,3 +101,16 @@ def test_runtime_sharding_keeps_paired_measurements_together():
     assert _assigned_runtime_shard_indices(
         ordered_items, shard_count=2, shard_index=1, measurement_pairs=pairs
     ) == [2, 3]
+
+
+def test_runtime_sharding_rejects_partially_overlapping_measurement_pairs():
+    keys = [("spec", index) for index in range(3)]
+    ordered_items = [(key, None) for key in keys]
+
+    with pytest.raises(ValueError, match="must be disjoint"):
+        _assigned_runtime_shard_indices(
+            ordered_items,
+            shard_count=1,
+            shard_index=0,
+            measurement_pairs=[(keys[0], keys[1]), (keys[1], keys[2])],
+        )

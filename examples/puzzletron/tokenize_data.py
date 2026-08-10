@@ -99,10 +99,11 @@ def tokenize_data_stage(config: dict) -> StageResult:
     tool = Path(__file__).resolve().parent / "tools" / "build_packed_token_memmap.py"
     teacher_dir = Path((config.get("convert") or {})["teacher_dir"])
     dataset_path = str(config["dataset_path"])
+    trust_remote_code = bool((config.get("model") or {}).get("trust_remote_code", False))
     outputs = []
     for cache in caches:
         output = Path(cache["output"])
-        command = (
+        command = [
             sys.executable,
             str(tool),
             "--dataset-path",
@@ -125,8 +126,9 @@ def tokenize_data_stage(config: dict) -> StageResult:
             str(stage_config.get("tokenize_batch_size", 64)),
             "--shuffle-seed",
             str(cache["shuffle_seed"]),
-            "--trust-remote-code",
-        )
+        ]
+        if trust_remote_code:
+            command.append("--trust-remote-code")
         subprocess.run(command, check=True)
         outputs.append(
             {

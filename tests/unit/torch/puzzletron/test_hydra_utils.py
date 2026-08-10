@@ -15,6 +15,7 @@
 
 import pytest
 from omegaconf import OmegaConf
+from omegaconf.errors import UnsupportedValueType
 
 from modelopt.torch.puzzletron.tools.hydra_utils import (
     _warmup_steps_resolver,
@@ -30,13 +31,15 @@ class _ToyPruningMixin:
 def test_clone_hydra_config_preserves_resolved_python_objects():
     cfg = OmegaConf.create({"pruning": {"activation_passes": [{"name": "ffn"}]}})
     cfg._set_flag("allow_objects", True)
-    cfg.pruning.activation_passes[0].pruning_mixin = _ToyPruningMixin()
+    pruning_mixin = _ToyPruningMixin()
+    cfg.pruning.activation_passes[0].pruning_mixin = pruning_mixin
 
     cloned = clone_hydra_config(cfg)
 
-    assert isinstance(cloned.pruning.activation_passes[0].pruning_mixin, _ToyPruningMixin)
-    with pytest.raises(Exception, match="supported primitive type"):
-        OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    assert cloned.pruning.activation_passes[0].pruning_mixin is pruning_mixin
+    container = OmegaConf.to_container(cfg, resolve=True)
+    with pytest.raises(UnsupportedValueType, match="supported primitive type"):
+        OmegaConf.create(container)
 
 
 def test_warmup_steps_casts_inputs_before_computing():

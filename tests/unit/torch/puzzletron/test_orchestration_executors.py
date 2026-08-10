@@ -499,9 +499,32 @@ def test_slurm_recover_keeps_running_when_squeue_misses_and_sacct_says_running(
     assert status.exit_code is None
 
 
+def test_slurm_recover_maps_squeue_requeued_to_pending(tmp_path: Path, monkeypatch):
+    def _fake_run(argv):
+        class _Result:
+            returncode = 0
+            stdout = "REQUEUED\n" if argv[0] == "squeue" else ""
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.slurm._run_command", _fake_run)
+    handle = JobHandle(
+        backend="slurm",
+        handle_id="slurm-1",
+        attempt_id="a1",
+        metadata={"job_id": "1"},
+    )
+
+    status = _slurm_executor(tmp_path).recover(handle)
+
+    assert status.state is JobState.PENDING
+
+
 def test_slurm_recover_maps_sacct_pending_and_failed_states(tmp_path: Path, monkeypatch):
     responses = {
         "PENDING|0:0\n": JobState.PENDING,
+        "REQUEUED|0:0\n": JobState.PENDING,
         "FAILED|1:0\n": JobState.FAILED,
         "TIMEOUT|1:0\n": JobState.FAILED,
         "CANCELLED by 1234|0:0\n": JobState.CANCELLED,

@@ -591,19 +591,13 @@ def test_active_prefix_automodel_float32_rmsnorm_matches_physical_gradients():
 
 
 def test_active_prefix_qwen3_next_rmsnorm_matches_physical_gradients():
-    class Qwen3NextRMSNorm(torch.nn.Module):
-        def __init__(self, dim: int, eps: float = 1e-6):
-            super().__init__()
-            self.eps = eps
-            self.weight = torch.nn.Parameter(torch.zeros(dim, dtype=torch.bfloat16))
-
-        def _norm(self, x):
-            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-        def forward(self, x):
-            output = self._norm(x.float())
-            output = output * (1.0 + self.weight.float())
-            return output.type_as(x)
+    qwen3_next = pytest.importorskip(
+        "transformers.models.qwen3_next.modeling_qwen3_next",
+        reason="installed Transformers version does not support Qwen3-Next",
+    )
+    qwen3_next_rmsnorm = getattr(qwen3_next, "Qwen3NextRMSNorm", None)
+    if qwen3_next_rmsnorm is None:
+        pytest.skip("installed Transformers version does not expose Qwen3NextRMSNorm")
 
     spec = EmbeddingPruningSpec(
         hidden_size=4,
@@ -611,9 +605,9 @@ def test_active_prefix_qwen3_next_rmsnorm_matches_physical_gradients():
         alignment=2,
         tensor_rules=(TensorAxisRule(r"^norm\.weight$", (0,), "normalization"),),
     )
-    envelope = Qwen3NextRMSNorm(4)
+    envelope = qwen3_next_rmsnorm(4).to(dtype=torch.bfloat16)
     envelope.weight.data.copy_(torch.linspace(0.0, 0.3, 4, dtype=torch.bfloat16))
-    physical = Qwen3NextRMSNorm(2)
+    physical = qwen3_next_rmsnorm(2).to(dtype=torch.bfloat16)
     physical.weight.data.copy_(envelope.weight[:2])
     x = torch.tensor(
         [[0.1015625, 0.205078125, 4.0, -3.0]],

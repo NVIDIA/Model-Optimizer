@@ -379,7 +379,7 @@ class SlurmExecutor(Executor):
         queue = _run_command(["squeue", "-h", "-j", job_id, "-o", "%T"])
         if queue.returncode == 0 and queue.stdout.strip():
             state_name = queue.stdout.strip().splitlines()[0].strip().upper()
-            if state_name in {"PENDING", "CONFIGURING", "SUSPENDED"}:
+            if state_name in {"PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED"}:
                 return JobStatus(
                     handle=handle, state=JobState.PENDING, log_paths=self.fetch_logs(handle)
                 )
@@ -402,7 +402,7 @@ class SlurmExecutor(Executor):
                 exit_code = int(exit_part.split(":")[0])
             except ValueError:
                 exit_code = None
-        if state_name.startswith(("PENDING", "CONFIGURING", "SUSPENDED")):
+        if state_name.startswith(("PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED")):
             return JobStatus(
                 handle=handle, state=JobState.PENDING, log_paths=self.fetch_logs(handle)
             )
