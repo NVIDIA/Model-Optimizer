@@ -224,6 +224,21 @@ def test_direct_tokenize_data_stage_runs_when_enabled(tmp_path, monkeypatch, wri
     assert result.skip_reason is None
 
 
+def test_enabled_tokenize_data_stage_accepts_empty_cache_set(tmp_path):
+    config = _config(
+        tmp_path,
+        dataset_path="dataset",
+        convert={"teacher_dir": str(tmp_path / "ckpts" / "teacher")},
+        tokenize_data={"enabled": True, "caches": []},
+    )
+
+    result = tokenize_data_module.tokenize_data_stage(config)
+    _validate_worker_result(config, result)
+
+    assert result.status == "success"
+    assert stage_is_complete(config, "tokenize_data")
+
+
 @pytest.mark.parametrize(
     ("stage", "config_sections", "manifest_fields"),
     [

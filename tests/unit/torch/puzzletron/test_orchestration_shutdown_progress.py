@@ -967,10 +967,9 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
                     JobStatus(handle=handle, state=JobState.COMPLETED) for handle in handles
                 ]
             for status in statuses:
-                if (
-                    status.state is JobState.COMPLETED
-                    and status.handle.metadata.get("work_id") == "vllm_stats:default:gang"
-                ):
+                if status.state is JobState.COMPLETED and str(
+                    status.handle.metadata.get("work_id", "")
+                ).startswith("vllm_stats:"):
                     _seed_vllm_stats_complete(
                         run_dir, write_terminal_manifest, plan.experiment_config
                     )
@@ -982,7 +981,7 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
         lambda **_kwargs: "fake-merge",
     )
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
-    result = controller.run()
+    result = controller.run(max_iterations=10)
 
     assert result["halted"] is True
     assert result["cancelled"] is False

@@ -239,10 +239,12 @@ def _token_caches_are_complete(config: Mapping[str, Any], manifest: Mapping[str,
     configured = stage_config.get("caches")
     outputs = manifest.get("outputs")
     recorded = outputs.get("caches") if isinstance(outputs, Mapping) else None
-    if not isinstance(configured, (list, tuple)) or not configured:
+    if not isinstance(configured, (list, tuple)):
         return False
     if not isinstance(recorded, (list, tuple)) or len(recorded) != len(configured):
         return False
+    if not configured:
+        return True
 
     expected_by_path: dict[Path, tuple[Mapping[str, Any], Path]] = {}
     for cache in configured:
@@ -672,6 +674,8 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
             for checkpoint in summary.get("checkpoints") or ()
         )
     manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
+    if manifest is None:
+        return False
     state = stage_terminal_state(manifest, expected_stage=stage_id)
     if state is None or not state.allows_completion(stage_id, config):
         return False

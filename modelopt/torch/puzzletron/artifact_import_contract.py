@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Mapping
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 __all__ = [
     "IMPORT_CAMPAIGN_MANIFEST",
@@ -101,6 +103,22 @@ def _safe_artifact_path(root: Path, value: Any) -> Path | None:
     return artifact
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+@lru_cache(maxsize=1024)
+def _cached_file_digest(path: Path, identity: tuple[int, int, int, int, int]) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if _file_identity(path) != identity:
+        raise OSError("artifact changed while hashing")
+    return digest.hexdigest()
+
+
 def _file_record(root: Path, relative: str) -> dict[str, Any] | None:
     path = _safe_artifact_path(root, relative)
     if path is None:
@@ -108,11 +126,12 @@ def _file_record(root: Path, relative: str) -> dict[str, Any] | None:
     try:
         if not path.is_file():
             return None
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return {"path": relative, "size": path.stat().st_size, "sha256": digest.hexdigest()}
+        resolved = path.resolve(strict=True)
+        identity = _file_identity(resolved)
+        digest = _cached_file_digest(resolved, identity)
+        if _file_identity(resolved) != identity:
+            return None
+        return {"path": relative, "size": identity[2], "sha256": digest}
     except OSError:
         return None
 
@@ -253,6 +272,8 @@ def imported_stage_manifest_is_complete(
         return False
     manifest_relative = f"manifests/{stage_id}.json"
     manifest_record = _file_record(root, manifest_relative)
+    if manifest_record is None:
+        return False
     expected_required_artifacts = {
         record["path"]: [dict(record)] for record in inventory if isinstance(record, Mapping)
     }
@@ -269,10 +290,6 @@ def imported_stage_manifest_is_complete(
         required_artifacts=expected_required_artifacts,
         stable_hash=stable_hash,
     )
-    if (
-        manifest_record is None
-        or marker is None
-        or any(marker.get(key) != value for key, value in expected_marker.items())
-    ):
+    if marker is None or any(marker.get(key) != value for key, value in expected_marker.items()):
         return False
     return True

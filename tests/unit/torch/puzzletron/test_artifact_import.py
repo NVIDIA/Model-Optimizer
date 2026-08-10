@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import modelopt.torch.puzzletron.artifact_import_contract as artifact_import_contract
 from examples.puzzletron.main import _completion_is_valid, _validate_worker_result
 from modelopt.torch.puzzletron.artifact_import import ArtifactImportError, import_campaign_artifacts
 from modelopt.torch.puzzletron.artifact_inventory import (
@@ -681,6 +682,33 @@ def test_touched_receipt_cannot_hide_backdated_source_mutation(tmp_path):
         import_campaign_artifacts(source, destination, receipt, bundles=("depth",))
 
     assert not destination.exists()
+
+
+def test_imported_artifact_digest_cache_reuses_unchanged_files(tmp_path, monkeypatch):
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"first!")
+    original_mtime_ns = artifact.stat().st_mtime_ns
+    artifact_import_contract._cached_file_digest.cache_clear()
+    real_sha256 = hashlib.sha256
+    calls = 0
+
+    def counting_sha256(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(artifact_import_contract.hashlib, "sha256", counting_sha256)
+    first = artifact_import_contract._file_record(tmp_path, artifact.name)
+    second = artifact_import_contract._file_record(tmp_path, artifact.name)
+    artifact.write_bytes(b"second")
+    stat = artifact.stat()
+    os.utime(artifact, ns=(stat.st_atime_ns, original_mtime_ns + 1_000_000_000))
+    changed = artifact_import_contract._file_record(tmp_path, artifact.name)
+    artifact_import_contract._cached_file_digest.cache_clear()
+
+    assert first == second
+    assert changed != first
+    assert calls == 2
 
 
 def test_bypass_evidence_does_not_complete_the_bypass_execution_node(tmp_path):

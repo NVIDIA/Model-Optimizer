@@ -117,6 +117,15 @@ def main() -> None:
     parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args()
 
+    for option, value in (
+        ("--num-samples", args.num_samples),
+        ("--seq-length", args.seq_length),
+        ("--workers", args.workers),
+        ("--tokenize-batch-size", args.tokenize_batch_size),
+    ):
+        if value <= 0:
+            parser.error(f"{option} must be positive")
+
     output = args.output.resolve()
     metadata_path = output.with_suffix(output.suffix + ".json")
     expected_bytes = args.num_samples * (args.seq_length + 1) * np.dtype(np.uint32).itemsize
