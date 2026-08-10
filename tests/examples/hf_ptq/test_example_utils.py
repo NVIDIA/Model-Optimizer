@@ -19,9 +19,7 @@ separate-file-standalone, separate-file-indexed) plus a negative case.
 """
 
 import json
-from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -199,59 +197,15 @@ def test_get_original_hf_quant_method_none_for_unquantized():
     )
 
 
-# ---------- _resolve_init_config ---------------------------------------------
-
-
-def _remote_config():
-    # Config whose class module lives under "transformers_modules" (remote code).
-    cls = type("_RemoteConfig", (), {"__module__": "transformers_modules.ckpt.config"})
-    return cls()
-
-
-def test_resolve_init_config_rederives_for_remote_config():
-    builtin_cfg = SimpleNamespace()
-    with patch.object(
-        example_utils.AutoConfig, "from_pretrained", return_value=builtin_cfg
-    ) as mock:
-        out = example_utils._resolve_init_config(
-            _remote_config(), object, "/ckpt", {"trust_remote_code": True}
-        )
-    assert out is builtin_cfg
-    mock.assert_called_once_with("/ckpt")  # trust_remote_code stripped
-
-
-def test_resolve_init_config_keeps_non_remote_config():
-    cfg = SimpleNamespace()  # module is "types", not remote
-    with patch.object(example_utils.AutoConfig, "from_pretrained") as mock:
-        assert example_utils._resolve_init_config(cfg, object, "/ckpt", {}) is cfg
-    mock.assert_not_called()
-
-
-def test_resolve_init_config_falls_back_when_rederive_raises():
-    cfg = _remote_config()
-    with patch.object(example_utils.AutoConfig, "from_pretrained", side_effect=ValueError()):
-        assert example_utils._resolve_init_config(cfg, object, "/ckpt", {}) is cfg
-
-
 @pytest.mark.parametrize(
-    (
-        "architecture",
-        "model_class_name",
-        "expected_config_dtype_kwarg",
-        "unexpected_config_dtype_kwarg",
-    ),
+    ("architecture", "model_class_name"),
     [
-        ("DeciLMForCausalLM", "AutoModelForCausalLM", "torch_dtype", "dtype"),
-        ("LlamaForCausalLM", "LlamaForCausalLM", "dtype", "torch_dtype"),
+        # DeciLM takes the legacy ``torch_dtype`` kwarg; everything else takes ``dtype``.
+        ("DeciLMForCausalLM", "AutoModelForCausalLM"),
+        ("LlamaForCausalLM", "LlamaForCausalLM"),
     ],
 )
-def test_get_model_uses_expected_dtype_kwarg(
-    monkeypatch,
-    architecture,
-    model_class_name,
-    expected_config_dtype_kwarg,
-    unexpected_config_dtype_kwarg,
-):
+def test_get_model_uses_expected_dtype_kwarg(monkeypatch, architecture, model_class_name):
     calls = {}
     hf_config = SimpleNamespace(
         architectures=[architecture],
@@ -267,12 +221,7 @@ def test_get_model_uses_expected_dtype_kwarg(
     class FakeAutoModelForCausalLM:
         @staticmethod
         def from_config(config, **kwargs):
-            calls["from_config"] = kwargs
-            assert config is hf_config
-            assert kwargs[expected_config_dtype_kwarg] is torch.float16
-            assert unexpected_config_dtype_kwarg not in kwargs
-            assert "max_memory" not in kwargs
-            return FakeModel()
+            raise AssertionError("get_model must not construct a model to size the load")
 
         @staticmethod
         def from_pretrained(*args, **kwargs):
@@ -303,18 +252,12 @@ def test_get_model_uses_expected_dtype_kwarg(
         monkeypatch.setattr(example_utils.transformers, model_class_name, FakeLlamaForCausalLM)
     monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
-    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
-    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
     model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
 
     assert isinstance(model, FakeModel)
     assert calls["eval"]
-    if expected_config_dtype_kwarg == "torch_dtype":
-        assert calls["from_config"]["trust_remote_code"] is True
-    else:
-        assert "trust_remote_code" not in calls["from_config"]
     assert calls["from_pretrained"]["trust_remote_code"] is True
 
 
@@ -369,9 +312,7 @@ def test_get_model_device_map_for_diffusion_gemma(
     monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
     monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
-    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
-    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
     monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
 
     example_utils.get_model("checkpoint", device="cuda", trust_remote_code=True)
@@ -464,100 +405,118 @@ def test_get_model_deepseek_honors_trust_remote_code(
     )
     monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
     monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
-    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
-    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
 
     example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
 
 
-# ---------- _build_meta_skeleton ----------------------------------------------
+def _patch_get_model_deps(monkeypatch, hf_config, model_class):
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **kw: hf_config)
+    monkeypatch.setattr(example_utils.transformers, "LlamaForCausalLM", model_class)
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
 
 
-def test_build_meta_skeleton_uses_permissive_patching():
-    """The probe must be no stricter than the loader it predicts.
-
-    ``include_buffers=True`` is a bare global ``torch.device("meta")`` context, which
-    also captures scratch arithmetic in ``__init__``; ``from_pretrained`` never does
-    that, so the probe must not either.
-    """
-    seen = {}
-
-    def fake_init_empty_weights(include_buffers):
-        seen["include_buffers"] = include_buffers
-        return nullcontext()
-
-    sentinel = object()
-    with patch.object(example_utils, "init_empty_weights", fake_init_empty_weights):
-        out = example_utils._build_meta_skeleton(
-            lambda cfg, **kw: sentinel, "cfg", {"dtype": torch.bfloat16}, "Arch"
-        )
-
-    assert out is sentinel
-    assert seen["include_buffers"] is False
-
-
-def test_build_meta_skeleton_survives_meta_hostile_init():
-    """Remote code that reads a real scalar in ``__init__`` must still build."""
-
-    def from_config(cfg, **kwargs):
-        # Mirrors Phi-4-multimodal's conformer: int() on a freshly built tensor. This
-        # raises under a global meta context but works with parameter-only patching.
-        return SimpleNamespace(width=int(torch.tensor(80.0)))
-
-    model = example_utils._build_meta_skeleton(from_config, "cfg", {}, "Arch")
-
-    assert model.width == 80
-
-
-def test_build_meta_skeleton_returns_none_and_warns_on_failure():
-    def from_config(cfg, **kwargs):
-        raise RuntimeError("boom")
-
-    with pytest.warns(UserWarning, match="Could not build a meta-device skeleton of Arch"):
-        assert example_utils._build_meta_skeleton(from_config, "cfg", {}, "Arch") is None
-
-
-def test_get_model_skips_device_map_estimate_when_skeleton_fails(monkeypatch):
-    """A failed probe must not abort the load: skip sizing, still call from_pretrained."""
-    calls = {}
-    hf_config = SimpleNamespace(
+def _llama_config():
+    return SimpleNamespace(
         architectures=["LlamaForCausalLM"],
         dtype=torch.float16,
         model_type="llama",
         torch_dtype=torch.bfloat16,
     )
 
+
+# ---------- _checkpoint_size_bytes / GPU-budget sizing -------------------------
+
+
+def test_checkpoint_size_bytes_prefers_index_metadata(tmp_path):
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": 16381470720}, "weight_map": {}})
+    )
+    # A shard is present but must be ignored in favour of the recorded total.
+    (tmp_path / "model-00001-of-00001.safetensors").write_bytes(b"\0" * 32)
+
+    assert example_utils._checkpoint_size_bytes(tmp_path) == 16381470720
+
+
+def test_checkpoint_size_bytes_sums_shards_without_index(tmp_path):
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"\0" * 100)
+    (tmp_path / "model-00002-of-00002.safetensors").write_bytes(b"\0" * 40)
+
+    assert example_utils._checkpoint_size_bytes(tmp_path) == 140
+
+
+def test_checkpoint_size_bytes_falls_back_to_shards_on_bad_index(tmp_path):
+    (tmp_path / "model.safetensors.index.json").write_text("{not json")
+    (tmp_path / "model.safetensors").write_bytes(b"\0" * 77)
+
+    assert example_utils._checkpoint_size_bytes(tmp_path) == 77
+
+
+@pytest.mark.parametrize(
+    ("total_size", "expect_capped"),
+    [
+        # 3 GiB of weights against a 4 GiB GPU budget: fits, so no cap is applied.
+        (3 * 1024**3, False),
+        # 6 GiB against the same budget: will spill, so leave activation headroom.
+        (6 * 1024**3, True),
+    ],
+)
+def test_get_model_caps_gpu_budget_only_when_weights_do_not_fit(
+    monkeypatch, tmp_path, total_size, expect_capped
+):
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total_size}, "weight_map": {}})
+    )
+    calls = {}
+
     class FakeModel:
         def eval(self):
-            calls["eval"] = True
+            pass
 
     class FakeLlamaForCausalLM:
         @staticmethod
         def _from_config(config, **kwargs):
-            raise RuntimeError("Tensor.item() cannot be called on meta tensors")
+            raise AssertionError("get_model must not construct a model to size the load")
 
         @staticmethod
         def from_pretrained(*args, **kwargs):
             calls["from_pretrained"] = kwargs
             return FakeModel()
 
-    def _boom_infer(model, max_memory):
-        raise AssertionError("infer_auto_device_map must be skipped without a skeleton")
+    _patch_get_model_deps(monkeypatch, _llama_config(), FakeLlamaForCausalLM)
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 2 * 1024**3, 1: 2 * 1024**3})
 
-    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **kw: hf_config)
-    monkeypatch.setattr(example_utils.transformers, "LlamaForCausalLM", FakeLlamaForCausalLM)
-    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
-    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=True)
+
+    if expect_capped:
+        assert calls["from_pretrained"]["max_memory"] == {
+            0: 2 * 1024**3 * 0.8,
+            1: 2 * 1024**3 * 0.8,
+        }
+    else:
+        assert "max_memory" not in calls["from_pretrained"]
+
+
+def test_get_model_skips_cap_when_checkpoint_size_unknown(monkeypatch, tmp_path):
+    """An unreadable checkpoint layout must not invent a memory cap."""
+    calls = {}
+
+    class FakeModel:
+        def eval(self):
+            pass
+
+    class FakeLlamaForCausalLM:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            return FakeModel()
+
+    _patch_get_model_deps(monkeypatch, _llama_config(), FakeLlamaForCausalLM)
     monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
-    monkeypatch.setattr(example_utils, "infer_auto_device_map", _boom_infer)
 
-    with pytest.warns(UserWarning, match="Skipping the device-map memory estimate"):
-        model = example_utils.get_model("checkpoint", device="cpu", trust_remote_code=True)
+    example_utils.get_model(str(tmp_path), device="cpu", trust_remote_code=True)
 
-    assert isinstance(model, FakeModel)
-    assert calls["eval"]
-    # The estimate is the only thing lost; no memory cap is invented for the load.
     assert "max_memory" not in calls["from_pretrained"]

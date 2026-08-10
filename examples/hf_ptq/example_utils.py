@@ -33,7 +33,6 @@ from typing import Any
 import torch
 import transformers
 import yaml
-from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
 from transformers import (
@@ -638,57 +637,37 @@ def get_original_hf_quant_method(config) -> str | None:
     return None
 
 
-def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs):
-    """Re-derive a built-in config when a remote-code config is used with a built-in model
-    class, so it matches the model definition's version; fall back to hf_config otherwise.
+def _checkpoint_size_bytes(ckpt_path) -> int | None:
+    """Total on-disk size of a checkpoint's weights, or ``None`` if it cannot be read.
+
+    Used to decide whether the weights will fit on the GPUs. The obvious alternative --
+    building a meta-device model and summing ``numel * dtype_size`` -- runs the
+    checkpoint's ``__init__``, which for remote-code models can fail outright and abort a
+    load that would otherwise have succeeded (NVBug 6563509). The safetensors index
+    already carries that sum: ``metadata.total_size`` matched ``compute_module_sizes``
+    exactly on Qwen3-8B (15.256 GiB) and DeepSeek-R1-Distill-Llama-70B (131.417 GiB).
+
+    On-disk size is the checkpoint's own dtype, which is what gets loaded under the
+    default ``dtype="auto"``.
     """
-    if auto_model_module in [AutoModelForCausalLM, AutoModel]:
-        return hf_config
-    if not type(hf_config).__module__.startswith("transformers_modules"):
-        return hf_config
-    builtin_config_kwargs = {k: v for k, v in config_kwargs.items() if k != "trust_remote_code"}
+    path = Path(ckpt_path)
+    if not path.is_dir():
+        return None
+
+    index_file = path / "model.safetensors.index.json"
+    if index_file.is_file():
+        try:
+            with open(index_file) as f:
+                total_size = json.load(f).get("metadata", {}).get("total_size")
+            if isinstance(total_size, int):
+                return total_size
+        except (OSError, ValueError):
+            pass  # fall through to summing the shards
+
+    shards = sorted(path.glob("*.safetensors")) or sorted(path.glob("*.bin"))
     try:
-        return AutoConfig.from_pretrained(ckpt_path, **builtin_config_kwargs)
-    except Exception as e:
-        warnings.warn(
-            f"Could not re-derive a built-in config for {ckpt_path} ({e}); using the "
-            "remote-code config for device-map inference."
-        )
-        return hf_config
-
-
-def _build_meta_skeleton(from_config, config_for_init, model_kwargs, architecture):
-    """Build a throwaway meta-device model used only to size ``infer_auto_device_map``.
-
-    ``compute_module_sizes`` needs shapes and dtypes, never values or storage, so this
-    probe only has to reproduce the module tree. It must also be *no stricter than the
-    loader it predicts*, or it kills runs ``from_pretrained`` would have completed:
-
-    - Transformers 4.x builds under ``init_empty_weights()``, i.e. ``include_buffers=False``.
-    - Transformers 5.x builds under ``torch.device("meta")`` plus
-      ``meta_device_safe_creation_ops()``, which redirects ``torch.linspace`` to CPU so
-      remote code that derives scalars from it in ``__init__`` keeps working.
-
-    ``include_buffers=True`` is stricter than both: accelerate implements it as a bare
-    global ``torch.device("meta")`` context, so *every* tensor built in ``__init__`` lands
-    on meta and any ``int(torch.tensor(...))`` raises. ``include_buffers=False`` patches
-    only ``nn.Module.register_parameter``, leaving ``__init__`` arithmetic on a real
-    device; buffers stay materialized, which costs nothing here because their shape and
-    dtype size the same either way.
-
-    Returns ``None`` (after warning) if the model cannot be built at all; the caller then
-    skips the estimate rather than failing a load ``from_pretrained`` can still do.
-    """
-    try:
-        with init_empty_weights(include_buffers=False):
-            return from_config(config_for_init, **model_kwargs)
-    except Exception as e:
-        warnings.warn(
-            f"Could not build a meta-device skeleton of {architecture} ({e!r}). "
-            "Skipping the device-map memory estimate and letting from_pretrained map the "
-            "model. If you hit GPU OOM, rerun with --use_seq_device_map (which applies "
-            "--gpu_max_mem_percentage) or lower --batch_size."
-        )
+        return sum(shard.stat().st_size for shard in shards) or None
+    except OSError:
         return None
 
 
@@ -893,28 +872,11 @@ def get_model(
                 auto_model_module = AutoModel
             else:
                 auto_model_module = AutoModelForCausalLM
-            from_config = auto_model_module.from_config
         else:
             auto_model_module = getattr(transformers, architecture)
-            from_config = auto_model_module._from_config
 
-        config_for_init = _resolve_init_config(
-            hf_config, auto_model_module, ckpt_path, config_kwargs
-        )
-
-        # When computing the device_map, assuming bfloat16 precision by default,
-        # unless specified by the hf_config.
-        config_dtype = _get_config_dtype(config_for_init)
-        model_kwargs2 = _apply_dtype_to_config(
-            model_kwargs, config_dtype, architecture, apply_config_dtype=True
-        )
-        if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
-            model_kwargs2.pop("trust_remote_code", None)
-        model_kwargs2.pop("max_memory", None)
-
-        # Only a sizing aid for ``infer_auto_device_map`` below; ``None`` when the model
-        # cannot be built on meta, in which case the estimate is skipped.
-        model = _build_meta_skeleton(from_config, config_for_init, model_kwargs2, architecture)
+        # Assume bfloat16 precision by default, unless specified by the hf_config.
+        config_dtype = _get_config_dtype(hf_config)
 
         max_memory = get_max_memory()
 
@@ -934,9 +896,14 @@ def get_model(
                 f"Offload folder: {offload_folder}\n"
                 "Weights exceeding GPU+CPU budgets will be streamed from disk."
             )
-        elif model is not None:
-            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
-            if "cpu" in inferred_device_map.values():
+        else:
+            # Weights that do not fit on the GPUs leave no room for calibration
+            # activations, because device_map="auto" packs them to ~100% of free memory.
+            # Cap the budget in that case. Sized from the checkpoint on disk rather than
+            # from a constructed model, so no checkpoint ``__init__`` runs here.
+            checkpoint_bytes = _checkpoint_size_bytes(ckpt_path)
+            gpu_budget = sum(size for dev, size in max_memory.items() if isinstance(dev, int))
+            if checkpoint_bytes is not None and checkpoint_bytes > gpu_budget:
                 for _device in max_memory:
                     if isinstance(_device, int):
                         max_memory[_device] *= gpu_mem_percentage
