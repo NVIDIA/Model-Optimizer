@@ -32,20 +32,14 @@ register(
 )
 ```
 
-Then add it to the import list in `__init__.py` and a row to `EXPECTED_MOE_VARIANTS` in
-`tests/unit/torch/export/test_model_specs.py` (an exhaustive-table test fails otherwise).
+Then add it to the import list in `__init__.py`, and add a row to
+`EXPECTED_MOE_VARIANTS` in `tests/unit/torch/export/test_model_specs.py` — an
+exhaustive-table test fails otherwise.
+
+Fill only the sections your model needs; every field is optional except `model_type`.
 
 ## Fields
 
-| Field | Meaning |
-|---|---|
-| `model_type` | HF `config.model_type`. Unique across the registry. |
-| `moe_variants` | MoE block layouts. Several when one model type materializes differently (e.g. Mixtral across transformers generations). |
-| `block_names` | MoE block class names, matched case-insensitively and **exactly** against the module's MRO. |
-| `expert_linear_names` | Expert projection names, e.g. `("gate_proj", "down_proj", "up_proj")`. |
-| `has_iterable_experts` | True when experts are per-expert submodules `get_experts_list` can group; False for stacked/fused layouts. |
-| `gate_up_pair` | The (gate, up) pair serving engines fuse into `gate_up_proj`. `None` if non-gated or already fused. |
-| `pqs_fuse_rules` | AWQ `pre_quant_scale` fusion, as `(class_substrings, fuse_into, fuse_from)`. |
-| `weight_plus_one_norm_names` | Norm classes storing `w - 1` (effective scale is `weight + 1`). |
-
-Specs hold data and trivial accessors only — subsystem logic stays in the subsystem.
+See [`specs.py`](specs.py) — each field is documented on its declaration, and those
+docstrings are what the API reference renders. Specs hold data and trivial accessors
+only; subsystem logic stays in the subsystem.

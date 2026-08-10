@@ -60,7 +60,7 @@ class MoEVariant:
     """
 
     block_names: tuple[str, ...] = ()
-    """Matching key: MoE block class names, matched against the module's MRO
+    """The matching key -- MoE block class names, matched against the module's MRO
     (case-insensitive exact names, not substrings; see ``match_class_names``)."""
 
     expert_linear_names: tuple[str, ...] | None = None
