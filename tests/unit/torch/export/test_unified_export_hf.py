@@ -81,6 +81,26 @@ def test_build_tied_alias_map_list_style_is_empty():
     assert _build_tied_alias_map(parent) == {}
 
 
+def test_build_tied_alias_map_skips_declared_but_unapplied_tie():
+    """A class declares a dict-style tie but the two params are DISTINCT objects
+    (e.g. ``tie_word_embeddings=False`` still ships a class-level ``_tied_weights_keys``).
+    A name-only match would drop an independent weight; the build-time object-identity
+    gate must skip it so the map stays empty.
+    """
+
+    class _Untied(torch.nn.Module):
+        _tied_weights_keys = {r"^lm_head\.weight$": "embed.weight"}
+
+        def __init__(self):
+            super().__init__()
+            self.embed = torch.nn.Linear(4, 4, bias=False)
+            self.lm_head = torch.nn.Linear(4, 4, bias=False)  # separate weight object
+
+    parent = _Untied()
+    assert parent.lm_head.weight is not parent.embed.weight  # declared, but not applied
+    assert _build_tied_alias_map(parent) == {}
+
+
 def test_tied_group_resolver_group_key_is_shared_and_order_independent():
     """Both sides of a declared tie map to the same key; untied params map to None."""
     enc, dec = make_tied_linear_pair()
@@ -241,6 +261,31 @@ def test_sync_tied_input_amax_no_op_for_untied_modules():
     assert torch.allclose(dec_q.amax, torch.tensor(5.0))
 
 
+def test_sync_tied_input_amax_merges_undeclared_shared_weight():
+    """Two Linears that physically SHARE a weight object but declare no tie still get
+    their input amaxes merged by object identity. The address backstop drops one such
+    side, so the surviving input_scale must cover both activation ranges (no clipping).
+    """
+    parent = torch.nn.Module()
+    parent.a = torch.nn.Linear(16, 32, bias=False)
+    parent.b = torch.nn.Linear(16, 32, bias=False)
+    parent.b.weight = parent.a.weight  # undeclared physical share (same Parameter object)
+
+    mtq.quantize(parent, mtq.FP8_DEFAULT_CFG, forward_loop=lambda m: None)
+    assert parent.a.weight is parent.b.weight  # share survives quantize
+    # No _tied_weights_keys declared, so name-based grouping finds nothing to merge.
+    assert TiedGroupResolver(parent).group_key("a.weight") is None
+
+    parent.a.input_quantizer.amax = torch.tensor(2.0)
+    parent.b.input_quantizer.amax = torch.tensor(8.0)
+
+    sync_tied_input_amax(parent)
+
+    expected = torch.tensor(8.0)
+    assert torch.allclose(parent.a.input_quantizer.amax, expected)
+    assert torch.allclose(parent.b.input_quantizer.amax, expected)
+
+
 def test_postprocess_name_based_drops_alias_across_distinct_addresses():
     """Declared alias is dropped by name even when its tensor has a DIFFERENT address
     than the canonical -- the FSDP full_state_dict case that address dedup cannot catch.
@@ -286,6 +331,7 @@ def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
             super().__init__()
             self.a = torch.nn.Linear(4, 4, bias=False)
             self.b = torch.nn.Linear(4, 4, bias=False)
+            self.b.weight = self.a.weight  # genuinely shared, declared both ways
 
     resolver = TiedGroupResolver(_Bi())
     # sanity: the map really is bidirectional at the prefix level
@@ -295,6 +341,31 @@ def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
 
     assert "a.weight" in out and "b.weight" in out  # neither side dropped
+
+
+def test_postprocess_keeps_both_sides_when_tied_quant_state_differs():
+    """Tied sides with different quant state (alias quantized, canonical not) must not be
+    deduped: dropping ``encoder.weight`` while its ``weight_scale`` / ``input_scale`` have
+    no canonical counterpart would orphan scales on a weight that's gone. The alias group
+    is dropped atomically (all-or-nothing), so here nothing is dropped.
+    """
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    resolver = TiedGroupResolver(parent)
+
+    sd = {
+        # alias (encoder) exported as quantized: weight + companion scales
+        "encoder.weight": torch.randn(4, 4),
+        "encoder.weight_scale": torch.randn(4),
+        "encoder.input_scale": torch.randn(1),
+        # canonical (decoder) exported unquantized: weight only, no scales
+        "decoder.weight": torch.randn(4, 4),
+    }
+
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+
+    # Mismatched companion keys -> keep the whole alias group; no orphaned scales.
+    assert set(out) == set(sd)
 
 
 def test_postprocess_name_based_drops_tied_expert_subtree_by_name():

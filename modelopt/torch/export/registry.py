@@ -28,13 +28,9 @@ editing if/elif chains inside ``unified_export_hf.py``.
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-
-if TYPE_CHECKING:
-    from .model_utils import TiedGroupResolver
 
 __all__ = [
     "ExportContext",
@@ -48,26 +44,16 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    ``resolver`` is the name-based :class:`TiedGroupResolver`, which resolves tied
-    weights from the model's own ``_tied_weights_keys`` / ``tie_word_embeddings``
-    declarations (stable across packing, FSDP resharding, and offload, unlike a
-    ``data_ptr``). It is the single source of truth for tied-weight identity across the
-    export: both dense and fused-MoE tied weights are packed independently and their
-    duplicate keys are dropped by name in ``postprocess_state_dict``.
+    Tied-weight dedup is not a handler concern: the driver builds one name-based
+    :class:`TiedGroupResolver` and feeds it to ``sync_tied_input_amax`` and
+    ``postprocess_state_dict`` directly. Both dense and fused-MoE tied weights are packed
+    independently and their duplicate keys are dropped by name there, so the context
+    carries no resolver (handlers never consulted it).
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    resolver: "TiedGroupResolver | None" = None
-
-    def __post_init__(self) -> None:
-        # Import here to avoid a circular import at module load time.
-        from .model_utils import TiedGroupResolver
-
-        # Reuse a caller-provided resolver when given (built once per export), else build.
-        if self.resolver is None:
-            self.resolver = TiedGroupResolver(self.model)
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
