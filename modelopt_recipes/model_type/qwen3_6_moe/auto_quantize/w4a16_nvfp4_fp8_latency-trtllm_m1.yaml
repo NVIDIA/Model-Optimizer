@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Qwen3.6 MoE hardware-aware AutoQuantize (HAQ): FP8 + NVFP4-weight-only + BF16 per-layer
+# search that minimizes accounted TRT-LLM kernel latency instead of effective bits. This is
+# the latency counterpart to w4a16_nvfp4_fp8_at_6p0bits-active_moe.yaml: SAME disabled/cost-
+# excluded layers and SAME candidate formats, so the two objectives are compared on one setup.
+#
+# The latency budget is measured at the batch-size-1, M=1 decode profile. W4A16 NVFP4 is priced
+# by the documented W4A4 measurement proxy for this low-M, weight-memory-bound POC (see the LUT's
+# cost_is_proxy rows and outputs/qwen36_trtllm_kernel_policy.yaml). Not a production latency claim
+# until actual W4A16 measurements replace the proxy rows.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  fp8: configs/ptq/presets/model/fp8
+  w4a16_nvfp4: configs/ptq/presets/model/w4a16_nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Qwen3.6 MoE HAQ: FP8 + NVFP4-weight-only + BF16 per-layer search minimizing accounted
+    TRT-LLM kernel latency at the batch-size-1 M=1 decode profile (W4A4->W4A16 proxy).
+
+auto_quantize:
+  constraints:
+    cost_model: latency
+    latency:
+      relative_to_min: 1.2
+    cost:
+      lut_path: /home/scratch.juhim_coreai/code/dev_notes/Autoquant_research/outputs/qwen36_sm100_tp1_ep1_haq_latency_v1.csv
+      deployment_profile: qwen36_sm100_tp1_ep1_decode
+      m: 1
+
+  # Same candidate suite as the effective-bits recipe; BF16/no-quant is an implicit extra choice.
+  candidate_formats:
+    - $import: fp8
+    - $import: w4a16_nvfp4
+
+  auto_quantize_method: gradient
+  score_size: 128
+
+  # Identical disabled set to the effective-bits recipe (the GDN in_proj_a/b are here, which is
+  # why the LUT's nvfp4_trtllm coverage gap for that group is a no-op: it is BF16-only).
+  disabled_layers:
+    - $import: base_disabled_layers
+    - "*shared_expert_gate*"
+
+  cost_excluded_layers:
+    - "*visual*"
+    - "*mtp*"
+    - "*vision_tower*"
