@@ -771,7 +771,7 @@ def _lmms_eval_command(
     *,
     checkpoint: str,
     output_path: Path,
-) -> tuple[list[str], dict[str, str], float | None]:
+) -> tuple[list[str], dict[str, str], float]:
     """Build a deterministic lmms-eval CLI invocation for one realized checkpoint."""
 
     model = str(settings.get("model", "vllm"))
@@ -824,7 +824,9 @@ def _lmms_eval_command(
             env[str(key)] = str(value)
     if settings.get("cache_dir") is not None:
         env.setdefault("LMMS_EVAL_HOME", str(settings["cache_dir"]))
-    timeout = settings.get("timeout_seconds", settings.get("timeout"))
+    timeout = settings.get("timeout_seconds")
+    if timeout is None:
+        timeout = settings.get("timeout")
     if timeout is None:
         timeout = _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
     return argv, env, float(timeout)
@@ -1015,7 +1017,7 @@ def _run_lmms_eval_process(
     *,
     cwd: str,
     env: Mapping[str, str],
-    timeout: float | None,
+    timeout: float,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         argv,
