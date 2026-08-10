@@ -1128,17 +1128,29 @@ def quantize_main(
         aq_config = None
         fixed_quantize_config = None
 
-    def _is_layerwise(obj):
-        if isinstance(obj, ModelOptPTQRecipe):
-            return _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, ModelOptAutoQuantizeRecipe):
-            return obj.quantize is not None and _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, list):
-            return any(_is_layerwise(a) for a in obj)
-        layerwise = getattr(obj, "layerwise", None)
-        return bool(getattr(layerwise, "enable", False))
+    def _layerwise_cfg(obj):
+        """The recipe's ``layerwise`` block, or None.
 
-    is_layerwise = _is_layerwise(recipe)
+        An algorithm parsed from YAML arrives as a plain dict, while the deprecated
+        ``--auto_quantize_*`` path builds config objects, so both shapes reach here.
+        """
+        if isinstance(obj, ModelOptPTQRecipe):
+            return _layerwise_cfg(obj.quantize.algorithm)
+        if isinstance(obj, ModelOptAutoQuantizeRecipe):
+            return _layerwise_cfg(obj.quantize.algorithm) if obj.quantize is not None else None
+        if isinstance(obj, list):
+            return next((cfg for cfg in map(_layerwise_cfg, obj) if cfg is not None), None)
+        if isinstance(obj, dict):
+            return obj.get("layerwise")
+        return getattr(obj, "layerwise", None)
+
+    def _layerwise_get(cfg, key, default=None):
+        if cfg is None:
+            return default
+        return cfg.get(key, default) if isinstance(cfg, dict) else getattr(cfg, key, default)
+
+    layerwise_cfg = _layerwise_cfg(recipe)
+    is_layerwise = bool(_layerwise_get(layerwise_cfg, "enable", False))
 
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
