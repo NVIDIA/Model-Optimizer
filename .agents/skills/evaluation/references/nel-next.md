@@ -88,7 +88,7 @@ benchmarks:                     # EXACTLY ONE entry — one benchmark per config
     repeats: <N>
     max_concurrent: <N>         # keep == sandbox.concurrency
     solver: {service: <svc>, timeout_strategy: task|max}
-    sandbox: {region: <...>, ecr_repository: ${HARBOR_ECR_REPOSITORY}, concurrency: <N>, log_stream_prefix: <...>}
+    sandbox: {region: <...>, ecr_repository: "${HARBOR_ECR_REPOSITORY}", concurrency: <N>, log_stream_prefix: <...>}
 cluster:
   type: slurm
   hostname: <login fqdn>
@@ -97,8 +97,10 @@ cluster:
   walltime: "04:00:00"          # auto_resume chains across windows
   shards: 1
   eval_image: ${NEL_NEXT_EVAL_IMAGE}   # from eval-config
+  container_mounts: [<host>:<container>:ro, ...]   # into the EVAL container, not the service
+                                                   # (e.g. SWE-bench's instruction_template)
   sbatch_extra_flags: {switches: 1, exclusive: true}
-  container_env: {HF_TOKEN: ${HF_TOKEN}, HF_HOME: /cache/huggingface, AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}, AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}, AWS_DEFAULT_REGION: <region>, LLM_API_KEY: "no-key-needed"}
+  container_env: {HF_TOKEN: "${HF_TOKEN}", HF_HOME: /cache/huggingface, AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}", AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}", AWS_DEFAULT_REGION: <region>, LLM_API_KEY: "no-key-needed"}
   mount_home: false
   auto_resume: true
   max_retries: 3
