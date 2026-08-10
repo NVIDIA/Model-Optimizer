@@ -27,7 +27,7 @@ invoked. They cover:
   ``trtexec_safe`` is absent.
 - SSH key-based auth only: no sshpass prefixes in any subprocess command.
 - Latency parsing from both ``_STD_PATTERN`` (GPU Compute Time) and
-  ``_SAFE_PATTERN`` (Average over N runs - GPU latency).
+  ``_SAFE_PATTERN`` (timestamped GPU Compute Time … median).
 - Error paths: non-zero trtexec returncode, scp failure, missing trtexec
   binary, unparseable stdout.
 """
@@ -596,7 +596,10 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     """The remote path runs trtexec → scp → ssh trtexec_safe, parsing _SAFE_PATTERN."""
     trtexec_proc = _make_proc(stdout="")  # build only; --skipInference
     scp_proc = _make_proc()
-    safe_stdout = "[01/15/2026-12:00:00] [I] Average over 10 runs - GPU latency: 3.42 ms\n"
+    safe_stdout = (
+        "[01/15/2026-12:00:00] [I] GPU Compute Time:  min = 3.40 ms, max = 3.44 ms, "
+        "mean = 3.41 ms, median = 3.42 ms, percentile(99%) = 3.44 ms\n"
+    )
     ssh_proc = _make_proc(stdout=safe_stdout)
     cleanup_proc = _make_proc()
 
@@ -613,10 +616,12 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     assert "alice@10.0.0.5:" in scp_cmd[-1]
     assert "ssh" in ssh_cmd
     assert "alice@10.0.0.5" in ssh_cmd
-    # The remote command string runs trtexec_safe with the engine path.
+    # The remote command string runs trtexec_safe with timing and engine args.
     remote_cmd_str = ssh_cmd[-1]
     assert "trtexec_safe" in remote_cmd_str
     assert "--loadEngine=" in remote_cmd_str
+    assert "--warmUp=" in remote_cmd_str
+    assert "--iterations=" in remote_cmd_str
     assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd[-1]
 
 
@@ -800,11 +805,15 @@ def test_std_pattern_matches_gpu_compute_time_line():
     assert match and match.group(1) == "1.42"
 
 
-def test_safe_pattern_matches_average_over_runs_line():
-    """The safe pattern matches the trtexec_safe ``Average over N runs - GPU latency`` line."""
-    text = "[01/15/2026-12:00:00] [I] Average over 10 runs - GPU latency: 7.89 ms"
+def test_safe_pattern_matches_gpu_compute_time_median():
+    """``_SAFE_PATTERN`` matches a timestamped ``GPU Compute Time … median`` line."""
+    text = (
+        "[02/03/1970-21:02:53] [I] GPU Compute Time:  min = 0.221299 ms, "
+        "max = 0.222502 ms, mean = 0.222012 ms, median = 0.222026 ms, "
+        "percentile(99%) = 0.222445 ms"
+    )
     match = re.search(bm._SAFE_PATTERN, text, re.IGNORECASE)
-    assert match and match.group(1) == "7.89"
+    assert match and match.group(1) == "0.222026"
 
 
 # ===========================================================================
@@ -821,7 +830,10 @@ def test_remote_scp_and_ssh_commands_contain_no_sshpass(tmp_path):
     )
     trtexec_proc = _make_proc(stdout="")
     scp_proc = _make_proc()
-    safe_stdout = "[01/15/2026-12:00:00] [I] Average over 5 runs - GPU latency: 1.0 ms"
+    safe_stdout = (
+        "[01/15/2026-12:00:00] [I] GPU Compute Time:  min = 0.99 ms, max = 1.01 ms, "
+        "mean = 1.00 ms, median = 1.0 ms, percentile(99%) = 1.01 ms"
+    )
     ssh_proc = _make_proc(stdout=safe_stdout)
     cleanup_proc = _make_proc()
 
@@ -858,7 +870,10 @@ def test_remote_config_url_with_password_is_ignored(tmp_path):
 
     trtexec_proc = _make_proc(stdout="")
     scp_proc = _make_proc()
-    safe_stdout = "[01/15/2026-12:00:00] [I] Average over 5 runs - GPU latency: 2.0 ms"
+    safe_stdout = (
+        "[01/15/2026-12:00:00] [I] GPU Compute Time:  min = 1.99 ms, max = 2.01 ms, "
+        "mean = 2.00 ms, median = 2.0 ms, percentile(99%) = 2.01 ms"
+    )
     ssh_proc = _make_proc(stdout=safe_stdout)
     cleanup_proc = _make_proc()
 
