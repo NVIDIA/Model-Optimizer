@@ -845,16 +845,13 @@ def _prepare_moe_inputs(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool,
-    resolver: "TiedGroupResolver | None" = None,
 ) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
     Each MoE block is dispatched by its experts container to the matching preparation
     handler.
     """
-    prepare_ctx = ExportContext(
-        model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora, resolver=resolver
-    )
+    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     for name, sub_module in model.named_modules():
         if is_moe(sub_module) and hasattr(sub_module, "experts"):
             handler = PrepareMoEInputsRegistry.match(sub_module.experts)
@@ -903,7 +900,6 @@ def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
-    resolver: "TiedGroupResolver | None" = None,
 ) -> None:
     """Process all quantized modules in model, export weights in-place.
 
@@ -915,15 +911,10 @@ def _process_quantized_modules(
         dtype: The data type for weight conversion.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
-        resolver: Optional pre-built :class:`TiedGroupResolver` to reuse; built fresh
-            from ``model`` when not provided.
     """
-    # ExportContext carries the name-based TiedGroupResolver (reused when passed in, else
-    # built fresh per invocation). There is no per-module dedup cache; tied-weight
-    # duplicates are dropped by name in postprocess_state_dict.
-    ctx = ExportContext(
-        model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora, resolver=resolver
-    )
+    # There is no per-module dedup cache; tied-weight duplicates are dropped by name in
+    # postprocess_state_dict, driven by the resolver the driver owns.
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
@@ -967,12 +958,12 @@ def _export_transformers_checkpoint(
         NotImplementedError: if the model has accelerate offload hooks.
     """
     dtype = _resolve_export_dtype(model, dtype)
-    # One name-based tied-weight resolver for the whole export, built once and reused by the
-    # MoE-input prep, every ExportContext, the amax sync, and the final dedup in
-    # postprocess_state_dict. It resolves ties from the model's declarations (stable across
-    # FSDP resharding / offload / packing).
+    # One name-based tied-weight resolver for the whole export, built once and used by the
+    # amax sync and the final dedup in postprocess_state_dict (its only two consumers). It
+    # resolves ties from the model's declarations (stable across FSDP resharding / offload
+    # / packing).
     resolver = TiedGroupResolver(model)
-    _prepare_moe_inputs(model, dtype, is_modelopt_qlora, resolver)
+    _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
@@ -1014,7 +1005,7 @@ def _export_transformers_checkpoint(
     # Process all quantized modules and export weights
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    _process_quantized_modules(model, dtype, is_modelopt_qlora, resolver=resolver)
+    _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
 
     if is_fsdp2_model(model):

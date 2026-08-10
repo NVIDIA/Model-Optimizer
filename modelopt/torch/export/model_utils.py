@@ -276,7 +276,17 @@ def _canonical_via_pattern_pair(alias_pat: str, canonical_pat: str, name: str) -
         return None
     if any(c in alias_head or c in canon_head for c in r"\()[]{}*+?|^$"):
         return None
-    return canon_head + name[len(alias_head) :]
+    candidate = canon_head + name[len(alias_head) :]
+    # The character-based common-suffix split can land mid-token, yielding a name the
+    # canonical pattern would never actually match. Confirm the rewrite is accepted by
+    # ``canonical_pat``; if not, signal the caller to fall back to ``re.sub`` rather than
+    # emit a bogus canonical name.
+    try:
+        if re.fullmatch(canonical_pat, candidate) is None:
+            return None
+    except re.error:
+        return None
+    return candidate
 
 
 def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
@@ -297,6 +307,12 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
       ``r"decoder.layers.\\1.experts.gate_up_proj"``) resolve per layer. Fused
       MoE experts declare their tie on the 3-D container Parameter
       (``…experts.gate_up_proj`` / ``…experts.down_proj``), which is captured here.
+      Each candidate entry is confirmed by **object identity**: the alias and canonical
+      names must resolve to the *same* live Parameter. A class-level dict declares the
+      tie regardless of config (e.g. ``lm_head`` <-> ``embed_tokens`` when
+      ``tie_word_embeddings=False``), so a name-only match would drop an independent
+      weight; the identity check is safe because the map is built before packing, while
+      all Parameters are resident (no freed-then-reused address can forge a match).
     - **``tie_word_embeddings=True``**: the output embedding (e.g. ``lm_head``) is
       aliased to the input embedding (e.g. ``…embed_tokens``). Best-effort — only
       applied when both embedding modules resolve to distinct parameter names.
@@ -309,8 +325,12 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
     alias_to_canonical: dict[str, str] = {}
     # remove_duplicate=False is essential: a genuinely shared (tied) Parameter would
     # otherwise appear under only its first-registered name, hiding the alias name when
-    # the canonical side is registered first and leaving the tie undetected.
-    param_names = [name for name, _ in model.named_parameters(remove_duplicate=False)]
+    # the canonical side is registered first and leaving the tie undetected. The same
+    # listing gives each name's Parameter object, used below to confirm a declared tie is
+    # actually applied (identical object) before trusting it.
+    named_params = list(model.named_parameters(remove_duplicate=False))
+    param_names = [name for name, _ in named_params]
+    param_by_name = dict(named_params)
 
     for mod_name, submodule in model.named_modules():
         tied = getattr(submodule, "_tied_weights_keys", None)
@@ -341,8 +361,21 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
                     except re.error:
                         continue
                 canonical_full = prefix + canonical_rel
-                if canonical_full != full_name:
-                    alias_to_canonical[full_name] = canonical_full
+                if canonical_full == full_name:
+                    continue
+                # A class-level ``_tied_weights_keys`` dict is declared regardless of
+                # config (e.g. ``lm_head`` <-> ``embed_tokens`` even when
+                # ``tie_word_embeddings=False``), so a name-only match could drop an
+                # independent weight. The resolver is built before packing, while every
+                # Parameter is resident and alive, so identical object <=> the declared
+                # tie is actually applied in this instance. Object identity is safe here
+                # precisely because nothing has been freed yet: no allocator address reuse
+                # can forge a false match, unlike ``data_ptr``.
+                alias_p = param_by_name.get(full_name)
+                canon_p = param_by_name.get(canonical_full)
+                if alias_p is None or canon_p is None or alias_p is not canon_p:
+                    continue
+                alias_to_canonical[full_name] = canonical_full
 
     # tie_word_embeddings: output embedding aliased to input embedding. Best-effort.
     if getattr(getattr(model, "config", None), "tie_word_embeddings", False):
@@ -450,4 +483,18 @@ class TiedGroupResolver:
             if cand in alias_prefixes:
                 canonical = alias_prefixes[cand] + key[len(cand) :]
                 return canonical if canonical != key else None
+        return None
+
+    def matched_alias_prefix(self, key: str, alias_prefixes: dict[str, str]) -> str | None:
+        """Return the alias *module* prefix ``key`` falls under (longest match), or None.
+
+        Companion to :meth:`canonical_state_dict_key`: identifies which declared alias a
+        state-dict key belongs to, so every key of one tie can be deduped atomically
+        (all-or-nothing) rather than per key.
+        """
+        parts = key.split(".")
+        for i in range(len(parts), 0, -1):
+            cand = ".".join(parts[:i])
+            if cand in alias_prefixes and alias_prefixes[cand] + key[len(cand) :] != key:
+                return cand
         return None
