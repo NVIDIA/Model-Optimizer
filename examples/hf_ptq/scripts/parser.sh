@@ -41,7 +41,7 @@ parse_options() {
     CALIB_WITH_IMAGES=false
 
   # Parse command-line options
-  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_checkpoint:,auto_quantize_bits:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_cost_model:,auto_quantize_active_moe_expert_ratio:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4,vlm,calib_with_images" -n "$0" -- "$@")
+  ARGS=$(getopt -o "" -l "model:,quant:,recipe:,kv_cache_quant:,tp:,pp:,sparsity:,awq_block_size:,calib:,calib_batch_size:,input:,output:,batch:,tasks:,lm_eval_tasks:,lm_eval_limit:,simple_eval_tasks:,simple_eval_limit:,mmlu_limit:,trust_remote_code,use_seq_device_map,gpu_max_mem_percentage:,kv_cache_free_gpu_memory_fraction:,low_memory_mode,no-verbose,calib_dataset:,calib_seq:,auto_quantize_checkpoint:,auto_quantize_bits:,auto_quantize_method:,auto_quantize_score_size:,auto_quantize_cost_model:,auto_quantize_active_moe_expert_ratio:,moe_calib_experts_ratio:,cast_mxfp4_to_nvfp4,vlm,calib_with_images" -n "$0" -- "$@")
 
   eval set -- "$ARGS"
   while true; do
@@ -56,6 +56,7 @@ parse_options() {
       --awq_block_size ) AWQ_BLOCK_SIZE="$2"; shift 2;;
       --calib ) CALIB_SIZE="$2"; shift 2;;
       --calib_batch_size ) CALIB_BATCH_SIZE="$2"; shift 2;;
+      --input ) BUILD_MAX_INPUT_LEN="$2"; shift 2;;
       --output ) BUILD_MAX_OUTPUT_LEN="$2"; shift 2;;
       --batch ) BUILD_MAX_BATCH_SIZE="$2"; shift 2;;
       --tasks ) TASKS="$2"; shift 2;;
@@ -90,6 +91,7 @@ parse_options() {
   DEFAULT_CALIB_SIZE=512
   DEFAULT_CALIB_SEQ=512
   DEFAULT_CALIB_BATCH_SIZE=0
+  DEFAULT_BUILD_MAX_INPUT_LEN=4096
   DEFAULT_BUILD_MAX_OUTPUT_LEN=1024
   DEFAULT_BUILD_MAX_BATCH_SIZE=2
 
@@ -101,6 +103,9 @@ parse_options() {
   fi
   if [ -z "$CALIB_BATCH_SIZE" ]; then
     CALIB_BATCH_SIZE=$DEFAULT_CALIB_BATCH_SIZE
+  fi
+  if [ -z "$BUILD_MAX_INPUT_LEN" ]; then
+    BUILD_MAX_INPUT_LEN=$DEFAULT_BUILD_MAX_INPUT_LEN
   fi
   if [ -z "$BUILD_MAX_OUTPUT_LEN" ]; then
     BUILD_MAX_OUTPUT_LEN=$DEFAULT_BUILD_MAX_OUTPUT_LEN

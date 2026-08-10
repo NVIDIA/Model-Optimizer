@@ -33,6 +33,11 @@ from modelopt.torch.utils.mlflow import (
 )
 
 URI = "https://mlflow.example.com"
+# Fake credentials for the redaction tests. TruffleHog's URI detector flags any
+# scheme://user:pass@host, so the marker sits on the definitions; these tests exist
+# precisely to prove such credentials are masked.
+CREDS_URI = "https://user:tok@mlflow.example.com"  # trufflehog:ignore
+SHORT_CREDS_URI = "https://u:tok@host"  # trufflehog:ignore
 
 
 class FakeMlflow:
@@ -409,7 +414,7 @@ def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
         (["--password", "hunter2", "--verbose"], ["--password", "***", "--verbose"]),
         # Credentials embedded in a URI are masked wherever they appear.
         (
-            ["--mlflow", "https://user:tok@mlflow.example.com"],
+            ["--mlflow", CREDS_URI],
             ["--mlflow", "https://***@mlflow.example.com"],
         ),
         # Ordinary arguments are untouched, including values that merely contain the word.
@@ -426,7 +431,7 @@ def test_redact_argv_masks_credentials(argv, expected):
 def test_command_artifact_carries_no_secrets(fake_mlflow, monkeypatch):
     """argv reaches the server as command.txt, so secrets in it must not."""
     monkeypatch.setattr(
-        sys, "argv", ["run.py", "--hf_token", "hf_abc123", "--mlflow", "https://u:tok@host"]
+        sys, "argv", ["run.py", "--hf_token", "hf_abc123", "--mlflow", SHORT_CREDS_URI]
     )
     logger = _logger()
 
@@ -444,9 +449,7 @@ def test_params_and_run_url_mask_credentials(monkeypatch):
     fake = FakeMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", fake)
     monkeypatch.setattr(sys, "argv", ["run.py"])
-    logger = MlflowRunLogger(
-        "https://user:tok@mlflow.example.com", "tester/hf_ptq/m-nvfp4", run_name="masked"
-    )
+    logger = MlflowRunLogger(CREDS_URI, "tester/hf_ptq/m-nvfp4", run_name="masked")
 
     logger.start(params={"hf_token": "secret", "endpoint": "https://u:p@host", "qformat": "nvfp4"})
     url = logger.run_url
@@ -455,7 +458,7 @@ def test_params_and_run_url_mask_credentials(monkeypatch):
     assert fake.params == {"hf_token": "***", "endpoint": "https://***@host", "qformat": "nvfp4"}
     assert "tok" not in url and "https://***@mlflow.example.com" in url
     # The real URI is still what talks to the server.
-    assert fake.tracking_uri == "https://user:tok@mlflow.example.com"
+    assert fake.tracking_uri == CREDS_URI
 
 
 def test_failure_after_start_run_does_not_orphan_the_run(monkeypatch):
