@@ -688,6 +688,20 @@ class LatencyLUT:
     def deployment_profiles(self) -> set[str]:
         return {row.deployment_profile for row in self._rows}
 
+    @property
+    def selection_policy(self) -> str:
+        policies = {row.selection_policy for row in self._rows}
+        return policies.pop() if len(policies) == 1 else "mixed"
+
+    @property
+    def kernel_policy_id(self) -> str:
+        ids = {row.kernel_policy_id for row in self._rows}
+        return ids.pop() if len(ids) == 1 else "mixed"
+
+    @property
+    def has_proxy_costs(self) -> bool:
+        return any(row.cost_is_proxy for row in self._rows)
+
     def group_patterns(self, deployment_profile: str, m: int) -> set[str]:
         return {
             row.group_pattern
