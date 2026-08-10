@@ -7,7 +7,9 @@ Pruning
     Checkout `Megatron-Bridge Minitron Pruning & Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ and
     `Puzzletron v2 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for heterogeneous pruning campaigns, or the
     `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
-    for an end-to-end computer-vision example.
+    for a dated, end-to-end computer-vision example. The notebook uses the still-supported ``fastnas`` mode,
+    but its long-running workflow is not covered by automated notebook execution tests. Treat its environment setup,
+    runtime estimate, and recorded metrics as illustrative unless you revalidate them with the current release.
     Retained Puzzletron campaign reports and their reproduction status are summarized in the
     `campaign report catalog <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/puzzletron/docs/campaign_reports.md>`_.
 
