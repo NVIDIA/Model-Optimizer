@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+__all__ = []
+
 REQUIRED_REPORT_IDS = {"nemotron3_nano_30b_a3b", "qwen3p5_9b"}
 EXPECTED_REPORT_FIELDS = {
     "id",
