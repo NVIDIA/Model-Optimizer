@@ -6,8 +6,8 @@
 # Nemotron-Post-Training-Dataset-v2 chat shard so Hugging Face Datasets does not
 # prepare the repository's other large splits.
 #
-# Training topology: 2 nodes x 8 GPUs, TP=1, PP=1, CP=2, EP=8, ETP=1.
-# This gives DP=8 and EDP=2. With micro-batch-size=1 and global-batch-size=16,
+# Training topology: 2 nodes x 8 GPUs, TP=2, PP=1, CP=1, EP=4, ETP=1.
+# This gives DP=8 and EDP=4. With micro-batch-size=1 and global-batch-size=16,
 # train-samples=6400 produces 400 iterations. To run at 16K instead, change both
 # --seq-length and --max-position-embeddings to 16384.
 #
@@ -23,7 +23,7 @@ job_name: Nemotron-3-Nano-30B-A3B_QAD_32k_400iter
 pipeline:
   allow_to_fail: false
   skip: false
-  note: "NVFP4 QAD at 32K for 400 iterations on one explicit Nemotron post-training chat shard"
+  note: "NVFP4 TEGroupedMLP QAD at 32K for 400 iterations on one explicit Nemotron post-training chat shard"
 
   # Import the BF16 Hugging Face checkpoint as the MCore teacher checkpoint.
   task_0:
@@ -47,6 +47,7 @@ pipeline:
       - --seq-length 4096 --max-position-embeddings 32768
       - --calib-size 32
       - --skip-generate
+      - --export-default-te-spec
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
@@ -56,9 +57,9 @@ pipeline:
       - RUN_EXPORT: "false"
       - DP: "1"
       - CP: "1"
-      - TP: "1"
+      - TP: "2"
       - PP: "1"
-      - EP: "8"
+      - EP: "4"
       - ETP: "1"
     slurm_config:
       _factory_: "slurm_factory"
@@ -83,6 +84,7 @@ pipeline:
       - --finetune-data-files data/chat-00000-of-00012.parquet
       # QAD
       - --modelopt-enabled
+      - --export-default-te-spec
       - --export-kd-teacher-load /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
       - --attention-dropout 0.0 --hidden-dropout 0.0
       - --no-check-for-nan-in-loss-and-grad
@@ -109,10 +111,10 @@ pipeline:
       - MLM_TRAIN_SCRIPT: finetune
       - DATASET: nvidia/Nemotron-Post-Training-Dataset-v2
       - DP: "1"
-      - CP: "2"
-      - TP: "1"
+      - CP: "1"
+      - TP: "2"
       - PP: "1"
-      - EP: "8"
+      - EP: "4"
       - ETP: "1"
     slurm_config:
       _factory_: "slurm_factory"
@@ -125,6 +127,7 @@ pipeline:
   task_3:
     script: common/megatron_lm/export/export.sh
     args:
+      - --export-default-te-spec
       - --dist-ckpt-strictness log_all
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
