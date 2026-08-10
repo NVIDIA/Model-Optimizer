@@ -1,0 +1,22 @@
+job_name: inkling_attention_sanity
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "Inkling ModelOpt relative-bias, window, 2:4, and Q/K/P/V kernel sanity"
+
+  task_0:
+    inline: >-
+      python3 -m pip install --no-cache-dir -e modules/Model-Optimizer &&
+      python3 common/smoke/inkling_attention.py
+    environment:
+      - PYTHONPATH: modules/Model-Optimizer
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: "00:20:00"
+      container: vllm/vllm-openai:v0.26.0-aarch64
+      container_mounts: []
+      srun_args:
+        - --no-container-mount-home

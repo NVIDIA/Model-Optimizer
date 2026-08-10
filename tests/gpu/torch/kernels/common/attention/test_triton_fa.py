@@ -107,6 +107,51 @@ class TestForward:
             ref = F.scaled_dot_product_attention(qb, kb, vb, is_causal=False).squeeze(2)
             torch.testing.assert_close(out[i : i + 1], ref, rtol=1e-3, atol=1e-3)
 
+    def test_relative_bias_gqa_sliding_window_matches_reference(self):
+        """Inkling-style relative logits compose with GQA and a causal window."""
+        seq_len, num_heads, num_kv_heads, head_dim = 17, 4, 2, 32
+        rel_extent, window_left = 8, 5
+        scale = 1.0 / head_dim
+
+        torch.manual_seed(104)
+        q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float32)
+        rel_logits = torch.randn(seq_len, num_heads, rel_extent, device="cuda", dtype=torch.float32)
+        locs, lens = make_varlen_meta([seq_len])
+
+        out = attention(
+            q,
+            k,
+            v,
+            locs,
+            lens,
+            seq_len,
+            softmax_scale=scale,
+            rel_logits=rel_logits,
+            window_left=window_left,
+        )
+
+        repeat = num_heads // num_kv_heads
+        k_heads = k.repeat_interleave(repeat, dim=1).permute(1, 0, 2)
+        v_heads = v.repeat_interleave(repeat, dim=1).permute(1, 0, 2)
+        q_heads = q.permute(1, 0, 2)
+        scores = torch.matmul(q_heads, k_heads.transpose(1, 2)) * scale
+        distance = (
+            torch.arange(seq_len, device="cuda")[:, None]
+            - torch.arange(seq_len, device="cuda")[None, :]
+        )
+        rel_idx = distance.clamp(0, rel_extent - 1)
+        bias = torch.gather(
+            rel_logits.permute(1, 0, 2),
+            2,
+            rel_idx.expand(num_heads, -1, -1),
+        )
+        bias = bias.masked_fill(~((distance >= 0) & (distance < rel_extent)), 0.0)
+        valid = (distance >= 0) & (distance <= window_left)
+        probs = torch.softmax((scores + bias).masked_fill(~valid, float("-inf")), dim=-1)
+        ref = torch.matmul(probs, v_heads).permute(1, 0, 2)
+
+        torch.testing.assert_close(out, ref, rtol=2e-3, atol=2e-3)
+
 
 # ---------------------------------------------------------------------------
 # Backward correctness (dense)

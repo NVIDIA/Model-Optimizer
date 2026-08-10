@@ -27,6 +27,7 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 
 if TRITON_KERNEL_AVAILABLE:
     from modelopt.torch.kernels.common.attention import attention, triton_fa
+    from modelopt.torch.kernels.quantization.attention.bmm1_qdq import fake_quant_k_onwrite
     from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
 
 NATIVE_E4M3_AVAILABLE = TRITON_KERNEL_AVAILABLE and torch.cuda.get_device_capability() >= (8, 9)
@@ -129,6 +130,47 @@ def _suffix_causal_reference(q, k, v, q_lens, kv_lens, num_heads, num_kv_heads, 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestPagedKV:
     """Paged KV cache mode tests — verify paged output matches contiguous."""
+
+    @requires_native_e4m3
+    def test_k_onwrite_matches_nvfp4_oracle_and_preserves_unmapped_slots(self):
+        """K-cache on-write QDQ uses block-16 groups along head dimension."""
+        page_size, num_kv_heads, head_dim = 16, 2, 128
+        torch.manual_seed(76)
+        cache = torch.randn(
+            2,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        before = cache.clone()
+        slot_mapping = torch.tensor([0, page_size + 1, -1], device="cuda")
+
+        fake_quant_k_onwrite(cache, slot_mapping)
+
+        selected = torch.stack((before[0, 0], before[1, 1]))
+        q, scale, double_scale = NVFP4QTensor.quantize(
+            selected,
+            16,
+            weights_scaling_factor_2=torch.tensor(1.0, device="cuda"),
+            try_tensorrt=False,
+        )
+        expected = q.dequantize(
+            dtype=cache.dtype,
+            scale=scale,
+            double_scale=double_scale,
+            block_sizes={-1: 16},
+        )
+        torch.testing.assert_close(cache[0, 0], expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(cache[1, 1], expected[1], rtol=0, atol=0)
+        torch.testing.assert_close(cache[0, 1], before[0, 1], rtol=0, atol=0)
+
+    def test_k_onwrite_rejects_non_block_aligned_head_dim(self):
+        cache = torch.empty(1, 16, 1, 126, device="cuda")
+        slots = torch.zeros(1, device="cuda", dtype=torch.int64)
+        with pytest.raises(ValueError, match="head_dim=126"):
+            fake_quant_k_onwrite(cache, slots)
 
     @pytest.mark.parametrize(
         ("page_size", "v_qdq_scale", "match"),
@@ -241,6 +283,56 @@ class TestPagedKV:
         )
 
         torch.testing.assert_close(out_paged, out_contig, rtol=1e-2, atol=1e-2)
+
+    def test_paged_relative_bias_gqa_sliding_window_matches_contiguous(self):
+        """Inkling relative logits and local window work with paged GQA."""
+        seq_len, num_heads, num_kv_heads, head_dim = 17, 4, 2, 128
+        rel_extent, window_left, page_size = 16, 5, 16
+        scale = 1.0 / head_dim
+
+        torch.manual_seed(78)
+        q, k, v = make_qkv(
+            seq_len,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+        )
+        rel_logits = torch.randn(
+            seq_len,
+            num_heads,
+            rel_extent,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        locs, lens = make_varlen_meta([seq_len])
+        common = {
+            "softmax_scale": scale,
+            "rel_logits": rel_logits,
+            "window_left": window_left,
+        }
+        contiguous = attention(q, k, v, locs, lens, seq_len, **common)
+        k_cache, v_cache, block_table = _scatter_to_paged_cache(
+            k, v, locs, lens, num_kv_heads, head_dim, page_size
+        )
+        dummy = torch.empty(0, num_kv_heads, head_dim, device="cuda", dtype=k.dtype)
+        paged = attention(
+            q,
+            dummy,
+            dummy,
+            locs,
+            lens,
+            seq_len,
+            b_seq_len_k=lens,
+            max_input_len_k=seq_len,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=block_table,
+            page_size=page_size,
+            **common,
+        )
+
+        torch.testing.assert_close(paged, contiguous, rtol=2e-2, atol=2e-2)
 
     @pytest.mark.parametrize("page_size", [16, 32, 64])
     def test_paged_different_page_sizes(self, page_size):

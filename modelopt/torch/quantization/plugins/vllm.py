@@ -102,6 +102,11 @@ def _import_attention_module():
 
 vllm_attention = _import_attention_module()
 
+try:
+    from vllm.models.inkling.nvidia.attention import InklingAttention as VllmInklingAttention
+except ImportError:
+    VllmInklingAttention = None
+
 # Try multiple import paths for vLLM compatibility across versions
 vllm_shared_fused_moe_layer = None
 for module_path in [
@@ -198,7 +203,13 @@ except (AttributeError, ImportError):
 
 _ATTENTION_TYPES = tuple(
     t
-    for t in [vllm_attention.Attention, CrossAttention, EncoderOnlyAttention, VllmMLAAttention]
+    for t in [
+        vllm_attention.Attention,
+        CrossAttention,
+        EncoderOnlyAttention,
+        VllmMLAAttention,
+        VllmInklingAttention,
+    ]
     if t is not None
 )
 
@@ -378,15 +389,28 @@ def configure_vllm_nvfp4_attention_quantizers(
     Returns:
         The supplied module, converted in place to ``_QuantVLLMAttention``.
     """
-    if not isinstance(module, vllm_attention.Attention):
-        raise TypeError(f"Expected vLLM Attention, got {type(module).__name__}")
+    is_regular_attention = isinstance(module, vllm_attention.Attention)
+    is_inkling_attention = VllmInklingAttention is not None and isinstance(
+        module, VllmInklingAttention
+    )
+    if not (is_regular_attention or is_inkling_attention):
+        raise TypeError(f"Expected a supported vLLM attention module, got {type(module).__name__}")
     if not isinstance(dtype, torch.dtype):
         raise TypeError(f"Expected torch.dtype, got {type(dtype).__name__}")
 
     device = torch.device(device)
     module.device, module.dtype = device, dtype
-    if not isinstance(module, _QuantVLLMAttention):
+    if is_regular_attention and not isinstance(module, _QuantVLLMAttention):
         module = QuantModuleRegistry.convert(module)
+    elif is_inkling_attention and not hasattr(module, "q_bmm_quantizer"):
+        # Inkling is not a vLLM Attention subclass: its Q/K/V preparation and
+        # relative-attention launch are fused in model-specific kernels. The
+        # runtime adapter consumes these quantizers without replacing the
+        # model class.
+        module.q_bmm_quantizer = TensorQuantizer()
+        module.k_bmm_quantizer = TensorQuantizer()
+        module.v_bmm_quantizer = TensorQuantizer()
+        module.parallel_state = create_parallel_state()
     if not hasattr(module, "p_bmm_quantizer"):
         module.p_bmm_quantizer = TensorQuantizer()
 

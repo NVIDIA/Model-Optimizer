@@ -80,6 +80,7 @@ class VllmAttentionInstallReport:
 @dataclass(frozen=True, slots=True)
 class _AttentionPlan:
     name: str
+    kind: str
     module: torch.nn.Module
     new_impl: Any
     sparse_kw: dict[str, Any]
@@ -233,6 +234,24 @@ def _layer_errors(module) -> list[str]:
     return errors
 
 
+def _inkling_layer_errors(module, *, quantize: bool, formats: tuple[str, ...]) -> list[str]:
+    errors = []
+    if getattr(module, "head_dim", None) != 128:
+        errors.append(f"Inkling head_dim={getattr(module, 'head_dim', None)!r} must be 128")
+    if getattr(module, "d_rel", None) != 16:
+        errors.append(f"Inkling d_rel={getattr(module, 'd_rel', None)!r} must be 16")
+    window_size = getattr(module, "window_size", None)
+    if not isinstance(window_size, tuple) or len(window_size) != 2 or window_size[1] not in (-1, 0):
+        errors.append(f"Inkling window_size={window_size!r} is unsupported")
+    if str(getattr(module, "kv_cache_dtype", "")).startswith("fp8"):
+        errors.append("Inkling FP8 KV cache is unsupported")
+    if not callable(getattr(module, "_split_kv_cache", None)):
+        errors.append("Inkling paged K/V cache accessor is unavailable")
+    if quantize and any(fmt != "nvfp4" for fmt in formats):
+        errors.append("Inkling currently supports NVFP4 Q/K/P/V formats only")
+    return errors
+
+
 def _device_capability_error(device) -> str | None:
     if device is None:
         return None
@@ -334,12 +353,16 @@ def _plan_vllm_attention(
     candidates = []
     attention_count = 0
     for name, module in model.named_modules():
-        if not isinstance(module, _VLLM_ATTENTION):
+        if isinstance(module, _VLLM_ATTENTION):
+            kind = "regular"
+        elif attention_plugin.is_inkling_attention(module):
+            kind = "inkling"
+        else:
             continue
         attention_count += 1
         sparse_kw = _sparse_kwargs(name, resolved_sparse_cfg)
         if quantize or sparse_kw:
-            candidates.append((name, module, sparse_kw))
+            candidates.append((name, kind, module, sparse_kw))
 
     if not candidates and not quantize:
         return _InstallPlan(
@@ -351,8 +374,13 @@ def _plan_vllm_attention(
     mode = _cudagraph_mode(model_runner) if quantize else None
     quant_plugin: Any = _load_quant_plugin() if quantize else None
     plans = []
-    for name, module, sparse_kw in candidates:
-        reasons = _layer_errors(module)
+    formats = (q_format, k_format, p_format, v_format)
+    for name, kind, module, sparse_kw in candidates:
+        reasons = (
+            _layer_errors(module)
+            if kind == "regular"
+            else _inkling_layer_errors(module, quantize=quantize, formats=formats)
+        )
         device = dtype = None
         if quantize:
             device, dtype = quant_plugin._get_device_dtype(module)
@@ -368,15 +396,20 @@ def _plan_vllm_attention(
         if quantize:
             if graph_error := _sparse_graph_error(sparse_kw, mode):
                 reasons.append(graph_error)
-        new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
-        if backend_error:
-            reasons.append(backend_error)
+        if kind == "regular":
+            new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
+            if backend_error:
+                reasons.append(backend_error)
+        else:
+            new_impl = attention_plugin.ModelOptInklingAttentionAdapter()
+            requires_flashinfer_patch = False
         if reasons:
             errors.extend(f"{name or '<root>'}: {reason}" for reason in reasons)
             continue
         plans.append(
             _AttentionPlan(
                 name,
+                kind,
                 module,
                 new_impl,
                 sparse_kw,
@@ -386,7 +419,7 @@ def _plan_vllm_attention(
             )
         )
     if quantize and attention_count == 0:
-        errors.append("no regular attention layers were found")
+        errors.append("no supported attention layers were found")
     _raise_unsupported(errors, "NVFP4 attention" if quantize else "sparse attention")
     return _InstallPlan(
         model_runner,
@@ -465,6 +498,13 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                 "v_qdq": v_qdq,
                 "v_qdq_amax": v_qdq_amax,
             }
+            if layer.kind == "inkling":
+                k_qdq, k_qdq_amax = attention_plugin._bmm_qdq_from_layer(
+                    layer.module, "k_bmm_quantizer", 6.0 * 448.0
+                )
+                if k_qdq != "nvfp4":
+                    raise RuntimeError("Inkling K must use dynamic block-16 NVFP4")
+                layer.new_impl.quant_kw.update({"k_qdq": k_qdq, "k_qdq_amax": k_qdq_amax})
 
         missing = object()
         old_query_flag = getattr(layer.module, "_query_quant_in_kernel", missing)
@@ -475,6 +515,9 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
             layer.module._query_quant_in_kernel = plan.q_format != "fp8"
             layer.module._value_quant_in_kernel = plan.v_format != "fp8"
         try:
+            if layer.kind == "inkling":
+                layer.new_impl.install(layer.module)
+                continue
             # Publish the adapter last so a native impl never runs with in-kernel
             # quantization flags that only the ModelOpt adapter understands.
             layer.module.impl = layer.new_impl

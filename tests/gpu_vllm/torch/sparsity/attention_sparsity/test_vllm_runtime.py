@@ -46,6 +46,22 @@ def _bare_attention(impl_cls=FlashAttentionImpl, module_cls=None):
     return module
 
 
+def _bare_inkling_attention():
+    if vllm_runtime.attention_plugin.InklingAttention is None:
+        pytest.skip("vLLM does not provide InklingAttention")
+    module = object.__new__(vllm_runtime.attention_plugin.InklingAttention)
+    nn.Module.__init__(module)
+    module.prefix = "model.layers.0.attn"
+    module.head_dim = 128
+    module.d_rel = 16
+    module.num_kv_heads = 8
+    module.window_size = (-1, -1)
+    module.kv_cache_dtype = "auto"
+    module.device = torch.device("cpu")
+    module.dtype = torch.bfloat16
+    return module
+
+
 def _sparse_metadata():
     return {
         "config_groups": {
@@ -273,6 +289,48 @@ def test_nvfp4_validation_of_all_layers_precedes_mutation(monkeypatch):
     assert invalid.impl is invalid_impl
     assert not hasattr(valid, "_query_quant_in_kernel")
     assert runner.cascade_attn_enabled is True
+
+
+def test_nvfp4_install_supports_inkling_attention(monkeypatch):
+    attention = _bare_inkling_attention()
+    runner = _model_runner(nn.ModuleDict({"inkling_attn": attention}))
+    runner.model_config.dtype = torch.bfloat16
+    runner.vllm_config.model_config.dtype = torch.bfloat16
+    monkeypatch.setattr(
+        quant_plugin,
+        "create_parallel_state",
+        lambda: quant_plugin.ParallelState(data_parallel_group=None),
+    )
+
+    report = vllm_runtime.install_vllm_nvfp4_attention(
+        runner,
+        sparse_cfg={
+            "*attn*": {
+                "enable": True,
+                "sparsity_n": 2,
+                "sparsity_m": 4,
+            }
+        },
+    )
+
+    assert report.installed_layers == ("inkling_attn",)
+    assert report.quantized_layers == ("inkling_attn",)
+    assert report.sparse_layers == ("inkling_attn",)
+    assert report.backend_counts == {"ModelOptInklingAttentionAdapter": 1}
+    assert isinstance(
+        attention._modelopt_inkling_attention_adapter,
+        vllm_runtime.attention_plugin.ModelOptInklingAttentionAdapter,
+    )
+    for name in ("q", "k", "p", "v"):
+        assert getattr(attention, f"{name}_bmm_quantizer").is_nvfp4_dynamic
+
+
+def test_inkling_install_rejects_non_nvfp4_formats():
+    attention = _bare_inkling_attention()
+    runner = _model_runner(nn.ModuleDict({"inkling_attn": attention}))
+
+    with pytest.raises(NotImplementedError, match="NVFP4 Q/K/P/V formats only"):
+        vllm_runtime.install_vllm_nvfp4_attention(runner, p_format="fp8")
 
 
 def test_apply_failure_does_not_leave_configured_layer_on_native_impl(monkeypatch):

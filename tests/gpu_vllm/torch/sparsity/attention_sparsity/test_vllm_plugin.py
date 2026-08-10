@@ -33,6 +33,7 @@ import torch
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as vllm_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
 
 if TRITON_KERNEL_AVAILABLE:
@@ -371,3 +372,204 @@ class TestModelOptSparseAttentionImpl:
             output=output,
         )
         torch.testing.assert_close(out_paged, out_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+def test_inkling_forward_matches_contiguous_reference(monkeypatch):
+    """Inkling metadata translation preserves relative-window paged GQA."""
+    seq_len, num_heads, num_kv_heads, head_dim = 17, 4, 2, 128
+    rel_extent, window_left, page_size = 16, 5, 16
+    scale = 1.0 / head_dim
+
+    torch.manual_seed(3)
+    q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    rel_logits = torch.randn(
+        seq_len,
+        num_heads,
+        rel_extent,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    query_start_loc = torch.tensor([0, seq_len], device="cuda", dtype=torch.int32)
+    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+    kv_cache, block_table = _make_paged_cache(
+        k,
+        v,
+        query_start_loc[:-1],
+        seq_lens,
+        num_kv_heads,
+        head_dim,
+        page_size,
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=seq_len,
+        max_query_len=seq_len,
+        max_seq_len=seq_len,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        block_table=block_table,
+    )
+    prefix = "model.layers.0.attn"
+    monkeypatch.setattr(
+        vllm_plugin,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={prefix: metadata}),
+    )
+    layer = SimpleNamespace(
+        prefix=prefix,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        scaling=scale,
+        window_size=(window_left, 0),
+        _modelopt_inkling_attention_adapter=SimpleNamespace(sparse_kw={}, quant_kw=None),
+        _split_kv_cache=lambda: kv_cache.unbind(0),
+    )
+    output = torch.empty_like(q)
+
+    vllm_plugin._inkling_attention_forward(layer, q, rel_logits, output)
+    reference = triton_attention(
+        q,
+        k,
+        v,
+        query_start_loc[:-1],
+        seq_lens,
+        seq_len,
+        softmax_scale=scale,
+        rel_logits=rel_logits,
+        window_left=window_left,
+    )
+
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+def test_inkling_decode_drops_prefill_only_nm_sparsity(monkeypatch):
+    """Inkling decode preserves the established prefill-only N:M contract."""
+    prefix = "model.layers.0.attn"
+    metadata = SimpleNamespace(
+        num_actual_tokens=1,
+        max_query_len=1,
+        max_seq_len=4,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([4], dtype=torch.int32),
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+    )
+    monkeypatch.setattr(
+        vllm_plugin,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={prefix: metadata}),
+    )
+    captured = {}
+
+    def fake_attention(q, _k, _v, *_args, **kwargs):
+        captured.update(kwargs)
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(vllm_plugin, "triton_attention", fake_attention)
+    cache = torch.zeros(1, 16, 1, 128)
+    layer = SimpleNamespace(
+        prefix=prefix,
+        num_kv_heads=1,
+        head_dim=128,
+        scaling=1.0 / 128,
+        window_size=(-1, -1),
+        _modelopt_inkling_attention_adapter=SimpleNamespace(
+            sparse_kw={
+                "sparsity_n": 2,
+                "sparsity_m": 4,
+                "dense_sink_tokens": 0,
+                "dense_recent_tokens": 0,
+            },
+            quant_kw=None,
+        ),
+        _split_kv_cache=lambda: (cache, cache),
+    )
+
+    vllm_plugin._inkling_attention_forward(
+        layer,
+        torch.zeros(1, 1, 128),
+        torch.zeros(1, 1, 16),
+        torch.empty(1, 1, 128),
+    )
+
+    for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
+        assert name not in captured
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+def test_quantized_sparse_inkling_forward_is_finite(monkeypatch):
+    """Inkling adapter composes paged Q/K/P/V NVFP4 with active 2:4."""
+    seq_len, num_heads, num_kv_heads, head_dim = 17, 4, 2, 128
+    rel_extent, page_size = 16, 16
+    torch.manual_seed(4)
+    q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    rel_logits = torch.randn(
+        seq_len,
+        num_heads,
+        rel_extent,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    query_start_loc = torch.tensor([0, seq_len], device="cuda", dtype=torch.int32)
+    seq_lens = torch.tensor([seq_len], device="cuda", dtype=torch.int32)
+    kv_cache, block_table = _make_paged_cache(
+        k,
+        v,
+        query_start_loc[:-1],
+        seq_lens,
+        num_kv_heads,
+        head_dim,
+        page_size,
+    )
+    cache_before = kv_cache.clone()
+    metadata = SimpleNamespace(
+        num_actual_tokens=seq_len,
+        max_query_len=seq_len,
+        max_seq_len=seq_len,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        block_table=block_table,
+        slot_mapping=torch.arange(seq_len, device="cuda", dtype=torch.int64),
+    )
+    prefix = "model.layers.0.attn"
+    monkeypatch.setattr(
+        vllm_plugin,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={prefix: metadata}),
+    )
+    q_inputs = []
+
+    def quantize_q(value):
+        q_inputs.append(value)
+        return value
+
+    layer = SimpleNamespace(
+        prefix=prefix,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        scaling=1.0 / head_dim,
+        window_size=(5, 0),
+        q_bmm_quantizer=quantize_q,
+        _modelopt_inkling_attention_adapter=SimpleNamespace(
+            sparse_kw={"sparsity_n": 2, "sparsity_m": 4, "dense_recent_tokens": 0},
+            quant_kw={
+                "k_qdq_amax": 6.0 * 448.0,
+                "p_qdq": "nvfp4",
+                "p_qdq_amax": 1.0,
+                "v_qdq": "nvfp4",
+                "v_qdq_amax": 6.0 * 448.0,
+            },
+        ),
+        _split_kv_cache=lambda: kv_cache.unbind(0),
+    )
+    output = torch.empty_like(q)
+
+    vllm_plugin._inkling_attention_forward(layer, q, rel_logits, output)
+
+    assert len(q_inputs) == 1 and q_inputs[0].dtype == torch.float32
+    assert torch.isfinite(output).all()
+    assert not torch.equal(kv_cache[0], cache_before[0])
+    assert not torch.equal(kv_cache[1, 0], cache_before[1, 0])

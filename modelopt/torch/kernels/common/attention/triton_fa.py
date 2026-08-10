@@ -77,6 +77,7 @@ _V_QDQ_MODES = {None: 0, "nvfp4": 2}
 
 
 LOG2E: float = 1.44269504088896
+_LOG2E = tl.constexpr(1.44269504088896)
 
 # ---------------------------------------------------------------------------
 # Autotune configs for forward kernel
@@ -217,6 +218,24 @@ def _apply_mask(
 
 
 @triton.jit
+def _apply_left_window(
+    scores,
+    q_pos,
+    kv_pos,
+    seq_len_q,
+    seq_len_kv,
+    kv_start,
+    WINDOW_LEFT: tl.constexpr,
+):
+    """Mask keys older than the causal query-relative left window."""
+    if WINDOW_LEFT >= 0:
+        q_abs_pos = q_pos[:, None] + seq_len_kv - seq_len_q
+        kv_abs_pos = kv_start + kv_pos[None, :]
+        scores += tl.where(kv_abs_pos >= q_abs_pos - WINDOW_LEFT, 0, float("-inf"))
+    return scores
+
+
+@triton.jit
 def _apply_sparse_nm_with_dense_tokens(
     scores,
     kv_start,
@@ -308,6 +327,11 @@ def _attn_fwd(
     stride_vc_head=0,
     PAGE_SIZE: tl.constexpr = 16,
     max_blocks_per_seq=0,
+    Rel_logits=None,  # [total_q, num_q_heads, rel_extent]
+    stride_rel_tok=0,
+    stride_rel_head=0,
+    REL_EXTENT: tl.constexpr = 0,
+    WINDOW_LEFT: tl.constexpr = -1,
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -356,7 +380,13 @@ def _attn_fwd(
     v_quantized_boundary = (seq_len_kv // 16) * 16
 
     # --- Main loop: iterate over KV tiles ---
-    for kv_start in range(0, kv_bound, BLOCK_N):
+    kv_lower = 0
+    if WINDOW_LEFT >= 0:
+        first_q_abs = causal_offset + tile_q * BLOCK_M
+        kv_lower = tl.maximum(0, first_q_abs - WINDOW_LEFT)
+        kv_lower = (kv_lower // BLOCK_N) * BLOCK_N
+
+    for kv_start in range(kv_lower, kv_bound, BLOCK_N):
         kv_start = tl.multiple_of(kv_start, BLOCK_N)  # Compiler hint for alignment
 
         # Load K^T [BLOCK_D, BLOCK_N] (transposed layout for Q @ K^T matmul)
@@ -392,7 +422,31 @@ def _attn_fwd(
             scores = tl.dot(q, k.to(tl.float32), input_precision="ieee") * qk_scale
         else:
             scores = tl.dot(q, k) * qk_scale
+
+        if REL_EXTENT > 0:
+            q_abs_pos = q_pos[:, None] + causal_offset
+            kv_abs_pos = kv_start + kv_pos[None, :]
+            rel_dist = q_abs_pos - kv_abs_pos
+            rel_idx = tl.minimum(tl.maximum(rel_dist, 0), REL_EXTENT - 1)
+            rel_valid = (
+                (q_pos[:, None] < seq_len_q) & (kv_abs_pos < seq_len_kv) & (rel_dist == rel_idx)
+            )
+            rel_ptrs = (
+                (q_offset + q_pos[:, None]) * stride_rel_tok + head_idx * stride_rel_head + rel_idx
+            )
+            rel_bias = tl.load(Rel_logits + rel_ptrs, mask=rel_valid, other=0.0)
+            scores += rel_bias.to(tl.float32) * _LOG2E
+
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
+        scores = _apply_left_window(
+            scores,
+            q_pos,
+            kv_pos,
+            seq_len_q,
+            seq_len_kv,
+            kv_start,
+            WINDOW_LEFT,
+        )
 
         # --- Optional N:M sparse softmax ---
         if SPARSITY_N > 0:
@@ -899,6 +953,8 @@ class _Attention(torch.autograd.Function):
         v_cache,
         block_table,
         page_size,
+        rel_logits,
+        window_left,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -915,6 +971,12 @@ class _Attention(torch.autograd.Function):
         if is_paged and (q.requires_grad or k.requires_grad or v.requires_grad):
             raise NotImplementedError(
                 "Paged KV cache path is forward-only; backward is not implemented."
+            )
+        if (rel_logits is not None or window_left is not None) and any(
+            tensor.requires_grad for tensor in (q, k, v)
+        ):
+            raise NotImplementedError(
+                "Relative-bias and sliding-window attention are forward-only."
             )
 
         # Prefill: Q/K/V are the same packed tensor, reuse Q offsets for K/V.
@@ -1018,6 +1080,11 @@ class _Attention(torch.autograd.Function):
             "stride_vc_head": v_cache.stride(2) if is_paged else 0,
             "PAGE_SIZE": page_size,
             "max_blocks_per_seq": block_table.shape[1] if is_paged else 0,
+            "Rel_logits": rel_logits,
+            "stride_rel_tok": rel_logits.stride(0) if rel_logits is not None else 0,
+            "stride_rel_head": rel_logits.stride(1) if rel_logits is not None else 0,
+            "REL_EXTENT": rel_logits.shape[2] if rel_logits is not None else 0,
+            "WINDOW_LEFT": -1 if window_left is None else window_left,
         }
 
         # Grid: (batch, q_heads, q_tiles). Uses a function because BLOCK_M is autotuned.
@@ -1215,6 +1282,8 @@ class _Attention(torch.autograd.Function):
             None,  # v_cache
             None,  # block_table
             None,  # page_size
+            None,  # rel_logits
+            None,  # window_left
         )
 
 
@@ -1246,6 +1315,8 @@ def attention(
     v_cache: torch.Tensor | None = None,
     block_table: torch.Tensor | None = None,
     page_size: int = 16,
+    rel_logits: torch.Tensor | None = None,
+    window_left: int | None = None,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, optional sparsity, and paged KV.
 
@@ -1312,6 +1383,11 @@ def attention(
         block_table: Page table [batch, max_blocks_per_seq] mapping sequence
             block indices to global page IDs.
         page_size: Number of tokens per page in the KV cache.
+        rel_logits: Optional additive relative-position logits with shape
+            ``[total_q_tokens, num_q_heads, rel_extent]``. Distances outside
+            ``[0, rel_extent)`` receive no bias.
+        window_left: Optional number of preceding tokens visible to each query.
+            The current token is always included by causal attention.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -1359,6 +1435,19 @@ def attention(
         raise ValueError("v_cache_quantized requires v_qdq='nvfp4'")
     if v_cache_quantized and any(x is None for x in (k_cache, v_cache, block_table)):
         raise ValueError("v_cache_quantized requires a paged KV cache")
+    if rel_logits is not None:
+        expected = (q.shape[0], q.shape[1])
+        if rel_logits.ndim != 3 or rel_logits.shape[:2] != expected:
+            raise ValueError(
+                "rel_logits must have shape [total_q_tokens, num_q_heads, rel_extent], "
+                f"got {tuple(rel_logits.shape)} for Q shape {tuple(q.shape)}"
+            )
+        if rel_logits.shape[2] < 1:
+            raise ValueError("rel_logits rel_extent must be positive")
+        if rel_logits.device != q.device:
+            raise ValueError("rel_logits and Q must be on the same device")
+    if window_left is not None and (not isinstance(window_left, int) or window_left < 0):
+        raise ValueError(f"window_left must be a nonnegative integer or None, got {window_left!r}")
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
     return _Attention.apply(
         q,
@@ -1387,6 +1476,8 @@ def attention(
         v_cache,
         block_table,
         page_size,
+        rel_logits,
+        window_left,
     )
 
 

@@ -32,6 +32,7 @@ import inspect
 import math
 import warnings
 from dataclasses import dataclass
+from types import MethodType
 
 import torch
 from vllm.v1.attention.backends.flash_attn import (
@@ -44,7 +45,20 @@ from modelopt.torch.kernels.common.attention.decode_attention import (
     attention_decode as triton_decode_attention,
 )
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
+from modelopt.torch.kernels.quantization.attention.bmm1_qdq import fake_quant_k_onwrite
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
+
+try:
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+    from vllm.forward_context import get_forward_context
+    from vllm.models.inkling.nvidia.attention import InklingAttention
+except ImportError:
+    InklingAttention = None
+    get_forward_context = None
+
+    def eager_break_during_capture(fn):
+        """Return ``fn`` unchanged on vLLM releases without graph-break support."""
+        return fn
 
 
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
@@ -154,6 +168,129 @@ def _p_qdq_from_layer(layer) -> tuple[str | None, float]:
 
 def _v_qdq_from_layer(layer) -> tuple[str | None, float | None]:
     return _bmm_qdq_from_layer(layer, "v_bmm_quantizer", None)
+
+
+def is_inkling_attention(module) -> bool:
+    """Return whether ``module`` is vLLM's model-specific Inkling attention."""
+    return InklingAttention is not None and isinstance(module, InklingAttention)
+
+
+def _nvfp4_scale(amax: float | None) -> float:
+    return 1.0 if amax is None else amax / (6.0 * 448.0)
+
+
+@eager_break_during_capture
+def _inkling_attention_forward(
+    layer,
+    q: torch.Tensor,
+    rel_logits: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Run ModelOpt attention after Inkling's fused Q/K/V preparation."""
+    adapter = layer._modelopt_inkling_attention_adapter
+    attn_metadata = get_forward_context().attn_metadata
+    if not isinstance(attn_metadata, dict):
+        output.zero_()
+        return
+
+    md = attn_metadata[layer.prefix]
+    nt = md.num_actual_tokens
+    q = q[:nt].contiguous()
+    rel_logits = rel_logits[:nt].contiguous()
+    key_cache, value_cache = layer._split_kv_cache()
+
+    quant_kw = adapter.quant_kw
+    if quant_kw is not None:
+        q = layer.q_bmm_quantizer(q.float())
+        fake_quant_k_onwrite(
+            key_cache,
+            md.slot_mapping[:nt],
+            k_qdq_scale=_nvfp4_scale(quant_kw["k_qdq_amax"]),
+        )
+
+    query_lens = md.query_start_loc[1:] - md.query_start_loc[:-1]
+    sparse_kw = dict(adapter.sparse_kw)
+    _resolve_skip_softmax_calibration(
+        sparse_kw,
+        is_prefill=md.max_query_len > 1,
+        max_seq_len=md.max_seq_len,
+    )
+    if md.max_query_len <= 1:
+        # Match the regular vLLM adapter: N:M sparse softmax is prefill-only.
+        for name in ("sparsity_n", "sparsity_m", "dense_sink_tokens", "dense_recent_tokens"):
+            sparse_kw.pop(name, None)
+
+    p_qdq = v_qdq = None
+    p_qdq_amax = 1.0
+    v_qdq_amax = None
+    v_cache_quantized = False
+    if quant_kw is not None:
+        p_qdq = quant_kw["p_qdq"]
+        p_qdq_amax = quant_kw["p_qdq_amax"]
+        v_qdq = quant_kw["v_qdq"]
+        v_qdq_amax = quant_kw["v_qdq_amax"]
+        if v_qdq == "nvfp4":
+            fake_quant_v_onwrite(
+                value_cache,
+                md.block_table,
+                ((md.seq_lens - query_lens) // 16) * 16,
+                (md.seq_lens // 16) * 16,
+                max_new_tokens=md.max_query_len,
+                page_size=value_cache.shape[1],
+                v_qdq_scale=_nvfp4_scale(v_qdq_amax),
+            )
+            v_cache_quantized = True
+
+    k_dummy = torch.empty(
+        0,
+        layer.num_kv_heads,
+        layer.head_dim,
+        dtype=key_cache.dtype,
+        device=q.device,
+    )
+    window_left = layer.window_size[0] if layer.window_size[0] >= 0 else None
+    result = triton_attention(
+        q,
+        k_dummy,
+        k_dummy,
+        md.query_start_loc[:-1],
+        query_lens,
+        md.max_query_len,
+        is_causal=True,
+        softmax_scale=layer.scaling,
+        b_start_loc_k=None,
+        b_seq_len_k=md.seq_lens,
+        max_input_len_k=md.max_seq_len,
+        p_qdq=p_qdq,
+        p_qdq_amax=p_qdq_amax,
+        v_qdq=v_qdq,
+        v_qdq_amax=v_qdq_amax,
+        v_cache_quantized=v_cache_quantized,
+        k_cache=key_cache,
+        v_cache=value_cache,
+        block_table=md.block_table,
+        page_size=key_cache.shape[1],
+        rel_logits=rel_logits,
+        window_left=window_left,
+        **sparse_kw,
+    )
+    output[:nt].copy_(result.to(output.dtype))
+
+
+@dataclass
+class ModelOptInklingAttentionAdapter:
+    """Per-layer state for vLLM Inkling's ModelOpt attention path."""
+
+    sparse_kw: dict | None = None
+    quant_kw: dict | None = None
+
+    def install(self, module) -> None:
+        """Replace one Inkling layer's private attention launch in place."""
+        if not is_inkling_attention(module):
+            raise TypeError(f"Expected InklingAttention, got {type(module).__name__}")
+        self.sparse_kw = dict(self.sparse_kw or {})
+        module._modelopt_inkling_attention_adapter = self
+        module._attention = MethodType(_inkling_attention_forward, module)
 
 
 def _quant_kw_from_impl(impl, layer):
