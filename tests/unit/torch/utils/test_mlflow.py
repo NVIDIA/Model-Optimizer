@@ -28,6 +28,7 @@ from modelopt.torch.utils.mlflow import (
     MlflowRunLogger,
     _git_sha,
     _redact_argv,
+    command_text,
     default_experiment_name,
     validate_tracking_uri,
 )
@@ -305,6 +306,54 @@ def test_command_flags_the_invisible_torchrun_wrapper(fake_mlflow, monkeypatch):
     command = fake_mlflow.texts["command.txt"]
     assert "hf_ptq.py --use_fsdp2" in command
     assert "WORLD_SIZE=8" in command and "not part of sys.argv" in command
+
+
+def test_command_can_record_another_processs_invocation(monkeypatch):
+    """A worker's own sys.argv is spawn plumbing, so the caller can supply the real one."""
+    monkeypatch.setattr(sys, "argv", ["-c", "from multiprocessing.spawn import spawn_main"])
+
+    command = command_text(["vllm_serve_fakequant.py", "/ckpts/model", "--api-key", "sk-secret"])
+
+    assert "vllm_serve_fakequant.py /ckpts/model" in command
+    assert "sk-secret" not in command
+    assert "spawn_main" not in command
+
+
+def test_log_text_uploads_while_the_run_is_open(fake_mlflow):
+    """For a value settled midway through, which a later crash would otherwise lose."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+    uploaded_before_finish = fake_mlflow.texts.get("recipe/quant_cfg.yaml")
+
+    logger.finish("FAILED")
+    assert uploaded_before_finish == "quant_cfg: {}\n"
+
+
+def test_log_text_is_inert_outside_an_open_run(fake_mlflow):
+    logger = _logger(enabled=False)
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+
+    logger = _logger()  # enabled, but never started
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+
+    assert fake_mlflow.texts == {}
+
+
+def test_log_text_never_raises_when_the_upload_fails(fake_mlflow, capsys):
+    """Losing one artifact must not take down the quantization that produced it."""
+    logger = _logger()
+    logger.start()
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.log_text = explode
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+    logger.finish("FINISHED")
+
+    assert "could not upload recipe/quant_cfg.yaml" in capsys.readouterr().out
 
 
 def test_capture_includes_preconfigured_library_logging(fake_mlflow, monkeypatch):

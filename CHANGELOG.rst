@@ -19,6 +19,7 @@ Changelog
 
 - Add ``modelopt.torch.utils.mlflow.MlflowRunLogger`` for recording a script run on an MLflow tracking server: the invocation, the ModelOpt version, the run log (captured by teeing ``stdout``/``stderr``) and any caller-supplied artifacts, with configuration as searchable params. ``mlflow`` is an optional dependency, imported only when tracking is enabled.
 - Add ``--mlflow <tracking-uri>`` to ``examples/hf_ptq/hf_ptq.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too). A tracked run records the invocation, the resolved recipe (``$import``\ s expanded), the run log and the quantization summaries, with every command-line argument as a searchable param; failed runs are recorded with their traceback. The experiment defaults to ``$USER/hf_ptq/<checkpoint basename>-<recipe name or --qformat>`` and can be overridden with ``--mlflow_experiment`` / ``--mlflow_run_name``.
+- Add ``--mlflow <tracking-uri>`` to ``examples/vllm_serve/vllm_serve_fakequant.py`` (MLflow's own ``MLFLOW_TRACKING_URI`` is honoured too), so a fake-quant serve records what it quantized and an evaluation of that endpoint can be traced back to a recipe. A tracked run uploads the launcher command, the resolved ``RECIPE_PATH`` (or the merged ``QUANT_CFG``/``KV_QUANT_CFG`` when presets are used), the worker log and the quantizer summary; the experiment defaults to ``$USER/vllm_serve_fakequant/<model basename>-<recipe name or quantization config>`` and can be overridden with ``--mlflow-experiment`` / ``--mlflow-run-name``.
 
 **Backward Breaking Changes**
 
