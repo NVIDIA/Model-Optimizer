@@ -1,6 +1,6 @@
 # Terminal-Bench 2.1 (AA) — nel-next / harbor
 
-**Read `references/nel-next.md` first** — it covers the separate 0.3.x venv, the
+**Read `references/nel-next.md` first** — it covers the separate nel-next venv, the
 `services`/`benchmarks`/`cluster`/`output` schema, AWS creds, the harbor/Fargate
 architecture, `eval_image` arch, timeout strategy, MLflow export, the canary
 syntax, and the run flow. This file is only the Terminal-Bench 2.1 deltas. Start
@@ -20,7 +20,6 @@ pinned via a vendored registry override in nemo-evaluator-next.
 | sandbox | `ecs_fargate`, `stateful: true` (agent + verifier share one container) |
 | `sandbox.region` | match the region in `${HARBOR_ECR_REPOSITORY}` (us-east-1 with the eval-config default) |
 | `sandbox.ecr_repository` | `${HARBOR_ECR_REPOSITORY}` — set by the `modelopttools:eval-config` skill (internal harbor ECR) |
-| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` — set by `modelopttools:eval-config` |
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
 | `max_concurrent` / `sandbox.concurrency` | `50` (canonical bench.yaml) |
 | timeout_strategy | `max` (canonical bench.yaml) + `agent_kwargs.llm_kwargs.timeout: 3600`; use `task` for leaderboard-comparable |

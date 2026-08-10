@@ -32,7 +32,7 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 benchmarks:
   - playbook: swebench_verified
     repeats: 5
-    max_concurrent: 15
+    max_concurrent: 15            # keep == sandbox.concurrency; per-model configs may raise both
     instruction_template: /configs/prompts/swebench_instruction.md   # mounted (see gotcha)
     solver:
       service: <svc-name>
@@ -60,7 +60,10 @@ whichever you use fixed across both sides of a comparison.
 
 ```bash
 ssh <login> 'mkdir -p <lustre>/<user>/prompts'
-scp swebench_instruction.md <login>:<lustre>/<user>/prompts/    # canonical file; verify sha256 against the source
+# Source: the prompt referenced by configs/benchmarks/swe-bench-verified/bench.yaml
+# (_swebench_verified.instruction_template); a reference run dir carries the exact file used.
+scp swebench_instruction.md <login>:<lustre>/<user>/prompts/
+ssh <login> 'sha256sum <lustre>/<user>/prompts/swebench_instruction.md'   # must match the source
 ```
 
 ```yaml
@@ -84,7 +87,7 @@ from the scored config.
 proxy:
   request_timeout: 3600
   extra_body: {skip_special_tokens: false}   # add model-card sampling extras if the card sets them
-  model_traffic: {capture_request_body: true}   # FEA-224; pair with the exclude_patterns entry
+  model_traffic: {capture_request_body: true}   # FEA-224; adds the upstream request body to the traffic capture that is ALREADY ON by default
   interceptors:
     # - {name: http_pairs_dump, config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}}   # canary only
     - {name: system_message, config: {strategy: replace, system_message: "<the OpenHands prompt from bench.yaml>"}}
@@ -95,8 +98,11 @@ proxy:
     - {name: reasoning_replay}   # … and replay across turns. Drop both for instruct models.
 ```
 
-**`reasoning_replay.mode` is per model, not per benchmark.** `think_tags` (Qwen-style),
-`native` (GLM), omitted (MiniMax). Copying another model's mode is a silent output-parsing bug.
+**`reasoning_replay.mode` is per model, not per benchmark.** Valid values are
+`think_tags` / `native` / `both`, and the **default is `think_tags`** — leaving `mode` unset is
+not a third behaviour, it selects `think_tags`. Qwen-style: `think_tags`. GLM: `native`.
+MiniMax: leave unset (i.e. `think_tags`). Copying another model's mode is a silent
+output-parsing bug.
 
 **Omitting `system_message` is a scoring change**: without it the agent runs the
 openhands-sdk default prompt instead of the canonical one.

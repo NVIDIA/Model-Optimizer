@@ -1,8 +1,8 @@
-# nel-next (nemo-evaluator 0.3.x) agentic AA eval template — NOT the 0.2.6 schema.
+# nel-next (nemo-evaluator 0.4.x) agentic AA eval template — NOT the 0.2.6 schema.
 # Read references/nel-next.md + recipes/tasks/aa_next/<benchmark>.md first.
 # Benchmark shown = Terminal-Bench 2.1; swap the `benchmarks:` block per the recipe.
 #
-# Run via the isolated 0.3.x venv:
+# Run via the isolated nel-next venv:
 #   .agents/scripts/nel-next.sh --setup-only
 #   set -a && source .env && set +a    # HF_TOKEN, AWS_*, NEL_NEXT_EVAL_IMAGE, HARBOR_*_ECR_REPOSITORY (from modelopttools:eval-config)
 #   .agents/scripts/nel-next.sh eval run recipes/examples/example_eval_next.yaml --dry-run

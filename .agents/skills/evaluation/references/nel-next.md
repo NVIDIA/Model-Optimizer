@@ -1,8 +1,8 @@
-# nel-next (nemo-evaluator 0.3.x) — shared reference for harbor / agentic benchmarks
+# nel-next (nemo-evaluator 0.4.x) — shared reference for harbor / agentic benchmarks
 
 Agentic AA benchmarks (Terminal-Bench 2.x, SWE-bench Verified/…) — an agent drives
 a sandboxed machine, each task graded by its own test script — run on **nel-next**
-= `nemo-evaluator` **0.3.x** + `harbor` extra, **not** the default
+= `nemo-evaluator` **0.4.x** + `harbor` extra, **not** the default
 `nemo-evaluator-launcher` 0.2.6. This file is the common machinery; per-benchmark
 deltas live in `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`.
 Start configs from `recipes/examples/example_eval_next.yaml`.
@@ -11,7 +11,7 @@ Start configs from `recipes/examples/example_eval_next.yaml`.
 
 | | default (SKILL Steps 1–9) | nel-next |
 |---|---|---|
-| package | `nemo-evaluator-launcher` 0.2.6 | `nemo-evaluator[harbor]` 0.3.x |
+| package | `nemo-evaluator-launcher` 0.2.6 | `nemo-evaluator[harbor]` 0.4.x |
 | env | the skill's normal env | **separate venv** (`.agents/scripts/nel-next.sh`) |
 | CLI | `nel run --config X.yaml` | `nel eval run X.yaml [--submit]` |
 | overrides | `-o ++a.b.c=v` | `-O a.b.c=v` |
@@ -20,7 +20,7 @@ Start configs from `recipes/examples/example_eval_next.yaml`.
 
 ## Separate venv (mandatory)
 
-Installing 0.3.x into the 0.2.6 env clobbers `nel`, so it lives in its own venv:
+Installing 0.4.x into the 0.2.6 env clobbers `nel`, so it lives in its own venv:
 
 ```bash
 .agents/scripts/nel-next.sh --setup-only      # one-time, ~1-2 min (needs `uv`)

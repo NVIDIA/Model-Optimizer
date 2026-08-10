@@ -14,13 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# nel-next.sh — run NeMo Evaluator "next" (nel 0.3.x) via uvx, isolated from 0.2.6.
+# nel-next.sh — run NeMo Evaluator "next" (nel 0.4.x) via uvx, isolated from 0.2.6.
 #
 # A few AA benchmarks (Terminal-Bench 2.x, SWE-bench) run on `nemo-evaluator`
-# 0.3.x + `harbor` extra — a different package/CLI/config-schema from the eval
+# 0.4.x + `harbor` extra — a different package/CLI/config-schema from the eval
 # skill's default `nemo-evaluator-launcher` 0.2.6 (CLI `nel eval run X.yaml`,
 # overrides `-O a.b.c=v`, schema services/benchmarks/cluster/output). Installing
-# it into the 0.2.6 env would clobber `nel`, so this runs 0.3.x in a throwaway
+# it into the 0.2.6 env would clobber `nel`, so this runs 0.4.x in a throwaway
 # `uvx` environment (uv resolves + caches + reuses it) and forwards to its `nel`.
 #
 # Usage (source .env FIRST so the config's ${VAR}s resolve; this never reads secrets):
@@ -56,7 +56,7 @@ else
 fi
 
 _log() { printf '\033[2m  %s\033[0m\n' "$*" >&2; }
-# Run a command (nel, python, …) from the uvx-managed 0.3.x environment.
+# Run a command (nel, python, …) from the uvx-managed 0.4.x environment.
 _uvx() { uvx --python 3.12 --from "$INSTALL_SPEC" "$@"; }
 
 # Post-run MLflow push. SLURM runs don't auto-export; this stages each merged
