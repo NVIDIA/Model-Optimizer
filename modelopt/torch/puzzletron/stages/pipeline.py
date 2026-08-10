@@ -1000,6 +1000,8 @@ def build_library_stage(config: dict[str, Any], manifest: StageManifest):
 
             launch_build_replacement_library(hydra_cfg)
             _calculate_static_workload_stats(config, hydra_cfg)
+            # Keep this stage-local so handler registration and config preflight do not
+            # load build-library implementation dependencies before the stage executes.
             from ..candidates import build_candidate_library_from_checkpoint
 
             library_cfg = config.get("build_replacement_library") or {}
