@@ -24,6 +24,7 @@ registry, diffusers_utils) and never an exporter, which is what lets all three e
 import it without a cycle.
 """
 
+import importlib
 import re
 import warnings
 from collections import defaultdict
@@ -60,6 +61,8 @@ from .quant_utils import (
     preprocess_linear_fusion,
 )
 from .registry import ExportContext, PrepareMoEInputsRegistry
+
+__all__ = ["collect_shared_input_modules", "requantize_resmooth_fused_llm_layers"]
 
 
 def _is_enabled_quantizer(quantizer):
@@ -412,8 +415,6 @@ def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
 
 def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
     """Try to patch revert_weight_conversion in a single module."""
-    import importlib
-
     try:
         mod = importlib.import_module(mod_path)
         if hasattr(mod, "revert_weight_conversion"):

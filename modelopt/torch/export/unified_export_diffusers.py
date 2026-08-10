@@ -56,6 +56,8 @@ try:
 except ImportError:
     export_sparse_attention_config = None
 
+__all__ = ["_export_diffusers_checkpoint"]
+
 
 def _save_component_state_dict_safetensors(
     component: nn.Module,

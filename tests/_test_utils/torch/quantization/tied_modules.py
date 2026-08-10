@@ -100,7 +100,7 @@ def wrap_in_parent_with_tied_keys(
 
     The parent's class name contains ``DiffusionGemma`` so the model_type
     gate inside :func:`_reorder_canonical_first` (mirrors the existing
-    whisper / nemotron-vl dispatch in ``unified_export_hf.py``) passes for
+    whisper / nemotron-vl dispatch in ``hf_export_prep.py``) passes for
     test parents — without this, the function early-returns before
     reaching the patterns step.
     """

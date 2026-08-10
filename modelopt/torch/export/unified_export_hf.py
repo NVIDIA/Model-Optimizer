@@ -28,9 +28,6 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
-# _HAS_DIFFUSERS is diffusers_utils' own probe; re-deriving it here would drift, since
-# that module imports cleanly whether or not diffusers is installed.
-from .diffusers_utils import _HAS_DIFFUSERS as HAS_DIFFUSERS
 from .diffusers_utils import is_diffusers_object
 
 try:
@@ -244,10 +241,7 @@ def export_hf_checkpoint(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    is_diffusers_obj = False
-    if HAS_DIFFUSERS:
-        is_diffusers_obj = is_diffusers_object(model)
-    if is_diffusers_obj:
+    if is_diffusers_object(model):
         _export_diffusers_checkpoint(
             model,
             dtype,

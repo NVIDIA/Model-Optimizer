@@ -58,6 +58,8 @@ from .quant_utils import (
 )
 from .registry import ExportContext, ExportModuleRegistry
 
+__all__ = ["_dispatch_export_handler", "_export_quantized_weight", "_process_quantized_modules"]
+
 
 def _compressed_per_block_scale(
     weight_quantizer: TensorQuantizer, weight: QTensorWrapper
