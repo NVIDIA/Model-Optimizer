@@ -278,6 +278,7 @@ def test_embedding_pipeline_rejects_vllm_stats_missing_a_configured_width(tmp_pa
 
 
 def test_embedding_build_library_reprojects_vllm_stats_after_workers(tmp_path, monkeypatch):
+    monkeypatch.setenv("RANK", "0")
     widths = (1024, 768)
     root_stats = [
         {"args": {"n_embd": width, "runtime_stats": True}, "subblocks": []} for width in widths
