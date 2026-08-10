@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Guided profiles, defaults, navigation, and bundle output for Puzzletron setup v2."""
+
 from __future__ import annotations
 
 import sys
@@ -9,10 +11,12 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import yaml
 
+import puzzletron_setup.v2.cli as cli_module
 import puzzletron_setup.v2.wizard as wizard_module
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
+from puzzletron_setup.v2.bundle import _effective_default_value
 from puzzletron_setup.v2.cli import _parser
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
@@ -28,6 +32,8 @@ from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
     _CUSTOM_DATA_SOURCE,
     _CUSTOM_MODEL_SOURCE,
+    _PUZZLE_KD_DATA_SOURCE,
+    _acquisition_sample_requirements,
     _fresh_state,
     _section_action,
     data_section,
@@ -211,11 +217,12 @@ def test_explicit_defaults_still_override_model_specific_profile():
         num_attention_heads=8,
         num_key_value_heads=2,
     )
+    family_defaults, model_profile_defaults = get_setup_preset("smoke").resolved_default_layers(
+        _QWEN_FAMILY_CONFIG, qwen_0p8b
+    )
     resolver = DefaultsResolver(
-        preset_defaults=get_setup_preset("smoke").resolved_defaults(
-            _QWEN_FAMILY_CONFIG,
-            qwen_0p8b,
-        ),
+        preset_defaults=family_defaults,
+        model_profile_defaults=model_profile_defaults,
         file_defaults={"pruning": {"width_importance_samples": 64}},
     )
 
@@ -263,6 +270,25 @@ def test_guided_profile_defaults_fail_closed_when_family_profile_is_missing(tmp_
         get_setup_preset("balanced").resolved_defaults(family_config)
 
 
+def test_guided_profile_defaults_reject_unknown_family_profile(tmp_path):
+    family_config = tmp_path / "family.yaml"
+    family_config.write_text("family: {}\n")
+    (tmp_path / "setup_v2_defaults.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "profiles": {
+                    "smoke": {"mip": {"num_solutions": 1}},
+                    "smkoe": {"mip": {"num_solutions": 2}},
+                },
+            }
+        )
+    )
+
+    with pytest.raises(SetupError, match="Unknown guided setup profiles.*smkoe"):
+        get_setup_preset("smoke").resolved_defaults(family_config)
+
+
 @pytest.mark.parametrize("family_config", [_QWEN_FAMILY_CONFIG, _NEMOTRON_FAMILY_CONFIG])
 @pytest.mark.parametrize("preset_name", ["smoke", "balanced", "high-confidence"])
 def test_each_model_family_defines_every_guided_profile(family_config, preset_name):
@@ -296,6 +322,30 @@ def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
     assert state.preset == "balanced"
     assert _parser().parse_args([]).full is False
     assert _parser().parse_args(["--full"]).full is True
+
+
+def test_cli_forwards_full_to_the_wizard(monkeypatch, tmp_path):
+    captured = {}
+
+    def run_wizard_v2(**kwargs):
+        captured.update(kwargs)
+        return tmp_path / "campaign"
+
+    monkeypatch.setattr(wizard_module, "run_wizard_v2", run_wizard_v2)
+
+    assert cli_module.main(["--full"]) == 0
+    assert captured["full"] is True
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_fresh_state_reprompts_for_empty_campaign_directory(tmp_path, full, capsys):
+    campaign = tmp_path / ("full" if full else "guided")
+    answers = ["", str(campaign)] if full else ["balanced", "", str(campaign)]
+
+    state = _fresh_state(ScriptedBackend(answers), None, full=full)
+
+    assert state.campaign_dir == campaign.resolve()
+    assert "Enter a campaign directory path." in capsys.readouterr().out
 
 
 def test_back_from_first_guided_section_can_change_profile(
@@ -409,6 +459,182 @@ def test_resume_replacement_defaults_file_is_persisted(
     assert WizardState.resume(state.path).defaults_path == replacement.resolve()
 
 
+@pytest.mark.parametrize("contents", [None, "schema_version: 2\n"])
+def test_invalid_resume_replacement_defaults_file_is_not_persisted(
+    tmp_path,
+    monkeypatch,
+    contents,
+):
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    replacement = tmp_path / "invalid.yaml"
+    if contents is not None:
+        replacement.write_text(contents)
+    monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
+    monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
+
+    with pytest.raises(SetupError):
+        wizard_module.run_wizard_v2(
+            resume=state.campaign_dir,
+            defaults_path=replacement,
+            backend=ScriptedBackend([]),
+        )
+
+    assert WizardState.resume(state.path).defaults_path is None
+
+
+@pytest.mark.parametrize(
+    ("defaults", "message"),
+    [
+        ({"pruning": {"depth_remove": "invalid"}}, "pruning.depth_remove must be an integer"),
+        ({"pruning": {"depth_remove": -1}}, "pruning.depth_remove must be at least 0"),
+        (
+            {"pruning": {"depth_remove": {"unexpected": 1}}},
+            "pruning.depth_remove must be an integer",
+        ),
+        ({"pruning": {"bypass": {"enabled": "false"}}}, "bypass.enabled must be a boolean"),
+        ({"profiles": {"bad": {"tp": "invalid"}}}, "profiles.bad.tp must be an integer"),
+        (
+            {"profiles": {"bad": {"tp": {"unexpected": 1}}}},
+            "profiles.bad.tp must be an integer",
+        ),
+        (
+            {"profiles": {"bad": {"sequence_parallel": "false"}}},
+            "profiles.bad.sequence_parallel must be a boolean",
+        ),
+        (
+            {"profiles": {"bad": {"consumers": None}}},
+            "profiles.bad.consumers must be a sequence of strings",
+        ),
+        (
+            {"profiles": {"bad": {"consumers": "stage"}}},
+            "profiles.bad.consumers must be a sequence of strings",
+        ),
+        (
+            {"profiles": {"bad": {"consumers": [123]}}},
+            "profiles.bad.consumers must be a sequence of strings",
+        ),
+        (
+            {"stages": {"depth_importance": {"batch": "invalid"}}},
+            "stages.depth_importance.batch must be an integer",
+        ),
+        (
+            {"stages": {"depth_importance": {"batch": {"unexpected": 1}}}},
+            "stages.depth_importance.batch must be an integer",
+        ),
+        (
+            {"pruning": {"axes": {"hidden_width": {"values": ["invalid"]}}}},
+            "pruning.axes.hidden_width.values must be a sequence of integers",
+        ),
+        ({"profiles": {"bad": None}}, "profiles.bad must be a mapping"),
+        (
+            {"infrastructure": {"execution_contract": {"prerun_commands": "echo bad"}}},
+            "prerun_commands must be a sequence of strings",
+        ),
+        (
+            {"infrastructure": {"execution_contract": {"postrun_commands": [123]}}},
+            "postrun_commands must be a sequence of strings",
+        ),
+        ({"data": {"subsets": 123}}, "data.subsets must be a string or a sequence of strings"),
+        (
+            {"data": {"acquisition": {"subsets": [123]}}},
+            "data.acquisition.subsets must be a string or a sequence of strings",
+        ),
+    ],
+)
+def test_guided_defaults_reject_invalid_leaf_values(tmp_path, defaults, message):
+    family_config = tmp_path / "family.yaml"
+    family_config.write_text("family: {}\n")
+    (tmp_path / "setup_v2_defaults.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "profiles": {"balanced": defaults},
+            }
+        )
+    )
+
+    with pytest.raises(SetupError, match=message):
+        get_setup_preset("balanced").resolved_defaults(family_config)
+
+
+def test_effective_default_provenance_follows_runtime_collections(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.set_collection(
+        "parallel_profiles",
+        {
+            "common": {"tp": 2, "cp": 1, "pp": 1, "dp_shard": 1, "dp_replicate": 1, "ep": 1},
+            "large": {"tp": 4, "cp": 2, "pp": 1, "dp_shard": 1, "dp_replicate": 1, "ep": 1},
+        },
+    )
+    state.set_collection(
+        "mip_config",
+        {
+            "runs": {
+                "latency": {
+                    "solver": {"num_solutions": 7},
+                    "objectives": [{"metric": "latency"}],
+                },
+                "memory": {
+                    "solver": {"num_solutions": 9},
+                    "objectives": [{"metric": "memory"}],
+                },
+            }
+        },
+    )
+    state.set_collection(
+        "serving_workloads",
+        {
+            "serving": {"prefill_seq_len": 2048, "max_num_seqs": 4},
+            "offline": {"prefill_seq_len": 1024, "max_num_seqs": 8},
+            "unmeasured": {"prefill_seq_len": 512, "max_num_seqs": 16},
+        },
+    )
+    state.set_collection(
+        "vllm_measurements",
+        {
+            "serving": {
+                "runtime_stats": {"topology": {"tensor_parallel_size": 2}},
+            },
+            "offline": {
+                "runtime_stats": {"topology": {"tensor_parallel_size": 4}},
+            },
+        },
+    )
+
+    assert {
+        name: profile["tp"]
+        for name, profile in _effective_default_value(state, "profiles", {}).items()
+    } == {"common": 2, "large": 4}
+    assert _effective_default_value(state, "mip.num_solutions", 1) == {
+        "latency": 7,
+        "memory": 9,
+    }
+    assert _effective_default_value(state, "mip.objective", "loss") == {
+        "latency": ["latency"],
+        "memory": ["memory"],
+    }
+    assert _effective_default_value(state, "vllm.enabled", False) is True
+    assert _effective_default_value(state, "vllm.max_num_seqs", 1) == {
+        "serving": 4,
+        "offline": 8,
+        "unmeasured": 16,
+    }
+    assert _effective_default_value(state, "vllm.prefill_seq_len", 4096) == {
+        "serving": 2048,
+        "offline": 1024,
+        "unmeasured": 512,
+    }
+    assert _effective_default_value(state, "vllm.topology.tensor_parallel_size", 1) == {
+        "serving": 2,
+        "offline": 4,
+    }
+
+
 def test_legacy_state_without_setup_metadata_resumes_in_full_mode(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     state.payload.pop("setup")
@@ -418,6 +644,19 @@ def test_legacy_state_without_setup_metadata_resumes_in_full_mode(tmp_path):
 
     assert resumed.setup_mode == "full"
     assert resumed.preset is None
+
+
+def test_setup_transitions_repair_non_mapping_setup_metadata(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.payload["setup"] = None
+
+    state.set_setup_mode("full")
+    state.payload["setup"] = "invalid"
+    state.set_preset("balanced")
+
+    resumed = WizardState.resume(state.path)
+    assert resumed.setup_mode == "full"
+    assert resumed.preset == "balanced"
 
 
 def test_guided_data_asks_only_for_source_and_uses_nested_defaults(
@@ -491,6 +730,66 @@ def test_guided_data_rejects_an_explicit_modality_incompatible_with_the_model(
         )
 
 
+@pytest.mark.parametrize(
+    ("answers", "file_defaults", "error_path"),
+    [
+        (
+            [_PUZZLE_KD_DATA_SOURCE],
+            {"data": {"acquisition": {"seed": "not-an-integer"}}},
+            "data.acquisition.seed",
+        ),
+        (
+            [_CUSTOM_DATA_SOURCE, "{dataset}"],
+            {"data": {"sequence_length": "not-an-integer"}},
+            "data.sequence_length",
+        ),
+    ],
+)
+def test_guided_data_rejects_non_integer_defaults(
+    tmp_path,
+    monkeypatch,
+    answers,
+    file_defaults,
+    error_path,
+):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    rendered_answers = [str(dataset) if answer == "{dataset}" else answer for answer in answers]
+    state = WizardState.start(
+        tmp_path / "campaign",
+        defaults_path=None,
+        setup_mode="quick",
+        preset="balanced",
+    )
+    monkeypatch.setattr(
+        "puzzletron_setup.v2.wizard.infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
+    )
+
+    with pytest.raises(SetupError, match=rf"{error_path} must be an integer"):
+        data_section(
+            WizardSession(state, ScriptedBackend(rendered_answers), guided=True),
+            DefaultsResolver(file_defaults=file_defaults),
+            _context(),
+        )
+
+
+def test_width_sanity_samples_contribute_without_sort_sanity(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.set_collection(
+        "pruning",
+        {
+            "width_importance_samples": 2,
+            "replacement_samples": 3,
+            "sort_sanity": False,
+            "width_sanity": True,
+            "width_sanity_samples": 11,
+        },
+    )
+
+    assert _acquisition_sample_requirements(state) == (2, 11)
+
+
 def test_guided_review_renders_the_actual_non_parameter_mip_constraint(
     tmp_path,
     capsys,
@@ -512,6 +811,7 @@ def test_guided_review_renders_the_actual_non_parameter_mip_constraint(
             }
         },
     )
+    state.set_field("model.source", ("model",))
 
     assert output_review_section(
         WizardSession(state, ScriptedBackend([True]), guided=True),
@@ -523,6 +823,7 @@ def test_guided_review_renders_the_actual_non_parameter_mip_constraint(
     assert "constraints:" in output
     assert "memory:" in output
     assert "24GiB" in output
+    assert "- model" in output
     assert "parameter_target" not in output
 
 
@@ -620,6 +921,31 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         "value": 8,
         "source": "model_profile",
     }
+    resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
+    assert resolved_defaults["pruning.depth_remove"] == {
+        "value": 1,
+        "requested": None,
+        "effective": 1,
+        "source": "preset",
+    }
+    pruning = generated.collection("pruning")
+    pruning["depth_remove"] = 0
+    generated.set_collection("pruning", pruning)
+    profiles = generated.collection("parallel_profiles")
+    first_profile = next(iter(profiles.values()))
+    profiles["secondary"] = {**first_profile, "tp": 2}
+    generated.set_collection("parallel_profiles", profiles)
+
+    wizard_module.build_bundles_v2(campaign, generated)
+
+    resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
+    assert resolved_defaults["pruning.depth_remove"] == {
+        "value": 1,
+        "requested": None,
+        "effective": 0,
+        "source": "preset",
+    }
+    assert resolved_defaults["profiles"]["effective"] == profiles
 
 
 def test_guided_section_uses_profile_without_action_prompt(tmp_path):

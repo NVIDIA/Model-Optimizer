@@ -96,6 +96,7 @@ def _bind_escape_back(question: Any) -> Any:
     """Make Escape return the same sentinel for every interactive widget."""
     key_bindings = question.application.key_bindings
     if not hasattr(key_bindings, "add"):
+        # Keep the optional interactive key-binding dependency out of non-interactive paths.
         from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 
         escape_bindings = KeyBindings()

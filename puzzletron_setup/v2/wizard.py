@@ -619,6 +619,19 @@ def _integer_field(
     return value
 
 
+def _guided_integer_default(value: Any, path: str, *, minimum: int) -> int:
+    """Validate one non-interactive integer default with an actionable error."""
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as error:
+        raise SetupError(
+            f"Guided setup default {path} must be an integer; got {value!r}."
+        ) from error
+    if parsed < minimum:
+        raise SetupError(f"Guided setup default {path} must be at least {minimum}; got {value!r}.")
+    return parsed
+
+
 def _select_model_source(
     session: WizardSession,
     resolver: DefaultsResolver,
@@ -747,6 +760,9 @@ def data_section(
     modality_source = (
         "inferred" if modality_default.source == "fallback" else modality_default.source
     )
+    if fixed_modality is not None and modality_default.source == "preserved":
+        suggested_modality = fixed_modality
+        modality_source = "inferred"
     if fixed_modality == "multimodal" and not context["model"].inventory.multimodal:
         raise SetupError(
             "NVIDIA Nemotron-VLM v2 requires a multimodal model. "
@@ -821,11 +837,18 @@ def data_section(
         runtime_source = str(Path(str(output)).expanduser().resolve())
         seed_default = 408 if adapter == _PUZZLE_KD_ADAPTER else 42
         if session.guided:
-            seed = _record_default(
-                session.state,
-                resolver,
+            seed_default_resolution = resolver.resolve_default(
+                "data.acquisition.seed", seed_default
+            )
+            seed = _guided_integer_default(
+                seed_default_resolution.value,
                 "data.acquisition.seed",
-                seed_default,
+                minimum=0,
+            )
+            session.state.set_field(
+                "data.acquisition.seed",
+                seed,
+                source=seed_default_resolution.source,
             )
             print(f"  Deterministic dataset selection seed: {seed}")
         else:
@@ -917,7 +940,11 @@ def data_section(
         if layout == "padded":
             layout = "padded_varlen"
         sequence_default = resolver.resolve_default("data.sequence_length", 4096)
-        sequence = int(sequence_default.value)
+        sequence = _guided_integer_default(
+            sequence_default.value,
+            "data.sequence_length",
+            minimum=1,
+        )
         print(
             f"  Data shape: {layout}, sequence length {sequence} "
             "(resolved defaults; use --full to customize)"
@@ -1349,22 +1376,8 @@ def _compatible_default_profile(
     node_type: str | None = None,
 ) -> tuple[ParallelProfile | None, tuple[Any, ...]]:
     """Reuse the first compatible profile without opening advanced prompts."""
-    last_issues: tuple[Any, ...] = ()
-    for name in registry.names():
-        profile = registry.get(name)
-        issues = tuple(
-            _profile_compatibility_issues(
-                session,
-                profile,
-                stage_id,
-                model,
-                node_type=node_type,
-            )
-        )
-        if not issues:
-            return registry.reuse(name, consumer=stage_id), ()
-        last_issues = issues
-    if not registry.names():
+    names = registry.names()
+    if not names:
         profile = ParallelProfile(stage_id)
         issues = tuple(
             _profile_compatibility_issues(
@@ -1377,6 +1390,22 @@ def _compatible_default_profile(
         )
         if not issues:
             return registry.create(profile, consumer=stage_id), ()
+        return None, issues
+
+    last_issues: tuple[Any, ...] = ()
+    for name in names:
+        profile = registry.get(name)
+        issues = tuple(
+            _profile_compatibility_issues(
+                session,
+                profile,
+                stage_id,
+                model,
+                node_type=node_type,
+            )
+        )
+        if not issues:
+            return registry.reuse(name, consumer=stage_id), ()
         last_issues = issues
     return None, last_issues
 
@@ -4387,7 +4416,7 @@ def _acquisition_sample_requirements(state: WizardState) -> tuple[int, int]:
         validation_requirements.append(int(pruning.get("depth_importance_samples", 1)))
     if bool(pruning.get("sort_sanity", False)):
         validation_requirements.append(int(pruning.get("sort_sanity_samples", 1)))
-    if bool(pruning.get("sort_sanity", False)) and bool(pruning.get("width_sanity", False)):
+    if bool(pruning.get("width_sanity", False)):
         validation_requirements.append(int(pruning.get("width_sanity_samples", 1)))
 
     for raw_flow in _mapping_copy(state.collection("post_mip_flows")).values():
@@ -4596,7 +4625,7 @@ def output_review_section(
             },
             "results": session.state.get_field("output.result_root"),
         }
-        print(yaml.safe_dump(summary, sort_keys=False))
+        print(yaml.safe_dump(_plain_review_value(summary), sort_keys=False))
         print(
             "  Nested values and provenance are saved in answers_v2.yaml. "
             "Use --full for per-section customization."
@@ -4689,25 +4718,28 @@ def _fresh_state(
             value = backend.text("Campaign directory:", "")
             if value is BACK:
                 continue
-            path = Path(str(value)).expanduser()
-            if str(path):
-                return WizardState.start(
-                    path,
-                    defaults_path=defaults_path,
-                    setup_mode="full",
-                )
+            if not str(value).strip():
+                print("  Enter a campaign directory path.")
+                continue
+            return WizardState.start(
+                Path(str(value)).expanduser(),
+                defaults_path=defaults_path,
+                setup_mode="full",
+            )
 
     while True:
         preset = _select_setup_preset(backend)
         if preset is BACK:
             continue
-        value = backend.text("Campaign directory:", "")
-        if value is BACK:
-            continue
-        path = Path(str(value)).expanduser()
-        if str(path):
+        while True:
+            value = backend.text("Campaign directory:", "")
+            if value is BACK:
+                break
+            if not str(value).strip():
+                print("  Enter a campaign directory path.")
+                continue
             return WizardState.start(
-                path,
+                Path(str(value)).expanduser(),
                 defaults_path=defaults_path,
                 setup_mode="quick",
                 preset=str(preset),
@@ -4901,6 +4933,7 @@ def run_wizard_v2(
         print("  Full setup enabled: every advanced section is customizable.")
     selected_defaults = defaults_path or state.defaults_path
     if resume is not None and defaults_path is not None:
+        load_defaults(defaults_path)
         state.set_defaults_path(defaults_path)
         print(f"  Persisted replacement defaults file: {state.defaults_path}")
     session = WizardSession(

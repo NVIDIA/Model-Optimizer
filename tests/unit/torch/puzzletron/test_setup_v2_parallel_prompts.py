@@ -16,8 +16,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Resource-profile prompting and compatibility behavior for Puzzletron setup v2."""
+
 from types import SimpleNamespace
 
+import pytest
+
+from puzzletron_setup import SetupError
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.prompts import ScriptedBackend
 from puzzletron_setup.v2.resources import ParallelProfile, ResourceProfileRegistry
@@ -150,6 +155,27 @@ def test_default_stages_reuse_first_compatible_profile_without_reprompting(
     assert (
         session.state.collection("stage_resources")["replacement_scoring"]["profile_name"] == "good"
     )
+    assert backend.remaining == 0
+
+
+def test_guided_stage_rejects_registry_without_a_compatible_profile(tmp_path):
+    session, backend = _session(tmp_path, [])
+    session.guided = True
+    registry = ResourceProfileRegistry({"bad": ParallelProfile(name="bad", tp=8)})
+    session.state.set_collection("parallel_profiles", registry.to_dict())
+    resolver = DefaultsResolver()
+    model = SimpleNamespace(inventory=MOE_INVENTORY)
+
+    with pytest.raises(SetupError, match="No configured parallel profile is compatible"):
+        _configure_stage_resource(
+            session,
+            resolver,
+            model,
+            "width_sanity",
+            action="defaults",
+            batch_default=8,
+        )
+
     assert backend.remaining == 0
 
 

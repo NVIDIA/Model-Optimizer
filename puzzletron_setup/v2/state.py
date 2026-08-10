@@ -195,14 +195,20 @@ class WizardState:
         value = setup.get("preset")
         return str(value) if value else None
 
+    def _setup_section(self) -> dict[str, Any]:
+        setup = self.payload.get("setup")
+        section = dict(setup) if isinstance(setup, Mapping) else {}
+        self.payload["setup"] = section
+        return section
+
     def set_setup_mode(self, mode: str) -> None:
         """Persist an explicit guided or full mode transition."""
-        self.payload.setdefault("setup", {})["mode"] = str(mode)
+        self._setup_section()["mode"] = str(mode)
         self.save()
 
     def set_preset(self, preset: str) -> None:
         """Persist a replacement guided profile selection."""
-        self.payload.setdefault("setup", {})["preset"] = str(preset)
+        self._setup_section()["preset"] = str(preset)
         self.save()
 
     def set_defaults_path(self, path: Path) -> None:

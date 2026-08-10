@@ -127,6 +127,11 @@ class SetupPreset:
         profiles = payload.get("profiles")
         if not isinstance(profiles, Mapping):
             raise SetupError(f"Guided setup defaults profiles must be a mapping: {defaults_path}")
+        known_profiles = {preset.name for preset in QUICK_SETUP_PRESETS}
+        unknown_profiles = set(profiles) - known_profiles
+        if unknown_profiles:
+            profiles_list = ", ".join(sorted(str(profile) for profile in unknown_profiles))
+            raise SetupError(f"Unknown guided setup profiles in {defaults_path}: {profiles_list}")
         defaults = profiles.get(self.name)
         if not isinstance(defaults, Mapping):
             raise SetupError(
@@ -170,7 +175,6 @@ class SetupPreset:
                     f"Guided setup model override {model_name!r} profiles must be a "
                     f"mapping in {defaults_path}."
                 )
-            known_profiles = {preset.name for preset in QUICK_SETUP_PRESETS}
             unknown_profiles = set(override_profiles) - known_profiles
             if unknown_profiles:
                 profiles_list = ", ".join(sorted(str(profile) for profile in unknown_profiles))

@@ -45,6 +45,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the setup-v2 command-line interface."""
     args = _parser().parse_args(argv)
+    # Keep heavyweight model inspection out of --help and argument-error paths.
     from .wizard import run_wizard_v2
 
     try:

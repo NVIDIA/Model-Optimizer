@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Dataset selection, acquisition, modality, and subset handling for setup v2."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -225,6 +227,32 @@ def test_nemotron_vlm_records_revision_locked_catalog_metadata(tmp_path):
     assert list(catalogs) == [
         f"{_NEMOTRON_VLM_DATA_SOURCE}@immutable-sha",
     ]
+
+
+def test_resume_can_change_between_fixed_dataset_modalities(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.set_field("data.modality", "text", source="user")
+    destination = tmp_path / "vlm"
+    backend = ScriptedBackend(
+        [
+            _NEMOTRON_VLM_DATA_SOURCE,
+            str(destination),
+            19,
+            ["sparsetables"],
+            "packed_varlen",
+            4096,
+        ]
+    )
+
+    assert data_section(
+        WizardSession(state, backend),
+        DefaultsResolver(preserved={"data": {"modality": "text"}}),
+        _context(multimodal=True),
+        catalog_loader=lambda source, **kwargs: _nemotron_catalog(),
+    )
+
+    assert backend.remaining == 0
+    assert state.get_field("data.modality") == "multimodal"
 
 
 def test_nemotron_vlm_subset_prompt_uses_catalog_choices_and_defaults(tmp_path):
