@@ -101,6 +101,7 @@ def descriptor_realization_findings(
                         "right_method": "physical",
                         "delta": delta,
                     },
+                    severity="error",
                 )
             )
     return findings

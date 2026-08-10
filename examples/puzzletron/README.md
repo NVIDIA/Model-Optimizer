@@ -468,7 +468,7 @@ The authoritative dependencies and enabled-stage rules live in
 | `width_importance` | Collect activation-based rankings for every enabled width axis. |
 | `sort` | Reorder the teacher so nested prefixes implement ranked width choices. |
 | `sort_sanity` | Check that sorting preserves teacher outputs. |
-| `width_sanity` | Compare ranked, random, and reverse slices on representative layers. |
+| `width_sanity` | Compare ranked, original-order, and reverse slices on representative layers. |
 | `slicing_sanity` | Verify dynamic slicing against physical materialization. |
 | `bypass_sanity` | Overfit small local-distillation cases before production bypass. |
 | `bypass` | Train nested replacement blocks across the configured search space. |
@@ -480,6 +480,27 @@ The authoritative dependencies and enabled-stage rules live in
 | `global_distillation_sanity` | Overfit the selected global student as a correctness check. |
 | `global_distillation` | Distill the selected architecture at the configured production scale. |
 | `post_distillation_evaluation` | Evaluate the final distilled checkpoint. |
+
+## Interpret width sanity results
+
+Puzzletron separates implementation correctness from ranking quality:
+
+- Sort and slicing equivalence failures are correctness errors and always fail
+  their stages.
+- A width-ranking miss means the activation-sorted candidate underperformed an
+  original or reverse control. It is a quality warning by default.
+
+To also fail a sanity stage on ranking-quality warnings, enable strict warning
+handling:
+
+```yaml
+sanity:
+  fail_on_warnings: true
+```
+
+See [Sorting, width ranking, and slicing sanity](docs/sanity_validation.md) for
+the slicing mental model, measured metrics, comparison controls, tolerances,
+worked example, and qualification guidance.
 
 Independent DAG branches may run concurrently when they have disjoint writers.
 Long-running stages should resume their durable checkpoints or immutable shards

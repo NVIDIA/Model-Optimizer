@@ -39,6 +39,7 @@ from .report_section_cache import (
     publish_report_transaction,
     stable_digest,
 )
+from .sanity_verdict import is_correctness_sanity_stage
 from .width_sanity import descriptor_realization_findings
 
 _STAGES = tuple(spec.stage_id for spec in STAGE_SPECS)
@@ -173,7 +174,7 @@ def _stage_artifact_present(root: Path, spec: StageSpec) -> bool:
 
 
 def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
-    """Return completed, disabled, or pending from artifacts and configuration."""
+    """Return the report state from the manifest, artifacts, and configuration."""
 
     post_mip_stages = {
         "zero_shot_evaluation",
@@ -184,6 +185,15 @@ def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
     }
     if (config.get("post_mip") or {}).get("flows") and spec.stage_id in post_mip_stages:
         return "disabled"
+    if is_correctness_sanity_stage(spec.stage_id):
+        manifest = _manifest(root, spec.stage_id)
+        summary = _load_optional(root / "artifacts" / spec.stage_id / "summary.json")
+        if (
+            manifest.get("status") == "failed"
+            or summary.get("passed") is False
+            or summary.get("verdict") == "failed"
+        ):
+            return "failed"
     if _stage_artifact_present(root, spec):
         return "completed"
     section = config.get(spec.stage_id)
@@ -284,8 +294,12 @@ def _sort_table(summary: dict[str, Any]) -> str:
             f"{reverse_cell}"
             "</tr>"
         )
-    gate = "passed" if summary.get("passed") is True else "warning"
-    gate_label = "passed" if summary.get("passed") is True else "warning"
+    gate = (
+        "passed"
+        if summary.get("passed") is True
+        else "failed (blocking correctness)"
+    )
+    gate_label = "passed" if summary.get("passed") is True else "failed"
     findings = list(summary.get("findings") or ())
     finding_notes = ""
     gate_attributes = ""
@@ -402,6 +416,7 @@ def _activation_diagnostic_summary(root: Path) -> dict[str, Any]:
             if identity not in seen:
                 rows.append(row)
                 seen.add(identity)
+    width_findings = list(width.get("findings") or ())
     slicing_findings = list(slicing.get("findings") or ())
     if not slicing_findings:
         slicing_findings = [
@@ -413,7 +428,13 @@ def _activation_diagnostic_summary(root: Path) -> dict[str, Any]:
     return {
         "rows": rows,
         "axes": sorted({str(row.get("axis")) for row in rows if row.get("axis")}),
-        "width_findings": list(width.get("findings") or ()),
+        "width_present": bool(width),
+        "width_passed": width.get("passed", not width_findings) is True if width else None,
+        "slicing_present": bool(slicing),
+        "slicing_passed": (
+            slicing.get("passed", not slicing_findings) is True if slicing else None
+        ),
+        "width_findings": width_findings,
         "slicing_findings": slicing_findings,
         "sort_findings": list((_load_optional(root / "artifacts" / "sort_sanity" / "summary.json")).get("findings") or ()),
     }
@@ -461,8 +482,26 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
         summary.get("slicing_findings") or ()
     ) + list(summary.get("sort_findings") or ())
     rows = _activation_diagnostic_rows(summary)
+    gates = []
+    if summary.get("width_present"):
+        width_passed = summary.get("width_passed") is True
+        gates.append(
+            "<p class='gate {}'>Width ranking: {}</p>".format(
+                "passed" if width_passed else "warning",
+                "passed" if width_passed else "quality warning",
+            )
+        )
+    if summary.get("slicing_present"):
+        slicing_passed = summary.get("slicing_passed") is True
+        gates.append(
+            "<p class='gate {}'>Dynamic/physical equivalence: {}</p>".format(
+                "passed" if slicing_passed else "failed",
+                "passed" if slicing_passed else "failed (blocking correctness)",
+            )
+        )
+    gate_summary = f"<div class='sanity-gates'>{''.join(gates)}</div>" if gates else ""
     if not rows:
-        return (
+        return gate_summary + (
             "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
             if findings
             else "<p class='empty'>No width or slicing sanity artifact.</p>"
@@ -486,7 +525,9 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
         for metric in metrics
     )
     if not axes or not metrics:
-        return "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
+        return gate_summary + (
+            "<p class='empty'>The sanity artifact contains no plottable numeric metrics.</p>"
+        )
     first_axis = axes[0]
     first_metric = metrics[0]
     cases: dict[tuple[Any, Any, Any], dict[str, dict[str, Any]]] = {}
@@ -539,10 +580,14 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
             + "".join(cells)
             + "</tr>"
         )
-    return (
+    return gate_summary + (
         "<p class='note'>Every sliced model is compared with the full, unsliced original teacher. "
         "The original baseline is the teacher channel order sliced to the same target. "
-        "Physical is a materialized slice of the sorted checkpoint and is the slicing ground truth.</p>"
+        "Physical is a materialized slice of the sorted checkpoint and is the slicing ground truth. "
+        "A width-ranking quality warning means the activation-sorted candidate was worse than "
+        "an original or reverse control beyond tolerance; it does not mean the dynamic and "
+        "physical implementations disagree. Campaign qualification may still require the "
+        "ranking warning to pass.</p>"
         "<label class='selector-label' for='activation-axis-select'>Swept axis</label>"
         f'<select id="activation-axis-select">{axis_options}</select>'
         "<label class='selector-label' for='activation-metric-select'>Metric</label>"
@@ -3262,6 +3307,7 @@ def _stage_dag(
         "orient='auto'><path d='M0,0 L7,3.5 L0,7 Z'/></marker></defs>"
         f"{''.join(edges)}{''.join(nodes)}</svg></div>"
         "<div class='dag-legend'><span class='completed'>Completed</span>"
+        "<span class='failed'>Failed</span>"
         "<span class='pending'>Pending</span>"
         "<span class='disabled'>Disabled</span></div>"
         "<div class='dag-legend dag-type-legend'><span class='required-node'>Required</span>"
@@ -3934,8 +3980,8 @@ main{{max-width:1280px;margin:auto;padding:32px}} h1{{font-size:30px;margin:0 0 
 .hoverlayer .hovertext path,.hoverlayer .hovertext rect,.hoverlayer .axistext path{{fill-opacity:.32!important}} .cardinality-formula{{padding:14px 16px;border:1px solid #4f8cff66;border-radius:10px;background:#0a1421;color:#cfe0ff;font:600 15px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}}
 pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;border-radius:12px;padding:16px;color:#cfe0ff;white-space:pre-wrap}}
 .summary-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}} .summary-grid article{{display:flex;min-height:86px;flex-direction:column;justify-content:center;gap:7px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:#0a1421}} .summary-grid span{{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}} .summary-grid strong{{color:#cfe0ff;font-size:16px}}
-.dag-scroll{{overflow-x:auto;padding:6px 0 12px}} .stage-dag{{display:block;min-width:100%;font-family:Inter,ui-sans-serif,system-ui,sans-serif}} .dag-edge{{fill:none;stroke:#4f8cff88;stroke-width:2;marker-end:url(#dag-arrow)}} .dag-edge.muted{{stroke:#55647a55;stroke-dasharray:5 6}} .dag-node rect{{fill:#0b1421;stroke:#34445e;stroke-width:1.5;transition:fill .15s,stroke .15s}} .dag-node.optional rect{{stroke-dasharray:6 4}} .dag-node circle{{fill:#55647a}} .dag-node .dag-label{{fill:var(--ink);font-size:11px;font-weight:650}} .dag-node .dag-status{{fill:var(--muted);font-size:9px;letter-spacing:.08em}} .dag-node.completed circle{{fill:var(--green)}} .dag-node.completed rect{{stroke:#35d07f99}} .dag-node.pending circle{{fill:var(--amber)}} .dag-node.pending rect{{stroke:#ffbd4577}} .dag-node.disabled{{opacity:.38}} .stage-dag a:hover .dag-node rect{{fill:#101d30;stroke:var(--blue)}} .dag-legend{{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:5px}} .dag-legend span::before{{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#55647a}} .dag-legend .completed::before{{background:var(--green)}} .dag-legend .pending::before{{background:var(--amber)}} .dag-legend .disabled::before{{background:#55647a;opacity:.45}} .dag-type-legend span::before{{width:13px;height:9px;border-radius:2px;background:transparent;border:1.5px solid #93a4bd}} .dag-type-legend .optional-node::before{{border-style:dashed}}
-@keyframes pulse{{50%{{transform:scale(1.7);box-shadow:0 0 18px #ffbd45aa}}}} .table-wrap{{overflow:auto}} table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right}} th:first-child{{text-align:left}} thead th{{color:#a9bee0;background:#0a1421;position:sticky;top:0}} tr.selected-candidate{{background:#4f8cff18}} tr.selected-candidate td{{box-shadow:inset 0 1px #4f8cff44,inset 0 -1px #4f8cff44}} .candidate-swatch{{display:inline-block;width:10px;height:10px;margin-right:8px;border-radius:50%}} td.warning-cell{{background:#ffbd4524;color:#ffe3a3;box-shadow:inset 0 0 0 1px #ffbd4570}} .warning-value{{cursor:help;outline-offset:3px}} #warning-tooltip{{position:fixed;z-index:10000;max-width:min(420px,calc(100vw - 24px));padding:9px 11px;border:1px solid #ffbd4588;border-radius:8px;background:#241b0d;color:#ffe3a3;font-size:12px;line-height:1.4;box-shadow:0 10px 30px #0009;pointer-events:none;white-space:pre-wrap}} .gate{{display:inline-block;border-radius:999px;padding:5px 10px;background:#1b2839}} .gate.passed{{color:var(--green)}} .empty,.note{{color:var(--muted)}} select{{margin:0 18px 18px 8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#0a1421;color:var(--ink)}} .selector-label{{color:var(--muted)}} code{{color:#bcd2ff}} .probe-summaries{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}} .probe-summary{{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0a1421}} .probe-summary.passed{{border-color:#35d07f66}} .probe-summary.failed{{border-color:#ff657766}} .probe-summary h3{{margin:0 0 10px}} .probe-summary dl{{display:grid;grid-template-columns:1fr auto;gap:5px 14px;margin:0}} .probe-summary dt{{color:var(--muted)}} .probe-summary dd{{margin:0;text-align:right}} .probe-plots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px}} .probe-plot-panel{{min-width:0;border:1px solid var(--line);border-radius:12px;padding:12px;background:#091321}} .probe-plot-panel h3{{margin:0 0 4px}} .plotly-chart{{width:100%;height:390px}} .depth-chart{{height:460px}}
+.dag-scroll{{overflow-x:auto;padding:6px 0 12px}} .stage-dag{{display:block;min-width:100%;font-family:Inter,ui-sans-serif,system-ui,sans-serif}} .dag-edge{{fill:none;stroke:#4f8cff88;stroke-width:2;marker-end:url(#dag-arrow)}} .dag-edge.muted{{stroke:#55647a55;stroke-dasharray:5 6}} .dag-node rect{{fill:#0b1421;stroke:#34445e;stroke-width:1.5;transition:fill .15s,stroke .15s}} .dag-node.optional rect{{stroke-dasharray:6 4}} .dag-node circle{{fill:#55647a}} .dag-node .dag-label{{fill:var(--ink);font-size:11px;font-weight:650}} .dag-node .dag-status{{fill:var(--muted);font-size:9px;letter-spacing:.08em}} .dag-node.completed circle{{fill:var(--green)}} .dag-node.completed rect{{stroke:#35d07f99}} .dag-node.failed circle{{fill:var(--red)}} .dag-node.failed rect{{stroke:#ff657799}} .dag-node.pending circle{{fill:var(--amber)}} .dag-node.pending rect{{stroke:#ffbd4577}} .dag-node.disabled{{opacity:.38}} .stage-dag a:hover .dag-node rect{{fill:#101d30;stroke:var(--blue)}} .dag-legend{{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:5px}} .dag-legend span::before{{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#55647a}} .dag-legend .completed::before{{background:var(--green)}} .dag-legend .failed::before{{background:var(--red)}} .dag-legend .pending::before{{background:var(--amber)}} .dag-legend .disabled::before{{background:#55647a;opacity:.45}} .dag-type-legend span::before{{width:13px;height:9px;border-radius:2px;background:transparent;border:1.5px solid #93a4bd}} .dag-type-legend .optional-node::before{{border-style:dashed}}
+@keyframes pulse{{50%{{transform:scale(1.7);box-shadow:0 0 18px #ffbd45aa}}}} .table-wrap{{overflow:auto}} table{{width:100%;border-collapse:collapse}} th,td{{padding:10px 12px;border-bottom:1px solid var(--line);text-align:right}} th:first-child{{text-align:left}} thead th{{color:#a9bee0;background:#0a1421;position:sticky;top:0}} tr.selected-candidate{{background:#4f8cff18}} tr.selected-candidate td{{box-shadow:inset 0 1px #4f8cff44,inset 0 -1px #4f8cff44}} .candidate-swatch{{display:inline-block;width:10px;height:10px;margin-right:8px;border-radius:50%}} td.warning-cell{{background:#ffbd4524;color:#ffe3a3;box-shadow:inset 0 0 0 1px #ffbd4570}} .warning-value{{cursor:help;outline-offset:3px}} #warning-tooltip{{position:fixed;z-index:10000;max-width:min(420px,calc(100vw - 24px));padding:9px 11px;border:1px solid #ffbd4588;border-radius:8px;background:#241b0d;color:#ffe3a3;font-size:12px;line-height:1.4;box-shadow:0 10px 30px #0009;pointer-events:none;white-space:pre-wrap}} .sanity-gates{{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}} .gate{{display:inline-block;border-radius:999px;padding:5px 10px;background:#1b2839}} .gate.passed{{color:var(--green)}} .gate.warning{{color:var(--amber)}} .gate.failed{{color:var(--red)}} .empty,.note{{color:var(--muted)}} select{{margin:0 18px 18px 8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#0a1421;color:var(--ink)}} .selector-label{{color:var(--muted)}} code{{color:#bcd2ff}} .probe-summaries{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}} .probe-summary{{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0a1421}} .probe-summary.passed{{border-color:#35d07f66}} .probe-summary.failed{{border-color:#ff657766}} .probe-summary h3{{margin:0 0 10px}} .probe-summary dl{{display:grid;grid-template-columns:1fr auto;gap:5px 14px;margin:0}} .probe-summary dt{{color:var(--muted)}} .probe-summary dd{{margin:0;text-align:right}} .probe-plots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px}} .probe-plot-panel{{min-width:0;border:1px solid var(--line);border-radius:12px;padding:12px;background:#091321}} .probe-plot-panel h3{{margin:0 0 4px}} .plotly-chart{{width:100%;height:390px}} .depth-chart{{height:460px}}
 .vllm-overview-cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:16px 0}} .vllm-overview-cards article{{display:flex;flex-direction:column;padding:14px;border:1px solid var(--line);border-radius:10px;background:#0a1421}} .vllm-overview-cards strong{{font-size:24px;color:#cfe0ff}} .vllm-overview-cards span{{color:var(--muted)}} .vllm-panel{{margin:14px 0}} .vllm-controls{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:14px 0}} .vllm-controls>span{{display:contents}} .vllm-controls label{{display:flex;flex-direction:column;gap:5px;color:var(--muted)}} .vllm-controls select{{margin:0}}
 .vllm-connect-toggle{{display:flex;align-items:center;gap:7px;margin:8px 0 12px;color:var(--muted)}} .vllm-connect-toggle input{{accent-color:#4f8cff}}
 .replacement-layer-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:6px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:10px;background:#091321}} .layer-toggle,.replacement-connect-toggle,.replacement-all-toggle{{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}} .layer-toggle input,.replacement-connect-toggle input,.replacement-all-toggle input{{accent-color:#4f8cff}} .replacement-connect-toggle{{margin:8px 0}} .replacement-layer-toolbar{{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:10px 0}} .replacement-all-toggle{{font-weight:600;color:var(--ink)}} .replacement-layer-color-key{{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}} .replacement-layer-color-key i{{display:block;width:min(280px,32vw);height:8px;border-radius:999px;background:linear-gradient(90deg,#ff6577,#4f8cff)}}

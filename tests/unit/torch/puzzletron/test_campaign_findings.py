@@ -12,7 +12,7 @@ from modelopt.torch.puzzletron.diagnostics.campaign_findings import (
 )
 
 
-def test_equivalence_warning_is_derived_from_values_not_axis_name():
+def test_equivalence_error_is_derived_from_values_not_axis_name():
     rows = [
         {"axis": "arbitrary_axis", "method": "dynamic", "lm_loss": 4.9582},
         {"axis": "arbitrary_axis", "method": "physical", "lm_loss": 4.9697},
@@ -29,6 +29,7 @@ def test_equivalence_warning_is_derived_from_values_not_axis_name():
 
     assert findings[0].evidence["delta"] == pytest.approx(0.0115)
     assert findings[0].evidence["group"] == {"axis": "arbitrary_axis"}
+    assert findings[0].severity == "error"
     assert "arbitrary_axis" not in findings[0].message
 
 
@@ -52,6 +53,8 @@ def test_ranking_findings_obey_metric_direction(direction, preferred, comparison
     )
 
     assert bool(findings) is warns
+    if findings:
+        assert findings[0].severity == "warning"
 
 
 def test_loss_trend_warns_when_ending_window_does_not_improve():

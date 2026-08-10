@@ -216,7 +216,7 @@ def test_parent_sweep_publication_accepts_per_metric_physical_tolerances(tmp_pat
     }
 
 
-def test_parent_sweep_physical_miss_is_published_as_warning(tmp_path):
+def test_parent_sweep_physical_miss_is_published_as_correctness_failure(tmp_path):
     parent_summary = {
         "rows": [
             {
@@ -244,5 +244,6 @@ def test_parent_sweep_physical_miss_is_published_as_warning(tmp_path):
 
     summary = json.loads(slicing_path.read_text())
     assert summary["passed"] is False
+    assert summary["verdict"] == "failed"
     assert summary["findings"]
-    assert all(finding["severity"] == "warning" for finding in summary["findings"])
+    assert all(finding["severity"] == "error" for finding in summary["findings"])
