@@ -54,6 +54,12 @@ _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 # Anything uploaded or printed passes through _redact first: a tracking URI may carry
 # ``user:token@`` and a caller's own flags may carry a secret.
 _SECRET_NAME = re.compile(r"token|api[-_]?key|password|passwd|secret|credential", re.IGNORECASE)
+# Names that are credentials outright, whatever they hold, so that an
+# all-digit token is not mistaken for configuration. Matched with separators
+# stripped, covering hf_token / hfToken / hf-token alike.
+_EXPLICIT_SECRET_NAME = re.compile(
+    r"hftoken|apikey|accesskey|password|passwd|secret|credential", re.IGNORECASE
+)
 _URI_USERINFO = re.compile(r"(?<=://)[^/\s@]+(?=@)")
 _MASK = "***"
 
@@ -70,6 +76,24 @@ def _stat_key(path: Path) -> tuple[int, int] | None:
 def _redact(value: Any) -> Any:
     """Mask credentials embedded in a URI, leaving non-strings untouched."""
     return _URI_USERINFO.sub(_MASK, value) if isinstance(value, str) else value
+
+
+def _is_secret_param(name: str, value: Any) -> bool:
+    """Whether a param named *name* holding *value* is a credential.
+
+    ``token`` matches plenty of configuration that is not a secret — a
+    speculative-decoding run reports ``num_speculative_tokens``, and engines
+    expose ``max_num_batched_tokens`` and friends — and masking those loses
+    the very numbers a run is recorded for. A credential is a non-trivial
+    string, so a name that merely looks sensitive is kept when its value is
+    an int, float, bool or None. An explicit ``*token``/``*key`` name still
+    masks whatever it holds.
+    """
+    if not _SECRET_NAME.search(name):
+        return False
+    if _EXPLICIT_SECRET_NAME.search(name.replace("_", "").replace("-", "")):
+        return True
+    return not isinstance(value, (bool, int, float, type(None)))
 
 
 def _redact_argv(argv: list[str]) -> list[str]:
@@ -417,7 +441,7 @@ class MlflowRunLogger:
     def _log_inputs(self, params, tags, texts) -> None:
         if params:
             self._mlflow.log_params(
-                {k: _MASK if _SECRET_NAME.search(k) else _redact(v) for k, v in params.items()}
+                {k: _MASK if _is_secret_param(k, v) else _redact(v) for k, v in params.items()}
             )
         self._mlflow.set_tags(
             {

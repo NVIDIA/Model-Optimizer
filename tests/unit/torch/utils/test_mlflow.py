@@ -27,6 +27,7 @@ from modelopt.torch.utils.logging import TeeStream
 from modelopt.torch.utils.mlflow import (
     MlflowRunLogger,
     _git_sha,
+    _is_secret_param,
     _redact_argv,
     default_experiment_name,
     validate_tracking_uri,
@@ -421,6 +422,46 @@ def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
 )
 def test_redact_argv_masks_credentials(argv, expected):
     assert _redact_argv(argv) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("hf_token", "hf_abc123"),
+        # A credential name masks whatever it holds: an all-digit token is
+        # still a token, so the value's type is no proof of safety.
+        ("hf_token", 1234),
+        ("hfToken", 1),
+        ("hf-token", 0),
+        ("api_key", 99),
+        ("aws_secret_access_key", 0),
+        ("password", True),
+        # An ambiguous name holding a string is masked, since that is the
+        # shape a credential takes.
+        ("some_token", "sk-live-abc"),
+    ],
+)
+def test_secret_params_are_masked(name, value):
+    assert _is_secret_param(name, value) is True
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        # Engine and algorithm configuration whose names merely contain
+        # "token". Masking these loses the numbers the run is recorded for.
+        ("num_speculative_tokens", 7),
+        ("max_num_batched_tokens", 8192),
+        ("dbo_decode_token_threshold", 32),
+        ("skip_tokenizer_init", False),
+        ("spec_tokens", None),
+        # Names that never matched in the first place.
+        ("draft_length", 7),
+        ("model_dir", "/models/Qwen3-0.6B"),
+    ],
+)
+def test_config_params_keep_their_value(name, value):
+    assert _is_secret_param(name, value) is False
 
 
 def test_command_artifact_carries_no_secrets(fake_mlflow, monkeypatch):
