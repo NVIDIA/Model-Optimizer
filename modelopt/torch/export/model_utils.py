@@ -15,6 +15,7 @@
 """Utility functions for model type detection and classification."""
 
 import re
+import warnings
 
 import torch.nn as nn
 
@@ -406,6 +407,18 @@ class TiedGroupResolver:
             a_base = alias.rsplit(".", 1)[0] if "." in alias else alias
             c_base = canonical.rsplit(".", 1)[0] if "." in canonical else canonical
             if a_base and c_base and a_base != c_base:
+                # An alias module prefix should map to exactly one canonical module prefix.
+                # A collision (two projections of one container declared tied to different
+                # canonical containers) would let the last mapping silently overwrite the
+                # first and misroute per-key rewrites; warn and keep the first instead.
+                prev = pairs.get(a_base)
+                if prev is not None and prev != c_base:
+                    warnings.warn(
+                        f"Ambiguous tied-weight prefix: alias module {a_base!r} maps to both "
+                        f"{prev!r} and {c_base!r}; keeping {prev!r}. Declared per-key rewrites "
+                        f"under this prefix may be incorrect."
+                    )
+                    continue
                 pairs[a_base] = c_base
         return pairs
 

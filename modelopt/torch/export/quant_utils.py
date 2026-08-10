@@ -1139,12 +1139,24 @@ def postprocess_state_dict(
         if alias_prefixes:
             for key in post_state_dict:
                 canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
-                if canonical_key is not None and canonical_key in post_state_dict:
-                    keys_to_delete.append(key)
+                if canonical_key is None or canonical_key not in post_state_dict:
+                    continue
+                # Guard against a (pathological) bidirectional map A<->B: only drop an alias
+                # whose canonical is a *terminal* canonical (not itself an alias). Otherwise
+                # both sides would be marked and the exported checkpoint would contain neither,
+                # leaving the loader with a missing tensor.
+                if resolver.canonical_state_dict_key(canonical_key, alias_prefixes) is not None:
                     logger.warning(
-                        f"Tied weight (declared): dropping alias '{key}'; "
-                        f"canonical '{canonical_key}' is kept."
+                        f"Skipping name-based dedup of '{key}': its canonical "
+                        f"'{canonical_key}' is itself a declared alias (bidirectional tie); "
+                        f"keeping both to avoid dropping the only copy."
                     )
+                    continue
+                keys_to_delete.append(key)
+                logger.warning(
+                    f"Tied weight (declared): dropping alias '{key}'; "
+                    f"canonical '{canonical_key}' is kept."
+                )
 
     # Address backstop: collapse two keys that still point at the SAME storage.
     #

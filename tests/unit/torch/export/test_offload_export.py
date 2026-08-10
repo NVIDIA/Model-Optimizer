@@ -304,7 +304,8 @@ def test_tied_weights_exported_independently_without_cache():
 
     Dense ties are no longer deduped at pack time (the duplicate is dropped by name in
     postprocess_state_dict), so both sides pack independently to byte-identical tensors.
-    Guards the offload path: independent tensors keep both shard keys intact.
+    This checks the packing behavior only; it does not construct an offloaded model or
+    drive the streaming export path.
     """
     shared = nn.Parameter(torch.randn(16, 16))
     first, second = nn.Linear(16, 16, bias=False), nn.Linear(16, 16, bias=False)
