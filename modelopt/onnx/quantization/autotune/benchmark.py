@@ -151,7 +151,7 @@ class Benchmark(ABC):
 
 _SAFE_PATTERN = (
     r"\[\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\]\s+\[I\]\s+"
-    r"Average over \d+ runs - GPU latency:\s*([\d.]+)\s*ms"
+    r"GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
 )
 _STD_PATTERN = r"\[I\]\s+GPU Compute Time:.*?median\s*=\s*([\d.]+)\s*ms"
 
@@ -506,7 +506,6 @@ class TrtExecBenchmark(Benchmark):
                             f"{self.remote_user}@{self.remote_ip}",
                             f"rm -f {shlex.quote(self.remote_engine_path)}",
                         ]
-                        cleanup_cmd = cleanup_cmd
                         try:
                             subprocess.run(
                                 cleanup_cmd,
@@ -528,12 +527,10 @@ class TrtExecBenchmark(Benchmark):
                         f"{self.remote_port}",
                         f"{self.remote_user}@{self.remote_ip}",
                         f"{ld_path} {shlex.quote(trt_path)} --useCudaGraph "
+                        f"--warmUp={self.warmup_runs} --iterations={self.timing_runs} "
                         f"--loadEngine={shlex.quote(self.remote_engine_path)}",
-                        f"--warmUp={self.warmup_runs}",
-                        f"--iterations={self.timing_runs}",
                     ]
 
-                    trtexec_safe_cmd = trtexec_safe_cmd
                     result = subprocess.run(
                         trtexec_safe_cmd,
                         capture_output=True,
@@ -550,11 +547,9 @@ class TrtExecBenchmark(Benchmark):
                             f"{self.remote_port}",
                             f"{self.remote_user}@{self.remote_ip}",
                             f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
+                            f"--warmUp={self.warmup_runs} --iterations={self.timing_runs} "
                             f"--loadEngine={shlex.quote(self.remote_engine_path)}",
-                            f"--warmUp={self.warmup_runs}",
-                            f"--iterations={self.timing_runs}",
                         ]
-                        trtexec_safe_cmd = trtexec_safe_cmd
 
                         result = subprocess.run(
                             trtexec_safe_cmd,
