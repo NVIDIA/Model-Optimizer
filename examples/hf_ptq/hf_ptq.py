@@ -709,6 +709,34 @@ def sparsity_main(
     mts.export(full_model)
 
 
+def _restore_quantized_state_if_requested(args: argparse.Namespace, full_model: torch.nn.Module) -> bool:
+    """Restore a previously-calibrated ModelOpt state and skip calibration.
+
+    Returns True if a restore happened (caller should skip mono_quantize).
+    """
+    if args.restore_quantized_state is None:
+        return False
+    if args.save_quantized_state is not None:
+        raise ValueError(
+            "--save_quantized_state and --restore_quantized_state are mutually exclusive: "
+            "restoring a saved state skips calibration, so there is nothing new to save."
+        )
+    print(
+        f"Restoring quantized state from {args.restore_quantized_state}; skipping calibration."
+    )
+    mto.restore(full_model, args.restore_quantized_state)
+    return True
+
+
+def _save_quantized_state_if_requested(args: argparse.Namespace, full_model: torch.nn.Module) -> None:
+    """Save the just-calibrated ModelOpt state, if requested, so a later export-only retry can
+    restore it via --restore_quantized_state instead of repeating calibration."""
+    if args.save_quantized_state is None:
+        return
+    print(f"Saving quantized state to {args.save_quantized_state}")
+    mto.save(full_model, args.save_quantized_state)
+
+
 def mono_quantize(
     args: argparse.Namespace,
     quant_cfg: dict[str, Any],
@@ -1278,7 +1306,9 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
-        if quant_cfg:
+        if _restore_quantized_state_if_requested(args, full_model):
+            pass
+        elif quant_cfg:
             mono_quantize(
                 args,
                 quant_cfg,
@@ -1289,6 +1319,7 @@ def quantize_main(
                 calib_dataloader,
                 is_nemotron_vl_model,
             )
+            _save_quantized_state_if_requested(args, full_model)
         else:
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
@@ -1515,6 +1546,64 @@ def parse_args() -> argparse.Namespace:
             "Path to checkpoint file for saving/restoring auto_quantize search state "
             "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe."
         ),
+    )
+    parser.add_argument(
+        "--save_quantized_state",
+        type=str,
+        default=None,
+        help=(
+            "Path to save the calibrated/quantized model's ModelOpt state after calibration "
+            "completes, before export. Lets a failed or interrupted export be retried via "
+            "--restore_quantized_state without repeating calibration. Plain (non-AutoQuantize) "
+            "recipe/qformat path only."
+        ),
+    )
+    parser.add_argument(
+        "--restore_quantized_state",
+        type=str,
+        default=None,
+        help=(
+            "Path to a ModelOpt state previously written by --save_quantized_state. When set, "
+            "calibration is skipped entirely and the saved state is restored onto the model "
+            "before proceeding straight to export."
+        ),
+    )
+    # Deprecated AutoQuantize CLI flags: kept as a backward-compat shim that converts them into an
+    # AutoQuantizeConfig on the fly (see _auto_quantize_config_from_cli). Prefer --recipe. The old
+    # CLI also lives on the 0.45 branch.
+    parser.add_argument(
+        "--auto_quantize_bits",
+        type=float,
+        default=None,
+        help="[Deprecated: use an AutoQuantize --recipe] Effective-bits target; also enables the "
+        "AutoQuantize CLI path. Candidate formats are taken from --qformat (comma-separated).",
+    )
+    parser.add_argument(
+        "--auto_quantize_method",
+        type=str,
+        default="gradient",
+        choices=["gradient", "kl_div"],
+        help="[Deprecated: use an AutoQuantize --recipe] Sensitivity scoring method.",
+    )
+    parser.add_argument(
+        "--auto_quantize_score_size",
+        type=int,
+        default=128,
+        help="[Deprecated: use an AutoQuantize --recipe] Number of samples for sensitivity scoring.",
+    )
+    parser.add_argument(
+        "--auto_quantize_cost_model",
+        type=str,
+        default="weight",
+        choices=["weight", "active_moe"],
+        help="[Deprecated: use an AutoQuantize --recipe] Cost model for the effective-bits search.",
+    )
+    parser.add_argument(
+        "--auto_quantize_active_moe_expert_ratio",
+        type=float,
+        default=None,
+        help="[Deprecated: use an AutoQuantize --recipe] Routed-expert active ratio for the "
+        "'active_moe' cost model.",
     )
     parser.add_argument(
         "--moe_calib_experts_ratio",

@@ -55,6 +55,39 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
+def test_save_quantized_state_calls_mto_save_with_model_and_path(monkeypatch):
+    """--save_quantized_state PATH must hand mto.save exactly (model, PATH) -- this is the
+    round-trip a retried export depends on, so the call shape has to be exact."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--save_quantized_state", "/tmp/calib.pt"
+    )
+    calls = []
+    monkeypatch.setattr(hf_ptq.mto, "save", lambda model, path: calls.append((model, path)))
+
+    dummy_model = object()
+    hf_ptq._save_quantized_state_if_requested(args, dummy_model)
+
+    assert calls == [(dummy_model, "/tmp/calib.pt")]
+
+
+def test_save_and_restore_quantized_state_together_is_rejected(monkeypatch):
+    """Both flags set is ambiguous -- restoring skips calibration, so there's nothing new to
+    save. Must fail loudly, not silently prefer one and drop the other."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--save_quantized_state",
+        "/tmp/out.pt",
+        "--restore_quantized_state",
+        "/tmp/in.pt",
+    )
+    monkeypatch.setattr(hf_ptq.mto, "restore", lambda model, path: pytest.fail("must not restore"))
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        hf_ptq._restore_quantized_state_if_requested(args, object())
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(

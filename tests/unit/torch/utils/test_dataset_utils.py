@@ -28,6 +28,7 @@ from modelopt.torch.utils.dataset_utils import (
     _iter_use_cache_configs,
     _pack_documents_into_rows,
     _process_batch,
+    create_forward_loop,
     get_dataset_dataloader,
     get_dataset_samples,
     get_max_batch_size,
@@ -287,6 +288,56 @@ def test_forward_loop_runs_under_disabled_use_cache():
 
     assert seen_use_cache == [False, False, False]
     assert model.config.use_cache is True
+
+
+def _tiny_loader(num_batches: int):
+    class _Model(torch.nn.Module):
+        def forward(self, **kwargs):
+            pass
+
+    def _collate(samples):
+        return {"input_ids": torch.stack([s["input_ids"] for s in samples])}
+
+    data = [{"input_ids": torch.zeros(4, dtype=torch.long)} for _ in range(num_batches)]
+    loader = DataLoader(data, batch_size=1, collate_fn=_collate)
+    return _Model(), loader
+
+
+def test_forward_loop_checkpoints_every_n_steps():
+    """checkpoint_fn fires every `checkpoint_every` batches -- 5 batches at every=2 means
+    two fires (after batch 2 and batch 4), not one per batch and not a trailing fire for
+    the final partial group."""
+    calls: list[int] = []
+    model, loader = _tiny_loader(5)
+
+    _forward_loop(model, loader, checkpoint_every=2, checkpoint_fn=lambda: calls.append(1))
+
+    assert len(calls) == 2
+
+
+def test_forward_loop_checkpoint_every_zero_never_fires():
+    """checkpoint_every=0 (the default) must never call checkpoint_fn -- and must not raise,
+    guarding against a naive `step % checkpoint_every` hitting ZeroDivisionError."""
+    calls: list[int] = []
+    model, loader = _tiny_loader(3)
+
+    _forward_loop(model, loader, checkpoint_fn=lambda: calls.append(1))
+
+    assert calls == []
+
+
+def test_create_forward_loop_passes_checkpoint_args_through():
+    """create_forward_loop's returned closure must forward checkpoint_every/checkpoint_fn
+    to _forward_loop -- otherwise the capability is inert for actual callers like hf_ptq.py."""
+    calls: list[int] = []
+    model, loader = _tiny_loader(4)
+
+    forward_loop = create_forward_loop(
+        dataloader=loader, checkpoint_every=2, checkpoint_fn=lambda: calls.append(1)
+    )
+    forward_loop(model)
+
+    assert len(calls) == 2
 
 
 def test_disable_use_cache_restores_on_exception():
