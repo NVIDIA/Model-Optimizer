@@ -529,6 +529,8 @@ class TrtExecBenchmark(Benchmark):
                         f"{self.remote_user}@{self.remote_ip}",
                         f"{ld_path} {shlex.quote(trt_path)} --useCudaGraph "
                         f"--loadEngine={shlex.quote(self.remote_engine_path)}",
+                        f"--warmUp={self.warmup_runs}",
+                        f"--iterations={self.timing_runs}",
                     ]
 
                     trtexec_safe_cmd = trtexec_safe_cmd
@@ -549,6 +551,8 @@ class TrtExecBenchmark(Benchmark):
                             f"{self.remote_user}@{self.remote_ip}",
                             f"{ld_path} {shlex.quote(trt_path)} --safe --useCudaGraph "
                             f"--loadEngine={shlex.quote(self.remote_engine_path)}",
+                            f"--warmUp={self.warmup_runs}",
+                            f"--iterations={self.timing_runs}",
                         ]
                         trtexec_safe_cmd = trtexec_safe_cmd
 
