@@ -728,11 +728,19 @@ def get_model(
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
 
         if is_nemotron_vl(hf_config):
-            print(
-                "Detected Nemotron VL model from config. "
-                "Disabling automatic device mapping for compatibility."
-            )
-            device_map = None
+            # By default Nemotron-VL loads single-device ("for compatibility"), but that OOMs for
+            # very large VLMs (whole model on one GPU). Allow an env override to shard across GPUs
+            # (accelerate model-parallel, NOT FSDP), e.g. MODELOPT_VL_DEVICE_MAP=auto|sequential.
+            _vl_dm = os.environ.get("MODELOPT_VL_DEVICE_MAP", "").strip()
+            if _vl_dm:
+                print(f"Detected Nemotron VL model from config. Using device_map='{_vl_dm}' (override).")
+                device_map = _vl_dm
+            else:
+                print(
+                    "Detected Nemotron VL model from config. "
+                    "Disabling automatic device mapping for compatibility."
+                )
+                device_map = None
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
