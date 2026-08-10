@@ -63,7 +63,7 @@ This section shows how to quantize a HuggingFace model using ModelOpt in the Meg
 
 `quantize.py` supports the following formats via `--quant_cfg` (e.g. `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, `w4a8_awq`, ...). You can also pass any full config name exposed by ModelOpt (e.g. `NVFP4_DEFAULT_CFG`) or a YAML `--recipe` (e.g. `general/ptq/nvfp4_default-kv_fp8`, authoritative for quant_cfg + algorithm + KV-cache). KV-cache quantization can be enabled on top via `--kv_cache_quant` (e.g. `fp8`, `nvfp4`).
 
-**Step 1 — quantize** Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset (Mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)) for calibration (sequence length = 4096):
+**Step 1, quantize** Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2) using 1024 samples from default dataset (Mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2)) for calibration (sequence length = 4096):
 
 ```bash
 torchrun --nproc_per_node 2 quantize.py \
@@ -75,7 +75,7 @@ torchrun --nproc_per_node 2 quantize.py \
     --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 ```
 
-**Step 2 — export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
+**Step 2, export** the Megatron checkpoint to a deployable HuggingFace checkpoint:
 
 ```bash
 torchrun --nproc_per_node 2 export.py \
@@ -111,7 +111,7 @@ This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quant
 
 The [distill.py](distill.py) script supports both standard HuggingFace checkpoints and [Puzzletron AnyModel](../puzzletron/README.md) checkpoints as student/teacher inputs. Just pass the checkpoint path via `--student_hf_path` / `--teacher_hf_path`. The distilled model is saved to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
-To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path` — `--student_hf_path` is still required to build the student architecture.
+To distill a student whose weights live in a **Megatron checkpoint** (e.g. a quantized checkpoint from [quantize.py](quantize.py) for [Quantization Aware Distillation](#quantization-aware-distillation-qad), or a pruned checkpoint), additionally pass `--student_megatron_path`; `--student_hf_path` is still required to build the student architecture.
 
 ### Data Preparation
 
@@ -227,7 +227,10 @@ For more details, see the [Megatron-Bridge conversion README](https://github.com
 
 ### Distillation Results
 
-See [examples/pruning/](../pruning/README.md#tutorials--results) for distillation experiment results covering Minitron and Puzzletron pruning algorithms.
+See [examples/pruning/](../pruning/README.md#tutorials--results) for Minitron
+tutorials and retained Puzzletron v2 campaign reports. Puzzletron report status,
+configuration relationships, and known gaps are summarized in its
+[campaign report catalog](../puzzletron/docs/campaign_reports.md).
 
 ## Pruning
 
@@ -242,9 +245,9 @@ The script supports three NAS-based pruning targets and one manual export mode:
 | NAS | `--prune_target_memory_mb` | Prune to a target memory footprint in MB (weights + KV-cache) for a given batch size and sequence length assuming BF16 precision |
 | Manual | `--prune_export_config` | Prune directly to a specified architecture config (no NAS). Useful if you want to take top K candidates and do a short knowledge distillation before selecting the best model. |
 
-Multiple NAS targets can be combined — e.g. `--prune_target_params 6e9 --prune_target_memory_mb 12288` finds the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096 assuming BF16 precision.
+Multiple NAS targets can be combined, e.g. `--prune_target_params 6e9 --prune_target_memory_mb 12288` finds the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096 assuming BF16 precision.
 
-**Prune by total parameter count** — prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
+**Prune by total parameter count**, prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
     1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration,
     at-most 20% depth (`num_layers`) and 40% width is pruned per prunable hparam (`hidden_size`, `ffn_hidden_size`, ...),
     top-10 candidates are evaluated for MMLU score (5% sampled data) to select the best model.
@@ -258,7 +261,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
     --output_hf_path /tmp/Qwen3-8B-Pruned-6B
 ```
 
-**Prune by active parameter count** — useful for MoE models where most experts are inactive per token (e.g. prune Nemotron-3-Nano-30B-A3B-BF16 (3.6B active params) to 3B active params):
+**Prune by active parameter count**, useful for MoE models where most experts are inactive per token (e.g. prune Nemotron-3-Nano-30B-A3B-BF16 (3.6B active params) to 3B active params):
 
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
@@ -268,7 +271,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
     --output_hf_path /tmp/Nemotron-3-Nano-30B-A3B-BF16-Pruned-3B-Active
 ```
 
-**Prune by memory footprint** — prune to fit a target GPU memory budget (weights + KV-cache at the given sequence length and batch size, assuming BF16):
+**Prune by memory footprint**, prune to fit a target GPU memory budget (weights + KV-cache at the given sequence length and batch size, assuming BF16):
 
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \
@@ -280,7 +283,7 @@ torchrun --nproc_per_node 2 prune_minitron.py \
     --output_hf_path /tmp/Qwen3-8B-Pruned-12GB
 ```
 
-**Manual pruning** — prune directly to a specified architecture (no NAS, no score evaluation):
+**Manual pruning**, prune directly to a specified architecture (no NAS, no score evaluation):
 
 ```bash
 torchrun --nproc_per_node 2 prune_minitron.py \

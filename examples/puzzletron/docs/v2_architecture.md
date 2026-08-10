@@ -1,8 +1,9 @@
 # Puzzletron v2 Architecture
 
-> **Scope:** This document maps the Puzzletron v2 design to the current working
-> branch as of July 23, 2026. The post-MIP node framework is implemented but
-> still evolving; explicitly future work is separated near the end.
+> **Scope:** This document maps the Puzzletron v2 design to the checked-in
+> implementation. Architecture components and schema capabilities are not model
+> support claims. See the [campaign report catalog](campaign_reports.md) for
+> retained observations and their reproduction status.
 
 ## Executive summary
 
@@ -153,9 +154,9 @@ relative to the repository root.
 ```mermaid
 flowchart TB
     subgraph entry["Campaign authoring"]
-        setup["Setup wizard<br/>puzzletron_setup/<br/>examples/puzzletron/puzzletron_setup.py"]
-        config["Config and bundle generation<br/>examples/puzzletron/configs/<br/>puzzletron_setup/bundle.py"]
-        public["Public entry points<br/>examples/puzzletron/orchestrate.py<br/>examples/puzzletron/main.py"]
+        setup["Setup wizard<br/>puzzletron_setup/v2/<br/>examples/puzzletron/puzzletron_setup_v2.py"]
+        config["Config and bundle generation<br/>examples/puzzletron/configs/<br/>puzzletron_setup/v2/bundle.py"]
+        public["Campaign entry boundary<br/>Public: examples/puzzletron/orchestrate.py<br/>Internal stage worker: examples/puzzletron/main.py"]
     end
 
     subgraph cp["Scheduler-neutral control plane"]
@@ -251,7 +252,7 @@ flowchart TB
 
 | Component | Primary code | Responsibility |
 |---|---|---|
-| Setup and campaign contracts | `puzzletron_setup/`, `examples/puzzletron/configs/` | Inspect model capabilities, ask relevant questions, and emit validated smoke/production experiment, runner, and execution bundles |
+| Setup and campaign contracts | `puzzletron_setup/v2/`, `examples/puzzletron/configs/` | Inspect model capabilities, ask relevant questions, and emit validated smoke/production experiment, runner, and execution bundles |
 | Stage contract | `modelopt/torch/puzzletron/stages/graph.py` | Define canonical stages, dependencies, completion artifacts, enablement, and distributed behavior |
 | Orchestrator | `modelopt/torch/puzzletron/orchestration/` exposed through `puzzletron_orchestrator/` | Compile the DAG, validate meshes, pack instances, execute work, persist state, retry, resume, and monitor |
 | Model abstraction | `modelopt/torch/puzzletron/anymodel/` | Describe model structure, supported axes, tensor bindings, export behavior, and HF versus AutoModel-native implementations |
@@ -387,6 +388,12 @@ slicing mental model, and a worked example.
 
 ## Current implementation versus design direction
 
+The list below describes implementation components. It does not imply that every
+component, model, axis, modality, or topology combination is end-to-end
+demonstrated. Current support requires new reproduced evidence; the
+[campaign report catalog](campaign_reports.md) records retained observations
+and their evidence status.
+
 ### Implemented in the current v2 code
 
 - A canonical stage registry and dependency graph.
@@ -416,7 +423,7 @@ slicing mental model, and a worked example.
 - Improve embedding-width search so ranking, replacement scoring, and bypass do
   not require a full independent sweep for every embedding size.
 - Systematically exercise valid parallelism, input-layout, and modality
-  combinations for every supported model.
+  combinations, then promote only the campaign slices with documented evidence.
 
 ## Manager takeaway
 

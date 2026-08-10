@@ -7,7 +7,7 @@ Pruning can involve removal (prune) of Linear and Conv layers; and Transformer a
 This section focuses on applying Model Optimizer's state-of-the-art complementary pruning modes to enable you to search for the best subnet architecture from your provided base model:
 
 1. [Minitron](https://arxiv.org/pdf/2408.11796): A pruning method developed by NVIDIA Research for pruning GPT (and later extended to Mamba, MoE, and Hybrid Transformer Mamba) models in NVIDIA Megatron-LM (M-LM) or Megatron-Bridge (M-Bridge) framework. It uses the activation magnitudes to prune the embedding hidden size; mlp ffn hidden size; transformer attention heads; mamba heads and head dimension; MoE number of experts, ffn hidden size, and shared expert intermediate size; and number of layers of the model.
-1. [Puzzletron](../puzzletron/README.md): An advanced pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
+1. [Puzzletron v2](../puzzletron/README.md): A heterogeneous pruning campaign workflow that uses measured serving costs and Mixed Integer Programming (MIP) based NAS. Retained reports and their evidence status are summarized in its [campaign report catalog](../puzzletron/docs/campaign_reports.md).
 1. FastNAS: A pruning method recommended for Computer Vision models. Given a pretrained model, FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 
 <div align="center">
@@ -19,7 +19,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 | Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
 | Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
 | Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
-| Tutorials / Results | End-to-end tutorials for Minitron and Puzzletron pruning | \[[Link](#tutorials--results)\] | |
+| Tutorials / Results | Minitron tutorials and Puzzletron campaign reports | \[[Link](#tutorials--results)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -28,13 +28,18 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 For Minitron pruning for Megatron-Bridge / Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.04`) which has all the dependencies installed.
 
+For Puzzletron v2, follow its dedicated [installation and campaign setup guide](../puzzletron/README.md#installation).
+
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
 ## Getting Started
 
-As part of the pruning process, you will need to set up the training and/or validation data loaders, and optionally define a validation score function (Minitron, FastNAS) and specify the desired pruning constraints (See [Support Matrix](#support-matrix) for available pruning constraints).
+As part of the Minitron or FastNAS pruning process, you will need to set up the training and/or validation data loaders, optionally define a validation score function, and specify the desired pruning constraints (See [Support Matrix](#support-matrix) for available pruning constraints).
 
-To prune your model, you can simply call the `mtp.prune` API and save the pruned model. If the model is pruned using Minitron, you can use your standard saving and loading functions since it is a homogeneous pruning; while for FastNAS, you need to use `mto.save` and `mto.restore` to save and restore the heterogeneous pruned model.
+For these two modes, call the `mtp.prune` API and save the pruned model. If the model is pruned using Minitron, you can use your standard saving and loading functions since it is a homogeneous pruning; while for FastNAS, you need to use `mto.save` and `mto.restore` to save and restore the heterogeneous pruned model.
+
+Puzzletron v2 uses its dedicated campaign configuration and runner instead of
+the unified `mtp.prune` flow. Start with the [Puzzletron v2 setup wizard](../puzzletron/README.md#setup-wizard).
 
 ### Minitron
 
@@ -193,15 +198,18 @@ Some of the official models pruned using Minitron method followed by distillatio
 
 See [minitron/](minitron/README.md) for end-to-end tutorials and results.
 
-### Puzzletron Pruning for LLMs (e.g. Llama, Qwen, Nemotron)
+### Puzzletron v2 Heterogeneous Pruning Campaigns
 
-Checkout the [Puzzletron README](../puzzletron/README.md) which showcases MIP-based NAS pruning that produces heterogeneous model architectures — varying FFN intermediate sizes per layer and selectively removing attention layers — to meet a target parameter count or memory budget.
+The [Puzzletron v2 guide](../puzzletron/README.md) covers the complete campaign:
+model-aware setup, importance collection, heterogeneous search, candidate
+evaluation, optional global distillation, and reporting.
 
-Supported models include Llama-3.1-8B-Instruct, Qwen3-8B, Qwen2.5-7B-Instruct, Nemotron-Nano-12B-v2, Mistral-Small-24B-Instruct-2501, and others via the [configs](../puzzletron/configs/) directory. See the [Puzzletron README](../puzzletron/README.md) for more details.
-
-After compression, use [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) to recover accuracy.
-
-See [puzzletron/](puzzletron/README.md) for distillation results on Puzzletron-compressed models.
+The checked-in v2 migration or reconstruction entry points are
+[Nemotron-3 Nano 30B-A3B](../puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml)
+and [Qwen3.5-9B](../puzzletron/configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml).
+See the [campaign report catalog](../puzzletron/docs/campaign_reports.md) for the
+retained reports, current-configuration relationships, unresolved warnings, and
+reproduction status.
 
 ### FastNAS Pruning for PyTorch Computer Vision Models
 
@@ -292,11 +300,11 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 ## Tutorials / Results
 
-End-to-end distillation results with Megatron-Bridge after Minitron and Puzzletron pruning:
+Current pruning guides and campaign reports:
 
-- **[Minitron — Nemotron-3-Nano-30B-A3B-BF16](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md)** ⭐ *recommended — newer and most comprehensive*: End-to-end tutorial of structured pruning for Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B) to 22B/A3.0B active parameters followed by two-phase knowledge distillation (80B tokens @ 8K seq length + 20B tokens @ 32K seq length = 100B tokens total), quantization, and vLLM deployment. Covers MoE + Mamba-Transformer hybrid, tool-calling data, and a long-context fine-tuning phase. Achieves near-parity with the official 30B model across popular pretraining and reasoning benchmarks while delivering up to 2.6× throughput speedup and 2.6× memory reduction when combined with FP8 quantization.
-- **[Minitron — Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: Earlier end-to-end tutorial covering structured pruning of the dense Mamba-Transformer Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Simpler architecture, single-phase 8K seq length distillation, no tool-calling or long-context phase.
-- **[Puzzletron — Qwen3-8B and Llama-3.1-8B-Instruct](puzzletron/Llama-3.1-8B-Instruct.md)**: MIP-based compression followed by short distillation runs on WikiText-103. Shows MMLU recovery and illustrates the importance of using larger datasets to avoid overfitting.
+- **[Minitron, Nemotron-3-Nano-30B-A3B-BF16](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md)** ⭐ *recommended, newer and most comprehensive*: End-to-end tutorial of structured pruning for Nemotron-3-Nano-30B-A3B-BF16 (31.6B/A3.6B) to 22B/A3.0B active parameters followed by two-phase knowledge distillation (80B tokens @ 8K seq length + 20B tokens @ 32K seq length = 100B tokens total), quantization, and vLLM deployment. Covers MoE + Mamba-Transformer hybrid, tool-calling data, and a long-context fine-tuning phase. Achieves near-parity with the official 30B model across popular pretraining and reasoning benchmarks while delivering up to 2.6× throughput speedup and 2.6× memory reduction when combined with FP8 quantization.
+- **[Minitron, Nemotron-Nano-9B-v2](minitron/NVIDIA-Nemotron-Nano-9B-v2/README.md)**: Earlier end-to-end tutorial covering structured pruning of the dense Mamba-Transformer Nemotron-Nano-9B-v2 to 7B followed by knowledge distillation up to 80B tokens, quantization, and vLLM deployment. Simpler architecture, single-phase 8K seq length distillation, no tool-calling or long-context phase.
+- **[Puzzletron v2 campaign reports](../puzzletron/README.md)**: Retained reports related to current migration or reconstruction configs. They are marked as not reproduced and do not establish current model support. See the [campaign report catalog](../puzzletron/docs/campaign_reports.md) for report metadata, unresolved findings, and requirements for future support evidence.
 
 ## Resources
 
