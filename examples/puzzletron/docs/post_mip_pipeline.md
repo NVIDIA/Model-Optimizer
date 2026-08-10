@@ -114,6 +114,13 @@ metric lists or cases. Later filters reference metrics as `mip.<metric>` or
 Nodes that require checkpoints never materialize implicitly. Add a `materialize`
 node where the transition is needed.
 
+## Add downstream evaluation to an existing campaign
+
+Keep the campaign's `puzzle_dir` and add a `post_mip.flows` entry whose source
+selects the completed MIP run. See the
+[lmms-eval run configuration](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/lmms_eval.yaml)
+for a complete filter, materialization, and downstream-evaluation flow.
+
 ## Lineage and model source
 
 Architectures are deduplicated across MIP and homogeneous results, while all MIP
