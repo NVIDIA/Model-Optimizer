@@ -50,8 +50,11 @@ services:
           # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
           config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}
         # SWE-bench (OpenHands, multi-turn) adds turn_counter + consolidate_system + a system_message — see swebench_verified.md
-        - name: http_pairs_dump                    # FEP-1104/1120 diagnostics; canonical LAST in the chain
-          config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}   # $$ defers expansion to run time
+        # FEP-1104/1120 diagnostics — uncomment for a CANARY/debug run, drop it for the scored run:
+        # first_n caps only 200s, so every error pair (full req+res bodies) is retained in memory for
+        # the whole run and re-serialized on each write — unbounded growth exactly when the server errors.
+        # - name: http_pairs_dump                    # canonical LAST in the chain (SWE-bench: first)
+        #   config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}   # $$ defers expansion to run time
     node_pool: gpu
 
 benchmarks:

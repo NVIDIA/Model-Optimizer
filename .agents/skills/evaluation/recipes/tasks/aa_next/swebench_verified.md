@@ -76,7 +76,9 @@ interceptor (a large OpenHands system prompt — copy it verbatim from `bench.ya
 plus `turn_counter`.
 
 **Order differs from TB2.1**: `http_pairs_dump` is **first** (not last) and `drop_params`
-comes **before** `consolidate_system`.
+comes **before** `consolidate_system`. `http_pairs_dump` is canary/diagnostic-only — it
+retains every error pair in memory for the whole run (`references/nel-next.md`); drop it
+from the scored config.
 
 ```yaml
 proxy:
@@ -84,7 +86,7 @@ proxy:
   extra_body: {skip_special_tokens: false}   # add model-card sampling extras if the card sets them
   model_traffic: {capture_request_body: true}   # FEA-224; pair with the exclude_patterns entry
   interceptors:
-    - {name: http_pairs_dump, config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}}
+    # - {name: http_pairs_dump, config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}}   # canary only
     - {name: system_message, config: {strategy: replace, system_message: "<the OpenHands prompt from bench.yaml>"}}
     - {name: turn_counter, config: {max_turns: 200, position: system_message}}
     - {name: drop_params, config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}}

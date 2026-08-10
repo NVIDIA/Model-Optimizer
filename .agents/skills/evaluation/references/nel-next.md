@@ -28,9 +28,13 @@ Installing 0.3.x into the 0.2.6 env clobbers `nel`, so it lives in its own venv:
 ```
 
 Default install is a git build from `github.com/NVIDIA-NeMo/Evaluator` via `NEL_NEXT_ORIGIN`
-(default branch → **0.4.0**). PyPI `nemo-evaluator` stops at **0.3.0**, so a version pin
-can't reach 0.4.x. No `v0.4.0` tag exists — pin `NEL_NEXT_REF` to a commit SHA for
-reproducibility. Set `NEL_NEXT_ORIGIN` in `.env` to build from a mirror.
+(`main` → **0.4.0**). PyPI `nemo-evaluator` stops at **0.3.0**, so a version pin can't reach
+0.4.x. No `v0.4.0` tag exists, so `NEL_NEXT_REF` **defaults to a pinned commit SHA** in
+`nel-next.sh` — a floating branch HEAD installs a different harness for the baseline and the
+candidate, so the pass@1 delta no longer isolates the model. `NEL_NEXT_REF=main` tracks HEAD
+for dev/canary work only; to move the pin, canary against the new SHA and bump the default in
+`nel-next.sh`. Record `nel-next.sh --version` (prints version + resolved spec) with scored
+results. Set `NEL_NEXT_ORIGIN` in `.env` to build from a mirror.
 
 ## Credentials + internal infra (`.env`)
 
@@ -144,9 +148,14 @@ with its own `run_id`, copying the shared `services:` block.
   vLLM 400s on them if they aren't stripped.
 - **`exclude_patterns`** = `["shard*", "model_traffic.jsonl"]` — captured request bodies
   stay in the run dir, never MLflow.
-- **`http_pairs_dump`** — `config: {dump_path: $${NEL_OUTPUT_DIR}/http_pairs_metrics.json,
-  first_n: 50}`. The `$$` defers expansion to run time. Chain position is per benchmark
-  (last for TB2.1, first for SWE-bench). Diagnostics only.
+- **`http_pairs_dump` — canary/diagnostic runs only, leave it OUT of scored runs.**
+  `config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}` (the `$$`
+  defers expansion to run time). `first_n` caps only the *successful* pairs: the keep rule is
+  `(total_seen <= first_n) or (status != 200)`, so **every** non-200 pair is held in memory
+  for the life of the run, full request + response bodies, and the whole list is re-serialized
+  on each write. A long agentic run that is 400ing or rate-limiting (the failure this dumps
+  diagnose) grows the proxy without bound — exactly the run you can least afford to lose.
+  Chain position is per benchmark (last for TB2.1, first for SWE-bench).
 - **Mount sources must pre-exist** — pyxis won't create the host side of a bind
   mount (invisible to `--dry-run`, fails at canary). `ssh <login> 'mkdir -p
   <lustre>/<user>/.cache/{vllm,huggingface}'`.

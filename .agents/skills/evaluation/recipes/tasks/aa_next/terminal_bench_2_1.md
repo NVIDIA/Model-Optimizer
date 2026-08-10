@@ -28,7 +28,7 @@ pinned via a vendored registry override in nemo-evaluator-next.
 | `proxy.request_timeout` | `3600` — must be **≥** `agent_kwargs.llm_kwargs.timeout` |
 | `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` |
 | `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` |
-| `http_pairs_dump` | **last** in the interceptor chain |
+| `http_pairs_dump` | **last** in the interceptor chain — canary/diagnostic only, drop it for a scored run (unbounded error-pair retention) |
 | scope | 89 tasks × `repeats: 8` |
 
 These values mirror the canonical TB2.1 config — re-check it before a scored run:
