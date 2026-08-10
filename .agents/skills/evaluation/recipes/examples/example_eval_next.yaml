@@ -49,7 +49,8 @@ services:
         - name: drop_params                        # agents send max_tokens; many servers reject it
           # last two are sent by the 0.5.x harbor eval image; vLLM 400s on them unless stripped
           config: {params: [max_tokens, max_completion_tokens, max_input_tokens_per_task, no_rebuild]}
-        # SWE-bench (OpenHands, multi-turn) adds turn_counter + consolidate_system + a system_message — see swebench_verified.md
+        # SWE-bench (OpenHands, multi-turn) adds turn_counter + system_message AND USES A DIFFERENT
+        # ORDER (drop_params before consolidate_system) — don't lift this chain — see swebench_verified.md
         # FEP-1104/1120 diagnostics — uncomment for a CANARY/debug run, drop it for the scored run:
         # first_n caps only 200s, so every error pair (full req+res bodies) is retained in memory for
         # the whole run and re-serialized on each write — unbounded growth exactly when the server errors.
