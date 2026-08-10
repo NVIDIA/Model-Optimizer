@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron AnyModel checkpoint conversion."""
+
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
