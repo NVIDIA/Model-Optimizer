@@ -39,6 +39,8 @@ from modelopt.torch.utils.mlflow import (
     validate_tracking_uri,
 )
 
+__all__ = ["add_mlflow_args", "mlflow_run", "resolve_mlflow_args"]
+
 # Result files each metric writes into --save_dir, keyed by the artifact
 # path they take on in MLflow. Missing entries are skipped by the logger,
 # so listing every metric's output here is safe regardless of which ran.
@@ -63,9 +65,9 @@ def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
             "uploading the configuration, the acceptance/timing results and the run log. "
-            "MLflow's own $MLFLOW_TRACKING_URI enables tracking without this flag, which "
-            "overrides it. A URI taken from the environment is best-effort: if it is "
-            "unusable the run warns and continues untracked."
+            "MLflow's own $MLFLOW_TRACKING_URI enables tracking without this flag; this "
+            "flag takes precedence when both are set. A URI taken from the environment "
+            "is best-effort: if it is unusable the run warns and continues untracked."
         ),
     )
     parser.add_argument(
@@ -95,10 +97,16 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
         return
     try:
         args.mlflow = validate_tracking_uri(args.mlflow)
-    except ValueError as e:
+    except ValueError:
+        # Deliberately not echoing the URI or the exception text, which quotes
+        # it: a rejected URI may carry credentials in its userinfo or query,
+        # and this lands in terminals and CI logs. The caller supplied the
+        # value, so naming the source is enough to act on.
+        source = "--mlflow" if args.mlflow_required else "$MLFLOW_TRACKING_URI"
+        message = f"{source} is not a valid http(s) MLflow tracking URI"
         if args.mlflow_required:
-            parser.error(f"--mlflow: {e}")
-        warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
+            parser.error(message)
+        warnings.warn(f"{message}; continuing untracked")
         args.mlflow = None
         return
     args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
@@ -143,29 +151,42 @@ def _headline_metrics(save_dir: str | None) -> dict[str, float]:
         return {}
     out: dict[str, float] = {}
 
-    def _first(path: Path):
+    def _first(path: Path) -> dict:
+        """The run's result object, or an empty one for anything unexpected.
+
+        A metric file is written by a separate process that may have died
+        mid-write, so its contents are not a given. Anything that is not a
+        mapping (or a list of them) yields {} rather than propagating: this
+        runs inside the caller's `finally`, where an exception would stop
+        the MLflow run from being closed at all.
+        """
         try:
             with path.open() as f:
                 payload = json.load(f)
         except (OSError, json.JSONDecodeError):
-            return None
+            return {}
         if isinstance(payload, list):
-            return payload[0] if payload else None
-        return payload
+            payload = payload[0] if payload else None
+        return payload if isinstance(payload, dict) else {}
 
     directory = Path(save_dir)
-    acceptance = _first(directory / "acceptance_rate.json") or {}
-    for key in ("Average_AL", "Average_AR"):
+    acceptance = _first(directory / "acceptance_rate.json")
+    # Pre-v1.0.0 specdec_bench names these _AR. The suffix records how the
+    # figure was computed, so it is kept in the metric name rather than
+    # folded into avg_al, which would silently mix the two definitions.
+    for key, metric in (("Average_AL", "avg_al"), ("Average_AR", "avg_ar")):
         if isinstance(acceptance.get(key), (int, float)):
-            out["avg_al"] = float(acceptance[key])
+            out[metric] = float(acceptance[key])
             break
-    categories = acceptance.get("Category_AL") or acceptance.get("Category_AR") or {}
-    if isinstance(categories, dict):
-        for name, value in categories.items():
-            if isinstance(value, (int, float)):
-                out[f"category_al/{name}"] = float(value)
+    for key, prefix in (("Category_AL", "category_al"), ("Category_AR", "category_ar")):
+        categories = acceptance.get(key)
+        if isinstance(categories, dict):
+            for name, value in categories.items():
+                if isinstance(value, (int, float)):
+                    out[f"{prefix}/{name}"] = float(value)
+            break
 
-    timing = _first(directory / "timing.json") or {}
+    timing = _first(directory / "timing.json")
     for source, name in (("Output TPS", "output_tps"), ("Output TPS/gpu", "output_tps_per_gpu")):
         if isinstance(timing.get(source), (int, float)):
             out[name] = float(timing[source])
@@ -199,7 +220,10 @@ def mlflow_run(args: argparse.Namespace):
         else {}
     )
 
-    logger.start(params=params, tags=_run_tags(args))
+    # files is named here as well as at finish(): start() stats each path so
+    # finish() can tell an output this run wrote from one left in --save_dir
+    # by a previous attempt, which is otherwise uploaded as if it were ours.
+    logger.start(params=params, tags=_run_tags(args), files=files)
     status = "FAILED"
     try:
         yield logger
