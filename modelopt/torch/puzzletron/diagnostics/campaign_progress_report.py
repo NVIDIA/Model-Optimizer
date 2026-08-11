@@ -27,11 +27,13 @@ from statistics import median
 from typing import Any, Callable, Iterable, Mapping
 
 from ..stages.graph import (
+    LEGACY_POST_MIP_STAGE_IDS,
     STAGE_SPECS,
     StageSpec,
     configured_parent_stage_ids,
     configured_stage_ids,
     stage_display_name,
+    stage_is_enabled,
 )
 from .report_section_cache import (
     ReportSectionCache,
@@ -176,14 +178,10 @@ def _stage_artifact_present(root: Path, spec: StageSpec) -> bool:
 def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
     """Return the report state from the manifest, artifacts, and configuration."""
 
-    post_mip_stages = {
-        "zero_shot_evaluation",
-        "aiperf",
-        "global_distillation_sanity",
-        "global_distillation",
-        "post_distillation_evaluation",
-    }
-    if (config.get("post_mip") or {}).get("flows") and spec.stage_id in post_mip_stages:
+    if (
+        (config.get("post_mip") or {}).get("flows")
+        and spec.stage_id in LEGACY_POST_MIP_STAGE_IDS
+    ):
         return "disabled"
     if is_correctness_sanity_stage(spec.stage_id):
         manifest = _manifest(root, spec.stage_id)
@@ -196,12 +194,7 @@ def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
             return "failed"
     if _stage_artifact_present(root, spec):
         return "completed"
-    section = config.get(spec.stage_id)
-    if (
-        not spec.required
-        and isinstance(section, dict)
-        and section.get("enabled") is False
-    ):
+    if not stage_is_enabled(spec.stage_id, config):
         return "disabled"
     return "pending"
 

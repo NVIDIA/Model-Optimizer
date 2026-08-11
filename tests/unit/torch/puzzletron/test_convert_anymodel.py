@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron AnyModel checkpoint conversion."""
+
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -253,7 +255,7 @@ def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, mo
         resolve_calls.append({"source": source, "revision": revision})
         return source_dir
 
-    def complete_stage(config, manifest, *, outputs, status, message=None):
+    def complete_stage(config, manifest, *, outputs, status="success", message=None):
         completions.append({"outputs": outputs, "status": status, "message": message})
         return completions[-1]
 
@@ -288,7 +290,7 @@ def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, mo
     assert resolve_calls == [{"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"}]
     assert first["status"] == "success"
     assert first["outputs"]["skipped"] is False
-    assert second["status"] == "skipped"
+    assert second["status"] == "success"
     assert second["outputs"]["skipped"] is True
 
 
@@ -327,7 +329,7 @@ def test_convert_stage_reuses_legacy_unpinned_teacher(tmp_path, monkeypatch):
     monkeypatch.setattr(
         convert_stage_module,
         "complete_stage",
-        lambda config, manifest, *, outputs, status, message=None: {
+        lambda config, manifest, *, outputs, status="success", message=None: {
             "outputs": outputs,
             "status": status,
         },
@@ -341,7 +343,7 @@ def test_convert_stage_reuses_legacy_unpinned_teacher(tmp_path, monkeypatch):
         manifest=object(),
     )
 
-    assert result["status"] == "skipped"
+    assert result["status"] == "success"
     assert result["outputs"]["skipped"] is True
 
 
@@ -417,7 +419,7 @@ def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, mon
     monkeypatch.setattr(
         convert_stage_module,
         "complete_stage",
-        lambda config, manifest, *, outputs, status, message=None: {
+        lambda config, manifest, *, outputs, status="success", message=None: {
             "outputs": outputs,
             "status": status,
         },

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for semantic Puzzletron resume markers and dependency invalidation."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -38,6 +40,7 @@ from modelopt.torch.puzzletron.manifest import (
     semantic_stage_config,
     write_stage_manifest,
 )
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_output_patterns
 from modelopt.torch.puzzletron.stages.graph import STAGE_REGISTRY
 
 _PRE_V3_COMPLETION_MARKER = """{
@@ -105,8 +108,15 @@ def _write_completion(root: Path, stage: str, identity: str) -> Path:
     return write_marker(root, stage, payload)
 
 
-def _write_stage_output(root: Path, stage: str, stage_config: dict) -> None:
-    manifest = StageManifest(stage=stage, config={stage: stage_config})
+def _write_stage_output(
+    root: Path,
+    stage: str,
+    stage_config: dict,
+    *,
+    full_config: dict | None = None,
+) -> None:
+    manifest_config = full_config if full_config is not None else {stage: stage_config}
+    manifest = StageManifest(stage=stage, config=manifest_config)
     manifest.complete(outputs={"summary": "ok"})
     write_stage_manifest(root / "manifests" / f"{stage}.json", manifest)
 
@@ -132,7 +142,10 @@ def test_vllm_completion_stales_when_runtime_aggregate_is_deleted(tmp_path: Path
     config_path = tmp_path / "config.yaml"
     config_path.write_text("static: true\n")
     _write_completion(tmp_path, "convert", "convert-v1")
-    _write_stage_output(tmp_path, "vllm_stats", config["vllm_stats"])
+    _write_stage_output(tmp_path, "vllm_stats", config["vllm_stats"], full_config=config)
+    summary = tmp_path / "artifacts" / "vllm_stats" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("{}\n")
     stats_path = tmp_path / "subblock_stats.json"
     stats_path.write_text("[{}]\n")
     kwargs = _resume_kwargs(config, config_path, "vllm_stats")
@@ -154,7 +167,10 @@ def test_vllm_completion_uses_configured_runtime_aggregate_filename(tmp_path: Pa
     config_path = tmp_path / "config.yaml"
     config_path.write_text("static: true\n")
     _write_completion(tmp_path, "convert", "convert-v1")
-    _write_stage_output(tmp_path, "vllm_stats", config["vllm_stats"])
+    _write_stage_output(tmp_path, "vllm_stats", config["vllm_stats"], full_config=config)
+    summary = tmp_path / "artifacts" / "vllm_stats" / "summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("{}\n")
     stats_path = tmp_path / "runtime/custom_stats.json"
     stats_path.parent.mkdir(parents=True)
     stats_path.write_text("[{}]\n")
@@ -614,22 +630,24 @@ def test_static_pre_v3_marker_reports_implementation_source_staleness(tmp_path: 
     assert result.validation_mode == "legacy-v2"
     assert "changed implementation/source identity" in result.stale_reasons
 
+
 def test_embedding_followup_does_not_replay_completed_root_vllm_stats() -> None:
     assert _embedding_followup_stage("build_library")
     assert not _embedding_followup_stage("vllm_stats")
 
 
-def test_embedding_build_library_completion_tracks_width_scenarios() -> None:
-    from examples.puzzletron.main import _stage_output_patterns
-
-    patterns = _stage_output_patterns(
-        {
-            "embedding_pruning": {"enabled": True, "widths": [1024, 768]},
-            "vllm_stats": {"subblock_stats_filename": "runtime.json"},
-        },
-        "build_library",
+def test_resume_patterns_are_the_canonical_completion_patterns(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        embedding_pruning={"enabled": True, "widths": [1024, 768]},
+        vllm_stats={"subblock_stats_filename": "runtime.json"},
     )
+    patterns = stage_output_patterns(config, "build_library")
+    resume_patterns = _resume_kwargs(config, tmp_path / "config.yaml", "build_library")[
+        "required_patterns"
+    ]
 
     assert "scenarios/width_scenarios.json" in patterns
     assert "scenarios/width-1024/depth-00/manifests/build_library.json" in patterns
     assert "scenarios/width-0768/depth-00/runtime.json" in patterns
+    assert resume_patterns == ("manifests/build_library.json", *patterns)
