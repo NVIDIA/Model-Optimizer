@@ -16,7 +16,11 @@
 """Megatron-Bridge integration tests for Puzzletron heterogeneous configs."""
 
 import json
+from types import SimpleNamespace
+from typing import cast
 
+from megatron.bridge.models.gpt_provider import GPTModelProvider
+from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
 from megatron.bridge.models.transformer_config import HeterogeneousTransformerConfig
 
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
@@ -36,6 +40,25 @@ class _HfConfig:
                 "block_configs": [block.to_dict() for block in self.block_configs],
             }
         )
+
+
+class _ParentBridge:
+    def __init__(self) -> None:
+        self.parent_provider = cast("GPTModelProvider", object())
+
+    def provider_bridge(self, _hf_pretrained: PreTrainedCausalLM) -> GPTModelProvider:
+        return self.parent_provider
+
+
+class _TestBridge(HeterogeneousBridgeMixin, _ParentBridge):
+    pass
+
+
+def test_empty_block_configs_use_parent_provider() -> None:
+    bridge = _TestBridge()
+    hf_pretrained = cast("PreTrainedCausalLM", SimpleNamespace(config=_HfConfig([])))
+
+    assert bridge.provider_bridge(hf_pretrained) is bridge.parent_provider
 
 
 def test_puzzletron_block_config_round_trips_through_mbridge() -> None:

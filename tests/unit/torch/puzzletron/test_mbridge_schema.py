@@ -92,6 +92,7 @@ def test_build_mcore_config_rejects_unrepresentable_blocks(block: BlockConfig, m
         ("v_head_dim", 4),
         ("sliding_window_size", 16),
         ("k_eq_v", True),
+        ("k_eq_v", False),
         ("kv_source_layer", 0),
         ("llama4", {"attention_chunk_size": 16}),
     ],
