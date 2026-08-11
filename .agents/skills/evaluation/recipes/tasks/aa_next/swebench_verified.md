@@ -5,7 +5,8 @@ run flow). Same harbor/ECS-Fargate flow as Terminal-Bench; the deltas are the
 **OpenHands agent**, a larger problem set, longer timeouts, and a different
 ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 
-> **Source of truth:** `configs/benchmarks/nel_next/swebench_verified/bench.yaml`
+> **Source of truth:** `configs/benchmarks/swe-bench-verified/bench.yaml` and
+> `configs/shared/nel_next_containers.yaml`
 > in nvidia-eval-factory-benchmarking — match its values for a reference run.
 
 ## Task-specific values (canonical `bench.yaml`)
@@ -19,7 +20,7 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 | `solver` | `timeout_strategy: max`, `run_timeout: 10800` (3h), `agent_kwargs.llm_kwargs.timeout: 3600` |
 | `sandbox.region` | `us-east-2` |
 | `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (dedicated `harbor-swebench` repo, **us-west-2**, regardless of sandbox region) |
-| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` (needs **≥ `0.3.1.1-harbor`** — FEP-1085 reasoning fix) |
+| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` (current internal source of truth: **`0.5.0.1-harbor`**) |
 | `cluster.container_env.AWS_DEFAULT_REGION` | `us-east-2` (match `sandbox.region`) |
 | `instruction_template` | **must be MOUNTED** — the harbor image doesn't bundle the built-in (gotcha below) |
 
@@ -40,6 +41,17 @@ benchmarks:
       concurrency: 15
       log_stream_prefix: swebench-verified-<model>-<cluster>
 ```
+
+### Canary gate — verify the OpenHands request timeout
+
+`0.3.1.1-harbor` accepts the `llm_kwargs.timeout` field above but does not pass
+it to the OpenHands `LLM` client, which silently retains its 300-second default.
+Use an eval image containing
+[NVIDIA-NeMo/Evaluator#1083](https://github.com/NVIDIA-NeMo/Evaluator/pull/1083)
+(`0.5.0.1-harbor` in the current internal source of truth). After the first
+canary task starts, inspect the OpenHands startup/agent log and require an
+active timeout of `3600`; treat `timeout: 300` as an infrastructure failure and
+do not launch the scored run.
 
 ### Gotcha — mount the instruction template
 

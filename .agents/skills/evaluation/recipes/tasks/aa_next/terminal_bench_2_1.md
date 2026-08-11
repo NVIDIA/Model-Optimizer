@@ -24,10 +24,11 @@ pinned via a vendored registry override in nemo-evaluator-next.
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
 | `max_concurrent` / `sandbox.concurrency` | `50` (canonical bench.yaml) |
 | timeout_strategy | `max` (canonical bench.yaml) + `agent_kwargs.llm_kwargs.timeout: 3600`; use `task` for leaderboard-comparable |
-| `cluster.eval_image` requirement | **≥ `0.3.1.1-harbor`** — TB 2.1's task set is pinned via a vendored registry override in that image (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) |
+| `cluster.eval_image` requirement | current internal source of truth: **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) |
 
 These values mirror the canonical TB2.1 config — re-check it before a scored run:
-`configs/benchmarks/nel_next/terminal_bench_21/bench.yaml` in
+`configs/benchmarks/terminal-bench-2.1/bench.yaml` and
+`configs/shared/nel_next_containers.yaml` in
 nvidia-eval-factory-benchmarking (see `references/nel-next.md` + the eval-config
 "source of truth" note). The `benchmarks:` block (drop into the example template):
 
@@ -50,7 +51,8 @@ benchmarks:
       log_stream_prefix: terminalbench21-<model>-<cluster>
 ```
 
-`cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (≥ `0.3.1.1-harbor`) and the AWS creds
+`cluster.eval_image: ${NEL_NEXT_EVAL_IMAGE}` (`0.5.0.1-harbor` in the current
+internal source of truth) and the AWS creds
 come from `modelopttools:eval-config` (run it first) + the workspace `.env`.
 
 ## Score Extraction
