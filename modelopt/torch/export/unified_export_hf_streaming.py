@@ -203,8 +203,14 @@ def _export_transformers_checkpoint_streaming(
     over a finished dict, each tensor goes through :func:`_postprocess_single_tensor` as it
     is produced. Two consequences follow from having no whole-dict view:
 
-    - Tied weights are dropped by *name* via HF ``_tied_weights_keys``, not by comparing
-      ``data_ptr``, which is meaningless once weights move between host and device.
+    - Tied weights are dropped by *name*, not by comparing ``data_ptr`` (meaningless once
+      weights move between host and device). NOTE: this path keeps its own narrow rule --
+      the exact list-style ``_tied_weights_keys`` names, gated on ``tie_word_embeddings`` --
+      and does NOT use :class:`TiedGroupResolver`. It therefore only handles the
+      ``tie_word_embeddings`` embedding tie; dict-style / per-expert MoE ties (e.g.
+      DiffusionGemma) are NOT deduped here, so the offloaded export can emit both sides of
+      such a tie where the resident path emits one. Threading the resolver in is tracked as
+      a follow-up; until then such models should use the resident (non-offloaded) path.
     - Conversion mappings that need tensor-level splits cannot be reversed one tensor at a
       time, so they are rejected up front rather than exported incorrectly.
 

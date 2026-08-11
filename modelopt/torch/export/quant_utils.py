@@ -18,7 +18,7 @@
 import logging
 from collections.abc import Generator
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from warnings import warn
 
 import torch
@@ -70,9 +70,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-
-if TYPE_CHECKING:
-    from .model_utils import TiedGroupResolver
+from .model_utils import TiedGroupResolver
 
 logger = logging.getLogger(__name__)
 
@@ -1198,17 +1196,24 @@ def postprocess_state_dict(
     #
     # Why it is still needed — safetensors ``save_file`` raises on any two keys that share
     # storage, so a residual share (a tie the model did not declare) must be collapsed here
-    # or the export fails at write time. Device and size distinguish independent tensors
-    # whose addresses merely coincide (e.g. a view and its base); zero-pointer (meta)
-    # tensors are left for serialization to reject. Keys already marked (declared aliases)
-    # are skipped so they do not seed the first-wins map.
+    # or the export fails at write time. The key mirrors safetensors' own shared-storage
+    # grouping exactly — (device, storage_ptr, storage_size) — so a base tensor and a
+    # shorter view of it (which save_file treats as shared and rejects) collapse here
+    # instead of both surviving and crashing the write. Keying on tensor extent
+    # (numel*element_size) would split that view/base pair; and since two distinct live
+    # tensors cannot share a data_ptr without sharing storage, storage identity never
+    # false-collapses independent weights. Zero-pointer (meta) tensors are left for
+    # serialization to reject. Keys already marked (declared aliases) are skipped so they
+    # do not seed the first-wins map.
+    from safetensors.torch import storage_ptr, storage_size
+
     already_marked = set(keys_to_delete)
     seen_tensors = {}
     for key, value in post_state_dict.items():
         if key in already_marked:
             continue
         if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
-            tensor_id = (value.device, value.data_ptr(), value.numel() * value.element_size())
+            tensor_id = (value.device, storage_ptr(value), storage_size(value))
             if tensor_id in seen_tensors:
                 keys_to_delete.append(key)
                 logger.warning(
@@ -1704,8 +1709,6 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" 
     collide the way a freed-then-reused ``data_ptr`` can.
     """
     from collections import defaultdict
-
-    from .model_utils import TiedGroupResolver
 
     if resolver is None:
         resolver = TiedGroupResolver(model)

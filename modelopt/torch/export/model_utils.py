@@ -150,87 +150,6 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     return None
 
 
-def _collect_canonical_tied_patterns(
-    model: nn.Module,
-) -> tuple[list[re.Pattern], list[str]]:
-    """Walk the model and collect canonical-side tied-weight matchers.
-
-    Patterns are submodule-prefixed regexes from each module's
-    ``_tied_weights_keys`` dict-style declaration (the prefix matters
-    for nested models where the dict lives on an inner submodule).
-    Side substrings are dot-separated tokens that appear only on the
-    canonical side of those declarations — needed because modelopt's
-    per-expert unpacking creates post-export keys (e.g.
-    ``…experts.Y.gate_proj.input_scale``) that HF's regexes never knew
-    about. List-style (legacy) declarations are skipped.
-    """
-    patterns: list[re.Pattern] = []
-    alias_token_set: set[str] = set()
-    canonical_token_set: set[str] = set()
-
-    def _tokens(s: str) -> set[str]:
-        """Identifiers in a regex string, with regex specials as separators."""
-        return {tok for tok in re.split(r"[^A-Za-z0-9_]+", s) if tok}
-
-    for name, submodule in model.named_modules():
-        tied = getattr(submodule, "_tied_weights_keys", None)
-        if not isinstance(tied, dict) or not tied:
-            continue
-        prefix = f"{name}." if name else ""
-        for alias_pat, canonical_pat in tied.items():
-            patterns.append(re.compile(prefix + canonical_pat))
-            alias_token_set.update(_tokens(prefix + alias_pat))
-            canonical_token_set.update(_tokens(prefix + canonical_pat))
-
-    # Tokens unique to the canonical side become substring matchers.
-    side_substrings = sorted(canonical_token_set - alias_token_set)
-    return patterns, side_substrings
-
-
-def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
-    r"""Reorder ``state_dict`` so canonical-side tied keys iterate first.
-
-    Lets the downstream first-wins data_ptr dedup keep canonical names.
-    Uses both regex patterns and substring matchers from
-    :func:`_collect_canonical_tied_patterns`. Gated on the model class
-    name to scope the reorder to DiffusionGemma; other tied
-    encoder-decoder models that ship dict-style ``_tied_weights_keys``
-    can be added to the allowlist here. Mirrors the ``model_type``
-    dispatch used for the Whisper and Nemotron-VL branches elsewhere
-    in ``unified_export_hf.py``.
-    """
-    model_type = type(model).__name__.lower()
-    if "diffusiongemma" not in model_type and "diffusion_gemma" not in model_type:
-        return state_dict
-
-    canonical_patterns, side_substrings = _collect_canonical_tied_patterns(model)
-    if not canonical_patterns and not side_substrings:
-        return state_dict
-
-    def _has_side_substring(key: str) -> bool:
-        # Require the token to appear as a proper dot-separated path
-        # component, not just as a substring of an unrelated identifier.
-        for tok in side_substrings:
-            if (
-                f".{tok}." in key
-                or key.startswith(f"{tok}.")
-                or key.endswith(f".{tok}")
-                or key == tok
-            ):
-                return True
-        return False
-
-    head: dict = {}
-    tail: dict = {}
-    for k, v in state_dict.items():
-        if any(p.search(k) for p in canonical_patterns) or _has_side_substring(k):
-            head[k] = v
-        else:
-            tail[k] = v
-    head.update(tail)
-    return head
-
-
 def _canonical_via_pattern_pair(alias_pat: str, canonical_pat: str, name: str) -> str | None:
     r"""Rewrite ``name`` into its canonical form for a *parallel-pattern* tie declaration.
 
@@ -303,9 +222,9 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
       applied when both embedding modules resolve to distinct parameter names.
 
     List-style ``_tied_weights_keys`` carries no canonical/alias distinction and is
-    skipped (mirrors :func:`_collect_canonical_tied_patterns`). Undeclared shared
-    Parameters are intentionally *not* resolved: deduping a tie that cannot be
-    declared in the exported config would drop a key the loader cannot re-tie.
+    skipped. Undeclared shared Parameters are intentionally *not* resolved: deduping a
+    tie that cannot be declared in the exported config would drop a key the loader
+    cannot re-tie.
     """
     alias_to_canonical: dict[str, str] = {}
     # remove_duplicate=False is essential: a genuinely shared (tied) Parameter would
@@ -421,6 +340,14 @@ class TiedGroupResolver:
         if gk is None:
             return None
         suffix = f".{first_proj_attr}"
+        if not gk.endswith(suffix):
+            # A misresolved canonical (a differently-named canonical projection, or a
+            # mangled re.sub fallback) would make removesuffix a silent no-op, returning a
+            # full parameter name as the container key. That key won't match the one from
+            # the container's other projection, so sync_tied_input_amax would put the two
+            # tied containers in different groups and skip the merge -- under-covering the
+            # retained input_scale. Degrade to "untied" instead of grouping incorrectly.
+            return None
         return gk.removesuffix(suffix)
 
     def alias_prefix_pairs(self) -> dict[str, str]:
