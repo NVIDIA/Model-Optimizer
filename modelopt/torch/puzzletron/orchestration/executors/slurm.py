@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Slurm executor using stdlib subprocess only."""
 
@@ -367,7 +379,7 @@ class SlurmExecutor(Executor):
         queue = _run_command(["squeue", "-h", "-j", job_id, "-o", "%T"])
         if queue.returncode == 0 and queue.stdout.strip():
             state_name = queue.stdout.strip().splitlines()[0].strip().upper()
-            if state_name in {"PENDING", "CONFIGURING", "SUSPENDED"}:
+            if state_name in {"PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED"}:
                 return JobStatus(
                     handle=handle, state=JobState.PENDING, log_paths=self.fetch_logs(handle)
                 )
@@ -375,6 +387,9 @@ class SlurmExecutor(Executor):
                 return JobStatus(
                     handle=handle, state=JobState.RUNNING, log_paths=self.fetch_logs(handle)
                 )
+        # squeue can briefly miss a live job (controller blips). Fall back to
+        # sacct, but keep non-terminal accounting states non-terminal — otherwise
+        # RUNNING is misclassified as FAILED and the orchestrator aborts.
         sacct = _run_command(["sacct", "-j", job_id, "-n", "-X", "--format=State,ExitCode", "-P"])
         if sacct.returncode != 0 or not sacct.stdout.strip():
             return JobStatus(handle=handle, state=JobState.UNKNOWN, reason="sacct unavailable")
@@ -387,6 +402,14 @@ class SlurmExecutor(Executor):
                 exit_code = int(exit_part.split(":")[0])
             except ValueError:
                 exit_code = None
+        if state_name.startswith(("PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED")):
+            return JobStatus(
+                handle=handle, state=JobState.PENDING, log_paths=self.fetch_logs(handle)
+            )
+        if state_name.startswith(("RUNNING", "COMPLETING")):
+            return JobStatus(
+                handle=handle, state=JobState.RUNNING, log_paths=self.fetch_logs(handle)
+            )
         if state_name.startswith("COMPLETED") and (exit_code in (None, 0)):
             return JobStatus(
                 handle=handle,

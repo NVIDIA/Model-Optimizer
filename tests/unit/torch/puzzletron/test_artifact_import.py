@@ -253,9 +253,7 @@ def _relocated_semantic_setup(tmp_path: Path) -> tuple[Path, Path, Path, dict, P
             "enabled": True,
             "output_dir": str(source / "pruning/pruning_scores/automodel/full"),
             "micro_batch_size": 1,
-            "automodel": {
-                "parallel": {"tp": 1, "cp": 4, "pp": 2, "ep": 1}
-            },
+            "automodel": {"parallel": {"tp": 1, "cp": 4, "pp": 2, "ep": 1}},
             "runtime": {
                 "execution": "distributed",
                 "sharding": {"world_size": 8},
@@ -331,7 +329,9 @@ def test_successful_dry_run_validates_and_writes_nothing(tmp_path):
         "subblock_stats.json",
     ]
     assert not destination.exists()
-    assert {path: path.read_bytes() for path in source.rglob("*") if path.is_file()} == source_before
+    assert {
+        path: path.read_bytes() for path in source.rglob("*") if path.is_file()
+    } == source_before
 
 
 def test_successful_import_preserves_canonical_files_and_publishes_imported_manifests(tmp_path):
@@ -416,7 +416,9 @@ def test_interrupted_temporary_copy_never_appears_complete_and_is_retryable(tmp_
     monkeypatch.setattr(artifact_import.shutil, "copy2", original)
     result = import_campaign_artifacts(source, destination, receipt, bundles=("activation",))
     assert result["status"] == "imported"
-    assert json.loads((destination / "manifests/activation.json").read_text())["status"] == "imported"
+    assert (
+        json.loads((destination / "manifests/activation.json").read_text())["status"] == "imported"
+    )
 
 
 def test_whole_campaign_copy_interruption_leaks_no_canonical_root(tmp_path, monkeypatch):
@@ -464,13 +466,13 @@ def test_identical_retry_is_a_noop(tmp_path):
     result = import_campaign_artifacts(source, destination, receipt)
 
     assert result["status"] == "noop"
-    assert {path: path.stat().st_mtime_ns for path in destination.rglob("*") if path.is_file()} == before
+    assert {
+        path: path.stat().st_mtime_ns for path in destination.rglob("*") if path.is_file()
+    } == before
 
 
-@pytest.mark.parametrize("symlink_kind", ("manifest", "ancestor"))
-def test_identical_retry_rejects_symlinked_import_manifest_boundary(
-    tmp_path, symlink_kind
-):
+@pytest.mark.parametrize("symlink_kind", ["manifest", "ancestor"])
+def test_identical_retry_rejects_symlinked_import_manifest_boundary(tmp_path, symlink_kind):
     source, destination, receipt = _setup(tmp_path)
     import_campaign_artifacts(source, destination, receipt, bundles=("activation",))
     manifest = destination / "manifests/imports/campaign_artifacts.json"
@@ -678,7 +680,9 @@ def test_touched_receipt_cannot_hide_backdated_source_mutation(tmp_path):
     touched = receipt.stat().st_mtime_ns + 10_000_000
     os.utime(receipt, ns=(touched, touched))
 
-    with pytest.raises(ArtifactImportError, match="receipt identity|source inventory|source mutation"):
+    with pytest.raises(
+        ArtifactImportError, match="receipt identity|source inventory|source mutation"
+    ):
         import_campaign_artifacts(source, destination, receipt, bundles=("depth",))
 
     assert not destination.exists()
@@ -811,6 +815,27 @@ def test_imported_completion_rejects_internally_valid_truncated_inventory(tmp_pa
     assert not _completion_is_valid(config, config_path, stage)
 
 
+def test_imported_completion_rejects_unexpected_marker_fields(tmp_path):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    marker_path = destination / f"manifests/completions/{stage}.json"
+    marker = json.loads(marker_path.read_text())
+    marker["unexpected"] = True
+    _write_json(marker_path, marker)
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
+
+
 def test_imported_completion_does_not_fall_back_when_embedded_receipt_is_removed(tmp_path):
     stage = "vllm_stats"
     source, destination, receipt = _setup(tmp_path)
@@ -853,9 +878,10 @@ def test_legacy_campaign_manifest_and_completion_marker_remain_retryable(tmp_pat
 
     assert stage_is_complete(config, stage)
     assert _completion_is_valid(config, config_path, stage)
-    assert json.loads((destination / f"manifests/completions/{stage}.json").read_text())[
-        "version"
-    ] == 3
+    assert (
+        json.loads((destination / f"manifests/completions/{stage}.json").read_text())["version"]
+        == 3
+    )
     assert (
         import_campaign_artifacts(
             source,
@@ -1020,10 +1046,8 @@ def test_deleted_imported_vllm_aggregate_stales_completion(tmp_path):
     assert not _completion_is_valid(config, config_path, "vllm_stats")
 
 
-@pytest.mark.parametrize("section", ("model", "data", "search_space"))
-def test_target_semantic_config_must_match_source_before_completion_publication(
-    tmp_path, section
-):
+@pytest.mark.parametrize("section", ["model", "data", "search_space"])
+def test_target_semantic_config_must_match_source_before_completion_publication(tmp_path, section):
     source, destination, receipt = _setup(tmp_path)
     config, config_path = _target_config(destination, tmp_path / "target-config.json")
     config[section] = {"identity": f"different-{section}"}
@@ -1059,7 +1083,7 @@ def test_relocated_sibling_accepts_normalized_import_compatible_semantics(tmp_pa
 
 @pytest.mark.parametrize(
     ("mutation", "expected"),
-    (
+    [
         (lambda config: config["model"].update(revision="different"), "model"),
         (
             lambda config: config["data"].update(path="tests/fixtures/puzzletron/other.jsonl"),
@@ -1080,7 +1104,7 @@ def test_relocated_sibling_accepts_normalized_import_compatible_semantics(tmp_pa
             lambda config: config["embedding_pruning"].update(alignment=128),
             "semantic config",
         ),
-    ),
+    ],
 )
 def test_normalization_rejects_true_semantic_mismatches(tmp_path, mutation, expected):
     source, destination, receipt, target_config, config_path = _relocated_semantic_setup(tmp_path)
@@ -1100,7 +1124,7 @@ def test_normalization_rejects_true_semantic_mismatches(tmp_path, mutation, expe
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("stage", ("vllm_stats", "scoring"))
+@pytest.mark.parametrize("stage", ["vllm_stats", "scoring"])
 def test_folded_stage_target_projection_mismatch_is_rejected(tmp_path, stage):
     source, destination, receipt = _setup(tmp_path)
     (source / f"manifests/{stage}.json").unlink()

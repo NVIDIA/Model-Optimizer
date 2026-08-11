@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Optionally materialize fixed-token caches ahead of Puzzletron stages."""
 
@@ -12,8 +24,9 @@ from pathlib import Path
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 from modelopt.torch.puzzletron.stage_runner import StageResult
 from modelopt.torch.puzzletron.stages.graph import StageSkipReason, stage_is_enabled
+from puzzletron_orchestrator.token_caches import resolve_tokenize_caches
 
-__all__ = ["tokenize_data_stage"]
+__all__ = ["resolve_tokenize_caches", "tokenize_data_stage"]
 
 
 def tokenize_data_stage(config: dict) -> StageResult:
@@ -39,13 +52,22 @@ def tokenize_data_stage(config: dict) -> StageResult:
             skip_reason.value,
         )
 
+    caches = resolve_tokenize_caches(config)
+    if not caches:
+        raise ValueError(
+            "tokenize_data.enabled is true but no caches are configured. "
+            "Set tokenize_data.caches, or set train_token_cache_path / "
+            "validation_token_cache_path so defaults can be derived."
+        )
+
     tool = Path(__file__).resolve().parent / "tools" / "build_packed_token_memmap.py"
     teacher_dir = Path((config.get("convert") or {})["teacher_dir"])
     dataset_path = str(config["dataset_path"])
+    trust_remote_code = bool((config.get("model") or {}).get("trust_remote_code", False))
     outputs = []
-    for cache in stage_config.get("caches") or ():
+    for cache in caches:
         output = Path(cache["output"])
-        command = (
+        command = [
             sys.executable,
             str(tool),
             "--dataset-path",
@@ -68,8 +90,9 @@ def tokenize_data_stage(config: dict) -> StageResult:
             str(stage_config.get("tokenize_batch_size", 64)),
             "--shuffle-seed",
             str(cache["shuffle_seed"]),
-            "--trust-remote-code",
-        )
+        ]
+        if trust_remote_code:
+            command.append("--trust-remote-code")
         subprocess.run(command, check=True)
         outputs.append(
             {

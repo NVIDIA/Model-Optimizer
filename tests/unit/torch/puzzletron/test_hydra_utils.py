@@ -13,9 +13,73 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
+"""Tests for Hydra configuration cloning and resolver helpers."""
 
-from modelopt.torch.puzzletron.tools.hydra_utils import _warmup_steps_resolver, warmup_steps
+import pytest
+from omegaconf import OmegaConf
+from omegaconf.errors import UnsupportedValueType
+
+import modelopt.torch.puzzletron.stages.pipeline as pipeline_stages
+import modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats as calc_subblock_stats
+from modelopt.torch.puzzletron.tools.hydra_utils import (
+    _warmup_steps_resolver,
+    clone_hydra_config,
+    warmup_steps,
+)
+
+
+class _ToyPruningMixin:
+    """Stand-in for resolved Hydra ``_target_`` objects such as pruning mixins."""
+
+
+def test_clone_hydra_config_preserves_resolved_python_objects():
+    cfg = OmegaConf.create(
+        {"pruning": {"activation_passes": [{"name": "ffn"}]}},
+        flags={"allow_objects": True},
+    )
+    pruning_mixin = _ToyPruningMixin()
+    cfg.pruning.activation_passes[0].pruning_mixin = pruning_mixin
+
+    cloned = clone_hydra_config(cfg)
+
+    assert cloned.pruning.activation_passes[0].pruning_mixin is pruning_mixin
+    container = OmegaConf.to_container(cfg, resolve=True)
+    with pytest.raises(UnsupportedValueType, match="supported primitive type"):
+        OmegaConf.create(container)
+
+
+def test_static_workload_stats_preserves_resolved_python_objects(monkeypatch):
+    pruning_mixin = _ToyPruningMixin()
+    hydra_cfg = OmegaConf.create(
+        {
+            "calc_subblock_stats": {
+                "batch_sizes": [1],
+                "prefill_seq_len": 128,
+                "generation_seq_len": 32,
+                "runtime_stats": {"enabled": True},
+                "merge_with_existing_stats": False,
+            },
+            "pruning": {"activation_passes": [{"name": "ffn"}]},
+        },
+        flags={"allow_objects": True},
+    )
+    hydra_cfg.pruning.activation_passes[0].pruning_mixin = pruning_mixin
+    launched = []
+    monkeypatch.setattr(calc_subblock_stats, "launch_calc_subblock_stats", launched.append)
+
+    pipeline_stages._calculate_static_workload_stats(
+        {"mip": {"workloads": {"interactive": {"isl": 256, "osl": 64, "batch_size": 2}}}},
+        hydra_cfg,
+    )
+
+    assert len(launched) == 1
+    selected = launched[0]
+    assert selected.pruning.activation_passes[0].pruning_mixin is pruning_mixin
+    assert list(selected.calc_subblock_stats.batch_sizes) == [2]
+    assert selected.calc_subblock_stats.prefill_seq_len == 256
+    assert selected.calc_subblock_stats.generation_seq_len == 64
+    assert selected.calc_subblock_stats.runtime_stats.enabled is False
+    assert selected.calc_subblock_stats.merge_with_existing_stats is True
 
 
 def test_warmup_steps_casts_inputs_before_computing():

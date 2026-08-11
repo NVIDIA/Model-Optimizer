@@ -183,10 +183,7 @@ def test_vllm_completion_uses_configured_runtime_aggregate_filename(tmp_path: Pa
 
 
 def test_every_registry_stage_projects_its_own_section_but_not_report_settings() -> None:
-    config = {
-        stage: {"semantic_value": stage}
-        for stage in STAGE_REGISTRY
-    }
+    config = {stage: {"semantic_value": stage} for stage in STAGE_REGISTRY}
     config["report"] = {"theme": "light"}
 
     for stage in STAGE_REGISTRY:
@@ -200,13 +197,13 @@ def test_every_registry_stage_projects_its_own_section_but_not_report_settings()
 
 @pytest.mark.parametrize(
     "stage",
-    (
+    [
         "sort_sanity",
         "width_sanity",
         "slicing_sanity",
         "bypass_sanity",
         "global_distillation_sanity",
-    ),
+    ],
 )
 def test_sanity_stage_identity_includes_global_warning_policy(stage: str) -> None:
     config = {
@@ -229,23 +226,45 @@ def test_non_sanity_stage_identity_ignores_global_warning_policy() -> None:
 
 
 @pytest.mark.parametrize(
-    "section",
-    ("tokenize_data", "convert", "dataset_path", "model", "data", "dataset"),
+    ("section", "changed_value"),
+    [
+        ("tokenize_data", {"enabled": True, "workers": 2}),
+        ("convert", {"teacher_dir": "/models/teacher-b"}),
+        ("dataset_path", "/datasets/source-b"),
+        ("model", {"source": "/models/source-b"}),
+        ("data", {"calibration": {"num_samples": 17, "seq_len": 8}}),
+        ("dataset", {"split": "validation"}),
+        ("train_token_cache_path", "/cache/train-b.tokens"),
+        ("validation_token_cache_path", "/cache/validation-b.tokens"),
+        ("pruning", {"shuffle_seed": 2}),
+        ("replacement_scoring", {"eval_samples": 33}),
+        ("depth_importance", {"eval_samples": 17}),
+        ("sort_sanity", {"eval_samples": 9}),
+        ("width_sanity", {"eval_samples": 5}),
+    ],
 )
 def test_tokenize_data_identity_includes_every_tokenizer_and_data_input(
     section: str,
+    changed_value,
 ) -> None:
     config = {
-        "tokenize_data": {"caches": [{"split": "train"}]},
+        "tokenize_data": {"enabled": True, "workers": 1},
         "convert": {"teacher_dir": "/models/teacher-a"},
         "dataset_path": "/datasets/source-a",
         "model": {"source": "/models/source-a"},
-        "data": {"content_field": "messages"},
+        "data": {"calibration": {"num_samples": 16, "seq_len": 8}},
         "dataset": {"split": "train"},
+        "train_token_cache_path": "/cache/train-a.tokens",
+        "validation_token_cache_path": "/cache/validation-a.tokens",
+        "pruning": {"shuffle_seed": 1},
+        "replacement_scoring": {"eval_samples": 32},
+        "depth_importance": {"eval_samples": 16},
+        "sort_sanity": {"eval_samples": 8},
+        "width_sanity": {"eval_samples": 4},
         "report": {"theme": "light"},
     }
     baseline = StageManifest(stage="tokenize_data", config=config).semantic_config_identity
-    changed = {**config, section: {"changed": True}}
+    changed = {**config, section: changed_value}
     report_changed = {**config, "report": {"theme": "dark"}}
 
     assert StageManifest(stage="tokenize_data", config=changed).semantic_config_identity != baseline
@@ -257,13 +276,13 @@ def test_tokenize_data_identity_includes_every_tokenizer_and_data_input(
 
 @pytest.mark.parametrize(
     ("stage", "handler_section"),
-    (
+    [
         ("width_importance", "pruning"),
         ("build_library", "build_library"),
         ("build_library", "vllm_stats"),
         ("build_library", "library"),
         ("replacement_scoring", "replacement_scoring"),
-    ),
+    ],
 )
 def test_handler_section_changes_stale_consumer_but_report_changes_do_not(
     tmp_path: Path,
@@ -365,7 +384,7 @@ def test_relevant_config_and_upstream_changes_have_stale_reasons(tmp_path: Path)
     )
 
 
-@pytest.mark.parametrize("mutated_parent_evidence", ("artifact", "manifest"))
+@pytest.mark.parametrize("mutated_parent_evidence", ["artifact", "manifest"])
 def test_child_revalidates_current_parent_evidence_without_marker_rewrite(
     tmp_path: Path,
     mutated_parent_evidence: str,
@@ -416,13 +435,11 @@ def test_child_revalidates_current_parent_evidence_without_marker_rewrite(
     result = check_marker_details(child_marker, **child_kwargs)
 
     assert not result.valid
-    assert result.stale_reasons == (
-        "changed selected upstream identity: build_library",
-    )
+    assert result.stale_reasons == ("changed selected upstream identity: build_library",)
 
 
-@pytest.mark.parametrize("parent_evidence", ("artifact", "manifest"))
-@pytest.mark.parametrize("change", ("mutated", "deleted"))
+@pytest.mark.parametrize("parent_evidence", ["artifact", "manifest"])
+@pytest.mark.parametrize("change", ["mutated", "deleted"])
 def test_child_build_rejects_parent_changed_before_identity_collection(
     tmp_path: Path,
     parent_evidence: str,
@@ -478,7 +495,7 @@ def test_child_build_rejects_parent_changed_before_identity_collection(
         )
 
 
-@pytest.mark.parametrize("parent_version", ("legacy-v2", "incomplete-v3"))
+@pytest.mark.parametrize("parent_version", ["legacy-v2", "incomplete-v3"])
 def test_unverifiable_parent_cannot_seed_or_validate_v3_child_after_evidence_mutation(
     tmp_path: Path,
     parent_version: str,
@@ -651,3 +668,51 @@ def test_resume_patterns_are_the_canonical_completion_patterns(tmp_path: Path) -
     assert "scenarios/width-1024/depth-00/manifests/build_library.json" in patterns
     assert "scenarios/width-0768/depth-00/runtime.json" in patterns
     assert resume_patterns == ("manifests/build_library.json", *patterns)
+
+
+def test_tokenize_resume_marker_binds_external_cache_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    external_output = tmp_path / "shared-cache" / "train.tokens"
+    external_output.parent.mkdir()
+    external_output.write_bytes(bytes(12))
+    external_metadata = external_output.with_suffix(external_output.suffix + ".json")
+    external_metadata.write_text("{}\n")
+    manifest_path = root / "manifests" / "tokenize_data.json"
+    manifest_path.parent.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("tokenize_data: {}\n")
+    config = _config(
+        root,
+        dataset_path=str(tmp_path / "dataset"),
+        convert={"teacher_dir": str(tmp_path / "teacher")},
+        tokenize_data={
+            "enabled": True,
+            "caches": [
+                {
+                    "output": str(external_output),
+                    "split": "train",
+                    "num_samples": 1,
+                    "seq_length": 2,
+                    "shuffle_seed": 7,
+                }
+            ],
+        },
+    )
+    manifest = StageManifest(stage="tokenize_data", config=config)
+    manifest.complete(outputs={"caches": []})
+    write_stage_manifest(manifest_path, manifest)
+
+    kwargs = _resume_kwargs(config, config_path, "tokenize_data")
+    assert kwargs["required_patterns"] == (
+        "manifests/tokenize_data.json",
+        manifest.execution_record["resolved_config_path"],
+        manifest.execution_record["artifact_manifest_path"],
+        str(external_output.resolve()),
+        str(external_metadata.resolve()),
+    )
+    kwargs.update(upstream_markers={}, source_roots=(), repository_roots=())
+    marker = write_marker(root, "tokenize_data", build_payload(**kwargs))
+    assert check_marker(marker, **kwargs)
+
+    external_output.write_bytes(b"changed")
+    assert not check_marker(marker, **kwargs)

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import yaml
 
+from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 from puzzletron_orchestrator.config import load_experiment_config
 from puzzletron_orchestrator.logging import OrchestratorLogger
 
@@ -361,8 +362,6 @@ def test_embedding_build_library_requires_every_width_scenario(
 def test_successful_manifest_stales_when_semantic_config_changes(
     tmp_path: Path, write_terminal_manifest
 ) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
     config = {
         "puzzle_dir": str(tmp_path),
         "convert": {"teacher_dir": "teacher-v1"},
@@ -380,8 +379,6 @@ def test_successful_manifest_stales_when_semantic_config_changes(
 def test_tokenize_data_completeness_rejects_mismatched_cache_metadata(
     tmp_path: Path, write_terminal_manifest, write_token_cache
 ) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
     output = tmp_path / "dataset_cache" / "train.tokens"
     config = {
         "puzzle_dir": str(tmp_path),
@@ -416,6 +413,9 @@ def test_tokenize_data_completeness_rejects_mismatched_cache_metadata(
 
     write_token_cache(config, config["tokenize_data"]["caches"][0])
     assert stage_is_complete(config, "tokenize_data")
+
+    config["model"] = {"trust_remote_code": True}
+    assert not stage_is_complete(config, "tokenize_data")
 
 
 def test_tokenize_data_completeness_requires_exact_receipts_and_cache_set(

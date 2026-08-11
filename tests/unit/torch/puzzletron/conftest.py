@@ -92,6 +92,9 @@ def write_token_cache():
                     "num_samples": num_samples,
                     "seq_length": seq_length,
                     "shuffle_seed": int(cache["shuffle_seed"]),
+                    "trust_remote_code": bool(
+                        (config.get("model") or {}).get("trust_remote_code", False)
+                    ),
                     "dtype": "uint32",
                     "bytes": expected_bytes,
                 }

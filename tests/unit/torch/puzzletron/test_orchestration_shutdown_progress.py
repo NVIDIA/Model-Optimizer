@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import json
 import signal
-from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import pytest
 import yaml
 
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
@@ -43,6 +44,9 @@ from puzzletron_orchestrator.progress import summarize_active_progress, summariz
 from puzzletron_orchestrator.schema import AttemptSpec, CommandSpec, JobHandle, JobState, JobStatus
 from puzzletron_orchestrator.state import StageRunRecord
 from puzzletron_orchestrator.terminal import ShutdownAction
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class _FakeExecutor(Executor):
@@ -194,9 +198,7 @@ def _write_sanity_drain_configs(tmp_path: Path):
     return experiment, runner, execution, run_dir
 
 
-def _seed_convert_complete(
-    run_dir: Path, write_terminal_manifest, config: dict
-) -> None:
+def _seed_convert_complete(run_dir: Path, write_terminal_manifest, config: dict) -> None:
     write_terminal_manifest(run_dir, "convert", config=config)
     teacher = run_dir / "ckpts" / "teacher"
     teacher.mkdir(parents=True, exist_ok=True)
@@ -216,9 +218,7 @@ def _seed_sort_complete(run_dir: Path, write_terminal_manifest, config: dict) ->
     (sorted_dir / "model.safetensors").write_text("weights\n")
 
 
-def _seed_sort_sanity_complete(
-    run_dir: Path, write_terminal_manifest, config: dict
-) -> None:
+def _seed_sort_sanity_complete(run_dir: Path, write_terminal_manifest, config: dict) -> None:
     _seed_sanity_complete(run_dir, "sort_sanity", write_terminal_manifest, config)
 
 
@@ -234,9 +234,7 @@ def _seed_sanity_complete(
     summary.write_text(json.dumps({"passed": True}) + "\n")
 
 
-def _seed_vllm_stats_complete(
-    run_dir: Path, write_terminal_manifest, config: dict
-) -> None:
+def _seed_vllm_stats_complete(run_dir: Path, write_terminal_manifest, config: dict) -> None:
     write_terminal_manifest(run_dir, "vllm_stats", config=config)
     stats = run_dir / "subblock_stats.json"
     stats.write_text(json.dumps([{"args": {"runtime_stats": True, "n_embd": 1}}]) + "\n")
@@ -380,26 +378,25 @@ def test_vllm_progress_reports_validated_over_total(tmp_path: Path):
 
 
 def test_vllm_progress_estimates_unique_subblocks_from_library(tmp_path: Path):
-    library = []
-    for width in (2048, 1920):
-        for experts in (256, 128):
-            library.append(
-                {
-                    "mamba_config": {
-                        "kind": "mamba",
-                        "name": "m",
-                        "no_op": False,
-                        "hidden_size": width,
-                    },
-                    "moe_config": {
-                        "kind": "moe",
-                        "name": "e",
-                        "no_op": False,
-                        "num_experts": experts,
-                        "hidden_size": width,
-                    },
-                }
-            )
+    library = [
+        {
+            "mamba_config": {
+                "kind": "mamba",
+                "name": "m",
+                "no_op": False,
+                "hidden_size": width,
+            },
+            "moe_config": {
+                "kind": "moe",
+                "name": "e",
+                "no_op": False,
+                "num_experts": experts,
+                "hidden_size": width,
+            },
+        }
+        for width in (2048, 1920)
+        for experts in (256, 128)
+    ]
     # Duplicate rows must not inflate the unique subblock count.
     library.extend(library)
     (tmp_path / "subblock_library.json").write_text(json.dumps(library))
@@ -546,9 +543,7 @@ def test_controller_aggregates_completed_work_before_resubmitting(
             return getattr(delegate, name)
 
         def aggregate(self, *, plan, node, work_plan):
-            _seed_convert_complete(
-                plan.puzzle_dir, write_terminal_manifest, plan.experiment_config
-            )
+            _seed_convert_complete(plan.puzzle_dir, write_terminal_manifest, plan.experiment_config)
 
     aggregate_adapter = _AggregateAdapter()
     monkeypatch.setattr(
@@ -701,12 +696,8 @@ def test_slurm_cancel_detects_jobs_that_remain_queued(tmp_path: Path, monkeypatc
         scripts_dir=tmp_path / "sbatch",
     )
     handle = JobHandle(backend="slurm", handle_id="slurm-11", attempt_id="a", metadata={})
-    try:
+    with pytest.raises(RuntimeError, match="remained queued"):
         executor.cancel([handle])
-    except RuntimeError as exc:
-        assert "remained queued" in str(exc)
-    else:
-        raise AssertionError("cancel must fail while the Slurm job remains queued")
 
 
 def test_slurm_cancel_waits_for_slow_allocation_cleanup(tmp_path: Path, monkeypatch):
@@ -788,6 +779,23 @@ def test_tokenize_progress_reports_samples_tokenized(tmp_path: Path):
         },
     )
     assert summary == "75/250 samples tokenized"
+
+
+def test_tokenize_progress_reports_single_worker_samples(tmp_path: Path):
+    output = tmp_path / "dataset_cache" / "train.tokens"
+    progress = output.parent / f".{output.name}.progress"
+    progress.mkdir(parents=True)
+    (progress / "worker_0000.json").write_text(
+        json.dumps({"worker": 0, "rows_complete": 40, "rows_total": 100})
+    )
+
+    summary = summarize_stage_artifacts(
+        tmp_path,
+        "tokenize_data",
+        config={"tokenize_data": {"caches": [{"output": str(output), "num_samples": 100}]}},
+    )
+
+    assert summary == "40/100 samples tokenized"
 
 
 def test_sort_progress_counts_unique_checkpoint_shards(tmp_path: Path):
@@ -1041,9 +1049,7 @@ def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(
 ):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     run_dir = tmp_path / "run"
-    _seed_convert_complete(
-        run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text())
-    )
+    _seed_convert_complete(run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text()))
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -1151,9 +1157,7 @@ def test_controller_failed_ancestor_blocks_descendant_submit(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(
-        run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text())
-    )
+    _seed_sort_complete(run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text()))
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",
@@ -1221,9 +1225,7 @@ def test_controller_multiple_failures_drain_both_sanity_branches(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
     experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(
-        run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text())
-    )
+    _seed_sort_complete(run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text()))
     upstream = {"convert", "tokenize_data", "width_importance", "sort"}
     monkeypatch.setattr(
         "puzzletron_orchestrator.controller.stage_is_complete",

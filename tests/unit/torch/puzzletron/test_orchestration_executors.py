@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for orchestration executors."""
 
@@ -444,6 +456,107 @@ def test_slurm_submit_recovers_job_after_ambiguous_timeout(tmp_path: Path, monke
     assert submit_count == 1
 
 
+def _slurm_executor(tmp_path: Path) -> SlurmExecutor:
+    return SlurmExecutor(
+        RunnerEnvironment(
+            kind="slurm",
+            contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+            slurm=SlurmRunnerConfig(account="acct", partition="interactive"),
+        ),
+        scripts_dir=tmp_path / "sbatch",
+    )
+
+
+def test_slurm_recover_keeps_running_when_squeue_misses_and_sacct_says_running(
+    tmp_path: Path, monkeypatch
+):
+    """Regression: empty squeue + sacct RUNNING must not become FAILED."""
+
+    def _fake_run(argv):
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        result = _Result()
+        if argv[0] == "squeue":
+            result.stdout = ""
+        elif argv[0] == "sacct":
+            result.stdout = "RUNNING|0:0\n"
+        return result
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.slurm._run_command", _fake_run)
+    handle = JobHandle(
+        backend="slurm",
+        handle_id="slurm-15214984",
+        attempt_id="a1",
+        metadata={"job_id": "15214984"},
+    )
+
+    status = _slurm_executor(tmp_path).recover(handle)
+
+    assert status.state is JobState.RUNNING
+    assert status.exit_code is None
+
+
+def test_slurm_recover_maps_squeue_requeued_to_pending(tmp_path: Path, monkeypatch):
+    def _fake_run(argv):
+        class _Result:
+            returncode = 0
+            stdout = "REQUEUED\n" if argv[0] == "squeue" else ""
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.slurm._run_command", _fake_run)
+    handle = JobHandle(
+        backend="slurm",
+        handle_id="slurm-1",
+        attempt_id="a1",
+        metadata={"job_id": "1"},
+    )
+
+    status = _slurm_executor(tmp_path).recover(handle)
+
+    assert status.state is JobState.PENDING
+
+
+def test_slurm_recover_maps_sacct_pending_and_failed_states(tmp_path: Path, monkeypatch):
+    responses = {
+        "PENDING|0:0\n": JobState.PENDING,
+        "REQUEUED|0:0\n": JobState.PENDING,
+        "FAILED|1:0\n": JobState.FAILED,
+        "TIMEOUT|1:0\n": JobState.FAILED,
+        "CANCELLED by 1234|0:0\n": JobState.CANCELLED,
+        "COMPLETED|0:0\n": JobState.COMPLETED,
+    }
+
+    for sacct_stdout, expected in responses.items():
+
+        def _fake_run(argv, *, _stdout=sacct_stdout):
+            class _Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            result = _Result()
+            if argv[0] == "squeue":
+                result.stdout = ""
+            elif argv[0] == "sacct":
+                result.stdout = _stdout
+            return result
+
+        monkeypatch.setattr("puzzletron_orchestrator.executors.slurm._run_command", _fake_run)
+        handle = JobHandle(
+            backend="slurm",
+            handle_id="slurm-1",
+            attempt_id="a1",
+            metadata={"job_id": "1"},
+        )
+        status = _slurm_executor(tmp_path).recover(handle)
+        assert status.state is expected, sacct_stdout
+
+
 def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
@@ -725,22 +838,20 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
-    assert [
-        attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts
-    ] == ["2", "2"]
-    assert [
-        attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in attempts
-    ] == ["width-2048", "width-1792"]
+    assert [attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts] == [
+        "2",
+        "2",
+    ]
+    assert [attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in attempts] == [
+        "width-2048",
+        "width-1792",
+    ]
     assert (
         attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
         == attempts[1].command.env["FINALIZE_COMPLETION_DIR"]
     )
-    assert attempts[0].command.env["PUZZLE_DIR"].endswith(
-        "scenarios/width-2048/depth-00"
-    )
-    assert attempts[1].command.env["PUZZLE_DIR"].endswith(
-        "scenarios/width-1792/depth-00"
-    )
+    assert attempts[0].command.env["PUZZLE_DIR"].endswith("scenarios/width-2048/depth-00")
+    assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")
 
 
 def test_stage_partition_override_forces_batch(tmp_path: Path):

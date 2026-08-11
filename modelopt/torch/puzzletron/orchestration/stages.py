@@ -69,6 +69,13 @@ semantic_stage_config = _GRAPH.semantic_stage_config
 
 
 def stage_display_name(stage_id: str, *, granularity: str | None = None) -> str:
+    """Return a public label for a graph stage or a ``post.*`` node.
+
+    Post-MIP node IDs fall back to title-cased node names. For graph-backed
+    stages whose labels expose a unit, ``granularity="subblock"`` selects the
+    subblock form and every other value selects the block form.
+    """
+
     if stage_id.startswith("post."):
         return stage_id.split(".", 2)[-1].replace("_", " ").title()
     return _GRAPH.stage_display_name(stage_id, granularity=granularity)
