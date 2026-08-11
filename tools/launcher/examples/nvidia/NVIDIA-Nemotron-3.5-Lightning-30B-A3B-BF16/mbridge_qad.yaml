@@ -1,4 +1,4 @@
-# NVIDIA Nemotron 3 Nano 30B-A3B NVFP4 quantization-aware distillation (QAD) via Megatron-Bridge.
+# NVIDIA Nemotron 3.5 Lightning 30B-A3B NVFP4 quantization-aware distillation (QAD) via Megatron-Bridge.
 #
 # Four tasks: tokenize the training data, PTQ the student to NVFP4, distill it against the BF16
 # teacher, and export a deployable unified-HF checkpoint.
@@ -12,19 +12,19 @@
 #
 # Usage from tools/launcher:
 #   source .env-slurm
-#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/mbridge_qad.yaml --yes
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/mbridge_qad.yaml --yes
 
-job_name: Nemotron-3-Nano-30B-A3B_mbridge_qad_32k_200iter
+job_name: Nemotron-3.5-Lightning-30B-A3B_mbridge_qad_32k_200iter
 pipeline:
   note: "NVFP4 QAD at 32K for 200 iterations on Nemotron-Post-Training-Dataset-v2 chat (Megatron-Bridge)"
 
   global_vars:
-    hf_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    hf_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
     data_dir: /cicd/tokenized/nemotron-post-training-v2
     data_prefix: /cicd/tokenized/nemotron-post-training-v2/nvidia--Nemotron-Post-Training-Dataset-v2_default_chat_messages
-    ptq_ckpt: /cicd/megatron-bridge/Nemotron-3-Nano-30B-A3B-NVFP4-ptq
-    qad_dir: /cicd/megatron-bridge/Nemotron-3-Nano-30B-A3B-NVFP4-qad
-    export_dir: /cicd/export/Nemotron-3-Nano-30B-A3B-NVFP4-qad-hf
+    ptq_ckpt: /cicd/megatron-bridge/Nemotron-3.5-Lightning-30B-A3B-NVFP4-ptq
+    qad_dir: /cicd/megatron-bridge/Nemotron-3.5-Lightning-30B-A3B-NVFP4-qad
+    export_dir: /cicd/export/Nemotron-3.5-Lightning-30B-A3B-NVFP4-qad-hf
 
   # 1) Tokenize the QAD training data into Megatron .bin/.idx, which distill.py reads via
   #    --data_paths. megatron_lm_qad.yaml points Megatron-LM's finetune path at a single parquet
@@ -67,7 +67,7 @@ pipeline:
       --tp_size 1
       --pp_size 1
       --ep_size 1
-      --quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
+      --recipe huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
       --calib_batch_size 1
       --calib_num_samples 1000
       --seq_length 32768
