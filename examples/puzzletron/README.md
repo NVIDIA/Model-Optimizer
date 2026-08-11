@@ -243,6 +243,7 @@ import os
 from packaging.version import Version
 
 import aiperf
+import lmms_eval
 import modelopt
 import nemo_automodel
 import torch
@@ -252,7 +253,14 @@ import vllm
 with open(os.environ["PUZZLETRON_CI_ENVIRONMENT"], encoding="utf-8") as stream:
     ci_environment = json.load(stream)
 
-for package in ("torch", "vllm", "nemo-automodel", "aiperf", "nvidia-modelopt"):
+for package in (
+    "torch",
+    "vllm",
+    "nemo-automodel",
+    "aiperf",
+    "lmms-eval",
+    "nvidia-modelopt",
+):
     print(package, metadata.version(package))
 
 print("torch CUDA", torch.version.cuda)
@@ -265,6 +273,7 @@ assert Version(metadata.version("torchvision")).release == Version(
     ci_environment["torchvision"]
 ).release
 assert transformers.__version__ == ci_environment["transformers"]
+assert metadata.version("lmms-eval") == ci_environment["lmms_eval"]
 assert Version(metadata.version("nemo-automodel")).base_version == (
     ci_environment["nemo_automodel"]["base_version"]
 )
@@ -367,6 +376,12 @@ After the smoke campaign succeeds, replace `smoke` with `production` and run
 the same command for the full campaign. Add `--dry-run` to inspect either plan
 without submitting work, or select one stage while iterating, for example
 `--stage mip --dry-run`.
+
+The setup wizard can also add downstream `lmms-eval` nodes that evaluate
+materialized candidates through vLLM. They run in the standard Puzzletron
+worker environment, whose example requirements pin a compatible `lmms-eval`
+snapshot. See [post-MIP pipelines](docs/post_mip_pipeline.md) for configuration
+details and for adding downstream evaluation to an existing campaign.
 
 ### Legacy checked-in Nano campaign
 
@@ -486,6 +501,11 @@ stdlib-first Slurm and SSH executors, attempt recovery, and semantic stage
 validation through WorkAdapters. See
 [`configs/orchestration/`](configs/orchestration/) for starter runner and
 execution files.
+
+Accepted rank-zero stage results also write immutable, checksum-validated
+execution records under `<puzzle-dir>/manifests/executions/`. Puzzletron
+validates these records when resuming a stage; the records identify existing
+outputs but do not copy or make those outputs immutable.
 
 ## Campaign stages
 

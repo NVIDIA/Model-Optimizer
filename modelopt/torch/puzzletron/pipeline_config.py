@@ -228,9 +228,7 @@ def normalize_pipeline_config(config: DictConfig | dict[str, Any]) -> dict[str, 
     _deep_update_missing(convert, "teacher_dir", cfg.get("teacher_dir"))
     _deep_update_missing(sort_sanity, "include_reverse", True)
     _normalize_positive_count(aiperf, "num_best_to_eval", "aiperf")
-    _normalize_positive_count(
-        global_distillation, "num_best_to_distill", "global_distillation"
-    )
+    _normalize_positive_count(global_distillation, "num_best_to_distill", "global_distillation")
     if "dir" in experiment and "teacher_dir" not in convert:
         convert["teacher_dir"] = str(Path(experiment["dir"]) / "ckpts" / "teacher")
 
@@ -454,10 +452,14 @@ def adapt_runtime_hydra_config(hydra_cfg: DictConfig, config: dict[str, Any]) ->
         automodel = _ensure_dictconfig_child(scoring, "automodel")
         _set_missing(automodel, "force_hf", _nested(config, "model", "force_hf", default=True))
         _set_missing(
-            automodel, "temperature", _nested(config, "replacement_scoring", "temperature")
+            automodel,
+            "temperature",
+            _nested(config, "replacement_scoring", "temperature"),
         )
         _set_missing(
-            automodel, "chunk_size", _nested(config, "replacement_scoring", "chunk_size")
+            automodel,
+            "chunk_size",
+            _nested(config, "replacement_scoring", "chunk_size"),
         )
 
     if "realize_model" in hydra_cfg:

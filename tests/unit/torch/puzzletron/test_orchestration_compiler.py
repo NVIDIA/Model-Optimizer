@@ -194,3 +194,62 @@ def test_post_mip_compiler_topologically_orders_serialized_nodes() -> None:
     stages = _post_mip_stage_metadata(config)
 
     assert [stage["node_id"] for stage in stages] == ["initial", "final_eval", "best"]
+
+
+def test_compile_campaign_plan_allocates_downstream_evaluation_from_vllm_topology(
+    tmp_configs,
+) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    experiment = yaml.safe_load(experiment_path.read_text())
+    experiment.update(
+        {
+            "mip": {"runs": {"runtime": {}}},
+            "post_mip": {
+                "flows": {
+                    "runtime": {
+                        "source": {"run": "runtime"},
+                        "nodes": {
+                            "materialized": {"type": "materialize"},
+                            "lmms_eval": {
+                                "type": "downstream_evaluation",
+                                "input": "materialized",
+                                "config": {
+                                    "tasks": ["ifeval"],
+                                    "topology": {
+                                        "tensor_parallel_size": 4,
+                                        "pipeline_parallel_size": 2,
+                                        "data_parallel_size": 1,
+                                        "prefill_context_parallel_size": 1,
+                                        "decode_context_parallel_size": 1,
+                                        "enable_expert_parallel": False,
+                                        "gpu_group_size": 8,
+                                    },
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    )
+    experiment_path.write_text(yaml.safe_dump(experiment))
+    execution = yaml.safe_load(execution_path.read_text())
+    execution["execution"]["stages"]["post.runtime.lmms_eval"] = {
+        "strategy": "sharded",
+        "instances": 2,
+    }
+    execution_path.write_text(yaml.safe_dump(execution))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="post.runtime.lmms_eval",
+    )
+    node = plan.stages[0]
+
+    assert node.stage_id == "post.runtime.lmms_eval"
+    assert node.parents == ("post.runtime.materialized",)
+    assert node.gpus_per_instance == 8
+    assert node.instances == 2
+    assert node.nodes == 2

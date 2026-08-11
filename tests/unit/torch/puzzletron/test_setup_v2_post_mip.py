@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from puzzletron_setup.v2.post_mip import recommended_flow
+from collections import OrderedDict
+
+from puzzletron_setup.v2.post_mip import FlowDraft, NodeDraft, PostMIPFlowEditor, recommended_flow
 
 
 def test_recommended_flow_propagates_aiperf_sweep_selection_mode():
@@ -45,3 +47,32 @@ def test_recommended_flow_accepts_a_single_concurrency_value():
 
     assert flow.nodes["serving"].config["concurrency"] == [2]
     assert flow.nodes["fastest"].selector["best_selection_mode"] == "individual_best"
+
+
+def test_downstream_evaluation_node_is_configurable_after_materialization():
+    flow = FlowDraft(
+        "runtime",
+        "runtime",
+        nodes=OrderedDict(
+            (
+                ("materialized", NodeDraft("materialized", "materialize")),
+                (
+                    "lmms_eval",
+                    NodeDraft(
+                        "lmms_eval",
+                        "downstream_evaluation",
+                        input_id="materialized",
+                        config={"tasks": ["ifeval"]},
+                    ),
+                ),
+            )
+        ),
+    )
+    editor = PostMIPFlowEditor({"runtime": {}})
+    editor.add_flow(flow)
+
+    review = editor.review("runtime")
+
+    assert review.node_order == ("materialized", "lmms_eval")
+    assert review.parents["lmms_eval"] == ("materialized",)
+    assert review.artifacts["lmms_eval"] == "checkpoint"
