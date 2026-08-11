@@ -292,6 +292,9 @@ def test_forward_loop_runs_under_disabled_use_cache():
 
 def _tiny_loader(num_batches: int):
     class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+
         def forward(self, **kwargs):
             pass
 
