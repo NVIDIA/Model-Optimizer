@@ -1690,6 +1690,19 @@ def parse_args() -> argparse.Namespace:
             "--low_memory_mode does not support --recipe; the low-memory loader initializes "
             "quantizers from --qformat/--kv_cache_qformat."
         )
+    if args.save_quantized_state is not None and args.restore_quantized_state is not None:
+        parser.error(
+            "--save_quantized_state and --restore_quantized_state are mutually exclusive: "
+            "restoring a saved state skips calibration, so there is nothing new to save."
+        )
+    if (args.save_quantized_state is not None or args.restore_quantized_state is not None) and (
+        args.auto_quantize_bits is not None or _recipe_is_auto_quantize(args.recipe)
+    ):
+        parser.error(
+            "--save_quantized_state/--restore_quantized_state are only supported for the plain "
+            "(non-AutoQuantize) recipe/qformat path; AutoQuantize's search state is not a single "
+            "quantized model state."
+        )
     if args.use_fsdp2 and args.use_seq_device_map:
         warnings.warn("--use_seq_device_map is ignored when --use_fsdp2 is set.")
         args.use_seq_device_map = False

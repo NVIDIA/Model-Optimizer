@@ -72,20 +72,47 @@ def test_save_quantized_state_calls_mto_save_with_model_and_path(monkeypatch):
 
 def test_save_and_restore_quantized_state_together_is_rejected(monkeypatch):
     """Both flags set is ambiguous -- restoring skips calibration, so there's nothing new to
-    save. Must fail loudly, not silently prefer one and drop the other."""
-    hf_ptq, args = _parse_hf_ptq_args(
-        monkeypatch,
-        "--pyt_ckpt_path",
-        "dummy",
-        "--save_quantized_state",
-        "/tmp/out.pt",
-        "--restore_quantized_state",
-        "/tmp/in.pt",
-    )
-    monkeypatch.setattr(hf_ptq.mto, "restore", lambda model, path: pytest.fail("must not restore"))
+    save. Must fail loudly, at the CLI boundary, not silently prefer one and drop the other."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch,
+            "--pyt_ckpt_path",
+            "dummy",
+            "--save_quantized_state",
+            "/tmp/out.pt",
+            "--restore_quantized_state",
+            "/tmp/in.pt",
+        )
 
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        hf_ptq._restore_quantized_state_if_requested(args, object())
+
+def test_save_quantized_state_with_auto_quantize_recipe_is_rejected(monkeypatch):
+    """AutoQuantize's search state is not a single quantized model state, so persistence flags
+    must be rejected before calibration starts, not discovered mid-run."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch,
+            "--pyt_ckpt_path",
+            "dummy",
+            "--recipe",
+            "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+            "--save_quantized_state",
+            "/tmp/out.pt",
+        )
+
+
+def test_restore_quantized_state_with_deprecated_auto_quantize_cli_is_rejected(monkeypatch):
+    """The deprecated --auto_quantize_bits CLI path is also AutoQuantize; it must be rejected
+    the same way as an AutoQuantize --recipe."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch,
+            "--pyt_ckpt_path",
+            "dummy",
+            "--auto_quantize_bits",
+            "5.4",
+            "--restore_quantized_state",
+            "/tmp/in.pt",
+        )
 
 
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
