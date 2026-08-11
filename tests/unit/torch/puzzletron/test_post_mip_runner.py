@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 from omegaconf import OmegaConf
 
+import modelopt.torch.puzzletron.stages.future as future_stages
 from modelopt.torch.puzzletron.post_mip import runner
 from modelopt.torch.puzzletron.post_mip.records import ArtifactKind
 from modelopt.torch.puzzletron.post_mip.runner import (
@@ -130,6 +131,60 @@ def test_online_eval_injects_resolved_hidden_width_into_solution(monkeypatch):
 
     assert work.hidden_width == 1792
     assert work.raw_solution["hidden_width"] == 1792
+
+
+def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypatch, tmp_path):
+    observed = {}
+    checkpoint = tmp_path / "checkpoint"
+    node = SimpleNamespace(
+        node_id="evaluation",
+        stage_id="post.params.evaluation",
+        config={"config": {"tasks": ["candidate-task"]}},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(checkpoint)},
+    )
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "zero_shot_evaluation": {"enabled": False},
+        "_runtime": {
+            "authored_config": {
+                "puzzle_dir": str(tmp_path),
+                "zero_shot_evaluation": {"enabled": False},
+            }
+        },
+    }
+
+    def _evaluation_stage(candidate, manifest):
+        observed["semantic_config"] = manifest.semantic_config
+        output = Path(candidate["zero_shot_evaluation"]["output_dir"])
+        output.mkdir(parents=True)
+        (output / "evaluation_summary.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "checkpoint": str(checkpoint),
+                        "metrics": {"score": 1.0},
+                        "result_path": str(output / "result.json"),
+                    }
+                ]
+            )
+        )
+
+    monkeypatch.setattr(future_stages, "evaluation_stage", _evaluation_stage)
+
+    result = runner._evaluate_checkpoint(config, node, source, "execution")
+
+    assert observed["semantic_config"]["zero_shot_evaluation"] == {
+        "enabled": True,
+        "checkpoints": [str(checkpoint)],
+        "output_dir": str(
+            tmp_path / "artifacts/post_mip/nodes/evaluation/executions/execution/raw/architecture"
+        ),
+        "tasks": ["candidate-task"],
+    }
+    assert result["metrics"] == {"score": 1.0}
 
 
 def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from examples.puzzletron.main import _validate_worker_result
 from examples.puzzletron.tokenize_data import tokenize_data_stage
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
 from modelopt.torch.puzzletron.orchestration.config import load_experiment_config
@@ -170,7 +171,7 @@ tokenize_data:
         write_token_cache(worker_config, cache)
 
     monkeypatch.setattr("examples.puzzletron.tokenize_data.subprocess.run", _run)
-    tokenize_data_stage(worker_config)
+    result = tokenize_data_stage(worker_config)
 
     manifest = json.loads((tmp_path / "manifests" / "tokenize_data.json").read_text())
     assert manifest["semantic_config"]["sort_sanity"] == {"enabled": False}
@@ -179,6 +180,8 @@ tokenize_data:
     resolved_config = json.loads(resolved_path.read_text())["resolved_stage_config"]
     assert resolved_config["sort_sanity"]["include_reverse"] is True
     assert resolved_config["width_sanity"]["target_values"] == {"hidden_width": 256}
+    _validate_worker_result(worker_config, result, expected_stage="tokenize_data")
+    assert stage_is_complete(worker_config, "tokenize_data")
     assert stage_is_complete(controller_config, "tokenize_data")
     controller_config["sort_sanity"]["enabled"] = True
     assert not stage_is_complete(controller_config, "tokenize_data")

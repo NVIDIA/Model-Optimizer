@@ -451,7 +451,9 @@ def _evaluate_checkpoint(
         stage=f"{node.stage_id}.{source.architecture_id}",
         inputs={"config": candidate},
         config=candidate,
-        semantic_config=semantic_stage_config(candidate, "zero_shot_evaluation"),
+        semantic_config=semantic_stage_config(
+            candidate, "zero_shot_evaluation", use_authored=False
+        ),
     )
     evaluation_stage(candidate, manifest)
     rows = json.loads((output / "evaluation_summary.json").read_text())

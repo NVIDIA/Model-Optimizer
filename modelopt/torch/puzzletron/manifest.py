@@ -138,7 +138,7 @@ def write_stage_execution_record(
         or stable_hash(authored_config, prefix=f"{stage}_cfg")
     )
     resolved_config_content = _resolved_config_content(
-        semantic_stage_config(dict(effective_config), stage)
+        semantic_stage_config(dict(effective_config), stage, use_authored=False)
         if isinstance(effective_config, Mapping)
         else effective_config
     )
