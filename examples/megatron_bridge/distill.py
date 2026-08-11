@@ -22,6 +22,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import contextlib
+import json
 import os
 
 import torch
@@ -290,6 +291,30 @@ def get_args():
     return args
 
 
+def _warn_if_bos_missing(tokenizer, dataset_root: str) -> None:
+    """Warn when the tokenizer prepends a BOS at inference but the SFT records do not carry one.
+
+    ``--sft`` tokenizes both fields verbatim, so the caller owns the BOS. Adding one here is not
+    safe (their text may already have it, which would double it), but training without the BOS the
+    model is served with is silent train/inference skew.
+    """
+    bos = getattr(tokenizer, "bos_token", None)
+    if not bos or not getattr(tokenizer, "add_bos_token", False):
+        return
+    try:
+        with open(os.path.join(dataset_root, "training.jsonl")) as f:
+            first_input = str(json.loads(f.readline()).get("input", ""))
+    except Exception:
+        return  # a malformed or missing file is the dataset builder's error to report, not ours
+    if not first_input.startswith(bos):
+        warn_rank_0(
+            f"This tokenizer prepends {bos!r} at inference, but the first record in "
+            f"{dataset_root}/training.jsonl does not start with it. --sft tokenizes the fields "
+            f"verbatim, so the model would be trained without the BOS it is served with. Include "
+            f"{bos!r} at the start of the 'input' field."
+        )
+
+
 def main(args: argparse.Namespace):
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
@@ -304,7 +329,8 @@ def main(args: argparse.Namespace):
         from transformers import AutoTokenizer
 
         _tok = {"trust_remote_code": args.trust_remote_code}
-        student_vocab = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok).get_vocab()
+        student_tokenizer = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok)
+        student_vocab = student_tokenizer.get_vocab()
         teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
         if student_vocab != teacher_vocab:
             detail = (
@@ -316,6 +342,8 @@ def main(args: argparse.Namespace):
                 "--sft tokenizes with the student's tokenizer and scores the teacher on those "
                 f"same ids, so student and teacher must share a tokenizer ({detail})."
             )
+
+        _warn_if_bos_missing(student_tokenizer, args.sft_dataset_root)
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path, load_weights=True):
