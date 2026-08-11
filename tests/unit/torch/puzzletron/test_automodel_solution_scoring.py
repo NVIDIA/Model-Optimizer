@@ -77,6 +77,8 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
 
 
 def test_native_automodel_gdn_rejects_compact_runtime_candidate():
+    # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
+    pytest.importorskip("nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn")
     from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
     from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 
@@ -133,6 +135,47 @@ def test_native_automodel_gdn_rejects_compact_runtime_candidate():
     assert gdn.forward.__func__ is original_forward
     assert set(vars(gdn)) == original_state
     assert dict(gdn._forward_hooks) == original_forward_hooks
+
+
+@pytest.mark.parametrize(
+    ("teacher_mamba", "child_mamba"),
+    [
+        pytest.param(
+            SimpleNamespace(no_op=False, num_heads=4, head_dim=8, state_dim=8),
+            SimpleNamespace(no_op=False, num_heads=4, head_dim=8, num_groups=2, state_dim=8),
+            id="missing-teacher-groups",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                no_op=False,
+                num_heads=4,
+                head_dim=8,
+                num_groups=2,
+                state_dim=8,
+            ),
+            SimpleNamespace(no_op=False, num_heads=4, head_dim=8),
+            id="missing-child-fields",
+        ),
+    ],
+)
+def test_gdn_runtime_hooks_skip_incomplete_shape_metadata(teacher_mamba, child_mamba):
+    def block_config(mamba):
+        return SimpleNamespace(
+            get_subblock=lambda kind: mamba if kind == "mamba" else None,
+        )
+
+    layer = SimpleNamespace(
+        linear_attn=SimpleNamespace(num_k_heads=2, in_proj_qkv=object()),
+    )
+
+    handles, contexts = ReplaceBlockScoringRecipe._typed_subblock_runtime_hooks(
+        layer,
+        teacher_block_config=block_config(teacher_mamba),
+        child_block_config=block_config(child_mamba),
+    )
+
+    assert handles == []
+    assert contexts == []
 
 
 def test_parent_sweep_reports_rank_local_exception_before_collective(capsys):

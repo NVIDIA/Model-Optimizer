@@ -31,7 +31,12 @@ from transformers import LlamaForCausalLM
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
     LlamaModelDescriptor,
 )
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+)
 from modelopt.torch.puzzletron.dataset import DataLayout, PuzzletronBatch, batch_from_automodel
 from modelopt.torch.puzzletron.diagnostics import width_slice_equivalence as width_slice_module
 from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence import (
@@ -376,7 +381,7 @@ def test_tiny_qwen_checkpoint_executes_compact_attention_and_gdn_axes(tmp_path: 
         descriptor=CompactRuntimeQwenDescriptor,
         sorted_checkpoint_dir=checkpoint,
         batch=batch,
-        artifact_dir=tmp_path / "qwen-artifacts",
+        artifact_dir=tmp_path / "qwen-compact-runtime-artifacts",
     )
 
     assert summary["passed"] is True
@@ -754,6 +759,73 @@ def test_axis_structure_rejects_unrelated_tensor_shape_change():
     )
 
     assert evidence == {}
+
+
+@pytest.mark.parametrize(
+    ("axis_id", "target_mamba", "source_value", "target_value"),
+    [
+        (
+            "gdn_key_head_dim",
+            MambaConfig(num_heads=4, head_dim=8, num_groups=2, state_dim=4),
+            8,
+            4,
+        ),
+        (
+            "gdn_value_head_dim",
+            MambaConfig(num_heads=4, head_dim=4, num_groups=2, state_dim=8),
+            8,
+            4,
+        ),
+        (
+            "gdn_value_heads_per_group",
+            MambaConfig(num_heads=2, head_dim=8, num_groups=2, state_dim=8),
+            2,
+            1,
+        ),
+    ],
+)
+def test_axis_structure_accepts_coupled_gdn_projection_width(
+    axis_id,
+    target_mamba,
+    source_value,
+    target_value,
+):
+    source = BlockConfig(
+        subblock_configs=(MambaConfig(num_heads=4, head_dim=8, num_groups=2, state_dim=8),)
+    )
+    target = BlockConfig(subblock_configs=(target_mamba,))
+    case = WidthSliceCase(
+        case_identity="gdn-shape",
+        axis_id=axis_id,
+        axis_class="block::hook",
+        scope="global",
+        layers=(0,),
+        source_value=source_value,
+        target_value=target_value,
+        subblock_kind="mamba",
+        field="shape",
+        source_block_config=source,
+        target_block_config=target,
+        expected_structure={},
+        implementation_provenance={},
+    )
+    before = {"model.layers.0.linear_attn.in_proj_qkv.weight": [64, 32]}
+    after = {"model.layers.0.linear_attn.in_proj_qkv.weight": [48, 32]}
+
+    evidence = width_slice_module._axis_specific_changed_shapes(
+        before,
+        after,
+        descriptor=LlamaModelDescriptor,
+        case=case,
+        num_layers=1,
+    )
+
+    assert evidence == {
+        "model.layers.0.linear_attn.in_proj_qkv.weight": {
+            "before": [64, 32],
+            "after": [48, 32],
+        }
+    }
 
 
 def test_artifact_validation_detects_deleted_case(tmp_path: Path):

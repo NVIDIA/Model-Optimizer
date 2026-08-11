@@ -889,11 +889,13 @@ def _axis_specific_changed_shapes(
             return True
         source_projection, target_projection = gdn_projection_widths
         return (
-            case.axis_id == "gdn_key_head_dim"
+            case.axis_id in {"gdn_key_head_dim", "gdn_value_head_dim", "gdn_value_heads_per_group"}
             and source_projection is not None
             and target_projection is not None
             and any(
-                int(source_dim) == source_projection and int(target_dim) == target_projection
+                source_dim != target_dim
+                and int(source_dim) == source_projection
+                and int(target_dim) == target_projection
                 for source_dim, target_dim in zip(source_shape, target_shape)
             )
         )

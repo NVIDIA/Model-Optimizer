@@ -82,6 +82,8 @@ def _module_output_zero_hook(module, args, output):
 
 
 def _module_output_identity_hook(module, args, output):
+    """Bypass generic masking after compact execution produced the reduced geometry."""
+
     return output
 
 
@@ -1731,7 +1733,10 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                     is_gdn = hasattr(mamba_module, "num_k_heads") and hasattr(
                         mamba_module, "in_proj_qkv"
                     )
-                    if is_gdn:
+                    if is_gdn and all(
+                        value is not None
+                        for value in (orig_heads, orig_head_dim, orig_groups, orig_state_dim)
+                    ):
                         teacher_shape = GDNShape(
                             num_key_heads=int(orig_groups),
                             num_value_heads=int(orig_heads),
@@ -1739,9 +1744,13 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                             value_head_dim=int(orig_head_dim),
                         )
                         target_shape = GDNShape(
-                            num_key_heads=int(getattr(child_mamba, "num_groups") or orig_groups),
+                            num_key_heads=int(
+                                getattr(child_mamba, "num_groups", None) or orig_groups
+                            ),
                             num_value_heads=int(target_heads),
-                            key_head_dim=int(getattr(child_mamba, "state_dim") or orig_state_dim),
+                            key_head_dim=int(
+                                getattr(child_mamba, "state_dim", None) or orig_state_dim
+                            ),
                             value_head_dim=int(target_head_dim),
                         )
                         if target_shape != teacher_shape:

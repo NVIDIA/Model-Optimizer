@@ -40,8 +40,13 @@ from modelopt.torch.puzzletron.pruning.gated_delta_net import (
 )
 
 
+def _qwen_modeling():
+    return pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+
+
 def _qwen_config(*, layer_type: str):
-    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    _qwen_modeling()
+    # Optional dependency: Qwen3.5 is available only in newer transformers builds.
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 
     return Qwen3_5TextConfig(
@@ -65,10 +70,10 @@ def _qwen_config(*, layer_type: str):
 
 
 def test_compact_grouped_attention_target_requires_reduced_supported_geometry():
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Attention
+    qwen_attention_cls = _qwen_modeling().Qwen3_5Attention
 
     config = _qwen_config(layer_type="full_attention")
-    attention = Qwen3_5Attention(config, 0)
+    attention = qwen_attention_cls(config, 0)
     layer = SimpleNamespace(self_attn=attention)
     teacher = SimpleNamespace(
         no_op=False,
@@ -96,6 +101,8 @@ def test_compact_grouped_attention_target_requires_reduced_supported_geometry():
 
 
 def test_compact_grouped_attention_rejects_native_automodel_backend():
+    # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
+    pytest.importorskip("nemo_automodel.components.models.qwen3_next.layers")
     from nemo_automodel.components.models.common import BackendConfig
     from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
     from transformers.models.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
@@ -157,14 +164,15 @@ def test_compact_grouped_attention_matches_physical_projection_geometry(
     dtype: torch.dtype,
 ):
     from transformers.cache_utils import DynamicCache
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Attention
+
+    qwen_attention_cls = _qwen_modeling().Qwen3_5Attention
 
     teacher_config = _qwen_config(layer_type="full_attention")
-    teacher = Qwen3_5Attention(teacher_config, 0).to(dtype=dtype).eval()
+    teacher = qwen_attention_cls(teacher_config, 0).to(dtype=dtype).eval()
     target_config = deepcopy(teacher_config)
     target_config.num_attention_heads = target_num_q
     target_config.num_key_value_heads = target_num_kv
-    physical = Qwen3_5Attention(target_config, 0).to(dtype=dtype).eval()
+    physical = qwen_attention_cls(target_config, 0).to(dtype=dtype).eval()
 
     state = {name: tensor.detach().clone() for name, tensor in teacher.state_dict().items()}
     keep_q, keep_kv = sorted_attention_keep_indices(
@@ -227,6 +235,7 @@ def test_compact_grouped_attention_matches_physical_projection_geometry(
                 attention_mask,
             )[0]
 
+        # DynamicCache configs select attention types, not Q/K/V geometry; both are full attention.
         physical_cache = DynamicCache(config=target_config)
         runtime_cache = DynamicCache(config=teacher_config)
         physical_prefill = physical(
@@ -299,17 +308,18 @@ def test_compact_gdn_matches_physical_projection_and_kernel_geometry(
     dtype: torch.dtype,
 ):
     from transformers.cache_utils import DynamicCache
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
+
+    qwen_gdn_cls = _qwen_modeling().Qwen3_5GatedDeltaNet
 
     teacher_config = _qwen_config(layer_type="linear_attention")
-    teacher = Qwen3_5GatedDeltaNet(teacher_config, 0).to(dtype=dtype).eval()
+    teacher = qwen_gdn_cls(teacher_config, 0).to(dtype=dtype).eval()
     teacher_shape = GDNShape.from_module(teacher)
     target_config = deepcopy(teacher_config)
     target_config.linear_num_key_heads = target_shape.num_key_heads
     target_config.linear_num_value_heads = target_shape.num_value_heads
     target_config.linear_key_head_dim = target_shape.key_head_dim
     target_config.linear_value_head_dim = target_shape.value_head_dim
-    physical = Qwen3_5GatedDeltaNet(target_config, 0).to(dtype=dtype).eval()
+    physical = qwen_gdn_cls(target_config, 0).to(dtype=dtype).eval()
 
     state = {
         f"gdn.{name}": tensor.detach().clone() for name, tensor in teacher.state_dict().items()
@@ -369,3 +379,54 @@ def test_compact_gdn_matches_physical_projection_and_kernel_geometry(
     )
     assert GDNShape.from_module(teacher) == teacher_shape
     assert "forward" not in vars(teacher)
+
+
+@pytest.mark.parametrize(
+    "missing_attribute",
+    [
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "conv_kernel_size",
+        "activation",
+        "layer_idx",
+    ],
+)
+def test_compact_gdn_support_requires_every_forward_attribute(monkeypatch, missing_attribute):
+    qwen_gdn_cls = _qwen_modeling().Qwen3_5GatedDeltaNet
+
+    teacher = qwen_gdn_cls(_qwen_config(layer_type="linear_attention"), 0).eval()
+    teacher_shape = GDNShape.from_module(teacher)
+    monkeypatch.delattr(teacher, missing_attribute)
+
+    assert not supports_compact_gated_delta_net(teacher, teacher_shape=teacher_shape)
+
+
+def test_compact_gdn_rejects_cache_with_teacher_geometry():
+    from transformers.cache_utils import DynamicCache
+
+    qwen_gdn_cls = _qwen_modeling().Qwen3_5GatedDeltaNet
+
+    teacher_config = _qwen_config(layer_type="linear_attention")
+    teacher = qwen_gdn_cls(teacher_config, 0).eval()
+    teacher_shape = GDNShape.from_module(teacher)
+    target_shape = GDNShape(
+        num_key_heads=teacher_shape.num_key_heads,
+        num_value_heads=teacher_shape.num_value_heads,
+        key_head_dim=teacher_shape.key_head_dim // 2,
+        value_head_dim=teacher_shape.value_head_dim,
+    )
+    cache = DynamicCache(config=teacher_config)
+    hidden_states = torch.randn(1, 2, teacher_config.hidden_size)
+    next_hidden = torch.randn(1, 1, teacher_config.hidden_size)
+
+    with torch.no_grad():
+        teacher(hidden_states, cache_params=cache)
+        with (
+            compact_gated_delta_net_forward(
+                teacher,
+                teacher_shape=teacher_shape,
+                target_shape=target_shape,
+            ),
+            pytest.raises(ValueError, match="cache convolution width.*target geometry"),
+        ):
+            teacher(next_hidden, cache_params=cache)

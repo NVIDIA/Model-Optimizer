@@ -319,6 +319,11 @@ def supports_compact_gated_delta_net(gdn_module, *, teacher_shape: GDNShape) -> 
         "out_proj",
         "chunk_gated_delta_rule",
         "recurrent_gated_delta_rule",
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "conv_kernel_size",
+        "activation",
+        "layer_idx",
     )
     if any(not hasattr(gdn_module, name) for name in required):
         return False
