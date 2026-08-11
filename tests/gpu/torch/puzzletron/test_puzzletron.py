@@ -367,7 +367,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     replacement_results = [
         json.loads(path.read_text())
         for path in smoke_root.glob(
-            "scenarios/*/distributed_eval/replacement_scoring/results/**/*.json"
+            "scenarios/width-*/depth-*/distributed_eval/replacement_scoring/results/**/*.json"
         )
     ]
     assert replacement_results
