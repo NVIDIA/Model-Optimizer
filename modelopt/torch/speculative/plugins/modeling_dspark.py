@@ -120,6 +120,30 @@ class DSparkModule(DFlashModule):
         # existed, so initialize the new layers explicitly.
         self._init_head_weights(config)
 
+        self._register_load_state_dict_pre_hook(self._remap_nested_head_keys, with_module=False)
+
+    # Head submodules that some published checkpoints nest under a `markov_head.` parent.
+    _NESTED_HEAD_PREFIX = "markov_head."
+
+    @classmethod
+    def _remap_nested_head_keys(cls, state_dict, prefix, *args, **kwargs):
+        """Accept head weights nested under ``markov_head.`` as well as flat.
+
+        ModelOpt keeps the head tensors flat on this module (``markov_w1`` /
+        ``markov_w2`` / ...), matching the upstream DeepSpec layout, and exports them that
+        way. Some released drafters — e.g.
+        ``nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark`` — instead nest them
+        under a ``markov_head.`` parent module. Rewriting those keys in place here lets
+        either layout load without changing the export format (which would break drafters
+        already trained and deployed with the flat names).
+        """
+        nested = prefix + cls._NESTED_HEAD_PREFIX
+        for key in [k for k in state_dict if k.startswith(nested)]:
+            flat = prefix + key[len(nested) :]
+            # A flat key already present wins: never clobber an explicit match.
+            state_dict.setdefault(flat, state_dict.pop(key))
+            state_dict.pop(key, None)
+
     def _init_head_weights(self, config):
         """Initialize the head Linear/Embedding layers (matching HF _init_weights std)."""
         std = getattr(config, "initializer_range", 0.02)

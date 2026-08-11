@@ -441,6 +441,10 @@ class HFDFlashModel(DFlashModel):
             self.dflash_config.hidden_size // self.dflash_config.num_attention_heads,
         )
         self.dflash_config.block_size = self.dflash_block_size
+        # Attention-shape knobs the draft module needs at build time. Carried on the draft
+        # config (not read from DFlashConfig) so _build_draft_module stays a pure function
+        # of dflash_config and restored checkpoints rebuild an identical module.
+        self.dflash_config.attention_sink_bias = self.dflash_attention_sink
 
         # Target layer IDs
         num_target_layers = (
@@ -567,13 +571,18 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_attention_mask(
         self, seq_len, anchor_positions, block_keep_mask, n_blocks, dtype, device, window=None
     ):
-        """Build SDPA attention mask: context (causal) + draft (bidirectional within block).
+        """Build SDPA attention mask: context (causal) + draft (per ``dflash_draft_attention``).
 
-        When ``window`` is not None, all layers use non-causal sliding-window attention
-        (MiMo-style): each draft query only sees context positions within ``window`` tokens
-        before its own position. Block-internal attention stays bidirectional and is left
-        un-windowed (the config enforces ``window >= block_size``, so a full block always
-        fits inside the window and windowing it would be a no-op).
+        When ``window`` is not None, all layers use sliding-window attention: each draft
+        query only sees context positions within ``window`` tokens before its own position.
+        Block-internal attention is left un-windowed (the config enforces
+        ``window >= block_size``, so a full block always fits inside the window and windowing
+        it would be a no-op).
+
+        Block-internal visibility follows ``self.dflash_draft_attention``:
+        ``"bidirectional"`` (default, MiMo-style) lets every query see the whole block, while
+        ``"causal"`` restricts a query at block position ``i`` to draft positions ``<= i`` so
+        the block is modelled autoregressively.
         """
         bsz = anchor_positions.shape[0]
         block_size = self.dflash_block_size
@@ -598,6 +607,12 @@ class HFDFlashModel(DFlashModel):
         is_draft = kv_indices >= seq_len
         kv_block_ids = (kv_indices - seq_len) // block_size
         mask_draft = is_draft & (q_block_ids == kv_block_ids)
+        if self.dflash_draft_attention == "causal":
+            # Autoregressive within the block: query at block position i sees draft
+            # positions <= i only. Compare positions *within* the block so the term is
+            # independent of which block the query belongs to.
+            kv_pos_in_block = (kv_indices - seq_len) % block_size
+            mask_draft = mask_draft & (kv_pos_in_block <= (q_indices % block_size))
         # Valid block
         valid_block = block_keep_mask.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
 
@@ -609,24 +624,33 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     def _build_generate_swa_mask(self, ctx_len, bsz, dtype, device):
-        """Generation-time SWA mask [B, 1, block_size, ctx_len + block_size], or None.
+        """Generation-time mask [B, 1, block_size, ctx_len + block_size], or None.
 
-        Returns None with full attention (KV cache with no mask): all positions attend
-        freely to context and each other within the block. With sliding-window attention,
+        Returns None only when there is nothing to mask: full attention over the context
+        *and* bidirectional blocks (KV cache with no mask). With sliding-window attention,
         each block query only sees context within ``dflash_swa_window_size`` tokens before
         its real position (ctx_len + position-in-block), matching training and vLLM
-        inference; block kv stays fully visible (bidirectional / un-windowed).
+        inference; block kv is left un-windowed. With ``dflash_draft_attention="causal"``
+        the block is additionally lower-triangular, mirroring
+        :meth:`_build_draft_attention_mask` so generation matches training.
         """
-        if self.dflash_swa_window_size is None:
-            return None
         window = self.dflash_swa_window_size
+        causal = self.dflash_draft_attention == "causal"
+        if window is None and not causal:
+            return None
         block_size = self.dflash_block_size
         kv_len = ctx_len + block_size
         kv_idx = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
-        q_real_pos = torch.arange(ctx_len, ctx_len + block_size, device=device).view(1, 1, -1, 1)
+        q_pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1, 1)
+        q_real_pos = ctx_len + q_pos_in_block
         is_ctx = kv_idx < ctx_len
-        # Context kv kept iff within the window; block kv (>= ctx_len) always visible.
-        keep = (~is_ctx) | (kv_idx > q_real_pos - window)
+        # Context kv kept iff within the window (when windowing); block kv always visible
+        # unless the block is causal, in which case only positions <= the query's.
+        keep_ctx = is_ctx if window is None else (is_ctx & (kv_idx > q_real_pos - window))
+        keep_block = ~is_ctx
+        if causal:
+            keep_block = keep_block & ((kv_idx - ctx_len) <= q_pos_in_block)
+        keep = keep_ctx | keep_block
         attn_mask = torch.zeros(bsz, 1, block_size, kv_len, device=device, dtype=dtype)
         attn_mask.masked_fill_(~keep, torch.finfo(dtype).min)
         return attn_mask

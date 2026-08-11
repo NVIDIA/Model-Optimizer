@@ -44,6 +44,7 @@ The draft architecture is independent of the target model.
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS  # noqa: N814
@@ -51,6 +52,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as _NORM_CLS  
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding as _ROTARY_CLS,  # noqa: N814
 )
+from transformers.models.qwen3.modeling_qwen3 import repeat_kv
 from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
 
 from .modeling_final_norm import _maybe_apply_base_final_norm
@@ -155,6 +157,16 @@ class DFlashAttention(nn.Module):
         self.q_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
 
+        # Learnable per-head attention sink (GPT-OSS / Nemotron formulation): one extra
+        # logit per head, appended before the softmax and dropped after, so a head can put
+        # probability mass "nowhere" instead of being forced to attend inside its window.
+        # Named to match the deployed checkpoints' `self_attn.attention_sink_bias`.
+        self.attention_sink_bias = (
+            nn.Parameter(torch.zeros(self.num_heads))
+            if getattr(config, "attention_sink_bias", False)
+            else None
+        )
+
         # Resolve HF attention function
         self._attn_fn = None
         # Qwen3 uses sliding window attention on some layers (config.layer_types)
@@ -205,20 +217,69 @@ class DFlashAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Use HF's attention dispatch (handles GQA internally)
-        attn_fn = self._get_attn_fn()
-        attn_output, _ = attn_fn(
-            self,
-            q,
-            k,
-            v,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-        )
+        if self.attention_sink_bias is not None:
+            if self.sliding_window is not None:
+                # The eager sink path applies only the caller-supplied mask; a per-layer
+                # window from config.layer_types would be silently dropped. DFlash windows
+                # the context through the attention mask instead (dflash_swa_window_size),
+                # so this combination is rejected rather than trained with the wrong mask.
+                raise NotImplementedError(
+                    "dflash_attention_sink is not supported together with a per-layer "
+                    "sliding window from dflash_architecture_config.layer_types. Use "
+                    "dflash_swa_window_size for the draft's sliding window instead."
+                )
+            attn_output = self._sink_attention(q, k, v, attention_mask)
+        else:
+            # Use HF's attention dispatch (handles GQA internally)
+            attn_fn = self._get_attn_fn()
+            attn_output, _ = attn_fn(
+                self,
+                q,
+                k,
+                v,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+            )
         attn_output = attn_output.reshape(bsz, q_len, -1)
         return self.o_proj(attn_output)
+
+    def _sink_attention(self, q, k, v, attention_mask):
+        """Eager attention with a learnable per-head sink logit.
+
+        The sink is an extra column appended to the attention logits before the softmax and
+        dropped immediately after, so it consumes probability mass without contributing to
+        the output. Fused SDPA/flash kernels cannot express that extra column, so this path
+        is eager; it runs only when ``dflash_attention_sink`` is enabled.
+
+        Mirrors ``transformers``' GPT-OSS ``eager_attention_forward``, including the
+        max-subtraction before the softmax that keeps bf16 training from overflowing.
+
+        Returns ``[B, q_len, num_heads, head_dim]`` to match the HF attention interface.
+        """
+        sink_bias = self.attention_sink_bias
+        assert sink_bias is not None, "_sink_attention requires dflash_attention_sink=True"
+
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        attn_weights = torch.matmul(q, k.transpose(2, 3)) * self.scaling
+        if attention_mask is not None:
+            # [B, 1, Q, KV] additive mask, already sliced to the kv length by the caller.
+            attn_weights = attn_weights + attention_mask[..., : k.shape[-2]]
+
+        sinks = sink_bias.view(1, -1, 1, 1).expand(
+            attn_weights.shape[0], -1, attn_weights.shape[-2], -1
+        )
+        combined = torch.cat([attn_weights, sinks.to(attn_weights.dtype)], dim=-1)
+        combined = combined - combined.amax(dim=-1, keepdim=True)
+        probs = F.softmax(combined, dim=-1, dtype=torch.float32).to(q.dtype)
+        attn_weights = probs[..., :-1]  # drop the sink column
+        attn_weights = F.dropout(
+            attn_weights, p=self.attention_dropout if self.training else 0.0, training=self.training
+        )
+        return torch.matmul(attn_weights, v).transpose(1, 2).contiguous()
 
 
 class DFlashDecoderLayer(nn.Module):
