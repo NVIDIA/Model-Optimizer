@@ -141,7 +141,8 @@ def get_args():
         help="Directory holding training.jsonl / validation.jsonl of "
         '{"input": <prompt>, "output": <response>} records (used with --sft). Both fields are '
         "tokenized verbatim: no chat template is applied and no BOS is prepended, so if the model "
-        "expects role/turn markers or a BOS token, bake them into the fields yourself.",
+        "expects role/turn markers or a BOS token, bake them into the fields yourself. An EOS "
+        "token is appended after the response.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -293,6 +294,29 @@ def main(args: argparse.Namespace):
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
+    if args.sft:
+        # SFT tokenizes raw text with the student's tokenizer and scores the teacher on those same
+        # ids, so both models must agree on what every id means. Equal vocabulary *sizes* are not
+        # enough -- Llama-2 and Mistral are both 32000 tokens with different mappings -- so compare
+        # the mappings. Checked before the providers are built so a mismatch costs seconds.
+        # The pretraining path is structurally immune: NullTokenizer plus pre-tokenized
+        # --data_paths means one tokenization feeds both models.
+        from transformers import AutoTokenizer
+
+        _tok = {"trust_remote_code": args.trust_remote_code}
+        student_vocab = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok).get_vocab()
+        teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
+        if student_vocab != teacher_vocab:
+            detail = (
+                f"{len(student_vocab)} vs {len(teacher_vocab)} tokens"
+                if len(student_vocab) != len(teacher_vocab)
+                else f"both {len(student_vocab)} tokens, but different token->id mappings"
+            )
+            raise ValueError(
+                "--sft tokenizes with the student's tokenizer and scores the teacher on those "
+                f"same ids, so student and teacher must share a tokenizer ({detail})."
+            )
+
     # Build student and teacher model providers
     def _build_model_provider(hf_path, load_weights=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
@@ -337,16 +361,6 @@ def main(args: argparse.Namespace):
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
     teacher_provider = _build_model_provider(args.teacher_hf_path)
-
-    if args.sft and student_provider.vocab_size != teacher_provider.vocab_size:
-        # The pretraining path is structurally immune to this: NullTokenizer plus pre-tokenized
-        # --data_paths means one tokenization feeds both models. SFT tokenizes raw text with the
-        # student's tokenizer, so a teacher from another family would score ids it never saw and
-        # silently produce a garbage KD target instead of an error.
-        raise ValueError(
-            "--sft tokenizes with the student's tokenizer, so student and teacher must share a "
-            f"vocabulary (got {student_provider.vocab_size} vs {teacher_provider.vocab_size})."
-        )
 
     kd_config = ModelOptDistillConfig(
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale

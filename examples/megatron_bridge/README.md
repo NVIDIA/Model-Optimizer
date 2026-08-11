@@ -135,7 +135,7 @@ with the loss masked to the completion. The directory must hold `training.jsonl`
 `validation.jsonl` of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
 the model's own HuggingFace tokenizer. Both fields are tokenized **verbatim** — no chat template is
 applied and no BOS token is prepended — so if your model expects role/turn markers or a BOS token,
-include them in the `"input"` field yourself.
+include them in the `"input"` field yourself. An EOS token is appended after the response.
 
 ### Distillation with Real Data
 
