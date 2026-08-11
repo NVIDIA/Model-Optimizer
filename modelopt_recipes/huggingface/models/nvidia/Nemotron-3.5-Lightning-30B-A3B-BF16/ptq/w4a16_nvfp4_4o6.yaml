@@ -70,4 +70,7 @@ quantize:
     - quantizer_name: 'lm_head.weight_quantizer'
       enable: true
       cfg: {$import: nvfp4_four_over_six}
-
+    # Keep the entire MTP subtree in BF16. This rule must remain last so it
+    # overrides the broad expert, Mamba, KV-cache, and output-layer selectors.
+    - quantizer_name: 'mtp.*'
+      enable: false
