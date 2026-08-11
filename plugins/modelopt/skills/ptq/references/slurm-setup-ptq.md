@@ -1,7 +1,7 @@
 # SLURM Setup for PTQ
 
 PTQ-specific SLURM details. For generic SLURM patterns (account discovery, job template,
-monitoring), see `skills/common/slurm-setup.md`.
+monitoring), see the common skill's `slurm-setup.md`.
 
 ---
 
@@ -73,7 +73,7 @@ FSDP2* section of `examples/hf_ptq/README.md`.
 
 Sizing guidance specific to this path: when the per-rank decoder shard approaches GPU capacity (200B+ at low rank count), either add more nodes (more ranks → smaller shard per rank) or add `--cpu_offload`. Layer detection is automatic; no YAML config needed.
 
-Use the multi-node template from `skills/common/slurm-setup.md` section 4 as the job script wrapper.
+Use the multi-node template from the common skill's `slurm-setup.md` section 4 as the job script wrapper.
 
 ---
 
@@ -82,6 +82,6 @@ Use the multi-node template from `skills/common/slurm-setup.md` section 4 as the
 Before the full calibration run, submit a smoke test with `--calib_size 4` and `--time=00:30:00`.
 This catches script errors cheaply before using GPU quota on a real run.
 
-See `skills/common/slurm-setup.md` section 2 for the smoke test partition pattern.
+See the common skill's `slurm-setup.md` section 2 for the smoke test partition pattern.
 
 Only submit the full calibration job after the smoke test exits cleanly.

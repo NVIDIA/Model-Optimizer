@@ -27,7 +27,7 @@
     "files": [],
     "expected_behavior": [
       "Checks for cluster config at ~/.config/modelopt/clusters.yaml, .agents/clusters.yaml, or .claude/clusters.yaml",
-      "Sources .agents/skills/common/remote_exec.sh",
+      "Sources remote_exec.sh from the loaded common skill root",
       "Calls remote_load_cluster, remote_check_ssh, remote_detect_env",
       "Checks if checkpoint is already on remote (e.g., from prior PTQ run) before syncing; only syncs if local",
       "For SLURM: writes a job script with srun --container-image and --container-mounts on srun line (not #SBATCH)",

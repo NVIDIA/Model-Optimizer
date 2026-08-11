@@ -34,7 +34,7 @@ Step 3c has the path.) Otherwise build it on the target cluster — never copy a
 between clusters:
 
 ```bash
-srun -p cpu -t 01:00:00 --pty .agents/scripts/gdpval-sif.sh   # uses $GDPVAL_SIF_DIR
+srun -p cpu -t 01:00:00 --pty "$SKILL_DIR/scripts/gdpval-sif.sh"   # uses $GDPVAL_SIF_DIR
 ```
 
 `gdpval-sif.sh` is idempotent (flock-guarded, atomic): it builds from `gdpval.def` at
@@ -160,7 +160,7 @@ mount source, and `raise ValueError` listing the missing ones **before** any
    validation, and the run then silently degrades. Guard with the verify-only mode:
 
    ```bash
-   .agents/scripts/gdpval-sif.sh --check     # uses $GDPVAL_SIF_DIR; exit 1 + lists what IS there
+   "$SKILL_DIR/scripts/gdpval-sif.sh" --check     # uses $GDPVAL_SIF_DIR; exit 1 + lists what IS there
    ```
 
    Keep `GDPVAL_SIF_NAME` / the helper's default in sync with the config's

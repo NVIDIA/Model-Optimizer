@@ -34,13 +34,13 @@ If the cluster config contains multiple clusters and the user did not name the t
 For remote, connect:
 
 ```bash
-source .agents/skills/common/remote_exec.sh
+source "$SKILL_DIR/remote_exec.sh"
 remote_load_cluster <cluster_name>
 remote_check_ssh
 remote_detect_env    # sets REMOTE_ENV_TYPE = slurm / docker / bare
 ```
 
-If remote but no config, ask user for: hostname, SSH username, SSH key path, remote workdir. Create `~/.config/modelopt/clusters.yaml` (see `skills/common/remote-execution.md` for format).
+If remote but no config, ask user for: hostname, SSH username, SSH key path, remote workdir. Create `~/.config/modelopt/clusters.yaml` (see `remote-execution.md` for format).
 
 ## Env-3. What compute is available?
 
@@ -79,4 +79,4 @@ Return to the skill's SKILL.md for the execution path based on these results.
 
 ## Multi-user / Slack bot
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md` before proceeding.
+If `MODELOPT_WORKSPACE_ROOT` is set, read `workspace-management.md` before proceeding.

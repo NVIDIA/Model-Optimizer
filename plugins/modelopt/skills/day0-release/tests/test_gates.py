@@ -18,7 +18,7 @@
 These are deterministic — no GPU, cluster, or network. They test the pure
 decision functions that the gates rest on. Run with:
 
-    python -m pytest .agents/skills/day0-release/tests/test_gates.py
+    python -m pytest "$SKILL_DIR/tests/test_gates.py"
 """
 
 import sys

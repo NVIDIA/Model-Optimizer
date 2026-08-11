@@ -20,7 +20,7 @@ Steps 1–9 apply — but with the branch differences below.
 - **Standalone** — one gym eval per config. Never add GDPVal to a multi-task
   `evaluation.tasks` list, and never add other tasks to a GDPVal config.
 - **Apptainer SIF sandbox** — prefer a site-provided SIF; otherwise
-  `.agents/scripts/gdpval-sif.sh` builds one into `$GDPVAL_SIF_DIR` (build-if-absent,
+  `$SKILL_DIR/scripts/gdpval-sif.sh` builds one into `$GDPVAL_SIF_DIR` (build-if-absent,
   never copied between clusters). Missing/misnamed → **silent** unsandboxed exec.
 - **Thinking mode is mandatory** — non-thinking loses ~86% of pairwise judgements.
   Serve with the model's `--reasoning-parser` and force it on via the adapter's

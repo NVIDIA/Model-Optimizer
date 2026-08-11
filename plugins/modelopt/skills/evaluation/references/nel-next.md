@@ -12,7 +12,7 @@ Start configs from `recipes/examples/example_eval_next.yaml`.
 | | default (SKILL Steps 1–9) | nel-next |
 |---|---|---|
 | package | `nemo-evaluator-launcher` 0.2.6 | `nemo-evaluator[harbor]` 0.4.x |
-| env | the skill's normal env | **separate venv** (`.agents/scripts/nel-next.sh`) |
+| env | the skill's normal env | **separate venv** (`$SKILL_DIR/scripts/nel-next.sh`) |
 | CLI | `nel run --config X.yaml` | `nel eval run X.yaml [--submit]` |
 | overrides | `-o ++a.b.c=v` | `-O a.b.c=v` |
 | canary limiter | `++…limit_samples=N` | `-O benchmarks.0.max_problems=N` (NOT `--max-problems`, which is `--bench`-only) |
@@ -23,8 +23,8 @@ Start configs from `recipes/examples/example_eval_next.yaml`.
 Installing 0.4.x into the 0.2.6 env clobbers `nel`, so it lives in its own venv:
 
 ```bash
-.agents/scripts/nel-next.sh --setup-only      # one-time, ~1-2 min (needs `uv`)
-.agents/scripts/nel-next.sh eval run <cfg> --dry-run | --submit | …
+"$SKILL_DIR/scripts/nel-next.sh" --setup-only      # one-time, ~1-2 min (needs `uv`)
+"$SKILL_DIR/scripts/nel-next.sh" eval run <cfg> --dry-run | --submit | …
 ```
 
 Default install is a git build from `github.com/NVIDIA-NeMo/Evaluator` via `NEL_NEXT_ORIGIN`
@@ -197,12 +197,12 @@ with its own `run_id`, copying the shared `services:` block.
 ## Run (dry-run → canary → full) → push to MLflow
 
 ```bash
-set -a && source .env && set +a; NEL=.agents/scripts/nel-next.sh
-$NEL eval run <cfg>.yaml --dry-run                                  # validate/render (no SSH)
-$NEL eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
-$NEL eval run <cfg>.yaml --submit                                   # full
-$NEL eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
-$NEL mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
+set -a && source .env && set +a; NEL="$SKILL_DIR/scripts/nel-next.sh"
+"$NEL" eval run <cfg>.yaml --dry-run                                  # validate/render (no SSH)
+"$NEL" eval run <cfg>.yaml --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
+"$NEL" eval run <cfg>.yaml --submit                                 # full
+"$NEL" eval {status|logs -f|report -f markdown|merge} -r <run_id>     # lifecycle
+"$NEL" mlflow-push -r <run_id> -c <cfg>.yaml                          # post-run: push merged bundle(s) to MLflow
 ```
 
 `eval run` on a slurm cluster scp's the sbatch + redacted `.secrets.env` and

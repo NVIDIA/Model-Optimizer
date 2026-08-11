@@ -3,9 +3,9 @@
 # Benchmark shown = Terminal-Bench 2.1; swap the `benchmarks:` block per the recipe.
 #
 # Run via the isolated nel-next venv:
-#   .agents/scripts/nel-next.sh --setup-only
+#   "$SKILL_DIR/scripts/nel-next.sh" --setup-only
 #   set -a && source .env && set +a    # HF_TOKEN, AWS_*, NEL_NEXT_EVAL_IMAGE, HARBOR_*_ECR_REPOSITORY (from modelopttools:eval-config)
-#   .agents/scripts/nel-next.sh eval run recipes/examples/example_eval_next.yaml --dry-run
+#   "$SKILL_DIR/scripts/nel-next.sh" eval run "$SKILL_DIR/recipes/examples/example_eval_next.yaml" --dry-run
 #   ... --submit -O benchmarks.0.max_problems=2 -O benchmarks.0.repeats=1 -O benchmarks.0.max_concurrent=2   # canary
 #   ... --submit                                                                                             # full
 # Internal harbor infra (eval_image + ECR) comes from .env via ${VAR}; all blocks

@@ -46,7 +46,7 @@ See `.agents/clusters.yaml.example` for a fully annotated example with multiple 
 ## 2. Connect and Establish Persistent Session
 
 ```bash
-source .agents/skills/common/remote_exec.sh
+source "$SKILL_DIR/remote_exec.sh"
 remote_load_cluster <cluster_name>    # or omit name to use default_cluster
 remote_check_ssh                      # validates connectivity + starts persistent session
 ```
@@ -153,6 +153,6 @@ remote_sync_from <remote_output_subdir> /local/output/
 
 ## Reference Files
 
-- **`skills/common/remote_exec.sh`** — Full utility library (session, run, sync, SLURM, Docker helpers)
+- **`remote_exec.sh`** — Full utility library (session, run, sync, SLURM, Docker helpers)
 - **`.agents/clusters.yaml`** — Active cluster configuration (canonical; `.claude/clusters.yaml` also accepted for back-compat)
 - **`.agents/clusters.yaml.example`** — Annotated example config

@@ -20,8 +20,8 @@ Before constructing commands, read:
 - `examples/megatron_bridge/README.md`, especially PTQ, data preparation, QAD,
   export, and Slurm usage
 - `examples/megatron_bridge/{quantize.py,distill.py}` via `--help`
-- `skills/common/{environment-setup,workspace-management,slurm-setup}.md`; also
-  `skills/common/remote-execution.md` for remote Slurm
+- the common skill's `environment-setup.md`, `workspace-management.md`, and
+  `slurm-setup.md`; also its `remote-execution.md` for remote Slurm
 
 Treat the example README and `--help` output as authoritative for mutable flags,
 commands, containers, and checkpoint formats. This skill supports Slurm only.

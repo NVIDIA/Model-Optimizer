@@ -27,8 +27,10 @@ Resolve these before starting (ask the user for anything missing):
 
 - **Model** — HF handle or checkpoint path.
 - **Recipe / qformat** — e.g. `nvfp4`, `fp8`, or a recipe path. One candidate for v1.
-- **Cluster / launcher** — from `clusters.yaml` (see `skills/common/environment-setup.md`).
-- **Eval set** — defaults to the AA suite (`evaluation/recipes/tasks/aa/`).
+- **Cluster / launcher** — from `clusters.yaml` (see the common skill's
+  `environment-setup.md`).
+- **Eval set** — defaults to the evaluation skill's AA suite
+  (`recipes/tasks/aa/`).
 - **Threshold** — max accuracy drop; default `0.01` (1%).
 
 ## The chain
@@ -60,8 +62,8 @@ progress:
 
 ### Step 1 — Setup gate
 
-Confirm credentials (`skills/common/credentials.md`) and cluster reachability
-(`skills/common/remote-execution.md`). If either fails, stop with
+Use the common skill's `credentials.md` and `remote-execution.md` to confirm
+credentials and cluster reachability. If either fails, stop with
 `SYSTEMIC` — do not start PTQ.
 
 ### Step 2 — PTQ
@@ -70,9 +72,9 @@ Invoke the **ptq** skill to produce the quantized checkpoint. Then gate:
 
 ```bash
 # The ptq skill's post-PTQ validation produces a validation-summary JSON (size
-# ratio + layer-precision counts + metadata diffs; see
-# ptq/references/checkpoint-validation.md). v1 gates on that summary:
-python .agents/skills/day0-release/scripts/gate_ptq.py --summary <validation-summary.json>
+# ratio + layer-precision counts + metadata diffs; see the ptq skill's
+# references/checkpoint-validation.md). v1 gates on that summary:
+python "$SKILL_DIR/scripts/gate_ptq.py" --summary <validation-summary.json>
 #   add `--recipe <qformat>` to override the recipe recorded in the summary
 ```
 
@@ -100,7 +102,7 @@ the working command back into NEL's `deployment.command` and resume the eval. If
 the checkpoint genuinely can't serve, `POINT_INFEASIBLE`. Gate:
 
 ```bash
-python .agents/skills/day0-release/scripts/gate_run.py --run <run-summary.json>
+python "$SKILL_DIR/scripts/gate_run.py" --run <run-summary.json>
 ```
 
 A `pass: false` here means the run is incomplete or invalid (judge/parse error,
@@ -118,7 +120,7 @@ baseline.
 After recording the external status, produce per-task deltas and run:
 
 ```bash
-python .agents/skills/day0-release/scripts/gate_compare.py \
+python "$SKILL_DIR/scripts/gate_compare.py" \
     --baseline <baseline_scores.json> --candidate <candidate_scores.json> \
     --threshold 0.01
 ```

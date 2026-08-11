@@ -10,26 +10,26 @@ Serve a model checkpoint as an OpenAI-compatible inference endpoint. Supports vL
 
 ## Quick Start
 
-Prefer `scripts/deploy.sh` for standard local deployments — it handles quant detection, health checks, and server lifecycle. Use the raw framework commands in Step 4 when you need flags the script doesn't support, or for remote deployment.
+Prefer `$SKILL_DIR/scripts/deploy.sh` for standard local deployments — it handles quant detection, health checks, and server lifecycle. Use the raw framework commands in Step 4 when you need flags the script doesn't support, or for remote deployment.
 
 ```bash
 # Start vLLM server with a ModelOpt checkpoint
-scripts/deploy.sh start --model ./qwen3-0.6b-fp8
+"$SKILL_DIR/scripts/deploy.sh" start --model ./qwen3-0.6b-fp8
 
 # Start with SGLang and tensor parallelism
-scripts/deploy.sh start --model ./llama-70b-nvfp4 --framework sglang --tp 4
+"$SKILL_DIR/scripts/deploy.sh" start --model ./llama-70b-nvfp4 --framework sglang --tp 4
 
 # Start from HuggingFace hub
-scripts/deploy.sh start --model nvidia/Llama-3.1-8B-Instruct-FP8
+"$SKILL_DIR/scripts/deploy.sh" start --model nvidia/Llama-3.1-8B-Instruct-FP8
 
 # Test the API
-scripts/deploy.sh test
+"$SKILL_DIR/scripts/deploy.sh" test
 
 # Check status
-scripts/deploy.sh status
+"$SKILL_DIR/scripts/deploy.sh" status
 
 # Stop
-scripts/deploy.sh stop
+"$SKILL_DIR/scripts/deploy.sh" stop
 ```
 
 The script handles: GPU detection, quantization flag auto-detection (FP8 vs FP4), server lifecycle (start/stop/restart/status), health check polling, and API testing.
@@ -38,7 +38,7 @@ The script handles: GPU detection, quantization flag auto-detection (FP8 vs FP4)
 
 ### 0. Check workspace (multi-user / Slack bot)
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md`. Before creating a new workspace, check the current session for existing model workspaces — especially if deploying a checkpoint from a prior PTQ run:
+If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md`. Before creating a new workspace, check the current session for existing model workspaces — especially if deploying a checkpoint from a prior PTQ run:
 
 ```bash
 ls "$MODELOPT_WORKSPACE_ROOT/<session_id>/" 2>/dev/null
@@ -79,7 +79,7 @@ Check the support matrix in `references/support-matrix.md` to confirm the model 
 
 ### 3. Check the environment
 
-Read `skills/common/environment-setup.md` for GPU detection, local vs remote, and SLURM/Docker/bare metal detection. After completing it you should know: GPU model/count, local or remote, and execution environment.
+Use the common skill's `environment-setup.md` for GPU detection, local vs remote, and SLURM/Docker/bare metal detection. After completing it you should know: GPU model/count, local or remote, and execution environment.
 
 Then check the **deployment framework** is installed:
 
@@ -211,12 +211,13 @@ token shapes, and how to read `profile_export_aiperf.json`.
 
 If a cluster config exists (`~/.config/modelopt/clusters.yaml`, `.agents/clusters.yaml`, or `.claude/clusters.yaml`), or the user mentions running on a remote machine:
 
-0. **Check container registry auth** — before submitting any SLURM job with a container image, verify credentials exist on the cluster per `skills/common/slurm-setup.md` section 6. If credentials are missing for the image's registry, ask the user to fix auth or switch to an image on an authenticated registry (e.g., NGC). **Do not submit until auth is confirmed.**
+0. **Check container registry auth** — before submitting any SLURM job with a container image, verify credentials exist on the cluster per the common skill's `slurm-setup.md` section 6. If credentials are missing for the image's registry, ask the user to fix auth or switch to an image on an authenticated registry (e.g., NGC). **Do not submit until auth is confirmed.**
 
-1. **Source remote utilities:**
+1. **Source remote utilities:** Load the common skill, then resolve
+   `remote_exec.sh` from that skill's root.
 
    ```bash
-   source .agents/skills/common/remote_exec.sh
+   source "<common-skill-dir>/remote_exec.sh"
    remote_load_cluster
    remote_check_ssh
    remote_detect_env
@@ -232,7 +233,7 @@ If a cluster config exists (`~/.config/modelopt/clusters.yaml`, `.agents/cluster
 
 3. **Deploy based on remote environment:**
 
-   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). After submitting, register the job and set up monitoring per the **monitor skill**. Get the node hostname from `squeue -j $JOBID -o %N`.
+   - **SLURM** — see the common skill's `slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). After submitting, register the job and set up monitoring per the **monitor skill**. Get the node hostname from `squeue -j $JOBID -o %N`.
 
    - **Bare metal / Docker** — use `remote_run` to start the server directly:
 

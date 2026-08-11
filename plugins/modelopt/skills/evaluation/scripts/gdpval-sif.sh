@@ -22,7 +22,7 @@
 # run reuses the built SIF instantly.
 #
 # Usage:
-#   .agents/scripts/gdpval-sif.sh [<sif-dir-or-file>] [--commit <sha>] [--force|--check]
+#   "$SKILL_DIR/scripts/gdpval-sif.sh" [<sif-dir-or-file>] [--commit <sha>] [--force|--check]
 #     <sif-dir-or-file>  Persistent path on the target cluster's shared FS.
 #                        DEFAULTS to $GDPVAL_SIF_DIR (from .env) when omitted. A
 #                        directory -> <dir>/$GDPVAL_SIF_NAME (default python-3.13.gdpval.sif,
@@ -45,7 +45,7 @@
 # build support, plus network egress to GitHub/base image. Run on a node that has
 # it — a login node, or (preferred for the ~30-min build) the CPU partition:
 #   srun -p cpu -t 01:00:00 --pty \
-#     .agents/scripts/gdpval-sif.sh /lustre/<...>/gdpval/sif
+#     "$SKILL_DIR/scripts/gdpval-sif.sh" /lustre/<...>/gdpval/sif
 #
 # Env overrides: GDPVAL_GYM_COMMIT, GDPVAL_SIF_NAME, APPTAINER_BIN.
 set -euo pipefail

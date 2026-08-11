@@ -12,7 +12,7 @@ Guide the user through creating NEL YAML configs, running evaluations, and monit
 
 ### Workspace integration
 
-If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md` and reuse existing workspaces (this skill is usually the final stage of PTQ → Deploy → Eval; carry any deployment-time patches into `deployment.command`).
+If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-management.md` and reuse existing workspaces (this skill is usually the final stage of PTQ → Deploy → Eval; carry any deployment-time patches into `deployment.command`).
 
 ### Workflow
 
@@ -41,7 +41,7 @@ overrides, and `services`/`benchmarks`/`cluster`/`output` schema. If the user as
 for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 
 1. Read **`references/nel-next.md`** (shared: venv, schema, AWS creds, architecture, timeout strategy, MLflow, run flow) + the per-benchmark recipe `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md`; start from `recipes/examples/example_eval_next.yaml`.
-2. Isolated nel-next venv: `.agents/scripts/nel-next.sh --setup-only` (keeps 0.2.6 `nel` untouched).
+2. Isolated nel-next venv: `"$SKILL_DIR/scripts/nel-next.sh" --setup-only` (keeps 0.2.6 `nel` untouched).
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
@@ -63,7 +63,7 @@ GDPVal:
    self-contained file.
 3. Prerequisite — the Apptainer SIF. **If your site provides one, use it**
    (NVIDIA-internal: `modelopttools:eval-config` Step 3c); otherwise set
-   `GDPVAL_SIF_DIR` in `.env` and build with `.agents/scripts/gdpval-sif.sh`
+   `GDPVAL_SIF_DIR` in `.env` and build with `"$SKILL_DIR/scripts/gdpval-sif.sh"`
    (build-if-absent, no cross-cluster copy). Either way the mounted dir must contain
    the file `GDPVAL_CONTAINER_PATH` names (template: `python-3.13.gdpval.sif`) — a
    name mismatch passes NEL's `test -d` check and the agent then silently runs
@@ -81,7 +81,7 @@ GDPVal:
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
 
-**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp .agents/skills/evaluation/recipes/env.example .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
+**Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
 
 **Secret safety — never open `.env` with Read/Write/Edit.** The harness mirrors later edits of any agent-opened file into the transcript, so touching `.env` leaks the keys the user adds afterward. Use shell only (`cp` to create, `source` to load — neither echoes); edit `env.example`, never `.env`; leave value entry to the user / `modelopttools:eval-config`.
 
@@ -378,7 +378,7 @@ Public images → submit without preflight. Private/restricted → check credent
 ssh <host> "grep -E '^\s*machine\s+' ~/.config/enroot/.credentials 2>/dev/null"
 ```
 
-Add credentials per `skills/common/slurm-setup.md` §6 if missing. If you can't add, switch to a compatible public image (e.g. `nvcr.io/nvidia/vllm:<YY.MM>-py3` — check catalog.ngc.nvidia.com). **Do not retry more than once** after an auth failure.
+Add credentials per the common skill's `slurm-setup.md` §6 if missing. If you can't add, switch to a compatible public image (e.g. `nvcr.io/nvidia/vllm:<YY.MM>-py3` — check catalog.ngc.nvidia.com). **Do not retry more than once** after an auth failure.
 
 ---
 
@@ -390,7 +390,7 @@ Run directly when the user asked to launch; otherwise ask before submitting.
 
 ```bash
 # .env lives at the workspace root (where you run nel); the template ships under the skill dir
-[ -f .env ] || cp .agents/skills/evaluation/recipes/env.example .env   # create only if Step 1 didn't
+[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env   # create only if Step 1 didn't
 set -a && source .env && set +a
 
 # If pre_cmd/post_cmd in config (review pre_cmd first — runs arbitrary commands):

@@ -29,10 +29,9 @@ change is being measured, typically a further quantized version of the baseline.
    before comparing scores. If not, validate logs, server health,
    judge/code-execution status, sample accounting, and reasoning parsing before
    computing deltas.
-5. For each task, use the canonical score field from the matching
-   `.agents/skills/evaluation/recipes/tasks/<task>.md` Score Extraction
-   section.
-6. Read and perform `.agents/skills/evaluation/references/run-validation.md`
+5. For each task, use the canonical score field from the matching evaluation
+   skill task recipe, `recipes/tasks/<task>.md`, under **Score Extraction**.
+6. Use the evaluation skill's `references/run-validation.md` to perform the
    **External Baseline Sanity Check**. Record each source URL, protocol
    difference, and task status before applying the candidate-delta gate. A
    failed baseline blocks a success verdict; correct and rerun it first. If no
@@ -80,8 +79,9 @@ If any item differs, either rerun with matched settings or label the result as
 not an apples-to-apples quantization comparison.
 
 These checks compare the baseline and candidate to each other. The external
-baseline check in `evaluation/references/run-validation.md` separately tests
-whether the baseline's absolute score is credible; both guards must be reported.
+baseline check in the evaluation skill's `references/run-validation.md`
+separately tests whether the baseline's absolute score is credible; both guards
+must be reported.
 
 ## Report Format
 

@@ -41,7 +41,7 @@ order:
    GPU needed:
 
    ```bash
-   python .agents/skills/benchmark-model-kernels/scripts/benchmark_model.py <model> \
+   python "$SKILL_DIR/scripts/benchmark_model.py" <model> \
      --tp <tp> --ep <ep> --ms <m1> <m2> ... --print_only
    ```
 
@@ -63,7 +63,7 @@ order:
 
    ```bash
    CUDA_VISIBLE_DEVICES=<gpu-index> \
-   python .agents/skills/benchmark-model-kernels/scripts/benchmark_model.py <model> \
+   python "$SKILL_DIR/scripts/benchmark_model.py" <model> \
      --tp <tp> --ep <ep> --ms <m1> <m2> ... \
      --flashinfer_repo <flashinfer-repo> --workdir <workdir>
    ```
@@ -112,7 +112,7 @@ missing shape:
 
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu-index> \
-python .agents/skills/benchmark-model-kernels/scripts/benchmark_via_builtin.py \
+python "$SKILL_DIR/scripts/benchmark_via_builtin.py" \
   --flashinfer_repo <flashinfer-repo> --ms <m1> <m2> ... \
   --nks <n>,<k>,<name> --workdir <workdir>
 ```

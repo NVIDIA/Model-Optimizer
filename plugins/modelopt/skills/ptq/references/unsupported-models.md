@@ -6,7 +6,7 @@ Follow the investigation steps below to determine if `hf_ptq.py` works or if pat
 
 ## Step A — Download the model and locate the source
 
-**Download first.** Follow `skills/common/workspace-management.md` to set up local and remote workspaces, sync ModelOpt source, and download the model on the target machine. This avoids downloading twice and gives access to README, custom modeling code, and tokenizer config.
+**Download first.** Follow the common skill's `workspace-management.md` to set up local and remote workspaces, sync ModelOpt source, and download the model on the target machine. This avoids downloading twice and gives access to README, custom modeling code, and tokenizer config.
 
 After download, inspect the model files on the target machine (use `remote_run` if remote):
 

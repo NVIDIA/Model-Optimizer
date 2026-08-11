@@ -24,10 +24,10 @@
 # `uvx` environment (uv resolves + caches + reuses it) and forwards to its `nel`.
 #
 # Usage (source .env FIRST so the config's ${VAR}s resolve; this never reads secrets):
-#   .agents/scripts/nel-next.sh --setup-only|--which|--version
-#   .agents/scripts/nel-next.sh eval run <config.yaml> [--dry-run|--submit] [-O k=v ...]
-#   .agents/scripts/nel-next.sh eval {status|logs|report|merge|resume|stop} -r <run_id>
-#   .agents/scripts/nel-next.sh mlflow-push -r <run_id> -c <config.yaml> [-- -o k=v ...]
+#   "$SKILL_DIR/scripts/nel-next.sh" --setup-only|--which|--version
+#   "$SKILL_DIR/scripts/nel-next.sh" eval run <config.yaml> [--dry-run|--submit] [-O k=v ...]
+#   "$SKILL_DIR/scripts/nel-next.sh" eval {status|logs|report|merge|resume|stop} -r <run_id>
+#   "$SKILL_DIR/scripts/nel-next.sh" mlflow-push -r <run_id> -c <config.yaml> [-- -o k=v ...]
 #     Post-run: SLURM doesn't auto-export. Pulls the merged bundle(s) + pushes to MLflow
 #     using the config's export_config.mlflow (resolves ${MLFLOW_TRACKING_URI}, forces
 #     emit_traces=false to avoid the per-sample hang). Run after `source .env`.

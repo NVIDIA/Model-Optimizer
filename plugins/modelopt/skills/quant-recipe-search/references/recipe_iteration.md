@@ -218,8 +218,8 @@ Do not reimplement workflows that existing skills own:
 | Fetch MLflow artifacts | `accessing-mlflow` |
 | Compute baseline-vs-candidate deltas | `compare-results` |
 
-Before launching PTQ in a ModelOpt repo, read the current PTQ skill from
-`.agents/skills/ptq/SKILL.md`; recipe paths and validation gates can change.
+Before launching PTQ in a ModelOpt repo, use the `ptq` skill; its current recipe
+paths and validation gates are authoritative.
 
 ## ModelOpt Starting Points
 
