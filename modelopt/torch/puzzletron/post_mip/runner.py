@@ -28,6 +28,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -561,6 +562,9 @@ _LMMS_EVAL_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS = frozenset(
 )
 _LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS = frozenset(
     {
+        "--batch-size",
+        "--batch_size",
+        "--model",
         "--model_args",
         "--model-args",
         "--output_path",
@@ -570,6 +574,7 @@ _LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS = frozenset(
 )
 _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
+_LMMS_EVAL_PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _as_cli_bool(value: bool) -> str:
@@ -688,6 +693,8 @@ def _model_arg_string(values: Mapping[str, Any]) -> str:
 def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
     raw = settings.get("model_args")
     checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
+    if checkpoint_arg != "model":
+        raise ValueError("downstream_evaluation.config.checkpoint_arg must be 'model'")
     topology = dict(settings.get("topology") or {})
     canonical_topology = normalize_vllm_topology(topology) if topology else {}
     reserved_fields = _lmms_eval_reserved_model_arg_fields(checkpoint_arg)
@@ -766,14 +773,17 @@ def _lmms_eval_command(
     *,
     checkpoint: str,
     output_path: Path,
-) -> tuple[list[str], dict[str, str], float | None]:
+) -> tuple[list[str], dict[str, str], float]:
     """Build a deterministic lmms-eval CLI invocation for one realized checkpoint."""
 
+    model = str(settings.get("model", "vllm"))
+    if model != "vllm":
+        raise ValueError("downstream_evaluation.config.model must be 'vllm'")
     tasks = ",".join(_configured_lmms_eval_tasks(settings))
     argv = [
         *_command_prefix(settings),
         "--model",
-        str(settings.get("model", "vllm")),
+        model,
         "--model_args",
         _merge_lmms_eval_model_args(settings, checkpoint),
         "--tasks",
@@ -816,10 +826,15 @@ def _lmms_eval_command(
             env[str(key)] = str(value)
     if settings.get("cache_dir") is not None:
         env.setdefault("LMMS_EVAL_HOME", str(settings["cache_dir"]))
-    timeout = settings.get("timeout_seconds", settings.get("timeout"))
+    timeout = settings.get("timeout_seconds")
+    if timeout is None:
+        timeout = settings.get("timeout")
     if timeout is None:
         timeout = _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
-    return argv, env, float(timeout)
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("lmms-eval timeout must be a finite positive number")
+    return argv, env, timeout
 
 
 def _metric_key(value: Any) -> str:
@@ -1002,12 +1017,22 @@ def _lmms_eval_process_group_exists(process: subprocess.Popen[str]) -> bool:
     return True
 
 
+def _wait_for_lmms_eval_process_group_exit(
+    process: subprocess.Popen[str], *, deadline: float
+) -> None:
+    while _lmms_eval_process_group_exists(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(_LMMS_EVAL_PROCESS_GROUP_POLL_INTERVAL_SECONDS, remaining))
+
+
 def _run_lmms_eval_process(
     argv: list[str],
     *,
     cwd: str,
     env: Mapping[str, str],
-    timeout: float | None,
+    timeout: float,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         argv,
@@ -1026,15 +1051,21 @@ def _run_lmms_eval_process(
             stdout, stderr = process.communicate(timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             _signal_lmms_eval_process_group(process, signal.SIGKILL)
+            cleanup_deadline = time.monotonic() + _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
             try:
                 stdout, stderr = process.communicate(
                     timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
                 )
             except subprocess.TimeoutExpired as kill_error:
                 stdout, stderr = kill_error.output, kill_error.stderr
+            _wait_for_lmms_eval_process_group_exit(process, deadline=cleanup_deadline)
         else:
             if _lmms_eval_process_group_exists(process):
                 _signal_lmms_eval_process_group(process, signal.SIGKILL)
+                _wait_for_lmms_eval_process_group_exit(
+                    process,
+                    deadline=time.monotonic() + _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+                )
         raise subprocess.TimeoutExpired(
             argv,
             error.timeout,

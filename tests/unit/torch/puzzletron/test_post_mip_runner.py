@@ -16,12 +16,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tests for post-MIP execution, including managed downstream evaluation."""
+
 import json
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.post_mip import runner
@@ -193,7 +197,6 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
 def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
     argv, env, timeout = runner._lmms_eval_command(
         {
-            "command_prefix": ["python", "-m", "lmms_eval"],
             "tasks": ["ifeval", "gsm8k"],
             "batch_size": 2,
             "limit": 8,
@@ -215,7 +218,7 @@ def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
     )
 
     model_args = argv[argv.index("--model_args") + 1]
-    assert argv[:5] == ["python", "-m", "lmms_eval", "--model", "vllm"]
+    assert argv[:5] == [sys.executable, "-m", "lmms_eval", "--model", "vllm"]
     assert argv[argv.index("--tasks") + 1] == "ifeval,gsm8k"
     assert argv[argv.index("--batch_size") + 1] == "2"
     assert argv[argv.index("--limit") + 1] == "8"
@@ -238,6 +241,20 @@ def test_lmms_eval_command_uses_bounded_default_timeout(tmp_path):
     )
 
     assert timeout == runner._DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_lmms_eval_command_rejects_invalid_timeout(tmp_path, timeout):
+    with pytest.raises(ValueError, match="finite positive number"):
+        runner._lmms_eval_command(
+            {
+                "tasks": ["ifeval"],
+                "timeout_seconds": timeout,
+                "topology": {"gpu_group_size": 1},
+            },
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
 
 
 def test_lmms_eval_command_rejects_reserved_model_args(tmp_path):
@@ -265,30 +282,54 @@ def test_lmms_eval_command_rejects_reserved_model_args(tmp_path):
         assert expected in message
 
 
-def test_lmms_eval_command_rejects_reserved_extra_args(tmp_path):
-    cases = (
-        (["--tasks", "gsm8k"], "--tasks"),
-        ("--output_path /tmp/other", "--output_path"),
-        (["--model_args=model=/ckpts/wrong"], "--model_args"),
-    )
-    for extra_args, expected in cases:
-        try:
-            runner._lmms_eval_command(
-                {
-                    "tasks": ["ifeval"],
-                    "topology": {"gpu_group_size": 1},
-                    "extra_args": extra_args,
-                },
-                checkpoint="/ckpts/candidate",
-                output_path=tmp_path / "results",
-            )
-        except ValueError as error:
-            message = str(error)
-        else:
-            raise AssertionError("expected reserved lmms-eval extra_args to fail")
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        ({"model": "hf"}, "config.model must be 'vllm'"),
+        ({"checkpoint_arg": "pretrained"}, "config.checkpoint_arg must be 'model'"),
+    ],
+)
+def test_lmms_eval_command_rejects_non_vllm_managed_settings(tmp_path, settings, expected):
+    with pytest.raises(ValueError, match=expected):
+        runner._lmms_eval_command(
+            {
+                "tasks": ["ifeval"],
+                "topology": {"gpu_group_size": 1},
+                **settings,
+            },
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
 
-        assert "reserved lmms-eval flags" in message
-        assert expected in message
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        pytest.param(["--model", "hf"], "--model", id="model"),
+        pytest.param(["--tasks", "gsm8k"], "--tasks", id="tasks"),
+        pytest.param(["--batch_size=99"], "--batch_size", id="batch-size-underscore"),
+        pytest.param("--batch-size 99", "--batch-size", id="batch-size-hyphen"),
+        pytest.param("--output_path /tmp/other", "--output_path", id="output-path"),
+        pytest.param(
+            ["--model_args=model=/ckpts/wrong"],
+            "--model_args",
+            id="model-args",
+        ),
+    ],
+)
+def test_lmms_eval_command_rejects_reserved_extra_args(tmp_path, extra_args, expected):
+    with pytest.raises(ValueError, match="reserved lmms-eval flags") as exc_info:
+        runner._lmms_eval_command(
+            {
+                "tasks": ["ifeval"],
+                "topology": {"gpu_group_size": 1},
+                "extra_args": extra_args,
+            },
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
+
+    assert expected in str(exc_info.value)
 
 
 def test_lmms_eval_timeout_terminates_process_group(monkeypatch, tmp_path):
@@ -327,19 +368,17 @@ def test_lmms_eval_timeout_terminates_process_group(monkeypatch, tmp_path):
     monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(runner.os, "killpg", fake_killpg)
 
-    try:
+    with pytest.raises(subprocess.TimeoutExpired) as exc_info:
         runner._run_lmms_eval_process(
             ["python", "-m", "lmms_eval"],
             cwd=str(tmp_path),
             env={},
             timeout=7.0,
         )
-    except subprocess.TimeoutExpired as error:
-        assert error.timeout == 7.0
-        assert error.output == "partial stdout"
-        assert error.stderr == "partial stderr"
-    else:
-        raise AssertionError("expected lmms-eval timeout to be raised")
+
+    assert exc_info.value.timeout == 7.0
+    assert exc_info.value.output == "partial stdout"
+    assert exc_info.value.stderr == "partial stderr"
 
     argv, kwargs, process = created[0]
     assert argv == ["python", "-m", "lmms_eval"]
@@ -353,6 +392,8 @@ def test_lmms_eval_timeout_terminates_process_group(monkeypatch, tmp_path):
 
 def test_lmms_eval_timeout_kills_remaining_process_group(monkeypatch, tmp_path):
     signals = []
+    sleep_intervals = []
+    clock = [0.0]
 
     class FakeProcess:
         pid = 3456
@@ -375,20 +416,29 @@ def test_lmms_eval_timeout_kills_remaining_process_group(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
     monkeypatch.setattr(runner.os, "killpg", fake_killpg)
+    monkeypatch.setattr(runner, "_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
 
-    try:
+    def fake_sleep(interval):
+        sleep_intervals.append(interval)
+        clock[0] += interval
+
+    monkeypatch.setattr(runner.time, "sleep", fake_sleep)
+
+    with pytest.raises(subprocess.TimeoutExpired):
         runner._run_lmms_eval_process(
             ["python", "-m", "lmms_eval"],
             cwd=str(tmp_path),
             env={},
             timeout=7.0,
         )
-    except subprocess.TimeoutExpired:
-        pass
-    else:
-        raise AssertionError("expected lmms-eval timeout to be raised")
 
     assert signals == [(3456, signal.SIGTERM), (3456, signal.SIGKILL)]
+    assert sum(sleep_intervals) == pytest.approx(0.25)
+    assert all(
+        interval <= runner._LMMS_EVAL_PROCESS_GROUP_POLL_INTERVAL_SECONDS
+        for interval in sleep_intervals
+    )
 
 
 def test_lmms_eval_timeout_kills_stubborn_process_group(monkeypatch, tmp_path):
@@ -403,36 +453,33 @@ def test_lmms_eval_timeout_kills_stubborn_process_group(monkeypatch, tmp_path):
 
         def communicate(self, timeout=None):
             self.communicate_timeouts.append(timeout)
-            if len(self.communicate_timeouts) < 3:
-                raise subprocess.TimeoutExpired(
-                    ["python", "-m", "lmms_eval"],
-                    timeout,
-                    output="partial stdout",
-                    stderr="partial stderr",
-                )
-            self.returncode = -signal.SIGKILL
-            return "partial stdout", "partial stderr"
+            raise subprocess.TimeoutExpired(
+                ["python", "-m", "lmms_eval"],
+                timeout,
+                output="partial stdout",
+                stderr="partial stderr",
+            )
 
     process = FakeProcess()
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(
-        runner.os,
-        "killpg",
-        lambda pid, signal_number: signals.append((pid, signal_number)),
-    )
 
-    try:
+    def fake_killpg(pid, signal_number):
+        if signal_number == 0:
+            raise ProcessLookupError
+        signals.append((pid, signal_number))
+
+    monkeypatch.setattr(runner.os, "killpg", fake_killpg)
+
+    with pytest.raises(subprocess.TimeoutExpired) as exc_info:
         runner._run_lmms_eval_process(
             ["python", "-m", "lmms_eval"],
             cwd=str(tmp_path),
             env={},
             timeout=7.0,
         )
-    except subprocess.TimeoutExpired as error:
-        assert error.output == "partial stdout"
-        assert error.stderr == "partial stderr"
-    else:
-        raise AssertionError("expected lmms-eval timeout to be raised")
+
+    assert exc_info.value.output == "partial stdout"
+    assert exc_info.value.stderr == "partial stderr"
 
     assert process.communicate_timeouts == [
         7.0,
