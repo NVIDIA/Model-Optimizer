@@ -8,7 +8,7 @@ from `recipes/examples/example_eval_next.yaml`.
 
 TB 2.1 is the successor to TB 2.0 — **identical harbor flow; only the playbook
 name changes** (`terminal_bench_2_1` vs `terminal_bench_2`). The 2.1 task set is
-pinned via a vendored registry override in nemo-evaluator-next.
+pinned via a vendored registry override shipped in the `nemo-evaluator` package.
 
 ## Task-specific values
 
@@ -23,10 +23,10 @@ pinned via a vendored registry override in nemo-evaluator-next.
 | `cluster.container_env.AWS_DEFAULT_REGION` | match `sandbox.region` |
 | `max_concurrent` / `sandbox.concurrency` | `50` (canonical bench.yaml) |
 | timeout_strategy | `max` (canonical bench.yaml) + `agent_kwargs.llm_kwargs.timeout: 3600`; use `task` for leaderboard-comparable |
-| `cluster.eval_image` | **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) |
-| `proxy.request_timeout` | `3600` — must be **≥** `agent_kwargs.llm_kwargs.timeout` |
-| `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` |
-| `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` |
+| `cluster.eval_image` | **`0.5.0.1-harbor`** (`${NEL_NEXT_EVAL_IMAGE}`, multi-arch) *(shared — see `references/nel-next.md`)* |
+| `proxy.request_timeout` | `3600` — must be **≥** `agent_kwargs.llm_kwargs.timeout` *(shared — see `references/nel-next.md`)* |
+| `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` *(shared — see `references/nel-next.md`)* |
+| `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` *(shared — see `references/nel-next.md`)* |
 | `http_pairs_dump` | **last** in the interceptor chain — canary/diagnostic only, drop it for a scored run (unbounded error-pair retention) |
 | scope | 89 tasks × `repeats: 8` |
 

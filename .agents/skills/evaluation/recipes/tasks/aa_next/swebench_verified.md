@@ -20,12 +20,12 @@ ECR/region. Start from `recipes/examples/example_eval_next.yaml`.
 | `solver` | `timeout_strategy: max`, `run_timeout: 10800` (3h), `agent_kwargs.llm_kwargs.timeout: 3600` |
 | `sandbox.region` | `us-east-2` |
 | `sandbox.ecr_repository` | `${HARBOR_SWEBENCH_ECR_REPOSITORY}` (dedicated `harbor-swebench` repo, **us-west-2**, regardless of sandbox region) |
-| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` → **`0.5.0.1-harbor`** (same pin as TB2.1: `configs/shared/nel_next_containers.yaml`) |
+| `cluster.eval_image` | `${NEL_NEXT_EVAL_IMAGE}` → **`0.5.0.1-harbor`** (same pin as TB2.1: `configs/shared/nel_next_containers.yaml`) *(shared — see `references/nel-next.md`)* |
 | `cluster.container_env.AWS_DEFAULT_REGION` | `us-east-2` (match `sandbox.region`) |
 | `instruction_template` | `/configs/prompts/swebench_instruction.md`, **must be MOUNTED**; content is scoring-relevant (gotcha below) |
-| `proxy.request_timeout` | `3600` (FEP-1104 paired HTTP timeout; leaves mirror it on the service proxy) |
-| `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` |
-| `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` |
+| `proxy.request_timeout` | `3600` (FEP-1104 paired HTTP timeout; leaves mirror it on the service proxy) *(shared — see `references/nel-next.md`)* |
+| `drop_params` | `max_tokens`, `max_completion_tokens`, `max_input_tokens_per_task`, `no_rebuild` *(shared — see `references/nel-next.md`)* |
+| `output.export_config.mlflow.exclude_patterns` | `["shard*", "model_traffic.jsonl"]` *(shared — see `references/nel-next.md`)* |
 | `system_message` | `strategy: replace` + the OpenHands prompt from `bench.yaml` (verbatim) — scoring-relevant |
 
 ```yaml

@@ -145,6 +145,15 @@ with its own `run_id`, copying the shared `services:` block.
 
 ## Rules & gotchas
 
+- **Client 0.4.x + `eval_image` 0.5.0.1-harbor is the validated pair — the numbers are not a
+  mismatch.** The image is on its own release train, independent of the pip package. The login
+  node renders `config_<bench>.yaml` from the *client's* model dump and the compute node parses
+  it inside the *image*, and every config model is `extra="forbid"` — so a field renamed or
+  dropped between the two versions would fail as a pydantic `ValidationError` only after the
+  nodes are allocated and the checkpoint is loaded, which `--dry-run` (client-side) cannot
+  catch. This pair is safe because it is what the TB2.1 + SWE-bench parity runs executed, not
+  by construction. **Re-canary whenever either side moves**, and treat a post-allocation
+  `ValidationError` mentioning an unknown/missing config field as skew, not a config bug.
 - **`eval_image`** = `${NEL_NEXT_EVAL_IMAGE}` → `0.5.0.1-harbor` (multi-arch). Re-check
   against `configs/shared/nel_next_containers.yaml` in the eval-factory repo, which is the
   pin and does move. Arch-suffixed `0.17.x/0.18.x-harbor-<arch>` are too old for TB 2.1.
@@ -154,8 +163,14 @@ with its own `run_id`, copying the shared `services:` block.
 - **`drop_params`** for harbor agentic benchmarks: `max_tokens`, `max_completion_tokens`,
   `max_input_tokens_per_task`, `no_rebuild`. The last two are sent by the 0.5.x eval image;
   vLLM 400s on them if they aren't stripped.
-- **`exclude_patterns`** = `["shard*", "model_traffic.jsonl"]` — captured request bodies
-  stay in the run dir, never MLflow.
+- **`exclude_patterns`** = `["shard*", "model_traffic.jsonl"]` — **always required**, not only
+  when `capture_request_body` is set. `model_traffic` capture is on by default
+  (`capture_tool_calls`/`capture_reasoning`/`capture_messages` default `true`; only
+  `capture_request_body` defaults `false`), so `model_traffic.jsonl` — assistant messages,
+  reasoning content, full tool-call payloads — is written on **every** run and must stay in the
+  run dir. `max_content_chars` (default `0` = no truncation) is the size knob. Add
+  `"http_pairs_metrics.json"` too on any run where `http_pairs_dump` is enabled: despite the
+  name it records full request/response **bodies and headers**.
 - **`http_pairs_dump` — canary/diagnostic runs only, leave it OUT of scored runs.**
   `config: {dump_path: "$${NEL_OUTPUT_DIR}/http_pairs_metrics.json", first_n: 50}` (the `$$`
   defers expansion to run time). `first_n` caps only the *successful* pairs: the keep rule is
