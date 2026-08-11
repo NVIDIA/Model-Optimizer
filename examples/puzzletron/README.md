@@ -344,6 +344,56 @@ homogeneous search are documented in [MIP runs](docs/mip_profiles.md). Configure
 candidate evaluation, filtering, materialization, and distillation with
 [post-MIP pipelines](docs/post_mip_pipeline.md).
 
+### Qwen 3.5 0.8B MIP smoke
+
+The focused Qwen 3.5 0.8B example pins the public checkpoint revision. Its
+default model config follows the tracked 0.8B runtime campaign and searches
+only the FFN intermediate sizes `[3072, 2048]`. The default smoke composes that
+config directly. It enables the composite scenario route required by
+named-profile MIP while allowing only the teacher embedding width; depth,
+attention, and GDN axes also remain at their teacher values. It is the first
+runtime-validation target.
+
+The experimental `advanced.yaml` overlay remains an explicit follow-up. Its
+broader axis structure is adapted from the Qwen 3.5 9B config and its target
+values are derived from the pinned 0.8B geometry. Those advanced targets were
+not selected from a completed 0.8B campaign and have not been fully
+runtime-validated. In particular, its `gdn_key_head_dim` 128 to 96 target still
+lacks physical-runtime equivalence evidence; that blocker does not apply to the
+default FFN-only smoke.
+
+The checked-in one-GPU execution plan ends at `mip`. Bypass, vLLM serving
+statistics, evaluation, AIPerf, and distillation are deliberately outside this
+smoke boundary. CPU plan tests validate composition and scheduling only; the
+opt-in GPU test must pass before treating the default route as runtime-validated.
+Review and replace every site placeholder in the runner before submission,
+then inspect the complete plan without launching work:
+
+```bash
+python examples/puzzletron/orchestrate.py \
+  --experiment examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/default.yaml \
+  --runner examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml \
+  --execution examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.smoke.yaml \
+  --stage full --dry-run
+```
+
+The real-checkpoint acceptance test is an explicit manual gate and is not run
+by generic GPU CI. From a reviewed worker-visible checkout and environment on
+one H100 80GB GPU, with model access configured, run:
+
+```bash
+python -m pytest -v -s --run-manual \
+  tests/gpu/torch/puzzletron/test_qwen3p5_0p8b_smoke.py
+```
+
+Retain the source revision, resolved environment or container, GPU model,
+command, and complete pytest log as the result record. Treat the route as
+runtime-validated only when the test passes and confirms a successful MIP
+manifest, the exact `params-90` active profile, and at least one feasible MIP
+scenario. The test runs the orchestrator locally with isolated temporary data
+and cache roots; it does not submit scheduler work or consume the runner
+placeholders above.
+
 ## Run the complete pipeline manually
 
 Choose one tested entry config:

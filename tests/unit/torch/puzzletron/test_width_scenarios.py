@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import json
 import sys
@@ -138,9 +150,7 @@ def test_replacement_library_and_solutions_record_hidden_width(tmp_path, monkeyp
     assert loaded.hidden_width == 768
 
 
-def test_replacement_library_uses_canonical_single_noops_without_joint_noop(
-    tmp_path, monkeypatch
-):
+def test_replacement_library_uses_canonical_single_noops_without_joint_noop(tmp_path, monkeypatch):
     blocks = [
         BlockConfig(
             subblock_configs=(
@@ -216,7 +226,11 @@ def test_runtime_stats_cache_filters_exact_hidden_width(tmp_path):
                     "subblocks": [
                         {
                             "parent_layer_index": 0,
-                            "subblock_config": {"kind": "ffn", "name": "ffn", "intermediate_size": 8},
+                            "subblock_config": {
+                                "kind": "ffn",
+                                "name": "ffn",
+                                "intermediate_size": 8,
+                            },
                             "runtime_ms": width / 1000,
                         }
                     ],
@@ -265,12 +279,16 @@ def test_embedding_pipeline_projects_root_vllm_stats_by_hidden_width(tmp_path):
 
 def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tmp_path):
     _write_scenario_manifest(tmp_path, 768)
+    packed_token_cache = tmp_path / "dataset_cache" / "validation.tokens"
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
         config={
             "puzzle_dir": str(tmp_path),
             "embedding_pruning": {"widths": [768]},
-            "replacement_scoring": {"granularity": "subblock"},
+            "replacement_scoring": {
+                "granularity": "subblock",
+                "packed_token_cache_path": str(packed_token_cache),
+            },
         },
         stage="replacement_scoring",
         gpus_per_node=8,
@@ -280,9 +298,7 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
     assert tuple(
         command[command.index("--worker-stage") : command.index("--worker-stage") + 2]
     ) == ("--worker-stage", "replacement_scoring")
-    overrides = [
-        command[index + 1] for index, value in enumerate(command) if value == "--override"
-    ]
+    overrides = [command[index + 1] for index, value in enumerate(command) if value == "--override"]
     assert any(
         override.endswith("/single_subblock_replacement_solutions.json")
         and override.startswith("replacement_scoring.solutions_path=")
@@ -293,6 +309,7 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
         and override.startswith("replacement_scoring.output_dir=")
         for override in overrides
     )
+    assert f"replacement_scoring.packed_token_cache_path={packed_token_cache}" in overrides
 
 
 def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
@@ -351,9 +368,7 @@ def test_embedding_pipeline_routes_width_local_bypass_overlay(tmp_path):
         gpus_per_node=2,
     )
 
-    overrides = [
-        command[index + 1] for index, value in enumerate(command) if value == "--override"
-    ]
+    overrides = [command[index + 1] for index, value in enumerate(command) if value == "--override"]
     assert (
         "replacement_scoring.bypass_checkpoint_dir="
         f"{tmp_path}/scenarios/width-0768/depth-00/ckpts/bypass_overlay"
@@ -378,20 +393,18 @@ def test_embedding_pipeline_prepares_subblock_solutions_for_every_width(tmp_path
     )
 
     assert len(commands) == 2
-    assert all(command[1].endswith("prepare_subblock_replacement_scoring.py") for command in commands)
+    assert all(
+        command[1].endswith("prepare_subblock_replacement_scoring.py") for command in commands
+    )
+    assert {Path(command[command.index("--puzzle-dir") + 1]).name for command in commands} == {
+        "depth-00"
+    }
     assert {
-        Path(command[command.index("--puzzle-dir") + 1]).name
-        for command in commands
-    } == {"depth-00"}
-    assert {
-        Path(command[command.index("--puzzle-dir") + 1]).parent.name
-        for command in commands
+        Path(command[command.index("--puzzle-dir") + 1]).parent.name for command in commands
     } == {"width-1024", "width-0768"}
 
 
-def test_embedding_pipeline_publishes_root_replacement_scoring_summary(
-    tmp_path, monkeypatch
-):
+def test_embedding_pipeline_publishes_root_replacement_scoring_summary(tmp_path, monkeypatch):
     calls = []
 
     def fake_report(puzzle_dir, **kwargs):
@@ -427,9 +440,9 @@ def test_embedding_pipeline_publishes_root_replacement_scoring_summary(
     assert summary["record_count"] == 1792
     assert summary["scenario_count"] == 2
     assert summary["axes"] == ["axis-1024", "axis-768"]
-    assert json.loads(
-        (tmp_path / "artifacts/replacement_scoring/summary.json").read_text()
-    ) == summary
+    assert (
+        json.loads((tmp_path / "artifacts/replacement_scoring/summary.json").read_text()) == summary
+    )
 
 
 def test_width_scenario_destination_rejects_or_replaces_stale_parent(tmp_path):

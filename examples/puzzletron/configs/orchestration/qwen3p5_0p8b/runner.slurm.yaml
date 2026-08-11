@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Portable public half of the Qwen 3.5 0.8B smoke run packet. Replace every
+# placeholder with the reviewed site contract before crossing the GPU gate.
+runner:
+  kind: slurm
+  slurm:
+    account: REPLACE_WITH_SLURM_ACCOUNT
+    partition: REPLACE_WITH_SLURM_PARTITION
+    partition_batch: REPLACE_WITH_SLURM_PARTITION
+    partition_interactive:
+    partition_cpu:
+    interactive_max_nodes: 1
+    max_nodes: 1
+    time_limit: "1:00:00"
+    log_dir: puzzle_runs/qwen3p5_0p8b_smoke/logs
+  execution_contract:
+    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
+    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
+    container: REPLACE_WITH_REVIEWED_PUZZLETRON_IMAGE
+    container_mounts: REPLACE_WITH_REQUIRED_CONTAINER_MOUNTS
+    prerun_commands: []
+    postrun_commands: []
