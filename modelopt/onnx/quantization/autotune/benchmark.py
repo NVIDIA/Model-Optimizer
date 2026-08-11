@@ -503,6 +503,7 @@ class TrtExecBenchmark(Benchmark):
                             "ssh",
                             "-p",
                             str(self.remote_port),
+                            "-oStrictHostKeyChecking=accept-new",
                             f"{self.remote_user}@{self.remote_ip}",
                             f"rm -f {shlex.quote(self.remote_engine_path)}",
                         ]
@@ -523,6 +524,7 @@ class TrtExecBenchmark(Benchmark):
                     trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec_safe')}"
                     trtexec_safe_cmd = [
                         "ssh",
+                        "-oStrictHostKeyChecking=accept-new",
                         "-p",
                         f"{self.remote_port}",
                         f"{self.remote_user}@{self.remote_ip}",
@@ -543,6 +545,7 @@ class TrtExecBenchmark(Benchmark):
                         trt_path = f"{os.path.join(self.remote_bin_path, 'trtexec')}"
                         trtexec_safe_cmd = [
                             "ssh",
+                            "-oStrictHostKeyChecking=accept-new",
                             "-p",
                             f"{self.remote_port}",
                             f"{self.remote_user}@{self.remote_ip}",
