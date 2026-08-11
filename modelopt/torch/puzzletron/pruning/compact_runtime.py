@@ -30,8 +30,22 @@ __all__ = [
     "compact_gated_delta_net_forward",
     "compact_grouped_attention_forward",
     "resolve_compact_grouped_attention_target",
+    "supports_compact_gated_delta_net",
     "supports_compact_grouped_attention",
 ]
+
+
+_SUPPORTED_GROUPED_ATTENTION_TYPES = {
+    ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5Attention"),
+}
+_SUPPORTED_GDN_TYPES = {
+    ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5GatedDeltaNet"),
+}
+
+
+def _type_key(module) -> tuple[str, str]:
+    module_type = type(module)
+    return module_type.__module__, module_type.__qualname__
 
 
 def _indices_on(indices: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
@@ -53,7 +67,8 @@ def _indexed_linear_forward(
 ):
     """Execute one linear layer through selected rows/columns without resizing parameters."""
 
-    original_forward = module.forward
+    missing = object()
+    original_instance_forward = vars(module).get("forward", missing)
 
     def forward(self, inputs):
         weight = self.weight
@@ -69,7 +84,10 @@ def _indexed_linear_forward(
     try:
         yield
     finally:
-        module.forward = original_forward
+        if original_instance_forward is missing:
+            del module.forward
+        else:
+            module.forward = original_instance_forward
 
 
 @contextmanager
@@ -84,15 +102,13 @@ def _temporary_attrs(module, updates: dict[str, object]):
             setattr(module, name, value)
 
 
-def supports_compact_grouped_attention(
+def _has_compact_grouped_attention_layout(
     attention_module,
     *,
     orig_num_q: int,
     orig_num_kv: int,
     head_dim: int,
 ) -> bool:
-    """Return whether a gated grouped-attention module has the expected packed layout."""
-
     q_proj = getattr(attention_module, "q_proj", None)
     k_proj = getattr(attention_module, "k_proj", None)
     v_proj = getattr(attention_module, "v_proj", None)
@@ -105,11 +121,36 @@ def supports_compact_grouped_attention(
     assert q_proj is not None and k_proj is not None and v_proj is not None and o_proj is not None
     return (
         int(getattr(attention_module, "head_dim", -1)) == int(head_dim)
-        and hasattr(attention_module, "num_key_value_groups")
+        and int(getattr(attention_module, "num_key_value_groups", -1))
+        == int(orig_num_q) // int(orig_num_kv)
         and int(q_proj.weight.shape[0]) == 2 * int(orig_num_q) * int(head_dim)
         and int(k_proj.weight.shape[0]) == int(orig_num_kv) * int(head_dim)
         and int(v_proj.weight.shape[0]) == int(orig_num_kv) * int(head_dim)
         and int(o_proj.weight.shape[1]) == int(orig_num_q) * int(head_dim)
+    )
+
+
+def supports_compact_grouped_attention(
+    attention_module,
+    *,
+    orig_num_q: int,
+    orig_num_kv: int,
+    head_dim: int,
+) -> bool:
+    """Return whether this exact tested Qwen attention layout supports compact execution."""
+
+    return (
+        _type_key(attention_module) in _SUPPORTED_GROUPED_ATTENTION_TYPES
+        and orig_num_q > 0
+        and orig_num_kv > 0
+        and head_dim > 0
+        and orig_num_q % orig_num_kv == 0
+        and _has_compact_grouped_attention_layout(
+            attention_module,
+            orig_num_q=orig_num_q,
+            orig_num_kv=orig_num_kv,
+            head_dim=head_dim,
+        )
     )
 
 
@@ -141,22 +182,47 @@ def resolve_compact_grouped_attention_target(layer, teacher_attention, child_att
         or head_dim is None
     ):
         return None
-    if target_num_q >= orig_num_q and target_num_kv >= orig_num_kv:
+    orig_num_q = int(orig_num_q)
+    orig_num_kv = int(orig_num_kv)
+    target_num_q = int(target_num_q)
+    target_num_kv = int(target_num_kv)
+    head_dim = int(head_dim)
+    if min(orig_num_q, orig_num_kv, target_num_q, target_num_kv, head_dim) <= 0:
+        raise ValueError("grouped-attention head counts and head dimension must be positive")
+    if orig_num_q % orig_num_kv or target_num_q % target_num_kv:
+        raise ValueError("grouped-attention query heads must be divisible by KV heads")
+    if target_num_q > orig_num_q or target_num_kv > orig_num_kv:
+        raise ValueError("grouped-attention target geometry cannot exceed the teacher")
+    if target_num_q == orig_num_q and target_num_kv == orig_num_kv:
         return None
+    if target_num_q // target_num_kv > orig_num_q // orig_num_kv:
+        raise ValueError("grouped-attention target GQA ratio cannot exceed the teacher")
+    has_compact_layout = _has_compact_grouped_attention_layout(
+        attention_module,
+        orig_num_q=orig_num_q,
+        orig_num_kv=orig_num_kv,
+        head_dim=head_dim,
+    )
+    if has_compact_layout and _type_key(attention_module) not in _SUPPORTED_GROUPED_ATTENTION_TYPES:
+        module_name, type_name = _type_key(attention_module)
+        raise RuntimeError(
+            "Compact grouped-attention scoring is unsupported for "
+            f"{module_name}.{type_name}; refusing to score reduced geometry"
+        )
     if not supports_compact_grouped_attention(
         attention_module,
-        orig_num_q=int(orig_num_q),
-        orig_num_kv=int(orig_num_kv),
-        head_dim=int(head_dim),
+        orig_num_q=orig_num_q,
+        orig_num_kv=orig_num_kv,
+        head_dim=head_dim,
     ):
         return None
     return {
         "module": attention_module,
-        "orig_num_q": int(orig_num_q),
-        "orig_num_kv": int(orig_num_kv),
-        "target_num_q": int(target_num_q),
-        "target_num_kv": int(target_num_kv),
-        "head_dim": int(head_dim),
+        "orig_num_q": orig_num_q,
+        "orig_num_kv": orig_num_kv,
+        "target_num_q": target_num_q,
+        "target_num_kv": target_num_kv,
+        "head_dim": head_dim,
     }
 
 
@@ -181,6 +247,10 @@ def compact_grouped_attention_forward(
         raise ValueError(
             f"Unsupported compact grouped-attention layout on {type(attention_module).__name__}"
         )
+    if min(target_num_q, target_num_kv) <= 0:
+        raise ValueError("target query and KV head counts must be positive")
+    if target_num_q > orig_num_q or target_num_kv > orig_num_kv:
+        raise ValueError("target query and KV head counts cannot exceed the teacher")
     if target_num_q % target_num_kv:
         raise ValueError(
             f"target query heads={target_num_q} must be divisible by KV heads={target_num_kv}"
@@ -230,6 +300,47 @@ def _compact_gdn_norm(norm, hidden_states, gate, value_dim_indices: torch.Tensor
     )
 
 
+def supports_compact_gated_delta_net(gdn_module, *, teacher_shape: GDNShape) -> bool:
+    """Return whether this exact tested Qwen GDN layout supports compact execution."""
+
+    if _type_key(gdn_module) not in _SUPPORTED_GDN_TYPES:
+        return False
+    if "_fp32_params" in getattr(gdn_module, "_modules", {}):
+        return False
+    if not {"A_log", "dt_bias"}.issubset(getattr(gdn_module, "_parameters", {})):
+        return False
+    required = (
+        "in_proj_qkv",
+        "in_proj_z",
+        "in_proj_a",
+        "in_proj_b",
+        "conv1d",
+        "norm",
+        "out_proj",
+        "chunk_gated_delta_rule",
+        "recurrent_gated_delta_rule",
+    )
+    if any(not hasattr(gdn_module, name) for name in required):
+        return False
+    projection_width = (
+        2 * teacher_shape.num_key_heads * teacher_shape.key_head_dim
+        + teacher_shape.num_value_heads * teacher_shape.value_head_dim
+    )
+    value_width = teacher_shape.num_value_heads * teacher_shape.value_head_dim
+    return (
+        GDNShape.from_module(gdn_module) == teacher_shape
+        and int(gdn_module.in_proj_qkv.weight.shape[0]) == projection_width
+        and int(gdn_module.in_proj_z.weight.shape[0]) == value_width
+        and int(gdn_module.in_proj_a.weight.shape[0]) == teacher_shape.num_value_heads
+        and int(gdn_module.in_proj_b.weight.shape[0]) == teacher_shape.num_value_heads
+        and int(gdn_module.conv1d.weight.shape[0]) == projection_width
+        and int(gdn_module.norm.weight.shape[0]) == teacher_shape.value_head_dim
+        and int(gdn_module.out_proj.weight.shape[1]) == value_width
+        and int(gdn_module.A_log.shape[0]) == teacher_shape.num_value_heads
+        and int(gdn_module.dt_bias.shape[0]) == teacher_shape.num_value_heads
+    )
+
+
 @contextmanager
 def compact_gated_delta_net_forward(
     gdn_module,
@@ -242,21 +353,11 @@ def compact_gated_delta_net_forward(
     live_shape = GDNShape.from_module(gdn_module)
     if live_shape != teacher_shape:
         raise ValueError(f"live GDN shape {live_shape} does not match teacher {teacher_shape}")
-    required = (
-        "in_proj_qkv",
-        "in_proj_z",
-        "in_proj_a",
-        "in_proj_b",
-        "conv1d",
-        "norm",
-        "out_proj",
-        "chunk_gated_delta_rule",
-        "recurrent_gated_delta_rule",
-    )
-    missing = [name for name in required if not hasattr(gdn_module, name)]
-    if missing:
-        raise ValueError(
-            f"Unsupported compact GDN layout on {type(gdn_module).__name__}: missing {missing}"
+    if not supports_compact_gated_delta_net(gdn_module, teacher_shape=teacher_shape):
+        module_name, type_name = _type_key(gdn_module)
+        raise RuntimeError(
+            "Compact GDN scoring is unsupported for "
+            f"{module_name}.{type_name}; refusing to score reduced geometry"
         )
 
     indices = gated_delta_net_prefix_indices(teacher_shape, target_shape)
@@ -264,15 +365,20 @@ def compact_gated_delta_net_forward(
     hidx = indices["hidx"]
     vidx = indices["vidx"]
     value_dim_indices = torch.arange(target_shape.value_head_dim)
-    original_forward = gdn_module.forward
+    missing = object()
+    original_instance_forward = vars(gdn_module).get("forward", missing)
 
     def compact_forward(
         self,
         hidden_states: torch.Tensor,
         cache_params=None,
+        cache_position=None,
         attention_mask: torch.Tensor | None = None,
+        seq_idx=None,
         **kwargs,
     ):
+        if kwargs:
+            raise TypeError(f"Unsupported compact GDN forward arguments: {sorted(kwargs)}")
         if (
             attention_mask is not None
             and attention_mask.shape[1] > 1
@@ -287,6 +393,23 @@ def compact_gated_delta_net_forward(
         if use_precomputed_states:
             conv_state = cache_params.layers[self.layer_idx].conv_states
             recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
+            compact_projection_width = int(cidx.numel())
+            expected_recurrent_shape = (
+                target_shape.num_value_heads,
+                target_shape.key_head_dim,
+                target_shape.value_head_dim,
+            )
+            if int(conv_state.shape[-2]) != compact_projection_width:
+                raise ValueError(
+                    "Compact GDN cache convolution width does not match the target geometry: "
+                    f"actual={int(conv_state.shape[-2])} expected={compact_projection_width}"
+                )
+            actual_recurrent_shape = tuple(int(size) for size in recurrent_state.shape[-3:])
+            if actual_recurrent_shape != expected_recurrent_shape:
+                raise ValueError(
+                    "Compact GDN recurrent-state shape does not match the target geometry: "
+                    f"actual={actual_recurrent_shape} expected={expected_recurrent_shape}"
+                )
 
         mixed_qkv = F.linear(
             hidden_states,
@@ -331,7 +454,7 @@ def compact_gated_delta_net_forward(
                     weight=conv_weight.squeeze(1),
                     bias=conv_bias,
                     activation=self.activation,
-                    seq_idx=kwargs.get("seq_idx"),
+                    seq_idx=seq_idx,
                 )
             else:
                 mixed_qkv = F.silu(
@@ -419,4 +542,7 @@ def compact_gated_delta_net_forward(
     try:
         yield
     finally:
-        gdn_module.forward = original_forward
+        if original_instance_forward is missing:
+            del gdn_module.forward
+        else:
+            gdn_module.forward = original_instance_forward
