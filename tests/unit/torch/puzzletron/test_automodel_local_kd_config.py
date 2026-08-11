@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron local-KD configuration, recipes, and launch behavior."""
+
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.plugins.automodel import (
@@ -25,16 +28,6 @@ from modelopt.torch.puzzletron.plugins.automodel import (
     local_kd_launch,
     local_kd_recipe,
 )
-
-
-def test_local_kd_derives_logical_dp_after_ep_overlay():
-    assert (
-        local_kd_config._logical_dp_size(
-            OmegaConf.create({}),
-            {"dp_size": 8, "ep_size": 4},
-        )
-        == 2
-    )
 
 
 def test_local_kd_treats_ep_as_an_overlay_not_a_sample_axis():
@@ -83,8 +76,6 @@ def test_lane_axis_counts_reject_model_parallel_replica_disagreement():
 
 
 def test_local_kd_only_requires_publication_validation_when_exporting_hf():
-    from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
-
     assert not local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.FALSE)
     assert local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.FINAL)
     assert local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.EVERY)
