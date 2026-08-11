@@ -45,6 +45,8 @@ class AutoModelReplaceBlockExecutor:
         self.source_hidden_width = None
         self.sliced_teacher_baseline = None
         self.latest_observability = None
+        self.latest_score_device_type = None
+        self.visible_cuda_device_count = None
         self._setup_complete = False
 
     def capabilities(self) -> dict:
@@ -247,10 +249,15 @@ class AutoModelReplaceBlockExecutor:
                 "hidden_width": self.source_hidden_width,
                 "sliced_teacher_baseline": self.sliced_teacher_baseline,
                 "observability": self.latest_observability,
+                "score_device_type": getattr(self, "latest_score_device_type", None),
+                "visible_cuda_device_count": getattr(
+                    self, "visible_cuda_device_count", None
+                ),
             },
         )
 
     def _score(self, prune_target: dict | list[dict] | None) -> dict | None:
+        import torch
         import torch.distributed as torch_dist
 
         import modelopt.torch.utils.distributed as dist
@@ -264,6 +271,7 @@ class AutoModelReplaceBlockExecutor:
         recipe = self.recipe
         cache = self.cache
         params = self.params
+        self.visible_cuda_device_count = torch.cuda.device_count()
         per_batch = []
         tp_group = recipe.tensor_parallel_group()
         candidate_lm_head = recipe.lm_head_weight() if recipe.has_outputs else None
@@ -298,6 +306,13 @@ class AutoModelReplaceBlockExecutor:
             for batch_idx, (hidden, targets) in enumerate(recipe.iterate_captures()):
                 if hidden is None:
                     continue
+                device_type = hidden.device.type
+                if self.latest_score_device_type not in (None, device_type):
+                    raise RuntimeError(
+                        "AutoModel scoring tensors changed device type within one executor: "
+                        f"{self.latest_score_device_type!r} -> {device_type!r}"
+                    )
+                self.latest_score_device_type = device_type
                 teacher_hidden = cache.hidden(
                     batch_idx,
                     device=hidden.device,

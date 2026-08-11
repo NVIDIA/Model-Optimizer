@@ -143,6 +143,31 @@ def test_dynamic_stage_semantic_projection_keeps_stage_id_fallback() -> None:
     assert semantic_stage_config(config, "post.custom") == config
 
 
+def test_semantic_projection_normalizes_empty_optional_sections() -> None:
+    baseline = semantic_stage_config({"build_library": {"enabled": True}}, "build_library")
+
+    assert (
+        semantic_stage_config(
+            {"build_library": {"enabled": True}, "library": None}, "build_library"
+        )
+        == baseline
+    )
+    assert (
+        semantic_stage_config({"build_library": {"enabled": True}, "library": {}}, "build_library")
+        == baseline
+    )
+    assert (
+        semantic_stage_config(
+            {
+                "build_library": {"enabled": True},
+                "library": {"vllm": {"enabled": True}},
+            },
+            "build_library",
+        )
+        != baseline
+    )
+
+
 def test_registry_uses_the_approved_fixed_dependencies():
     assert selected_parent_stage_ids("tokenize_data", {}) == ("convert",)
     assert selected_parent_stage_ids("vllm_stats", {}) == ("convert",)

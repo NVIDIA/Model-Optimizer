@@ -525,7 +525,13 @@ def semantic_stage_config(config: Mapping[str, Any], stage_id: str) -> dict[str,
     spec = STAGE_REGISTRY.get(stage_id)
     stage_sections = (stage_id,) if spec is None else spec.semantic_config_sections
     sections = dict.fromkeys((*SHARED_SEMANTIC_CONFIG_SECTIONS, *stage_sections))
-    return {key: config[key] for key in sections if key in config}
+    return {
+        key: config[key]
+        for key in sections
+        if key in config
+        and config[key] is not None
+        and not (isinstance(config[key], Mapping) and not config[key])
+    }
 
 
 def stage_display_name(stage_id: str, *, granularity: str | None = None) -> str:

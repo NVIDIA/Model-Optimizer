@@ -172,7 +172,23 @@ def _task_binding(*, group_size: int) -> task_launcher.TaskBinding:
     )
 
 
-def test_single_node_torchrun_uses_localhost_for_rendezvous() -> None:
+def test_rendezvous_ports_are_stable_distinct_and_in_range() -> None:
+    first = task_launcher.rendezvous_port("attempt-a", 0, 2)
+    second = task_launcher.rendezvous_port("attempt-a", 1, 2)
+
+    assert first == task_launcher.rendezvous_port("attempt-a", 0, 2)
+    assert first != second
+    assert 20000 <= first < 50000
+    assert 20000 <= second < 50000
+
+
+@pytest.mark.parametrize("group_index", [-1, 2])
+def test_rendezvous_port_rejects_invalid_group_index(group_index: int) -> None:
+    with pytest.raises(ValueError, match="must be between"):
+        task_launcher.rendezvous_port("attempt-a", group_index, 2)
+
+
+def test_single_node_torchrun_lets_c10d_choose_a_free_local_port() -> None:
     command = task_launcher.build_task_command(
         payload=("python", "worker.py"),
         launcher=TaskLauncher.TORCHRUN,
@@ -180,7 +196,19 @@ def test_single_node_torchrun_uses_localhost_for_rendezvous() -> None:
         gpus_per_task=4,
     )
 
-    assert "--rdzv-endpoint=localhost:23456" in command
+    assert command == (
+        "python",
+        "-m",
+        "torch.distributed.run",
+        "--nnodes=1",
+        "--nproc-per-node=4",
+        "--rdzv-backend=c10d",
+        "--rdzv-endpoint=localhost:0",
+        "--rdzv-id=attempt-a-group-0",
+        "--no-python",
+        "python",
+        "worker.py",
+    )
 
 
 def test_multi_node_torchrun_uses_master_hostname_for_rendezvous() -> None:
@@ -191,7 +219,19 @@ def test_multi_node_torchrun_uses_master_hostname_for_rendezvous() -> None:
         gpus_per_task=4,
     )
 
-    assert "--rdzv-endpoint=node-a:23456" in command
+    assert command == (
+        "python",
+        "-m",
+        "torch.distributed.run",
+        "--nnodes=2",
+        "--nproc-per-node=4",
+        "--rdzv-backend=c10d",
+        "--rdzv-endpoint=node-a:23456",
+        "--rdzv-id=attempt-a-group-0",
+        "--no-python",
+        "python",
+        "worker.py",
+    )
 
 
 def test_direct_launcher_does_not_wrap_payload() -> None:

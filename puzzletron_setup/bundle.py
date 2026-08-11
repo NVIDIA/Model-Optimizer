@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Render and validate portable Puzzletron setup bundles."""
 
 from __future__ import annotations
@@ -470,6 +467,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "modality": data["modality"],
             "layout": data["layout"],
             "max_sample_length": sequence_length,
+            "sequence_length": sequence_length,
             "path": data["source"],
             "acquisition": deepcopy(data_acquisition) if data_acquisition else None,
             "packing": (

@@ -289,6 +289,8 @@ def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
     executor.params = {"micro_batch_size": 4}
     executor.sliced_teacher_baseline = {"lm_loss": {"avg": 0.0}}
     executor.latest_observability = None
+    executor.latest_score_device_type = "cpu"
+    executor.visible_cuda_device_count = 0
     monkeypatch.setattr(
         executor,
         "_score",
@@ -309,6 +311,8 @@ def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
     assert result.metrics["lm_loss"]["avg"] == 1.0
     assert [target["layer_idx"] for target in captured[0]] == [0, 1]
     assert result.provenance["micro_batch_size"] == 4
+    assert result.provenance["score_device_type"] == "cpu"
+    assert result.provenance["visible_cuda_device_count"] == 0
 
 
 def test_runtime_fingerprint_ignores_distributed_compute_dtype_transition():

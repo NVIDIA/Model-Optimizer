@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..identity import stable_hash
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -19,6 +20,7 @@ from ..schema import (
     WorkItem,
     WorkPlan,
 )
+from ..stages import semantic_stage_config
 from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import stage_is_complete, stage_output_patterns
@@ -130,6 +132,23 @@ def _replacement_overrides(plan: CampaignPlan, puzzle_dir: Path) -> tuple[str, .
     return tuple(overrides)
 
 
+def _replacement_completion_identity(
+    plan: CampaignPlan,
+    root_overrides: list[str],
+) -> str:
+    return stable_hash(
+        {
+            "contract_hash": plan.contract_hash,
+            "semantic_config": semantic_stage_config(
+                plan.experiment_config,
+                "replacement_scoring",
+            ),
+            "root_overrides": root_overrides,
+        },
+        prefix="replacement_scoring_completion",
+    )
+
+
 class PersistentPoolAdapter(WorkAdapter):
     """Launch one coordinator plus resident worker pool."""
 
@@ -233,7 +252,8 @@ class PersistentPoolAdapter(WorkAdapter):
             else plan.puzzle_dir
         )
         campaign_dir = replacement_puzzle_dir / "distributed_eval" / node.stage_id
-        effective_overrides = list(overrides or [])
+        root_overrides = list(overrides or [])
+        effective_overrides = list(root_overrides)
         if node.stage_id == "replacement_scoring":
             effective_overrides.extend(_replacement_overrides(plan, replacement_puzzle_dir))
         if role == "gang":
@@ -254,6 +274,7 @@ class PersistentPoolAdapter(WorkAdapter):
                 script = repo / "examples/puzzletron/distributed_eval/run_depth_pool.sh"
             else:
                 env.update(_replacement_environment(plan, replacement_puzzle_dir))
+                env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
                 replacement_widths = _replacement_widths(plan)
                 if len(replacement_widths) > 1:
                     width = int(item.metadata["width"])
@@ -264,7 +285,7 @@ class PersistentPoolAdapter(WorkAdapter):
                                 / "artifacts"
                                 / "replacement_scoring"
                                 / ".pool_completion"
-                                / plan.contract_hash
+                                / _replacement_completion_identity(plan, root_overrides)
                             ),
                             "FINALIZE_COMPLETION_MARKER": f"width-{width}",
                             "FINALIZE_EXPECTED_COMPLETIONS": str(
@@ -326,6 +347,7 @@ class PersistentPoolAdapter(WorkAdapter):
             env["DISTRIBUTED_EVAL_OVERRIDES"] = f"{existing}\n{override}".strip()
         if node.stage_id == "replacement_scoring":
             env.update(_replacement_environment(plan, replacement_puzzle_dir))
+            env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
         elif node.stage_id == "depth_importance":
             depth = plan.experiment_config.get("depth_importance") or {}
             env["OUTPUT_DIR"] = str(

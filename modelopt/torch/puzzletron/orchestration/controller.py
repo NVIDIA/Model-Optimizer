@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Durable campaign controller loop."""
 
 from __future__ import annotations
@@ -25,9 +22,9 @@ import signal
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .adapters.post_mip import ManualInputRequired
 from .adapters.registry import adapter_for_stage
@@ -35,10 +32,12 @@ from .adapters.stage_compat import stage_is_complete
 from .compiler import plan_to_dict
 from .dashboard import StageView, format_duration, progress_eta, progress_fraction
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
+from .identity import stable_hash
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
 from .reporting import FinalReportResult, build_final_report_attempt, final_report_paths
 from .schema import (
+    AttemptSpec,
     CampaignPlan,
     FailureClass,
     FailurePolicy,
@@ -47,8 +46,10 @@ from .schema import (
     JobState,
     JobStatus,
     StagePlanNode,
+    ValidatedResult,
+    WorkPlan,
 )
-from .stages import stage_display_name
+from .stages import semantic_stage_config, stage_display_name
 from .state import (
     CampaignStateStore,
     PersistedAttempt,
@@ -60,6 +61,9 @@ from .task_topology import resolve_task_topology
 from .terminal import InteractiveControlRequest, ShutdownAction, TerminalControls
 
 __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
+
+
+_ARTIFACT_SETTLING_TIMEOUT_SECONDS = 300.0
 
 
 def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
@@ -114,6 +118,14 @@ class DryRunSubmission:
     launcher: str
     exclusive: bool
     argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _FinalizationFailure:
+    phase: Literal["aggregation", "validation"]
+    reason: str
+    artifacts: tuple[str, ...] = ()
+    exception_type: str | None = None
 
 
 def dry_run_plan(
@@ -189,6 +201,7 @@ class CampaignController:
         self._shutting_down = False
         self._interactive_ready = False
         self._failed_stages: set[str] = set()
+        self._finalization_failures: dict[str, _FinalizationFailure] = {}
         self._manual_waiting: ManualInputRequired | None = None
         defaults = dict(plan.execution_defaults or {})
         self._halt_policy = HaltPolicy(str(defaults.get("halt_policy", HaltPolicy.DRAIN.value)))
@@ -311,22 +324,129 @@ class CampaignController:
             ):
                 self.logger.skip(f"{node.stage_id}: completion artifacts validated")
 
-    @staticmethod
-    def _completed_work_ids(attempts: list[dict[str, Any]]) -> set[str]:
-        return {
-            str(attempt["work_id"])
-            for attempt in attempts
-            if attempt.get("status") == JobState.COMPLETED.value
-        }
+    def _required_completed_attempts(
+        self,
+        node: StagePlanNode,
+        attempts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        work_plan = adapter_for_stage(node).plan(self.plan, node)
+        stage_execution_identity = self._stage_execution_identity(node, work_plan)
+        completed: list[dict[str, Any]] = []
+        for item in work_plan.items:
+            matches = [
+                attempt
+                for attempt in attempts
+                if attempt.get("work_id") == item.work_id
+                and attempt.get("status") == JobState.COMPLETED.value
+                and attempt.get("contract_hash") == self.plan.contract_hash
+                and isinstance(attempt.get("metadata"), Mapping)
+                and attempt["metadata"].get("stage_execution_identity") == stage_execution_identity
+            ]
+            if not matches:
+                return None
+
+            def _completion_time(attempt: dict[str, Any]) -> float:
+                completed_at = attempt.get("completed_at")
+                if isinstance(completed_at, (int, float)):
+                    return float(completed_at)
+                submitted_at = attempt.get("submitted_at")
+                return float(submitted_at) if isinstance(submitted_at, (int, float)) else 0.0
+
+            completed.append(
+                max(
+                    matches,
+                    key=_completion_time,
+                )
+            )
+        return completed
+
+    def _stage_execution_identity(
+        self,
+        node: StagePlanNode,
+        work_plan: WorkPlan | None = None,
+    ) -> str:
+        work_plan = work_plan or adapter_for_stage(node).plan(self.plan, node)
+        compiled_node = next(
+            stage
+            for stage in plan_to_dict(self.plan)["stages"]
+            if stage["stage_id"] == node.stage_id
+        )
+        return stable_hash(
+            {
+                "execution_contract_hash": self.plan.contract_hash,
+                "semantic_config": semantic_stage_config(
+                    self.plan.experiment_config, node.stage_id
+                ),
+                "compiled_node": compiled_node,
+                "work_items": [
+                    {
+                        "work_id": item.work_id,
+                        "shard_index": item.shard_index,
+                        "shard_count": item.shard_count,
+                        "gpus_per_instance": item.gpus_per_instance,
+                        "local_gpu_ids": list(item.local_gpu_ids),
+                        "metadata": dict(item.metadata),
+                    }
+                    for item in work_plan.items
+                ],
+            },
+            prefix=f"{node.stage_id}_execution",
+        )
+
+    def _bind_attempt_to_stage_execution(
+        self,
+        node: StagePlanNode,
+        work_plan: WorkPlan,
+        attempt: AttemptSpec,
+    ) -> AttemptSpec:
+        return replace(
+            attempt,
+            metadata={
+                **dict(attempt.metadata),
+                "stage_execution_identity": self._stage_execution_identity(node, work_plan),
+            },
+        )
 
     def _required_work_is_completed(
         self,
         node: StagePlanNode,
         attempts: list[dict[str, Any]],
     ) -> bool:
-        work_plan = adapter_for_stage(node).plan(self.plan, node)
-        required = {item.work_id for item in work_plan.items}
-        return required.issubset(self._completed_work_ids(attempts))
+        return self._required_completed_attempts(node, attempts) is not None
+
+    def _legacy_completed_attempts(
+        self,
+        node: StagePlanNode,
+        attempts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        work_ids = {item.work_id for item in adapter_for_stage(node).plan(self.plan, node).items}
+        return [
+            attempt
+            for attempt in attempts
+            if attempt.get("work_id") in work_ids
+            and attempt.get("status") == JobState.COMPLETED.value
+            and attempt.get("contract_hash") == self.plan.contract_hash
+            and (
+                not isinstance(attempt.get("metadata"), Mapping)
+                or "stage_execution_identity" not in attempt["metadata"]
+            )
+        ]
+
+    def _completed_work_artifact_settling_elapsed(
+        self,
+        node: StagePlanNode,
+        attempts: list[dict[str, Any]],
+    ) -> float | None:
+        completed = self._required_completed_attempts(node, attempts)
+        if completed is None:
+            return None
+        completed_at: list[float] = []
+        for attempt in completed:
+            value = attempt.get("completed_at")
+            if not isinstance(value, (int, float)):
+                return _ARTIFACT_SETTLING_TIMEOUT_SECONDS
+            completed_at.append(float(value))
+        return max(0.0, time.time() - max(completed_at))
 
     def _policy_allows_retry(self, node: StagePlanNode, failure: FailureClass) -> bool:
         if failure in {FailureClass.SUCCESS, FailureClass.CANCELLED}:
@@ -362,13 +482,93 @@ class CampaignController:
             return True
         if self._required_work_is_completed(node, attempts):
             # Aggregation is attempted before submission in the controller loop.
-            # If its outputs are still incomplete, rerun the work instead of
-            # remaining permanently blocked by historical completed attempts.
-            return False
-        return False
+            # A scheduler-successful attempt must never overlap with a duplicate
+            # while distributed filesystems are still publishing its artifacts.
+            # The controller loop either validates those outputs or records a
+            # bounded settling failure. Historical records without a completion
+            # timestamp fail validation immediately because their settling age
+            # cannot be established safely.
+            return self._completed_work_artifact_settling_elapsed(node, attempts) is not None
+        return bool(self._legacy_completed_attempts(node, attempts))
 
     def _stage_is_active(self, stage_id: str) -> bool:
         return any(work_id.startswith(f"{stage_id}:") for _, work_id, _ in self._active.values())
+
+    def _recover_failed_stages(self) -> None:
+        for node in self.plan.stages:
+            record = self.store.load_stage_record(node.stage_id)
+            stage_execution_identity = self._stage_execution_identity(node)
+            current_failure = bool(record and record.attempts) and all(
+                attempt.contract_hash == self.plan.contract_hash
+                and (attempt.metadata or {}).get("stage_execution_identity")
+                == stage_execution_identity
+                for attempt in record.attempts
+            )
+            legacy_incompatibility = bool(record and record.attempts) and all(
+                attempt.contract_hash == self.plan.contract_hash
+                and (attempt.metadata or {}).get("stage_execution_identity_incompatible") is True
+                for attempt in record.attempts
+            )
+            if (
+                record is None
+                or record.status != JobState.FAILED.value
+                or not record.attempts
+                or not (current_failure or legacy_incompatibility)
+                or stage_is_complete(self.plan.experiment_config, node.stage_id)
+            ):
+                continue
+            self._failed_stages.add(node.stage_id)
+            self.logger.error(f"{node.stage_id}: recovered terminal stage validation failure")
+
+    def _fail_legacy_completed_attempts(
+        self,
+        node: StagePlanNode,
+        attempts: list[dict[str, Any]],
+    ) -> bool:
+        legacy_attempts = self._legacy_completed_attempts(node, attempts)
+        if not legacy_attempts:
+            return False
+        persisted_attempts = [
+            PersistedAttempt(
+                attempt_id=attempt["attempt_id"],
+                work_id=attempt["work_id"],
+                stage_id=node.stage_id,
+                status=attempt.get("status", JobState.COMPLETED.value),
+                contract_hash=attempt["contract_hash"],
+                metadata={
+                    **dict(attempt.get("metadata") or {}),
+                    "stage_execution_identity_incompatible": True,
+                },
+            )
+            for attempt in legacy_attempts
+        ]
+        reason = (
+            "completed attempt metadata predates stage execution identities; "
+            "refusing automatic resubmission"
+        )
+        self._failed_stages.add(node.stage_id)
+        self.store.write_stage_record(
+            StageRunRecord(
+                stage_id=node.stage_id,
+                status=JobState.FAILED.value,
+                attempts=persisted_attempts,
+                aggregated=False,
+            )
+        )
+        self.store.append_event(
+            "stage_execution_identity_incompatible",
+            {
+                "stage_id": node.stage_id,
+                "failure_class": FailureClass.CONFIG.value,
+                "contract_hash": self.plan.contract_hash,
+                "stage_execution_identity": self._stage_execution_identity(node),
+                "attempt_ids": [attempt.attempt_id for attempt in persisted_attempts],
+                "incompatibility": "missing_stage_execution_identity",
+                "reason": reason,
+            },
+        )
+        self.logger.error(f"{node.stage_id}: {reason}")
+        return True
 
     def _available_nodes(self) -> int | None:
         slurm = self.plan.runner.slurm
@@ -409,13 +609,17 @@ class CampaignController:
                 self.logger.success(f"{item.work_id}: already complete, skipping")
                 continue
             attempt_id = str(uuid.uuid4())
-            attempt = adapter.command(
-                plan=self.plan,
-                node=node,
-                item=item,
-                attempt_id=attempt_id,
-                runner=self.plan.runner,
-                overrides=overrides,
+            attempt = self._bind_attempt_to_stage_execution(
+                node,
+                work_plan,
+                adapter.command(
+                    plan=self.plan,
+                    node=node,
+                    item=item,
+                    attempt_id=attempt_id,
+                    runner=self.plan.runner,
+                    overrides=overrides,
+                ),
             )
             if available_nodes is not None and attempt.allocation_nodes > available_nodes:
                 self.logger.wait(
@@ -491,21 +695,23 @@ class CampaignController:
                 + "\n"
             )
             temporary.replace(decision_path)
-            aggregate = adapter.aggregate(plan=self.plan, node=node, work_plan=work_plan)
+            try:
+                aggregate = adapter.aggregate(plan=self.plan, node=node, work_plan=work_plan)
+            except (OSError, ValueError, RuntimeError) as error:
+                return self._record_stage_aggregation_failure(
+                    node,
+                    error,
+                )
+        except (OSError, ValueError, RuntimeError) as error:
+            return self._record_stage_aggregation_failure(
+                node,
+                error,
+            )
         validation = adapter.validate(plan=self.plan, node=node)
         if not validation.valid:
-            self.logger.warning(f"{node.stage_id}: {validation.reason}")
-            return False
-        attempts = [
-            PersistedAttempt(
-                attempt_id=attempt["attempt_id"],
-                work_id=attempt["work_id"],
-                stage_id=node.stage_id,
-                status=attempt.get("status", JobState.COMPLETED.value),
-                contract_hash=attempt.get("contract_hash", self.plan.contract_hash),
-            )
-            for attempt in self.store.list_attempts(node.stage_id)
-        ]
+            return self._record_stage_validation_failure(node, validation)
+        self._finalization_failures.pop(node.stage_id, None)
+        attempts = self._persisted_stage_attempts(node)
         self.store.write_stage_record(
             StageRunRecord(
                 stage_id=node.stage_id,
@@ -517,6 +723,99 @@ class CampaignController:
         self.store.append_event("stage_completed", {"stage_id": node.stage_id})
         self.logger.success(
             f"{node.stage_id} complete; artifacts={', '.join(validation.artifacts) or 'validated'}"
+        )
+        return True
+
+    def _record_stage_validation_failure(
+        self,
+        node: StagePlanNode,
+        validation: ValidatedResult,
+    ) -> bool:
+        self._finalization_failures[node.stage_id] = _FinalizationFailure(
+            phase="validation",
+            reason=validation.reason,
+            artifacts=validation.artifacts,
+        )
+        self.logger.warning(f"{node.stage_id}: {validation.reason}")
+        return False
+
+    def _record_stage_aggregation_failure(
+        self,
+        node: StagePlanNode,
+        error: OSError | ValueError | RuntimeError,
+    ) -> bool:
+        reason = f"stage aggregation failed: {type(error).__name__}: {error}"
+        self._finalization_failures[node.stage_id] = _FinalizationFailure(
+            phase="aggregation",
+            reason=reason,
+            exception_type=type(error).__name__,
+        )
+        self.logger.warning(f"{node.stage_id}: {reason}")
+        return False
+
+    def _persisted_stage_attempts(self, node: StagePlanNode) -> list[PersistedAttempt]:
+        stage_execution_identity = self._stage_execution_identity(node)
+        return [
+            PersistedAttempt(
+                attempt_id=attempt["attempt_id"],
+                work_id=attempt["work_id"],
+                stage_id=node.stage_id,
+                status=attempt.get("status", JobState.COMPLETED.value),
+                contract_hash=attempt["contract_hash"],
+                metadata=dict(attempt["metadata"]),
+            )
+            for attempt in self.store.list_attempts(node.stage_id)
+            if attempt.get("contract_hash") == self.plan.contract_hash
+            and isinstance(attempt.get("metadata"), Mapping)
+            and attempt["metadata"].get("stage_execution_identity") == stage_execution_identity
+        ]
+
+    def _fail_stage_if_artifacts_did_not_settle(
+        self,
+        node: StagePlanNode,
+        attempts: list[dict[str, Any]],
+    ) -> bool:
+        if node.stage_id in self._failed_stages:
+            return True
+        elapsed = self._completed_work_artifact_settling_elapsed(node, attempts)
+        if elapsed is None or elapsed < _ARTIFACT_SETTLING_TIMEOUT_SECONDS:
+            return False
+        failure = self._finalization_failures.get(node.stage_id)
+        reason = failure.reason if failure is not None else "required artifacts are incomplete"
+        expected_artifacts = list(failure.artifacts) if failure is not None else []
+        phase = failure.phase if failure is not None else "validation"
+        persisted_attempts = self._persisted_stage_attempts(node)
+        self._failed_stages.add(node.stage_id)
+        self.store.write_stage_record(
+            StageRunRecord(
+                stage_id=node.stage_id,
+                status=JobState.FAILED.value,
+                attempts=persisted_attempts,
+                aggregated=False,
+            )
+        )
+        event_type = (
+            "stage_aggregation_failed" if phase == "aggregation" else "stage_validation_failed"
+        )
+        self.store.append_event(
+            event_type,
+            {
+                "stage_id": node.stage_id,
+                "phase": phase,
+                "exception_type": failure.exception_type if failure is not None else None,
+                "failure_class": FailureClass.TIMEOUT_FATAL.value,
+                "contract_hash": self.plan.contract_hash,
+                "stage_execution_identity": self._stage_execution_identity(node),
+                "attempt_ids": [attempt.attempt_id for attempt in persisted_attempts],
+                "elapsed_seconds": elapsed,
+                "timeout_seconds": _ARTIFACT_SETTLING_TIMEOUT_SECONDS,
+                "reason": reason,
+                "expected_artifacts": expected_artifacts,
+            },
+        )
+        self.logger.error(
+            f"{node.stage_id}: completed work outputs did not settle within "
+            f"{_ARTIFACT_SETTLING_TIMEOUT_SECONDS:g}s: {reason}"
         )
         return True
 
@@ -1029,6 +1328,7 @@ class CampaignController:
                     f"instances={node.instances}, total_gpus={node.total_gpus}"
                 )
             self._recover_active_attempts()
+            self._recover_failed_stages()
             self._log_completed_stages()
             self._refresh_dashboard()
             self.terminal_controls.start()
@@ -1052,13 +1352,26 @@ class CampaignController:
                     for node in self.plan.stages:
                         if stage_is_complete(self.plan.experiment_config, node.stage_id):
                             continue
+                        if node.stage_id in self._failed_stages:
+                            continue
                         stage_attempts = self.store.list_attempts(node.stage_id)
                         if stage_attempts and not self._stage_is_active(node.stage_id):
                             if self._required_work_is_completed(node, stage_attempts):
-                                self._finalize_stage(node)
+                                finalized = self._finalize_stage(node)
+                                if not finalized and self._manual_waiting is None:
+                                    self._fail_stage_if_artifacts_did_not_settle(
+                                        node, stage_attempts
+                                    )
                                 if self._manual_waiting is not None:
                                     break
+                            else:
+                                self._fail_legacy_completed_attempts(node, stage_attempts)
                     if self._manual_waiting is not None:
+                        break
+                    if self._failed_stages and self._should_fail_fast():
+                        halted = True
+                        self._refresh_dashboard()
+                        self.shutdown(reason="fatal stage validation failure")
                         break
                     for node in self._ready_nodes():
                         if self._shutdown_requested:
@@ -1160,7 +1473,7 @@ class CampaignController:
         elif cancelled:
             self.logger.shutdown("campaign stopped by user; rerun the same command to resume")
         elif halted:
-            self.logger.error("campaign halted after a failed attempt")
+            self.logger.error("campaign halted after a stage failure")
         elif self._manual_waiting is not None:
             self.logger.wait("campaign paused for a durable manual-filter decision")
         else:

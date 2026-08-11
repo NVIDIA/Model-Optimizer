@@ -88,6 +88,11 @@ from pathlib import Path
 import subprocess
 import sys
 
+from examples.puzzletron.finalize_replacement_scoring import (
+    finalization_marker_is_current,
+    write_finalization_marker,
+)
+
 (
     completion_dir_text,
     marker_name,
@@ -104,8 +109,12 @@ completion_dir.mkdir(parents=True, exist_ok=True)
 with (completion_dir / ".finalize.lock").open("a+") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     finalized = completion_dir / "finalized"
-    if finalized.is_file():
+    root = Path(puzzle_dir)
+    root_summary = root / "artifacts" / "replacement_scoring" / "summary.json"
+    root_manifest = root / "manifests" / "replacement_scoring.json"
+    if finalization_marker_is_current(finalized, root_manifest, root_summary):
         raise SystemExit(0)
+    finalized.unlink(missing_ok=True)
     completed = tuple(completion_dir.glob("*.done"))
     expected = int(expected_text)
     if len(completed) < expected:
@@ -126,7 +135,7 @@ with (completion_dir / ".finalize.lock").open("a+") as lock:
         ],
         check=True,
     )
-    finalized.touch()
+    write_finalization_marker(finalized, root_manifest)
 PY
   else
     "${PYTHON_BIN}" "${SCRIPT_DIR}/../finalize_replacement_scoring.py" \

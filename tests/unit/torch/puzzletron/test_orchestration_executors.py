@@ -830,6 +830,7 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
             item=item,
             attempt_id=f"a{index}",
             runner=runner,
+            overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
         )
         for index, item in enumerate(work_plan.items)
     ]
@@ -838,6 +839,17 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
+    assert [attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts] == [
+        "+replacement_scoring.automodel.lm_head_backend=streaming",
+        "+replacement_scoring.automodel.lm_head_backend=streaming",
+    ]
+    assert all(
+        "puzzle_dir=" not in attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts
+    )
+    assert all(
+        "puzzle_dir=" in attempt.command.env["DISTRIBUTED_EVAL_OVERRIDES"]
+        for attempt in attempts
+    )
     assert [attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts] == [
         "2",
         "2",
@@ -849,6 +861,34 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert (
         attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
         == attempts[1].command.env["FINALIZE_COMPLETION_DIR"]
+    )
+    changed_plan = CampaignPlan(
+        experiment_config_path=plan.experiment_config_path,
+        puzzle_dir=plan.puzzle_dir,
+        experiment_config={
+            **plan.experiment_config,
+            "replacement_scoring": {
+                "granularity": "subblock",
+                "default_metric": "mse_loss_hidden_states",
+            },
+        },
+        runner=runner,
+        execution_defaults=plan.execution_defaults,
+        stages=(node,),
+        contract_hash=plan.contract_hash,
+    )
+    changed_work_plan = adapter.plan(changed_plan, node)
+    changed_attempt = adapter.command(
+        plan=changed_plan,
+        node=node,
+        item=changed_work_plan.items[0],
+        attempt_id="changed",
+        runner=runner,
+        overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
+    )
+    assert (
+        changed_attempt.command.env["FINALIZE_COMPLETION_DIR"]
+        != attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
     )
     assert attempts[0].command.env["PUZZLE_DIR"].endswith("scenarios/width-2048/depth-00")
     assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")

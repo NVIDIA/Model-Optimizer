@@ -22,6 +22,7 @@ __all__ = [
     "TaskBinding",
     "build_task_command",
     "main",
+    "rendezvous_endpoint",
     "rendezvous_port",
     "resolve_task_binding",
 ]
@@ -74,6 +75,14 @@ def rendezvous_port(attempt_id: str, group_index: int, group_count: int) -> int:
         raise ValueError(f"group_count={group_count} exceeds rendezvous port span={port_span}")
     seed = int(hashlib.sha256(attempt_id.encode()).hexdigest()[:8], 16)
     return port_start + (seed % (port_span - group_count + 1)) + group_index
+
+
+def rendezvous_endpoint(binding: TaskBinding) -> str:
+    """Return a collision-free local endpoint or the shared multi-node endpoint."""
+
+    if binding.group_size == 1:
+        return "localhost:0"
+    return f"{binding.master_addr}:{binding.master_port}"
 
 
 def resolve_task_binding(
@@ -131,7 +140,7 @@ def build_task_command(
     command = tuple(str(part) for part in payload)
     if launcher is TaskLauncher.DIRECT:
         return command
-    rendezvous_host = "localhost" if binding.group_size == 1 else binding.master_addr
+    endpoint = rendezvous_endpoint(binding)
     return (
         "python",
         "-m",
@@ -139,7 +148,7 @@ def build_task_command(
         f"--nnodes={binding.group_size}",
         f"--nproc-per-node={gpus_per_task}",
         "--rdzv-backend=c10d",
-        f"--rdzv-endpoint={rendezvous_host}:{binding.master_port}",
+        f"--rdzv-endpoint={endpoint}",
         f"--rdzv-id={binding.rendezvous_id}",
         "--no-python",
         *command,
@@ -241,7 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"host={binding.hostname} task={binding.task_index} "
         f"local={binding.local_task_index} gpus={','.join(visible_gpus)} "
         f"group={binding.group_index} rank={binding.group_rank}/{binding.group_size} "
-        f"endpoint={binding.master_addr}:{binding.master_port} "
+        f"endpoint={rendezvous_endpoint(binding)} "
         f"rdzv_id={binding.rendezvous_id}",
         flush=True,
     )
