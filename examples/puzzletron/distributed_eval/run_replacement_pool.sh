@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 set -Eeuo pipefail
 
@@ -10,10 +22,12 @@ set -Eeuo pipefail
 : "${WORKER_COUNT:?set WORKER_COUNT to the number of worker groups}"
 : "${PUZZLETRON_GROUP_INDEX:=${PUZZLETRON_TASK_INDEX:-${SLURM_PROCID:-}}}"
 : "${PUZZLETRON_GROUP_INDEX:?run this script as one orchestrator worker-group task}"
+: "${PUZZLETRON_GROUP_RANK:=0}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GROUP_INDEX="${PUZZLETRON_GROUP_INDEX}"
+GROUP_RANK="${PUZZLETRON_GROUP_RANK}"
 JOB_ID="${SLURM_JOB_ID:-local}"
 WORKER_PREFIX="${JOB_ID}-replacement-"
 MANIFEST_PATH="${CAMPAIGN_DIR}/manifest.json"
@@ -38,7 +52,7 @@ cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
-  if [[ "${GROUP_INDEX}" == "0" ]]; then
+  if [[ "${GROUP_INDEX}" == "0" && "${GROUP_RANK}" == "0" ]]; then
     drain_workers
   fi
   if [[ -n "${worker_pid}" ]] && kill -0 "${worker_pid}" 2>/dev/null; then
@@ -49,7 +63,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [[ "${GROUP_INDEX}" == "0" && ! -f "${MANIFEST_PATH}" ]]; then
+if [[ "${GROUP_INDEX}" == "0" && "${GROUP_RANK}" == "0" && ! -f "${MANIFEST_PATH}" ]]; then
   CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" \
     -m modelopt.torch.puzzletron.distributed_eval.cli init \
     --campaign-dir "${CAMPAIGN_DIR}" \
@@ -69,21 +83,17 @@ while [[ ! -f "${MANIFEST_PATH}" ]]; do
   sleep 1
 done
 
-export NNODES=1
-export NODE_RANK=0
 export NPROC_PER_NODE="${NPROC_PER_NODE:-${WORLD_SIZE}}"
 export WORKER_GROUP_INDEX="${GROUP_INDEX}"
 export WORKER_ID="${WORKER_PREFIX}${GROUP_INDEX}"
 export WORKER_HOST="${WORKER_HOST:-$(hostname -f)}"
 export WORKER_PORT="${WORKER_PORT:-$((5010 + GROUP_INDEX))}"
-export RDZV_ENDPOINT="127.0.0.1:$((29500 + GROUP_INDEX))"
-export RDZV_ID="replacement-${JOB_ID}-${GROUP_INDEX}"
 
 bash "${SCRIPT_DIR}/run_worker.sh" &
 worker_pid=$!
 
 coordinator_rc=0
-if [[ "${GROUP_INDEX}" == "0" ]]; then
+if [[ "${GROUP_INDEX}" == "0" && "${GROUP_RANK}" == "0" ]]; then
   CUDA_VISIBLE_DEVICES="" "${PYTHON_BIN}" - \
       "${CAMPAIGN_DIR}" \
       "${WORKER_COUNT}" \

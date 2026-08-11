@@ -596,6 +596,7 @@ def compile_campaign_plan(
         execution_defaults=_mapping(execution.get("defaults")),
         stages=tuple(nodes),
         contract_hash=contract_hash,
+        overrides=tuple(overrides or ()),
     )
 
 
@@ -606,6 +607,7 @@ def plan_to_dict(plan: CampaignPlan) -> dict[str, Any]:
         "experiment_config_path": plan.experiment_config_path,
         "puzzle_dir": str(plan.puzzle_dir),
         "contract_hash": plan.contract_hash,
+        "overrides": list(plan.overrides),
         "runner_kind": plan.runner.kind,
         "execution_defaults": dict(plan.execution_defaults),
         "stages": [

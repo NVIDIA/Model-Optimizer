@@ -58,6 +58,7 @@ PUZZLETRON_V2_CI_ENVIRONMENT_PATH = (
 with PUZZLETRON_V2_CI_ENVIRONMENT_PATH.open(encoding="utf-8") as environment_file:
     PUZZLETRON_V2_CI_ENVIRONMENT = json.load(environment_file)
 PUZZLETRON_V2_AUTOMODEL_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["nemo_automodel"]
+PUZZLETRON_V2_LMMS_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"]
 PUZZLETRON_V2_AUTOMODEL = (
     "nemo-automodel @ git+"
     f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['repository']}@"
@@ -72,30 +73,46 @@ def _verify_puzzletron_v2_environment(session):
         "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
         "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
         "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
-        "lmms-eval": PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"],
+        "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE["base_version"],
         "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
+    }
+    expected_vcs = {
+        "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE,
+        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE,
     }
     session.run(
         "python",
         "-c",
-        (
-            "import sys; "
-            "from importlib.metadata import version; "
-            "from packaging.version import Version; "
-            f"expected = {expected_versions!r}; "
-            "actual = {"
-            "'python': f'{sys.version_info.major}.{sys.version_info.minor}', "
-            "'torch': Version(version('torch')).base_version, "
-            "'torchvision': Version(version('torchvision')).base_version, "
-            "'transformers': Version(version('transformers')).base_version, "
-            "'lmms-eval': Version(version('lmms-eval')).base_version, "
-            "'nemo-automodel': Version(version('nemo-automodel')).base_version}; "
-            "mismatches = {name: (actual[name], expected_version) "
-            "for name, expected_version in expected.items() "
-            "if actual[name] != expected_version}; "
-            "assert not mismatches, "
-            "f'Pinned Puzzletron CI environment mismatch: {mismatches}'"
-        ),
+        f"""
+import json
+import sys
+from importlib.metadata import distribution, version
+
+from packaging.version import Version
+
+from examples.puzzletron.ci_environment import verify_installed_vcs_source
+
+expected = {expected_versions!r}
+expected_vcs = {expected_vcs!r}
+actual = {{
+    "python": f"{{sys.version_info.major}}.{{sys.version_info.minor}}",
+    "torch": Version(version("torch")).base_version,
+    "torchvision": Version(version("torchvision")).base_version,
+    "transformers": Version(version("transformers")).base_version,
+    "lmms-eval": Version(version("lmms-eval")).base_version,
+    "nemo-automodel": Version(version("nemo-automodel")).base_version,
+}}
+mismatches = {{
+    name: (actual[name], expected_version)
+    for name, expected_version in expected.items()
+    if actual[name] != expected_version
+}}
+
+for name, source in expected_vcs.items():
+    verify_installed_vcs_source(name, source)
+
+assert not mismatches, f"Pinned Puzzletron CI environment mismatch: {{mismatches}}"
+""",
     )
 
 

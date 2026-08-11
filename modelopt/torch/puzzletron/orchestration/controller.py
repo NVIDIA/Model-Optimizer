@@ -133,6 +133,10 @@ def dry_run_plan(
     *,
     overrides: list[str] | None = None,
 ) -> list[DryRunSubmission]:
+    if overrides is not None and tuple(overrides) != plan.overrides:
+        raise ValueError(
+            "dry-run overrides must match the overrides compiled into the campaign plan"
+        )
     submissions: list[DryRunSubmission] = []
     for node in plan.stages:
         adapter = adapter_for_stage(node)
@@ -145,7 +149,7 @@ def dry_run_plan(
                 item=item,
                 attempt_id=attempt_id,
                 runner=plan.runner,
-                overrides=overrides,
+                overrides=list(plan.overrides),
             )
             topology = resolve_task_topology(attempt)
             submissions.append(
@@ -378,6 +382,7 @@ class CampaignController:
                     self.plan.experiment_config, node.stage_id
                 ),
                 "compiled_node": compiled_node,
+                "root_overrides": list(self.plan.overrides),
                 "work_items": [
                     {
                         "work_id": item.work_id,
@@ -517,6 +522,29 @@ class CampaignController:
                 or stage_is_complete(self.plan.experiment_config, node.stage_id)
             ):
                 continue
+            finalization_failures = [
+                (attempt.metadata or {}).get("stage_finalization_failure")
+                for attempt in record.attempts
+            ]
+            if all(
+                isinstance(failure, Mapping) and failure.get("phase") == "aggregation"
+                for failure in finalization_failures
+            ):
+                failure = finalization_failures[0]
+                assert isinstance(failure, Mapping)
+                self._finalization_failures[node.stage_id] = _FinalizationFailure(
+                    phase="aggregation",
+                    reason=str(failure.get("reason") or "stage aggregation failed"),
+                    exception_type=(
+                        str(failure["exception_type"])
+                        if failure.get("exception_type") is not None
+                        else None
+                    ),
+                )
+                self.logger.wait(
+                    f"{node.stage_id}: recovered aggregation failure; retrying finalization"
+                )
+                continue
             self._failed_stages.add(node.stage_id)
             self.logger.error(f"{node.stage_id}: recovered terminal stage validation failure")
 
@@ -582,7 +610,7 @@ class CampaignController:
             active_nodes += int((attempt.get("allocation") or {}).get("nodes", 0))
         return max(0, slurm.max_nodes - active_nodes)
 
-    def _submit_stage(self, node: StagePlanNode, *, overrides: list[str] | None = None) -> bool:
+    def _submit_stage(self, node: StagePlanNode) -> bool:
         if self._stage_has_active_or_completed_work(node):
             return False
         adapter = adapter_for_stage(node)
@@ -618,7 +646,7 @@ class CampaignController:
                     item=item,
                     attempt_id=attempt_id,
                     runner=self.plan.runner,
-                    overrides=overrides,
+                    overrides=list(self.plan.overrides),
                 ),
             )
             if available_nodes is not None and attempt.allocation_nodes > available_nodes:
@@ -784,7 +812,20 @@ class CampaignController:
         reason = failure.reason if failure is not None else "required artifacts are incomplete"
         expected_artifacts = list(failure.artifacts) if failure is not None else []
         phase = failure.phase if failure is not None else "validation"
-        persisted_attempts = self._persisted_stage_attempts(node)
+        persisted_attempts = [
+            replace(
+                attempt,
+                metadata={
+                    **dict(attempt.metadata or {}),
+                    "stage_finalization_failure": {
+                        "phase": phase,
+                        "reason": reason,
+                        "exception_type": (failure.exception_type if failure is not None else None),
+                    },
+                },
+            )
+            for attempt in self._persisted_stage_attempts(node)
+        ]
         self._failed_stages.add(node.stage_id)
         self.store.write_stage_record(
             StageRunRecord(
@@ -1281,6 +1322,11 @@ class CampaignController:
     ) -> dict[str, Any]:
         """Run the controller until all stages complete or a fatal failure occurs."""
 
+        if overrides is not None and tuple(overrides) != self.plan.overrides:
+            raise ValueError(
+                "runtime overrides must match the overrides compiled into the campaign plan"
+            )
+
         iterations = 0
         halted = False
         cancelled = False
@@ -1376,7 +1422,7 @@ class CampaignController:
                     for node in self._ready_nodes():
                         if self._shutdown_requested:
                             break
-                        self._submit_stage(node, overrides=overrides)
+                        self._submit_stage(node)
                     self._refresh_dashboard(
                         drain_pending=bool(
                             self._failed_stages and (self._active or self._ready_nodes())

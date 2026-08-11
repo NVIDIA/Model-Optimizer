@@ -276,6 +276,8 @@ import os
 
 from packaging.version import Version
 
+from examples.puzzletron.ci_environment import verify_installed_vcs_source
+
 import aiperf
 import lmms_eval
 import modelopt
@@ -307,10 +309,17 @@ assert Version(metadata.version("torchvision")).release == Version(
     ci_environment["torchvision"]
 ).release
 assert transformers.__version__ == ci_environment["transformers"]
-assert metadata.version("lmms-eval") == ci_environment["lmms_eval"]
+assert Version(metadata.version("lmms-eval")).base_version == (
+    ci_environment["lmms_eval"]["base_version"]
+)
 assert Version(metadata.version("nemo-automodel")).base_version == (
     ci_environment["nemo_automodel"]["base_version"]
 )
+for package, source in (
+    ("lmms-eval", ci_environment["lmms_eval"]),
+    ("nemo-automodel", ci_environment["nemo_automodel"]),
+):
+    verify_installed_vcs_source(package, source)
 assert torch.version.cuda == "12.9"
 assert torch.cuda.is_available()
 PY

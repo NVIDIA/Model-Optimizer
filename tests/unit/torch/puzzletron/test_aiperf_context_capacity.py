@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron AIPerf context-capacity handling."""
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from modelopt.torch.puzzletron.benchmarks.aiperf import (
+    _aiperf_subprocess_environment,
     _canonical_topology,
     _clean_subprocess_environment,
     _exact_length_extra_inputs,
@@ -103,6 +106,26 @@ def test_prepare_vllm_checkpoint_leaves_native_teacher_unchanged(tmp_path):
     assert _prepare_vllm_checkpoint(tmp_path) is False
 
 
+def test_aiperf_environment_avoids_broken_offline_local_path_resolution():
+    expected_source = {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "HF_HOME": "/cache/huggingface",
+        "UNCHANGED": "value",
+    }
+    source = dict(expected_source)
+
+    resolved = _aiperf_subprocess_environment(source)
+
+    assert "HF_HUB_OFFLINE" not in resolved
+    assert "TRANSFORMERS_OFFLINE" not in resolved
+    assert resolved["HF_DATASETS_OFFLINE"] == "1"
+    assert resolved["HF_HOME"] == "/cache/huggingface"
+    assert resolved["UNCHANGED"] == "value"
+    assert source == expected_source
+
+
 def test_canonical_topology_covers_tp_pp_dp_effective_ep_and_context_parallel():
     topology = _canonical_topology(
         {
@@ -179,6 +202,7 @@ def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
     assert command[command.index("--synthetic-input-tokens-stddev") + 1] == "0"
     assert command[command.index("--output-tokens-mean") + 1] == "128"
     assert command[command.index("--output-tokens-stddev") + 1] == "0"
+    assert command[command.index("--tokenizer") + 1] == str(tmp_path / "tokenizer")
     assert "--use-server-token-count" in command
 
 

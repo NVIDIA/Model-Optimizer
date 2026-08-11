@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Dependency-light launcher for one task in an orchestration attempt."""
 
@@ -39,6 +51,7 @@ TASK_IDENTITY_ENV_KEYS = frozenset(
         "PUZZLETRON_LOCAL_TASK_INDEX",
         "PUZZLETRON_MASTER_ADDR",
         "PUZZLETRON_MASTER_PORT",
+        "PUZZLETRON_RENDEZVOUS_ENDPOINT",
         "PUZZLETRON_RENDEZVOUS_ID",
         "PUZZLETRON_TASK_HOSTS",
         "PUZZLETRON_TASK_INDEX",
@@ -212,9 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"task {task_index} expected {args.gpus_per_task} visible GPUs, got {visible_gpus}"
         )
     tasks_per_node = (
-        args.task_count
-        if args.gpus_per_task == 0
-        else args.gpus_per_node // args.gpus_per_task
+        args.task_count if args.gpus_per_task == 0 else args.gpus_per_node // args.gpus_per_task
     )
     expected_hosts = math.ceil(args.task_count / tasks_per_node)
     if expected_hosts > args.nodes:
@@ -243,6 +254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         PUZZLETRON_GROUP_SIZE=str(binding.group_size),
         PUZZLETRON_MASTER_ADDR=binding.master_addr,
         PUZZLETRON_MASTER_PORT=str(binding.master_port),
+        PUZZLETRON_RENDEZVOUS_ENDPOINT=rendezvous_endpoint(binding),
         PUZZLETRON_RENDEZVOUS_ID=binding.rendezvous_id,
     )
     print(

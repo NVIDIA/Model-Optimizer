@@ -680,6 +680,54 @@ def test_depth_pool_packs_four_two_gpu_workers_per_node(tmp_path: Path):
     assert "--gpus-per-task=2" in script
 
 
+def test_depth_pool_splits_one_sixteen_gpu_worker_across_two_nodes(tmp_path: Path):
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="depth_importance",
+        strategy=ExecutionStrategy.PERSISTENT_POOL,
+        instances=1,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={"tp": 2, "cp": 1, "pp": 2, "ep": 2, "dp_shard": 2, "dp_replicate": 1},
+        gpus_per_instance=16,
+        gpus_per_node=8,
+        nodes=2,
+        total_gpus=16,
+        exclusive=True,
+        parents=("tokenize_data",),
+        distributed=True,
+        partition="batch",
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={"depth_importance": {"output_dir": str(tmp_path / "depth")}},
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+
+    adapter = adapter_for_stage(node)
+    item = adapter.plan(plan, node).items[0]
+    attempt = adapter.command(
+        plan=plan,
+        node=node,
+        item=item,
+        attempt_id="a1",
+        runner=runner,
+    )
+
+    assert attempt.allocation_nodes == 2
+    assert attempt.task_topology.task_count == 2
+    assert attempt.task_topology.tasks_per_group == 2
+    assert attempt.task_topology.gpus_per_task == 8
+    assert attempt.command.env["NPROC_PER_NODE"] == "8"
+
+
 def test_post_mip_workers_share_one_packed_allocation(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
@@ -847,8 +895,7 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
         "puzzle_dir=" not in attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts
     )
     assert all(
-        "puzzle_dir=" in attempt.command.env["DISTRIBUTED_EVAL_OVERRIDES"]
-        for attempt in attempts
+        "puzzle_dir=" in attempt.command.env["DISTRIBUTED_EVAL_OVERRIDES"] for attempt in attempts
     )
     assert [attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts] == [
         "2",

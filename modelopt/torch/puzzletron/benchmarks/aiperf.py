@@ -355,6 +355,14 @@ def _clean_subprocess_environment(
     return env
 
 
+def _aiperf_subprocess_environment(env: dict[str, str]) -> dict[str, str]:
+    """Avoid AIPerf's offline resolver for an explicit local tokenizer path."""
+    resolved = dict(env)
+    resolved.pop("HF_HUB_OFFLINE", None)
+    resolved.pop("TRANSFORMERS_OFFLINE", None)
+    return resolved
+
+
 def run_aiperf_sweep(
     checkpoint_dir: str | Path,
     *,
@@ -430,6 +438,7 @@ def run_aiperf_sweep(
     )
     for key, value in (topology.get("env") or {}).items():
         env[str(key)] = str(value)
+    aiperf_env = _aiperf_subprocess_environment(env)
     cached: dict[int, BenchmarkResult] = {}
     missing: list[tuple[int, Path, list[str], str]] = []
     for concurrency in concurrency_values:
@@ -496,7 +505,7 @@ def run_aiperf_sweep(
                     command,
                     check=True,
                     timeout=benchmark_timeout,
-                    env=env,
+                    env=aiperf_env,
                 )
                 export = run_dir / "profile_export_aiperf.json"
                 if not export.is_file():

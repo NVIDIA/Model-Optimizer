@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron diagnostic scoring configuration."""
+
 import json
 from copy import deepcopy
 from pathlib import Path

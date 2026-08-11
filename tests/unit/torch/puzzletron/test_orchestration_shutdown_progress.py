@@ -635,6 +635,47 @@ def test_stage_execution_identity_ignores_unrelated_config(tmp_path: Path):
     assert identity_a == identity_b
 
 
+def test_controller_rejects_overrides_that_differ_from_compiled_plan(tmp_path: Path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    compiled_overrides = ["convert.model_path=/models/compiled"]
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        overrides=compiled_overrides,
+        stage_filter="convert",
+    )
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor)
+    baseline_plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+
+    with pytest.raises(ValueError, match="must match the overrides compiled"):
+        controller.run(overrides=["convert.model_path=/models/runtime"], once=True)
+
+    assert executor.submitted_stage_ids == []
+    assert controller.store.list_attempts("convert") == []
+
+    result = controller.run(overrides=compiled_overrides, once=True)
+
+    assert result["halted"] is False
+    assert executor.submitted_stage_ids == ["convert"]
+    submitted_attempt = next(iter(executor._attempts.values()))
+    override_index = submitted_attempt.command.argv.index("--override")
+    assert submitted_attempt.command.argv[override_index + 1] == compiled_overrides[0]
+    assert submitted_attempt.metadata["stage_execution_identity"] == (
+        controller._stage_execution_identity(plan.stages[0])
+    )
+    baseline_identity = CampaignController(
+        baseline_plan, executor=_FakeExecutor()
+    )._stage_execution_identity(baseline_plan.stages[0])
+    assert submitted_attempt.metadata["stage_execution_identity"] != baseline_identity
+
+
 def test_controller_revalidates_recent_completed_work_before_resubmitting(
     tmp_path: Path, monkeypatch
 ):
@@ -830,16 +871,20 @@ def test_controller_fails_when_completed_work_artifacts_do_not_settle(
     )
 
     class _MissingArtifactsAdapter:
+        aggregation_ready = False
+
         def __getattr__(self, name):
             return getattr(delegate, name)
 
         def aggregate(self, *, plan, node, work_plan):
-            if aggregation_failure:
+            if aggregation_failure and not self.aggregation_ready:
                 raise FileNotFoundError("shards are still publishing")
+            return {"status": "complete"}
 
         def validate(self, *, plan, node):
             if aggregation_failure:
-                pytest.fail("validation must wait until aggregation succeeds")
+                assert self.aggregation_ready
+                return ValidatedResult(valid=True, reason="stage outputs present")
             return ValidatedResult(
                 valid=False,
                 reason="stage outputs missing",
@@ -891,15 +936,20 @@ def test_controller_fails_when_completed_work_artifacts_do_not_settle(
     assert stage_record is not None
     assert stage_record.status == JobState.FAILED.value
     assert stage_record.attempts[0].status == JobState.COMPLETED.value
+    assert stage_record.attempts[0].metadata["stage_finalization_failure"]["phase"] == phase
 
     recovered_executor = _TrackingFakeExecutor()
+    missing.aggregation_ready = aggregation_failure
     recovered = CampaignController(plan, executor=recovered_executor)
     recovered_result = recovered.run(once=True)
 
-    assert recovered_result["halted"] is True
-    assert recovered_result["failed_stages"] == ["convert"]
-    assert recovered_executor.submitted_stage_ids == []
+    assert recovered_result["halted"] is (not aggregation_failure)
+    assert recovered_result["failed_stages"] == ([] if aggregation_failure else ["convert"])
+    assert recovered_executor.submitted_stage_ids == (
+        ["final_report"] if aggregation_failure else []
+    )
     assert len(list(controller.store.events_root.glob(f"*_{event_name}.json"))) == 1
+    assert recovered.store.stage_is_complete("convert") is aggregation_failure
 
 
 @pytest.mark.parametrize("stale_kind", ["contract", "stage_execution"])

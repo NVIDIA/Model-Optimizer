@@ -1,7 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for explicit orchestration task topology."""
+
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -156,6 +172,116 @@ def test_task_launcher_slices_full_node_visibility_for_packed_container_tasks(
     assert result == 0
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == expected
     assert captured["env"]["PUZZLETRON_TASK_LAUNCHER"] == "direct"
+    assert captured["env"]["PUZZLETRON_RENDEZVOUS_ENDPOINT"] == "localhost:0"
+
+
+def test_task_launcher_exports_shared_multi_node_rendezvous(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    monkeypatch.setenv("PUZZLETRON_TASK_INDEX", "1")
+    monkeypatch.setenv("PUZZLETRON_LOCAL_TASK_INDEX", "0")
+    monkeypatch.setenv("PUZZLETRON_TASK_HOSTS", "node-a,node-b")
+
+    def fake_execvpe(executable, command, env) -> None:
+        captured.update(executable=executable, command=command, env=env)
+
+    monkeypatch.setattr(task_launcher.os, "execvpe", fake_execvpe)
+
+    assert (
+        task_launcher.main(
+            [
+                "--attempt-id",
+                "attempt-a",
+                "--nodes",
+                "2",
+                "--gpus-per-node",
+                "8",
+                "--task-count",
+                "2",
+                "--gpus-per-task",
+                "8",
+                "--tasks-per-group",
+                "2",
+                "--launcher",
+                "direct",
+                "--",
+                "python",
+                "worker.py",
+            ]
+        )
+        == 0
+    )
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["PUZZLETRON_GROUP_SIZE"] == "2"
+    assert env["PUZZLETRON_GROUP_RANK"] == "1"
+    assert env["PUZZLETRON_RENDEZVOUS_ENDPOINT"].startswith("node-a:")
+    assert env["PUZZLETRON_RENDEZVOUS_ID"] == "attempt-a-group-0"
+
+
+@pytest.mark.parametrize(
+    ("group_size", "group_rank", "endpoint"),
+    [("1", "0", "localhost:0"), ("2", "1", "node-a:23456")],
+)
+def test_run_worker_consumes_task_launcher_identity(
+    tmp_path: Path,
+    group_size: str,
+    group_rank: str,
+    endpoint: str,
+) -> None:
+    script = Path(__file__).parents[4] / "examples/puzzletron/distributed_eval/run_worker.sh"
+    env = {
+        **os.environ,
+        "CAMPAIGN_DIR": str(tmp_path / "campaign"),
+        "CONFIG_PATH": str(tmp_path / "experiment.yaml"),
+        "TORCHRUN": "/bin/echo",
+        "NPROC_PER_NODE": "4",
+        "PUZZLETRON_GROUP_SIZE": group_size,
+        "PUZZLETRON_GROUP_RANK": group_rank,
+        "PUZZLETRON_RENDEZVOUS_ENDPOINT": endpoint,
+        "PUZZLETRON_RENDEZVOUS_ID": "attempt-a-group-0",
+    }
+
+    result = subprocess.run(
+        ["bash", str(script)],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert f"--nnodes {group_size}" in result.stdout
+    assert f"--node-rank {group_rank}" in result.stdout
+    assert f"--rdzv-endpoint {endpoint}" in result.stdout
+    assert "--rdzv-id attempt-a-group-0" in result.stdout
+
+
+@pytest.mark.parametrize("script_name", ["run_replacement_pool.sh", "run_depth_pool.sh"])
+def test_nonzero_group_rank_does_not_own_pool_control_path(
+    tmp_path: Path, script_name: str
+) -> None:
+    campaign_dir = tmp_path / "campaign"
+    campaign_dir.mkdir()
+    (campaign_dir / "manifest.json").write_text("{}\n")
+    script = Path(__file__).parents[4] / "examples/puzzletron/distributed_eval" / script_name
+    env = {
+        **os.environ,
+        "CAMPAIGN_DIR": str(campaign_dir),
+        "CONFIG_PATH": str(tmp_path / "experiment.yaml"),
+        "WORLD_SIZE": "2",
+        "WORKER_COUNT": "1",
+        "NPROC_PER_NODE": "1",
+        "TORCHRUN": "/bin/true",
+        "PYTHON_BIN": "/bin/false",
+        "PUZZLETRON_GROUP_INDEX": "0",
+        "PUZZLETRON_GROUP_RANK": "1",
+        "PUZZLETRON_GROUP_SIZE": "2",
+        "PUZZLETRON_RENDEZVOUS_ENDPOINT": "node-a:23456",
+        "PUZZLETRON_RENDEZVOUS_ID": "attempt-a-group-0",
+    }
+
+    subprocess.run(["bash", str(script)], env=env, check=True, timeout=10)
 
 
 def _task_binding(*, group_size: int) -> task_launcher.TaskBinding:

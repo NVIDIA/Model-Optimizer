@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Persistent pool adapter for coordinator/worker stages."""
 
@@ -258,12 +270,15 @@ class PersistentPoolAdapter(WorkAdapter):
             effective_overrides.extend(_replacement_overrides(plan, replacement_puzzle_dir))
         if role == "gang":
             worker_count = int(item.metadata.get("worker_count", node.instances))
+            allocation_nodes, allocation_gpus, topology = packed_allocation(
+                node, instances=worker_count
+            )
             env = {
                 "CAMPAIGN_DIR": str(campaign_dir),
                 "CONFIG_PATH": plan.experiment_config_path,
                 "PUZZLE_DIR": str(replacement_puzzle_dir),
                 "WORLD_SIZE": str(node.gpus_per_instance),
-                "NPROC_PER_NODE": str(node.gpus_per_instance),
+                "NPROC_PER_NODE": str(topology.gpus_per_task),
                 "WORKER_COUNT": str(worker_count),
             }
             if node.stage_id == "depth_importance":
@@ -288,9 +303,7 @@ class PersistentPoolAdapter(WorkAdapter):
                                 / _replacement_completion_identity(plan, root_overrides)
                             ),
                             "FINALIZE_COMPLETION_MARKER": f"width-{width}",
-                            "FINALIZE_EXPECTED_COMPLETIONS": str(
-                                len(replacement_widths)
-                            ),
+                            "FINALIZE_EXPECTED_COMPLETIONS": str(len(replacement_widths)),
                         }
                     )
                 script = repo / "examples/puzzletron/distributed_eval/run_replacement_pool.sh"
@@ -298,9 +311,6 @@ class PersistentPoolAdapter(WorkAdapter):
                 existing = env.get("DISTRIBUTED_EVAL_OVERRIDES", "")
                 env["DISTRIBUTED_EVAL_OVERRIDES"] = f"{existing}\n{override}".strip()
             log_path = str(log_dir / f"{node.stage_id}_gang_{attempt_id}.log")
-            allocation_nodes, allocation_gpus, topology = packed_allocation(
-                node, instances=worker_count
-            )
             return AttemptSpec(
                 attempt_id=attempt_id,
                 work_id=item.work_id,
@@ -356,13 +366,9 @@ class PersistentPoolAdapter(WorkAdapter):
         if role == "worker":
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in item.local_gpu_ids)
             env["NPROC_PER_NODE"] = str(node.gpus_per_instance)
-            env["NNODES"] = "1"
-            env["NODE_RANK"] = "0"
             worker_id = int(item.metadata.get("worker_id", 0))
             env["WORKER_GROUP_INDEX"] = str(worker_id)
             env["WORKER_PORT"] = str(5010 + worker_id)
-            env["RDZV_ENDPOINT"] = f"127.0.0.1:{29500 + worker_id}"
-            env["RDZV_ID"] = f"{node.stage_id}-{attempt_id}"
         argv = ("bash", str(script))
         # GPU partitions reject zero-GPU jobs; coordinators still need one GPU slot.
         allocation_gpus = 1 if role == "coordinator" else node.gpus_per_instance
