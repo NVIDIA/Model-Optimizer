@@ -1145,15 +1145,11 @@ def _hidden_width_ranking_verdict(
     }
 
 
-def _hidden_width_realization_tolerance(
-    diag_cfg: dict[str, Any], metric: str
-) -> float:
+def _hidden_width_realization_tolerance(diag_cfg: dict[str, Any], metric: str) -> float:
     """Resolve the physical gate independently from ranking comparisons."""
 
     comparison_tolerance = float(diag_cfg.get("comparison_tolerance", 0.0))
-    default = float(
-        diag_cfg.get("physical_equivalence_tolerance", comparison_tolerance)
-    )
+    default = float(diag_cfg.get("physical_equivalence_tolerance", comparison_tolerance))
     overrides = dict(diag_cfg.get("physical_equivalence_tolerances") or {})
     return float(overrides.get(str(metric), default))
 
@@ -1266,7 +1262,6 @@ def _run_hidden_width_diagnostic_at_width(
     width: int,
     alignment: int,
 ) -> dict[str, Any] | None:
-
     from ..plugins.automodel.solution_launch import launch_score_solutions_automodel
     from ..pruning.materialize import materialize_hidden_width_checkpoint
 
@@ -1609,9 +1604,7 @@ def _merge_reused_sort_equivalence(
     return merged
 
 
-def _parent_sweep_sanity_verdict(
-    width_summary: dict[str, Any], sort_summary: dict[str, Any]
-):
+def _parent_sweep_sanity_verdict(width_summary: dict[str, Any], sort_summary: dict[str, Any]):
     """Combine advisory width quality with blocking reused-sort correctness."""
 
     width_findings = list(width_summary.get("findings") or ())
@@ -2005,9 +1998,7 @@ def _validate_parent_sweep_checkpoint_loads(sweep_manifest: dict) -> None:
     for role, value in (sweep_manifest.get("checkpoint_loads") or {}).items():
         loads = int(value)
         if loads not in (0, 1):
-            raise RuntimeError(
-                f"fresh parent sweep loaded {role} more than once; loads={loads}"
-            )
+            raise RuntimeError(f"fresh parent sweep loaded {role} more than once; loads={loads}")
 
 
 def _publish_parent_sweep_sanity(
@@ -2022,15 +2013,12 @@ def _publish_parent_sweep_sanity(
     tolerance = float(diag_cfg.get("physical_equivalence_tolerance", 1.0e-3))
     tolerance_overrides = {
         str(metric): float(value)
-        for metric, value in dict(
-            diag_cfg.get("physical_equivalence_tolerances") or {}
-        ).items()
+        for metric, value in dict(diag_cfg.get("physical_equivalence_tolerances") or {}).items()
     }
     unknown_metrics = sorted(set(tolerance_overrides).difference(_PRIMARY_METRICS))
     if unknown_metrics:
         raise ValueError(
-            "physical_equivalence_tolerances contains unknown metrics: "
-            f"{unknown_metrics}"
+            f"physical_equivalence_tolerances contains unknown metrics: {unknown_metrics}"
         )
     invalid_tolerances = {
         metric: value
@@ -2039,8 +2027,7 @@ def _publish_parent_sweep_sanity(
     }
     if invalid_tolerances:
         raise ValueError(
-            "physical equivalence tolerances must be finite and non-negative: "
-            f"{invalid_tolerances}"
+            f"physical equivalence tolerances must be finite and non-negative: {invalid_tolerances}"
         )
     metric_specs = {
         metric: MetricSpec(
@@ -2068,11 +2055,7 @@ def _publish_parent_sweep_sanity(
     ):
         payload["passed"] = not payload.get("findings")
         payload["verdict"] = (
-            "passed"
-            if payload["passed"]
-            else "failed"
-            if stage == "slicing_sanity"
-            else "warning"
+            "passed" if payload["passed"] else "failed" if stage == "slicing_sanity" else "warning"
         )
         payload["provenance"] = provenance
         output = puzzle_dir / "artifacts" / stage / "summary.json"
@@ -2730,9 +2713,7 @@ def _activation_diagnostic_parent_sweep(
             (artifacts_dir / "diagnostic_cleanup.json").write_text(
                 json.dumps(cleanup, indent=2, sort_keys=True) + "\n"
             )
-            if realized_definitions and bool(
-                diag_cfg.get("cleanup_physical_checkpoints", True)
-            ):
+            if realized_definitions and bool(diag_cfg.get("cleanup_physical_checkpoints", True)):
                 shutil.rmtree(parent_root / "realized", ignore_errors=True)
         dist.barrier()
 
@@ -3124,9 +3105,7 @@ def _sort_equivalence_decision(
     """Gate the production sort independently from its reverse-order control."""
 
     sorted_passed = abs(float(delta)) <= float(tolerance)
-    reverse_passed = reverse_delta is None or abs(float(reverse_delta)) <= float(
-        reverse_tolerance
-    )
+    reverse_passed = reverse_delta is None or abs(float(reverse_delta)) <= float(reverse_tolerance)
     return {
         "sorted_passed": sorted_passed,
         "reverse_passed": reverse_passed,
@@ -3145,9 +3124,7 @@ def _sort_equivalence_tolerances(
             descriptor_tolerances.get("max_abs_lm_loss_delta", 1e-3),
         )
     )
-    reverse_tolerance = float(
-        diag_cfg.get("max_abs_reverse_lm_loss_delta", tolerance)
-    )
+    reverse_tolerance = float(diag_cfg.get("max_abs_reverse_lm_loss_delta", tolerance))
     return tolerance, reverse_tolerance
 
 
@@ -3311,10 +3288,7 @@ def _write_sort_equivalence_summary(
                 f"| teacher | {teacher_value:.8g} | 0 |",
                 f"| sorted_teacher | {sorted_value:.8g} | {delta:.8g} |",
                 *(
-                    [
-                        f"| reverse_sorted_teacher | {reverse_value:.8g} | "
-                        f"{reverse_delta:.8g} |"
-                    ]
+                    [f"| reverse_sorted_teacher | {reverse_value:.8g} | {reverse_delta:.8g} |"]
                     if reverse_value is not None and reverse_delta is not None
                     else []
                 ),
@@ -3531,7 +3505,9 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
     ).load_runtime_hydra_config(config)
     stage_cfg = dict(config.get("slicing_sanity") or {})
     if stage_cfg.get("backend") == "distributed_parent_sweep":
-        summary_path = _puzzle_dir(config, hydra_cfg) / "artifacts" / "slicing_sanity" / "summary.json"
+        summary_path = (
+            _puzzle_dir(config, hydra_cfg) / "artifacts" / "slicing_sanity" / "summary.json"
+        )
         if not summary_path.is_file():
             raise FileNotFoundError(
                 "distributed parent-sweep slicing summary is missing; run width_sanity "

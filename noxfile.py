@@ -110,6 +110,7 @@ def puzzletron_v2(session):
         "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
         "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
         "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
+        "lmms-eval": PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"],
         "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
     }
     session.run(
@@ -125,6 +126,7 @@ def puzzletron_v2(session):
             "'torch': Version(version('torch')).base_version, "
             "'torchvision': Version(version('torchvision')).base_version, "
             "'transformers': Version(version('transformers')).base_version, "
+            "'lmms-eval': Version(version('lmms-eval')).base_version, "
             "'nemo-automodel': Version(version('nemo-automodel')).base_version}; "
             "mismatches = {name: (actual[name], expected_version) "
             "for name, expected_version in expected.items() "
@@ -239,8 +241,43 @@ def pre_commit_all(session):
 
 @nox.session
 def pre_commit_diff(session):
+    if len(session.posargs) not in (0, 2):
+        session.error("pre_commit_diff expects optional FROM_REF and TO_REF arguments")
+
+    from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
     session.install("-e", ".[all,dev-lint]")
-    session.run("pre-commit", "run", "--from-ref", "origin/main", "--to-ref", "HEAD")
+    skip_hooks = {hook for hook in os.environ.get("SKIP", "").split(",") if hook}
+    skip_hooks.add("mypy")
+    session.run(
+        "pre-commit",
+        "run",
+        "--from-ref",
+        from_ref,
+        "--to-ref",
+        to_ref,
+        "--show-diff-on-failure",
+        env={"SKIP": ",".join(sorted(skip_hooks))},
+    )
+
+    changed_files = session.run(
+        "git",
+        "diff",
+        "--name-only",
+        "--diff-filter=ACMR",
+        f"{from_ref}...{to_ref}",
+        "--",
+        "*.py",
+        external=True,
+        silent=True,
+    )
+    changed_python_files = [path for path in changed_files.splitlines() if Path(path).is_file()]
+    if changed_python_files:
+        session.run(
+            "mypy",
+            "--follow-imports=skip",
+            "--ignore-missing-imports",
+            *changed_python_files,
+        )
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────

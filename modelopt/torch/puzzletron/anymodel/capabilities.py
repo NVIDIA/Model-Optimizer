@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -46,7 +58,7 @@ class SubblockCapabilities:
 
 @dataclass(frozen=True)
 class MagnitudeFallbackSpec:
-    """Descriptor-owned observation contract for the generic |activation| metric."""
+    """Descriptor-owned observation contract for the generic ``|activation|`` metric."""
 
     observation_module: str
     tensor_selector: str
@@ -362,7 +374,7 @@ def validate_capabilities(
     # exists"; for architectures without a native registry entry NeMo falls back to the HF
     # implementation.  Treat native support as mandatory only when EP is requested or a selected
     # axis explicitly requires native AutoModel.
-    native_required = (not force_hf and ep > 1)
+    native_required = not force_hf and ep > 1
     if force_hf and ep > 1:
         errors.append("force_hf=True cannot be used with ep > 1")
     if ep > 1 and not capabilities.parallelism.ep:

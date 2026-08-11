@@ -1,8 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for Puzzletron local-KD configuration, recipes, and launch behavior."""
+
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.plugins.automodel import (
@@ -12,18 +30,14 @@ from modelopt.torch.puzzletron.plugins.automodel import (
 )
 
 
-def test_local_kd_derives_logical_dp_after_ep_overlay():
-    assert local_kd_config._logical_dp_size(
-        OmegaConf.create({}),
-        {"dp_size": 8, "ep_size": 4},
-    ) == 2
-
-
 def test_local_kd_treats_ep_as_an_overlay_not_a_sample_axis():
-    assert local_kd_config._logical_dp_size(
-        OmegaConf.create({}),
-        {"dp_size": 8, "ep_size": 4},
-    ) == 2
+    assert (
+        local_kd_config._logical_dp_size(
+            OmegaConf.create({}),
+            {"dp_size": 8, "ep_size": 4},
+        )
+        == 2
+    )
 
 
 def test_nested_hidden_widths_include_teacher_identity_candidate():
@@ -62,17 +76,9 @@ def test_lane_axis_counts_reject_model_parallel_replica_disagreement():
 
 
 def test_local_kd_only_requires_publication_validation_when_exporting_hf():
-    from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
-
-    assert not local_kd_recipe._consolidated_export_enabled(
-        SaveConsolidatedMode.FALSE
-    )
-    assert local_kd_recipe._consolidated_export_enabled(
-        SaveConsolidatedMode.FINAL
-    )
-    assert local_kd_recipe._consolidated_export_enabled(
-        SaveConsolidatedMode.EVERY
-    )
+    assert not local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.FALSE)
+    assert local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.FINAL)
+    assert local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.EVERY)
 
 
 def test_local_kd_rejects_a_disabled_data_parallel_axis_with_ep(
@@ -161,18 +167,24 @@ def test_subblock_parameter_cost_is_memoized_by_width_and_config() -> None:
         return 123
 
     cache = {}
-    assert local_kd_recipe._cached_subblock_cost(
-        cache,
-        width=4096,
-        subblock=subblock,
-        calculate=calculate,
-    ) == 123
-    assert local_kd_recipe._cached_subblock_cost(
-        cache,
-        width=4096,
-        subblock=subblock,
-        calculate=calculate,
-    ) == 123
+    assert (
+        local_kd_recipe._cached_subblock_cost(
+            cache,
+            width=4096,
+            subblock=subblock,
+            calculate=calculate,
+        )
+        == 123
+    )
+    assert (
+        local_kd_recipe._cached_subblock_cost(
+            cache,
+            width=4096,
+            subblock=subblock,
+            calculate=calculate,
+        )
+        == 123
+    )
 
     assert calls == [subblock]
 
@@ -212,9 +224,7 @@ def test_disjoint_local_loss_backpropagates_immediately_and_returns_detached_val
 
 
 def test_local_kd_hidden_mask_excludes_padded_tokens_from_replay_loss() -> None:
-    student = torch.tensor(
-        [[[1.0, 1.0], [2.0, 2.0], [100.0, 100.0], [200.0, 200.0]]]
-    )
+    student = torch.tensor([[[1.0, 1.0], [2.0, 2.0], [100.0, 100.0], [200.0, 200.0]]])
     teacher = torch.zeros_like(student)
     hidden_mask = torch.tensor([[True, True, False, False]])
 
@@ -382,9 +392,7 @@ def test_elastic_probe_can_disable_global_checkpoint_publication() -> None:
         SimpleNamespace(bypass={"elastic": True})
     )
     assert not local_kd_launch._should_publish_elastic_checkpoint(
-        SimpleNamespace(
-            bypass={"elastic": True, "publish_elastic_checkpoint": False}
-        )
+        SimpleNamespace(bypass={"elastic": True, "publish_elastic_checkpoint": False})
     )
     assert not local_kd_launch._should_publish_elastic_checkpoint(
         SimpleNamespace(bypass={"elastic": False})
@@ -432,13 +440,11 @@ def test_overfit_probe_repeats_one_batch_without_mutating_main_run() -> None:
 
 
 def test_overfit_worker_mode_selects_one_configured_mode() -> None:
-    overfit = OmegaConf.create(
-        {"modes": ["smallest_fixed", "diverse_resampled"]}
-    )
+    overfit = OmegaConf.create({"modes": ["smallest_fixed", "diverse_resampled"]})
 
-    assert local_kd_launch._selected_overfit_probe_modes(
-        overfit, "diverse_resampled"
-    ) == ("diverse_resampled",)
+    assert local_kd_launch._selected_overfit_probe_modes(overfit, "diverse_resampled") == (
+        "diverse_resampled",
+    )
     assert local_kd_launch._selected_overfit_probe_modes(overfit, None) == (
         "smallest_fixed",
         "diverse_resampled",
@@ -502,10 +508,12 @@ def test_bypass_run_location_is_broadcast_from_rank_zero(monkeypatch) -> None:
 def test_distributed_path_consensus_rejects_split_checkpoint_roots(monkeypatch) -> None:
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    run_a = str(Path("/tmp/run-a").resolve())
+    run_b = str(Path("/tmp/run-b").resolve())
 
     def gather(values, local):
-        assert local == "/tmp/run-a"
-        values[:] = ["/tmp/run-a", "/tmp/run-b"]
+        assert local == run_a
+        values[:] = [run_a, run_b]
 
     monkeypatch.setattr(torch.distributed, "all_gather_object", gather)
 

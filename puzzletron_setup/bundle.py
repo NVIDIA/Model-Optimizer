@@ -346,6 +346,13 @@ def _post_mip_flows(
                 if smoke:
                     config["minimum_request_count"] = 4
                     config["requests_per_concurrency"] = 1
+            elif node_type == "downstream_evaluation":
+                config.setdefault("model", "vllm")
+                config.setdefault("batch_size", 1)
+                config.setdefault("log_samples", True)
+                config.setdefault("topology", deepcopy(dict(default_serving_topology)))
+                if smoke:
+                    config["limit"] = min(int(config.get("limit", 8) or 8), 8)
             elif node_type == "global_kd":
                 config.setdefault("automodel", {})["parallel"] = _parallel(global_kd_mesh)
                 config["local_batch_size"] = _aligned_batch_size(
@@ -816,7 +823,7 @@ def _dynamic_stage_entries(
                 entry.update(resource="cpu", partition=cpu_partition)
             if node_type == "evaluation":
                 entry["parallel"] = dict(common)
-            elif node_type == "aiperf":
+            elif node_type in {"aiperf", "downstream_evaluation"}:
                 config = _mapping(node.get("config"))
                 entry["parallel"] = _serving_parallel(_mapping(config.get("topology")))
             elif node_type == "materialize":

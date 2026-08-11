@@ -14,7 +14,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_orchestrator.controller import dry_run_plan
+from puzzletron_orchestrator.controller import _stage_dashboard_display_name, dry_run_plan
 from puzzletron_orchestrator.executors.baremetal import GpuLeaseManager
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
@@ -177,6 +177,27 @@ def test_adapter_registry_selects_sharded_adapter(tmp_path: Path):
     work_plan = adapter.plan(plan, node)
     assert work_plan.strategy is ExecutionStrategy.SHARDED
     assert [item.work_id for item in work_plan.items] == ["vllm_stats:default:gang"]
+
+
+def test_stage_dashboard_display_name_uses_downstream_evaluation_node_type():
+    config = {
+        "post_mip": {
+            "flows": {
+                "params-75": {
+                    "nodes": {
+                        "lmms_eval": {
+                            "type": "downstream_evaluation",
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert (
+        _stage_dashboard_display_name(config, "post.params-75.lmms_eval")
+        == "Downstream Evaluation"
+    )
 
 
 def test_vllm_stats_rejects_conflicting_execution_mesh(tmp_path: Path):

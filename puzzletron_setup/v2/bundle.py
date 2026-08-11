@@ -76,6 +76,98 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _mapping_path(value: Any, parts: list[str]) -> tuple[bool, Any]:
+    for part in parts:
+        if not isinstance(value, Mapping) or part not in value:
+            return False, None
+        value = value[part]
+    return True, value
+
+
+def _named_values(values: Any, parts: list[str]) -> dict[str, Any]:
+    resolved = {}
+    for name, value in _mapping(values).items():
+        found, effective = _mapping_path(value, parts)
+        if found:
+            resolved[str(name)] = deepcopy(effective)
+    return resolved
+
+
+def _effective_default_value(state: WizardState, path: str, fallback: Any) -> Any:
+    """Return the authored consumer value for one resolved default, if present."""
+    record = state.records().get(path)
+    if record is not None:
+        return deepcopy(record.effective)
+
+    root, *parts = path.split(".")
+    direct_collection = state.collection(root)
+    if direct_collection is not None:
+        found, value = _mapping_path(direct_collection, parts)
+        if found:
+            return deepcopy(value)
+
+    if path == "profiles":
+        profiles = _mapping(state.collection("parallel_profiles"))
+        return deepcopy(profiles) if profiles else fallback
+
+    if root == "stages" and len(parts) == 2 and parts[1] == "instances":
+        found, value = _mapping_path(state.collection("stage_resources"), parts)
+        return deepcopy(value) if found else fallback
+
+    if root == "mip" and len(parts) == 1:
+        runs = _mapping(_mapping(state.collection("mip_config")).get("runs"))
+        field = parts[0]
+        if field == "num_solutions":
+            values = _named_values(runs, ["solver", "num_solutions"])
+        elif field == "objective":
+            values = {
+                str(name): [
+                    item["metric"]
+                    for item in _mapping(run).get("objectives", ())
+                    if isinstance(item, Mapping) and "metric" in item
+                ]
+                for name, run in runs.items()
+            }
+        elif field == "goal_metric":
+            values = {
+                str(name): list(_mapping(_mapping(run).get("constraints")))
+                for name, run in runs.items()
+            }
+        elif field == "goal_value":
+            values = {
+                str(name): deepcopy(_mapping(_mapping(run).get("constraints")))
+                for name, run in runs.items()
+            }
+        else:
+            values = {}
+        return values or fallback
+
+    if root == "vllm" and len(parts) == 1 and parts[0] == "enabled":
+        return bool(_mapping(state.collection("vllm_measurements")))
+    if root == "vllm":
+        measurements = state.collection("vllm_measurements")
+        if len(parts) == 1:
+            workload_key = {
+                "batch_size": "batch_size",
+                "max_num_seqs": "max_num_seqs",
+                "prefill_seq_len": "prefill_seq_len",
+                "generation_seq_len": "generation_seq_len",
+            }.get(parts[0])
+            if workload_key:
+                values = _named_values(state.collection("serving_workloads"), [workload_key])
+            elif parts[0] == "granularity":
+                values = _named_values(measurements, ["granularity"])
+            else:
+                values = {}
+        elif len(parts) == 2 and parts[0] == "topology":
+            values = _named_values(measurements, ["runtime_stats", "topology", parts[1]])
+        else:
+            values = {}
+        return values or fallback
+
+    return fallback
+
+
 def _legacy_state(state: WizardState) -> Mapping[str, Any]:
     legacy = state.collection("legacy_state")
     if not isinstance(legacy, Mapping):
@@ -257,10 +349,7 @@ def _bundle_readme(
                 acquisition_command.extend(
                     [
                         "--subset-rows",
-                        *[
-                            f"{name}={rows}"
-                            for name, rows in subset_rows.items()
-                        ],
+                        *[f"{name}={rows}" for name, rows in subset_rows.items()],
                     ]
                 )
             acquisition_command.extend(
@@ -341,15 +430,29 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
             validations[budget] = validation
             (bundle / "dry-run-plan.txt").write_text(dry_run_bundle(bundle))
 
-        resolved = {
-            path: {
-                "value": record.value,
-                "requested": record.requested,
-                "effective": record.effective,
-                "source": record.source,
+        resolved = {}
+        for path, raw_record in dict(state.collection("default_resolutions") or {}).items():
+            if not isinstance(raw_record, Mapping):
+                raise SetupError(f"Default resolution {path!r} must be a mapping.")
+            record = dict(raw_record)
+            value = record.get("value")
+            resolved[str(path)] = {
+                "value": value,
+                "requested": None,
+                "effective": _effective_default_value(state, str(path), value),
+                "source": record.get("source"),
             }
-            for path, record in state.records().items()
-        }
+        resolved.update(
+            {
+                path: {
+                    "value": record.value,
+                    "requested": record.requested,
+                    "effective": record.effective,
+                    "source": record.source,
+                }
+                for path, record in state.records().items()
+            }
+        )
         _write_yaml(temp_root / "resolved_defaults.yaml", resolved)
         repository = str(
             state.get_field(

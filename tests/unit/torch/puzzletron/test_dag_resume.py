@@ -183,10 +183,7 @@ def test_vllm_completion_uses_configured_runtime_aggregate_filename(tmp_path: Pa
 
 
 def test_every_registry_stage_projects_its_own_section_but_not_report_settings() -> None:
-    config = {
-        stage: {"semantic_value": stage}
-        for stage in STAGE_REGISTRY
-    }
+    config = {stage: {"semantic_value": stage} for stage in STAGE_REGISTRY}
     config["report"] = {"theme": "light"}
 
     for stage in STAGE_REGISTRY:
@@ -200,13 +197,13 @@ def test_every_registry_stage_projects_its_own_section_but_not_report_settings()
 
 @pytest.mark.parametrize(
     "stage",
-    (
+    [
         "sort_sanity",
         "width_sanity",
         "slicing_sanity",
         "bypass_sanity",
         "global_distillation_sanity",
-    ),
+    ],
 )
 def test_sanity_stage_identity_includes_global_warning_policy(stage: str) -> None:
     config = {
@@ -279,13 +276,13 @@ def test_tokenize_data_identity_includes_every_tokenizer_and_data_input(
 
 @pytest.mark.parametrize(
     ("stage", "handler_section"),
-    (
+    [
         ("width_importance", "pruning"),
         ("build_library", "build_library"),
         ("build_library", "vllm_stats"),
         ("build_library", "library"),
         ("replacement_scoring", "replacement_scoring"),
-    ),
+    ],
 )
 def test_handler_section_changes_stale_consumer_but_report_changes_do_not(
     tmp_path: Path,
@@ -387,7 +384,7 @@ def test_relevant_config_and_upstream_changes_have_stale_reasons(tmp_path: Path)
     )
 
 
-@pytest.mark.parametrize("mutated_parent_evidence", ("artifact", "manifest"))
+@pytest.mark.parametrize("mutated_parent_evidence", ["artifact", "manifest"])
 def test_child_revalidates_current_parent_evidence_without_marker_rewrite(
     tmp_path: Path,
     mutated_parent_evidence: str,
@@ -438,13 +435,11 @@ def test_child_revalidates_current_parent_evidence_without_marker_rewrite(
     result = check_marker_details(child_marker, **child_kwargs)
 
     assert not result.valid
-    assert result.stale_reasons == (
-        "changed selected upstream identity: build_library",
-    )
+    assert result.stale_reasons == ("changed selected upstream identity: build_library",)
 
 
-@pytest.mark.parametrize("parent_evidence", ("artifact", "manifest"))
-@pytest.mark.parametrize("change", ("mutated", "deleted"))
+@pytest.mark.parametrize("parent_evidence", ["artifact", "manifest"])
+@pytest.mark.parametrize("change", ["mutated", "deleted"])
 def test_child_build_rejects_parent_changed_before_identity_collection(
     tmp_path: Path,
     parent_evidence: str,
@@ -500,7 +495,7 @@ def test_child_build_rejects_parent_changed_before_identity_collection(
         )
 
 
-@pytest.mark.parametrize("parent_version", ("legacy-v2", "incomplete-v3"))
+@pytest.mark.parametrize("parent_version", ["legacy-v2", "incomplete-v3"])
 def test_unverifiable_parent_cannot_seed_or_validate_v3_child_after_evidence_mutation(
     tmp_path: Path,
     parent_version: str,
@@ -684,7 +679,6 @@ def test_tokenize_resume_marker_binds_external_cache_outputs(tmp_path: Path) -> 
     external_metadata.write_text("{}\n")
     manifest_path = root / "manifests" / "tokenize_data.json"
     manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text('{"semantic_identity": "tokenize_semantic"}\n')
     config_path = tmp_path / "config.yaml"
     config_path.write_text("tokenize_data: {}\n")
     config = _config(
@@ -704,10 +698,15 @@ def test_tokenize_resume_marker_binds_external_cache_outputs(tmp_path: Path) -> 
             ],
         },
     )
+    manifest = StageManifest(stage="tokenize_data", config=config)
+    manifest.complete(outputs={"caches": []})
+    write_stage_manifest(manifest_path, manifest)
 
     kwargs = _resume_kwargs(config, config_path, "tokenize_data")
     assert kwargs["required_patterns"] == (
         "manifests/tokenize_data.json",
+        manifest.execution_record["resolved_config_path"],
+        manifest.execution_record["artifact_manifest_path"],
         str(external_output.resolve()),
         str(external_metadata.resolve()),
     )

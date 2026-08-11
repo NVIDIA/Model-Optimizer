@@ -114,7 +114,7 @@ class PostMIPAdapter(WorkAdapter):
         config = _node_config(plan, node.stage_id)
         node_type = str(config.get("type"))
         count = 1 if node_type in {"filter", "manual_filter"} else node.instances
-        if node_type == "evaluation":
+        if node_type in {"evaluation", "downstream_evaluation"}:
             available = _available_evaluation_candidates(plan, node.stage_id, config)
             if available is not None:
                 if available < 1:

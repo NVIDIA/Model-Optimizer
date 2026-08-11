@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -55,20 +67,18 @@ def _named_constraints(
 def build_grid_budget_entries(grid_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Expand a grid-budget config into concrete MIP constraint entries.
 
-    Explicit entries are passed through:
+    Explicit entries are passed through, for example::
 
-    ```
-    grid_budgeting:
-      enabled: true
-      entries:
-        - name: depth_24
-          mip_constraints: {"stats.not_no_op": 24}
-        - name: params_8b
-          human_constraints: {"num_params": "8B"}
-    ```
+        grid_budgeting:
+          enabled: true
+          entries:
+            - name: depth_24
+              mip_constraints: {"stats.not_no_op": 24}
+            - name: params_8b
+              human_constraints: {"num_params": "8B"}
 
     Convenience fields map to the aggregate stats already computed by
-    `run_puzzle.py`. Unknown future axes can be expressed through `entries`
+    ``run_puzzle.py``. Unknown future axes can be expressed through ``entries``
     without changing this function.
     """
     grid_cfg = dict(grid_cfg or {})
@@ -98,9 +108,7 @@ def build_grid_budget_entries(grid_cfg: dict[str, Any]) -> list[dict[str, Any]]:
             target="stats.num_experts",
         )
     )
-    entries.extend(
-        _named_constraints("top_k", _list(grid_cfg.get("top_k")), target="stats.top_k")
-    )
+    entries.extend(_named_constraints("top_k", _list(grid_cfg.get("top_k")), target="stats.top_k"))
     entries.extend(
         _named_constraints(
             "mamba_heads",

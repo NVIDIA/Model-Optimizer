@@ -50,7 +50,9 @@ _CANDIDATE_STAGE_IDS = frozenset(
         "vllm_stats",
     }
 )
-_CANDIDATE_POST_MIP_TYPES = frozenset({"evaluation", "global_kd", "aiperf"})
+_CANDIDATE_POST_MIP_TYPES = frozenset(
+    {"evaluation", "global_kd", "aiperf", "downstream_evaluation"}
+)
 
 
 @dataclass(frozen=True)

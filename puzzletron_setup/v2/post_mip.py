@@ -29,9 +29,10 @@ IMPLEMENTED_NODE_TYPES = (
     "materialize",
     "evaluation",
     "aiperf",
+    "downstream_evaluation",
     "global_kd",
 )
-RESERVED_NODE_TYPES = ("ptq", "downstream_evaluation")
+RESERVED_NODE_TYPES = ("ptq",)
 
 
 @dataclass(frozen=True)

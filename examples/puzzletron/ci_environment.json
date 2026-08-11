@@ -5,6 +5,7 @@
   "torch": "2.11.0",
   "torchvision": "0.26.0",
   "transformers": "5.8.1",
+  "lmms_eval": "0.7.0",
   "nemo_automodel": {
     "base_version": "0.5.0",
     "repository": "https://github.com/Separius/Automodel.git",
