@@ -298,7 +298,7 @@ def load_runtime_hydra_config(config: dict[str, Any]) -> DictConfig:
     """Reconstruct the instantiated Hydra config used by GPU-heavy stages."""
     runtime = dict(config.get("_runtime") or {})
     config_path = runtime.get("config_path")
-    if runtime.get("resolved_config_path") or not config_path:
+    if not config_path:
         hydra_cfg = OmegaConf.create(config)
         OmegaConf.set_struct(hydra_cfg, False)
         _install_runtime_section_aliases(hydra_cfg)

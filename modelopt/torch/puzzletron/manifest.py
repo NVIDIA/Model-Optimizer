@@ -108,6 +108,18 @@ def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _file_evidence(path: Path) -> dict[str, int | str]:
+    """Return bounded-memory size and digest evidence for one file."""
+
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
+
+
 def _resolved_config_content(config: object) -> Any:
     """Remove path/launch-only runtime facts from resolved semantic identity."""
 
@@ -211,11 +223,9 @@ def write_stage_execution_record(
             if not output_path.is_absolute():
                 output_path = root / output_path
             if output_path.is_file():
-                output_bytes = output_path.read_bytes()
                 immutable_evidence[str(key)] = {
                     "path": value,
-                    "size": len(output_bytes),
-                    "sha256": _sha256_bytes(output_bytes),
+                    **_file_evidence(output_path),
                 }
     artifact_payload = {
         "schema": _EXECUTION_RECORD_SCHEMA,

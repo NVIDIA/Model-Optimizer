@@ -153,6 +153,33 @@ def test_execution_record_binds_terminal_skip_reason(tmp_path: Path) -> None:
         validate_stage_execution_record(manifest_path, expected_stage="tokenize_data")
 
 
+@pytest.mark.parametrize(
+    "record_key",
+    ["resolved_config_path", "artifact_manifest_path"],
+    ids=["resolved-config", "artifact-manifest"],
+)
+def test_skipped_stage_resume_rejects_missing_immutable_record(
+    tmp_path: Path,
+    record_key: str,
+) -> None:
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text("model: {}\n")
+    config = _stage_config(tmp_path, config_path)
+    config["tokenize_data"] = {"enabled": False}
+    manifest = StageManifest(stage="tokenize_data", config=config)
+    manifest.complete(status="skipped", skip_reason="disabled")
+    manifest_path = tmp_path / "manifests" / "tokenize_data.json"
+    write_stage_manifest(manifest_path, manifest)
+    pointer = json.loads(manifest_path.read_text())
+
+    (tmp_path / pointer["execution_record"][record_key]).unlink()
+
+    with pytest.raises(ValueError, match=r"invalid .* record"):
+        _completion_is_valid(config, config_path, "tokenize_data")
+    with pytest.raises(ValueError, match=r"invalid .* record"):
+        _mark_completion(config, config_path, "tokenize_data")
+
+
 def test_artifact_manifest_separates_output_pointer_from_immutable_evidence(
     tmp_path: Path,
 ) -> None:
