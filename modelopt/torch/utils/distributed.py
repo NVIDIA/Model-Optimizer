@@ -281,22 +281,31 @@ def _off_dtype_params(model) -> set[torch.nn.Parameter]:
 
 
 def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
-    """Move ``params`` onto the device FSDP2 chose for ``model``'s shards.
+    """Move ``params`` onto the device FSDP2 computes on for ``model``.
 
     ``fully_shard`` only moves the params it manages, so ignored ones would be stranded on
     whatever device the caller built the model on. Meta params are left alone for deferred init.
+
+    The device comes from a sharded param's mesh rather than its local shard: under
+    ``cpu_offload`` the shard rests on CPU while compute still happens on the accelerator.
     """
-    device = next(
-        (
-            state._fsdp_param_group.device
-            for module in model.modules()
-            if isinstance(module, FSDPModule)
-            and (state := fully_shard.state(module))._fsdp_param_group is not None
-        ),
-        None,
-    )
-    if device is None:
+    # Lazy import: logging imports this module at top level (circular).
+    from modelopt.torch.utils.logging import warn_rank_0
+
+    mesh = next((p.device_mesh for p in model.parameters() if isinstance(p, DTensor)), None)
+    if mesh is None:
+        warn_rank_0(
+            f"FSDP2 sharded no parameter of {type(model).__name__}, so the compute device for "
+            f"{len(params)} unsharded off-dtype parameter(s) cannot be determined; leaving them "
+            "where they are. Move them to the compute device or the forward will fail."
+        )
         return
+
+    device = (
+        torch.device("cpu")
+        if mesh.device_type == "cpu"
+        else torch.device(mesh.device_type, getattr(torch, mesh.device_type).current_device())
+    )
     for param in params:
         if not param.is_meta and param.device != device:
             param.data = param.data.to(device)

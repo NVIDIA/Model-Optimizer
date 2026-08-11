@@ -15,6 +15,9 @@
 
 """GPU/distributed tests for ``modelopt.torch.utils.distributed``."""
 
+from functools import partial
+
+import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -103,15 +106,17 @@ def test_fsdp2_wrap_mixed_dtypes(dist_workers):
     dist_workers.run(_test_fsdp2_wrap_mixed_dtypes)
 
 
-def _test_fsdp2_wrap_moves_ignored_params_to_device(rank, size):
-    """A CPU-resident model must end up fully on GPU: fully_shard skips the params it ignores."""
+def _test_fsdp2_wrap_moves_ignored_params_to_device(rank, size, cpu_offload):
+    """A CPU-resident model must end up computing on GPU: fully_shard skips the params it ignores."""
     model = _mixed_dtype_model(torch.device("cpu"))
     assert model.model.layers[0].mlp.gate.weight.device.type == "cpu"
 
-    fsdp2_wrap(model)
+    fsdp2_wrap(model, cpu_offload=cpu_offload)
 
-    # fully_shard moves the params it manages; fsdp2_wrap has to move the rest itself.
-    assert model.model.layers[0].mlp.mlp.up_proj.weight.to_local().device.type == "cuda"
+    # Under cpu_offload the shard rests on CPU, but compute — and so the ignored params — is
+    # still on GPU, which is why the device is taken from the mesh and not from the local shard.
+    sharded_weight = model.model.layers[0].mlp.mlp.up_proj.weight
+    assert sharded_weight.to_local().device.type == ("cpu" if cpu_offload else "cuda")
     assert model.model.layers[0].mlp.gate.weight.device.type == "cuda"
 
     input_ids = torch.randint(0, VOCAB_SIZE, (1, 8), device=torch.device(f"cuda:{rank}"))
@@ -119,5 +124,8 @@ def _test_fsdp2_wrap_moves_ignored_params_to_device(rank, size):
         assert model(input_ids=input_ids).logits.shape == (1, 8, VOCAB_SIZE)
 
 
-def test_fsdp2_wrap_moves_ignored_params_to_device(dist_workers):
-    dist_workers.run(_test_fsdp2_wrap_moves_ignored_params_to_device)
+@pytest.mark.parametrize("cpu_offload", [False, True])
+def test_fsdp2_wrap_moves_ignored_params_to_device(dist_workers, cpu_offload):
+    dist_workers.run(
+        partial(_test_fsdp2_wrap_moves_ignored_params_to_device, cpu_offload=cpu_offload)
+    )
