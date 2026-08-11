@@ -15,8 +15,6 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
-from collections import OrderedDict
-
 import torch
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
@@ -24,43 +22,13 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import (
-    TiedGroupResolver,
-    _build_tied_alias_map,
-    _collect_canonical_tied_patterns,
-    _reorder_canonical_first,
-)
+from modelopt.torch.export.model_utils import TiedGroupResolver, _build_tied_alias_map
 from modelopt.torch.export.quant_utils import (
     fuse_prequant_layernorm,
     postprocess_state_dict,
     sync_tied_input_amax,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
-
-
-def test_collect_canonical_tied_patterns_dict_style():
-    """Dict-style _tied_weights_keys yields regex patterns + canonical-side substrings."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-
-    patterns, side_substrings = _collect_canonical_tied_patterns(parent)
-
-    assert len(patterns) >= 1
-    # "decoder" is in the canonical RHS but not the alias LHS — must auto-derive.
-    # "encoder" is alias-only and must NOT be returned as canonical (would invert dedup).
-    assert "decoder" in side_substrings
-    assert "encoder" not in side_substrings
-
-
-def test_collect_canonical_tied_patterns_list_style_yields_no_canonical_info():
-    """Legacy list-style _tied_weights_keys carries no canonical/alias info — returns empty."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
-
-    patterns, side_substrings = _collect_canonical_tied_patterns(parent)
-
-    assert patterns == []
-    assert side_substrings == []
 
 
 def test_build_tied_alias_map_dict_style_maps_alias_to_canonical():
@@ -201,26 +169,6 @@ def test_tied_group_resolver_parallel_pattern_declaration():
         "model.encoder.language_model.layers.0.experts.3.gate_proj.weight", prefixes
     )
     assert got == "model.decoder.layers.0.experts.3.gate_proj.weight"
-
-
-def test_reorder_canonical_first_puts_decoder_keys_before_encoder_keys():
-    """_reorder_canonical_first moves canonical-side state_dict keys ahead of alias-side keys."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-
-    sd = OrderedDict(
-        [
-            ("encoder.weight", torch.zeros(1)),
-            ("unrelated.foo", torch.zeros(1)),
-            ("decoder.weight", torch.zeros(1)),
-        ]
-    )
-
-    reordered = _reorder_canonical_first(sd, parent)
-    keys = list(reordered.keys())
-
-    assert keys.index("decoder.weight") < keys.index("encoder.weight")
-    assert set(reordered) == set(sd)  # no drops or additions
 
 
 def _quantize_and_get_input_quantizers(parent):
@@ -411,14 +359,19 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
     assert len(out) == 2 * 3 * 2  # 2 experts * 3 projections * (weight + weight_scale)
 
 
-def test_postprocess_state_dict_preserves_tensors_with_different_byte_ranges():
+def test_postprocess_state_dict_collapses_view_and_base_sharing_storage():
+    """A base tensor and a view into it share storage, so safetensors ``save_file`` would
+    reject them. The address backstop keys on storage identity (like safetensors), so it
+    collapses the pair here rather than letting both survive and crash the write."""
     storage = torch.arange(4)
     state_dict = {"short": storage[:2], "long": storage}
     assert state_dict["short"].data_ptr() == state_dict["long"].data_ptr()
 
     processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
 
-    assert set(processed) == set(state_dict)
+    # Exactly one side survives (first-wins), so no shared-storage pair reaches save_file.
+    assert len(processed) == 1
+    assert "short" in processed  # first-iterated key seeds the map; the later share is dropped
 
 
 def test_postprocess_state_dict_preserves_zero_pointer_tensors():

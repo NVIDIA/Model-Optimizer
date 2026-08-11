@@ -92,12 +92,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import (
-    TiedGroupResolver,
-    _reorder_canonical_first,
-    get_language_model_from_vl,
-    is_multimodal_model,
-)
+from .model_utils import TiedGroupResolver, get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
@@ -1021,12 +1016,6 @@ def _export_transformers_checkpoint(
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
-
-    # Reorder so canonical-side tied keys (per HF's _tied_weights_keys)
-    # iterate first into postprocess_state_dict's first-wins data_ptr dedup.
-    # Self-gated to DiffusionGemma inside _reorder_canonical_first; no-op
-    # for every other model.
-    quantized_state_dict = _reorder_canonical_first(quantized_state_dict, model)
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict,
