@@ -32,13 +32,19 @@
 # sys.path.insert(0, os.path.abspath('.'))
 
 import contextlib
+import dataclasses
+import inspect
 import os
 import sys
+from typing import TYPE_CHECKING, cast
 
 import sphinx.application
 from docutils import nodes
 from docutils.nodes import Element
 from sphinx.writers.html5 import HTML5Translator
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from modelopt import __version__
 
@@ -124,7 +130,7 @@ html_permalinks_icon = "#"  # default icon not rendering properly
 
 
 # Mock imports for autodoc
-autodoc_mock_imports = ["mpi4py", "tensorrt_llm", "triton", "vllm"]
+autodoc_mock_imports = ["cuopt", "mpi4py", "nemo_automodel", "tensorrt_llm", "triton", "vllm"]
 
 autosummary_generate = True
 autosummary_imported_members = False
@@ -208,6 +214,32 @@ class PatchedHTMLTranslator(HTML5Translator):
             self.body.append(("%s" + self.secnumber_suffix) % ".".join(map(str, node["secnumber"])))
 
 
+def _drop_generated_dataclass_docstring(
+    app: sphinx.application.Sphinx,
+    what: str,
+    qualified_name: str,
+    obj: object,
+    options: object,
+    lines: list[str],
+) -> None:
+    """Discard the signature-like docstring synthesized by ``dataclass``."""
+    del app, options
+    if (
+        what != "class"
+        or not qualified_name.startswith("modelopt.torch.puzzletron.")
+        or not dataclasses.is_dataclass(obj)
+    ):
+        return
+
+    class_name = getattr(obj, "__name__", "")
+    generated = f"{class_name}{inspect.signature(cast('Callable[..., object]', obj))}".removesuffix(
+        " -> None"
+    )
+    if inspect.getdoc(obj) == generated:
+        lines.clear()
+
+
 def setup(app: sphinx.application.Sphinx) -> None:
     """Setup according to the Sphinx extension API."""
+    app.connect("autodoc-process-docstring", _drop_generated_dataclass_docstring)
     app.set_translator("html", PatchedHTMLTranslator)
