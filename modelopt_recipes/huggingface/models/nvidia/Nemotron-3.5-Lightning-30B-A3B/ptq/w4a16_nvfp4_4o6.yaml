@@ -39,9 +39,6 @@ quantize:
     - quantizer_name: '*mixer.shared_experts*weight_quantizer'
       enable: true
       cfg: {$import: nvfp4_four_over_six}
-    - quantizer_name: '*lm_head*weight_quantizer'
-      enable: true
-      cfg: {$import: nvfp4_four_over_six}
     - quantizer_name: '*mlp.experts*weight_quantizer'
       enable: true
       cfg: {$import: nvfp4_four_over_six}
@@ -66,7 +63,11 @@ quantize:
       enable: true
       cfg:
         num_bits: e4m3
-    # MCore lm_head (output_layer) W4A16 4/6 weight-only.
+    # lm_head (output_layer) W4A16 4/6 weight-only.
     - quantizer_name: 'output_layer.weight_quantizer'
       enable: true
       cfg: {$import: nvfp4_four_over_six}
+    - quantizer_name: 'lm_head.weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+
