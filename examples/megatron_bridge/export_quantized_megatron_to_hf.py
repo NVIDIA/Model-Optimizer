@@ -102,31 +102,29 @@ def get_args() -> argparse.Namespace:
 
 
 def _provider_overrides_from_checkpoint(megatron_path: str) -> dict:
-    """Read ``mtp_num_layers`` from the checkpoint so the exporter matches how it was saved.
+    """Read ``mtp_num_layers`` from the checkpoint, or ``{}`` if it is not recorded there.
 
-    Only ``mtp_num_layers`` is taken from here. ``moe_grouped_gemm`` is deliberately NOT derived:
-    for a ``MambaModelProvider`` the expert layout is set by ``mamba_stack_spec``, so the value a
-    checkpoint records does not describe how its experts were actually built.
+    ``moe_grouped_gemm`` is deliberately not read: for a ``MambaModelProvider`` the expert layout
+    comes from ``mamba_stack_spec``, so the recorded value does not describe how it was built.
     """
-    defaults = {"mtp_num_layers": 0}
     run_config = next(iter(sorted(pathlib.Path(megatron_path).glob("*/run_config.yaml"))), None)
     if run_config is None:
         run_config = pathlib.Path(megatron_path) / "run_config.yaml"
     if not run_config.exists():
-        print_rank_0(f"No run_config.yaml under {megatron_path}; using defaults {defaults}.")
-        return defaults
+        print_rank_0(f"No run_config.yaml under {megatron_path}; keeping the HF config's shape.")
+        return {}
     try:
         cfg = yaml.safe_load(run_config.read_text()) or {}
     except Exception as exc:
-        print_rank_0(f"Could not parse {run_config} ({exc}); using defaults {defaults}.")
-        return defaults
+        print_rank_0(f"Could not parse {run_config} ({exc}); keeping the HF config's shape.")
+        return {}
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else cfg
-    resolved = {
-        key: model_cfg.get(key, default)
-        for key, default in defaults.items()
-        if isinstance(model_cfg, dict)
-    }
-    resolved = {**defaults, **resolved}
+    if not isinstance(model_cfg, dict) or "mtp_num_layers" not in model_cfg:
+        print_rank_0(
+            f"{run_config.name} does not record mtp_num_layers; keeping the HF config's shape."
+        )
+        return {}
+    resolved = {"mtp_num_layers": model_cfg["mtp_num_layers"]}
     print_rank_0(f"Model shape from {run_config.name}: {resolved}")
     return resolved
 
@@ -149,7 +147,7 @@ def main(args: argparse.Namespace):
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
-            "mtp_num_layers": _ckpt_shape["mtp_num_layers"],
+            **_ckpt_shape,
         },
         init_model_parallel=True,
         load_weights=False,  # The weights come from the Megatron checkpoint, so HF weights are not loaded

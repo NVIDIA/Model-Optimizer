@@ -703,9 +703,7 @@ def _pack_documents_into_rows(
     eos_id = tokenizer.eos_token_id
     pad_id = tokenizer.pad_token_id
     has_eos_sep = eos_id is not None
-    # With random_offset (Megatron-LM --calib-use-random-offset), build one extra window
-    # of headroom, then drop a random number of leading tokens so the window grid shifts and
-    # calibration samples mid-document positions differently (relevant for long-context KV stats).
+    # random_offset (Megatron-LM --calib-use-random-offset) needs one extra window of headroom.
     target_len = num_rows * seq_length + (seq_length if random_offset else 0)
     token_stream: list[int] = []
     for s in samples:
@@ -718,7 +716,9 @@ def _pack_documents_into_rows(
     if random_offset:
         max_off = min(seq_length, max(0, len(token_stream) - num_rows * seq_length))
         if max_off > 0:
-            token_stream = token_stream[random.randint(0, max_off) :]
+            # Seeded so every DP rank derives the SAME offset: rows are packed locally on each
+            # rank and then sharded by index, which is only a partition if the ranks agree.
+            token_stream = token_stream[random.Random(0).randint(0, max_off) :]
 
     n_full = min(num_rows, len(token_stream) // seq_length)
     rows_ids: list[list[int]] = [
@@ -797,6 +797,8 @@ def get_dataset_dataloader(
             ``num_samples`` rows) is padded. Default ``False`` for backwards-compatibility
             with the prior one-doc-per-row tokenize-and-pad behavior; calibration
             callers should pass ``True``.
+        random_offset: Drop a random leading-token offset before packing (``pack=True``
+            only), shifting the window grid. Megatron-LM ``--calib-use-random-offset``.
         distributed: If True, shard the dataset across ranks with a ``DistributedSampler``
             (e.g. for data-parallel calibration). ``sampler_kwargs`` supplies ``num_replicas``
             and ``rank``.
