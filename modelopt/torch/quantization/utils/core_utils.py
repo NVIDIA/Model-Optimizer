@@ -30,7 +30,6 @@ from torch.distributed.tensor import DTensor, Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
-from modelopt.torch.utils.distributed import is_fsdp2_model
 from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 
 if TYPE_CHECKING:
@@ -662,19 +661,6 @@ def has_accelerate_offload(module: nn.Module) -> bool:
     return any(
         _get_offload_hook(getattr(m, "_hf_hook", None)) is not None for m in module.modules()
     )
-
-
-def has_non_resident_weights(module: nn.Module) -> bool:
-    """Whether any weight under ``module`` lives outside it for part of the export.
-
-    Structural (FSDP2 wrapping, accelerate offload hooks) rather than a snapshot of
-    current placement: offloaded weights come and go as materialization windows open and
-    close, so a point-in-time check answers differently depending on when it runs.
-
-    Callers use this for decisions that must hold for a whole export — notably
-    pointer-keyed dedup, which needs ``data_ptr()`` to identify a tensor throughout.
-    """
-    return has_accelerate_offload(module) or is_fsdp2_model(module)
 
 
 @contextmanager
