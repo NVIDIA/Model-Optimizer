@@ -85,7 +85,10 @@ def _register_faulthandler() -> None:
         )
         stack_path.parent.mkdir(parents=True, exist_ok=True)
         stack_log = stack_path.open("a")
-    faulthandler.register(signal.SIGUSR1, file=stack_log, all_threads=True)
+    if stack_log is None:
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    else:
+        faulthandler.register(signal.SIGUSR1, file=stack_log, all_threads=True)
 
 
 _register_faulthandler()
