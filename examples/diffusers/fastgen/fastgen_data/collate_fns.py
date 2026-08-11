@@ -17,10 +17,10 @@
 
 Self-contained on **stock** ``nemo_automodel`` (no AutoModel patch required):
 
-* :func:`collate_fn_text_to_image` builds the Qwen-Image batch directly from the vendored
-  :class:`TextToImageDataset` per-item output (``image_latents`` / ``text_embeddings`` /
-  ``text_embeddings_mask`` + an optional broadcast ``negative_text_embeddings`` for CFG). It
-  deliberately does **not** call the stock ``collate_fn_production``: released
+* :func:`collate_fn_text_to_image` and :func:`collate_fn_text_prompts` build the Qwen-Image
+  conditioning contract directly from the vendored :class:`TextToImageDataset` per-item output.
+  The latter omits image latents for data-free training. They deliberately do **not** call the
+  stock ``collate_fn_production``: released
   ``nemo_automodel`` (0.5.0) unconditionally stacks model-specific token keys
   (``clip_tokens`` / ``t5_tokens``) that the Qwen-Image cache does not produce, which would
   raise ``KeyError``. The vendored dataset and this collate are a matched pair, so coupling
@@ -44,45 +44,28 @@ from .text_to_image_dataset import TextToImageDataset
 
 __all__ = [
     "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_text_prompts",
     "collate_fn_text_to_image",
 ]
 
 logger = logging.getLogger(__name__)
 
 
-def collate_fn_text_to_image(
+def collate_fn_text_prompts(
     batch: list[dict],
     negative_text_embeddings: torch.Tensor | None = None,
     negative_text_embeddings_mask: torch.Tensor | None = None,
 ) -> dict:
-    """Build a text-to-image batch (latents + text embeddings/mask + CFG negatives).
-
-    Args:
-        batch: Samples from :class:`TextToImageDataset` (pre-encoded ``prompt_embeds`` path).
-        negative_text_embeddings: Optional static negative-prompt embedding of shape
-            ``[seq, dim]``. When provided it is broadcast across the batch and attached as
-            ``negative_text_embeddings`` (shape ``[B, seq, dim]``) for CFG-based objectives.
-        negative_text_embeddings_mask: Optional mask for the negative embedding.
-
-    Returns:
-        Dict with ``image_latents`` / ``text_embeddings`` / ``text_embeddings_mask`` (and, when
-        provided, the broadcast ``negative_text_embeddings`` / ``negative_text_embeddings_mask``).
-    """
+    """Build a prompt-only batch with text embeddings, masks, and CFG negatives."""
     if "prompt_embeds" not in batch[0]:
         raise NotImplementedError(
             "On-the-fly text encoding is not supported; preprocess to pre-encoded `prompt_embeds`."
         )
 
-    # Bucket sampling yields one resolution per batch.
     resolutions = {tuple(item["crop_resolution"].tolist()) for item in batch}
     assert len(resolutions) == 1, f"Mixed resolutions in batch: {resolutions}"
 
-    # Stack only the keys the FastGen pipelines consume, straight from the vendored dataset's
-    # per-item output. We do NOT call the stock ``collate_fn_production`` (see module docstring):
-    # released nemo_automodel 0.5.0 unconditionally stacks ``clip_tokens`` / ``t5_tokens``, which
-    # the Qwen-Image cache omits.
     image_batch = {
-        "image_latents": torch.stack([item["latent"] for item in batch]),
         "data_type": "image",
         "text_embeddings": pad_sequence(
             [item["prompt_embeds"] for item in batch],
@@ -117,7 +100,7 @@ def collate_fn_text_to_image(
 
     if negative_text_embeddings is not None:
         # Broadcast the static [seq, dim] embedding to [B, seq, dim].
-        batch_size = image_batch["image_latents"].shape[0]
+        batch_size = len(batch)
         neg = negative_text_embeddings
         if neg.dim() == 2:
             neg = neg.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
@@ -132,6 +115,21 @@ def collate_fn_text_to_image(
                 neg_mask = neg_mask.expand(batch_size, -1).contiguous()
             image_batch["negative_text_embeddings_mask"] = neg_mask
 
+    return image_batch
+
+
+def collate_fn_text_to_image(
+    batch: list[dict],
+    negative_text_embeddings: torch.Tensor | None = None,
+    negative_text_embeddings_mask: torch.Tensor | None = None,
+) -> dict:
+    """Build a text-conditioned image-latent batch."""
+    image_batch = collate_fn_text_prompts(
+        batch,
+        negative_text_embeddings=negative_text_embeddings,
+        negative_text_embeddings_mask=negative_text_embeddings_mask,
+    )
+    image_batch["image_latents"] = torch.stack([item["latent"] for item in batch])
     return image_batch
 
 
@@ -170,6 +168,7 @@ def build_text_to_image_multiresolution_dataloader(
     *,
     cache_dir: str,
     train_text_encoder: bool = False,
+    prompt_only: bool = False,
     batch_size: int = 1,
     dp_rank: int = 0,
     dp_world_size: int = 1,
@@ -193,6 +192,7 @@ def build_text_to_image_multiresolution_dataloader(
         cache_dir: Directory with the preprocessed cache (metadata.json, shards, resolution
             subdirs).
         train_text_encoder: If True, the dataset returns tokens instead of embeddings.
+        prompt_only: Return text conditioning without image latents.
         batch_size: Batch size per GPU.
         dp_rank: Data-parallel rank.
         dp_world_size: Data-parallel world size.
@@ -217,6 +217,7 @@ def build_text_to_image_multiresolution_dataloader(
     dataset = TextToImageDataset(
         cache_dir=cache_dir,
         train_text_encoder=train_text_encoder,
+        prompt_only=prompt_only,
         split=split,
         validation_count=validation_count,
         split_seed=split_seed,
@@ -224,7 +225,7 @@ def build_text_to_image_multiresolution_dataloader(
     effective_root = dataset.cache_root
 
     # Load the optional negative-prompt embedding once and bind it into the collate.
-    collate_fn = collate_fn_text_to_image
+    collate_fn = collate_fn_text_prompts if prompt_only else collate_fn_text_to_image
     if negative_prompt_embedding_path is not None:
         negative_path = resolve_under_root(
             effective_root,
@@ -241,7 +242,7 @@ def build_text_to_image_multiresolution_dataloader(
                 tuple(neg_mask.shape),
             )
         collate_fn = functools.partial(
-            collate_fn_text_to_image,
+            collate_fn,
             negative_text_embeddings=neg_embed,
             negative_text_embeddings_mask=neg_mask,
         )

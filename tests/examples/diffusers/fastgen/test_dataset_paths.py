@@ -124,6 +124,26 @@ def test_dataset_accepts_absolute_payload_beneath_root(make_fastgen_cache, tmp_p
     assert "latent" in dataset[0]
 
 
+def test_prompt_only_dataset_and_loader_do_not_emit_image_latents(make_fastgen_cache, tmp_path):
+    cache = make_fastgen_cache(tmp_path / "cache")
+    dataset = TextToImageDataset(cache, prompt_only=True)
+    assert "latent" not in dataset[0]
+
+    loader, _ = build_text_to_image_multiresolution_dataloader(
+        cache_dir=str(cache),
+        prompt_only=True,
+        batch_size=1,
+        num_workers=0,
+        shuffle=False,
+        negative_prompt_embedding_path="negative_prompt_embedding.pt",
+    )
+    batch = next(iter(loader))
+
+    assert "image_latents" not in batch
+    assert {"text_embeddings", "text_embeddings_mask"}.issubset(batch)
+    assert "negative_text_embeddings" in batch
+
+
 def test_environment_redirects_samples_and_relative_negative_embedding(
     make_fastgen_cache, monkeypatch, tmp_path
 ):

@@ -25,7 +25,6 @@ from pathlib import Path
 import torch
 import yaml
 from diffusers import QwenImagePipeline, QwenImageTransformer2DModel
-from torch import nn
 
 _THIS_DIR = Path(__file__).resolve().parent
 _FASTGEN_DIR = _THIS_DIR.parent
@@ -153,7 +152,7 @@ def main() -> None:
     )
     sampler = PDDPipeline(
         transformer,
-        nn.Identity(),
+        None,
         config,
         QwenImagePDDAdapter(config, compute_dtype=torch.bfloat16),
     )

@@ -62,11 +62,13 @@ def test_pdd_config_accepts_supported_schedule_and_adapter_time_scale():
         student_sample_steps=2,
         teacher_integrator="midpoint",
         num_train_timesteps=1000,
+        data_free=True,
     )
 
     assert config.inference_blocks == [64, 64]
     assert config.teacher_integrator == "midpoint"
     assert config.num_train_timesteps == 1000
+    assert config.data_free is True
 
 
 def test_rejected_attribute_assignment_leaves_pdd_config_unchanged():
@@ -147,7 +149,6 @@ def test_pdd_config_accepts_inference_partition_outside_training_block_support()
         {"student_sample_type": "sde"},
         {"teacher_integrator": "heun"},
         {"teacher_integrator": "rk4"},
-        {"data_free": True},
     ],
 )
 def test_pdd_config_locks_algorithm_modes(overrides):

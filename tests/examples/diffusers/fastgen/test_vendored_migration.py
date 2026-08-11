@@ -199,6 +199,33 @@ def test_collate_emits_contract_keys_and_broadcasts_negative_prompt():
     )  # broadcast [seq,dim]->[B,seq,dim]
 
 
+def test_prompt_only_collate_omits_image_latents_and_keeps_cfg_conditioning():
+    pytest.importorskip("nemo_automodel")
+    torch = pytest.importorskip("torch")
+
+    from fastgen_data import collate_fn_text_prompts
+
+    sample = {
+        "crop_resolution": torch.tensor([1024, 1024]),
+        "original_resolution": torch.tensor([1024, 1024]),
+        "crop_offset": torch.tensor([0, 0]),
+        "prompt": "a test prompt",
+        "image_path": "/unused/source.png",
+        "bucket_id": 0,
+        "aspect_ratio": 1.0,
+        "prompt_embeds": torch.randn(5, 16),
+        "prompt_embeds_mask": torch.ones(5, dtype=torch.long),
+    }
+    negative = torch.randn(5, 16)
+
+    result = collate_fn_text_prompts([sample, sample], negative_text_embeddings=negative)
+
+    assert "image_latents" not in result
+    assert result["text_embeddings"].shape == (2, 5, 16)
+    assert result["text_embeddings_mask"].shape == (2, 5)
+    assert result["negative_text_embeddings"].shape == (2, 5, 16)
+
+
 def test_collate_zero_pads_variable_length_qwen_embeddings_and_masks():
     pytest.importorskip("nemo_automodel")
     torch = pytest.importorskip("torch")

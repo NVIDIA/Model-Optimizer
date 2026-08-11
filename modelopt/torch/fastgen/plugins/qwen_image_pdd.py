@@ -1,3 +1,6 @@
+# Adapted from the Qwen-Image implementation in Diffusers:
+# https://github.com/huggingface/diffusers/blob/275869dcae4ebcfee6a80253fdabc56033335020/src/diffusers/models/transformers/transformer_qwenimage.py
+# SPDX-FileCopyrightText: Copyright (c) 2025 Qwen-Image Team, The HuggingFace Team. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -23,6 +26,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from ..config import PDDConfig
@@ -35,6 +39,7 @@ __all__ = [
     "QwenImagePDDAdapter",
     "adopt_qwen_image_mr210_forward",
     "convert_qwen_image_to_pdd",
+    "freeze_qwen_image_mr210_unused_parameters",
     "require_qwen_image_mr210_forward",
     "restore_qwen_image_pdd_projection",
 ]
@@ -230,6 +235,34 @@ def require_qwen_image_mr210_forward(model: nn.Module) -> str:
     if not isinstance(model, nn.Module) or not _is_qwen_image_mr210_forward(model):
         raise RuntimeError("Qwen-Image PDD requires the bound FastGen MR210 forward execution.")
     return QWEN_IMAGE_PDD_EXECUTION
+
+
+def freeze_qwen_image_mr210_unused_parameters(transformer: nn.Module) -> tuple[str, ...]:
+    """Freeze final-block text outputs that the MR210 forward does not consume."""
+    blocks = getattr(transformer, "transformer_blocks", None)
+    if not isinstance(blocks, nn.ModuleList) or not blocks:
+        raise RuntimeError("Qwen MR210 requires a nonempty transformer_blocks ModuleList.")
+
+    final_block = blocks[-1]
+    local_names = (
+        "attn.to_add_out.weight",
+        "attn.to_add_out.bias",
+        "txt_mlp.net.0.proj.weight",
+        "txt_mlp.net.0.proj.bias",
+        "txt_mlp.net.2.weight",
+        "txt_mlp.net.2.bias",
+    )
+    frozen_names = []
+    for local_name in local_names:
+        try:
+            parameter = final_block.get_parameter(local_name)
+        except AttributeError as error:
+            raise RuntimeError(
+                f"Qwen MR210 final block is missing required parameter {local_name!r}."
+            ) from error
+        parameter.requires_grad_(False)
+        frozen_names.append(f"transformer_blocks.{len(blocks) - 1}.{local_name}")
+    return tuple(frozen_names)
 
 
 def adopt_qwen_image_mr210_forward(transformer: nn.Module) -> nn.Module:
@@ -520,15 +553,19 @@ class QwenImagePDDAdapter:
         model_kwargs: Mapping[str, Any],
         *,
         condition_name: str,
+        prepared_condition: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        encoder_hidden_states, attention_mask = self._prepare_call(
-            model,
-            state,
-            time,
-            condition,
-            model_kwargs,
-            condition_name=condition_name,
-        )
+        if prepared_condition is None:
+            encoder_hidden_states, attention_mask = self._prepare_call_collectively(
+                model,
+                state,
+                time,
+                condition,
+                model_kwargs,
+                condition_name=condition_name,
+            )
+        else:
+            encoder_hidden_states, attention_mask = prepared_condition
 
         batch_size, _, height, width = state.shape
         model_dtype = self._model_dtype(model, state.dtype)
@@ -550,6 +587,92 @@ class QwenImagePDDAdapter:
             **model_kwargs,
         )
         return self._extract_packed_output(output)
+
+    @staticmethod
+    def _raise_collective_preflight_error(
+        local_error: Exception | None,
+        *,
+        state: torch.Tensor,
+    ) -> None:
+        if dist.is_available() and dist.is_initialized():
+            failed = torch.tensor(local_error is not None, dtype=torch.int32, device=state.device)
+            dist.all_reduce(failed, op=dist.ReduceOp.MAX)
+            if bool(failed):
+                if local_error is not None:
+                    raise local_error
+                raise RuntimeError("Qwen PDD preflight failed on another rank.")
+        elif local_error is not None:
+            raise local_error
+
+    def _prepare_call_collectively(
+        self,
+        model: nn.Module,
+        state: torch.Tensor,
+        time: torch.Tensor,
+        condition: Any,
+        model_kwargs: Mapping[str, Any],
+        *,
+        condition_name: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prepared: tuple[torch.Tensor, torch.Tensor] | None = None
+        local_error: Exception | None = None
+        try:
+            prepared = self._prepare_call(
+                model,
+                state,
+                time,
+                condition,
+                model_kwargs,
+                condition_name=condition_name,
+            )
+        except Exception as error:
+            local_error = error
+
+        self._raise_collective_preflight_error(local_error, state=state)
+        if prepared is None:
+            raise RuntimeError("Qwen PDD preflight did not prepare a model call.")
+        return prepared
+
+    def _prepare_teacher_cfg_calls(
+        self,
+        model: nn.Module,
+        state: torch.Tensor,
+        time: torch.Tensor,
+        condition: Any,
+        negative_condition: Any,
+        model_kwargs: Mapping[str, Any],
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor],
+    ]:
+        """Make rank-local CFG validation fail collectively before either teacher call."""
+        prepared_condition: tuple[torch.Tensor, torch.Tensor] | None = None
+        prepared_negative_condition: tuple[torch.Tensor, torch.Tensor] | None = None
+        local_error: Exception | None = None
+        try:
+            prepared_condition = self._prepare_call(
+                model,
+                state,
+                time,
+                condition,
+                model_kwargs,
+                condition_name="condition",
+            )
+            prepared_negative_condition = self._prepare_call(
+                model,
+                state,
+                time,
+                negative_condition,
+                model_kwargs,
+                condition_name="negative_condition",
+            )
+        except Exception as error:
+            local_error = error
+
+        self._raise_collective_preflight_error(local_error, state=state)
+        if prepared_condition is None or prepared_negative_condition is None:
+            raise RuntimeError("Qwen teacher CFG preflight did not prepare both model calls.")
+        return prepared_condition, prepared_negative_condition
 
     @staticmethod
     def _expected_packed_shape(state: torch.Tensor, *, output_features: int) -> torch.Size:
@@ -708,27 +831,18 @@ class QwenImagePDDAdapter:
     ) -> torch.Tensor:
         """Return conditional or fixed two-pass packed-CFG Qwen teacher velocity."""
         guidance_scale = self.guidance_scale
-        if guidance_scale is not None and negative_condition is None:
-            raise ValueError("negative_condition is required when Qwen teacher CFG is enabled.")
         if guidance_scale is not None:
-            # Validate both collective-participating calls before either model
-            # call so malformed rank-local conditioning cannot split call counts.
-            self._prepare_call(
+            prepared_condition, prepared_negative_condition = self._prepare_teacher_cfg_calls(
                 model,
                 state,
                 time,
                 condition,
-                model_kwargs,
-                condition_name="condition",
-            )
-            self._prepare_call(
-                model,
-                state,
-                time,
                 negative_condition,
                 model_kwargs,
-                condition_name="negative_condition",
             )
+        else:
+            prepared_condition = None
+            prepared_negative_condition = None
 
         conditional = self._call_packed(
             model,
@@ -737,6 +851,7 @@ class QwenImagePDDAdapter:
             condition,
             model_kwargs,
             condition_name="condition",
+            prepared_condition=prepared_condition,
         )
         if guidance_scale is None:
             return self._unpack_single(conditional, state)
@@ -748,6 +863,7 @@ class QwenImagePDDAdapter:
             negative_condition,
             model_kwargs,
             condition_name="negative_condition",
+            prepared_condition=prepared_negative_condition,
         )
         expected = self._expected_packed_shape(state, output_features=state.shape[1] * 4)
         if conditional.shape != expected or unconditional.shape != expected:
@@ -756,25 +872,22 @@ class QwenImagePDDAdapter:
                 f"{tuple(conditional.shape)} and {tuple(unconditional.shape)}."
             )
 
-        # MR210 unpacks each Qwen prediction before guidance. Keep that
-        # operation order: the FP32 global reduction order over NCHW is not
-        # guaranteed to match an algebraically equivalent packed reduction.
-        conditional_unpacked = self._unpack_single(conditional, state)
-        unconditional_unpacked = self._unpack_single(unconditional, state)
-        guided_low_precision = conditional_unpacked + (float(guidance_scale) - 1.0) * (
-            conditional_unpacked - unconditional_unpacked
+        # Qwen-Image applies its native CFG rescale independently to every
+        # packed image token before unpacking the velocity.
+        guided_low_precision = conditional + (float(guidance_scale) - 1.0) * (
+            conditional - unconditional
         )
-        conditional_fp32 = conditional_unpacked.to(torch.float32)
+        conditional_fp32 = conditional.to(torch.float32)
         guided_fp32 = guided_low_precision.to(torch.float32)
-        norm_dims = tuple(range(1, conditional_fp32.ndim))
         conditional_norm = torch.linalg.vector_norm(
             conditional_fp32,
-            dim=norm_dims,
+            dim=-1,
             keepdim=True,
         )
         guided_norm = torch.linalg.vector_norm(
             guided_fp32,
-            dim=norm_dims,
+            dim=-1,
             keepdim=True,
         ).clamp_min(1e-5)
-        return (guided_fp32 * (conditional_norm / guided_norm)).to(conditional.dtype)
+        guided = (guided_fp32 * (conditional_norm / guided_norm)).to(conditional.dtype)
+        return self._unpack_single(guided, state)

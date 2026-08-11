@@ -31,7 +31,11 @@ if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
 from pdd import recipe as pdd_recipe
-from pdd.recipe import _preserve_fp32_timestep_inputs, _validate_prepared_student
+from pdd.recipe import (
+    _freeze_unused_qwen_parameters_before_optimizer,
+    _preserve_fp32_timestep_inputs,
+    _validate_prepared_student,
+)
 from pdd.training import PDDFlowMatchingStepAdapter
 
 from modelopt.torch.fastgen import PDDConfig
@@ -44,9 +48,27 @@ class _PreparedStudent(nn.Module):
         self.proj_out = nn.Linear(3, out_features)
 
 
+class _PreparedQwenStudent(_PreparedStudent):
+    def __init__(self, out_features: int) -> None:
+        super().__init__(out_features)
+        block = nn.Module()
+        block.attn = nn.Module()
+        block.attn.to_add_out = nn.Linear(3, 3)
+        block.txt_mlp = nn.Module()
+        block.txt_mlp.net = nn.ModuleList(
+            [
+                nn.ModuleDict({"proj": nn.Linear(3, 4)}),
+                nn.Identity(),
+                nn.Linear(4, 3),
+            ]
+        )
+        self.transformer_blocks = nn.ModuleList([block])
+        self.backbone = nn.Linear(3, 3)
+
+
 class _LossPipeline:
     def __init__(self, *, guidance_scale: float | None = None) -> None:
-        self.config = SimpleNamespace(guidance_scale=guidance_scale)
+        self.config = SimpleNamespace(guidance_scale=guidance_scale, data_free=False)
         self.scale = nn.Parameter(torch.tensor(2.0))
         self.last_call = None
 
@@ -54,6 +76,44 @@ class _LossPipeline:
         self.last_call = (data, condition, negative_condition, collect_metrics)
         per_sample = (data * self.scale).square().flatten(1).mean(1)
         return per_sample.mean(), {"student_target_mse": per_sample}
+
+
+class _DataFreeLossPipeline:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(
+            guidance_scale=None,
+            data_free=True,
+            grid_max_t=0.999,
+            grid_size=4,
+        )
+        self.scale = nn.Parameter(torch.tensor(2.0))
+        self.calls = []
+
+    def compute_data_free_loss(
+        self,
+        state,
+        *,
+        n,
+        condition,
+        negative_condition,
+        collect_metrics,
+    ):
+        self.calls.append(
+            {
+                "state": state.detach().clone(),
+                "n": n.detach().clone(),
+                "condition": tuple(value.detach().clone() for value in condition),
+                "negative_condition": negative_condition,
+                "collect_metrics": collect_metrics,
+            }
+        )
+        per_sample = (state * self.scale).square().flatten(1).mean(1)
+        return (
+            per_sample.mean(),
+            {"student_target_mse": per_sample},
+            state.detach() + 1,
+            n + 2,
+        )
 
 
 def _batch() -> dict[str, torch.Tensor]:
@@ -108,6 +168,41 @@ def test_pdd_fsdp_preserves_fp32_timestep_inputs(monkeypatch) -> None:
     )
 
 
+def test_unused_final_text_outputs_are_frozen_before_optimizer_collection(monkeypatch) -> None:
+    class _Pipeline:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del cls, args, kwargs
+            return SimpleNamespace(transformer=_PreparedQwenStudent(out_features=32)), {}
+
+    monkeypatch.setattr(
+        pdd_recipe.automodel_diffusion_train,
+        "NeMoAutoDiffusionPipeline",
+        _Pipeline,
+    )
+
+    original_descriptor = _Pipeline.__dict__["from_pretrained"]
+    with _freeze_unused_qwen_parameters_before_optimizer():
+        student, _ = _Pipeline.from_pretrained("student", load_for_training=True)
+        teacher, _ = _Pipeline.from_pretrained("teacher", load_for_training=False)
+
+    frozen_names = {
+        name
+        for name, parameter in student.transformer.named_parameters()
+        if not parameter.requires_grad
+    }
+    assert frozen_names == {
+        "transformer_blocks.0.attn.to_add_out.weight",
+        "transformer_blocks.0.attn.to_add_out.bias",
+        "transformer_blocks.0.txt_mlp.net.0.proj.weight",
+        "transformer_blocks.0.txt_mlp.net.0.proj.bias",
+        "transformer_blocks.0.txt_mlp.net.2.weight",
+        "transformer_blocks.0.txt_mlp.net.2.bias",
+    }
+    assert all(parameter.requires_grad for parameter in teacher.transformer.parameters())
+    assert _Pipeline.__dict__["from_pretrained"] is original_descriptor
+
+
 @pytest.mark.parametrize("guidance_scale", [None, 4.0])
 def test_step_adapter_returns_native_tuple_and_preserves_pdd_gradient(guidance_scale) -> None:
     pipeline = _LossPipeline(guidance_scale=guidance_scale)
@@ -128,3 +223,72 @@ def test_step_adapter_returns_native_tuple_and_preserves_pdd_gradient(guidance_s
     _, _, negative_condition, collect_metrics = pipeline.last_call
     assert (negative_condition is not None) is (guidance_scale is not None)
     assert collect_metrics is True
+
+
+def test_data_free_step_uses_independent_accumulation_slots_and_reuses_prompts() -> None:
+    pipeline = _DataFreeLossPipeline()
+    optimizer_step = [0]
+    adapter = PDDFlowMatchingStepAdapter(
+        pipeline,
+        grad_acc_steps=2,
+        latent_shape=(1, 2, 2),
+        optimizer_step_getter=lambda: optimizer_step[0],
+    )
+
+    def prompt_batch(value: float) -> dict[str, torch.Tensor]:
+        return {
+            "text_embeddings": torch.full((1, 3, 4), value),
+            "text_embeddings_mask": torch.ones(1, 3, dtype=torch.long),
+        }
+
+    adapter.step(
+        nn.Identity(),
+        prompt_batch(1.0),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        global_step=0,
+    )
+    adapter.step(
+        nn.Identity(),
+        prompt_batch(2.0),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        global_step=0,
+    )
+    first_states = [call["state"] for call in pipeline.calls]
+    optimizer_step[0] = 1
+
+    adapter.step(
+        nn.Identity(),
+        prompt_batch(101.0),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        global_step=0,
+    )
+    adapter.step(
+        nn.Identity(),
+        prompt_batch(102.0),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        global_step=0,
+    )
+
+    assert torch.equal(pipeline.calls[0]["n"], torch.tensor([0]))
+    assert torch.equal(pipeline.calls[1]["n"], torch.tensor([0]))
+    assert torch.equal(pipeline.calls[2]["n"], torch.tensor([2]))
+    assert torch.equal(pipeline.calls[3]["n"], torch.tensor([2]))
+    torch.testing.assert_close(pipeline.calls[2]["state"], first_states[0] + 1)
+    torch.testing.assert_close(pipeline.calls[3]["state"], first_states[1] + 1)
+    assert torch.all(pipeline.calls[2]["condition"][0] == 1.0)
+    assert torch.all(pipeline.calls[3]["condition"][0] == 2.0)
+
+    optimizer_step[0] = 2
+    adapter.step(
+        nn.Identity(),
+        prompt_batch(3.0),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        global_step=0,
+    )
+    assert torch.equal(pipeline.calls[4]["n"], torch.tensor([0]))
+    assert torch.all(pipeline.calls[4]["condition"][0] == 3.0)

@@ -13,6 +13,8 @@ model:
   mode: finetune
   transformer_engine_linear: false
   fuse_qkv_projections: false
+  # Native Qwen-Image latent shape at 1024x1024.
+  latent_shape: [16, 128, 128]
 
 pdd:
   pred_type: flow
@@ -23,18 +25,18 @@ pdd:
   grid_size: 128
   grid_max_t: 0.999
   flow_shift: 5.0
-  block_size_min: 4
+  block_size_min: 16
   block_size_max: 64
-  teacher_integrator: euler
+  teacher_integrator: midpoint
   inference_blocks: [32, 32, 32, 32]
-  data_free: false
+  data_free: true
 
 optim:
-  learning_rate: 5.0e-5
+  learning_rate: 1.0e-5
   clip_grad: 1.0
   optimizer:
     _target_: torch.optim.AdamW
-    weight_decay: 0.01
+    weight_decay: 0.0
     betas: [0.9, 0.999]
     eps: 1.0e-8
     amsgrad: false
@@ -44,18 +46,26 @@ optim:
     fused: false
     maximize: false
 
+lr_scheduler:
+  lr_decay_style: constant
+  lr_warmup_steps: 0
+  lr_decay_steps: 3000
+  init_lr: 1.0e-5
+  max_lr: 1.0e-5
+  min_lr: 1.0e-5
+
 # PDD supplies the loss; AutoModel owns the ordinary diffusion training lifecycle.
 flow_matching:
   adapter_type: qwen_image
 
 step_scheduler:
-  max_steps: 50000
+  max_steps: 3000
   num_epochs: 200
   log_every: 10
-  ckpt_every_steps: 1000
+  ckpt_every_steps: 250
   local_batch_size: 4
   save_checkpoint_every_epoch: false
-  global_batch_size: 256
+  global_batch_size: 2048
 
 fsdp:
   dp_size:
@@ -70,6 +80,7 @@ data:
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: data/qwen_image_cache
+    prompt_only: true
     base_resolution: [1024, 1024]
     batch_size: 4
     drop_last: true
@@ -84,8 +95,8 @@ data:
 
 checkpoint:
   enabled: true
-  checkpoint_dir: checkpoints/pdd_qwen_image
+  checkpoint_dir: checkpoints/pdd_qwen_image_data_free_midpoint_3k
   model_save_format: safetensors
   save_consolidated: final
   diffusers_compatible: true
-  restore_from: LATEST
+  restore_from:

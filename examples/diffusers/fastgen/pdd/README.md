@@ -6,10 +6,20 @@ Qwen-Image student with 128 output heads. A block schedule such as `[32, 32, 32,
 generates with four transformer calls; inference may choose any positive block sizes that sum to
 128.
 
-The frozen Qwen-Image teacher constructs the PDD target. The complete student transformer,
-including the widened output projection, is finetuned at a constant learning rate of `5e-5`; this
-is not a heads-only run. Training samples aligned target spans from 4 through 64 intervals, so the
-same checkpoint supports multiple inference schedules.
+The frozen Qwen-Image teacher constructs the PDD target using Qwen's native packed, per-token CFG
+rescale. The checked-in configuration adapts the paper's data-free Midpoint algorithm and
+hyperparameters to the current FastGen prompt cache: it trains the full student from on-policy
+trajectories carried from fresh noise, using a constant `1e-5` learning rate for 3,000 steps. It
+samples target spans up to 64 intervals and advances each carried trajectory by 16 intervals,
+supporting 2-, 4-, and 8-NFE inference schedules.
+
+Data-free removes image supervision, not text conditioning. Training still consumes positive
+prompt embeddings and masks plus a static negative-prompt embedding for teacher CFG. The current
+FastGen cache can provide those tensors; its cached image latents are omitted from the training
+batch and never enter the PDD objective. That synthetic-DALL-E3 prompt corpus is an available
+experiment input, not a claim to reproduce the paper's Pi-Flow prompt set or its OneIG,
+DPG-Bench, and GenEval checkpoint-selection protocol. Canonical prompt and evaluation parity
+remain experiment work rather than product-code requirements.
 
 ## Ownership
 
@@ -45,13 +55,16 @@ torchrun --standalone --nproc-per-node=8 \
   --fsdp.dp_size=8
 ```
 
-The cache must contain `metadata.json`, its declared tensor shards, and
+The cache must contain `metadata.json`, its declared prompt-embedding shards, and
 `negative_prompt_embedding.pt`. `MODELOPT_FASTGEN_DATASET_CACHE_DIR` overrides the configured
 cache root; paths declared by the dataset remain confined to that root.
 
-The checked-in recipe targets 50,000 optimizer steps with global batch size 256, local batch size
-4, and constant `5e-5` learning rate. `checkpoint.restore_from: LATEST` lets AutoModel resume the
-latest native checkpoint. For wall-time-limited Slurm jobs, request an early signal such as
+The checked-in recipe targets 3,000 optimizer steps with global batch size 2,048, local batch size
+4, and constant learning rate `1e-5`. Use a new, empty checkpoint directory for the first job.
+AutoModel auto-detects the latest checkpoint in that directory on later jobs. In-flight data-free
+trajectories are transient, as in FastGen's carry callback, and restart from fresh noise after a
+resume; AutoModel restores the model, optimizer, scheduler, RNG, and dataloader. For
+wall-time-limited Slurm jobs, request an early signal such as
 `#SBATCH --signal=TERM@1200`; AutoModel saves at the next completed step and exits. Keep
 `step_scheduler.max_steps` at the overall training target rather than imposing a per-job step
 limit.

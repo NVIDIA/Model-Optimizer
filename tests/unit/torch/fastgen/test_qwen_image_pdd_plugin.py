@@ -35,6 +35,7 @@ from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QWEN_IMAGE_PDD_LAYER_SPEC,
     adopt_qwen_image_mr210_forward,
     convert_qwen_image_to_pdd,
+    freeze_qwen_image_mr210_unused_parameters,
     require_qwen_image_mr210_forward,
 )
 
@@ -323,7 +324,7 @@ def test_fused_student_matches_explicit_packed_weight_fusion() -> None:
     assert student.proj_out(projection.weight.new_zeros(1, 5)).shape[-1] == 16
 
 
-def test_teacher_cfg_uses_mr210_global_fp32_norm_rescale() -> None:
+def test_teacher_cfg_uses_qwen_per_token_fp32_norm_rescale() -> None:
     teacher = _TinyQwenTransformer()
     config = _config(guidance_scale=4.0)
     adapter = QwenImagePDDAdapter(config)
@@ -338,23 +339,76 @@ def test_teacher_cfg_uses_mr210_global_fp32_norm_rescale() -> None:
     )
 
     assert len(teacher.calls) == 2
-    conditional = unpack_latents(teacher.calls[0]["output"], 4, 4)
-    unconditional = unpack_latents(teacher.calls[1]["output"], 4, 4)
+    conditional = teacher.calls[0]["output"]
+    unconditional = teacher.calls[1]["output"]
     guided_low_precision = conditional + 3.0 * (conditional - unconditional)
     conditional_fp32 = conditional.float()
     guided_fp32 = guided_low_precision.float()
     factor = torch.linalg.vector_norm(
         conditional_fp32,
-        dim=(1, 2, 3),
+        dim=-1,
         keepdim=True,
-    ) / torch.linalg.vector_norm(guided_fp32, dim=(1, 2, 3), keepdim=True).clamp_min(1e-5)
-    expected = (guided_fp32 * factor).to(conditional.dtype)
+    ) / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
+    expected = unpack_latents((guided_fp32 * factor).to(conditional.dtype), 4, 4)
 
     assert actual.dtype == torch.bfloat16
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(teacher.calls[0]["encoder_hidden_states"], condition[0])
     torch.testing.assert_close(teacher.calls[1]["encoder_hidden_states"], negative_condition[0])
     assert all("txt_seq_lens" not in call["kwargs"] for call in teacher.calls)
+
+
+def test_teacher_cfg_remote_preflight_failure_stops_both_model_calls(monkeypatch) -> None:
+    teacher = _TinyQwenTransformer()
+    adapter = QwenImagePDDAdapter(_config(guidance_scale=4.0))
+    state, time, condition, negative_condition = _inputs()
+
+    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_available", lambda: True)
+    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_initialized", lambda: True)
+
+    def report_remote_failure(failed, *, op):
+        assert not bool(failed)
+        assert op is torch.distributed.ReduceOp.MAX
+        failed.fill_(1)
+
+    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "all_reduce", report_remote_failure)
+
+    with pytest.raises(RuntimeError, match="preflight failed on another rank"):
+        adapter.teacher_velocity(
+            teacher,
+            state,
+            time,
+            condition=condition,
+            negative_condition=negative_condition,
+        )
+
+    assert teacher.calls == []
+
+
+def test_teacher_cfg_local_missing_negative_condition_fails_collectively(monkeypatch) -> None:
+    teacher = _TinyQwenTransformer()
+    adapter = QwenImagePDDAdapter(_config(guidance_scale=4.0))
+    state, time, condition, _ = _inputs()
+
+    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_available", lambda: True)
+    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_initialized", lambda: True)
+
+    def preserve_local_failure(failed, *, op):
+        assert bool(failed)
+        assert op is torch.distributed.ReduceOp.MAX
+
+    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "all_reduce", preserve_local_failure)
+
+    with pytest.raises(TypeError, match="negative_condition must be a tuple"):
+        adapter.teacher_velocity(
+            teacher,
+            state,
+            time,
+            condition=condition,
+            negative_condition=None,
+        )
+
+    assert teacher.calls == []
 
 
 def test_teacher_cfg_stays_in_model_output_dtype() -> None:
@@ -383,18 +437,18 @@ def test_teacher_cfg_stays_in_model_output_dtype() -> None:
     )
 
     assert actual.dtype == torch.bfloat16
-    conditional, unconditional = (unpack_latents(output, 4, 4) for output in teacher.outputs)
+    conditional, unconditional = teacher.outputs
     guided_low_precision = conditional + 3.0 * (conditional - unconditional)
     conditional_fp32 = conditional.float()
     guided_fp32 = guided_low_precision.float()
     factor = torch.linalg.vector_norm(
-        conditional_fp32, dim=(1, 2, 3), keepdim=True
-    ) / torch.linalg.vector_norm(guided_fp32, dim=(1, 2, 3), keepdim=True).clamp_min(1e-5)
-    expected = (guided_fp32 * factor).to(torch.bfloat16)
+        conditional_fp32, dim=-1, keepdim=True
+    ) / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
+    expected = unpack_latents((guided_fp32 * factor).to(torch.bfloat16), 4, 4)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_teacher_cfg_zero_guided_norm_uses_mr210_clamp() -> None:
+def test_teacher_cfg_zero_guided_norm_uses_qwen_clamp() -> None:
     class ZeroGuidedTeacher(_QwenImageTestDouble):
         def __init__(self) -> None:
             super().__init__()
@@ -497,19 +551,17 @@ def test_mr210_qwen_loss_and_backward_match_independent_equations() -> None:
         time_k,
         negative_condition,
     )
-    conditional = _unpack_oracle(conditional_packed, 4, 4)
-    unconditional = _unpack_oracle(unconditional_packed, 4, 4)
-    guided_low_precision = conditional + 3.0 * (conditional - unconditional)
-    conditional_fp32 = conditional.float()
+    guided_low_precision = conditional_packed + 3.0 * (conditional_packed - unconditional_packed)
+    conditional_fp32 = conditional_packed.float()
     guided_fp32 = guided_low_precision.float()
-    norm_dims = (1, 2, 3)
-    teacher_target_low_precision = (
+    teacher_target_packed = (
         guided_fp32
         * (
-            torch.linalg.vector_norm(conditional_fp32, dim=norm_dims, keepdim=True)
-            / torch.linalg.vector_norm(guided_fp32, dim=norm_dims, keepdim=True).clamp_min(1e-5)
+            torch.linalg.vector_norm(conditional_fp32, dim=-1, keepdim=True)
+            / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
         )
     ).to(torch.bfloat16)
+    teacher_target_low_precision = _unpack_oracle(teacher_target_packed, 4, 4)
     teacher_target = teacher_target_low_precision.float().detach()
     oracle_loss = (student_target - teacher_target).square().mean()
     oracle_loss.backward()
@@ -589,6 +641,33 @@ def _tiny_diffusers_qwen():
         joint_attention_dim=12,
         guidance_embeds=False,
         axes_dims_rope=(2, 2, 4),
+    )
+
+
+def test_mr210_freezes_exactly_the_structurally_unused_parameters() -> None:
+    student = _tiny_diffusers_qwen()
+
+    frozen_names = freeze_qwen_image_mr210_unused_parameters(student)
+
+    assert set(frozen_names) == {
+        "transformer_blocks.0.attn.to_add_out.weight",
+        "transformer_blocks.0.attn.to_add_out.bias",
+        "transformer_blocks.0.txt_mlp.net.0.proj.weight",
+        "transformer_blocks.0.txt_mlp.net.0.proj.bias",
+        "transformer_blocks.0.txt_mlp.net.2.weight",
+        "transformer_blocks.0.txt_mlp.net.2.bias",
+    }
+    assert {
+        name for name, parameter in student.named_parameters() if not parameter.requires_grad
+    } == set(frozen_names)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in student.parameters() if parameter.requires_grad]
+    )
+    optimized_parameter_ids = {
+        id(parameter) for group in optimizer.param_groups for parameter in group["params"]
+    }
+    assert all(
+        id(student.get_parameter(name)) not in optimized_parameter_ids for name in frozen_names
     )
 
 
@@ -720,27 +799,19 @@ def test_mr210_real_qwen_loss_and_backward_match_independent_graph() -> None:
         x_bar_k = _mr210_rollout_oracle(x_n, oracle_heads_fp32, grid, n, k)
     student_target = oracle_heads_fp32[:, int(k.item())]
     time_k = grid[k]
-    conditional = _unpack_oracle(
-        oracle_forward(oracle_teacher, x_bar_k, time_k, condition),
-        4,
-        4,
-    )
-    unconditional = _unpack_oracle(
-        oracle_forward(oracle_teacher, x_bar_k, time_k, negative_condition),
-        4,
-        4,
-    )
+    conditional = oracle_forward(oracle_teacher, x_bar_k, time_k, condition)
+    unconditional = oracle_forward(oracle_teacher, x_bar_k, time_k, negative_condition)
     guided_low_precision = conditional + 3.0 * (conditional - unconditional)
     conditional_fp32 = conditional.float()
     guided_fp32 = guided_low_precision.float()
-    norm_dims = (1, 2, 3)
-    teacher_target_low_precision = (
+    teacher_target_packed = (
         guided_fp32
         * (
-            torch.linalg.vector_norm(conditional_fp32, dim=norm_dims, keepdim=True)
-            / torch.linalg.vector_norm(guided_fp32, dim=norm_dims, keepdim=True).clamp_min(1e-5)
+            torch.linalg.vector_norm(conditional_fp32, dim=-1, keepdim=True)
+            / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
         )
     ).to(torch.bfloat16)
+    teacher_target_low_precision = _unpack_oracle(teacher_target_packed, 4, 4)
     teacher_target = teacher_target_low_precision.float().detach()
     oracle_loss = (student_target - teacher_target).square().mean()
     oracle_loss.backward()
@@ -1009,7 +1080,7 @@ def test_mr210_time_embed_receives_fp32_grid_value() -> None:
     assert captured[0].item() != time.to(torch.bfloat16).float().item()
 
 
-def test_mr210_qwen_teacher_cfg_matches_global_reference() -> None:
+def test_mr210_qwen_teacher_cfg_matches_per_token_reference() -> None:
     teacher = adopt_qwen_image_mr210_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
     config = _config(guidance_scale=4.0)
     adapter = QwenImagePDDAdapter(config)
@@ -1038,15 +1109,15 @@ def test_mr210_qwen_teacher_cfg_matches_global_reference() -> None:
         )[0]
 
     with torch.no_grad():
-        conditional = unpack_latents(direct_packed(condition), 4, 4)
-        unconditional = unpack_latents(direct_packed(negative_condition), 4, 4)
+        conditional = direct_packed(condition)
+        unconditional = direct_packed(negative_condition)
         guided_low_precision = conditional + 3.0 * (conditional - unconditional)
         conditional_fp32 = conditional.float()
         guided_fp32 = guided_low_precision.float()
         factor = torch.linalg.vector_norm(
-            conditional_fp32, dim=(1, 2, 3), keepdim=True
-        ) / torch.linalg.vector_norm(guided_fp32, dim=(1, 2, 3), keepdim=True).clamp_min(1e-5)
-        expected = (guided_fp32 * factor).to(torch.bfloat16)
+            conditional_fp32, dim=-1, keepdim=True
+        ) / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
+        expected = unpack_latents((guided_fp32 * factor).to(torch.bfloat16), 4, 4)
         actual = adapter.teacher_velocity(
             teacher,
             state,
@@ -1095,7 +1166,7 @@ def test_qwen_pdd_rejects_unsupported_config_condition_and_call_contracts() -> N
     config = _config()
     adapter = QwenImagePDDAdapter(config)
     state, time, condition, _ = _inputs()
-    with pytest.raises(ValueError, match="negative_condition is required"):
+    with pytest.raises(TypeError, match="negative_condition must be a tuple"):
         adapter.teacher_velocity(transformer, state, time, condition=condition)
     with pytest.raises(TypeError, match="negative_condition must be a tuple"):
         adapter.teacher_velocity(

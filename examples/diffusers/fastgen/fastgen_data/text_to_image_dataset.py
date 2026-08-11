@@ -32,6 +32,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         self,
         cache_dir: str | Path,
         train_text_encoder: bool = False,
+        prompt_only: bool = False,
         split: str | None = None,
         validation_count: int | None = None,
         split_seed: int = 2026,
@@ -40,6 +41,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         Args:
             cache_dir: Directory containing preprocessed cache
             train_text_encoder: If True, returns tokens instead of embeddings
+            prompt_only: Omit cached image latents from returned samples.
             split: Optional deterministic ``"train"`` or ``"validation"`` selection.
             validation_count: Number of validation samples when ``split`` is set.
             split_seed: Local seed used to construct deterministic split membership.
@@ -49,6 +51,7 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         if split is not None and validation_count is None:
             raise ValueError("validation_count is required when split is set")
         self.train_text_encoder = train_text_encoder
+        self.prompt_only = prompt_only
         self.cache_root = resolve_cache_root(cache_dir)
         self._split = split
         self._validation_count = validation_count
@@ -122,7 +125,6 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         # Prepare output - support both bucket_resolution and crop_resolution keys
         resolution_key = "bucket_resolution" if "bucket_resolution" in item else "crop_resolution"
         output = {
-            "latent": data["latent"],
             "crop_resolution": torch.tensor(item[resolution_key]),
             "original_resolution": torch.tensor(item["original_resolution"]),
             "crop_offset": torch.tensor(data["crop_offset"]),
@@ -131,6 +133,8 @@ class TextToImageDataset(BaseMultiresolutionDataset):
             "bucket_id": item["bucket_id"],
             "aspect_ratio": item.get("aspect_ratio", 1.0),
         }
+        if not self.prompt_only:
+            output["latent"] = data["latent"]
         if self.train_text_encoder:
             output["clip_tokens"] = data["clip_tokens"].squeeze(0)
             output["t5_tokens"] = data["t5_tokens"].squeeze(0)

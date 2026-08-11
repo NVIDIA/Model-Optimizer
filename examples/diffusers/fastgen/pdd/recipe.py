@@ -31,7 +31,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 
 try:
     import nemo_automodel.recipes.diffusion.train as automodel_diffusion_train
-    from nemo_automodel._diffusers.auto_diffusion_pipeline import NeMoAutoDiffusionPipeline
+    from nemo_automodel import NeMoAutoDiffusionPipeline
     from nemo_automodel.components.training.rng import ScopedRNG
     from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe
 except ImportError as exc:
@@ -44,6 +44,7 @@ from modelopt.torch.fastgen import PDDConfig, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QwenImagePDDAdapter,
     adopt_qwen_image_mr210_forward,
+    freeze_qwen_image_mr210_unused_parameters,
 )
 
 from .training import PDDFlowMatchingStepAdapter
@@ -111,11 +112,39 @@ def _validate_prepared_student(model: nn.Module, config: PDDConfig) -> None:
         )
 
 
+@contextmanager
+def _freeze_unused_qwen_parameters_before_optimizer() -> Iterator[None]:
+    """Freeze unused Qwen outputs before AutoModel collects optimizer parameters."""
+    pipeline_cls = automodel_diffusion_train.NeMoAutoDiffusionPipeline
+    original_descriptor = pipeline_cls.__dict__["from_pretrained"]
+    original_from_pretrained = pipeline_cls.from_pretrained
+
+    def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+        del cls
+        pipe, managers = original_from_pretrained(*args, **kwargs)
+        if not kwargs.get("load_for_training", False):
+            return pipe, managers
+        model = pipe.transformer
+        frozen_names = freeze_qwen_image_mr210_unused_parameters(model)
+        logging.info(
+            "[PDD] Full training excludes %d unused final-block text-output tensors: %s",
+            len(frozen_names),
+            ", ".join(frozen_names),
+        )
+        return pipe, managers
+
+    pipeline_cls.from_pretrained = classmethod(from_pretrained)
+    try:
+        yield
+    finally:
+        pipeline_cls.from_pretrained = original_descriptor
+
+
 class PDDDiffusionRecipe(TrainDiffusionRecipe):
     """Use AutoModel's native lifecycle with a PDD loss and frozen teacher."""
 
     def setup(self) -> None:
-        with _preserve_fp32_timestep_inputs():
+        with _preserve_fp32_timestep_inputs(), _freeze_unused_qwen_parameters_before_optimizer():
             super().setup()
 
             raw_pdd = _config_mapping(self.cfg.get("pdd", {}))
@@ -136,8 +165,21 @@ class PDDDiffusionRecipe(TrainDiffusionRecipe):
             self.pdd_config,
             QwenImagePDDAdapter(self.pdd_config, compute_dtype=self.compute_dtype),
         )
-        self.flow_matching_pipeline = PDDFlowMatchingStepAdapter(pdd_pipeline)
-        logging.info("[PDD] AutoModel lifecycle enabled; grid_size=%d", self.pdd_config.grid_size)
+        latent_shape = self.cfg.get("model.latent_shape", None)
+        if latent_shape is not None:
+            latent_shape = tuple(latent_shape)
+        self.flow_matching_pipeline = PDDFlowMatchingStepAdapter(
+            pdd_pipeline,
+            grad_acc_steps=self.step_scheduler.grad_acc_steps,
+            latent_shape=latent_shape,
+            optimizer_step_getter=lambda: self.step_scheduler.step,
+        )
+        logging.info(
+            "[PDD] AutoModel lifecycle enabled; grid_size=%d, data_free=%s, grad_acc_steps=%d",
+            self.pdd_config.grid_size,
+            self.pdd_config.data_free,
+            self.step_scheduler.grad_acc_steps,
+        )
 
     def _load_teacher(self) -> nn.Module:
         """Load the frozen PDD target model with AutoModel's diffusion parallelizer."""

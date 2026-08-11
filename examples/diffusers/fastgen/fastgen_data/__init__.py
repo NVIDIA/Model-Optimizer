@@ -19,11 +19,11 @@ The data path builds on stock ``nemo_automodel==0.5.0`` where it is model-agnost
 the example-owned batch contract locally, so the published example does not depend on AutoModel
 source modifications:
 
-* ``collate_fns.py`` — the collate fn + dataloader builder. It reuses the upstream
-  ``SequentialBucketSampler`` but builds the DMD2 batch itself (``image_latents`` /
-  ``text_embeddings`` / ``text_embeddings_mask`` + the optional broadcast negative-prompt
-  embedding) directly from the vendored dataset's per-item output. It deliberately does **not**
-  call upstream ``collate_fn_production``, which stacks model-specific token keys
+* ``collate_fns.py`` — the collate functions + dataloader builder. It reuses the upstream
+  ``SequentialBucketSampler`` and emits either the ordinary latent-conditioned batch or a
+  prompt-only batch for data-free PDD, including the optional broadcast negative-prompt
+  embedding. It deliberately does **not** call upstream ``collate_fn_production``, which stacks
+  model-specific token keys
   (``clip_tokens`` / ``t5_tokens``) that the Qwen-Image cache does not produce.
 * ``text_to_image_dataset.py`` — a faithful vendored copy of the upstream dataset reader (built
   on the upstream ``BaseMultiresolutionDataset``); its change emits ``prompt_embeds_mask``

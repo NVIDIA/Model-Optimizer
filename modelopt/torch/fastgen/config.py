@@ -221,7 +221,7 @@ class DistillationConfig(ModeloptBaseConfig):
 
 
 class PDDConfig(DistillationConfig):
-    """Hyperparameters for data-dependent Parallel Decoding Distillation (PDD).
+    """Hyperparameters for Parallel Decoding Distillation (PDD).
 
     PDD trains one velocity head per interval on a fixed shifted rectified-flow
     grid. The explicit inference block schedule partitions that same grid; it does
@@ -278,10 +278,12 @@ class PDDConfig(DistillationConfig):
         title="Fused inference block schedule",
         description="Contiguous interval counts that partition the complete PDD grid.",
     )
-    data_free: Literal[False] = ModeloptField(
+    data_free: bool = ModeloptField(
         default=False,
         title="Data-free training",
-        description="Data-free PDD is unsupported; training uses noised real latents.",
+        description=(
+            "Carry student-generated trajectories from fresh noise instead of noising real latents."
+        ),
     )
 
     def __setattr__(self, name: str, value: object) -> None:

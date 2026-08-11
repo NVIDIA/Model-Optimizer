@@ -273,7 +273,7 @@ def test_euler_loss_matches_analytic_empty_and_tail_reconstruction() -> None:
     assert len(adapter.student_calls) == len(adapter.teacher_calls) == 1
     assert torch.equal(metrics["n"], n)
     assert torch.equal(metrics["k"], k)
-    assert torch.equal(metrics["target_span"], torch.tensor([0, 1]))
+    assert torch.equal(metrics["target_span"], torch.tensor([1, 2]))
     assert metrics["student_target_mse"].shape == (2,)
     assert metrics["all_student_heads_finite"].shape == (2,)
     assert bool(metrics["loss_finite"])
@@ -307,6 +307,46 @@ def test_midpoint_target_uses_exact_final_interval_midpoint() -> None:
     torch.testing.assert_close(adapter.teacher_calls[0]["time"], grid[k])
     torch.testing.assert_close(adapter.teacher_calls[1]["state"], midpoint_state)
     torch.testing.assert_close(adapter.teacher_calls[1]["time"], midpoint_time)
+
+
+def test_data_free_loss_matches_algorithm_3_and_advances_exact_minimum_block() -> None:
+    pipeline, adapter = _pipeline(teacher_integrator="midpoint")
+    state = torch.tensor([[0.25, 1.5, -0.5], [2.0, -1.0, 0.75]])
+    n = torch.tensor([0, 6])
+    k = torch.tensor([3, 7])
+
+    loss, metrics, next_state, next_n = pipeline.compute_data_free_loss(
+        state,
+        n=n,
+        k=k,
+        condition="positive",
+        negative_condition="negative",
+    )
+
+    grid = pipeline.time_grid()
+    heads = pipeline.student.all_heads(state)
+    x_k = _explicit_integrate_per_sample(state, heads, grid, n, k)
+    first_velocity = pipeline.teacher(x_k, grid[k])
+    delta = grid[k + 1] - grid[k]
+    midpoint_state = x_k + 0.5 * delta[:, None] * first_velocity
+    midpoint_target = pipeline.teacher(midpoint_state, grid[k] + 0.5 * delta)
+    selected = heads[torch.arange(state.shape[0]), k]
+    expected_next = _explicit_integrate_per_sample(
+        state,
+        heads,
+        grid,
+        n,
+        n + pipeline.config.block_size_min,
+    )
+
+    torch.testing.assert_close(loss, (selected - midpoint_target).square().mean())
+    torch.testing.assert_close(next_state, expected_next)
+    assert next_state.requires_grad is False
+    assert torch.equal(next_n, torch.tensor([2, 8]))
+    assert torch.equal(metrics["n"], n)
+    assert torch.equal(metrics["k"], k)
+    assert adapter.student_calls[0]["condition"] == "positive"
+    assert adapter.teacher_calls[0]["negative_condition"] == "negative"
 
 
 def test_selected_head_low_precision_outputs_use_float32_mse() -> None:
@@ -470,6 +510,17 @@ def test_fused_sampler_matches_explicit_block_updates(blocks) -> None:
         assert call["condition"] == "prompt"
         assert call["kwargs"] == {"tag": 23}
         start = end
+
+
+def test_sampling_does_not_require_a_teacher() -> None:
+    pipeline, adapter = _pipeline()
+    sampler = PDDPipeline(pipeline.student, None, pipeline.config, adapter)
+
+    result = sampler.sample(torch.ones(1, 3))
+
+    assert result.shape == (1, 3)
+    with pytest.raises(RuntimeError, match="training requires a teacher"):
+        sampler.compute_loss(torch.ones(1, 3))
 
 
 def test_fused_sampler_uses_precast_max_time_once_for_raw_noise() -> None:

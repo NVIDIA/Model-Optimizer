@@ -15,9 +15,10 @@
 
 """Framework-neutral projection, training, and sampling primitives for PDD.
 
-This module owns projection layout and fusion plus the data-dependent objective
-and block sampler. Model calls and architecture-specific packing remain behind
-the adapter protocol and belong in ``modelopt.torch.fastgen.plugins``.
+This module owns projection layout and fusion plus the data-dependent and
+data-free objectives and block sampler. Model calls and architecture-specific
+packing remain behind the adapter protocol and belong in
+``modelopt.torch.fastgen.plugins``.
 """
 
 from __future__ import annotations
@@ -424,19 +425,24 @@ class PDDModelAdapter(Protocol):
 
 
 class PDDPipeline(DistillationPipeline):
-    """Data-dependent PDD loss and fused sampler over a single core-owned grid."""
+    """PDD losses and fused sampler over a single core-owned grid."""
 
     def __init__(
         self,
         student: nn.Module,
-        teacher: nn.Module,
+        teacher: nn.Module | None,
         config: PDDConfig,
         adapter: PDDModelAdapter,
     ) -> None:
-        """Store the models/config/adapter and freeze the teacher."""
+        """Store the models/config/adapter and freeze the optional training teacher."""
         if not isinstance(config, PDDConfig):
             raise TypeError(f"config must be PDDConfig, got {type(config).__name__}.")
-        super().__init__(student, teacher, config)
+        if teacher is None:
+            self.student = student
+            self.teacher = None
+            self.config = config
+        else:
+            super().__init__(student, teacher, config)
         self.adapter = adapter
 
     def time_grid(self, device: torch.device | str | None = None) -> torch.Tensor:
@@ -567,6 +573,134 @@ class PDDPipeline(DistillationPipeline):
         dims = tuple(range(1, value.ndim))
         return value.square().mean(dim=dims).sqrt()
 
+    def _compute_loss_from_state(
+        self,
+        state: torch.Tensor,
+        *,
+        condition: Any = None,
+        negative_condition: Any = None,
+        model_kwargs: Mapping[str, Any] | None = None,
+        n: torch.Tensor,
+        k: torch.Tensor,
+        collect_metrics: bool = True,
+        advance_intervals: int | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor | None]:
+        """Compute the shared PDD target from an already constructed state ``x_n``."""
+        if self.teacher is None:
+            raise RuntimeError("PDD training requires a teacher model.")
+        kwargs = self._model_kwargs(model_kwargs)
+        state_fp32 = state.to(torch.float32)
+        batch_size = state.shape[0]
+        grid = self.time_grid(state.device)
+        time_n = grid[n]
+        broadcast_shape = (batch_size,) + (1,) * (state.ndim - 1)
+
+        student_heads = self.adapter.student_all_heads(
+            self.student,
+            state_fp32,
+            time_n,
+            condition=condition,
+            **kwargs,
+        )
+        expected_head_shape = torch.Size((batch_size, self.config.grid_size, *state.shape[1:]))
+        student_heads = self._normalize_velocity(
+            student_heads,
+            expected_shape=expected_head_shape,
+            device=state.device,
+            name="student_all_heads",
+        )
+        with torch.no_grad():
+            x_bar_k = integrate_interval_velocities(state_fp32, student_heads, grid, n, k)
+
+        batch_ids = torch.arange(batch_size, device=state.device)
+        student_target = student_heads[batch_ids, k]
+        time_k = grid[k]
+        with torch.no_grad():
+            teacher_query = x_bar_k.detach()
+            teacher_first = self.adapter.teacher_velocity(
+                self.teacher,
+                teacher_query,
+                time_k,
+                condition=condition,
+                negative_condition=negative_condition,
+                **kwargs,
+            )
+            teacher_first = self._normalize_velocity(
+                teacher_first,
+                expected_shape=state.shape,
+                device=state.device,
+                name="teacher_velocity",
+            )
+            if self.config.teacher_integrator == "euler":
+                teacher_target = teacher_first
+            else:
+                delta_k = grid[k + 1] - time_k
+                midpoint_state = (
+                    teacher_query + 0.5 * delta_k.reshape(broadcast_shape) * teacher_first
+                )
+                midpoint_time = time_k + 0.5 * delta_k
+                teacher_target = self.adapter.teacher_velocity(
+                    self.teacher,
+                    midpoint_state,
+                    midpoint_time,
+                    condition=condition,
+                    negative_condition=negative_condition,
+                    **kwargs,
+                )
+                teacher_target = self._normalize_velocity(
+                    teacher_target,
+                    expected_shape=state.shape,
+                    device=state.device,
+                    name="teacher_velocity",
+                )
+
+            next_state = None
+            if advance_intervals is not None:
+                next_n = n + advance_intervals
+                torch._assert_async(
+                    torch.all(next_n <= self.config.grid_size),
+                    "data-free state advance must not pass the final PDD interval.",
+                )
+                next_state = integrate_interval_velocities(
+                    state_fp32,
+                    student_heads,
+                    grid,
+                    n,
+                    next_n,
+                ).detach()
+
+        squared_error = (student_target - teacher_target).square()
+        loss = squared_error.mean()
+        metric_dims = tuple(range(1, squared_error.ndim))
+        with torch.no_grad():
+            metrics = {
+                "student_target_mse": squared_error.mean(dim=metric_dims).detach(),
+            }
+            if collect_metrics:
+                all_head_dims = tuple(range(1, student_heads.ndim))
+                metrics.update(
+                    n=n.detach(),
+                    k=k.detach(),
+                    target_span=(k - n + 1).detach(),
+                    student_velocity_rms=self._rms_per_sample(student_target).detach(),
+                    teacher_velocity_rms=self._rms_per_sample(teacher_target).detach(),
+                    reconstructed_state_rms=self._rms_per_sample(x_bar_k).detach(),
+                    all_student_heads_finite=torch.isfinite(student_heads)
+                    .all(dim=all_head_dims)
+                    .detach(),
+                    student_target_finite=torch.isfinite(student_target)
+                    .all(dim=metric_dims)
+                    .detach(),
+                    teacher_target_finite=torch.isfinite(teacher_target)
+                    .all(dim=metric_dims)
+                    .detach(),
+                    reconstructed_state_finite=torch.isfinite(x_bar_k)
+                    .all(dim=metric_dims)
+                    .detach(),
+                    loss_finite=torch.isfinite(loss).detach(),
+                )
+        return loss, metrics, next_state
+
     def compute_loss(
         self,
         data: torch.Tensor,
@@ -601,8 +735,6 @@ class PDDPipeline(DistillationPipeline):
                 raise ValueError(f"noise must be on {data.device}, got {noise.device}.")
             noise_fp32 = noise.to(torch.float32)
 
-        kwargs = self._model_kwargs(model_kwargs)
-        data_fp32 = data.to(torch.float32)
         batch_size = data.shape[0]
         grid = self.time_grid(data.device)
         n, k = self._resolve_indices(
@@ -612,100 +744,54 @@ class PDDPipeline(DistillationPipeline):
             k=k,
             generator=generator,
         )
-        time_n = grid[n]
-        broadcast_shape = (batch_size,) + (1,) * (data.ndim - 1)
-        x_n = add_noise(data_fp32, noise_fp32, time_n)
-
-        student_heads = self.adapter.student_all_heads(
-            self.student,
-            x_n,
-            time_n,
+        state = add_noise(data.to(torch.float32), noise_fp32, grid[n])
+        loss, metrics, _ = self._compute_loss_from_state(
+            state,
             condition=condition,
-            **kwargs,
+            negative_condition=negative_condition,
+            model_kwargs=model_kwargs,
+            n=n,
+            k=k,
+            collect_metrics=collect_metrics,
         )
-        expected_head_shape = torch.Size((batch_size, self.config.grid_size, *data.shape[1:]))
-        student_heads = self._normalize_velocity(
-            student_heads,
-            expected_shape=expected_head_shape,
-            device=data.device,
-            name="student_all_heads",
-        )
-        with torch.no_grad():
-            x_bar_k = integrate_interval_velocities(x_n, student_heads, grid, n, k)
-
-        batch_ids = torch.arange(batch_size, device=data.device)
-        student_target = student_heads[batch_ids, k]
-        time_k = grid[k]
-        with torch.no_grad():
-            teacher_query = x_bar_k.detach()
-            teacher_first = self.adapter.teacher_velocity(
-                self.teacher,
-                teacher_query,
-                time_k,
-                condition=condition,
-                negative_condition=negative_condition,
-                **kwargs,
-            )
-            teacher_first = self._normalize_velocity(
-                teacher_first,
-                expected_shape=data.shape,
-                device=data.device,
-                name="teacher_velocity",
-            )
-            if self.config.teacher_integrator == "euler":
-                teacher_target = teacher_first
-            else:
-                delta_k = grid[k + 1] - time_k
-                midpoint_state = (
-                    teacher_query + 0.5 * delta_k.reshape(broadcast_shape) * teacher_first
-                )
-                midpoint_time = time_k + 0.5 * delta_k
-                teacher_target = self.adapter.teacher_velocity(
-                    self.teacher,
-                    midpoint_state,
-                    midpoint_time,
-                    condition=condition,
-                    negative_condition=negative_condition,
-                    **kwargs,
-                )
-                teacher_target = self._normalize_velocity(
-                    teacher_target,
-                    expected_shape=data.shape,
-                    device=data.device,
-                    name="teacher_velocity",
-                )
-
-        squared_error = (student_target - teacher_target).square()
-        loss = squared_error.mean()
-        metric_dims = tuple(range(1, squared_error.ndim))
-        with torch.no_grad():
-            metrics = {
-                "student_target_mse": squared_error.mean(dim=metric_dims).detach(),
-            }
-            if collect_metrics:
-                all_head_dims = tuple(range(1, student_heads.ndim))
-                metrics.update(
-                    n=n.detach(),
-                    k=k.detach(),
-                    target_span=(k - n).detach(),
-                    student_velocity_rms=self._rms_per_sample(student_target).detach(),
-                    teacher_velocity_rms=self._rms_per_sample(teacher_target).detach(),
-                    reconstructed_state_rms=self._rms_per_sample(x_bar_k).detach(),
-                    all_student_heads_finite=torch.isfinite(student_heads)
-                    .all(dim=all_head_dims)
-                    .detach(),
-                    student_target_finite=torch.isfinite(student_target)
-                    .all(dim=metric_dims)
-                    .detach(),
-                    teacher_target_finite=torch.isfinite(teacher_target)
-                    .all(dim=metric_dims)
-                    .detach(),
-                    reconstructed_state_finite=torch.isfinite(x_bar_k)
-                    .all(dim=metric_dims)
-                    .detach(),
-                    loss_finite=torch.isfinite(loss).detach(),
-                )
         return loss, metrics
+
+    def compute_data_free_loss(
+        self,
+        state: torch.Tensor,
+        *,
+        n: torch.Tensor,
+        condition: Any = None,
+        negative_condition: Any = None,
+        model_kwargs: Mapping[str, Any] | None = None,
+        k: torch.Tensor | None = None,
+        generator: torch.Generator | None = None,
+        collect_metrics: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Compute Algorithm 3 and return the detached state carried to ``n + L_min``."""
+        if type(collect_metrics) is not bool:
+            raise TypeError("collect_metrics must be a bool.")
+        self._validate_state(state, name="state")
+        n, k = self._resolve_indices(
+            batch_size=state.shape[0],
+            device=state.device,
+            n=n,
+            k=k,
+            generator=generator,
+        )
+        loss, metrics, next_state = self._compute_loss_from_state(
+            state,
+            condition=condition,
+            negative_condition=negative_condition,
+            model_kwargs=model_kwargs,
+            n=n,
+            k=k,
+            collect_metrics=collect_metrics,
+            advance_intervals=self.config.block_size_min,
+        )
+        if next_state is None:  # guarded by advance_intervals above
+            raise RuntimeError("data-free PDD did not produce a carried state.")
+        return loss, metrics, next_state, (n + self.config.block_size_min).detach()
 
     def _validate_blocks(self, blocks: Sequence[int] | None) -> tuple[int, ...]:
         if blocks is None:
