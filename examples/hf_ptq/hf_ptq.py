@@ -1137,6 +1137,34 @@ def quantize_main(
     default_pad_token,
     device: torch.device,
 ):
+    # Detect if this is a Nemotron VL model using architecture-based detection. Cheap and
+    # needed on both the restore and calibration paths below.
+    is_nemotron_vl_model = is_nemotron_vl(full_model)
+
+    if _restore_quantized_state_if_requested(args, full_model):
+        # Restore mode retries a failed/interrupted export from a previously calibrated state,
+        # so none of the calibration-only work below (batch-size probing, calibration
+        # dataloader construction, the pre-quantize generation preview) is needed -- go
+        # straight to export. Passing None for the generation-preview args disables the
+        # before/after generation comparison inside post_quantize; export still runs.
+        post_quantize(
+            args,
+            full_model,
+            language_model,
+            model_type,
+            tokenizer,
+            processor,
+            None,
+            None,
+            None,
+            is_nemotron_vl_model,
+            None,
+            default_padding_side,
+            default_pad_token,
+            None,
+        )
+        return
+
     # Load the recipe up front so we can detect layerwise calibration before batch-size probing.
     recipe = None
     if args.recipe is not None:
@@ -1234,9 +1262,6 @@ def quantize_main(
         ),
     )
 
-    # Detect if this is a Nemotron VL model using architecture-based detection
-    is_nemotron_vl_model = is_nemotron_vl(full_model)
-
     preview_input_ids, preview_attention_mask, generated_ids_before_ptq = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
@@ -1306,9 +1331,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
-        if _restore_quantized_state_if_requested(args, full_model):
-            pass
-        elif quant_cfg:
+        if quant_cfg:
             mono_quantize(
                 args,
                 quant_cfg,

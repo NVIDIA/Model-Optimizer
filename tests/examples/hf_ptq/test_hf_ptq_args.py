@@ -115,6 +115,54 @@ def test_restore_quantized_state_with_deprecated_auto_quantize_cli_is_rejected(m
         )
 
 
+def test_restore_quantized_state_skips_calibration_and_exports(monkeypatch):
+    """--restore_quantized_state must skip batch-size probing, calibration dataloader
+    construction, and the pre-quantize generation preview entirely, and go straight to
+    export -- retrying a failed export must not depend on the original calibration dataset
+    still being available."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--restore_quantized_state", "/tmp/in.pt"
+    )
+    args.verbose = False
+
+    monkeypatch.setattr(hf_ptq.mto, "restore", lambda model, path: None)
+    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
+
+    def _fail(*_args, **_kwargs):
+        pytest.fail("calibration-only setup must be skipped in restore mode")
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", _fail)
+    monkeypatch.setattr(hf_ptq, "pre_quantize", _fail)
+    monkeypatch.setattr(hf_ptq, "mono_quantize", _fail)
+    monkeypatch.setattr(hf_ptq, "auto_quantize", _fail)
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", _fail)
+
+    export_calls = []
+    monkeypatch.setattr(
+        hf_ptq,
+        "export_quantized",
+        lambda args, full_model, language_model, model_type, tokenizer, dps, dpt: export_calls.append(
+            full_model
+        ),
+    )
+
+    full_model = object()
+    hf_ptq.quantize_main(
+        args,
+        full_model,
+        object(),  # language_model
+        "llama",
+        False,  # calibration_only
+        None,  # processor
+        None,  # tokenizer
+        "left",  # default_padding_side
+        None,  # default_pad_token
+        "cuda",  # device
+    )
+
+    assert export_calls == [full_model]
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
