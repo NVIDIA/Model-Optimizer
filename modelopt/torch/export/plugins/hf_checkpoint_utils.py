@@ -147,7 +147,9 @@ def _restore_nemotron_h_legacy_schema_if_dropped(config_data: dict[str, Any]) ->
         pattern = "".join(
             _NEMOTRON_H_PATTERN_CHAR_BY_LAYER_TYPE[layer_type] for layer_type in layer_types
         )
-    except KeyError as e:
+    except (KeyError, TypeError) as e:
+        # KeyError: a recognized-but-unlisted string block type. TypeError: a malformed
+        # entry (list, dict, ...) that isn't even hashable for the dict lookup.
         warnings.warn(
             f"Cannot reconstruct NemotronH's legacy hybrid_override_pattern: unrecognized "
             f"layers_block_type entry {e}. Leaving config.json in the new schema; a "

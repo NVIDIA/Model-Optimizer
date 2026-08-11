@@ -387,6 +387,22 @@ def test_sanitize_hf_config_for_deployment_warns_on_unrecognized_nemotron_h_laye
     assert config_data["layers_block_type"] == ["full_attention", "some_future_block_type"]
 
 
+def test_sanitize_hf_config_for_deployment_warns_on_non_hashable_layer_type():
+    """A malformed entry (e.g. a nested list or dict from a corrupted config.json) isn't
+    hashable, so the dict lookup raises TypeError instead of KeyError. Must warn and leave
+    config.json in the new schema, not raise and abort export."""
+    config_data = {
+        "model_type": "nemotron_h",
+        "layers_block_type": ["full_attention", ["mlp"]],
+    }
+
+    with pytest.warns(UserWarning, match="Cannot reconstruct"):
+        sanitize_hf_config_for_deployment(config_data, model=SimpleNamespace())
+
+    assert "hybrid_override_pattern" not in config_data
+    assert config_data["layers_block_type"] == ["full_attention", ["mlp"]]
+
+
 def test_sanitize_hf_config_for_deployment_keeps_unexplained_layer_type_mismatch():
     """Do not rewrite config when extra layer types are not explained by nextn metadata."""
     config_data = {
