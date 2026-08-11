@@ -2,27 +2,34 @@
 Pruning
 =======
 
-.. tip::
+ModelOpt provides three pruning workflows:
 
-    Checkout `Megatron-Bridge Minitron Pruning & Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ and
-    `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
-    for an end-to-end example of pruning.
+* `Puzzletron v2 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_
+  for guided, resumable heterogeneous pruning campaigns.
+* `Minitron <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#minitron>`_
+  for structured pruning of large language models.
+* `FastNAS <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#fastnas-pruning-for-pytorch-computer-vision-models>`_
+  for computer vision subnet search.
 
-ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, Puzzletron, and FastNAS - via a unified API
-:meth:`mtp.prune <modelopt.torch.prune.pruning.prune>`. Given a model,
-these methods finds the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
-from your provided base model with little to no accuracy degradation (depending on how aggressive is the pruning).
+Minitron and FastNAS are available through the unified
+:meth:`mtp.prune <modelopt.torch.prune.pruning.prune>` API. FastNAS and
+Minitron auto pruning find a subnet that meets the given deployment constraints
+(e.g. FLOPs or parameters). Manual Minitron pruning instead applies explicitly
+configured target dimensions. Depending on how aggressive the pruning is, the
+resulting model may have little to no accuracy degradation from the base model.
 These pruning methods support pruning the convolutional and linear layers, and
-attention heads of the model. More details on these pruning modes is as follows:
+attention heads of the model. More details on these pruning modes are as follows:
 
 #.  ``mcore_minitron``: A pruning method developed by NVIDIA Research for pruning GPT, Mamba and Hybrid
     Transformer Mamba models in NVIDIA Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
     the embedding hidden size, mlp ffn hidden size, transformer attention heads, GQA query groups,
     mamba heads and head dimension, and number of layers of the model.
     Checkout more details of the algorithm in the `paper <https://arxiv.org/abs/2408.11796>`_.
-#.  ``puzzletron``: An advanced LLM/VLM pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.
 #.  ``fastnas``: A pruning method recommended for Computer Vision models. Given a pretrained model,
     FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
+
+The remainder of this guide covers the unified Minitron and FastNAS API.
+Puzzletron v2 instead uses its setup wizard and campaign runner.
 
 Follow the steps described below to obtain the optimal model satisfying your
 requirements using :mod:`mtp<modelopt.torch.prune>`:
@@ -60,6 +67,9 @@ Prerequisites
 
 Below we show an example using :class:`"fastnas" <modelopt.torch.prune.fastnas.FastNASModeDescriptor>`.
 For Minitron pruning, please refer to the `example snippet <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#getting-started>`_ in the pruning readme.
+For an end-to-end FastNAS walkthrough, see the
+`ResNet20 on CIFAR-10 notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
+(a dated example; revalidate its environment and results with the current release).
 
 Perform pruning
 ---------------
