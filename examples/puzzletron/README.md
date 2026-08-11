@@ -381,6 +381,16 @@ python examples/puzzletron/main.py \
 stages with valid manifests and acceptance markers are skipped; use `--force`
 only when intentionally invalidating and rerunning the selected work.
 
+Each rank-zero stage result also writes an immutable execution record under
+`<puzzle-dir>/manifests/executions/<stage>/<execution-identity>/`. The
+`resolved_config.json` file contains stage-relevant resolved configuration,
+semantic identities, and authoring provenance. The `artifact_manifest.json`
+separates mutable canonical output pointers from fingerprints of files that
+existed when the record was published; it does not copy stage outputs or claim
+later mutations are immutable. The current `manifests/<stage>.json` points to
+both files, and new acceptance markers require them when they are present. The
+acceptance marker remains the validated inventory of required files.
+
 There is one current orchestration boundary to understand before using
 `--stage full`. The canonical `zero_shot_evaluation` handler evaluates realized
 checkpoints, while the Nano experiment uses `mode: online_solutions` to score

@@ -18,8 +18,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,12 +35,433 @@ __all__ = [
     "StageManifest",
     "read_stage_manifest",
     "semantic_stage_config",
+    "validate_stage_execution_record",
+    "write_stage_execution_record",
     "write_stage_manifest",
 ]
 
 
+_EXECUTION_RECORD_SCHEMA = "puzzletron.stage-execution/v1"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _json_bytes(payload: dict[str, Any]) -> bytes:
+    return (json.dumps(canonicalize(payload), indent=2, sort_keys=True) + "\n").encode()
+
+
+def _publish_immutable_record(
+    record_dir: Path,
+    files: dict[str, bytes],
+) -> None:
+    record_dir = _path_without_symlinks(record_dir, description="stage execution record path")
+    for name in files:
+        _path_without_symlinks(record_dir / name, description="stage execution record path")
+    record_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{record_dir.name}.", dir=record_dir.parent))
+    try:
+        for name, content in files.items():
+            (temporary / name).write_bytes(content)
+        try:
+            temporary.rename(record_dir)
+            return
+        except OSError:
+            if not record_dir.is_dir():
+                raise
+        mismatches = [
+            name
+            for name, content in files.items()
+            if not (record_dir / name).is_file() or (record_dir / name).read_bytes() != content
+        ]
+        if mismatches:
+            raise FileExistsError(
+                f"immutable stage execution record already exists with different content: "
+                f"{record_dir} ({', '.join(mismatches)})"
+            )
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
+def _safe_relative_path(raw_path: object, *, description: str) -> Path:
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError(f"invalid {description}: {raw_path!r}")
+    path = Path(raw_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"unsafe {description}: {raw_path!r}")
+    return path
+
+
+def _path_without_symlinks(path: Path, *, description: str) -> Path:
+    absolute = path.expanduser().absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"{description} is symlinked: {current}")
+    return absolute
+
+
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _file_evidence(path: Path) -> dict[str, int | str]:
+    """Return bounded-memory size and digest evidence for one file."""
+
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return {"size": size, "sha256": digest.hexdigest()}
+
+
+def _resolved_config_content(config: object) -> Any:
+    """Remove path/launch-only runtime facts from resolved semantic identity."""
+
+    if not isinstance(config, Mapping):
+        return canonicalize(config)
+    return canonicalize({key: value for key, value in config.items() if key != "_runtime"})
+
+
+def write_stage_execution_record(
+    manifest_path: str | Path,
+    manifest_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist immutable resolved config and artifact metadata for one execution."""
+
+    manifest_path = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
+    if manifest_path.parent.name != "manifests":
+        raise ValueError(
+            f"stage manifest must use the campaign manifests directory: {manifest_path}"
+        )
+    root = manifest_path.parent.parent
+    stage = str(manifest_payload.get("stage") or "")
+    if not stage or Path(stage).name != stage or stage in {".", ".."}:
+        raise ValueError(f"invalid stage identifier for execution record: {stage!r}")
+
+    authored_config = canonicalize(manifest_payload.get("config") or {})
+    raw_effective_config = manifest_payload.get("effective_config")
+    effective_config = canonicalize(
+        authored_config if raw_effective_config is None else raw_effective_config
+    )
+    authored_config_identity = str(
+        manifest_payload.get("config_identity")
+        or stable_hash(authored_config, prefix=f"{stage}_cfg")
+    )
+    resolved_config_content = _resolved_config_content(
+        semantic_stage_config(dict(effective_config), stage)
+        if isinstance(effective_config, Mapping)
+        else effective_config
+    )
+    resolved_config_identity = stable_hash(resolved_config_content, prefix=f"{stage}_resolved_cfg")
+    implementation_provenance = canonicalize(
+        manifest_payload.get("implementation_provenance") or {}
+    )
+    execution_identity = stable_hash(
+        {
+            "stage": stage,
+            "status": manifest_payload.get("status"),
+            "skip_reason": manifest_payload.get("skip_reason"),
+            "started_at": manifest_payload.get("started_at"),
+            "ended_at": manifest_payload.get("ended_at"),
+            "authored_config_identity": authored_config_identity,
+            "resolved_config_identity": resolved_config_identity,
+            "semantic_config_identity": manifest_payload.get("semantic_config_identity"),
+            "semantic_identity": manifest_payload.get("semantic_identity"),
+            "capability_snapshot": manifest_payload.get("capability_snapshot"),
+            "implementation_provenance": implementation_provenance,
+        },
+        prefix=f"{stage}_execution",
+    )
+    record_dir = root / "manifests" / "executions" / stage / execution_identity
+    resolved_path = record_dir / "resolved_config.json"
+    artifact_path = record_dir / "artifact_manifest.json"
+    resolved_relative = resolved_path.relative_to(root).as_posix()
+    artifact_relative = artifact_path.relative_to(root).as_posix()
+
+    inputs = manifest_payload.get("inputs") or {}
+    runtime = effective_config.get("_runtime") if isinstance(effective_config, dict) else {}
+    runtime = runtime if isinstance(runtime, dict) else {}
+    resolved_payload = {
+        "schema": _EXECUTION_RECORD_SCHEMA,
+        "schema_version": 1,
+        "stage": stage,
+        "status": manifest_payload.get("status"),
+        "skip_reason": manifest_payload.get("skip_reason"),
+        "started_at": manifest_payload.get("started_at"),
+        "ended_at": manifest_payload.get("ended_at"),
+        "execution_identity": execution_identity,
+        "authored_config_identity": authored_config_identity,
+        "resolved_config_identity": resolved_config_identity,
+        "semantic_config": manifest_payload.get("semantic_config") or {},
+        "semantic_config_identity": manifest_payload.get("semantic_config_identity"),
+        "semantic_identity": manifest_payload.get("semantic_identity"),
+        "provenance": {
+            "authored_config_path": runtime.get("config_path"),
+            "overrides": list(runtime.get("overrides") or ()),
+            "implementation": implementation_provenance,
+            "descriptor_resolution": inputs.get("descriptor_resolution"),
+            "capability_snapshot": manifest_payload.get("capability_snapshot"),
+        },
+        "resolved_stage_config": resolved_config_content,
+    }
+    resolved_bytes = _json_bytes(resolved_payload)
+    resolved_sha256 = _sha256_bytes(resolved_bytes)
+
+    declared_outputs = canonicalize(manifest_payload.get("outputs") or {})
+    immutable_evidence = {}
+    if isinstance(declared_outputs, Mapping):
+        for key, value in declared_outputs.items():
+            if not isinstance(value, str):
+                continue
+            output_path = Path(value)
+            if not output_path.is_absolute():
+                output_path = root / output_path
+            if output_path.is_file():
+                immutable_evidence[str(key)] = {
+                    "path": value,
+                    **_file_evidence(output_path),
+                }
+    artifact_payload = {
+        "schema": _EXECUTION_RECORD_SCHEMA,
+        "schema_version": 1,
+        "stage": stage,
+        "status": manifest_payload.get("status"),
+        "skip_reason": manifest_payload.get("skip_reason"),
+        "started_at": manifest_payload.get("started_at"),
+        "ended_at": manifest_payload.get("ended_at"),
+        "execution_identity": execution_identity,
+        "resolved_config": {
+            "path": resolved_relative,
+            "identity": resolved_config_identity,
+            "sha256": resolved_sha256,
+        },
+        "stage_manifest": {
+            "path": manifest_path.relative_to(root).as_posix(),
+            "semantic_identity": manifest_payload.get("semantic_identity"),
+        },
+        "artifact_contract": "stage-manifest-output-pointers/v1",
+        "canonical_output_pointers": declared_outputs,
+        "immutable_evidence": immutable_evidence,
+    }
+    artifact_identity = stable_hash(artifact_payload, prefix=f"{stage}_artifacts")
+    artifact_payload["artifact_manifest_identity"] = artifact_identity
+    artifact_bytes = _json_bytes(artifact_payload)
+    artifact_sha256 = _sha256_bytes(artifact_bytes)
+    _publish_immutable_record(
+        record_dir,
+        {
+            resolved_path.name: resolved_bytes,
+            artifact_path.name: artifact_bytes,
+        },
+    )
+    return {
+        "schema": _EXECUTION_RECORD_SCHEMA,
+        "execution_identity": execution_identity,
+        "resolved_config_path": resolved_relative,
+        "resolved_config_identity": resolved_config_identity,
+        "resolved_config_sha256": resolved_sha256,
+        "artifact_manifest_path": artifact_relative,
+        "artifact_manifest_identity": artifact_identity,
+        "artifact_manifest_sha256": artifact_sha256,
+    }
+
+
+def _read_mapping(path: Path, *, description: str) -> tuple[dict[str, Any], bytes]:
+    try:
+        content = path.read_bytes()
+        payload = json.loads(content)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid {description}: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid {description}: {path}")
+    return payload, content
+
+
+def validate_stage_execution_record(
+    manifest_path: str | Path,
+    *,
+    expected_stage: str | None = None,
+) -> tuple[str, ...]:
+    """Validate the canonical pointer and every immutable record it references.
+
+    Historical stage manifests without ``execution_record`` remain readable. Any
+    manifest that opts into the execution-record schema is checked fail closed.
+    """
+
+    path = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
+    if path.parent.name != "manifests":
+        raise ValueError(f"stage manifest is outside the expected layout: {path}")
+    root = path.parent.parent
+    pointer, _ = _read_mapping(path, description="stage manifest")
+    stage = pointer.get("stage")
+    if not isinstance(stage, str) or Path(stage).name != stage or stage in {".", ".."}:
+        raise ValueError(f"invalid stage identifier in stage manifest: {stage!r}")
+    if expected_stage is not None and stage != expected_stage:
+        raise ValueError(
+            f"stage manifest identity mismatch: expected {expected_stage!r}, found {stage!r}"
+        )
+
+    pointer_config = pointer.get("config")
+    if not isinstance(pointer_config, Mapping):
+        raise ValueError("stage manifest config must be a mapping")
+    expected_config_identity = stable_hash(pointer_config, prefix=f"{stage}_cfg")
+    if pointer.get("config_identity") != expected_config_identity:
+        raise ValueError("stage manifest config identity mismatch")
+
+    pointer_semantic_config = pointer.get("semantic_config")
+    if not isinstance(pointer_semantic_config, Mapping):
+        raise ValueError("stage manifest semantic config must be a mapping")
+    expected_semantic_config_identity = stable_hash(
+        pointer_semantic_config, prefix=f"{stage}_semantic_cfg"
+    )
+    if pointer.get("semantic_config_identity") != expected_semantic_config_identity:
+        raise ValueError("stage manifest semantic config identity mismatch")
+    expected_semantic_identity = stable_hash(
+        {
+            "stage": stage,
+            "semantic_config_identity": expected_semantic_config_identity,
+            "capability_snapshot": pointer.get("capability_snapshot"),
+        },
+        prefix=f"{stage}_semantic",
+    )
+    if pointer.get("semantic_identity") != expected_semantic_identity:
+        raise ValueError("stage manifest semantic identity mismatch")
+
+    if "execution_record" not in pointer:
+        return ()
+    record = pointer.get("execution_record")
+    if not isinstance(record, Mapping) or record.get("schema") != _EXECUTION_RECORD_SCHEMA:
+        raise ValueError(f"invalid stage execution record: {record!r}")
+    execution_identity = record.get("execution_identity")
+    if not isinstance(execution_identity, str) or not execution_identity:
+        raise ValueError("invalid stage execution identity")
+
+    resolved_relative = _safe_relative_path(
+        record.get("resolved_config_path"), description="stage execution record path"
+    )
+    artifact_relative = _safe_relative_path(
+        record.get("artifact_manifest_path"), description="stage execution record path"
+    )
+    expected_parent = Path("manifests") / "executions" / stage / execution_identity
+    for relative, filename in (
+        (resolved_relative, "resolved_config.json"),
+        (artifact_relative, "artifact_manifest.json"),
+    ):
+        if relative.parent != expected_parent or relative.name != filename:
+            raise ValueError(f"stage execution record path does not match identity: {relative}")
+
+    resolved_path = _path_without_symlinks(
+        root / resolved_relative, description="stage execution record path"
+    )
+    artifact_path = _path_without_symlinks(
+        root / artifact_relative, description="stage execution record path"
+    )
+    resolved, resolved_bytes = _read_mapping(
+        resolved_path, description="resolved stage configuration record"
+    )
+    artifact, artifact_bytes = _read_mapping(artifact_path, description="stage artifact record")
+    resolved_sha256 = _sha256_bytes(resolved_bytes)
+    if record.get("resolved_config_sha256") != resolved_sha256:
+        raise ValueError("resolved stage configuration SHA256 mismatch")
+    if record.get("artifact_manifest_sha256") != _sha256_bytes(artifact_bytes):
+        raise ValueError("stage artifact record SHA256 mismatch")
+
+    for label, payload in (("resolved", resolved), ("artifact", artifact)):
+        if payload.get("schema") != _EXECUTION_RECORD_SCHEMA or payload.get("schema_version") != 1:
+            raise ValueError(f"invalid {label} stage execution record schema")
+        if payload.get("stage") != stage or payload.get("execution_identity") != execution_identity:
+            raise ValueError(f"{label} stage execution identity mismatch")
+        for key in ("status", "skip_reason", "started_at", "ended_at"):
+            if payload.get(key) != pointer.get(key):
+                raise ValueError(f"{label} stage execution {key} mismatch")
+
+    resolved_identity = stable_hash(
+        resolved.get("resolved_stage_config"), prefix=f"{stage}_resolved_cfg"
+    )
+    if (
+        resolved.get("resolved_config_identity") != resolved_identity
+        or record.get("resolved_config_identity") != resolved_identity
+    ):
+        raise ValueError("resolved stage configuration identity mismatch")
+    for key in (
+        "authored_config_identity",
+        "semantic_config_identity",
+        "semantic_identity",
+    ):
+        pointer_key = "config_identity" if key == "authored_config_identity" else key
+        if resolved.get(key) != pointer.get(pointer_key):
+            raise ValueError(f"resolved stage {key} mismatch")
+
+    resolved_provenance = resolved.get("provenance") or {}
+    if not isinstance(resolved_provenance, Mapping):
+        raise ValueError("resolved stage provenance must be a mapping")
+    implementation = resolved_provenance.get("implementation") or {}
+    pointer_implementation = pointer.get("implementation_provenance") or {}
+    if implementation != pointer_implementation:
+        raise ValueError("resolved implementation provenance mismatch")
+    pointer_inputs = pointer.get("inputs") or {}
+    if not isinstance(pointer_inputs, Mapping):
+        raise ValueError("stage manifest inputs must be a mapping")
+    if resolved.get("semantic_config") != pointer_semantic_config:
+        raise ValueError("resolved stage semantic config mismatch")
+    if resolved_provenance.get("descriptor_resolution") != pointer_inputs.get(
+        "descriptor_resolution"
+    ):
+        raise ValueError("resolved descriptor input provenance mismatch")
+    if resolved_provenance.get("capability_snapshot") != pointer.get("capability_snapshot"):
+        raise ValueError("resolved capability provenance mismatch")
+
+    expected_execution_identity = stable_hash(
+        {
+            "stage": stage,
+            "status": resolved.get("status"),
+            "skip_reason": resolved.get("skip_reason"),
+            "started_at": resolved.get("started_at"),
+            "ended_at": resolved.get("ended_at"),
+            "authored_config_identity": resolved.get("authored_config_identity"),
+            "resolved_config_identity": resolved_identity,
+            "semantic_config_identity": resolved.get("semantic_config_identity"),
+            "semantic_identity": resolved.get("semantic_identity"),
+            "capability_snapshot": resolved_provenance.get("capability_snapshot"),
+            "implementation_provenance": implementation,
+        },
+        prefix=f"{stage}_execution",
+    )
+    if expected_execution_identity != execution_identity:
+        raise ValueError("stage execution identity does not match record content")
+
+    artifact_identity_payload = dict(artifact)
+    artifact_identity = artifact_identity_payload.pop("artifact_manifest_identity", None)
+    expected_artifact_identity = stable_hash(artifact_identity_payload, prefix=f"{stage}_artifacts")
+    if (
+        artifact_identity != expected_artifact_identity
+        or record.get("artifact_manifest_identity") != expected_artifact_identity
+    ):
+        raise ValueError("stage artifact record identity mismatch")
+    resolved_ref = artifact.get("resolved_config")
+    if not isinstance(resolved_ref, Mapping) or resolved_ref != {
+        "path": resolved_relative.as_posix(),
+        "identity": resolved_identity,
+        "sha256": resolved_sha256,
+    }:
+        raise ValueError("stage artifact resolved-configuration reference mismatch")
+    stage_ref = artifact.get("stage_manifest")
+    if (
+        not isinstance(stage_ref, Mapping)
+        or stage_ref.get("path") != path.relative_to(root).as_posix()
+    ):
+        raise ValueError("stage artifact canonical-manifest reference mismatch")
+    if stage_ref.get("semantic_identity") != pointer.get("semantic_identity"):
+        raise ValueError("stage artifact semantic identity mismatch")
+    if artifact.get("canonical_output_pointers") != pointer.get("outputs"):
+        raise ValueError("stage artifact canonical output pointers mismatch")
+    return resolved_relative.as_posix(), artifact_relative.as_posix()
 
 
 @dataclass
@@ -53,6 +478,8 @@ class StageManifest:
     semantic_config: dict[str, Any] | None = None
     implementation_provenance: dict[str, Any] = field(default_factory=dict)
     skip_reason: str | None = None
+    effective_config: dict[str, Any] | None = None
+    execution_record: dict[str, Any] | None = None
     stale_reason: str | None = None
     started_at: str = field(default_factory=_now_iso)
     ended_at: str | None = None
@@ -124,15 +551,25 @@ class StageManifest:
         }
         if self.skip_reason is not None:
             payload["skip_reason"] = self.skip_reason
+        if self.execution_record is not None:
+            payload["execution_record"] = canonicalize(self.execution_record)
         return payload
 
 
 def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:
-    """Atomically write a stage manifest from rank zero."""
+    """Atomically write a stage manifest from rank zero.
+
+    Rank zero publishes the immutable execution record and assigns its reference
+    to ``manifest.execution_record`` before writing the manifest. Other ranks
+    return without writing and leave ``manifest.execution_record`` unchanged.
+    """
 
     if os.environ.get("RANK") not in (None, "", "0"):
         return
     path = Path(path)
+    execution_payload = manifest.to_dict()
+    execution_payload["effective_config"] = canonicalize(manifest.effective_config)
+    manifest.execution_record = write_stage_execution_record(path, execution_payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n")

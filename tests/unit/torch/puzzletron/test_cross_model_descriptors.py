@@ -1,3 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for Puzzletron cross-model descriptor selection and integration."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -253,9 +270,12 @@ def test_gpt_oss_converter_preserves_each_layers_attention_window() -> None:
         for block in GptOssConverter.create_block_configs_from_main_config(config)
     ]
 
-    assert [
-        block.require_subblock("attention").sliding_window_size for block in blocks
-    ] == [128, "full", 128, "full"]
+    assert [block.require_subblock("attention").sliding_window_size for block in blocks] == [
+        128,
+        "full",
+        128,
+        "full",
+    ]
 
 
 def test_gpt_oss_hf_and_native_share_contract_field_mapping() -> None:
@@ -305,9 +325,7 @@ def test_nemotron_weight_groups_accept_native_automodel_moe_names() -> None:
     ]
     native_output_names = ["model.norm.weight", "lm_head.weight"]
 
-    groups = NemotronHModelDescriptor.get_weight_groups(
-        native_block_names + native_output_names, 1
-    )
+    groups = NemotronHModelDescriptor.get_weight_groups(native_block_names + native_output_names, 1)
 
     assert groups["block_0_ffn"] == native_block_names
     assert groups["lm_head"] == native_output_names
@@ -413,9 +431,7 @@ def test_nemotron_nano_hidden_width_spec_slices_non_latent_experts() -> None:
         tie_word_embeddings=False,
         moe_latent_size=None,
     )
-    spec = NemotronHModelDescriptor.embedding_pruning_spec(
-        config, widths=(8, 4), alignment=1
-    )
+    spec = NemotronHModelDescriptor.embedding_pruning_spec(config, widths=(8, 4), alignment=1)
     state = {
         "backbone.layers.2.mixer.experts.0.up_proj.weight": torch.zeros(6, 8),
         "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(8, 6),
@@ -450,9 +466,7 @@ def test_nemotron_capabilities_include_hidden_width_pipeline() -> None:
 
 
 def test_nemotron_moe_variant_axes_cover_scoring_and_materialization() -> None:
-    axes = NemotronHModelDescriptor.puzzletron_capabilities(
-        SimpleNamespace(hidden_size=2688)
-    ).axes
+    axes = NemotronHModelDescriptor.puzzletron_capabilities(SimpleNamespace(hidden_size=2688)).axes
 
     assert axes["moe_experts"].runtime_slice_impl == "solution_recipe.moe_expert_reroute"
     assert axes["moe_top_k"].materialize_impl == "materialize.config_only_moe_top_k"
@@ -496,9 +510,7 @@ def test_gpt_oss_pipeline_patch_restores_native_inner_forward() -> None:
 
 def test_gpt_oss_embedding_spec_preserves_mxfp4_input_channel_blocks() -> None:
     config = SimpleNamespace(hidden_size=64, tie_word_embeddings=False)
-    spec = GptOssModelDescriptor.embedding_pruning_spec(
-        config, widths=(64, 32), alignment=32
-    )
+    spec = GptOssModelDescriptor.embedding_pruning_spec(config, widths=(64, 32), alignment=32)
     state = {
         "model.layers.0.mlp.experts.gate_up_proj_blocks": torch.zeros(2, 128, 2, 16),
         "model.layers.0.mlp.experts.gate_up_proj_scales": torch.zeros(2, 128, 2),
@@ -514,15 +526,18 @@ def test_gpt_oss_embedding_spec_preserves_mxfp4_input_channel_blocks() -> None:
 
     assert len(audit["handled"]) == len(state)
     assert torch.equal(order, torch.cat((torch.arange(32, 64), torch.arange(32))))
-    assert sliced["model.layers.0.mlp.experts.gate_up_proj_blocks"].shape == (2, 128, 1, 16)
+    assert sliced["model.layers.0.mlp.experts.gate_up_proj_blocks"].shape == (
+        2,
+        128,
+        1,
+        16,
+    )
     assert sliced["model.layers.0.mlp.experts.down_proj_blocks"].shape == (2, 32, 2, 16)
 
 
 def test_gpt_oss_embedding_spec_slices_post_bypass_fused_experts() -> None:
     config = SimpleNamespace(hidden_size=64, tie_word_embeddings=False)
-    spec = GptOssModelDescriptor.embedding_pruning_spec(
-        config, widths=(64, 32), alignment=32
-    )
+    spec = GptOssModelDescriptor.embedding_pruning_spec(config, widths=(64, 32), alignment=32)
     state = {
         "model.layers.0.mlp.experts.gate_up_proj": torch.zeros(2, 64, 128),
         "model.layers.0.mlp.experts.down_proj": torch.zeros(2, 128, 64),
@@ -551,7 +566,9 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
     def handler(config, manifest):
         observed["runtime_descriptor"] = config["_runtime"]["descriptor"]
         observed["manifest_config"] = manifest.config
+        observed["manifest_effective_config"] = manifest.effective_config
         observed["resolution"] = manifest.inputs["descriptor_resolution"]
+        config["_runtime"]["descriptor"] = "mutated-by-handler"
         return StageResult(
             stage="width_importance",
             status="success",
@@ -574,6 +591,7 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
 
     assert observed["runtime_descriptor"] == "llama"
     assert "_runtime" not in observed["manifest_config"]
+    assert observed["manifest_effective_config"]["_runtime"]["descriptor"] == "llama"
     assert "descriptor_override" not in observed["manifest_config"]["model"]
     assert observed["resolution"]["name"] == "llama"
 
@@ -609,9 +627,7 @@ def test_gpt_oss_declares_attention_sink_as_query_head_state() -> None:
 def test_generic_window_capability_is_discovered_for_non_gpt_attention() -> None:
     config = _text_config(sliding_window=512)
 
-    axis = LlamaModelDescriptor.puzzletron_capabilities(config).axes[
-        "sliding_window_size"
-    ]
+    axis = LlamaModelDescriptor.puzzletron_capabilities(config).axes["sliding_window_size"]
 
     assert axis.variant_only
     assert axis.vllm_export
@@ -656,12 +672,8 @@ def test_stage_preflight_requires_vllm_control_for_runtime_stats(monkeypatch) ->
         {
             "model": {"force_hf": False},
             "parallel": {"ep": 1},
-            "search_space": {
-                "axes": {"mla_q_lora_rank": {"enabled": True, "values": [384]}}
-            },
-            "calc_subblock_stats": {
-                "runtime_stats": {"enabled": True, "backend": "vllm"}
-            },
+            "search_space": {"axes": {"mla_q_lora_rank": {"enabled": True, "values": [384]}}},
+            "calc_subblock_stats": {"runtime_stats": {"enabled": True, "backend": "vllm"}},
         },
         SimpleNamespace(capabilities=object()),
         stage="library",
@@ -772,7 +784,7 @@ def test_nemotron_updates_remote_read_only_layer_types_through_hybrid_pattern() 
 def test_nemotron_runtime_proxy_supplies_legacy_hybrid_pattern(monkeypatch) -> None:
     captured = {}
 
-    class _CapturedConfig(Exception):
+    class _CapturedConfigError(Exception):
         def __init__(self, hybrid_override_pattern=None, **kwargs):
             captured.update(kwargs)
             captured["hybrid_override_pattern"] = hybrid_override_pattern
@@ -796,13 +808,11 @@ def test_nemotron_runtime_proxy_supplies_legacy_hybrid_pattern(monkeypatch) -> N
         )
     ]
     monkeypatch.setattr(
-        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfig
+        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfigError
     )
-    monkeypatch.setattr(
-        NemotronHModelDescriptor, "_runtime_model_cls", lambda: object
-    )
+    monkeypatch.setattr(NemotronHModelDescriptor, "_runtime_model_cls", lambda: object)
 
-    with pytest.raises(_CapturedConfig):
+    with pytest.raises(_CapturedConfigError):
         NemotronHModelDescriptor.create_runtime_benchmark_model(runtime, blocks)
 
     assert "layers_block_type" not in captured
@@ -825,7 +835,7 @@ def test_nemotron_runtime_proxy_uses_active_mamba_shape_for_global_initializatio
 ) -> None:
     captured = {}
 
-    class _CapturedConfig(Exception):
+    class _CapturedConfigError(Exception):
         def __init__(self, **kwargs):
             captured.update(kwargs)
             raise self
@@ -842,14 +852,14 @@ def test_nemotron_runtime_proxy_uses_active_mamba_shape_for_global_initializatio
     )
     blocks = [
         BlockConfig(subblock_configs=(AttentionConfig(num_query_heads=4, num_kv_heads=2),)),
-        BlockConfig(
-            subblock_configs=(MambaConfig(num_heads=48, head_dim=56, state_dim=96),)
-        ),
+        BlockConfig(subblock_configs=(MambaConfig(num_heads=48, head_dim=56, state_dim=96),)),
     ]
-    monkeypatch.setattr(NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfig)
+    monkeypatch.setattr(
+        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfigError
+    )
     monkeypatch.setattr(NemotronHModelDescriptor, "_runtime_model_cls", lambda: object)
 
-    with pytest.raises(_CapturedConfig):
+    with pytest.raises(_CapturedConfigError):
         NemotronHModelDescriptor.create_runtime_benchmark_model(runtime, blocks)
 
     assert captured["mamba_num_heads"] == 48
@@ -858,12 +868,8 @@ def test_nemotron_runtime_proxy_uses_active_mamba_shape_for_global_initializatio
 
 
 def test_llama_requests_scaffold_only_for_cacheless_candidate() -> None:
-    attention = BlockConfig(
-        subblock_configs=(AttentionConfig(no_op=False), FFNConfig(no_op=True))
-    )
-    ffn = BlockConfig(
-        subblock_configs=(AttentionConfig(no_op=True), FFNConfig(no_op=False))
-    )
+    attention = BlockConfig(subblock_configs=(AttentionConfig(no_op=False), FFNConfig(no_op=True)))
+    ffn = BlockConfig(subblock_configs=(AttentionConfig(no_op=True), FFNConfig(no_op=False)))
 
     assert LlamaModelDescriptor.runtime_benchmark_scaffold_policy(attention) == "none"
     assert (
@@ -880,9 +886,7 @@ def test_nemotron_requests_attention_scaffold_for_cacheless_candidates() -> None
         subblock_configs=(MambaConfig(no_op=False, num_heads=48, head_dim=64, state_dim=128),)
     )
     moe = BlockConfig(
-        subblock_configs=(
-            MoEConfig(no_op=False, num_experts=16, expert_intermediate_size=512),
-        )
+        subblock_configs=(MoEConfig(no_op=False, num_experts=16, expert_intermediate_size=512),)
     )
 
     assert NemotronHModelDescriptor.runtime_benchmark_scaffold_policy(attention) == "none"
@@ -945,7 +949,12 @@ def test_nemotron_runtime_bounding_preserves_native_moe_and_mamba_families() -> 
     bounded_mamba = NemotronHModelDescriptor._runtime_proxy_block_config(runtime, mamba_block)
 
     moe = bounded_moe.require_subblock("moe")
-    assert (moe.num_experts, moe.expert_intermediate_size, moe.latent_dim, moe.top_k) == (
+    assert (
+        moe.num_experts,
+        moe.expert_intermediate_size,
+        moe.latent_dim,
+        moe.top_k,
+    ) == (
         8,
         256,
         128,
