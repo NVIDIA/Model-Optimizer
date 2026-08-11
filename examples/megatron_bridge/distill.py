@@ -139,7 +139,7 @@ def get_args():
         "--sft_dataset_root",
         type=str,
         default=None,
-        help="Directory holding training.jsonl / validation.jsonl of "
+        help="Directory holding training.jsonl (and validation.jsonl when --eval_iters > 0) of "
         '{"input": <prompt>, "output": <response>} records (used with --sft). Both fields are '
         "tokenized verbatim: no chat template is applied and no BOS is prepended, so if the model "
         "expects role/turn markers or a BOS token, bake them into the fields yourself. An EOS "
@@ -278,7 +278,8 @@ def get_args():
 
     if args.sft and not args.sft_dataset_root:
         raise ValueError(
-            "--sft requires --sft_dataset_root (a directory with training.jsonl / validation.jsonl)."
+            "--sft requires --sft_dataset_root (a directory with training.jsonl, plus "
+            "validation.jsonl when --eval_iters > 0)."
         )
     if args.sft and (args.data_paths or args.use_mock_data):
         raise ValueError(
@@ -297,9 +298,20 @@ def _warn_if_bos_missing(tokenizer, dataset_root: str) -> None:
     ``--sft`` tokenizes both fields verbatim, so the caller owns the BOS. Adding one here is not
     safe (their text may already have it, which would double it), but training without the BOS the
     model is served with is silent train/inference skew.
+
+    Bounded on purpose: it inspects only the first record of ``training.jsonl``, so a mixed corpus
+    whose first record happens to carry a BOS will not be flagged.
     """
     bos = getattr(tokenizer, "bos_token", None)
-    if not bos or not getattr(tokenizer, "add_bos_token", False):
+    if not bos:
+        return
+    try:
+        # Probe rather than trusting ``add_bos_token``: many fast tokenizers prepend BOS via the
+        # post-processor without exposing that attribute, and a missing warning is the worse
+        # failure here.
+        if tokenizer("x").input_ids[:1] != [tokenizer.bos_token_id]:
+            return
+    except Exception:
         return
     try:
         with open(os.path.join(dataset_root, "training.jsonl")) as f:
@@ -535,7 +547,15 @@ def main(args: argparse.Namespace):
             TokenizerConfig(
                 tokenizer_type="HuggingFaceTokenizer",
                 tokenizer_model=args.student_hf_path,
-                hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+                hf_tokenizer_kwargs={
+                    "trust_remote_code": args.trust_remote_code,
+                    # Enforce the verbatim contract here rather than relying on the dataset's
+                    # add_bos/add_eos: text_to_ids adds special tokens when this is left at its
+                    # default of True, and prompt_template tokenizes "{input}" and "{output}"
+                    # separately -- so a BOS-adding tokenizer would inject one at the answer
+                    # boundary, where answer_only_loss starts scoring.
+                    "include_special_tokens": False,
+                },
             )
             if args.sft
             else TokenizerConfig(

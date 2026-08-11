@@ -131,8 +131,8 @@ See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megat
 for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
 
 Alternatively, pass `--sft --sft_dataset_root <dir>` to distill on **raw prompt-completion JSONL**
-with the loss masked to the completion. The directory must hold `training.jsonl` and
-`validation.jsonl` of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
+with the loss masked to the completion. The directory must hold `training.jsonl` (and
+`validation.jsonl` when `--eval_iters > 0`) of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
 the model's own HuggingFace tokenizer. Both fields are tokenized **verbatim** — no chat template is
 applied and no BOS token is prepended — so if your model expects role/turn markers or a BOS token,
 include them in the `"input"` field yourself. An EOS token is appended after the response.
