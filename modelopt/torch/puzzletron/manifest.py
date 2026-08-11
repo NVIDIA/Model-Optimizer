@@ -382,6 +382,12 @@ def validate_stage_execution_record(
     artifact, artifact_bytes = _read_mapping(
         artifact_path, description="stage artifact record"
     )
+    resolved_sha256 = _sha256_bytes(resolved_bytes)
+    if record.get("resolved_config_sha256") != resolved_sha256:
+        raise ValueError("resolved stage configuration SHA256 mismatch")
+    if record.get("artifact_manifest_sha256") != _sha256_bytes(artifact_bytes):
+        raise ValueError("stage artifact record SHA256 mismatch")
+
     for label, payload in (("resolved", resolved), ("artifact", artifact)):
         if (
             payload.get("schema") != _EXECUTION_RECORD_SCHEMA
@@ -397,9 +403,6 @@ def validate_stage_execution_record(
             if payload.get(key) != pointer.get(key):
                 raise ValueError(f"{label} stage execution {key} mismatch")
 
-    resolved_sha256 = _sha256_bytes(resolved_bytes)
-    if record.get("resolved_config_sha256") != resolved_sha256:
-        raise ValueError("resolved stage configuration SHA256 mismatch")
     resolved_identity = stable_hash(
         resolved.get("resolved_stage_config"), prefix=f"{stage}_resolved_cfg"
     )
@@ -457,8 +460,6 @@ def validate_stage_execution_record(
     if expected_execution_identity != execution_identity:
         raise ValueError("stage execution identity does not match record content")
 
-    if record.get("artifact_manifest_sha256") != _sha256_bytes(artifact_bytes):
-        raise ValueError("stage artifact record SHA256 mismatch")
     artifact_identity_payload = dict(artifact)
     artifact_identity = artifact_identity_payload.pop(
         "artifact_manifest_identity", None
