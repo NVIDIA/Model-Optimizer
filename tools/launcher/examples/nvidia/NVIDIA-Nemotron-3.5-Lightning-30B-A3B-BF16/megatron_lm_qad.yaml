@@ -1,25 +1,26 @@
-# NVIDIA Nemotron 3 Nano 30B-A3B NVFP4 quantization-aware distillation (QAD).
+# NVIDIA Nemotron 3.5 Lightning 30B-A3B NVFP4 quantization-aware distillation (QAD).
 #
-# The pipeline converts the Hugging Face BF16 model to an MCore teacher,
+# The pipeline converts the HuggingFace BF16 model to an MCore teacher,
 # quantizes a separate MCore student, distills the student for 400 iterations,
 # and exports the resulting checkpoint. The training task uses an explicit
 # Nemotron-Post-Training-Dataset-v2 chat shard so Hugging Face Datasets does not
 # prepare the repository's other large splits.
 #
-# Training topology: 2 nodes x 8 GPUs, TP=2, PP=1, CP=1, EP=4, ETP=1.
-# This gives DP=8 and EDP=4. With micro-batch-size=1 and global-batch-size=16,
-# train-samples=6400 produces 400 iterations. To run at 16K instead, change both
-# --seq-length and --max-position-embeddings to 16384.
+# PTQ topology: 1 B200 node x 4 GPUs, TP=1, PP=1, CP=1, EP=4, ETP=1.
+# QAD topology: 2 B200 nodes x 4 GPUs, TP=2, PP=1, CP=1, EP=4, ETP=1.
+# With micro-batch-size=1 and global-batch-size=16, train-samples=6400 produces
+# 400 iterations. To use another sequence length, change both --seq-length and
+# --max-position-embeddings. Our final QAD run used a sequence length of 524,288.
 #
 # Requirements:
-#   - The BF16 model is mounted at /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.
+#   - The BF16 model is mounted at /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16.
 #   - HF_TOKEN can access the gated nvidia/Nemotron-Post-Training-Dataset-v2 dataset.
 #
 # Usage from tools/launcher:
 #   source .env-slurm
-#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/megatron_lm_qad.yaml --yes
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/megatron_lm_qad.yaml --yes
 
-job_name: Nemotron-3-Nano-30B-A3B_QAD_32k_400iter
+job_name: Nemotron-3.5-Lightning-30B-A3B_QAD_32k_400iter
 pipeline:
   allow_to_fail: false
   skip: false
@@ -29,7 +30,7 @@ pipeline:
   task_0:
     script: common/megatron_bridge/import/import.sh
     environment:
-      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - HF_MODEL_ID: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
       - OUTPUT_DIR: /cicd/megatron-lm-bf16/nvidia
       - TORCH_DTYPE: bfloat16
     slurm_config:
@@ -44,20 +45,20 @@ pipeline:
   task_1:
     script: common/megatron_lm/quantize/quantize.sh
     args:
-      - --seq-length 4096 --max-position-embeddings 32768
-      - --calib-size 32
+      - --seq-length 32768 --max-position-embeddings 32768
+      - --calib-size 768
       - --skip-generate
       - --export-default-te-spec
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - QUANT_CFG: MAMBA_MOE_NVFP4_AGGRESSIVE_CFG
-      - MLM_MODEL_CKPT: /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
-      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B/lightning_w4a16_nvfp4_4o6
+      - MLM_MODEL_CKPT: /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-MCore
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
       - RUN_MMLU: "false"
       - RUN_EXPORT: "false"
       - DP: "1"
       - CP: "1"
-      - TP: "2"
+      - TP: "1"
       - PP: "1"
       - EP: "4"
       - ETP: "1"
@@ -66,8 +67,8 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06.00
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 4
+      gpus_per_node: 4
 
   # Distill the quantized student from the BF16 teacher on chat-template data.
   task_2:
@@ -85,7 +86,7 @@ pipeline:
       # QAD
       - --modelopt-enabled
       - --export-default-te-spec
-      - --export-kd-teacher-load /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16-MCore
+      - --export-kd-teacher-load /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-MCore
       - --attention-dropout 0.0 --hidden-dropout 0.0
       - --no-check-for-nan-in-loss-and-grad
       - --recompute-granularity selective
@@ -106,8 +107,8 @@ pipeline:
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - MLM_MODEL_CKPT: /cicd/megatron-lm/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - MLM_MODEL_SAVE: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - MLM_MODEL_SAVE: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
       - MLM_TRAIN_SCRIPT: finetune
       - DATASET: nvidia/Nemotron-Post-Training-Dataset-v2
       - DP: "1"
@@ -121,8 +122,8 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06.00
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 2
-      ntasks_per_node: 8
-      gpus_per_node: 8
+      ntasks_per_node: 4
+      gpus_per_node: 4
 
   task_3:
     script: common/megatron_lm/export/export.sh
@@ -131,10 +132,10 @@ pipeline:
       - --dist-ckpt-strictness log_all
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
-      - MLM_MODEL_CKPT: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - EXPORT_DIR: /cicd/export/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_NVFP4_QAD
-      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      - QUANT_CFG: huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B/lightning_w4a16_nvfp4_4o6
+      - MLM_MODEL_CKPT: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+      - EXPORT_DIR: /cicd/export/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16_NVFP4_QAD
+      - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
       - DP: "1"
       - CP: "1"
       - TP: "1"
