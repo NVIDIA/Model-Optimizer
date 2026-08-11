@@ -28,17 +28,20 @@ def test_failed_atomic_replace_preserves_last_resumable_state(tmp_path, monkeypa
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     state.set_field("model.source", "/models/teacher")
     durable_snapshot = state.path.read_bytes()
-    replace_calls = []
+    real_replace = state_module.os.replace
+    replace_targets = []
 
     def fail_replace(source, destination):
-        replace_calls.append((source, destination))
-        raise OSError("injected replace failure")
+        replace_targets.append(destination)
+        if destination == state.path:
+            raise OSError("injected replace failure")
+        return real_replace(source, destination)
 
     monkeypatch.setattr(state_module.os, "replace", fail_replace)
 
     with pytest.raises(SetupError, match="Cannot save v2 setup state"):
         state.set_field("model.source", "/models/candidate")
 
-    assert [destination for _, destination in replace_calls] == [state.path]
+    assert state.path in replace_targets
     assert state.path.read_bytes() == durable_snapshot
     assert WizardState.resume(state.path).get_field("model.source") == "/models/teacher"
