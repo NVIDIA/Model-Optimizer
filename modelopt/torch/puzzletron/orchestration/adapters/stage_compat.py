@@ -53,6 +53,18 @@ __all__ = [
 ]
 
 
+def _completion_pattern(root: Path, path: Any) -> str:
+    """Return a campaign-relative pattern or an exact absolute external path."""
+
+    resolved = _normalized_path(path)
+    try:
+        return str(resolved.relative_to(root))
+    except ValueError:
+        # Acceptance markers treat absolute patterns as exact files. This binds
+        # configured caches outside the campaign without globbing external trees.
+        return str(resolved)
+
+
 def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str, ...]:
     """Return completion artifact patterns for one stage."""
 
@@ -72,7 +84,26 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
             return ()
         if not configured_caches:
             return ()
-        return ("dataset_cache/*.tokens", "dataset_cache/*.tokens.json")
+        configured_root = config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir")
+        if configured_root is None:
+            return ()
+        puzzle_dir = _normalized_path(configured_root)
+        patterns = []
+        try:
+            for cache in configured_caches:
+                output = _normalized_path(cache["output"])
+                patterns.extend(
+                    (
+                        _completion_pattern(puzzle_dir, output),
+                        _completion_pattern(
+                            puzzle_dir,
+                            output.with_suffix(output.suffix + ".json"),
+                        ),
+                    )
+                )
+        except (KeyError, TypeError, ValueError):
+            return ()
+        return tuple(dict.fromkeys(patterns))
     if stage_id == "slicing_sanity":
         slicing = config.get("slicing_sanity") or {}
         if slicing.get("backend") == "distributed_parent_sweep":
@@ -224,6 +255,7 @@ def _token_cache_metadata_is_complete(
             "num_samples": num_samples,
             "seq_length": seq_length,
             "shuffle_seed": shuffle_seed,
+            "trust_remote_code": bool((config.get("model") or {}).get("trust_remote_code", False)),
             "dtype": "uint32",
             "bytes": expected_bytes,
         }
@@ -406,7 +438,12 @@ def _depth_trajectory_is_complete(config: Mapping[str, Any], puzzle_dir: Path) -
 def _patterns_present(puzzle_dir: Path, patterns: tuple[str, ...]) -> bool:
     if not patterns:
         return False
-    return all(bool(list(puzzle_dir.glob(pattern))) for pattern in patterns)
+    return all(
+        Path(pattern).is_file()
+        if Path(pattern).is_absolute()
+        else any(path.is_file() for path in puzzle_dir.glob(pattern))
+        for pattern in patterns
+    )
 
 
 def _prefixed_hash(prefix: str, payload: Mapping[str, Any]) -> str:

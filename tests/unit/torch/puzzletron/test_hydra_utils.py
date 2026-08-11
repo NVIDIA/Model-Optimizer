@@ -33,8 +33,10 @@ class _ToyPruningMixin:
 
 
 def test_clone_hydra_config_preserves_resolved_python_objects():
-    cfg = OmegaConf.create({"pruning": {"activation_passes": [{"name": "ffn"}]}})
-    cfg._set_flag("allow_objects", True)
+    cfg = OmegaConf.create(
+        {"pruning": {"activation_passes": [{"name": "ffn"}]}},
+        flags={"allow_objects": True},
+    )
     pruning_mixin = _ToyPruningMixin()
     cfg.pruning.activation_passes[0].pruning_mixin = pruning_mixin
 
@@ -58,9 +60,9 @@ def test_static_workload_stats_preserves_resolved_python_objects(monkeypatch):
                 "merge_with_existing_stats": False,
             },
             "pruning": {"activation_passes": [{"name": "ffn"}]},
-        }
+        },
+        flags={"allow_objects": True},
     )
-    hydra_cfg._set_flag("allow_objects", True)
     hydra_cfg.pruning.activation_passes[0].pruning_mixin = pruning_mixin
     launched = []
     monkeypatch.setattr(calc_subblock_stats, "launch_calc_subblock_stats", launched.append)

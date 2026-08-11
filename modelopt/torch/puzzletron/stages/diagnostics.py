@@ -52,6 +52,7 @@ from ..pruning.sorted_teacher import build_sorted_teacher
 from ..tools.checkpoint_utils import load_model_config
 from ..tools.logger import mprint
 from .common import complete_stage
+from .graph import StageSkipReason
 from .pipeline import (
     _activations_log_dir,
     _distributed,
@@ -2780,6 +2781,7 @@ def activation_diagnostic_stage(config: dict[str, Any], manifest: StageManifest)
             manifest,
             outputs={"skipped": True},
             status="skipped",
+            skip_reason=StageSkipReason.DISABLED,
             message="Activation diagnostic is disabled.",
         )
     if bool(diag_cfg.get("single_load_parent_sweep", False)):
@@ -3979,6 +3981,7 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
             manifest,
             outputs={"skipped": True},
             status="skipped",
+            skip_reason=StageSkipReason.DISABLED,
             message="Bypass diagnostic is disabled.",
         )
 

@@ -811,6 +811,27 @@ def test_imported_completion_rejects_internally_valid_truncated_inventory(tmp_pa
     assert not _completion_is_valid(config, config_path, stage)
 
 
+def test_imported_completion_rejects_unexpected_marker_fields(tmp_path):
+    stage = "vllm_stats"
+    source, destination, receipt = _setup(tmp_path)
+    config, config_path = _target_config(destination, tmp_path / "target-config.json")
+    import_campaign_artifacts(
+        source,
+        destination,
+        receipt,
+        bundles=(stage,),
+        target_config_path=config_path,
+    )
+
+    marker_path = destination / f"manifests/completions/{stage}.json"
+    marker = json.loads(marker_path.read_text())
+    marker["unexpected"] = True
+    _write_json(marker_path, marker)
+
+    assert not stage_is_complete(config, stage)
+    assert not _completion_is_valid(config, config_path, stage)
+
+
 def test_imported_completion_does_not_fall_back_when_embedded_receipt_is_removed(tmp_path):
     stage = "vllm_stats"
     source, destination, receipt = _setup(tmp_path)

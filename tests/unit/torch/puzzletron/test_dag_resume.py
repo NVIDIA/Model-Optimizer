@@ -229,23 +229,45 @@ def test_non_sanity_stage_identity_ignores_global_warning_policy() -> None:
 
 
 @pytest.mark.parametrize(
-    "section",
-    ("tokenize_data", "convert", "dataset_path", "model", "data", "dataset"),
+    ("section", "changed_value"),
+    [
+        ("tokenize_data", {"enabled": True, "workers": 2}),
+        ("convert", {"teacher_dir": "/models/teacher-b"}),
+        ("dataset_path", "/datasets/source-b"),
+        ("model", {"source": "/models/source-b"}),
+        ("data", {"calibration": {"num_samples": 17, "seq_len": 8}}),
+        ("dataset", {"split": "validation"}),
+        ("train_token_cache_path", "/cache/train-b.tokens"),
+        ("validation_token_cache_path", "/cache/validation-b.tokens"),
+        ("pruning", {"shuffle_seed": 2}),
+        ("replacement_scoring", {"eval_samples": 33}),
+        ("depth_importance", {"eval_samples": 17}),
+        ("sort_sanity", {"eval_samples": 9}),
+        ("width_sanity", {"eval_samples": 5}),
+    ],
 )
 def test_tokenize_data_identity_includes_every_tokenizer_and_data_input(
     section: str,
+    changed_value,
 ) -> None:
     config = {
-        "tokenize_data": {"caches": [{"split": "train"}]},
+        "tokenize_data": {"enabled": True, "workers": 1},
         "convert": {"teacher_dir": "/models/teacher-a"},
         "dataset_path": "/datasets/source-a",
         "model": {"source": "/models/source-a"},
-        "data": {"content_field": "messages"},
+        "data": {"calibration": {"num_samples": 16, "seq_len": 8}},
         "dataset": {"split": "train"},
+        "train_token_cache_path": "/cache/train-a.tokens",
+        "validation_token_cache_path": "/cache/validation-a.tokens",
+        "pruning": {"shuffle_seed": 1},
+        "replacement_scoring": {"eval_samples": 32},
+        "depth_importance": {"eval_samples": 16},
+        "sort_sanity": {"eval_samples": 8},
+        "width_sanity": {"eval_samples": 4},
         "report": {"theme": "light"},
     }
     baseline = StageManifest(stage="tokenize_data", config=config).semantic_config_identity
-    changed = {**config, section: {"changed": True}}
+    changed = {**config, section: changed_value}
     report_changed = {**config, "report": {"theme": "dark"}}
 
     assert StageManifest(stage="tokenize_data", config=changed).semantic_config_identity != baseline
@@ -651,3 +673,47 @@ def test_resume_patterns_are_the_canonical_completion_patterns(tmp_path: Path) -
     assert "scenarios/width-1024/depth-00/manifests/build_library.json" in patterns
     assert "scenarios/width-0768/depth-00/runtime.json" in patterns
     assert resume_patterns == ("manifests/build_library.json", *patterns)
+
+
+def test_tokenize_resume_marker_binds_external_cache_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    external_output = tmp_path / "shared-cache" / "train.tokens"
+    external_output.parent.mkdir()
+    external_output.write_bytes(bytes(12))
+    external_metadata = external_output.with_suffix(external_output.suffix + ".json")
+    external_metadata.write_text("{}\n")
+    manifest_path = root / "manifests" / "tokenize_data.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text('{"semantic_identity": "tokenize_semantic"}\n')
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("tokenize_data: {}\n")
+    config = _config(
+        root,
+        dataset_path=str(tmp_path / "dataset"),
+        convert={"teacher_dir": str(tmp_path / "teacher")},
+        tokenize_data={
+            "enabled": True,
+            "caches": [
+                {
+                    "output": str(external_output),
+                    "split": "train",
+                    "num_samples": 1,
+                    "seq_length": 2,
+                    "shuffle_seed": 7,
+                }
+            ],
+        },
+    )
+
+    kwargs = _resume_kwargs(config, config_path, "tokenize_data")
+    assert kwargs["required_patterns"] == (
+        "manifests/tokenize_data.json",
+        str(external_output.resolve()),
+        str(external_metadata.resolve()),
+    )
+    kwargs.update(upstream_markers={}, source_roots=(), repository_roots=())
+    marker = write_marker(root, "tokenize_data", build_payload(**kwargs))
+    assert check_marker(marker, **kwargs)
+
+    external_output.write_bytes(b"changed")
+    assert not check_marker(marker, **kwargs)

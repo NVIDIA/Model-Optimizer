@@ -151,8 +151,14 @@ def _sha256(path: Path) -> str:
 
 def _artifact_record(root: Path, path: Path) -> dict:
     stat = path.stat()
+    try:
+        recorded_path = str(path.relative_to(root))
+    except ValueError:
+        # Exact absolute required patterns bind configured artifacts outside the
+        # campaign root. External globs are deliberately unsupported.
+        recorded_path = str(path)
     record = {
-        "path": str(path.relative_to(root)),
+        "path": recorded_path,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
@@ -175,7 +181,11 @@ def _immutable_artifact_record(root: Path, path: Path) -> dict:
 def _required_artifacts(root: Path, patterns: Iterable[str]) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for pattern in patterns:
-        matches = sorted(path for path in root.glob(pattern) if path.is_file())
+        configured = Path(pattern).expanduser()
+        if configured.is_absolute():
+            matches = [configured] if configured.is_file() else []
+        else:
+            matches = sorted(path for path in root.glob(pattern) if path.is_file())
         if not matches:
             raise FileNotFoundError(f"required artifact pattern has no matches: {pattern}")
         result[str(pattern)] = [_artifact_record(root, path) for path in matches]

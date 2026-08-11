@@ -35,6 +35,7 @@ from ..scoring_parent import ensure_scoring_parent
 from ..subblock_stats.measurements import apply_vllm_measurement, normalize_vllm_measurements
 from ..tools.hydra_utils import clone_hydra_config
 from .common import complete_stage, experiment_dir, stage_manifest_path
+from .graph import StageSkipReason
 
 if TYPE_CHECKING:
     from ..manifest import StageManifest
@@ -765,7 +766,7 @@ def bypass_stage(config: dict[str, Any], manifest: StageManifest):
                 "scoring_parent_artifact": str(parent_artifact),
             },
             status="skipped",
-            skip_reason="disabled",
+            skip_reason=StageSkipReason.DISABLED,
             message="Bypass is disabled.",
         )
         if os.environ.get("RANK") in (None, "", "0"):

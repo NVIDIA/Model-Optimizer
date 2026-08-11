@@ -414,6 +414,9 @@ def test_tokenize_data_completeness_rejects_mismatched_cache_metadata(
     write_token_cache(config, config["tokenize_data"]["caches"][0])
     assert stage_is_complete(config, "tokenize_data")
 
+    config["model"] = {"trust_remote_code": True}
+    assert not stage_is_complete(config, "tokenize_data")
+
 
 def test_tokenize_data_completeness_requires_exact_receipts_and_cache_set(
     tmp_path: Path, write_terminal_manifest, write_token_cache

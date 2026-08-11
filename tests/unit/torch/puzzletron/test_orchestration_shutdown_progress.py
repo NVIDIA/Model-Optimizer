@@ -790,6 +790,23 @@ def test_tokenize_progress_reports_samples_tokenized(tmp_path: Path):
     assert summary == "75/250 samples tokenized"
 
 
+def test_tokenize_progress_reports_single_worker_samples(tmp_path: Path):
+    output = tmp_path / "dataset_cache" / "train.tokens"
+    progress = output.parent / f".{output.name}.progress"
+    progress.mkdir(parents=True)
+    (progress / "worker_0000.json").write_text(
+        json.dumps({"worker": 0, "rows_complete": 40, "rows_total": 100})
+    )
+
+    summary = summarize_stage_artifacts(
+        tmp_path,
+        "tokenize_data",
+        config={"tokenize_data": {"caches": [{"output": str(output), "num_samples": 100}]}},
+    )
+
+    assert summary == "40/100 samples tokenized"
+
+
 def test_sort_progress_counts_unique_checkpoint_shards(tmp_path: Path):
     log = tmp_path / "sort.log"
     log.write_text(

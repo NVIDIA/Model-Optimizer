@@ -159,6 +159,10 @@ def _receipt_inventory(
     receipt_version = campaign.get("receipt_version")
     receipt = campaign.get("receipt")
     if receipt_version is None and receipt is None:
+        # Compatibility window: pre-receipt manifests remain readable until
+        # the first ModelOpt release after Puzzletron v2 GA. This proves only
+        # legacy file inventory, not receipt binding; remove it in that release
+        # after migration manifests have been regenerated.
         return ()
     if receipt_version != 2 or not isinstance(receipt, Mapping):
         return None
@@ -290,6 +294,6 @@ def imported_stage_manifest_is_complete(
         required_artifacts=expected_required_artifacts,
         stable_hash=stable_hash,
     )
-    if marker is None or any(marker.get(key) != value for key, value in expected_marker.items()):
+    if marker != expected_marker:
         return False
     return True

@@ -23,9 +23,12 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .identity import canonicalize, stable_hash
+
+if TYPE_CHECKING:
+    from .stages.graph import StageSkipReason, StageStatus
 
 __all__ = [
     "StageManifest",
@@ -85,8 +88,8 @@ class StageManifest:
         self,
         *,
         outputs: dict[str, Any] | None = None,
-        status: str = "success",
-        skip_reason: str | None = None,
+        status: str | StageStatus = "success",
+        skip_reason: str | StageSkipReason | None = None,
     ) -> None:
         """Mark the stage complete with its validated outputs and final status."""
 

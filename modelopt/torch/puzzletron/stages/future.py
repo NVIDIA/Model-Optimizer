@@ -34,6 +34,7 @@ from ..distillation.global_automodel import (
     run_global_kd,
 )
 from .common import complete_stage
+from .graph import StageSkipReason
 
 if TYPE_CHECKING:
     from ..manifest import StageManifest
@@ -296,7 +297,7 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
             manifest,
             outputs={"skipped": True},
             status="skipped",
-            skip_reason="disabled",
+            skip_reason=StageSkipReason.DISABLED,
             message="AIPerf is disabled.",
         )
     from ..benchmarks import run_aiperf_sweep, write_aiperf_report
@@ -435,7 +436,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
             manifest,
             outputs={"skipped": True},
             status="skipped",
-            skip_reason="disabled",
+            skip_reason=StageSkipReason.DISABLED,
             message="Zero-shot evaluation is disabled.",
         )
     from omegaconf import OmegaConf
@@ -766,6 +767,7 @@ def distillation_overfit_stage(config: dict[str, Any], manifest: StageManifest):
             manifest,
             outputs={"enabled": False},
             status="skipped",
+            skip_reason=StageSkipReason.DISABLED,
             message="global_distillation_sanity.enabled is false",
         )
 

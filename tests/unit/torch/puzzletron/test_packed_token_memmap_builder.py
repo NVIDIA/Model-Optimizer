@@ -83,6 +83,7 @@ def test_cache_reuse_requires_current_complete_metadata(
         "num_samples": 1,
         "seq_length": 2,
         "shuffle_seed": 7,
+        "trust_remote_code": False,
         "dtype": "uint32",
         "bytes": expected_bytes,
         "workers": 1,
@@ -148,3 +149,62 @@ def test_cache_reuse_requires_current_complete_metadata(
         **stale_metadata,
         "dataset_path": str(dataset_path.resolve()),
     }
+
+
+def test_cache_reuse_identity_includes_trust_remote_code(tmp_path, monkeypatch):
+    output = tmp_path / "train.tokens"
+    pool_calls = []
+
+    class FakePool:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def imap_unordered(self, _worker, tasks):
+            pool_calls.append(tuple(tasks))
+            return [
+                {
+                    "worker": task["worker"],
+                    "rows": task["stop"] - task["start"],
+                    "examples": 1,
+                }
+                for task in tasks
+            ]
+
+    def fake_pool(*, processes):
+        assert processes == 1
+        return FakePool()
+
+    monkeypatch.setattr(
+        build_packed_token_memmap.mp,
+        "get_context",
+        lambda _method: SimpleNamespace(Pool=fake_pool),
+    )
+    arguments = [
+        "build_packed_token_memmap.py",
+        "--dataset-path",
+        str(tmp_path / "dataset"),
+        "--tokenizer-path",
+        str(tmp_path / "tokenizer"),
+        "--output",
+        str(output),
+        "--num-samples",
+        "1",
+        "--seq-length",
+        "2",
+        "--workers",
+        "1",
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+    build_packed_token_memmap.main()
+
+    monkeypatch.setattr(sys, "argv", [*arguments, "--trust-remote-code"])
+    build_packed_token_memmap.main()
+
+    assert len(pool_calls) == 2
+    assert (
+        json.loads(output.with_suffix(output.suffix + ".json").read_text())["trust_remote_code"]
+        is True
+    )
