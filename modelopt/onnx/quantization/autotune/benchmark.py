@@ -476,7 +476,7 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.error(f"stderr: {result.stderr}")
                 return float("inf")
             latency_pattern = _STD_PATTERN
-            if self.has_remote_config and self.is_safe:
+            if self.has_remote_config:
                 # need to push the model to the device and use trtexec_safe to run
                 scp_cmd = [
                     "scp",
