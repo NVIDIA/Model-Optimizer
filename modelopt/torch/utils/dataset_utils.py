@@ -1171,7 +1171,8 @@ def _forward_loop(
             0 (the default) disables checkpointing entirely -- `checkpoint_fn` is never
             called, matching prior behavior for existing callers.
         checkpoint_fn: No-arg callback invoked periodically per `checkpoint_every`. Ignored
-            if `checkpoint_every` is 0.
+            if `checkpoint_every` is 0. Runs on every process that executes the loop; must be
+            rank-safe or collective if it persists shared state.
     """
     with _disable_use_cache(model), torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
@@ -1225,7 +1226,11 @@ def create_forward_loop(
             model outputs).
         checkpoint_every: If > 0, checkpoint_fn is called after every this-many batches. 0
             (the default) disables checkpointing.
-        checkpoint_fn: No-arg callback invoked periodically per checkpoint_every.
+        checkpoint_fn: No-arg callback invoked periodically per checkpoint_every. Runs on every
+            process that executes the forward loop; under a multi-process/distributed run,
+            the callback itself must be rank-safe (e.g. guard writes with a rank check) or
+            collective (e.g. an all-reduce/barrier) if it persists shared state such as a
+            checkpoint file.
 
     Example usage for quantization:
 
@@ -1249,6 +1254,11 @@ def create_forward_loop(
         A forward loop function that can be called with no arguments. When called, this function iterates over
             the dataset specified by `dataset_name`.
     """
+    if checkpoint_every < 0:
+        raise ValueError(f"checkpoint_every must be non-negative, got {checkpoint_every}")
+    if checkpoint_every > 0 and not callable(checkpoint_fn):
+        raise ValueError("checkpoint_fn must be callable when checkpoint_every > 0")
+
     if dataloader is None:
         if batch_size == 0:
             # We let the system to determine the max data batch for each forward.

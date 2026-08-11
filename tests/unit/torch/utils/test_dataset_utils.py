@@ -340,6 +340,21 @@ def test_create_forward_loop_passes_checkpoint_args_through():
     assert len(calls) == 2
 
 
+def test_create_forward_loop_rejects_negative_checkpoint_every():
+    """A negative checkpoint_every stays truthy under `% checkpoint_every`, so it must be
+    rejected explicitly rather than silently mis-triggering (or ZeroDivisionError-adjacent
+    surprises) deep inside the loop."""
+    with pytest.raises(ValueError, match="non-negative"):
+        create_forward_loop(dataloader=Mock(), checkpoint_every=-1, checkpoint_fn=lambda: None)
+
+
+def test_create_forward_loop_rejects_missing_checkpoint_fn():
+    """checkpoint_every > 0 with no callable checkpoint_fn would call None after the first
+    completed interval; reject it up front instead of failing mid-run."""
+    with pytest.raises(ValueError, match="checkpoint_fn"):
+        create_forward_loop(dataloader=Mock(), checkpoint_every=2, checkpoint_fn=None)
+
+
 def test_disable_use_cache_restores_on_exception():
     """Restore must run even if the with-block raises."""
     model = torch.nn.Linear(4, 4)
