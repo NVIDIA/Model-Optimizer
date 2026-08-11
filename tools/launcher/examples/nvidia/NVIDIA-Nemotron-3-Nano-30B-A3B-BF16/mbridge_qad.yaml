@@ -1,0 +1,129 @@
+# NVIDIA Nemotron 3 Nano 30B-A3B NVFP4 quantization-aware distillation (QAD) via Megatron-Bridge.
+#
+# Four tasks: tokenize the training data, PTQ the student to NVFP4, distill it against the BF16
+# teacher, and export a deployable unified-HF checkpoint.
+#
+# Training topology: 8 nodes x 4 GPUs, TP=1, PP=1, CP=4, EP=16. That leaves DP=8, so a
+# global-batch-size of 64 at micro-batch-size 1 is 8 gradient-accumulation microbatches per step.
+# 200 iterations x 64 sequences x 32768 tokens = 419M training tokens.
+#
+# Requirements:
+#   - HF_TOKEN can access the gated nvidia/Nemotron-Post-Training-Dataset-v2 dataset.
+#
+# Usage from tools/launcher:
+#   source .env-slurm
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/mbridge_qad.yaml --yes
+
+job_name: Nemotron-3-Nano-30B-A3B_mbridge_qad_32k_200iter
+pipeline:
+  note: "NVFP4 QAD at 32K for 200 iterations on Nemotron-Post-Training-Dataset-v2 chat (Megatron-Bridge)"
+
+  global_vars:
+    hf_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    data_dir: /cicd/tokenized/nemotron-post-training-v2
+    data_prefix: /cicd/tokenized/nemotron-post-training-v2/nvidia--Nemotron-Post-Training-Dataset-v2_default_chat_messages
+    ptq_ckpt: /cicd/megatron-bridge/Nemotron-3-Nano-30B-A3B-NVFP4-ptq
+    qad_dir: /cicd/megatron-bridge/Nemotron-3-Nano-30B-A3B-NVFP4-qad
+    export_dir: /cicd/export/Nemotron-3-Nano-30B-A3B-NVFP4-qad-hf
+
+  # 1) Tokenize the QAD training data into Megatron .bin/.idx, which distill.py reads via
+  #    --data_paths. megatron_lm_qad.yaml points Megatron-LM's finetune path at a single parquet
+  #    shard instead; Megatron-Bridge trains from pre-tokenized data, so the split is tokenized
+  #    once here. --hf_streaming avoids the Arrow cast errors that this dataset's nested tool-call
+  #    fields trigger in non-streaming mode. No --append_eod: these are chat rows ("messages"),
+  #    whose chat template already terminates each conversation.
+  #    CPU-bound and long-running; it needs no GPU beyond the allocation minimum.
+  task_0:
+    inline: >-
+      python -m modelopt.torch.utils.plugins.megatron_preprocess_data
+      --hf_dataset nvidia/Nemotron-Post-Training-Dataset-v2
+      --hf_name default
+      --hf_split chat
+      --hf_streaming
+      --json_keys messages
+      --tokenizer <<global_vars.hf_model>>
+      --output_dir <<global_vars.data_dir>>
+      --workers 32
+      --max_sequence_length 256_000
+    slurm_config:
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: "08:00:00"
+
+  # 2) NVFP4 PTQ. Produces the quantized Megatron checkpoint that seeds the QAD student.
+  #    TP=EP=PP=1 leaves pure DP=4, so each rank calibrates on its own shard of the samples.
+  #    --calib_dataset_name is left unset, which selects the default public text mix.
+  task_1:
+    environment:
+      - LAUNCH_SCRIPT: torchrun --nproc_per_node 4
+    inline: >-
+      $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/quantize.py
+      --hf_model_name_or_path <<global_vars.hf_model>>
+      --trust_remote_code
+      --tp_size 1
+      --pp_size 1
+      --ep_size 1
+      --quant_cfg MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
+      --calib_batch_size 1
+      --calib_num_samples 1000
+      --seq_length 32768
+      --skip_generate
+      --export_megatron_path <<global_vars.ptq_ckpt>>
+    slurm_config: &sc
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.06
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  # 3) Distill the NVFP4 student from the BF16 teacher on the tokenized chat data.
+  task_2:
+    environment:
+      - LAUNCH_SCRIPT: torchrun --nproc_per_node 4
+    inline: >-
+      $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/distill.py
+      --teacher_hf_path <<global_vars.hf_model>>
+      --student_hf_path <<global_vars.hf_model>>
+      --student_megatron_path <<global_vars.ptq_ckpt>>
+      --trust_remote_code
+      --tp_size 1
+      --pp_size 1
+      --cp_size 4
+      --ep_size 16
+      --data_paths <<global_vars.data_prefix>>
+      --data_path_to_cache <<global_vars.data_dir>>/cache
+      --seq_length 32768
+      --mbs 1
+      --gbs 64
+      --lr 2e-5
+      --min_lr 5e-6
+      --lr_warmup_iters 30
+      --train_iters 200
+      --eval_interval 50
+      --eval_iters 8
+      --log_interval 10
+      --checkpoint_keep_last 2
+      --output_dir <<global_vars.qad_dir>>
+    slurm_config:
+      <<: *sc
+      nodes: 8
+
+  # 4) Export the distilled (still quantized) checkpoint to a deployable unified-HF checkpoint.
+  #    TP must be 1 -- the HF writer does not gather TP shards -- and PP=4 splits 52 layers 13/stage.
+  task_3:
+    environment:
+      - LAUNCH_SCRIPT: torchrun --nproc_per_node 4
+    inline: >-
+      $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py
+      --hf_model_name_or_path <<global_vars.hf_model>>
+      --megatron_path <<global_vars.qad_dir>>/checkpoints
+      --trust_remote_code
+      --pp_size 4
+      --export_unified_hf_path <<global_vars.export_dir>>
+    slurm_config:
+      <<: *sc
