@@ -309,7 +309,8 @@ def _output_layer_untied(config) -> bool:
         from megatron.training import get_args as _mlm_get_args
 
         return bool(getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False))
-    except Exception as e:
+    except (ImportError, AssertionError) as e:
+        # ImportError: no megatron.training. AssertionError: get_args() before initialize_megatron.
         # Warn once per config rather than on every save and every load.
         if not getattr(config, "_modelopt_warned_output_layer_untied", False):
             warn_rank_0(

@@ -1862,6 +1862,28 @@ def test_output_layer_untied_warns_once_when_args_unavailable():
     assert warn.call_count == 1
 
 
+def test_output_layer_untied_warns_when_args_uninitialized():
+    """Megatron-LM importable but not initialized: treated as tied, warned once."""
+
+    class _Config:
+        pass
+
+    def _uninitialized():
+        raise AssertionError("args is not initialized.")
+
+    fake_training = types.ModuleType("megatron.training")
+    fake_training.get_args = _uninitialized
+
+    config = _Config()
+    with (
+        patch.dict(sys.modules, {"megatron.training": fake_training}),
+        patch("modelopt.torch.quantization.plugins.megatron.warn_rank_0") as warn,
+    ):
+        assert _output_layer_untied(config) is False
+        assert _output_layer_untied(config) is False
+    assert warn.call_count == 1
+
+
 def test_output_layer_untied_not_stamped_onto_teacher_config():
     """A distillation teacher keeps its own tiedness; the student's answer must not leak in."""
 
