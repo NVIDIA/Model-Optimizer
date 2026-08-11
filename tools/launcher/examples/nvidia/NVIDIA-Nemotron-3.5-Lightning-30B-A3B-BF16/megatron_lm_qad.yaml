@@ -51,7 +51,7 @@ pipeline:
       - --export-default-te-spec
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - QUANT_CFG: huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B/lightning_w4a16_nvfp4_4o6
+      - QUANT_CFG: huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
       - MLM_MODEL_CKPT: /cicd/megatron-lm-bf16/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-MCore
       - MLM_MODEL_SAVE: /cicd/megatron-lm/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-W4A16
       - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
