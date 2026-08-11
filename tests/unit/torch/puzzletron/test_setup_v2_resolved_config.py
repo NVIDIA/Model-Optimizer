@@ -68,6 +68,7 @@ def _campaign_state(tmp_path: Path) -> WizardState:
         "data.layout": "fixed",
         "data.sequence_length": 2048,
         "infrastructure.execution_contract.repository": str(REPOSITORY_ROOT),
+        "infrastructure.execution_contract.venv": ".venv",
         "infrastructure.runner.kind": "slurm",
         "infrastructure.runner.slurm.account": "account",
         "infrastructure.runner.slurm.partition_batch": "batch",

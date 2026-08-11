@@ -41,11 +41,8 @@ from puzzletron_setup.bundle import (
     validate_bundle,
 )
 
-from .resolved import (
-    ResolvedCampaignConfig,
-    _effective_default_value,
-    resolve_campaign_config,
-)
+from .resolved import ResolvedCampaignConfig, resolve_campaign_config
+from .resolved import _effective_default_value as _effective_default_value
 from .validation import validate_state
 
 if TYPE_CHECKING:
