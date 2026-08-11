@@ -343,6 +343,7 @@ class TrtExecBenchmark(Benchmark):
         plugin_libraries: list[str] | None = None,
         trtexec_args: list[str] | None = None,
         network_timeout_seconds: float = 60 * 5,  # 5 minutes
+        remote_engine_path: str = "trtexec_benchmark_model.trt",
     ):
         """Initialize the trtexec benchmark.
 
@@ -382,7 +383,7 @@ class TrtExecBenchmark(Benchmark):
         self.remote_ip: str | None = None
         self.remote_port: int = 22
         self.remote_user: str = "root"
-        self.remote_engine_path: str = "trtexec_benchmark_model.trt"
+        self.remote_engine_path: str = remote_engine_path
         self.remote_bin_path: str = "trtexec"
         self.remote_lib_path: str = ""
 

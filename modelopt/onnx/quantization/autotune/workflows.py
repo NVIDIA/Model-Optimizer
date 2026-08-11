@@ -88,6 +88,7 @@ def init_benchmark_instance(
     timing_runs: int = 20,
     trtexec_args: list[str] | None = None,
     network_timeout_minutes: int = 10,
+    remote_engine_path: str = "trtexec_benchmark_model.trt",
 ):
     """Initialize global TensorRT benchmark instance for model performance measurement.
 
@@ -116,6 +117,7 @@ def init_benchmark_instance(
                 plugin_libraries=plugin_libraries,
                 trtexec_args=trtexec_args,
                 network_timeout_seconds=network_timeout_minutes * 60,
+                remote_engine_path=remote_engine_path,
             )
             logger.info("Trtexec benchmark initialized")
         else:

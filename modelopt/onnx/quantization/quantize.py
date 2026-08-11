@@ -303,6 +303,7 @@ def _find_nodes_to_quantize_autotune(
     timing_runs: int = 100,
     trtexec_args: str | None = None,
     network_timeout_minutes: int = 10,
+    remote_engine_path: str = "trtexec_benchmark_model.trt",
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
@@ -326,6 +327,7 @@ def _find_nodes_to_quantize_autotune(
         timing_runs=timing_runs,
         trtexec_args=trtexec_args.split() if trtexec_args else None,
         network_timeout_minutes=network_timeout_minutes,
+        remote_engine_path=remote_engine_path,
     )
 
     if benchmark_instance is None:
@@ -398,6 +400,7 @@ def quantize(
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
     autotune_network_timeout_minutes: int = 10,
+    autotune_remote_engine_path: str = "trtexec_benchmark_model.trt",
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -561,6 +564,10 @@ def quantize(
         autotune_trtexec_args:
             Additional trtexec arguments as a single quoted string.
             Example: --autotune_trtexec_args '--fp16 --workspace=4096'
+        autotune_network_timeout_minutes:
+            Timeout for autotune network subcommands such as scp.
+        autotune_remote_engine_path:
+            Temporary engine file storage on remote device
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
@@ -706,6 +713,7 @@ def quantize(
                 timing_runs=autotune_timing_runs,
                 trtexec_args=autotune_trtexec_args,
                 network_timeout_minutes=autotune_network_timeout_minutes,
+                remote_engine_path=autotune_remote_engine_path,
             )
             op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
             nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
