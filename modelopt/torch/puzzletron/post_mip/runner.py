@@ -1047,7 +1047,7 @@ def _run_lmms_eval_process(
                 _signal_lmms_eval_process_group(process, signal.SIGKILL)
         raise subprocess.TimeoutExpired(
             argv,
-            timeout,
+            error.timeout,
             output=stdout if stdout is not None else error.output,
             stderr=stderr if stderr is not None else error.stderr,
         ) from error
