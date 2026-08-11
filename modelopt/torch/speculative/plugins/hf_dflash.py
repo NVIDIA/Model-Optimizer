@@ -447,14 +447,35 @@ class HFDFlashModel(DFlashModel):
         # of dflash_config and restored checkpoints rebuild an identical module.
         self.dflash_config.attention_sink_bias = self.dflash_attention_sink
 
-        # Target layer IDs
+        # Target layer IDs: which base layers feed the draft's feature-fusion `fc`.
+        # An explicit dflash_architecture_config.target_layer_ids wins — a published draft
+        # is trained against specific capture points (e.g. the Nemotron-3.5 DSpark draft's
+        # [1,5,19,29,41,51]), and recomputing the uniform default would both mis-shape `fc`
+        # and feed the draft features from layers it never saw. Otherwise derive the
+        # uniform default.
         num_target_layers = (
             base_config.num_orig_hidden_layers
             if self.dflash_offline
             else base_config.num_hidden_layers
         )
         num_draft_layers = self.dflash_config.num_hidden_layers
-        self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+        user_target_layer_ids = config.dflash_architecture_config.get("target_layer_ids")
+        if user_target_layer_ids:
+            if len(user_target_layer_ids) != num_draft_layers:
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids has "
+                    f"{len(user_target_layer_ids)} entries but the draft has "
+                    f"{num_draft_layers} layers; one target layer per draft layer is required."
+                )
+            if max(user_target_layer_ids) >= num_target_layers:
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
+                    f"references a layer beyond the base model's {num_target_layers} layers."
+                )
+            self.target_layer_ids = list(user_target_layer_ids)
+            logger.info("DFlash: using explicit target_layer_ids %s", self.target_layer_ids)
+        else:
+            self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
         self.dflash_config.target_layer_ids = self.target_layer_ids
 
         # mask_token_id: validated by DFlashConfig, auto-detected from tokenizer context

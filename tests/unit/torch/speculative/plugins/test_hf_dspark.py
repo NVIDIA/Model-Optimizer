@@ -35,7 +35,11 @@ import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
 from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
-from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule, repeat_kv
+from modelopt.torch.speculative.plugins.modeling_dflash import (
+    DFlashModule,
+    build_target_layer_ids,
+    repeat_kv,
+)
 from modelopt.torch.speculative.plugins.modeling_dspark import DSparkModule
 
 BLOCK_SIZE = 4
@@ -676,3 +680,45 @@ class TestInitCheckpoint:
         save_file(sd, str(path))
         with pytest.raises(ValueError, match="shape mismatch"):
             self._make_model(init_checkpoint=export_dir)
+
+
+class TestExplicitTargetLayerIds:
+    """dflash_architecture_config.target_layer_ids overrides the uniform default.
+
+    A published draft is trained against specific capture points; recomputing the default
+    would feed it features from layers it never saw (and mis-shape ``fc``).
+    """
+
+    def _make_model(self, target_layer_ids=None, num_layers=NUM_DRAFT_LAYERS):
+        model = get_tiny_llama(num_hidden_layers=8)
+        config = _get_dspark_config(num_layers=num_layers)
+        if target_layer_ids is not None:
+            config["dflash_architecture_config"]["target_layer_ids"] = target_layer_ids
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def test_explicit_ids_are_used(self):
+        model = self._make_model(target_layer_ids=[0, 7])
+        assert model.target_layer_ids == [0, 7]
+        assert model.dflash_config.target_layer_ids == [0, 7]
+
+    def test_default_when_unset(self):
+        """Without an override the uniform default is still derived."""
+        model = self._make_model()
+        assert len(model.target_layer_ids) == NUM_DRAFT_LAYERS
+        assert model.target_layer_ids == build_target_layer_ids(8, NUM_DRAFT_LAYERS)
+
+    def test_wrong_count_raises(self):
+        with pytest.raises(ValueError, match="one target layer per draft layer"):
+            self._make_model(target_layer_ids=[0, 3, 7])
+
+    def test_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="beyond the base model"):
+            self._make_model(target_layer_ids=[0, 99])
+
+    def test_export_round_trips_explicit_ids(self, tmp_path):
+        model = self._make_model(target_layer_ids=[0, 7])
+        model.get_exporter().export(tmp_path / "exp")
+        with open(tmp_path / "exp" / "config.json") as f:
+            cfg = json.load(f)
+        assert cfg["dflash_config"]["target_layer_ids"] == [0, 7]
