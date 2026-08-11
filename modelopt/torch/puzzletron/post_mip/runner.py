@@ -28,6 +28,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -573,6 +574,7 @@ _LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS = frozenset(
 )
 _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
+_LMMS_EVAL_PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _as_cli_bool(value: bool) -> str:
@@ -829,7 +831,10 @@ def _lmms_eval_command(
         timeout = settings.get("timeout")
     if timeout is None:
         timeout = _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
-    return argv, env, float(timeout)
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("lmms-eval timeout must be a finite positive number")
+    return argv, env, timeout
 
 
 def _metric_key(value: Any) -> str:
@@ -1012,6 +1017,16 @@ def _lmms_eval_process_group_exists(process: subprocess.Popen[str]) -> bool:
     return True
 
 
+def _wait_for_lmms_eval_process_group_exit(
+    process: subprocess.Popen[str], *, deadline: float
+) -> None:
+    while _lmms_eval_process_group_exists(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(_LMMS_EVAL_PROCESS_GROUP_POLL_INTERVAL_SECONDS, remaining))
+
+
 def _run_lmms_eval_process(
     argv: list[str],
     *,
@@ -1036,15 +1051,21 @@ def _run_lmms_eval_process(
             stdout, stderr = process.communicate(timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             _signal_lmms_eval_process_group(process, signal.SIGKILL)
+            cleanup_deadline = time.monotonic() + _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
             try:
                 stdout, stderr = process.communicate(
                     timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
                 )
             except subprocess.TimeoutExpired as kill_error:
                 stdout, stderr = kill_error.output, kill_error.stderr
+            _wait_for_lmms_eval_process_group_exit(process, deadline=cleanup_deadline)
         else:
             if _lmms_eval_process_group_exists(process):
                 _signal_lmms_eval_process_group(process, signal.SIGKILL)
+                _wait_for_lmms_eval_process_group_exit(
+                    process,
+                    deadline=time.monotonic() + _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+                )
         raise subprocess.TimeoutExpired(
             argv,
             error.timeout,

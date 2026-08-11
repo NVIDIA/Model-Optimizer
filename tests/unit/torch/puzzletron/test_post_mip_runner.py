@@ -243,6 +243,20 @@ def test_lmms_eval_command_uses_bounded_default_timeout(tmp_path):
     assert timeout == runner._DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
 
 
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_lmms_eval_command_rejects_invalid_timeout(tmp_path, timeout):
+    with pytest.raises(ValueError, match="finite positive number"):
+        runner._lmms_eval_command(
+            {
+                "tasks": ["ifeval"],
+                "timeout_seconds": timeout,
+                "topology": {"gpu_group_size": 1},
+            },
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
+
+
 def test_lmms_eval_command_rejects_reserved_model_args(tmp_path):
     cases = (
         ({"model": "/ckpts/wrong"}, "model"),
@@ -378,6 +392,8 @@ def test_lmms_eval_timeout_terminates_process_group(monkeypatch, tmp_path):
 
 def test_lmms_eval_timeout_kills_remaining_process_group(monkeypatch, tmp_path):
     signals = []
+    sleep_intervals = []
+    clock = [0.0]
 
     class FakeProcess:
         pid = 3456
@@ -400,6 +416,14 @@ def test_lmms_eval_timeout_kills_remaining_process_group(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
     monkeypatch.setattr(runner.os, "killpg", fake_killpg)
+    monkeypatch.setattr(runner, "_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: clock[0])
+
+    def fake_sleep(interval):
+        sleep_intervals.append(interval)
+        clock[0] += interval
+
+    monkeypatch.setattr(runner.time, "sleep", fake_sleep)
 
     with pytest.raises(subprocess.TimeoutExpired):
         runner._run_lmms_eval_process(
@@ -410,6 +434,11 @@ def test_lmms_eval_timeout_kills_remaining_process_group(monkeypatch, tmp_path):
         )
 
     assert signals == [(3456, signal.SIGTERM), (3456, signal.SIGKILL)]
+    assert sum(sleep_intervals) == pytest.approx(0.25)
+    assert all(
+        interval <= runner._LMMS_EVAL_PROCESS_GROUP_POLL_INTERVAL_SECONDS
+        for interval in sleep_intervals
+    )
 
 
 def test_lmms_eval_timeout_kills_stubborn_process_group(monkeypatch, tmp_path):
@@ -433,11 +462,13 @@ def test_lmms_eval_timeout_kills_stubborn_process_group(monkeypatch, tmp_path):
 
     process = FakeProcess()
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(
-        runner.os,
-        "killpg",
-        lambda pid, signal_number: signals.append((pid, signal_number)),
-    )
+
+    def fake_killpg(pid, signal_number):
+        if signal_number == 0:
+            raise ProcessLookupError
+        signals.append((pid, signal_number))
+
+    monkeypatch.setattr(runner.os, "killpg", fake_killpg)
 
     with pytest.raises(subprocess.TimeoutExpired) as exc_info:
         runner._run_lmms_eval_process(
