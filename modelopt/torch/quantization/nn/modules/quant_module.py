@@ -131,7 +131,7 @@ class QuantModule(DynamicModule):
     @staticmethod
     @torch.no_grad()
     def _fold_weight_quantizer(
-        quantizer: TensorQuantizer,
+        quantizer: TensorQuantizer | SequentialQuantizer,
         weights: Iterable[torch.Tensor],
         keep_attrs: bool = False,
     ):
@@ -145,10 +145,16 @@ class QuantModule(DynamicModule):
             weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
-        if not keep_attrs:
-            for attr_name in ("_pre_quant_scale", "_amax"):
-                if hasattr(quantizer, attr_name):
-                    delattr(quantizer, attr_name)
+        tensor_quantizers = (
+            quantizer if isinstance(quantizer, SequentialQuantizer) else (quantizer,)
+        )
+        for tensor_quantizer in tensor_quantizers:
+            # The pre-quant scale is already baked into the folded weight.
+            tensor_quantizer._enable_pre_quant_scale = False
+            if not keep_attrs:
+                for attr_name in ("_pre_quant_scale", "_amax"):
+                    if hasattr(tensor_quantizer, attr_name):
+                        delattr(tensor_quantizer, attr_name)
 
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
@@ -163,7 +169,7 @@ class QuantModule(DynamicModule):
             attr = getattr(self, name)
             if (
                 name.endswith("weight_quantizer")
-                and isinstance(attr, TensorQuantizer)
+                and isinstance(attr, (TensorQuantizer, SequentialQuantizer))
                 and attr.fake_quant
             ):
                 # Get the corresponding weight name by removing _weight_quantizer suffix
