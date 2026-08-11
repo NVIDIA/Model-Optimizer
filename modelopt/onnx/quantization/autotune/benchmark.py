@@ -354,9 +354,10 @@ class TrtExecBenchmark(Benchmark):
             trtexec_args: Additional command-line arguments to pass to trtexec.
                          These are appended after the standard arguments.
                          Example: ['--fp16', '--workspace=4096', '--verbose']
-        network_timeout_seconds: Timeout for network operations in seconds.
-            Default is 5 minutes.  This is the timeout for uploading an engine to the remote device
-            and running trtexec_safe.  If the timeout is exceeded, the benchmark will fail.
+            network_timeout_seconds: Timeout for network operations in seconds.
+                                    Default is 5 minutes.  This is the timeout for uploading an
+                                    engine to the remote device and running trtexec_safe.
+                                    If the timeout is exceeded, the benchmark will fail.
         """
         super().__init__(timing_cache_file, warmup_runs, timing_runs, plugin_libraries)
         self.trtexec_args = list(trtexec_args) if trtexec_args is not None else []
