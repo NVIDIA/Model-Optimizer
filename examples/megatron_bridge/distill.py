@@ -308,15 +308,9 @@ def get_args():
 
 
 def _check_shared_vocabulary(args) -> None:
-    """Raise when teacher and student do not map every token to the same id.
+    """Raise unless teacher and student use the same tokenizer.
 
-    The KD losses compare the two models' logits elementwise over the vocab dimension, so a token
-    must mean the same thing to both regardless of how the data reaches them. Equal vocabulary
-    *sizes* are not enough -- Llama-2 and Mistral are both 32000 tokens with different mappings --
-    so compare the mappings. Run before the providers are built so a mismatch costs seconds.
-
-    A tokenizer that cannot be loaded (some VLM repos ship only a processor) is warned about
-    rather than fatal: this guard is not worth failing a run that would otherwise work.
+    Warns instead when a tokenizer cannot be loaded (some VLM repos ship only a processor).
     """
     _tok = {"trust_remote_code": args.trust_remote_code}
     try:
@@ -328,26 +322,17 @@ def _check_shared_vocabulary(args) -> None:
             "Distillation needs them to agree on every token id; check it yourself if in doubt."
         )
         return
-    conflicts = {t for t, i in student_vocab.items() if teacher_vocab.get(t, i) != i}
-    missing = student_vocab.keys() - teacher_vocab.keys()
-    if conflicts or missing:
+    if student_vocab != teacher_vocab:
         raise ValueError(
-            "Distillation scores the teacher on the student's token ids, so the teacher must map "
-            f"every student token to the same id: {len(conflicts)} conflicting id(s), "
-            f"{len(missing)} token(s) absent from the teacher. Student and teacher must share a "
-            "tokenizer."
+            "Distillation scores the teacher on the student's token ids, so teacher and student "
+            "must use the same tokenizer."
         )
 
 
 def _warn_if_bos_missing(args) -> None:
     """Warn when the tokenizer prepends a BOS at inference but the SFT records do not carry one.
 
-    ``--sft`` tokenizes both fields verbatim, so the caller owns the BOS. Adding one here is not
-    safe (their text may already have it, which would double it), but training without the BOS the
-    model is served with is silent train/inference skew.
-
-    Bounded on purpose: it inspects only the first record of ``training.jsonl``, so a mixed corpus
-    whose first record happens to carry a BOS will not be flagged.
+    Inspects only the first record of ``training.jsonl``.
     """
     dataset_root = args.sft_dataset_root
     try:
@@ -403,12 +388,8 @@ def main(args: argparse.Namespace):
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
         if args.sft:
-            # The SFT loss mask covers only the response tokens, so the reduction must be
-            # per-token for it to combine correctly across context-parallel ranks. This lands on
-            # both providers (harmless: the teacher's LM loss is zeroed in
-            # adjust_distillation_model_for_mcore) and must stay in sync with
-            # ``average_in_collective=not args.sft`` on the shared DistributedDataParallelConfig
-            # below -- a per-token loss must not be pre-averaged.
+            # A response-only loss mask needs per-token reduction to combine across CP ranks.
+            # Must stay in sync with ``average_in_collective=not args.sft`` on the DDP config.
             provider.calculate_per_token_loss = True
         if args.recompute_granularity is not None:
             provider.recompute_granularity = args.recompute_granularity
@@ -433,12 +414,8 @@ def main(args: argparse.Namespace):
         student_provider.gradient_accumulation_fusion = False
     teacher_provider = _build_model_provider(args.teacher_hf_path)
 
-    # The KD losses compare logits elementwise over the vocab dimension, so the two output layers
-    # must have the same width. That width is the *padded* vocab size, which the providers derive
-    # from their own ``vocab_size`` and ``make_vocab_size_divisible_by``; a shared tokenizer does
-    # not imply it, because the two HF configs can declare different vocab sizes. Independent of
-    # the data path: the pretraining path feeds both models one tokenization, but says nothing
-    # about how wide their output layers are.
+    # The KD losses compare logits elementwise over the vocab dim, so both output layers must have
+    # the same padded width. A shared tokenizer does not imply it: the HF configs can disagree.
     padded = {
         name: calculate_padded_vocab_size(
             p.vocab_size, p.make_vocab_size_divisible_by, p.tensor_model_parallel_size
@@ -455,10 +432,8 @@ def main(args: argparse.Namespace):
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
     )
 
-    # VLM detection convention: HF VLM configs expose a ``vision_config``, and Megatron-Bridge nests
-    # the text model under the ``language_model`` submodule (used as ``distill_submodule`` below). If a
-    # future model breaks either convention, the ``getattr(model, "language_model")`` in the provider
-    # will error loudly rather than silently distilling the wrong module.
+    # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
+    # ``language_model`` (used as ``distill_submodule`` below).
     is_vlm = hasattr(
         AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
         "vision_config",
@@ -518,18 +493,9 @@ def main(args: argparse.Namespace):
         "skip_getting_attention_mask_from_dataset": True,
     }
     if args.sft:
-        # SFT-masked distillation via Bridge's FinetuningDatasetConfig -> NeMo-style GPTSFTDataset.
-        # `dataset_root` holds training.jsonl / validation.jsonl of {"input", "output"} records.
-        # prompt_template="{input}{output}" tokenizes input+output verbatim (adjacent placeholders,
-        # no separator); label_key="output" with answer_only_loss=True masks the loss to the
-        # response only (answer_start_idx == len(context_ids)); truncation_field="input" truncates
-        # the context when the pair exceeds seq_length.
-        #
-        # add_bos=False plus the placeholder-only prompt_template means the records are tokenized
-        # as written -- no chat template, no BOS, no role markers. One exception: GPTSFTDataset
-        # applies .strip(" ") to each field, so a significant trailing/leading SPACE is lost (a
-        # newline is not). Callers whose model expects markers must bake them into the "input"
-        # field; see --sft_dataset_root help.
+        # SFT-masked distillation via Bridge's FinetuningDatasetConfig -> NeMo-style GPTSFTDataset,
+        # reading {"input", "output"} jsonl. Fields are tokenized as written except that each is
+        # ``.strip(" ")``-ed; see --sft_dataset_root help.
         dataset_config = FinetuningDatasetConfig(
             seq_length=args.seq_length,
             dataset_root=args.sft_dataset_root,
@@ -543,14 +509,8 @@ def main(args: argparse.Namespace):
                 "prompt_template": "{input}{output}",
                 "label_key": "output",
                 "truncation_field": "input",
-                # GPTSFTDataset defaults to "right", which is wrong here twice over: within
-                # "input" it drops the END of the prompt -- the question tail and whatever turn
-                # marker the caller baked in, i.e. exactly the boundary answer_only_loss starts
-                # scoring at -- and once the prompt alone cannot absorb the overflow it walks the
-                # template back-to-front and eats "output", the only span the loss is computed on.
-                # "left" drops the oldest context instead. The cost is that a record over
-                # seq_length loses the head of "input", including any BOS baked in there; see
-                # --sft_dataset_root help.
+                # Drop the oldest context. The default "right" would cut the prompt/answer
+                # boundary and then "output" itself, the only span the loss is computed on.
                 "truncation_method": "left",
                 "answer_only_loss": True,
                 "add_bos": False,
@@ -609,13 +569,9 @@ def main(args: argparse.Namespace):
                 tokenizer_model=args.student_hf_path,
                 hf_tokenizer_kwargs={
                     "trust_remote_code": args.trust_remote_code,
-                    # Enforce the verbatim contract here rather than relying on the dataset's
-                    # add_bos/add_eos: text_to_ids adds special tokens when this is left at its
-                    # default of True, and prompt_template tokenizes "{input}" and "{output}"
-                    # separately -- so a BOS-adding tokenizer would inject one at the answer
-                    # boundary, where answer_only_loss starts scoring. Consumed by Bridge in
-                    # training/tokenizers/config.py, which reads it out of hf_tokenizer_kwargs;
-                    # it is not forwarded blindly to AutoTokenizer.
+                    # Default True would make text_to_ids inject a BOS at the answer boundary,
+                    # since "{input}" and "{output}" are tokenized separately. Consumed by Bridge
+                    # in training/tokenizers/config.py.
                     "include_special_tokens": False,
                 },
             )
