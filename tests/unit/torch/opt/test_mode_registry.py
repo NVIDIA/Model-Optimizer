@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
+import pytest
+
 from modelopt.torch.opt.mode import ModeDescriptor, _ModeRegistryCls
 
 
@@ -47,8 +51,20 @@ def test_mode_registry():
 
     registry.remove_mode("a_test_mode")
 
+    # after removal, the mode must no longer resolve via any registry
     assert not _ModeRegistryCls.contained_in_any("a_test_mode")
+    with pytest.raises(KeyError, match="a_test_mode"):
+        _ModeRegistryCls.get_from_any("a_test_mode")
 
-    del registry
+    # NOTE: `del registry` alone does NOT remove the registry from
+    # `_ModeRegistryCls._all_registries`: the class-level list holds a strong reference, so the
+    # local `del` never drops the refcount to zero and `__del__` (which would remove it from the
+    # list) is unreachable. Remove it explicitly so this test leaves no residue behind for other
+    # tests sharing the process. Since `__del__` unconditionally calls `list.remove`, it would
+    # then raise ValueError once the orphaned object is garbage collected, so neutralize it for
+    # the actual destruction.
+    _ModeRegistryCls._all_registries.remove(registry)
+    with mock.patch.object(_ModeRegistryCls, "__del__", return_value=None):
+        del registry  # refcount now drops to zero -> patched `__del__` runs here
 
-    assert "test_registry" not in _ModeRegistryCls._all_registries
+    assert all(r._registry_name != "test_registry" for r in _ModeRegistryCls._all_registries)
