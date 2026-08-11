@@ -50,7 +50,7 @@ from megatron.bridge.training.post_training.distillation import ModelOptDistillC
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
@@ -141,9 +141,11 @@ def get_args():
         default=None,
         help="Directory holding training.jsonl (and validation.jsonl when --eval_iters > 0) of "
         '{"input": <prompt>, "output": <response>} records (used with --sft). Both fields are '
-        "tokenized verbatim: no chat template is applied and no BOS is prepended, so if the model "
-        "expects role/turn markers or a BOS token, bake them into the fields yourself. An EOS "
-        "token is appended after the response.",
+        "tokenized as written, except that leading and trailing spaces on each field are "
+        "stripped: no chat template is applied and no BOS is prepended, so if the model expects "
+        "role/turn markers or a BOS token, bake them into the fields yourself, and put any "
+        "significant separator inside the text as a newline rather than a space. An EOS token is "
+        "appended after the response.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -338,21 +340,25 @@ def main(args: argparse.Namespace):
         # the mappings. Checked before the providers are built so a mismatch costs seconds.
         # The pretraining path is structurally immune: NullTokenizer plus pre-tokenized
         # --data_paths means one tokenization feeds both models.
-        from transformers import AutoTokenizer
-
         _tok = {"trust_remote_code": args.trust_remote_code}
         student_tokenizer = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok)
         student_vocab = student_tokenizer.get_vocab()
         teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
-        if student_vocab != teacher_vocab:
-            detail = (
-                f"{len(student_vocab)} vs {len(teacher_vocab)} tokens"
-                if len(student_vocab) != len(teacher_vocab)
-                else f"both {len(student_vocab)} tokens, but different token->id mappings"
-            )
+        # Only student ids ever reach the teacher, so agreement on those is the invariant. A
+        # teacher vocabulary that is a strict superset (extra reserved tokens, say) is fine.
+        conflicts = {t for t, i in student_vocab.items() if teacher_vocab.get(t, i) != i}
+        missing = student_vocab.keys() - teacher_vocab.keys()
+        if conflicts or missing:
             raise ValueError(
                 "--sft tokenizes with the student's tokenizer and scores the teacher on those "
-                f"same ids, so student and teacher must share a tokenizer ({detail})."
+                "same ids, so the teacher must map every student token to the same id: "
+                f"{len(conflicts)} conflicting id(s), {len(missing)} token(s) absent from the "
+                "teacher. Student and teacher must share a tokenizer."
+            )
+        if len(teacher_vocab) > len(student_vocab):
+            warn_rank_0(
+                f"Teacher vocabulary has {len(teacher_vocab) - len(student_vocab)} token(s) the "
+                "student lacks; ids agree on every student token, so distillation is well-defined."
             )
 
         _warn_if_bos_missing(student_tokenizer, args.sft_dataset_root)
@@ -477,8 +483,10 @@ def main(args: argparse.Namespace):
         # the context when the pair exceeds seq_length.
         #
         # add_bos=False plus the placeholder-only prompt_template means the records are tokenized
-        # exactly as written -- no chat template, no BOS, no role markers. Callers whose model
-        # expects those must bake them into the "input" field; see --sft_dataset_root help.
+        # as written -- no chat template, no BOS, no role markers. One exception: GPTSFTDataset
+        # applies .strip(" ") to each field, so a significant trailing/leading SPACE is lost (a
+        # newline is not). Callers whose model expects markers must bake them into the "input"
+        # field; see --sft_dataset_root help.
         dataset_config = FinetuningDatasetConfig(
             seq_length=args.seq_length,
             dataset_root=args.sft_dataset_root,
@@ -492,6 +500,10 @@ def main(args: argparse.Namespace):
                 "prompt_template": "{input}{output}",
                 "label_key": "output",
                 "truncation_field": "input",
+                # GPTSFTDataset defaults to "right", which truncates the END of the prompt --
+                # the question and whatever turn marker the caller baked in, i.e. exactly the
+                # boundary answer_only_loss starts scoring at. Drop the oldest context instead.
+                "truncation_method": "left",
                 "answer_only_loss": True,
                 "add_bos": False,
                 "add_eos": True,

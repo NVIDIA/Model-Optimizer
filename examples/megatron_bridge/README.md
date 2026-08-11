@@ -133,9 +133,11 @@ for full instructions on tokenizing JSONL files and Hugging Face datasets and ge
 Alternatively, pass `--sft --sft_dataset_root <dir>` to distill on **raw prompt-completion JSONL**
 with the loss masked to the completion. The directory must hold `training.jsonl` (and
 `validation.jsonl` when `--eval_iters > 0`) of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
-the model's own HuggingFace tokenizer. Both fields are tokenized **verbatim** — no chat template is
-applied and no BOS token is prepended — so if your model expects role/turn markers or a BOS token,
-include them in the `"input"` field yourself. An EOS token is appended after the response.
+the model's own HuggingFace tokenizer. Both fields are tokenized **as written**, except that
+leading and trailing spaces on each field are stripped — no chat template is applied and no BOS
+token is prepended. So if your model expects role/turn markers or a BOS token, include them in the
+`"input"` field yourself, and express any significant separator as a newline rather than a trailing
+space. An EOS token is appended after the response.
 
 ### Distillation with Real Data
 
