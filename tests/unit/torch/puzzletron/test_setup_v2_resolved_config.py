@@ -225,6 +225,8 @@ def test_snapshot_rejects_direct_mutation(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError):
         snapshot.pruning["depth_remove"] = 2
+    with pytest.raises(TypeError):
+        snapshot.model.config["text_config"]["hidden_size"] = 2048
     with pytest.raises(FrozenInstanceError):
         snapshot.compatibility_projection.workload_id = "throughput-second"
 
@@ -300,6 +302,32 @@ def test_absent_semantic_collections_preserve_compatibility_overrides(tmp_path: 
     assert experiment["post_mip"]["marker"] == "compatibility"
 
 
+def test_build_ignores_stale_legacy_projection(tmp_path: Path, monkeypatch) -> None:
+    state = _campaign_state(tmp_path)
+    legacy = bundle_module._legacy_state_from_resolved(resolve_campaign_config(state))
+    legacy["model"]["source"] = "poisoned/model"
+    legacy["answers"]["data"]["source"] = "/poisoned/data"
+    legacy["answers"]["data"]["sequence_length"] = 1
+    legacy["answers"]["infrastructure"]["runner"]["slurm"]["account"] = "poisoned"
+    state.set_collection("legacy_state", legacy)
+    monkeypatch.setattr(
+        bundle_module,
+        "validate_bundle",
+        lambda path: SimpleNamespace(valid=True, error=None),
+    )
+    monkeypatch.setattr(bundle_module, "dry_run_bundle", lambda path: "dry run\n")
+
+    build_bundles_v2(state.campaign_dir, state)
+
+    for budget in ("smoke", "production"):
+        experiment = yaml.safe_load((state.campaign_dir / budget / "experiment.yaml").read_text())
+        runner = yaml.safe_load((state.campaign_dir / budget / "runner.yaml").read_text())
+        assert experiment["model"]["source"] == "Qwen/Qwen3.5-Test"
+        assert experiment["data"]["path"] == "/datasets/text"
+        assert experiment["data"]["max_sample_length"] == 2048
+        assert runner["runner"]["slurm"]["account"] == "account"
+
+
 def test_build_freezes_one_snapshot_before_rendering_both_budgets(
     tmp_path: Path,
     monkeypatch,
@@ -310,6 +338,12 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
         if path.name == "smoke":
             state.set_field("stages.width_importance.batch", 99, source="user")
             state.set_collection("stage_batches", {"pruning.micro_batch_size": 99})
+            stage_resources = deepcopy(state.collection("stage_resources"))
+            stage_resources["width_importance"]["instances"] = 9
+            state.set_collection("stage_resources", stage_resources)
+            parallel_profiles = deepcopy(state.collection("parallel_profiles"))
+            parallel_profiles["model"]["tp"] = 8
+            state.set_collection("parallel_profiles", parallel_profiles)
             state.set_collection("experiment_overrides", {"mutated": True})
             state.set_collection(
                 "runner_overrides",
@@ -328,12 +362,16 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
 
     assert state.get_field("stages.width_importance.batch") == 99
     assert state.collection("stage_batches")["pruning.micro_batch_size"] == 99
-    assert state.collection("legacy_state") is None
+    assert state.collection("stage_resources")["width_importance"]["instances"] == 9
+    assert state.collection("parallel_profiles")["model"]["tp"] == 8
     for budget in ("smoke", "production"):
         experiment = yaml.safe_load((state.campaign_dir / budget / "experiment.yaml").read_text())
+        execution = yaml.safe_load((state.campaign_dir / budget / "execution.yaml").read_text())
         runner = yaml.safe_load((state.campaign_dir / budget / "runner.yaml").read_text())
         assert experiment["pruning"]["micro_batch_size"] == 7
         assert "mutated" not in experiment
+        assert execution["execution"]["stages"]["width_importance"]["instances"] == 1
+        assert execution["execution"]["stages"]["width_importance"]["parallel"]["tp"] == 2
         assert runner["runner"]["slurm"]["partition"] == "late-override"
     provenance = yaml.safe_load((state.campaign_dir / "resolved_defaults.yaml").read_text())
     assert provenance["stages.width_importance.batch"] == {
