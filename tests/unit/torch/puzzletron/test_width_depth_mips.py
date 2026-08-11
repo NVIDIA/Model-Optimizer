@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from safetensors.torch import save_file
 
 import examples.puzzletron.run_width_depth_mips as width_depth_mips
 from examples.puzzletron.run_width_depth_mips import _replacement_score_paths, _stats_profile
@@ -67,35 +69,14 @@ def test_required_workload_configs_exclude_unreferenced_definitions():
     )
 
 
-def test_checkpoint_parameter_count_uses_safe_open_keys_protocol(tmp_path, monkeypatch):
-    (tmp_path / "model.safetensors").touch()
-
-    class TensorSlice:
-        def __init__(self, shape):
-            self.shape = shape
-
-        def get_shape(self):
-            return self.shape
-
-    class SafeOpenHandle:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def keys(self):
-            return ("first", "second")
-
-        def get_slice(self, key):
-            return TensorSlice((2, 3) if key == "first" else (5,))
-
-    def safe_open_handle(path, *, framework):
-        assert path == str(tmp_path / "model.safetensors")
-        assert framework == "pt"
-        return SafeOpenHandle()
-
-    monkeypatch.setattr(width_depth_mips, "safe_open", safe_open_handle)
+def test_checkpoint_parameter_count_uses_safe_open_keys_protocol(tmp_path):
+    save_file(
+        {
+            "first": torch.zeros((2, 3)),
+            "second": torch.zeros((5,)),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
 
     assert width_depth_mips._checkpoint_parameter_count(tmp_path) == 11
 

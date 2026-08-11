@@ -1104,6 +1104,10 @@ def test_static_workload_stats_preserves_resolved_runtime_objects(monkeypatch):
     assert selected.calc_subblock_stats.batch_sizes == [2]
     assert selected.calc_subblock_stats.prefill_seq_len == 64
     assert selected.calc_subblock_stats.generation_seq_len == 16
+    assert hydra_cfg.calc_subblock_stats.runtime_stats.enabled is True
+    assert hydra_cfg.calc_subblock_stats.batch_sizes == [1]
+    assert hydra_cfg.calc_subblock_stats.prefill_seq_len == 32
+    assert hydra_cfg.calc_subblock_stats.generation_seq_len == 8
 
 
 @pytest.mark.parametrize(
