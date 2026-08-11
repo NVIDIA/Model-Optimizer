@@ -36,8 +36,10 @@ See `README.md` in this directory for more details.
 """
 
 import argparse
+import pathlib
 
 import torch
+import yaml
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.core.utils import unwrap_model
 
@@ -99,7 +101,38 @@ def get_args() -> argparse.Namespace:
     return args
 
 
+def _provider_overrides_from_checkpoint(megatron_path: str) -> dict:
+    """Read ``mtp_num_layers`` from the checkpoint so the exporter matches how it was saved.
+
+    Only ``mtp_num_layers`` is taken from here. ``moe_grouped_gemm`` is deliberately NOT derived:
+    for a ``MambaModelProvider`` the expert layout is set by ``mamba_stack_spec``, so the value a
+    checkpoint records does not describe how its experts were actually built.
+    """
+    defaults = {"mtp_num_layers": 0}
+    run_config = next(iter(sorted(pathlib.Path(megatron_path).glob("*/run_config.yaml"))), None)
+    if run_config is None:
+        run_config = pathlib.Path(megatron_path) / "run_config.yaml"
+    if not run_config.exists():
+        print_rank_0(f"No run_config.yaml under {megatron_path}; using defaults {defaults}.")
+        return defaults
+    try:
+        cfg = yaml.safe_load(run_config.read_text()) or {}
+    except Exception as exc:
+        print_rank_0(f"Could not parse {run_config} ({exc}); using defaults {defaults}.")
+        return defaults
+    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else cfg
+    resolved = {
+        key: model_cfg.get(key, default)
+        for key, default in defaults.items()
+        if isinstance(model_cfg, dict)
+    }
+    resolved = {**defaults, **resolved}
+    print_rank_0(f"Model shape from {run_config.name}: {resolved}")
+    return resolved
+
+
 def main(args: argparse.Namespace):
+    _ckpt_shape = _provider_overrides_from_checkpoint(args.megatron_path)
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )
@@ -116,6 +149,7 @@ def main(args: argparse.Namespace):
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
+            "mtp_num_layers": _ckpt_shape["mtp_num_layers"],
         },
         init_model_parallel=True,
         load_weights=False,  # The weights come from the Megatron checkpoint, so HF weights are not loaded

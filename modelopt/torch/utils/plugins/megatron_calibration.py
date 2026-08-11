@@ -50,6 +50,7 @@ def get_megatron_calibration_dataloader(
     device: torch.device | str | None = "cuda",
     apply_chat_template: bool = True,
     pack: bool = False,
+    random_offset: bool = False,
 ) -> torch.utils.data.DataLoader:
     """Build a DP-sharded calibration dataloader for Megatron-Core models.
 
@@ -76,6 +77,7 @@ def get_megatron_calibration_dataloader(
         device=device,
         apply_chat_template=apply_chat_template,
         pack=pack,
+        random_offset=random_offset,
         distributed=dp_size > 1,
         sampler_kwargs={
             "num_replicas": dp_size,
@@ -95,6 +97,7 @@ def get_megatron_calibration_forward_loop(
     device: torch.device | str | None = "cuda",
     apply_chat_template: bool = True,
     pack: bool = False,
+    random_offset: bool = False,
 ) -> Callable[[torch.nn.Module], None]:
     """Build a Megatron-Core calibration ``forward_loop(model)``.
 
@@ -116,6 +119,7 @@ def get_megatron_calibration_forward_loop(
         device=device,
         apply_chat_template=apply_chat_template,
         pack=pack,
+        random_offset=random_offset,
     )
 
     def _forward_loop(model: torch.nn.Module) -> None:
