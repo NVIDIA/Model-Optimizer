@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from modelopt.recipe import load_recipe
@@ -55,11 +56,12 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
-def test_save_quantized_state_calls_mto_save_with_model_and_path(monkeypatch):
+def test_save_quantized_state_calls_mto_save_with_model_and_path(monkeypatch, tmp_path):
     """--save_quantized_state PATH must hand mto.save exactly (model, PATH) -- this is the
     round-trip a retried export depends on, so the call shape has to be exact."""
+    state_path = str(tmp_path / "calib.pt")
     hf_ptq, args = _parse_hf_ptq_args(
-        monkeypatch, "--pyt_ckpt_path", "dummy", "--save_quantized_state", "/tmp/calib.pt"
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--save_quantized_state", state_path
     )
     calls = []
     monkeypatch.setattr(hf_ptq.mto, "save", lambda model, path: calls.append((model, path)))
@@ -67,7 +69,7 @@ def test_save_quantized_state_calls_mto_save_with_model_and_path(monkeypatch):
     dummy_model = object()
     hf_ptq._save_quantized_state_if_requested(args, dummy_model)
 
-    assert calls == [(dummy_model, "/tmp/calib.pt")]
+    assert calls == [(dummy_model, state_path)]
 
 
 def test_save_and_restore_quantized_state_together_is_rejected(monkeypatch):
@@ -113,6 +115,34 @@ def test_restore_quantized_state_with_deprecated_auto_quantize_cli_is_rejected(m
             "--restore_quantized_state",
             "/tmp/in.pt",
         )
+
+
+def test_save_quantized_state_round_trips_through_real_mto(monkeypatch, tmp_path):
+    """The mocked test above pins the call *shape*; this exercises the real ModelOpt
+    persistence path end to end: quantize a small local model, save its state through
+    hf_ptq's helper, restore it into a fresh copy, and confirm the restored model carries
+    the calibrated quantizer state and is usable (a forward pass runs cleanly)."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--save_quantized_state", str(tmp_path / "state.pt")
+    )
+
+    model = torch.nn.Linear(4, 4)
+    hf_ptq.mtq.quantize(
+        model, QUANT_CFG_CHOICES["fp8"], lambda m: m(torch.randn(2, 4))
+    )
+    expected_amax = model.weight_quantizer.amax.clone()
+
+    hf_ptq._save_quantized_state_if_requested(args, model)
+    assert (tmp_path / "state.pt").exists()
+
+    restored = torch.nn.Linear(4, 4)
+    restore_args = SimpleNamespace(
+        restore_quantized_state=str(tmp_path / "state.pt"), save_quantized_state=None
+    )
+    assert hf_ptq._restore_quantized_state_if_requested(restore_args, restored) is True
+
+    assert torch.equal(restored.weight_quantizer.amax, expected_amax)
+    restored(torch.randn(2, 4))  # usable: forward runs without error post-restore
 
 
 def test_restore_quantized_state_skips_calibration_and_exports(monkeypatch):
