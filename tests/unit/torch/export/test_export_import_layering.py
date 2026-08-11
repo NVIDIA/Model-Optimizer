@@ -32,8 +32,11 @@ import-time cycle, which is exactly what the parse sees.
 import ast
 from pathlib import Path
 
+import pytest
+
 import modelopt.torch.export
 
+EXPORT_PACKAGE = "modelopt.torch.export"
 EXPORT_DIR = Path(modelopt.torch.export.__file__).parent
 
 # Modules that must not grow a dependency on any exporter — the leaves the split created.
@@ -45,15 +48,40 @@ EXPORTERS = [
     "unified_export_hf_streaming",
 ]
 
+# `plugins/vllm_fakequant_megatron.py` imports `unified_export_megatron`, which imports
+# back out of `plugins` — a module-scope cycle that predates the HF export split and sits
+# entirely in the megatron half of the package. It resolves today only because
+# `export/__init__.py` imports `.plugins` before `.unified_export_megatron`, and because
+# what `unified_export_megatron` needs back are `plugins` *submodules*, which resolve
+# against a partially initialized package. Excluded so this test fails on new cycles
+# rather than on that one; `test_known_cycle_edges_still_exist` deletes the exclusion's
+# reason to exist once the edge goes away.
+KNOWN_CYCLE_EDGES = {("plugins", "unified_export_megatron")}
 
-def _relative_imports(tree: ast.AST, level: int, *, module_scope_only: bool) -> set[str]:
-    """Sibling module names pulled in by ``from .<name> import ...`` / ``from . import <name>``.
 
-    ``level`` selects how far up the relative import points: 1 for a file directly in the
-    export package, 2 for one in a subpackage such as ``plugins``. With
+def _intra_package_imports(tree: ast.AST, level: int, *, module_scope_only: bool) -> set[str]:
+    """Export-package member names the parsed source imports, by any spelling.
+
+    All four reach the same module and so must all be seen, or the graph below could be
+    evaded by respelling one import::
+
+        from .unified_export_hf import x  # relative
+        from . import unified_export_hf  # relative, bare
+        from modelopt.torch.export.unified_export_hf import x  # absolute
+        import modelopt.torch.export.unified_export_hf  # absolute
+
+    ``level`` selects how far up the *relative* spellings point: 1 for a file directly in
+    the export package, 2 for one in a subpackage such as ``plugins``. Absolute spellings
+    are position-independent, so ``level`` does not apply to them. With
     ``module_scope_only``, function and class bodies are skipped, leaving only the imports
     that run at import time.
+
+    One spelling stays invisible: ``from modelopt.torch.export import <symbol>``, where
+    the symbol is a function re-exported by ``__init__`` rather than a submodule name.
+    Nothing in the package does that today, and from inside the package it would be a
+    cycle through the package initializer regardless of this graph.
     """
+    prefix = f"{EXPORT_PACKAGE}."
     names: set[str] = set()
     stack = list(ast.iter_child_nodes(tree))
     while stack:
@@ -62,21 +90,36 @@ def _relative_imports(tree: ast.AST, level: int, *, module_scope_only: bool) -> 
             node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
         ):
             continue
-        if isinstance(node, ast.ImportFrom) and node.level == level:
-            if node.module:
-                names.add(node.module.split(".")[0])
-            else:
-                # `from . import x, y` — the imported names are the sibling modules.
-                names.update(alias.name for alias in node.names)
+        if isinstance(node, ast.Import):
+            # `import modelopt.torch.export.x[.y]`
+            names.update(
+                alias.name[len(prefix) :].split(".")[0]
+                for alias in node.names
+                if alias.name.startswith(prefix)
+            )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module == EXPORT_PACKAGE:
+                # `from modelopt.torch.export import x, y`
+                names.update(alias.name.split(".")[0] for alias in node.names)
+            elif node.level == 0 and node.module and node.module.startswith(prefix):
+                # `from modelopt.torch.export.x[.y] import ...`
+                names.add(node.module[len(prefix) :].split(".")[0])
+            elif node.level == level:
+                if node.module:
+                    names.add(node.module.split(".")[0])
+                else:
+                    # `from . import x, y` — the imported names are the sibling modules.
+                    names.update(alias.name for alias in node.names)
         stack.extend(ast.iter_child_nodes(node))
     return names
 
 
-def _import_graph() -> dict[str, set[str]]:
+def _import_graph(*, drop_known_cycles: bool = True) -> dict[str, set[str]]:
     """Map each export module to the sibling export modules it imports at module scope.
 
     ``plugins`` is one node, carrying the union of what its files import back out of the
     export package, so a module-scope cycle routed through a plugin still shows up.
+    ``drop_known_cycles`` removes the pre-existing edges in ``KNOWN_CYCLE_EDGES``.
     """
     plugins_dir = EXPORT_DIR / "plugins"
     nodes = {p.stem for p in EXPORT_DIR.glob("*.py")} - {"__init__"}
@@ -86,14 +129,18 @@ def _import_graph() -> dict[str, set[str]]:
     graph: dict[str, set[str]] = {}
     for name in sorted(nodes - {"plugins"}):
         tree = ast.parse((EXPORT_DIR / f"{name}.py").read_text())
-        graph[name] = _relative_imports(tree, 1, module_scope_only=True) & nodes
+        graph[name] = _intra_package_imports(tree, 1, module_scope_only=True) & nodes
 
     if "plugins" in nodes:
         edges: set[str] = set()
         for path in sorted(plugins_dir.glob("*.py")):
             tree = ast.parse(path.read_text())
-            edges |= _relative_imports(tree, 2, module_scope_only=True)
+            edges |= _intra_package_imports(tree, 2, module_scope_only=True)
         graph["plugins"] = edges & nodes
+
+    if drop_known_cycles:
+        for src, dst in KNOWN_CYCLE_EDGES:
+            graph.get(src, set()).discard(dst)
     return graph
 
 
@@ -125,10 +172,43 @@ def _find_cycle(graph: dict[str, set[str]]) -> list[str] | None:
     return None
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("from .unified_export_hf import export_hf_checkpoint", id="relative"),
+        pytest.param("from . import unified_export_hf", id="relative-bare"),
+        pytest.param(
+            "from modelopt.torch.export.unified_export_hf import export_hf_checkpoint",
+            id="absolute-from",
+        ),
+        pytest.param("import modelopt.torch.export.unified_export_hf", id="absolute-import"),
+        pytest.param("from modelopt.torch.export import unified_export_hf", id="absolute-bare"),
+    ],
+)
+def test_every_import_spelling_is_parsed(source):
+    """No spelling of an intra-package import can slip past the graph.
+
+    Absolute forms are the ones worth pinning: ``plugins/vllm_fakequant_megatron.py``
+    already uses them, so a parser that only understood relative imports would silently
+    drop real edges.
+    """
+    found = _intra_package_imports(ast.parse(source), 1, module_scope_only=True)
+    assert "unified_export_hf" in found, f"{source!r} was not recognized as an intra-package import"
+
+
 def test_export_import_graph_is_acyclic():
     """No export module imports, directly or transitively, a module that imports it back."""
     cycle = _find_cycle(_import_graph())
     assert cycle is None, "import cycle in modelopt.torch.export: " + " -> ".join(cycle or [])
+
+
+def test_known_cycle_edges_still_exist():
+    """Keep the exclusion list honest — drop an entry once its edge is gone."""
+    graph = _import_graph(drop_known_cycles=False)
+    for src, dst in sorted(KNOWN_CYCLE_EDGES):
+        assert dst in graph.get(src, set()), (
+            f"{src} no longer imports {dst}; remove it from KNOWN_CYCLE_EDGES"
+        )
 
 
 def test_leaf_modules_never_import_an_exporter():
@@ -140,7 +220,7 @@ def test_leaf_modules_never_import_an_exporter():
     """
     for name in LEAF_MODULES:
         tree = ast.parse((EXPORT_DIR / f"{name}.py").read_text())
-        imported = _relative_imports(tree, 1, module_scope_only=False)
+        imported = _intra_package_imports(tree, 1, module_scope_only=False)
         offenders = sorted(imported.intersection(EXPORTERS))
         assert not offenders, f"{name}.py must not import an exporter, but imports {offenders}"
 
