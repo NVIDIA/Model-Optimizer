@@ -109,6 +109,7 @@ def run_autotune() -> int:
         warmup_runs=args.warmup_runs,
         timing_runs=args.timing_runs,
         trtexec_args=trtexec_args,
+        network_timeout_minutes=args.network_timeout_minutes,
     )
 
     if benchmark_instance is None:
@@ -313,6 +314,12 @@ Examples:
         default=None,
         help="Additional command-line arguments to pass to trtexec as a single quoted string. "
         "Example: --trtexec_benchmark_args '--fp16 --workspace=4096 --verbose'",
+    )
+    trt_group.add_argument(
+        "--network_timeout_minutes",
+        type=int,
+        default=10,
+        help="Timeout used for network commands when performing remote auto tuning, mainly relevant for scp",
     )
 
     # Logging

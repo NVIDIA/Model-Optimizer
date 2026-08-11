@@ -463,6 +463,12 @@ def get_parser() -> argparse.ArgumentParser:
             "set. Example: '--fp16 --workspace=4096'"
         ),
     )
+    autotune_group.add_argument(
+        "--autotune_network_timeout_minutes",
+        type=int,
+        default=10,
+        help="Timeout used for network commands when performing remote auto tuning, mainly relevant for scp",
+    )
     return argparser
 
 
@@ -569,6 +575,7 @@ def main():
         autotune_warmup_runs=args.autotune_warmup_runs,
         autotune_timing_runs=args.autotune_timing_runs,
         autotune_trtexec_args=args.autotune_trtexec_args,
+        autotune_network_timeout_minutes=args.autotune_network_timeout_minutes,
         input_shapes_profile=args.input_shapes_profile,
         model_id=args.model_id,
         trust_remote_code=args.trust_remote_code,

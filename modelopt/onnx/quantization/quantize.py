@@ -302,6 +302,7 @@ def _find_nodes_to_quantize_autotune(
     warmup_runs: int = 50,
     timing_runs: int = 100,
     trtexec_args: str | None = None,
+    network_timeout_minutes: int = 10,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
@@ -324,6 +325,7 @@ def _find_nodes_to_quantize_autotune(
         warmup_runs=warmup_runs,
         timing_runs=timing_runs,
         trtexec_args=trtexec_args.split() if trtexec_args else None,
+        network_timeout_minutes=network_timeout_minutes,
     )
 
     if benchmark_instance is None:
@@ -395,6 +397,7 @@ def quantize(
     autotune_warmup_runs: int = 50,
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
+    autotune_network_timeout_minutes: int = 10,
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -702,6 +705,7 @@ def quantize(
                 warmup_runs=autotune_warmup_runs,
                 timing_runs=autotune_timing_runs,
                 trtexec_args=autotune_trtexec_args,
+                network_timeout_minutes=autotune_network_timeout_minutes,
             )
             op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
             nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
