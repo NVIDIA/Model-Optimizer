@@ -26,6 +26,7 @@ Changelog
 **Bug Fixes**
 
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- Fix ``--use_fsdp2`` PTQ (``examples/hf_ptq``) failing on models that hold a few parameters in a dtype other than the model's own, with ``AssertionError: FSDP expects uniform original parameter dtype`` on the first calibration forward. Nemotron-3-Nano is one such model: its MoE router gates are declared ``float32`` while the rest of the checkpoint is bfloat16, so each decoder layer's FSDP2 shard group mixed dtypes. ``fsdp2_wrap`` now passes those off-dtype parameters to ``fully_shard(ignored_params=...)``, leaving them replicated in their original dtype instead of casting them, and warns with their names and their share of the model.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^

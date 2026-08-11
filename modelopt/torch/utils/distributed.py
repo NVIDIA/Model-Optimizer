@@ -252,6 +252,31 @@ def is_fsdp2_model(model) -> bool:
     return any(isinstance(m, FSDPModule) for m in model.modules())
 
 
+def _off_dtype_params(model) -> set[torch.nn.Parameter]:
+    """Params whose dtype differs from the model's dominant (by element count) param dtype.
+
+    FSDP2 needs one dtype per shard group, but HF models routinely keep a few params in fp32 for
+    stability (e.g. MoE router gates). Pass these to ``fully_shard(ignored_params=...)``.
+    """
+    numel_by_dtype: dict[torch.dtype, int] = {}
+    for param in model.parameters():
+        numel_by_dtype[param.dtype] = numel_by_dtype.get(param.dtype, 0) + param.numel()
+    if len(numel_by_dtype) <= 1:
+        return set()
+
+    dominant = max(numel_by_dtype, key=lambda d: numel_by_dtype[d])
+    off_dtype = {n: p for n, p in model.named_parameters() if p.dtype != dominant}
+    off_numel = sum(numel_by_dtype[d] for d in numel_by_dtype if d != dominant)
+    names = sorted(off_dtype)
+    warn(
+        f"Model has mixed parameter dtypes {set(numel_by_dtype)}; FSDP2 needs one dtype per shard "
+        f"group, so {len(names)} non-{dominant} parameter(s) "
+        f"({100 * off_numel / sum(numel_by_dtype.values()):.2f}% of elements) will stay replicated "
+        f"rather than sharded: {names[:3]}{' ...' if len(names) > 3 else ''}"
+    )
+    return set(off_dtype.values())
+
+
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
@@ -259,6 +284,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
     (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
     detection result.
+
+    Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
+    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes.
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -274,6 +302,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         fsdp_kwargs["mp_policy"] = mp_policy
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+    ignored_params = _off_dtype_params(model)
+    if ignored_params:
+        fsdp_kwargs["ignored_params"] = ignored_params
 
     # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
     config = getattr(model, "config", None)
