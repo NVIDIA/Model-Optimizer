@@ -131,7 +131,6 @@ pipeline:
       - --dist-ckpt-strictness log_all
     environment:
       - MLM_MODEL_CFG: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-      - QUANT_CFG: MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
       - MLM_MODEL_CKPT: /cicd/megatron-lm-qad/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
       - EXPORT_DIR: /cicd/export/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_NVFP4_QAD
       - HF_MODEL_CKPT: /hf-local/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
