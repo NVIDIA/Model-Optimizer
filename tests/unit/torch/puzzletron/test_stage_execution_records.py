@@ -19,17 +19,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING
 
 import pytest
 
 from examples.puzzletron.main import _completion_is_valid, _mark_completion, _resume_kwargs
+from modelopt.torch.puzzletron.execution_record import _portable_relative_path
 from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
     validate_stage_execution_record,
     write_stage_manifest,
 )
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,6 +101,32 @@ def test_stage_manifest_persists_path_neutral_resolved_stage_config(
     assert resolved["resolved_config_identity"] == stable_hash(
         resolved["resolved_stage_config"], prefix="convert_resolved_cfg"
     )
+
+
+def test_execution_record_paths_use_portable_separators() -> None:
+    root = PureWindowsPath(r"C:\campaign")
+    path = root / "manifests" / "executions" / "convert" / "record.json"
+
+    assert _portable_relative_path(path, root) == ("manifests/executions/convert/record.json")
+
+
+def test_nonzero_rank_does_not_publish_or_mutate_execution_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text("model: {}\n")
+    manifest = StageManifest(stage="convert", config=_stage_config(tmp_path, config_path))
+    manifest.complete()
+    manifest_path = tmp_path / "manifests" / "convert.json"
+    monkeypatch.setenv("RANK", "1")
+
+    write_stage_manifest(manifest_path, manifest)
+
+    assert manifest.version == "1"
+    assert manifest.execution_record is None
+    assert not manifest_path.exists()
+    assert not (tmp_path / "manifests" / "executions").exists()
 
 
 def test_execution_record_preserves_provenance_and_cross_record_timestamps(
@@ -415,6 +444,7 @@ def test_resume_remains_compatible_with_historical_stage_manifest(
         config=config,
     )
     historical_payload = manifest.to_dict()
+    assert historical_payload["version"] == "1"
     assert "execution_record" not in historical_payload
     manifest_path = tmp_path / "manifests" / "convert.json"
     manifest_path.parent.mkdir()
@@ -423,6 +453,54 @@ def test_resume_remains_compatible_with_historical_stage_manifest(
     _mark_completion(config, config_path, "convert")
 
     assert _completion_is_valid(config, config_path, "convert")
+
+
+def test_version_two_manifest_requires_execution_record_pointer(tmp_path: Path) -> None:
+    manifest_path, _config_path, _config, _manifest = _write_convert_record(tmp_path)
+    pointer = json.loads(manifest_path.read_text())
+    assert pointer["version"] == "2"
+    pointer.pop("execution_record")
+    manifest_path.write_text(json.dumps(pointer))
+
+    with pytest.raises(ValueError, match="requires an execution record"):
+        validate_stage_execution_record(manifest_path, expected_stage="convert")
+
+
+@pytest.mark.parametrize(
+    ("stage", "stage_config", "status", "skip_reason"),
+    [
+        ("convert", {}, "success", None),
+        ("aiperf", {"enabled": False}, "skipped", "disabled"),
+    ],
+    ids=("success", "skipped"),
+)
+def test_orchestrator_resume_rejects_missing_execution_record_pointer(
+    tmp_path: Path,
+    stage: str,
+    stage_config: dict,
+    status: str,
+    skip_reason: str | None,
+) -> None:
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "experiment": {"dir": str(tmp_path)},
+        stage: stage_config,
+    }
+    if stage == "convert":
+        teacher_config = tmp_path / "ckpts" / "teacher" / "config.json"
+        teacher_config.parent.mkdir(parents=True)
+        teacher_config.write_text("{}\n")
+    manifest = StageManifest(stage=stage, config=config)
+    manifest.complete(status=status, skip_reason=skip_reason)
+    manifest_path = tmp_path / "manifests" / f"{stage}.json"
+    write_stage_manifest(manifest_path, manifest)
+    assert stage_is_complete(config, stage)
+
+    pointer = json.loads(manifest_path.read_text())
+    pointer.pop("execution_record")
+    manifest_path.write_text(json.dumps(pointer))
+
+    assert not stage_is_complete(config, stage)
 
 
 @pytest.mark.parametrize(

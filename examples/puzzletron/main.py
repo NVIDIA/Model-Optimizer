@@ -259,6 +259,7 @@ def _completion_is_valid(config: dict, config_path: str | Path, stage: str) -> b
         # Validation-only: raises if the referenced execution record was tampered with.
         _stage_execution_record_patterns(config, stage)
         return True
+    _stage_execution_record_patterns(config, stage)
     if not artifacts_are_complete(config, stage):
         return False
     kwargs = _resume_kwargs(config, config_path, stage)
@@ -273,6 +274,7 @@ def _mark_completion(config: dict, config_path: str | Path, stage: str) -> None:
         # Validation-only: raises if the referenced execution record was tampered with.
         _stage_execution_record_patterns(config, stage)
         return
+    _stage_execution_record_patterns(config, stage)
     if not artifacts_are_complete(config, stage):
         raise RuntimeError(f"stage {stage!r} failed canonical artifact validation")
     kwargs = _resume_kwargs(config, config_path, stage)
