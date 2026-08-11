@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for width-scenario identities, preparation, and projection."""
 
@@ -338,12 +350,16 @@ def test_embedding_build_library_projects_vllm_stats_before_and_after_workers(
 
 def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tmp_path):
     _write_scenario_manifest(tmp_path, 768)
+    packed_token_cache = tmp_path / "dataset_cache" / "validation.tokens"
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
         config={
             "puzzle_dir": str(tmp_path),
             "embedding_pruning": {"widths": [768]},
-            "replacement_scoring": {"granularity": "subblock"},
+            "replacement_scoring": {
+                "granularity": "subblock",
+                "packed_token_cache_path": str(packed_token_cache),
+            },
         },
         stage="replacement_scoring",
         gpus_per_node=8,
@@ -364,6 +380,7 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
         and override.startswith("replacement_scoring.output_dir=")
         for override in overrides
     )
+    assert f"replacement_scoring.packed_token_cache_path={packed_token_cache}" in overrides
 
 
 def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):

@@ -1,7 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for the profile-scoped Puzzletron width/depth MIP helper contracts."""
+
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import torch
+from safetensors.torch import save_file
 
 import examples.puzzletron.run_width_depth_mips as width_depth_mips
 from examples.puzzletron.run_width_depth_mips import _replacement_score_paths, _stats_profile
@@ -24,6 +44,41 @@ def test_depth_stage_config_keeps_legacy_depth_fallback():
     config = {"depth": {"max_subblocks_to_remove": 3, "granularity": "subblock"}}
 
     assert width_depth_mips._depth_stage_config(config) == config["depth"]
+
+
+def test_required_workload_configs_exclude_unreferenced_definitions():
+    mip_config = {
+        "workloads": {
+            "serving": {"isl": 4096, "osl": 1024},
+            "interactive": {"isl": 1024, "osl": 128},
+        }
+    }
+    profiles = [
+        SimpleNamespace(required_workloads=()),
+        SimpleNamespace(required_workloads=("interactive",)),
+    ]
+
+    assert width_depth_mips._required_workload_configs(mip_config, profiles) == {
+        "interactive": {"isl": 1024, "osl": 128}
+    }
+    assert (
+        width_depth_mips._required_workload_configs(
+            mip_config, [SimpleNamespace(required_workloads=())]
+        )
+        == {}
+    )
+
+
+def test_checkpoint_parameter_count_uses_safe_open_keys_protocol(tmp_path):
+    save_file(
+        {
+            "first": torch.zeros((2, 3)),
+            "second": torch.zeros((5,)),
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+
+    assert width_depth_mips._checkpoint_parameter_count(tmp_path) == 11
 
 
 @pytest.mark.parametrize(
@@ -155,9 +210,10 @@ def test_forced_removals_support_total_and_typed_prefixes_in_global_order():
         {"layer_idx": 4, "kind": "moe"},
     ]
 
-    assert width_depth_mips._forced_removals_for_depth(
-        selected, DepthSelection.total_prefix(3)
-    ) == selected[:3]
+    assert (
+        width_depth_mips._forced_removals_for_depth(selected, DepthSelection.total_prefix(3))
+        == selected[:3]
+    )
     assert width_depth_mips._forced_removals_for_depth(
         selected,
         DepthSelection((("attention", 2), ("moe", 1))),

@@ -1,0 +1,226 @@
+# @package _global_
+
+defaults:
+  - /base@_global_
+  - /families/qwen3_5/family@_global_
+  # Validate the conservative FFN-only search before opting into advanced axes.
+  - /families/qwen3_5/qwen3p5_0p8b/model@_global_
+  - _self_
+
+# Focused one-GPU smoke for the real pinned checkpoint. The enabled DAG ends at
+# MIP; bypass, serving statistics, evaluation, AIPerf, and distillation are not
+# part of this milestone.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_smoke}
+dataset_path: ${oc.env:PUZZLETRON_DATASET_PATH,../Puzzle-KD-Nemotron-Post-Training-Dataset-v2}
+display_name: Qwen3p5_0p8B
+
+model:
+  source: ${input_hf_model_path}
+  revision: ${model_info.hf_revision}
+  descriptor_override: qwen3_5
+  trust_remote_code: false
+  force_hf: false
+
+capability_validation:
+  require_complete_pipeline: true
+
+data:
+  modality: text
+  layout: fixed
+  max_sample_length: 512
+  packing:
+
+train_token_cache_path: ${puzzle_dir}/dataset_cache/train.tokens
+validation_token_cache_path: ${puzzle_dir}/dataset_cache/validation.tokens
+tokenize_data:
+  enabled: true
+  workers: 16
+  tokenize_batch_size: 64
+  content_field: messages
+  caches:
+    - output: ${train_token_cache_path}
+      split: train
+      num_samples: 8
+      seq_length: 512
+      shuffle_seed: 444
+    - output: ${validation_token_cache_path}
+      split: validation
+      num_samples: 2
+      seq_length: 512
+      shuffle_seed: 445
+
+embedding_pruning:
+  # Enable the composite scenario route used by named-profile MIP while
+  # retaining only the teacher embedding width in this FFN-focused smoke.
+  enabled: true
+  widths: [1024]
+  alignment: 256
+  cycle_widths: true
+
+pruning:
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path: ${train_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+
+sort_sanity:
+  enabled: true
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+
+width_sanity:
+  enabled: true
+  hidden_width_diagnostic: false
+  axes:
+    - ffn_intermediate
+  single_load_parent_sweep: true
+  one_case_per_axis: false
+  target_count_per_axis: 1
+  layer_count: 2
+  layer_selection: spread
+  methods: [activation, random, reverse]
+  physical_realization: true
+  cleanup_physical_checkpoints: true
+  reuse_sort_equivalence: true
+  require_beats_random: false
+  require_beats_reverse: false
+  physical_equivalence_tolerance: 0.001
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+
+slicing_sanity:
+  enabled: true
+  backend: distributed_parent_sweep
+
+# This smoke intentionally uses the no-bypass library boundary.
+bypass:
+  enabled: false
+
+depth_importance:
+  enabled: false
+  granularity: subblock
+  source_checkpoint_dir: ${teacher_dir}
+  output_dir: ${puzzle_dir}/depth/iterative
+  expected_initial_sublayers: 48
+  max_removals: 0
+  max_subblocks_to_remove: 0
+  metric: lm_loss
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+
+build_library:
+  enabled: true
+  include_bypass: false
+
+vllm_stats:
+  enabled: false
+
+replacement_scoring:
+  enabled: true
+  granularity: subblock
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path: ${validation_token_cache_path}
+  automodel:
+    parallel:
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+
+mip:
+  enabled: true
+  score_granularity: subblock
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.subblock_output_dir}}
+  canonical_solutions_path: ${to_path:${replacement_scoring.subblock_solutions_path}}
+  workloads:
+    serving-default:
+      isl: 4096
+      osl: 1024
+      batch_size: 1
+      concurrency: 1
+  runs:
+    params-90:
+      constraints:
+        params:
+          max: 90%
+      objectives:
+        - metric: metrics.cosine_embedding_loss_hidden_states
+          direction: minimize
+      search_space:
+        depth: [0]
+        embedding: [1024]
+        axes_default: teacher
+        axes:
+          ffn.intermediate_size: all
+      solver:
+        backend: auto
+        num_solutions: 1
+        min_hamming_distance: 2
+        max_seconds_per_solution: 30
+      homogeneous:
+        enabled: true
+        keep: 5
+        rank_by: objective
+
+post_mip:
+  flows: {}
+zero_shot_evaluation:
+  enabled: false
+aiperf:
+  enabled: false
+global_distillation_sanity:
+  enabled: false
+global_distillation:
+  enabled: false
+post_distillation_evaluation:
+  enabled: false
+
+execution:
+  gpus_per_node: 1

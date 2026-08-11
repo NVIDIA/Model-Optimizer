@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Solve a profile-scoped width/depth MIP grid, with optional realization."""
 
@@ -11,7 +23,7 @@ import json
 import math
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from omegaconf import OmegaConf
 from safetensors import safe_open
@@ -41,6 +53,9 @@ from modelopt.torch.puzzletron.replacement_library.library import ReplacementLib
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch.puzzletron.stages.pipeline import _hf_checkpoint_complete
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 
 def _atomic_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +70,18 @@ def _depth_stage_config(config: dict[str, Any]) -> dict[str, Any]:
     return dict(config.get("depth_importance") or config.get("depth") or {})
 
 
+def _required_workload_configs(
+    mip_config: dict[str, Any], profiles: Iterable[Any]
+) -> dict[str, dict[str, Any]]:
+    """Return only workload definitions referenced by compiled profiles."""
+
+    configured = dict(mip_config.get("workloads") or {})
+    names = tuple(
+        dict.fromkeys(workload for profile in profiles for workload in profile.required_workloads)
+    )
+    return {name: dict(configured[name]) for name in names}
+
+
 def _checkpoint_parameter_count(checkpoint: Path) -> int:
     index_path = checkpoint / "model.safetensors.index.json"
     if index_path.is_file():
@@ -67,7 +94,7 @@ def _checkpoint_parameter_count(checkpoint: Path) -> int:
     total = 0
     for relative in files:
         with safe_open(str(checkpoint / relative), framework="pt") as handle:
-            for key in handle.keys():
+            for key in handle.keys():  # noqa: SIM118 - safe_open is not iterable
                 total += math.prod(int(dim) for dim in handle.get_slice(key).get_shape())
     return int(total)
 
@@ -108,9 +135,7 @@ def _forced_removals_for_depth(
     return removals
 
 
-def _replacement_score_paths(
-    base_dir: Path, granularity: str
-) -> tuple[Path, Path]:
+def _replacement_score_paths(base_dir: Path, granularity: str) -> tuple[Path, Path]:
     """Resolve width-local score inputs without changing full-block identities."""
 
     granularity = str(granularity).lower()
@@ -191,9 +216,7 @@ def _load_completed_scenario(
     if not solve_only:
         for result in [*solutions, *homogeneous]:
             checkpoint_value = result.get("checkpoint")
-            if not checkpoint_value or not _hf_checkpoint_complete(
-                Path(str(checkpoint_value))
-            ):
+            if not checkpoint_value or not _hf_checkpoint_complete(Path(str(checkpoint_value))):
                 return None
     return scenario
 
@@ -247,8 +270,7 @@ def _stats_profile(
         return profiles[0]
     if runtime_stats:
         raise RuntimeError(
-            f"expected exactly one measured runtime profile in {stats_path}, "
-            f"found {len(profiles)}"
+            f"expected exactly one measured runtime profile in {stats_path}, found {len(profiles)}"
         )
 
     def parameter_inventory(profile: dict[str, Any]) -> tuple[Any, tuple[Any, ...]]:
@@ -279,9 +301,7 @@ def _workload_stats_args(
 ) -> dict[str, Any]:
     """Build an exact static or measured-runtime workload identity."""
 
-    args = _normalize_subblock_stats_args(
-        dict(mip_config.get("subblock_stats_args") or {})
-    )
+    args = _normalize_subblock_stats_args(dict(mip_config.get("subblock_stats_args") or {}))
     runtime_globally_enabled = bool(
         dict(vllm_stats_config.get("runtime_stats") or {}).get("enabled", False)
     )
@@ -353,9 +373,7 @@ def _teacher_costs(
         )
     else:
         gathered = gather_multi_layer_puzzle_metrics(scoring_dir)
-    stats = filter_subblock_stats_by_args(
-        json.loads(stats_path.read_text()), runtime_args
-    )
+    stats = filter_subblock_stats_by_args(json.loads(stats_path.read_text()), runtime_args)
     _add_block_stats_to_gathered_metrics(gathered, stats)
     totals: dict[str, float] = {
         key: float(value)
@@ -363,9 +381,7 @@ def _teacher_costs(
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
     teachers = [
-        row
-        for row in gathered.values()
-        if isinstance(row, dict) and row.get("is_teacher") is True
+        row for row in gathered.values() if isinstance(row, dict) and row.get("is_teacher") is True
     ]
     if not teachers:
         raise RuntimeError(f"no teacher blocks were reconstructed from {scoring_dir}")
@@ -384,9 +400,7 @@ def _teacher_summary_costs(
 
     summary = {str(key): float(value) for key, value in base_costs.items()}
     for workload, costs in workload_costs.items():
-        summary.update(
-            {f"{key}@{workload}": float(value) for key, value in costs.items()}
-        )
+        summary.update({f"{key}@{workload}": float(value) for key, value in costs.items()})
     return summary
 
 
@@ -412,13 +426,9 @@ def _verify_direct_constraints(
             minimum, maximum = None, bound
         value = total_costs[key]
         if minimum is not None and value < minimum and not math.isclose(value, minimum):
-            raise RuntimeError(
-                f"MIP constraint violated for {context}: {key}={value} < {minimum}"
-            )
+            raise RuntimeError(f"MIP constraint violated for {context}: {key}={value} < {minimum}")
         if maximum is not None and value > maximum and not math.isclose(value, maximum):
-            raise RuntimeError(
-                f"MIP constraint violated for {context}: {key}={value} > {maximum}"
-            )
+            raise RuntimeError(f"MIP constraint violated for {context}: {key}={value} > {maximum}")
 
 
 def _sliced_teacher_baseline(scoring_dir: Path, objective: str) -> float:
@@ -507,9 +517,7 @@ def main() -> None:
         depth_granularity=depth_granularity,
     )
     if args.parameter_ratio or args.latency_ratio:
-        raise ValueError(
-            "--parameter-ratio/--latency-ratio were removed; configure mip.runs"
-        )
+        raise ValueError("--parameter-ratio/--latency-ratio were removed; configure mip.runs")
     if not named_profiles:
         raise ValueError("mip.runs must compile to at least one concrete solve")
     input_artifact_identity = artifact_snapshot_identity(
@@ -525,8 +533,7 @@ def main() -> None:
     )
     active_manifest_path = puzzle_dir / "mip" / "active_profiles.json"
     profile_identities = {
-        profile.profile_id: stable_hash(profile, prefix="mip_profile")
-        for profile in named_profiles
+        profile.profile_id: stable_hash(profile, prefix="mip_profile") for profile in named_profiles
     }
     _atomic_json(
         active_manifest_path,
@@ -539,7 +546,8 @@ def main() -> None:
             "profile_identities": profile_identities,
         },
     )
-    uses_runtime = any(profile.required_workloads for profile in named_profiles)
+    required_workloads = _required_workload_configs(mip_config, named_profiles)
+    uses_runtime = bool(required_workloads)
     objectives = tuple(dict.fromkeys(profile.objective.metric for profile in named_profiles))
 
     teacher_width = max(widths)
@@ -575,7 +583,7 @@ def main() -> None:
         )
         workload_profiles = {}
         workload_teacher_costs = {}
-        for workload_name, workload_args in dict(mip_config.get("workloads") or {}).items():
+        for workload_name, workload_args in required_workloads.items():
             normalized_args = _workload_stats_args(
                 mip_config,
                 vllm_stats_config,
@@ -612,9 +620,7 @@ def main() -> None:
             },
         }
 
-    formula_teacher_params = int(
-        round(width_inputs[teacher_width]["teacher_costs"]["stats.num_params"])
-    )
+    formula_teacher_params = round(width_inputs[teacher_width]["teacher_costs"]["stats.num_params"])
     if formula_teacher_params != actual_teacher_params:
         raise RuntimeError(
             "full-width teacher parameter formula/checkpoint mismatch: "
@@ -646,9 +652,7 @@ def main() -> None:
     }
     teacher_totals.update(
         {
-            workload: {
-                key.removeprefix("stats."): value for key, value in costs.items()
-            }
+            workload: {key.removeprefix("stats."): value for key, value in costs.items()}
             for workload, costs in teacher_inputs["workload_teacher_costs"].items()
         }
     )
@@ -721,9 +725,9 @@ def main() -> None:
                 "removed_sublayers": 0,
                 "status": "reference",
                 "score": width_inputs[teacher_width]["sliced_teacher_baselines"][objective],
-                "sliced_teacher_baseline": width_inputs[teacher_width][
-                    "sliced_teacher_baselines"
-                ][objective],
+                "sliced_teacher_baseline": width_inputs[teacher_width]["sliced_teacher_baselines"][
+                    objective
+                ],
                 "total_costs": _teacher_summary_costs(
                     width_inputs[teacher_width]["teacher_costs"],
                     width_inputs[teacher_width]["workload_teacher_costs"],
@@ -756,10 +760,7 @@ def main() -> None:
                 depth = depth_selection.total
                 forced_removals = _forced_removals_for_depth(selected, depth_selection)
                 scenario_root = (
-                    profile_root
-                    / "scenarios"
-                    / f"width-{width:04d}"
-                    / depth_selection.slug
+                    profile_root / "scenarios" / f"width-{width:04d}" / depth_selection.slug
                 )
                 solve_identity = _scenario_solve_identity(
                     run_profile,
@@ -795,9 +796,7 @@ def main() -> None:
                 mip_cfg.solver_backend = run_profile["solver"].backend
                 mip_cfg.num_solutions = run_profile["solver"].num_solutions
                 mip_cfg.min_hamming_distance = run_profile["solver"].min_hamming_distance
-                mip_cfg.max_seconds_per_solution = run_profile[
-                    "solver"
-                ].max_seconds_per_solution
+                mip_cfg.max_seconds_per_solution = run_profile["solver"].max_seconds_per_solution
                 if run_profile["mip_constraints"] is None:
                     mip_cfg.human_constraints = human_constraints
                     mip_cfg.pop("mip_constraints", None)
@@ -813,9 +812,7 @@ def main() -> None:
                 }
                 mip_cfg.axes_default = run_profile["axes_default"]
                 mip_cfg.axis_options = dict(run_profile["axis_options"])
-                mip_cfg.num_homogeneous_solutions = run_profile[
-                    "num_homogeneous_solutions"
-                ]
+                mip_cfg.num_homogeneous_solutions = run_profile["num_homogeneous_solutions"]
                 mip_cfg.homogeneous_rank_by = run_profile["homogeneous_rank_by"]
                 mip_cfg.homogeneous_constraint_weights = run_profile[
                     "homogeneous_constraint_weights"
@@ -856,7 +853,7 @@ def main() -> None:
                             for key, value in (solution.get("total_costs") or {}).items()
                             if isinstance(value, (int, float)) and not isinstance(value, bool)
                         }
-                        parameter_count = int(round(total_costs["stats.num_params"]))
+                        parameter_count = round(total_costs["stats.num_params"])
                         chosen_count = len(solution.get("chosen_replacements") or [])
                         solver_objective_sum = _solution_score(solution, objective)
                         baseline = float(inputs["sliced_teacher_baselines"][objective])
@@ -915,17 +912,10 @@ def main() -> None:
                         scenario["solutions"].append(record)
                     scenario.update(scenario["solutions"][0])
                 scenario["solution_count"] = len(scenario["solutions"])
-                homogeneous_path = solution_path.with_name(
-                    "homogeneous_solutions.json"
-                )
-                if (
-                    run_profile["num_homogeneous_solutions"] != 0
-                    and homogeneous_path.is_file()
-                ):
+                homogeneous_path = solution_path.with_name("homogeneous_solutions.json")
+                if run_profile["num_homogeneous_solutions"] != 0 and homogeneous_path.is_file():
                     homogeneous_records = []
-                    for index, homogeneous in enumerate(
-                        json.loads(homogeneous_path.read_text())
-                    ):
+                    for index, homogeneous in enumerate(json.loads(homogeneous_path.read_text())):
                         homogeneous_costs = {
                             str(key): float(value)
                             for key, value in homogeneous["total_costs"].items()
@@ -945,19 +935,12 @@ def main() -> None:
                         record = {
                             "rank": index,
                             "kind": "homogeneous",
-                            "score": objective_sum
-                            - (chosen_count - 1) * baseline,
+                            "score": objective_sum - (chosen_count - 1) * baseline,
                             "solver_objective_sum": objective_sum,
                             "total_costs": homogeneous_costs,
-                            "parameter_count": int(
-                                round(homogeneous_costs["stats.num_params"])
-                            ),
-                            "homogeneous_assignment": homogeneous[
-                                "homogeneous_assignment"
-                            ],
-                            "constraint_closeness": homogeneous.get(
-                                "constraint_closeness"
-                            ),
+                            "parameter_count": round(homogeneous_costs["stats.num_params"]),
+                            "homogeneous_assignment": homogeneous["homogeneous_assignment"],
+                            "constraint_closeness": homogeneous.get("constraint_closeness"),
                             "solution_repr": homogeneous.get("solution_repr"),
                         }
                         if not args.solve_only:
@@ -967,11 +950,7 @@ def main() -> None:
                             ]
                             library = libraries[width]
                             model_config = library.create_model_config(replacements)
-                            checkpoint = (
-                                scenario_root
-                                / "checkpoints"
-                                / f"homogeneous_{index}"
-                            )
+                            checkpoint = scenario_root / "checkpoints" / f"homogeneous_{index}"
                             library.materialize_checkpoint(
                                 replacements,
                                 checkpoint,
@@ -998,9 +977,7 @@ def main() -> None:
                 _atomic_json(scenario_root / "scenario_manifest.json", scenario)
                 summary["scenarios"].append(scenario)
 
-        expected_scenarios = len(run_profile["widths"]) * len(
-            run_profile["depth_selections"]
-        )
+        expected_scenarios = len(run_profile["widths"]) * len(run_profile["depth_selections"])
         if len(summary["scenarios"]) != expected_scenarios:
             raise RuntimeError(
                 f"expected {expected_scenarios} width/depth scenarios, "

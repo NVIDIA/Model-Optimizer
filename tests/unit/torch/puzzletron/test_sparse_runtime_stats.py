@@ -1126,6 +1126,49 @@ def test_build_library_refreshes_static_stats_for_each_vllm_mode(
     assert calls == ["library", "static", "candidates"]
 
 
+def test_static_workload_stats_preserves_resolved_runtime_objects(monkeypatch):
+    pruning_mixin = object()
+    hydra_cfg = OmegaConf.create(
+        {
+            "pruning": {"activation_passes": [{"pruning_mixin": pruning_mixin}]},
+            "calc_subblock_stats": {
+                "runtime_stats": {"enabled": True},
+                "batch_sizes": [1],
+                "prefill_seq_len": 32,
+                "generation_seq_len": 8,
+            },
+        },
+        flags={"allow_objects": True},
+    )
+    calls = []
+
+    def record_static_stats(cfg):
+        calls.append(cfg)
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats.launch_calc_subblock_stats",
+        record_static_stats,
+    )
+
+    pipeline_stages._calculate_static_workload_stats(
+        {"mip": {"workloads": {"serving": {"isl": 64, "osl": 16, "batch_size": 2}}}},
+        hydra_cfg,
+    )
+
+    assert len(calls) == 1
+    selected = calls[0]
+    assert selected.pruning.activation_passes[0].pruning_mixin is pruning_mixin
+    assert selected.calc_subblock_stats.runtime_stats.enabled is False
+    assert selected.calc_subblock_stats.merge_with_existing_stats is True
+    assert selected.calc_subblock_stats.batch_sizes == [2]
+    assert selected.calc_subblock_stats.prefill_seq_len == 64
+    assert selected.calc_subblock_stats.generation_seq_len == 16
+    assert hydra_cfg.calc_subblock_stats.runtime_stats.enabled is True
+    assert hydra_cfg.calc_subblock_stats.batch_sizes == [1]
+    assert hydra_cfg.calc_subblock_stats.prefill_seq_len == 32
+    assert hydra_cfg.calc_subblock_stats.generation_seq_len == 8
+
+
 @pytest.mark.parametrize(
     "failure_source",
     ["candidate_module_import", "candidate_library_build"],
