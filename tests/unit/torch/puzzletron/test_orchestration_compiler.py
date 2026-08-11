@@ -60,7 +60,10 @@ def tmp_configs(tmp_path: Path):
                 "runner": {
                     "kind": "slurm",
                     "slurm": {"account": "test"},
-                    "execution_contract": {"repository": str(tmp_path), "venv": str(tmp_path / ".venv")},
+                    "execution_contract": {
+                        "repository": str(tmp_path),
+                        "venv": str(tmp_path / ".venv"),
+                    },
                 }
             }
         )
@@ -85,10 +88,26 @@ def tmp_configs(tmp_path: Path):
 def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
     _, _, execution_path = tmp_configs
     execution = load_execution_config(execution_path)
-    specs = resolve_stage_execution_specs(execution, ("width_importance", "vllm_stats"))
+    specs = resolve_stage_execution_specs(
+        {},
+        (
+            "width_importance",
+            "vllm_stats",
+            "depth_importance",
+            "replacement_scoring",
+            "zero_shot_evaluation",
+            "aiperf",
+        ),
+    )
     assert specs["width_importance"].strategy is ExecutionStrategy.SINGLE
     assert specs["vllm_stats"].strategy is ExecutionStrategy.SHARDED
-    assert specs["vllm_stats"].instances == 16
+    assert specs["depth_importance"].strategy is ExecutionStrategy.PERSISTENT_POOL
+    assert specs["replacement_scoring"].strategy is ExecutionStrategy.PERSISTENT_POOL
+    assert specs["zero_shot_evaluation"].strategy is ExecutionStrategy.SHARDED
+    assert specs["aiperf"].strategy is ExecutionStrategy.SHARDED
+
+    configured = resolve_stage_execution_specs(execution, ("vllm_stats",))
+    assert configured["vllm_stats"].instances == 16
 
 
 def test_compile_campaign_plan_packs_vllm_stats_instances(tmp_configs):

@@ -17,6 +17,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .artifact_import_contract import (
+    IMPORT_CAMPAIGN_MANIFEST,
+    canonical_receipt_identity,
+    imported_completion_payload,
+    imported_stage_manifest_is_complete,
+)
 from .artifact_inventory import inventory_campaign_artifacts
 from .identity import canonicalize, stable_hash
 from .manifest import StageManifest, semantic_stage_config
@@ -27,7 +33,6 @@ __all__ = ["ArtifactImportError", "DEFAULT_BUNDLES", "import_campaign_artifacts"
 
 DEFAULT_BUNDLES = ("activation", "depth", "vllm_stats", "scoring", "bypass_evidence")
 _EXECUTION_BUNDLES = frozenset(("activation", "depth", "vllm_stats", "scoring"))
-_IMPORT_MANIFEST = Path("manifests/imports/campaign_artifacts.json")
 _CAMPAIGN_ROOT_PLACEHOLDER = "<campaign-root>"
 _EXECUTION_ONLY_CONFIG_KEYS = frozenset(
     ("enabled", "execution", "micro_batch_size", "parallel", "sharding", "topology")
@@ -45,11 +50,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _canonical_json_hash(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -96,8 +96,7 @@ def _load_receipt(path: Path) -> dict[str, Any]:
     ):
         raise ArtifactImportError("source receipt is missing artifact or compatibility metadata")
     identity = payload.get("receipt_identity")
-    identity_payload = {key: value for key, value in payload.items() if key != "receipt_identity"}
-    if not isinstance(identity, str) or identity != _canonical_json_hash(identity_payload):
+    if not isinstance(identity, str) or identity != canonical_receipt_identity(payload):
         raise ArtifactImportError("source receipt identity is invalid")
     if not isinstance(payload.get("artifact_paths"), dict):
         raise ArtifactImportError("source receipt has no canonical artifact paths")
@@ -145,7 +144,9 @@ def _validate_receipt_files(
             if not source_path.is_file():
                 raise ArtifactImportError(f"missing source artifact: {relative}")
             if source_path.stat().st_size != size or _sha256(source_path) != digest:
-                raise ArtifactImportError(f"source mutation does not match receipt identity: {relative}")
+                raise ArtifactImportError(
+                    f"source mutation does not match receipt identity: {relative}"
+                )
             files.append(
                 {
                     "source": str(relative),
@@ -280,7 +281,9 @@ def _apply_granularity_evidence(
     """Fill newly explicit config selectors only from validated artifact metadata."""
 
     compatibility = receipt.get("compatibility")
-    granularities = compatibility.get("granularities", {}) if isinstance(compatibility, Mapping) else {}
+    granularities = (
+        compatibility.get("granularities", {}) if isinstance(compatibility, Mapping) else {}
+    )
     for section in (stage, "scoring"):
         target_section = target.get(section)
         if not isinstance(target_section, Mapping) or "granularity" not in target_section:
@@ -448,38 +451,15 @@ def _completion_payload(
     required_artifacts = {
         relative: [_file_record(root, relative)] for relative in sorted(relative_paths)
     }
-    payload = {
-        "version": 3,
-        "completion_kind": "imported",
-        "mode": name,
-        "width": None,
-        "depth": None,
-        "config": str(target_config_path),
-        "receipt_identity": receipt_identity,
-        "relevant_stage_config_identity": stable_hash(
-            semantic_stage_config(dict(target_config), name),
-            prefix=f"{name}_resume_cfg",
-        ),
-        "stage_manifest_semantic_identity": manifest["semantic_identity"],
-        "required_artifacts": required_artifacts,
-        "upstream_identities": {},
-        "implementation_provenance": {"imported": True},
-    }
-    payload["completion_identity"] = stable_hash(
-        {
-            "completion_kind": "imported",
-            "mode": name,
-            "width": None,
-            "depth": None,
-            "receipt_identity": receipt_identity,
-            "relevant_stage_config_identity": payload["relevant_stage_config_identity"],
-            "stage_manifest_semantic_identity": payload["stage_manifest_semantic_identity"],
-            "required_artifacts": required_artifacts,
-            "upstream_identities": {},
-        },
-        prefix=f"{name}_completion",
+    return imported_completion_payload(
+        stage_id=name,
+        target_config=str(target_config_path),
+        receipt_identity=receipt_identity,
+        expected_semantic_config=semantic_stage_config(dict(target_config), name),
+        semantic_identity=str(manifest["semantic_identity"]),
+        required_artifacts=required_artifacts,
+        stable_hash=stable_hash,
     )
-    return payload
 
 
 def _campaign_manifest_payload(
@@ -488,8 +468,10 @@ def _campaign_manifest_payload(
     selected: tuple[str, ...],
     target_config: Mapping[str, Any] | None,
     target_config_path: Path | None,
+    *,
+    include_receipt: bool = True,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "version": 1,
         "status": "complete",
         "source_campaign": str(source_root),
@@ -502,6 +484,9 @@ def _campaign_manifest_payload(
             else None
         ),
     }
+    if include_receipt:
+        payload.update(receipt_version=2, receipt=dict(receipt))
+    return payload
 
 
 def _same_file(path: Path, item: Mapping[str, Any], *, read_only: bool = False) -> bool:
@@ -543,13 +528,21 @@ def _validate_existing_destination(
     expected_campaign = _campaign_manifest_payload(
         source_root, receipt, selected, target_config, target_config_path
     )
-    campaign_manifest_path = destination / _IMPORT_MANIFEST
+    legacy_campaign = _campaign_manifest_payload(
+        source_root,
+        receipt,
+        selected,
+        target_config,
+        target_config_path,
+        include_receipt=False,
+    )
+    campaign_manifest_path = destination / IMPORT_CAMPAIGN_MANIFEST
     _reject_symlink_ancestors(campaign_manifest_path, label="destination import manifest")
     try:
         actual_campaign = json.loads(campaign_manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ArtifactImportError(f"conflicting destination: {destination}") from error
-    if actual_campaign != expected_campaign:
+    if actual_campaign not in (expected_campaign, legacy_campaign):
         raise ArtifactImportError(f"conflicting destination: {destination}")
     _validate_payload_files(destination, plans, read_only=True)
     for name, manifest in manifests.items():
@@ -561,7 +554,19 @@ def _validate_existing_destination(
             raise ArtifactImportError(f"conflicting destination manifest: {path}") from error
         if current != manifest:
             raise ArtifactImportError(f"conflicting destination manifest: {path}")
-        if name in _EXECUTION_BUNDLES and target_config is not None and target_config_path is not None:
+        if (
+            name in _EXECUTION_BUNDLES
+            and target_config is not None
+            and target_config_path is not None
+        ):
+            if not imported_stage_manifest_is_complete(
+                destination,
+                name,
+                current,
+                expected_semantic_config=semantic_stage_config(dict(target_config), name),
+                stable_hash=stable_hash,
+            ):
+                raise ArtifactImportError(f"invalid imported stage contract: {name}")
             expected_completion = _completion_payload(
                 destination,
                 name,
@@ -634,9 +639,13 @@ def _prepare_transaction_metadata(
             )
             _write_json(transaction_root / f"manifests/completions/{name}.json", completion)
     _write_json(
-        transaction_root / _IMPORT_MANIFEST,
+        transaction_root / IMPORT_CAMPAIGN_MANIFEST,
         _campaign_manifest_payload(
-            source_root, receipt, selected, target_config, target_config_path
+            source_root,
+            receipt,
+            selected,
+            target_config,
+            target_config_path,
         ),
     )
 
@@ -796,6 +805,18 @@ def import_campaign_artifacts(
             target_config,
             config_path,
         )
+        if target_config is not None and config_path is not None:
+            for name in selected:
+                if name not in _EXECUTION_BUNDLES:
+                    continue
+                if not imported_stage_manifest_is_complete(
+                    transaction_root,
+                    name,
+                    manifests[name],
+                    expected_semantic_config=semantic_stage_config(target_config, name),
+                    stable_hash=stable_hash,
+                ):
+                    raise ArtifactImportError(f"invalid imported stage contract: {name}")
         _validate_payload_files(transaction_root, plans, read_only=True)
         _recompute_source_receipt(source, receipt)
     except BaseException:

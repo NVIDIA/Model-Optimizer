@@ -34,12 +34,12 @@ class MetricSpec:
 
 @dataclass(frozen=True)
 class Finding:
-    """One non-blocking warning derived from report evidence."""
+    """One evidence-derived advisory warning or correctness error."""
 
     stage: str
     message: str
     evidence: Mapping[str, Any]
-    severity: Literal["warning"] = "warning"
+    severity: Literal["warning", "error"] = "warning"
 
 
 def _allowed(left: float, right: float, spec: MetricSpec) -> float:
@@ -72,7 +72,7 @@ def equivalence_findings(
     group_keys: Sequence[str],
     method_key: str = "method",
 ) -> list[Finding]:
-    """Warn when paired methods differ beyond a metric's equivalence tolerance."""
+    """Report a correctness error when equivalent methods disagree beyond tolerance."""
 
     findings = []
     for group, values in _groups(rows, group_keys).items():
@@ -111,6 +111,7 @@ def equivalence_findings(
                         "delta": delta,
                         "tolerance": allowed,
                     },
+                    severity="error",
                 )
             )
     return findings
@@ -126,7 +127,12 @@ def ranking_findings(
     group_keys: Sequence[str],
     method_key: str = "method",
 ) -> list[Finding]:
-    """Warn when a preferred ranking is worse than a comparison beyond tolerance."""
+    """Report a quality warning when a preferred ranking is worse than a control.
+
+    The warning evaluates the ranking heuristic, not whether the compared model
+    transformations are equivalent. A caller may still promote it through a
+    stricter qualification policy.
+    """
 
     findings = []
     for group, values in _groups(rows, group_keys).items():

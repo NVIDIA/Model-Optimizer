@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tests for width-slice equivalence evidence and stage integration."""
+
 from __future__ import annotations
 
 import json
@@ -14,7 +16,6 @@ import torch
 import transformers
 from transformers import LlamaForCausalLM
 
-from examples.puzzletron.main import _stage_output_patterns
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
     LlamaModelDescriptor,
 )
@@ -33,6 +34,7 @@ from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence import (
 )
 from modelopt.torch.puzzletron.identity import canonicalize, stable_hash
 from modelopt.torch.puzzletron.manifest import StageManifest
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_output_patterns
 from modelopt.torch.puzzletron.stages import DEFAULT_HANDLERS
 from modelopt.torch.puzzletron.stages import diagnostics as diagnostics_stage_module
 from modelopt.torch.puzzletron.stages.diagnostics import width_slice_equivalence_stage
@@ -697,7 +699,7 @@ def test_stage_is_reachable_from_the_generic_handler_registry():
 
 
 def test_dag_resume_inventories_manifest_summary_and_every_case():
-    assert _stage_output_patterns({}, "slicing_sanity") == (
+    assert stage_output_patterns({}, "slicing_sanity") == (
         "artifacts/width_slice_equivalence/manifest.json",
         "artifacts/width_slice_equivalence/summary.json",
         "artifacts/width_slice_equivalence/cases/**/*.json",
@@ -708,7 +710,7 @@ def test_dag_resume_inventories_manifest_summary_and_every_case():
 def test_dag_resume_inventories_distributed_parent_sweep_summary():
     config = {"slicing_sanity": {"backend": "distributed_parent_sweep"}}
 
-    assert _stage_output_patterns(config, "slicing_sanity") == (
+    assert stage_output_patterns(config, "slicing_sanity") == (
         "artifacts/slicing_sanity/summary.json",
     )
 
@@ -944,7 +946,7 @@ def test_stage_selects_generic_multimodal_processor_collator_loader(
     assert selected["data_layout"] == "fixed"
 
 
-def test_distributed_slicing_verdict_warns_without_failing_stage(
+def test_distributed_slicing_verdict_fails_closed_and_normalizes_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     summary_path = tmp_path / "artifacts" / "slicing_sanity" / "summary.json"
@@ -980,7 +982,9 @@ def test_distributed_slicing_verdict_warns_without_failing_stage(
         manifest,
     )
 
-    assert result.status == "success"
-    assert manifest.status == "success"
+    assert result.status == "failed"
+    assert manifest.status == "failed"
     assert manifest.outputs["passed"] is False
-    assert manifest.outputs["findings"] == [finding]
+    assert manifest.outputs["verdict"] == "failed"
+    assert manifest.outputs["blocking"] is True
+    assert manifest.outputs["findings"] == [{**finding, "severity": "error"}]

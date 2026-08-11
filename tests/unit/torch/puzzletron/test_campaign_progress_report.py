@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron campaign progress report generation."""
+
 import json
 from pathlib import Path
 
@@ -70,6 +72,35 @@ def test_pipeline_state_uses_artifacts_and_completed_takes_precedence(tmp_path: 
     assert _pipeline_state(tmp_path, bypass, {"bypass": {"enabled": False}}) == "completed"
 
 
+def test_pipeline_state_uses_registry_enablement(tmp_path: Path):
+    tokenize_data = STAGE_REGISTRY["tokenize_data"]
+    width_sanity = STAGE_REGISTRY["width_sanity"]
+
+    assert _pipeline_state(tmp_path, tokenize_data, {}) == "disabled"
+    assert (
+        _pipeline_state(
+            tmp_path,
+            width_sanity,
+            {
+                "sort_sanity": {"enabled": False},
+                "width_sanity": {"enabled": True},
+            },
+        )
+        == "disabled"
+    )
+    assert (
+        _pipeline_state(
+            tmp_path,
+            width_sanity,
+            {
+                "sort_sanity": {"enabled": True},
+                "width_sanity": {"enabled": True},
+            },
+        )
+        == "pending"
+    )
+
+
 def _disabled_bypass_report(tmp_path: Path) -> str:
     config = {
         "display_name": "Example Experiment",
@@ -101,7 +132,7 @@ def test_report_has_clean_header_and_completed_required_artifacts(tmp_path: Path
     assert "<span class='required-node'>Required</span>" in document
     assert "<span class='optional-node'>Optional</span>" in document
     assert "dagre.min.js" in document
-    assert 'data-source="convert" data-target="tokenize_data"' in document
+    assert 'data-source="convert" data-target="vllm_stats"' in document
 
 
 def test_pipeline_dag_only_contains_configured_stages(tmp_path: Path):
@@ -186,11 +217,15 @@ def test_progress_report_renders_canonical_sort_sanity_metrics(tmp_path: Path):
     assert 'data-stage="sort_sanity" data-status="completed"' in document
 
 
-def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: Path):
+def test_sort_sanity_failure_renders_blocking_failure_and_failed_dag_node(tmp_path: Path):
     message = "sorted teacher loss drift exceeded tolerance"
     _write(
         tmp_path / "manifests/sort_sanity.json",
-        {"config": {"sort_sanity": {"enabled": True}}},
+        {
+            "status": "failed",
+            "config": {"sort_sanity": {"enabled": True}},
+            "outputs": {"passed": False, "verdict": "failed", "blocking": True},
+        },
     )
     _write(
         tmp_path / "artifacts/sort_sanity/summary.json",
@@ -201,7 +236,7 @@ def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: P
             "findings": [
                 {
                     "stage": "sort_sanity",
-                    "severity": "warning",
+                    "severity": "error",
                     "message": message,
                     "evidence": {"metric": "lm_loss"},
                 }
@@ -212,10 +247,10 @@ def test_sort_sanity_failure_renders_warning_without_failed_dag_node(tmp_path: P
     result = generate_campaign_progress_report(tmp_path)
     document = Path(result["html"]).read_text(encoding="utf-8")
 
-    assert "Equivalence gate: warning" in document
+    assert "Equivalence gate: failed (blocking correctness)" in document
     assert "warning-value" in document
     assert f"data-warning='{message}'" in document
-    assert 'data-stage="sort_sanity" data-status="completed"' in document
+    assert 'data-stage="sort_sanity" data-status="failed"' in document
 
 
 def test_progress_report_uses_pending_instead_of_transient_running_state(tmp_path: Path):
@@ -257,18 +292,36 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
     _write(
         tmp_path / "artifacts/width_sanity/summary.json",
         {
+            "passed": False,
             "rows": [
                 {**common, "method": "sorted", "raw_replacement_loss": 1.2},
                 {**common, "method": "original", "raw_replacement_loss": 1.1},
                 {**common, "method": "reverse", "raw_replacement_loss": 1.3},
             ],
-            "findings": [],
+            "findings": [
+                {
+                    "stage": "width_sanity",
+                    "message": "sorted ranking is worse than original.",
+                    "severity": "warning",
+                    "evidence": {
+                        "group": {
+                            "axis": "arbitrary_axis",
+                            "layer_idx": 3,
+                            "target_value": 8,
+                        },
+                        "metric": "raw_replacement_loss",
+                        "preferred_method": "sorted",
+                        "comparison_method": "original",
+                    },
+                }
+            ],
         },
     )
     message = "sorted and physical differ for raw_replacement_loss."
     _write(
         tmp_path / "artifacts/slicing_sanity/summary.json",
         {
+            "passed": False,
             "rows": [
                 {**common, "method": "sorted", "raw_replacement_loss": 1.2},
                 {**common, "method": "physical", "raw_replacement_loss": 1.0},
@@ -277,7 +330,7 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
                 {
                     "stage": "slicing_sanity",
                     "message": message,
-                    "severity": "warning",
+                    "severity": "error",
                     "evidence": {
                         "group": {
                             "axis": "arbitrary_axis",
@@ -296,6 +349,11 @@ def test_width_and_slicing_findings_render_on_affected_cells(tmp_path: Path):
     result = generate_campaign_progress_report(tmp_path)
     document = Path(result["html"]).read_text(encoding="utf-8")
 
+    assert "Width ranking: quality warning" in document
+    assert "Dynamic/physical equivalence: failed (blocking correctness)" in document
+    assert "it does not mean the dynamic and physical implementations disagree" in document
+    assert "Campaign qualification may still require the ranking warning to pass" in document
+    assert 'data-stage="slicing_sanity" data-status="failed"' in document
     assert "class='warning-cell'" in document
     assert "class='warning-value'" in document
     assert "tabindex='0'" in document
@@ -643,6 +701,22 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
     positions = [document.index(f"value='{metric}'") for metric in ordered]
     assert positions == sorted(positions)
     assert "unadjusted hidden-state mean squared error" in document
+
+
+def test_activation_diagnostic_empty_metrics_keep_gate_outcomes_visible():
+    section = report_module._activation_diagnostic_section(
+        {
+            "rows": [{"axis": "ffn_intermediate", "method": "sorted"}],
+            "width_present": True,
+            "width_passed": False,
+            "slicing_present": True,
+            "slicing_passed": False,
+        }
+    )
+
+    assert "Width ranking: quality warning" in section
+    assert "Dynamic/physical equivalence: failed (blocking correctness)" in section
+    assert "no plottable numeric metrics" in section
 
 
 def test_progress_report_recovers_sort_table_from_compact_reuse_summary(tmp_path: Path):

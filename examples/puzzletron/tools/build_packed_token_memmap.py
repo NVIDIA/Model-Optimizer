@@ -76,7 +76,11 @@ def _worker(task: dict[str, Any]) -> dict[str, Any]:
                 if (row_index - start) % 16 == 0 or row_index == stop:
                     _atomic_json(
                         progress_dir / f"worker_{worker:04d}.json",
-                        {"worker": worker, "rows_complete": row_index - start, "rows_total": stop - start},
+                        {
+                            "worker": worker,
+                            "rows_complete": row_index - start,
+                            "rows_total": stop - start,
+                        },
                     )
 
     batch_size = int(task["tokenize_batch_size"])
@@ -113,14 +117,45 @@ def main() -> None:
     parser.add_argument("--trust-remote-code", action="store_true")
     args = parser.parse_args()
 
+    for option, value in (
+        ("--num-samples", args.num_samples),
+        ("--seq-length", args.seq_length),
+        ("--workers", args.workers),
+        ("--tokenize-batch-size", args.tokenize_batch_size),
+    ):
+        if value <= 0:
+            parser.error(f"{option} must be positive")
+
     output = args.output.resolve()
     metadata_path = output.with_suffix(output.suffix + ".json")
     expected_bytes = args.num_samples * (args.seq_length + 1) * np.dtype(np.uint32).itemsize
-    if metadata_path.is_file():
-        metadata = json.loads(metadata_path.read_text())
-        if metadata.get("status") == "complete" and output.stat().st_size == expected_bytes:
-            print(json.dumps({"status": "reused", "output": str(output), **metadata}, indent=2))
-            return
+    workers = min(int(args.workers), int(args.num_samples))
+    metadata = {
+        "status": "complete",
+        "version": 1,
+        "dataset_path": str(Path(args.dataset_path).resolve()),
+        "tokenizer_path": str(Path(args.tokenizer_path).resolve()),
+        "split": args.split,
+        "content_field": args.content_field,
+        "num_samples": args.num_samples,
+        "seq_length": args.seq_length,
+        "shuffle_seed": args.shuffle_seed,
+        "dtype": "uint32",
+        "bytes": expected_bytes,
+        "workers": workers,
+    }
+    try:
+        existing_metadata = json.loads(metadata_path.read_text())
+        reusable = (
+            existing_metadata == metadata
+            and output.is_file()
+            and output.stat().st_size == expected_bytes
+        )
+    except (OSError, ValueError):
+        reusable = False
+    if reusable:
+        print(json.dumps({"status": "reused", "output": str(output), **metadata}, indent=2))
+        return
 
     output.parent.mkdir(parents=True, exist_ok=True)
     progress_dir = output.parent / f".{output.name}.progress"
@@ -128,7 +163,6 @@ def main() -> None:
     with output.open("wb") as stream:
         stream.truncate(expected_bytes)
 
-    workers = min(int(args.workers), int(args.num_samples))
     tasks = []
     for worker in range(workers):
         start = args.num_samples * worker // workers
@@ -151,20 +185,6 @@ def main() -> None:
             print(json.dumps(result, sort_keys=True), flush=True)
     if sum(int(result["rows"]) for result in results) != args.num_samples:
         raise RuntimeError("packed-token workers did not cover every requested row")
-    metadata = {
-        "status": "complete",
-        "version": 1,
-        "dataset_path": str(Path(args.dataset_path).resolve()),
-        "tokenizer_path": str(Path(args.tokenizer_path).resolve()),
-        "split": args.split,
-        "content_field": args.content_field,
-        "num_samples": args.num_samples,
-        "seq_length": args.seq_length,
-        "shuffle_seed": args.shuffle_seed,
-        "dtype": "uint32",
-        "bytes": expected_bytes,
-        "workers": workers,
-    }
     _atomic_json(metadata_path, metadata)
     print(json.dumps(metadata, indent=2, sort_keys=True))
 

@@ -8,7 +8,7 @@ campaign report.
 
 ## Table of Contents
 
-- [End-to-end tested models](#end-to-end-tested-models)
+- [Campaign reports](#campaign-reports)
 - [Setup wizard](#setup-wizard)
 - [Installation](#installation)
 - [Run with an agent](#run-with-an-agent)
@@ -18,23 +18,28 @@ campaign report.
 - [Online evaluation and downstream stages](#online-evaluation-and-downstream-stages)
 - [Reports](#reports)
 
-## End-to-end tested models
+## Campaign reports
 
-The configs below are the exact current-code entry points for the completed
-campaigns. Each verified report is a self-contained HTML file that embeds all
-sanity-check outputs, stage manifests, and evaluation results; they can be
-100s of MB. Download them to disk and open locally rather than previewing in a
-browser tab.
+The reports below retain their original run data from development snapshots.
+The [campaign report catalog](docs/campaign_reports.md) records each report's
+producer state, reproduction and support status, metadata origin, relationship
+to current configuration files, and known limitations. An entry marked as not
+reproduced is not a current model-support claim. Detailed run facts remain in
+the retained reports.
 
-The most important section in every report is **Zero-shot Evaluation**, which
-compares the pruned candidate solutions directly against the full teacher model
-across multiple benchmarks. Use that section first to assess accuracy trade-offs
-before inspecting the serving-performance or sanity-check sections.
+Each report is a self-contained HTML file that embeds sanity-check outputs,
+stage manifests, and evaluation results; it can be 100s of MB. Download it to
+disk and open it locally rather than previewing it in a browser tab.
 
-| Model | Hugging Face model | Full experiment config | Verified report |
+Each report's **Zero-shot Evaluation** section compares the pruned candidate
+solutions directly against the full teacher model across multiple benchmarks.
+Interpret those results together with the reproduction status and unresolved
+correctness findings recorded in the campaign report catalog.
+
+| Model | Hugging Face model | Current configuration reference | Campaign report |
 |---|---|---|---|
 | Nemotron-3 Nano 30B-A3B | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | [default.yaml](configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml) | [HTML report](reports/nemotron3_nano_30b_a3b.html) |
-| Qwen3p5_9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
+| Qwen3.5-9B | `Qwen/Qwen3.5-9B` | [default.yaml](configs/families/qwen3_5/qwen3p5_9b/runs/default.yaml) | [HTML report](reports/qwen3p5_9b.html) |
 
 ## Setup wizard
 
@@ -476,8 +481,7 @@ python examples/puzzletron/main.py \
   --gpus-per-node 8
 ```
 
-The authoritative dependencies and enabled-stage rules live in
-[`stages/graph.py`](../../modelopt/torch/puzzletron/stages/graph.py).
+The dependency-free [`StageSpec` registry](../../modelopt/torch/puzzletron/stages/graph.py) is the authoritative contract for every public stage's identity, dependencies, enablement, semantic config sections, and static completion artifacts. Add or change those properties there. Default execution strategies remain scheduler-specific and live in the [orchestration compiler](../../modelopt/torch/puzzletron/orchestration/compiler.py); handlers, scheduler adapters, mesh resolution, and heavyweight artifact validators remain separate runtime concerns.
 
 | Stage | Purpose |
 |---|---|
@@ -488,7 +492,7 @@ The authoritative dependencies and enabled-stage rules live in
 | `width_importance` | Collect activation-based rankings for every enabled width axis. |
 | `sort` | Reorder the teacher so nested prefixes implement ranked width choices. |
 | `sort_sanity` | Check that sorting preserves teacher outputs. |
-| `width_sanity` | Compare ranked, random, and reverse slices on representative layers. |
+| `width_sanity` | Compare ranked, original-order, and reverse slices on representative layers. |
 | `slicing_sanity` | Verify dynamic slicing against physical materialization. |
 | `bypass_sanity` | Overfit small local-distillation cases before production bypass. |
 | `bypass` | Train nested replacement blocks across the configured search space. |
@@ -500,6 +504,27 @@ The authoritative dependencies and enabled-stage rules live in
 | `global_distillation_sanity` | Overfit the selected global student as a correctness check. |
 | `global_distillation` | Distill the selected architecture at the configured production scale. |
 | `post_distillation_evaluation` | Evaluate the final distilled checkpoint. |
+
+## Interpret width sanity results
+
+Puzzletron separates implementation correctness from ranking quality:
+
+- Sort and slicing equivalence failures are correctness errors and always fail
+  their stages.
+- A width-ranking miss means the activation-sorted candidate underperformed an
+  original or reverse control. It is a quality warning by default.
+
+To also fail a sanity stage on ranking-quality warnings, enable strict warning
+handling:
+
+```yaml
+sanity:
+  fail_on_warnings: true
+```
+
+See [Sorting, width ranking, and slicing sanity](docs/sanity_validation.md) for
+the slicing mental model, measured metrics, comparison controls, tolerances,
+worked example, and qualification guidance.
 
 Independent DAG branches may run concurrently when they have disjoint writers.
 Long-running stages should resume their durable checkpoints or immutable shards

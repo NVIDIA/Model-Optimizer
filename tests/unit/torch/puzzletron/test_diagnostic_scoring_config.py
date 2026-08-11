@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 import examples.puzzletron.run_axis_diagnostic_worker as axis_worker
@@ -12,11 +14,6 @@ from examples.puzzletron.run_axis_diagnostic_worker import (
     _hidden_widths,
     _validate_worker_topology,
     _worker_config,
-)
-from modelopt.torch.puzzletron.diagnostics.sanity_verdict import (
-    SanityVerdict,
-    complete_sanity_stage,
-    finding_from_message,
 )
 from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.stages import diagnostics
@@ -100,24 +97,168 @@ def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separa
     )["passed"]
 
 
-def test_failed_sort_verdict_completes_manifest_with_warning(tmp_path: Path):
+def test_sort_equivalence_summary_records_blocking_drift(tmp_path: Path):
+    scoring_output_dir = tmp_path / "scoring"
+    scoring_output_dir.mkdir()
+    (scoring_output_dir / "teacher.json").write_text(
+        json.dumps({"lm_loss": {"avg": 1.0}}), encoding="utf-8"
+    )
+    (scoring_output_dir / "sliced_teacher.json").write_text(
+        json.dumps({"lm_loss": {"avg": 1.25}}), encoding="utf-8"
+    )
+    summary_path = tmp_path / "summary.json"
+
+    diagnostics._write_sort_equivalence_summary(
+        teacher_dir=tmp_path / "teacher",
+        sorted_dir=tmp_path / "sorted",
+        reverse_dir=tmp_path / "reverse",
+        scoring_output_dir=scoring_output_dir,
+        reverse_output_dir=None,
+        summary_path=summary_path,
+        table_path=tmp_path / "table.md",
+        metric="lm_loss",
+        include_reverse=False,
+        tolerance=0.01,
+        reverse_tolerance=0.01,
+    )
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["passed"] is False
+    assert summary["delta"] == 0.25
+    assert summary["findings"][0]["stage"] == "sort_sanity"
+    assert summary["findings"][0]["severity"] == "error"
+    assert summary["verdict"] == "failed"
+
+
+def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(
+    monkeypatch, tmp_path: Path
+):
     config = {"experiment": {"dir": str(tmp_path)}}
     manifest = StageManifest(stage="sort_sanity", config=config)
-    finding = finding_from_message(
-        stage="sort_sanity",
-        message="sorted teacher drift exceeded tolerance",
+    summary_path = tmp_path / "artifacts" / "sort_sanity" / "summary.json"
+    summary_path.parent.mkdir(parents=True)
+    (tmp_path / "manifests").mkdir()
+    finding = {
+        "stage": "sort_sanity",
+        "message": "sorted teacher drift too large",
+        "severity": "error",
+    }
+    summary_path.write_text(
+        json.dumps(
+            {
+                "passed": False,
+                "metric": "lm_loss",
+                "delta": 0.25,
+                "reverse_delta": 0.0,
+                "findings": [finding],
+            }
+        ),
+        encoding="utf-8",
+    )
+    barriers = []
+    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(diagnostics.dist, "is_master", lambda: False)
+    monkeypatch.setattr(diagnostics.dist, "barrier", lambda: barriers.append("barrier"))
+    monkeypatch.setattr(diagnostics.dist, "broadcast", lambda value, src=0: value)
+    monkeypatch.setattr(
+        diagnostics,
+        "_write_sort_equivalence_summary",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("non-master wrote summary")),
     )
 
-    result = complete_sanity_stage(
+    result = diagnostics._finalize_sort_equivalence_stage(
         config,
         manifest,
-        verdict=SanityVerdict(passed=False, findings=[finding]),
+        teacher_dir=tmp_path / "teacher",
+        sorted_dir=tmp_path / "sorted",
+        reverse_dir=tmp_path / "reverse",
+        scoring_output_dir=tmp_path / "scoring",
+        reverse_output_dir=None,
+        summary_path=summary_path,
+        table_path=summary_path.with_name("table.md"),
+        metric="lm_loss",
+        include_reverse=False,
+        tolerance=0.01,
+        reverse_tolerance=0.01,
     )
 
-    assert result.status == "success"
-    assert manifest.status == "success"
-    assert manifest.outputs["passed"] is False
-    assert manifest.outputs["verdict"] == "warning"
+    assert result.status == "failed"
+    assert barriers == ["barrier", "barrier"]
+    assert manifest.outputs["verdict"] == "failed"
+    assert manifest.outputs["delta"] == 0.25
+    assert manifest.outputs["findings"] == [finding]
+
+
+@pytest.mark.parametrize("is_master", [True, False])
+def test_sort_equivalence_propagates_master_write_failure(
+    monkeypatch, tmp_path: Path, is_master: bool
+):
+    barriers = []
+    write_calls = []
+    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(diagnostics.dist, "is_master", lambda: is_master)
+    monkeypatch.setattr(diagnostics.dist, "barrier", lambda: barriers.append("barrier"))
+    monkeypatch.setattr(
+        diagnostics.dist,
+        "broadcast",
+        lambda value, src=0: value or {"type": "ValueError", "message": "missing metric"},
+    )
+
+    def fail_write(**_kwargs):
+        write_calls.append("write")
+        raise ValueError("missing metric")
+
+    monkeypatch.setattr(
+        diagnostics,
+        "_write_sort_equivalence_summary",
+        fail_write,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="summary write failed on the master rank: ValueError: missing metric",
+    ):
+        diagnostics._finalize_sort_equivalence_stage(
+            {"experiment": {"dir": str(tmp_path)}},
+            StageManifest(stage="sort_sanity"),
+            teacher_dir=tmp_path / "teacher",
+            sorted_dir=tmp_path / "sorted",
+            reverse_dir=tmp_path / "reverse",
+            scoring_output_dir=tmp_path / "scoring",
+            reverse_output_dir=None,
+            summary_path=tmp_path / "summary.json",
+            table_path=tmp_path / "table.md",
+            metric="lm_loss",
+            include_reverse=False,
+            tolerance=0.01,
+            reverse_tolerance=0.01,
+        )
+
+    assert barriers == ["barrier"]
+    assert write_calls == (["write"] if is_master else [])
+
+
+def test_sort_equivalence_rejects_finalization_after_distributed_cleanup(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: False)
+
+    with pytest.raises(RuntimeError, match="active process group"):
+        diagnostics._finalize_sort_equivalence_stage(
+            {"experiment": {"dir": str(tmp_path)}},
+            StageManifest(stage="sort_sanity"),
+            teacher_dir=tmp_path / "teacher",
+            sorted_dir=tmp_path / "sorted",
+            reverse_dir=tmp_path / "reverse",
+            scoring_output_dir=tmp_path / "scoring",
+            reverse_output_dir=None,
+            summary_path=tmp_path / "summary.json",
+            table_path=tmp_path / "table.md",
+            metric="lm_loss",
+            include_reverse=False,
+            tolerance=0.01,
+            reverse_tolerance=0.01,
+        )
 
 
 def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: Path):

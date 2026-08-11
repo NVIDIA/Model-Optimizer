@@ -43,7 +43,7 @@ jobs:
       any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
       puzzletron_changed: >-
         ${{ steps.puzzletron_base.outputs.any_changed ||
-          steps.puzzletron_changed.outputs.any_changed ||
+          steps.puzzletron_changed.outputs.any_modified ||
           steps.puzzletron_non_pr.outputs.any_changed }}
     steps:
       - id: non-pr
@@ -81,7 +81,9 @@ jobs:
         with:
           files: |
             .github/workflows/unit_tests.yml
+            examples/puzzletron/**/*.html
             examples/puzzletron/**/*.json
+            examples/puzzletron/**/*.md
             examples/puzzletron/**/*.py
             examples/puzzletron/**/*.sh
             examples/puzzletron/**/*.txt
