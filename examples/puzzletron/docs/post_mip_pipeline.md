@@ -133,8 +133,10 @@ from the original candidate.
 
 ## Downstream evaluation
 
-`downstream_evaluation` shells out to `python -m lmms_eval` through
-`command_prefix`. Install the pinned evaluator into an isolated environment
+`downstream_evaluation` runs `python -m lmms_eval` as a subprocess through
+`command_prefix`. The runner passes an argument list directly and does not invoke
+a shell. Values in `command_prefix` and `extra_args` are arguments; shell syntax
+is not interpreted. Install the pinned evaluator into an isolated environment
 rather than the Puzzletron runtime environment, because `lmms-eval==0.7.2` pins
 `wandb==0.25.0` and the pinned AutoModel build requires a newer `wandb`:
 

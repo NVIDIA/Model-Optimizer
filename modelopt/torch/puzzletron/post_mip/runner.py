@@ -568,6 +568,7 @@ _LMMS_EVAL_RESERVED_EXTRA_ARG_FLAGS = frozenset(
         "--tasks",
     }
 )
+_DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 
 
@@ -700,19 +701,15 @@ def _merge_lmms_eval_model_args(settings: Mapping[str, Any], checkpoint: str) ->
                 "pipeline_parallel_size": canonical_topology["pp"],
                 "data_parallel_size": canonical_topology["dp"],
                 "enable_expert_parallel": canonical_topology["enable_expert_parallel"],
-                "distributed_executor_backend": canonical_topology[
-                    "distributed_executor_backend"
-                ],
+                "distributed_executor_backend": canonical_topology["distributed_executor_backend"],
             }
         )
-    for key in _LMMS_EVAL_MODEL_ARG_FIELDS:
+    for key in sorted(_LMMS_EVAL_MODEL_ARG_FIELDS):
         if key in settings:
             derived[key] = settings[key]
 
     if isinstance(raw, str):
-        _reject_reserved_lmms_eval_model_args(
-            _lmms_eval_model_arg_keys(raw), reserved_fields
-        )
+        _reject_reserved_lmms_eval_model_args(_lmms_eval_model_arg_keys(raw), reserved_fields)
         prefix = raw.strip().strip(",")
         suffix = _model_arg_string(derived)
         return ",".join(part for part in (prefix, suffix) if part)
@@ -820,28 +817,21 @@ def _lmms_eval_command(
     if settings.get("cache_dir") is not None:
         env.setdefault("LMMS_EVAL_HOME", str(settings["cache_dir"]))
     timeout = settings.get("timeout_seconds", settings.get("timeout"))
-    return argv, env, (float(timeout) if timeout is not None else None)
+    if timeout is None:
+        timeout = _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
+    return argv, env, float(timeout)
 
 
 def _metric_key(value: Any) -> str:
     return (
-        str(value)
-        .strip()
-        .replace(" ", "_")
-        .replace(",", "_")
-        .replace("/", "_")
-        .replace("\\", "_")
+        str(value).strip().replace(" ", "_").replace(",", "_").replace("/", "_").replace("\\", "_")
     )
 
 
 def _numeric_metrics(task_payload: Mapping[str, Any]) -> dict[str, float]:
     metrics = {}
     for metric_name, value in task_payload.items():
-        if (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-        ):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             metrics[str(metric_name)] = float(value)
     return metrics
 
@@ -914,8 +904,7 @@ def _validate_lmms_eval_completion(
     missing_results = [task for task in expected_tasks if task not in results]
     if missing_results:
         raise RuntimeError(
-            "lmms-eval result is missing configured task results: "
-            f"{sorted(missing_results)}"
+            f"lmms-eval result is missing configured task results: {sorted(missing_results)}"
         )
 
     missing_metrics = [
@@ -991,9 +980,7 @@ def _lmms_eval_output_tail(result: subprocess.CompletedProcess[str], *, max_line
     return "\n".join(sections)
 
 
-def _signal_lmms_eval_process_group(
-    process: subprocess.Popen[str], signal_number: int
-) -> None:
+def _signal_lmms_eval_process_group(process: subprocess.Popen[str], signal_number: int) -> None:
     try:
         if os.name == "posix":
             os.killpg(process.pid, signal_number)
@@ -1036,12 +1023,15 @@ def _run_lmms_eval_process(
     except subprocess.TimeoutExpired as error:
         _signal_lmms_eval_process_group(process, signal.SIGTERM)
         try:
-            stdout, stderr = process.communicate(
-                timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
-            )
+            stdout, stderr = process.communicate(timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             _signal_lmms_eval_process_group(process, signal.SIGKILL)
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=_LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired as kill_error:
+                stdout, stderr = kill_error.output, kill_error.stderr
         else:
             if _lmms_eval_process_group_exists(process):
                 _signal_lmms_eval_process_group(process, signal.SIGKILL)
@@ -1097,17 +1087,14 @@ def _downstream_evaluation(
     if result.returncode:
         tail = _lmms_eval_output_tail(result)
         raise RuntimeError(
-            f"lmms-eval failed with exit code {result.returncode}"
-            + (f": {tail}" if tail else "")
+            f"lmms-eval failed with exit code {result.returncode}" + (f": {tail}" if tail else "")
         )
     try:
         payload, result_path = _lmms_eval_result_payload(output)
     except FileNotFoundError as error:
         tail = _lmms_eval_output_tail(result)
         raise FileNotFoundError(str(error) + (f": {tail}" if tail else "")) from error
-    sample_counts = _validate_lmms_eval_completion(
-        payload, _configured_lmms_eval_tasks(settings)
-    )
+    sample_counts = _validate_lmms_eval_completion(payload, _configured_lmms_eval_tasks(settings))
     metrics = _flatten_lmms_eval_metrics(payload)
     if not metrics:
         raise RuntimeError(f"lmms-eval result has no numeric task metrics: {result_path}")
@@ -1276,8 +1263,12 @@ def run_post_mip_node_shard(
                         timeout_field = "timeout_seconds"
                     elif not isinstance(error, subprocess.TimeoutExpired):
                         timeout_field = "readiness_timeout"
-                    default_timeout = 3600 if node.node_type == "downstream_evaluation" else (
-                        600 if timeout_field == "benchmark_timeout" else 1200
+                    default_timeout = (
+                        _DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
+                        if node.node_type == "downstream_evaluation"
+                        else 600
+                        if timeout_field == "benchmark_timeout"
+                        else 1200
                     )
                     row["timeout_seconds"] = float(
                         getattr(error, "timeout", None)

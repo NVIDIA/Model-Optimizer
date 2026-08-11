@@ -227,6 +227,19 @@ def test_lmms_eval_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert timeout == 123
 
 
+def test_lmms_eval_command_uses_bounded_default_timeout(tmp_path):
+    _, _, timeout = runner._lmms_eval_command(
+        {
+            "tasks": ["ifeval"],
+            "topology": {"gpu_group_size": 1},
+        },
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    assert timeout == runner._DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
+
+
 def test_lmms_eval_command_rejects_reserved_model_args(tmp_path):
     cases = (
         ({"model": "/ckpts/wrong"}, "model"),
@@ -424,7 +437,7 @@ def test_lmms_eval_timeout_kills_stubborn_process_group(monkeypatch, tmp_path):
     assert process.communicate_timeouts == [
         7.0,
         runner._LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS,
-        None,
+        runner._LMMS_EVAL_PROCESS_CLEANUP_TIMEOUT_SECONDS,
     ]
     assert signals == [(5678, signal.SIGTERM), (5678, signal.SIGKILL)]
 
@@ -550,9 +563,7 @@ def test_downstream_evaluation_rejects_missing_configured_task(monkeypatch, tmp_
     )
 
     try:
-        runner._downstream_evaluation(
-            {"puzzle_dir": str(tmp_path)}, node, source, "execution"
-        )
+        runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
     except RuntimeError as error:
         message = str(error)
     else:
@@ -603,9 +614,7 @@ def test_downstream_evaluation_rejects_zero_sample_task(monkeypatch, tmp_path):
     )
 
     try:
-        runner._downstream_evaluation(
-            {"puzzle_dir": str(tmp_path)}, node, source, "execution"
-        )
+        runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
     except RuntimeError as error:
         message = str(error)
     else:
@@ -648,9 +657,7 @@ def test_downstream_evaluation_reports_lmms_eval_output_when_results_are_missing
     )
 
     try:
-        runner._downstream_evaluation(
-            {"puzzle_dir": str(tmp_path)}, node, source, "execution"
-        )
+        runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
     except FileNotFoundError as error:
         message = str(error)
     else:
