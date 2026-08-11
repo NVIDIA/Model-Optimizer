@@ -131,7 +131,8 @@ def build_block_prune_specs(
         and orig_intermediate
         and target_intermediate < orig_intermediate
     ):
-        assert down_proj_name is not None
+        if down_proj_name is None:
+            raise ValueError("down_proj_name is required when pruning FFN width")
         specs.append(
             FFNRemovalSpec(
                 down_proj_name, ffn_keep_mask(orig_intermediate, torch.arange(target_intermediate))
@@ -150,9 +151,12 @@ def build_block_prune_specs(
         and target_num_q > 0
         and orig_num_kv
     ):
-        assert orig_num_q is not None
-        assert o_proj_name is not None
-        assert head_dim is not None
+        if orig_num_q is None:
+            raise ValueError("orig_num_q is required when pruning attention heads")
+        if o_proj_name is None:
+            raise ValueError("o_proj_name is required when pruning attention heads")
+        if head_dim is None:
+            raise ValueError("head_dim is required when pruning attention heads")
         # Every kept KV group keeps an equal number of query heads (regular GQA).
         assert target_num_q % target_num_kv == 0, (
             f"target_num_q {target_num_q} not divisible by target_num_kv {target_num_kv}"
