@@ -227,10 +227,8 @@ For more details, see the [Megatron-Bridge conversion README](https://github.com
 
 ### Distillation Results
 
-See [examples/pruning/](../pruning/README.md#tutorials--results) for Minitron
-tutorials and retained Puzzletron v2 campaign reports. Puzzletron report status,
-configuration relationships, and known gaps are summarized in its
-[campaign report catalog](../puzzletron/docs/campaign_reports.md).
+See [examples/pruning/](../pruning/README.md#tutorials--results) for current
+Minitron tutorials and results.
 
 ## Pruning
 

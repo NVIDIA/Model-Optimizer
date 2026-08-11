@@ -1,14 +1,13 @@
 # Puzzletron v2
 
-Puzzletron searches for smaller and faster variants of a pretrained model by
-combining width and depth importance, physical slicing, measured serving costs,
-mixed-integer search, evaluation, and optional knowledge distillation. Each
-stage writes resumable artifacts and contributes to one self-contained HTML
-campaign report.
+Puzzletron v2 helps you explore model shapes and select a smaller, faster
+variant against your quality and deployment goals. Its guided setup creates a
+reproducible, resumable campaign that compares candidates and can optionally
+distill the selected model.
 
 ## Table of Contents
 
-- [Campaign reports](#campaign-reports)
+- [Start here](#start-here)
 - [Setup wizard](#setup-wizard)
 - [Installation](#installation)
 - [Run with an agent](#run-with-an-agent)
@@ -17,22 +16,16 @@ campaign report.
 - [Campaign stages](#campaign-stages)
 - [Reports](#reports)
 
-## Campaign reports
+## Start here
 
-The [campaign report catalog](docs/campaign_reports.md) records each report's
-producer state, reproduction and support status, metadata origin, relationship
-to current configuration files, and known limitations. An entry marked as not
-reproduced is not a current model-support claim. Detailed run facts remain in
-the retained reports.
-
-Each report is a self-contained HTML file that embeds sanity-check outputs,
-stage manifests, and evaluation results; it can be 100s of MB. Download it to
-disk and open it locally rather than previewing it in a browser tab.
-
-Each report's **Zero-shot Evaluation** section compares the pruned candidate
-solutions directly against the full teacher model across multiple benchmarks.
-Interpret those results together with the reproduction status and unresolved
-correctness findings recorded in the campaign report catalog.
+- **New campaign:** use the [setup wizard](#setup-wizard) to generate validated
+  smoke and production bundles.
+- **Generated campaign:** complete the [installation](#installation), then
+  [run the campaign](#run-a-campaign) with its generated bundle.
+- **Agent-assisted campaign:** follow [Run with an agent](#run-with-an-agent)
+  with your model, data, compute environment, and deployment goals.
+- **Existing results:** see [Reports](#reports) to regenerate a campaign report
+  or inspect the retained examples.
 
 ## Setup wizard
 
@@ -61,23 +54,16 @@ accepted answer and the exact navigation frame are saved in
 python examples/puzzletron/puzzletron_setup_v2.py --resume /path/to/campaign
 ```
 
-The wizard supports reusable named parallel profiles, canonical per-stage execution
-strategies, independent instance counts, scheduling-compatible effective batches,
-multiple named vLLM workload/topology measurements, independent MIP goals with
-internal constraints/variants/matrices, and editable post-MIP flow DAGs. The
-recommended flow begins with online evaluation and uses LM loss for filtering;
-it does not include Initial Filter. PTQ and downstream evaluation are shown as
-reserved but unavailable.
+The wizard supports reusable execution profiles, multiple deployment
+measurements, independent optimization goals, and editable downstream flows.
+The defaults keep the common path concise while preserving detailed controls
+for advanced campaigns. See [Configuration](#configuration) for the generated
+bundle structure and extension points.
 
 The final review writes `resolved_defaults.yaml`, `README.md`, and validated
 `smoke/` and `production/` bundles transactionally. Both bundles are validated
 and dry-run, but neither is submitted and production is not gated on smoke. The
 wizard never launches the orchestrator.
-
-Wizard discovery and schema generation do not establish model or axis support.
-The [campaign report catalog](docs/campaign_reports.md) records retained
-reports, their evidence status, and the requirements for a future support
-claim.
 
 ## Installation
 
@@ -310,10 +296,7 @@ export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
 Independent runs, variants, solution pools, resource constraints, and
 homogeneous search are documented in [MIP runs](docs/mip_profiles.md). Configure
 candidate evaluation, filtering, materialization, and distillation with
-[post-MIP pipelines](docs/post_mip_pipeline.md). The
-[campaign report catalog](docs/campaign_reports.md) records retained reports and
-their evidence status; it is not a current model or pruning-axis support
-matrix.
+[post-MIP pipelines](docs/post_mip_pipeline.md).
 
 ## Run a campaign
 
@@ -339,32 +322,28 @@ python -m pip install -r examples/puzzletron/requirements-orchestrator.txt
 The login-node environment must expose `sbatch`, `squeue`, and `sacct`. It does
 not need PyTorch, Hydra, ModelOpt installation, CUDA, or the worker container.
 
-Each stage reads its AutoModel mesh from the experiment config
-(`tp`, `cp`, `pp`, `ep`, `dp_shard`, `dp_replicate`). The orchestrator derives
-`gpus_per_instance = PP × DP_REPLICATE × DP_SHARD × CP × TP` (EP overlays
-`dp_shard`) and packs `instances` independent model copies onto nodes. For
-example, sixteen one-GPU `vllm_stats` shards on an eight-GPU node type allocate
-two nodes and dispatch sixteen shard commands.
-
-Example single-stage dry-run:
-
-```bash
-PUZZLETRON_EXPERIMENT=examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
-PUZZLETRON_RUNNER=examples/puzzletron/configs/orchestration/runner.slurm.example.yaml
-PUZZLETRON_EXECUTION=examples/puzzletron/configs/orchestration/execution.example.yaml
-
-python examples/puzzletron/orchestrate.py \
-  --experiment "$PUZZLETRON_EXPERIMENT" \
-  --runner "$PUZZLETRON_RUNNER" \
-  --execution "$PUZZLETRON_EXECUTION" \
-  --stage mip \
-  --dry-run
-```
+### Generated v2 campaign
 
 Setup-v2-generated bundles encode evaluation, filtering, materialization,
-AIPerf, and distillation in `post_mip.flows`. Run their generated experiment,
-runner, and execution configs with `--stage full`; the orchestrator schedules
-the dynamic `post.*` nodes as part of the campaign DAG.
+AIPerf, and distillation in one campaign DAG. Run the generated smoke bundle
+first to validate the environment and campaign wiring:
+
+```bash
+PUZZLETRON_BUNDLE=/path/to/generated/campaign/smoke
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$PUZZLETRON_BUNDLE/experiment.yaml" \
+  --runner "$PUZZLETRON_BUNDLE/runner.yaml" \
+  --execution "$PUZZLETRON_BUNDLE/execution.yaml" \
+  --stage full
+```
+
+After the smoke campaign succeeds, replace `smoke` with `production` and run
+the same command for the full campaign. Add `--dry-run` to inspect either plan
+without submitting work, or select one stage while iterating, for example
+`--stage mip --dry-run`.
+
+### Legacy checked-in Nano campaign
 
 The checked-in Nano experiment uses the legacy `zero_shot_evaluation`,
 `aiperf`, and global distillation stages. Its online-solution path still needs
@@ -458,6 +437,8 @@ verified completed stages. Do not use it as the initial command for legacy
 configs with `mode: online_solutions`; setup-v2-generated bundles use their
 dynamic `post.*` DAG instead.
 
+### Monitor and resume
+
 The launch command is a blocking foreground controller: it submits every
 dependency-ready branch concurrently, polls scheduler state, and exits when the
 selected plan completes or fails. Progress is colorized automatically on a TTY.
@@ -495,7 +476,10 @@ python examples/puzzletron/orchestrate.py \
   --stage width_importance
 ```
 
-The dependency-free [`StageSpec` registry](../../modelopt/torch/puzzletron/stages/graph.py) is the authoritative contract for every public stage's identity, dependencies, enablement, semantic config sections, and static completion artifacts. Add or change those properties there. Default execution strategies remain scheduler-specific and live in the [orchestration compiler](../../modelopt/torch/puzzletron/orchestration/compiler.py); handlers, scheduler adapters, mesh resolution, and heavyweight artifact validators remain separate runtime concerns.
+The [`StageSpec` registry](../../modelopt/torch/puzzletron/stages/graph.py)
+defines stage dependencies and enablement. See the
+[v2 architecture](docs/v2_architecture.md) for orchestration internals and
+maintainer guidance.
 
 | Stage | Purpose |
 |---|---|
@@ -568,3 +552,17 @@ fingerprints are cached under
 are reused and only affected sections rebuild. Use `--rebuild-section aiperf`
 (repeatable) for selected sections, or `--no-cache` for an intentional full
 rebuild.
+
+### Retained campaign reports
+
+The [campaign report catalog](docs/campaign_reports.md) records each retained
+report's producer state, reproduction and support status, metadata origin,
+relationship to current configuration files, and known limitations. An entry
+marked as not reproduced is not a current model-support claim. Detailed run
+facts remain in the reports.
+
+Each retained report is a self-contained HTML file that embeds sanity-check
+outputs, stage manifests, and evaluation results; it can be hundreds of MB.
+Download it to disk and open it locally rather than previewing it in a browser
+tab. Interpret its evaluation results together with the reproduction status
+and unresolved findings in the catalog.

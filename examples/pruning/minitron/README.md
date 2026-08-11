@@ -8,4 +8,4 @@ Each subdirectory covers a specific source model and target size, including the 
 
 - [Minitron pruning instructions](../../megatron_bridge/README.md#pruning) and [Megatron-Bridge distillation instructions](../../megatron_bridge/README.md#distillation)
 - [Megatron dataset tokenization](../../dataset/MEGATRON_DATA_PREP.md)
-- [Puzzletron v2 campaign workflow](../../puzzletron/README.md) and [campaign report catalog](../../puzzletron/docs/campaign_reports.md)
+- Other pruning workflows: [Puzzletron v2](../../puzzletron/README.md)

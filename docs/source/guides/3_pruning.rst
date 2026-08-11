@@ -2,16 +2,18 @@
 Pruning
 =======
 
-.. tip::
+ModelOpt provides three pruning workflows:
 
-    Checkout `Megatron-Bridge Minitron Pruning & Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ and
-    `Puzzletron v2 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_ for heterogeneous pruning campaigns.
-    Retained Puzzletron campaign reports and their reproduction status are summarized in the
-    `campaign report catalog <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/puzzletron/docs/campaign_reports.md>`_.
+* `Puzzletron v2 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_
+  for guided, resumable heterogeneous pruning campaigns.
+* `Minitron <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#minitron>`_
+  for structured pruning of large language models.
+* `FastNAS <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#fastnas-pruning-for-pytorch-computer-vision-models>`_
+  for computer vision subnet search.
 
-ModelOpt provides Minitron and FastNAS pruning modes through the unified
-:meth:`mtp.prune <modelopt.torch.prune.pruning.prune>`. Given a model,
-these methods find the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
+Minitron and FastNAS are available through the unified
+:meth:`mtp.prune <modelopt.torch.prune.pruning.prune>` API. Given a model,
+these modes find the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
 from your provided base model with little to no accuracy degradation (depending on how aggressive the pruning is).
 These pruning methods support pruning the convolutional and linear layers, and
 attention heads of the model. More details on these pruning modes are as follows:
@@ -24,15 +26,8 @@ attention heads of the model. More details on these pruning modes are as follows
 #.  ``fastnas``: A pruning method recommended for Computer Vision models. Given a pretrained model,
     FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 
-For heterogeneous model pruning, use the separate `Puzzletron v2 campaign workflow
-<https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/puzzletron>`_. It combines
-model-aware setup, measured serving costs, Mixed Integer Programming (MIP) based NAS,
-candidate evaluation, optional global distillation, and resumable reporting. Puzzletron
-v2 is not driven by the unified ``mtp.prune`` example below. Consult the
-`Puzzletron campaign report catalog <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/puzzletron/docs/campaign_reports.md>`_
-for retained report metadata, relationships to current configurations,
-unresolved slicing findings, and why the listed reports do not establish
-current model support.
+The remainder of this guide covers the unified Minitron and FastNAS API.
+Puzzletron v2 instead uses its setup wizard and campaign runner.
 
 Follow the steps described below to obtain the optimal model satisfying your
 requirements using :mod:`mtp<modelopt.torch.prune>`:
@@ -70,13 +65,9 @@ Prerequisites
 
 Below we show an example using :class:`"fastnas" <modelopt.torch.prune.fastnas.FastNASModeDescriptor>`.
 For Minitron pruning, please refer to the `example snippet <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#getting-started>`_ in the pruning readme.
-
-.. note::
-
-    The `ResNet20 on CIFAR-10 notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
-    is a dated, end-to-end FastNAS example. It uses the still-supported ``fastnas`` mode, but its long-running
-    workflow is not covered by automated notebook execution tests. Treat its environment setup, runtime estimate,
-    and recorded metrics as illustrative unless you revalidate them with the current release.
+For an end-to-end FastNAS walkthrough, see the
+`ResNet20 on CIFAR-10 notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
+(a dated example; revalidate its environment and results with the current release).
 
 Perform pruning
 ---------------
