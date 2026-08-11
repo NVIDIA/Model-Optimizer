@@ -91,9 +91,10 @@ post_mip:
             max_steps: 2048
 ```
 
-Evaluation nodes publish every finite metric they produce. They do not declare
-metric lists or cases. Later filters reference metrics as `mip.<metric>` or
-`<node_id>.<metric>`.
+Evaluation nodes publish every finite metric they produce. Downstream lmms-eval
+nodes publish results only after every configured task, or every leaf of a
+configured task group, has numeric metrics and positive effective sample counts.
+Later filters reference metrics as `mip.<metric>` or `<node_id>.<metric>`.
 
 ## Node types
 
@@ -114,6 +115,13 @@ metric lists or cases. Later filters reference metrics as `mip.<metric>` or
 Nodes that require checkpoints never materialize implicitly. Add a `materialize`
 node where the transition is needed.
 
+## Add downstream evaluation to an existing campaign
+
+Keep the campaign's `puzzle_dir` and add a `post_mip.flows` entry whose source
+selects the completed MIP run. See the
+[lmms-eval run configuration](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/lmms_eval.yaml)
+for a complete filter, materialization, and downstream-evaluation flow.
+
 ## Lineage and model source
 
 Architectures are deduplicated across MIP and homogeneous results, while all MIP
@@ -133,21 +141,15 @@ from the original candidate.
 
 ## Downstream evaluation
 
-`downstream_evaluation` runs `python -m lmms_eval` as a subprocess through
-`command_prefix`. The runner passes an argument list directly and does not invoke
-a shell. Values in `command_prefix` and `extra_args` are arguments; shell syntax
-is not interpreted. Install the pinned evaluator into an isolated environment
-rather than the Puzzletron runtime environment, because `lmms-eval==0.7.2` pins
-`wandb==0.25.0` and the pinned AutoModel build requires a newer `wandb`:
+`downstream_evaluation` runs `python -m lmms_eval` as a subprocess from the
+Puzzletron worker environment. The runner passes an argument list directly and
+does not invoke a shell. Values in `command_prefix` and `extra_args` are arguments;
+shell syntax is not interpreted. The standard example requirements pin a snapshot
+compatible with the newer `wandb` required by the pinned AutoModel build:
 
 ```bash
-python3 -m venv /workspace/.venv-lmms-eval
-source /workspace/.venv-lmms-eval/bin/activate
-python -m pip install -r examples/puzzletron/requirements-lmms-eval.txt
-python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.2"'
-deactivate
-
-export PUZZLETRON_LMMS_EVAL_PYTHON=/workspace/.venv-lmms-eval/bin/python
+python -m pip install -r examples/puzzletron/requirements.txt
+python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.0"'
 ```
 
 The runner derives the realized checkpoint path, vLLM topology arguments, task
