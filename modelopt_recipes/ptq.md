@@ -235,7 +235,7 @@ that baseline. The deviations come in four kinds:
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
-| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/nvidia/Mistral-Medium-3.5-128B-NVFP4` |
+| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
@@ -335,12 +335,12 @@ encoders (or the never-calibrated self-conditioning branch), regressing those
 modalities or crashing export. The extra patterns keep them in full precision;
 everything else matches the general recipe.
 
-### Checkpoint mirrors — `models/nvidia/<checkpoint>`
+### Checkpoint mirrors — `models/<org>/<checkpoint>`
 
 The `huggingface/models/` tier reproduces a **single published (or planned)
 checkpoint's** quant config verbatim:
 
-- **`Mistral-Medium-3.5-128B-NVFP4/ptq/nvfp4-max-calib`** mirrors
+- **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
