@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Create a fully configurable Puzzletron campaign without launching it."""
+"""Create a guided or fully configurable Puzzletron campaign without launching it."""
 
 from __future__ import annotations
 

@@ -34,20 +34,44 @@ Hugging Face model configuration and generates self-contained smoke and
 production experiment, runner, and execution bundles. Its setup environment
 does not require PyTorch or model weights.
 
-Install the setup dependencies, then start the guided flow with the current v2
-defaults profile:
+Install the setup dependencies:
 
 ```bash
 python -m pip install -r examples/puzzletron/requirements-setup.txt
+```
+
+The guided flow offers three profiles:
+
+- **Quick smoke** is the fastest way to verify the campaign shape.
+- **Balanced pruning** is recommended for a first real campaign.
+- **High-confidence search** spends more runtime on scoring and sanity checks.
+
+The selected profile supplies pruning and search defaults from the detected
+model family's `setup_v2_defaults.yaml`, including geometry-specific refinements
+when available. Setup then asks for the model and dataset and requires explicit
+acceptance or customization of infrastructure-specific worker and cluster
+defaults.
+
+Start the wizard with the repository's example defaults file:
+
+```bash
 python examples/puzzletron/puzzletron_setup_v2.py \
   --defaults examples/puzzletron/configs/setup/defaults.example.yaml
 ```
 
 The example defaults use only repository-relative values. Copy the file and add
 site-specific data, scheduler, and container settings before selecting it.
-Defaults are loaded only when passed explicitly. Selection prompts have
-a visible **← Back** action; text and numeric prompts accept `:back`. Every
-accepted answer and the exact navigation frame are saved in
+The defaults file is loaded only when passed explicitly and takes precedence
+over the selected profile. To expose every per-section and nested setting, use
+the advanced flow explicitly:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py --full
+```
+
+Press **Esc** to go back from any prompt. Selection prompts show a visible
+**← Back** action, and text or numeric prompts accept `:back`.
+Every accepted answer and the exact navigation frame are saved in
 `answers_v2.yaml`, so an interrupted session can resume with:
 
 ```bash
