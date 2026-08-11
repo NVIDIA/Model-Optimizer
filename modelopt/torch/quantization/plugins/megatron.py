@@ -141,9 +141,13 @@ def quant_module_get_extra_state(self) -> dict:
     QuantModule's extra_state with QuantModule.get_extra_state()
     which avoids the need to store the full module name.
     """
-    # Nothing quantized here -> return {} so unquantized output_layer._extra_state stays empty (Megatron asserts empty).
-    if not isinstance(self, RealQuantLinear) and not any(
-        isinstance(m, TensorQuantizer) and m.is_enabled for m in self.modules()
+    # Megatron requires an unquantized output_layer's extra_state to be empty. Scoped to
+    # output_layer: for every other module this quantizer_state is the only record that its
+    # quantizers were disabled (e.g. by auto_quantize or disable_quantizer), which must survive.
+    if (
+        getattr(self, "_modelopt_output_layer", False)
+        and not isinstance(self, RealQuantLinear)
+        and not any(isinstance(m, TensorQuantizer) and m.is_enabled for m in self.modules())
     ):
         return {}
 
@@ -274,6 +278,45 @@ def _create_incompatible_method(method_name: str):
     return _incompatible_method
 
 
+def _resolve_output_layer_untied(model: torch.nn.Module) -> bool | None:
+    """Whether ``output_layer`` weights are untied from the input embeddings, or None if unknown."""
+    shared = getattr(model, "share_embeddings_and_output_weights", None)
+    if shared is not None:
+        return not bool(shared)
+    for name, module in model.named_modules():
+        # Skip subtrees that do not own the language model's output_layer: the vision tower (never
+        # quantized here) and a distillation teacher, which may be tied differently from the
+        # student it is wrapped with.
+        if "vision_model" in name or "_teacher_model" in name:
+            continue
+        shared = getattr(module, "share_embeddings_and_output_weights", None)
+        if shared is not None:
+            return not bool(shared)
+    return None
+
+
+def _output_layer_untied(config) -> bool:
+    """Whether ``output_layer`` is untied, for use from ``sharded_state_dict``.
+
+    Prefers the flag recorded by ``megatron_replace_quant_module_hook`` (the only source available
+    under Megatron-Bridge, which has no global args store), then Megatron-LM's
+    ``--untie-embeddings-and-output-weights``.
+    """
+    untied = getattr(config, "modelopt_output_layer_untied", None)
+    if untied is not None:
+        return untied
+    try:
+        from megatron.training import get_args as _mlm_get_args
+
+        return bool(getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False))
+    except Exception as e:
+        # Warn once per config rather than on every save and every load.
+        if not getattr(config, "_modelopt_warned_output_layer_untied", False):
+            warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
+            config._modelopt_warned_output_layer_untied = True
+        return False
+
+
 def megatron_replace_quant_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model quantization support.
 
@@ -286,6 +329,7 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
        typing-matching the QuantModuleRegistry.
     3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
+    untied = _resolve_output_layer_untied(model)
 
     def _configure_attention_for_kv_cache_quant(module: Attention):
         """Configure Attention module for KV cache quantization compatibility."""
@@ -313,8 +357,8 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
             if type(module) in QuantModuleRegistry:
-                # Register for EVERY QuantModule incl. output_layer: the old is_enabled gate ran
-                # pre-replacement (weight_quantizer None) so it skipped output_layer -> static amax dropped on save.
+                if name.endswith("output_layer"):
+                    module._modelopt_output_layer = True
                 register_modelopt_extra_state_callbacks(
                     module,
                     quant_module_get_extra_state,
@@ -330,6 +374,10 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
             if "vision_model" not in name:
                 # We only enable hetereogenous_dist_checkpoint for language model, vision model is not quantized
                 module.config.hetereogenous_dist_checkpoint = True
+                # Read back via ``self.config`` in sharded_state_dict; output_layer shares its
+                # parent MegatronModule's config object. The teacher may be tied differently.
+                if untied is not None and "_teacher_model" not in name:
+                    module.config.modelopt_output_layer_untied = untied
             _register_extra_state_callbacks(module)
 
 
@@ -397,16 +445,7 @@ class _MegatronParallelLinear(_ParallelLinear):
         #    output_layer.input_quantizer._amax but TP-only does not. This lead to
         #    state_dict mismatch.
         if prefix.endswith("output_layer."):
-            try:
-                from megatron.training import get_args as _mlm_get_args
-
-                _untied = bool(
-                    getattr(_mlm_get_args(), "untie_embeddings_and_output_weights", False)
-                )
-            except Exception as e:
-                warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
-                _untied = False
-            if not _untied:
+            if not _output_layer_untied(self.config):
                 return super().sharded_state_dict(prefix, sharded_offsets, metadata)
 
         quantizer_state_dict = {}
