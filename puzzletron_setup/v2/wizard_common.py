@@ -37,7 +37,12 @@ if TYPE_CHECKING:
     from .session import WizardSession
     from .state import WizardState
 
-__all__: list[str] = []
+__all__ = [
+    "BUILTINS",
+    "CANONICAL_STAGE_STRATEGIES",
+    "STATIC_MODEL_BATCH_PATHS",
+    "STATIC_MODEL_STAGES",
+]
 
 BUILTINS = {
     "data": {"layout": "fixed", "sequence_length": 4096},
