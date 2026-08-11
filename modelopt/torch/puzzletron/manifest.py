@@ -56,17 +56,11 @@ def _publish_immutable_record(
     record_dir: Path,
     files: dict[str, bytes],
 ) -> None:
-    record_dir = _path_without_symlinks(
-        record_dir, description="stage execution record path"
-    )
+    record_dir = _path_without_symlinks(record_dir, description="stage execution record path")
     for name in files:
-        _path_without_symlinks(
-            record_dir / name, description="stage execution record path"
-        )
+        _path_without_symlinks(record_dir / name, description="stage execution record path")
     record_dir.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{record_dir.name}.", dir=record_dir.parent)
-    )
+    temporary = Path(tempfile.mkdtemp(prefix=f".{record_dir.name}.", dir=record_dir.parent))
     try:
         for name, content in files.items():
             (temporary / name).write_bytes(content)
@@ -79,8 +73,7 @@ def _publish_immutable_record(
         mismatches = [
             name
             for name, content in files.items()
-            if not (record_dir / name).is_file()
-            or (record_dir / name).read_bytes() != content
+            if not (record_dir / name).is_file() or (record_dir / name).read_bytes() != content
         ]
         if mismatches:
             raise FileExistsError(
@@ -120,9 +113,7 @@ def _resolved_config_content(config: object) -> Any:
 
     if not isinstance(config, Mapping):
         return canonicalize(config)
-    return canonicalize(
-        {key: value for key, value in config.items() if key != "_runtime"}
-    )
+    return canonicalize({key: value for key, value in config.items() if key != "_runtime"})
 
 
 def write_stage_execution_record(
@@ -131,9 +122,7 @@ def write_stage_execution_record(
 ) -> dict[str, Any]:
     """Persist immutable resolved config and artifact metadata for one execution."""
 
-    manifest_path = _path_without_symlinks(
-        Path(manifest_path), description="stage manifest path"
-    )
+    manifest_path = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
     if manifest_path.parent.name != "manifests":
         raise ValueError(
             f"stage manifest must use the campaign manifests directory: {manifest_path}"
@@ -157,9 +146,7 @@ def write_stage_execution_record(
         if isinstance(effective_config, Mapping)
         else effective_config
     )
-    resolved_config_identity = stable_hash(
-        resolved_config_content, prefix=f"{stage}_resolved_cfg"
-    )
+    resolved_config_identity = stable_hash(resolved_config_content, prefix=f"{stage}_resolved_cfg")
     implementation_provenance = canonicalize(
         manifest_payload.get("implementation_provenance") or {}
     )
@@ -172,9 +159,7 @@ def write_stage_execution_record(
             "ended_at": manifest_payload.get("ended_at"),
             "authored_config_identity": authored_config_identity,
             "resolved_config_identity": resolved_config_identity,
-            "semantic_config_identity": manifest_payload.get(
-                "semantic_config_identity"
-            ),
+            "semantic_config_identity": manifest_payload.get("semantic_config_identity"),
             "semantic_identity": manifest_payload.get("semantic_identity"),
             "capability_snapshot": manifest_payload.get("capability_snapshot"),
             "implementation_provenance": implementation_provenance,
@@ -188,9 +173,7 @@ def write_stage_execution_record(
     artifact_relative = str(artifact_path.relative_to(root))
 
     inputs = manifest_payload.get("inputs") or {}
-    runtime = (
-        effective_config.get("_runtime") if isinstance(effective_config, dict) else {}
-    )
+    runtime = effective_config.get("_runtime") if isinstance(effective_config, dict) else {}
     runtime = runtime if isinstance(runtime, dict) else {}
     resolved_payload = {
         "schema": _EXECUTION_RECORD_SCHEMA,
@@ -301,9 +284,7 @@ def validate_stage_execution_record(
     manifest that opts into the execution-record schema is checked fail closed.
     """
 
-    path = _path_without_symlinks(
-        Path(manifest_path), description="stage manifest path"
-    )
+    path = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
     if path.parent.name != "manifests":
         raise ValueError(f"stage manifest is outside the expected layout: {path}")
     root = path.parent.parent
@@ -345,10 +326,7 @@ def validate_stage_execution_record(
     if "execution_record" not in pointer:
         return ()
     record = pointer.get("execution_record")
-    if (
-        not isinstance(record, Mapping)
-        or record.get("schema") != _EXECUTION_RECORD_SCHEMA
-    ):
+    if not isinstance(record, Mapping) or record.get("schema") != _EXECUTION_RECORD_SCHEMA:
         raise ValueError(f"invalid stage execution record: {record!r}")
     execution_identity = record.get("execution_identity")
     if not isinstance(execution_identity, str) or not execution_identity:
@@ -366,9 +344,7 @@ def validate_stage_execution_record(
         (artifact_relative, "artifact_manifest.json"),
     ):
         if relative.parent != expected_parent or relative.name != filename:
-            raise ValueError(
-                f"stage execution record path does not match identity: {relative}"
-            )
+            raise ValueError(f"stage execution record path does not match identity: {relative}")
 
     resolved_path = _path_without_symlinks(
         root / resolved_relative, description="stage execution record path"
@@ -379,9 +355,7 @@ def validate_stage_execution_record(
     resolved, resolved_bytes = _read_mapping(
         resolved_path, description="resolved stage configuration record"
     )
-    artifact, artifact_bytes = _read_mapping(
-        artifact_path, description="stage artifact record"
-    )
+    artifact, artifact_bytes = _read_mapping(artifact_path, description="stage artifact record")
     resolved_sha256 = _sha256_bytes(resolved_bytes)
     if record.get("resolved_config_sha256") != resolved_sha256:
         raise ValueError("resolved stage configuration SHA256 mismatch")
@@ -389,15 +363,9 @@ def validate_stage_execution_record(
         raise ValueError("stage artifact record SHA256 mismatch")
 
     for label, payload in (("resolved", resolved), ("artifact", artifact)):
-        if (
-            payload.get("schema") != _EXECUTION_RECORD_SCHEMA
-            or payload.get("schema_version") != 1
-        ):
+        if payload.get("schema") != _EXECUTION_RECORD_SCHEMA or payload.get("schema_version") != 1:
             raise ValueError(f"invalid {label} stage execution record schema")
-        if (
-            payload.get("stage") != stage
-            or payload.get("execution_identity") != execution_identity
-        ):
+        if payload.get("stage") != stage or payload.get("execution_identity") != execution_identity:
             raise ValueError(f"{label} stage execution identity mismatch")
         for key in ("status", "skip_reason", "started_at", "ended_at"):
             if payload.get(key) != pointer.get(key):
@@ -436,9 +404,7 @@ def validate_stage_execution_record(
         "descriptor_resolution"
     ):
         raise ValueError("resolved descriptor input provenance mismatch")
-    if resolved_provenance.get("capability_snapshot") != pointer.get(
-        "capability_snapshot"
-    ):
+    if resolved_provenance.get("capability_snapshot") != pointer.get("capability_snapshot"):
         raise ValueError("resolved capability provenance mismatch")
 
     expected_execution_identity = stable_hash(
@@ -461,12 +427,8 @@ def validate_stage_execution_record(
         raise ValueError("stage execution identity does not match record content")
 
     artifact_identity_payload = dict(artifact)
-    artifact_identity = artifact_identity_payload.pop(
-        "artifact_manifest_identity", None
-    )
-    expected_artifact_identity = stable_hash(
-        artifact_identity_payload, prefix=f"{stage}_artifacts"
-    )
+    artifact_identity = artifact_identity_payload.pop("artifact_manifest_identity", None)
+    expected_artifact_identity = stable_hash(artifact_identity_payload, prefix=f"{stage}_artifacts")
     if (
         artifact_identity != expected_artifact_identity
         or record.get("artifact_manifest_identity") != expected_artifact_identity

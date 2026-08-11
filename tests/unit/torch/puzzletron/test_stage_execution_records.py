@@ -23,11 +23,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from examples.puzzletron.main import (
-    _completion_is_valid,
-    _mark_completion,
-    _resume_kwargs,
-)
+from examples.puzzletron.main import _completion_is_valid, _mark_completion, _resume_kwargs
 from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
@@ -135,6 +131,28 @@ def test_execution_record_preserves_provenance_and_cross_record_timestamps(
     }
 
 
+def test_execution_record_binds_terminal_skip_reason(tmp_path: Path) -> None:
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text("model: {}\n")
+    config = _stage_config(tmp_path, config_path)
+    manifest = StageManifest(stage="tokenize_data", config=config)
+    manifest.complete(status="skipped", skip_reason="disabled")
+    manifest_path = tmp_path / "manifests" / "tokenize_data.json"
+
+    write_stage_manifest(manifest_path, manifest)
+
+    pointer = json.loads(manifest_path.read_text())
+    record = pointer["execution_record"]
+    resolved = json.loads((tmp_path / record["resolved_config_path"]).read_text())
+    artifact = json.loads((tmp_path / record["artifact_manifest_path"]).read_text())
+    assert pointer["skip_reason"] == resolved["skip_reason"] == artifact["skip_reason"]
+
+    pointer["skip_reason"] = "tampered"
+    manifest_path.write_text(json.dumps(pointer))
+    with pytest.raises(ValueError, match="resolved stage execution skip_reason mismatch"):
+        validate_stage_execution_record(manifest_path, expected_stage="tokenize_data")
+
+
 def test_artifact_manifest_separates_output_pointer_from_immutable_evidence(
     tmp_path: Path,
 ) -> None:
@@ -162,17 +180,10 @@ def test_artifact_manifest_separates_output_pointer_from_immutable_evidence(
     }
     assert artifacts["started_at"] == canonical["started_at"]
     assert artifacts["ended_at"] == canonical["ended_at"]
-    assert (
-        artifacts["artifact_manifest_identity"] == record["artifact_manifest_identity"]
-    )
+    assert artifacts["artifact_manifest_identity"] == record["artifact_manifest_identity"]
     resolved_bytes = (tmp_path / record["resolved_config_path"]).read_bytes()
-    assert (
-        artifacts["resolved_config"]["sha256"]
-        == hashlib.sha256(resolved_bytes).hexdigest()
-    )
-    required_patterns = _resume_kwargs(config, config_path, "convert")[
-        "required_patterns"
-    ]
+    assert artifacts["resolved_config"]["sha256"] == hashlib.sha256(resolved_bytes).hexdigest()
+    required_patterns = _resume_kwargs(config, config_path, "convert")["required_patterns"]
     assert record["resolved_config_path"] in required_patterns
     assert record["artifact_manifest_path"] in required_patterns
 
@@ -236,8 +247,9 @@ def test_ephemeral_runtime_change_preserves_resolved_config_identity(
     write_stage_manifest(manifest_path, original)
     write_stage_manifest(manifest_path, changed)
 
-    assert original.execution_record["resolved_config_identity"] == (
-        changed.execution_record["resolved_config_identity"]
+    assert (
+        original.execution_record["resolved_config_identity"]
+        == (changed.execution_record["resolved_config_identity"])
     )
     assert (tmp_path / original.execution_record["resolved_config_path"]).is_file()
     assert (tmp_path / changed.execution_record["resolved_config_path"]).is_file()
@@ -266,11 +278,13 @@ def test_same_config_rerun_creates_a_distinct_execution_record(tmp_path: Path) -
     write_stage_manifest(manifest_path, original)
     write_stage_manifest(manifest_path, rerun)
 
-    assert original.execution_record["execution_identity"] != (
-        rerun.execution_record["execution_identity"]
+    assert (
+        original.execution_record["execution_identity"]
+        != (rerun.execution_record["execution_identity"])
     )
-    assert original.execution_record["resolved_config_identity"] == (
-        rerun.execution_record["resolved_config_identity"]
+    assert (
+        original.execution_record["resolved_config_identity"]
+        == (rerun.execution_record["resolved_config_identity"])
     )
 
 
@@ -291,11 +305,13 @@ def test_implementation_provenance_change_creates_a_distinct_execution_record(
 
     write_stage_manifest(manifest_path, changed)
 
-    assert original.execution_record["execution_identity"] != (
-        changed.execution_record["execution_identity"]
+    assert (
+        original.execution_record["execution_identity"]
+        != (changed.execution_record["execution_identity"])
     )
-    assert original.execution_record["resolved_config_identity"] == (
-        changed.execution_record["resolved_config_identity"]
+    assert (
+        original.execution_record["resolved_config_identity"]
+        == (changed.execution_record["resolved_config_identity"])
     )
 
 
@@ -341,9 +357,7 @@ def test_artifact_contract_preserves_declared_output_before_it_exists(
     config_path = tmp_path / "experiment.yaml"
     config_path.write_text("model: {}\n")
     late_output = tmp_path / "ckpts" / "scoring-parent.json"
-    manifest = StageManifest(
-        stage="convert", config=_stage_config(tmp_path, config_path)
-    )
+    manifest = StageManifest(stage="convert", config=_stage_config(tmp_path, config_path))
     manifest.complete(outputs={"scoring_parent_artifact": str(late_output)})
 
     write_stage_manifest(tmp_path / "manifests" / "convert.json", manifest)
@@ -369,7 +383,7 @@ def test_resume_remains_compatible_with_historical_stage_manifest(
     config = _stage_config(tmp_path, config_path)
     manifest = StageManifest(
         stage="convert",
-        status="imported",
+        status="success",
         outputs={"teacher_dir": str(teacher_config.parent)},
         config=config,
     )
@@ -389,9 +403,7 @@ def test_resume_remains_compatible_with_historical_stage_manifest(
     ["resolved_config_path", "artifact_manifest_path"],
     ids=["resolved-config", "artifact-manifest"],
 )
-def test_resume_requires_both_execution_record_files(
-    tmp_path: Path, record_key: str
-) -> None:
+def test_resume_requires_both_execution_record_files(tmp_path: Path, record_key: str) -> None:
     config_path = tmp_path / "experiment.yaml"
     config_path.write_text("model: {}\n")
     teacher_config = tmp_path / "ckpts" / "teacher" / "config.json"
@@ -407,7 +419,7 @@ def test_resume_requires_both_execution_record_files(
     assert _completion_is_valid(config, config_path, "convert")
 
     (tmp_path / manifest.execution_record[record_key]).unlink()
-    with pytest.raises(ValueError, match="invalid .* record"):
+    with pytest.raises(ValueError, match=r"invalid .* record"):
         _completion_is_valid(config, config_path, "convert")
 
 
@@ -540,14 +552,10 @@ def test_writer_rejects_symlinked_execution_record_ancestor(tmp_path: Path) -> N
     manifests_dir.mkdir()
     external_executions = tmp_path / "external-executions"
     external_executions.mkdir()
-    (manifests_dir / "executions").symlink_to(
-        external_executions, target_is_directory=True
-    )
+    (manifests_dir / "executions").symlink_to(external_executions, target_is_directory=True)
     config_path = tmp_path / "experiment.yaml"
     config_path.write_text("model: {}\n")
-    manifest = StageManifest(
-        stage="convert", config=_stage_config(tmp_path, config_path)
-    )
+    manifest = StageManifest(stage="convert", config=_stage_config(tmp_path, config_path))
     manifest.complete()
 
     with pytest.raises(ValueError, match="stage execution record path is symlinked"):
@@ -584,9 +592,7 @@ def test_validator_rejects_symlinked_execution_record_paths(
 ) -> None:
     manifest_path, _config_path, _config, manifest = _write_convert_record(tmp_path)
     if location == "stage-ancestor":
-        stage_dir = (
-            tmp_path / manifest.execution_record["resolved_config_path"]
-        ).parent.parent
+        stage_dir = (tmp_path / manifest.execution_record["resolved_config_path"]).parent.parent
         external_stage_dir = stage_dir.with_name("external-convert")
         stage_dir.rename(external_stage_dir)
         stage_dir.symlink_to(external_stage_dir, target_is_directory=True)
@@ -619,9 +625,7 @@ def test_resolved_content_tamper_is_rejected_after_outer_sha_is_updated(
     )
     _rewrite_json_record(manifest_path, pointer)
 
-    with pytest.raises(
-        ValueError, match="resolved stage configuration identity mismatch"
-    ):
+    with pytest.raises(ValueError, match="resolved stage configuration identity mismatch"):
         validate_stage_execution_record(manifest_path, expected_stage="convert")
 
 
@@ -714,9 +718,7 @@ def test_resume_recomputes_canonical_pointer_identities(
     manifest_path = tmp_path / "manifests" / "convert.json"
     write_stage_manifest(manifest_path, manifest)
     pointer = json.loads(manifest_path.read_text())
-    if field == "config":
-        pointer[field]["model"]["revision"] = "tampered"
-    elif field == "semantic_config":
+    if field in {"config", "semantic_config"}:
         pointer[field]["model"]["revision"] = "tampered"
     elif field == "capability_snapshot":
         pointer[field]["backend"] = "tampered"

@@ -27,9 +27,7 @@ from modelopt.torch.puzzletron.anymodel.capabilities import (
     default_capabilities,
     validate_capabilities,
 )
-from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter import (
-    GptOssConverter,
-)
+from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_converter import GptOssConverter
 from modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor import (
     GptOssModelDescriptor,
 )
@@ -43,10 +41,7 @@ from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor 
     Qwen3P5TextModelDescriptor,
     Qwen3P5VLModelDescriptor,
 )
-from modelopt.torch.puzzletron.anymodel.registry import (
-    infer_descriptor_name,
-    resolve_descriptor,
-)
+from modelopt.torch.puzzletron.anymodel.registry import infer_descriptor_name, resolve_descriptor
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -273,9 +268,12 @@ def test_gpt_oss_converter_preserves_each_layers_attention_window() -> None:
         for block in GptOssConverter.create_block_configs_from_main_config(config)
     ]
 
-    assert [
-        block.require_subblock("attention").sliding_window_size for block in blocks
-    ] == [128, "full", 128, "full"]
+    assert [block.require_subblock("attention").sliding_window_size for block in blocks] == [
+        128,
+        "full",
+        128,
+        "full",
+    ]
 
 
 def test_gpt_oss_hf_and_native_share_contract_field_mapping() -> None:
@@ -325,9 +323,7 @@ def test_nemotron_weight_groups_accept_native_automodel_moe_names() -> None:
     ]
     native_output_names = ["model.norm.weight", "lm_head.weight"]
 
-    groups = NemotronHModelDescriptor.get_weight_groups(
-        native_block_names + native_output_names, 1
-    )
+    groups = NemotronHModelDescriptor.get_weight_groups(native_block_names + native_output_names, 1)
 
     assert groups["block_0_ffn"] == native_block_names
     assert groups["lm_head"] == native_output_names
@@ -351,27 +347,17 @@ def test_nemotron_hidden_width_spec_covers_hf_and_native_hybrid_tensors() -> Non
         "backbone.layers.1.mixer.q_proj.weight": torch.zeros(8, 2688),
         "backbone.layers.1.mixer.o_proj.weight": torch.zeros(2688, 8),
         "backbone.layers.2.mixer.gate.weight": torch.zeros(4, 2688),
-        "backbone.layers.2.mixer.fc1_latent_proj.weight": torch.zeros(
-            latent_size, 2688
-        ),
-        "backbone.layers.2.mixer.fc2_latent_proj.weight": torch.zeros(
-            2688, latent_size
-        ),
+        "backbone.layers.2.mixer.fc1_latent_proj.weight": torch.zeros(latent_size, 2688),
+        "backbone.layers.2.mixer.fc2_latent_proj.weight": torch.zeros(2688, latent_size),
         "backbone.layers.2.mixer.experts.0.up_proj.weight": torch.zeros(6, latent_size),
-        "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(
-            latent_size, 6
-        ),
+        "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(latent_size, 6),
         "backbone.layers.2.mixer.shared_experts.up_proj.weight": torch.zeros(12, 2688),
-        "backbone.layers.2.mixer.shared_experts.down_proj.weight": torch.zeros(
-            2688, 12
-        ),
+        "backbone.layers.2.mixer.shared_experts.down_proj.weight": torch.zeros(2688, 12),
         "backbone.norm_f.weight": torch.zeros(2688),
         "lm_head.weight": torch.zeros(8, 2688),
         "model.layers.3.mixer.fc1_latent_proj.weight": torch.zeros(latent_size, 2688),
         "model.layers.3.mixer.fc2_latent_proj.weight": torch.zeros(2688, latent_size),
-        "model.layers.3.mixer.experts.gate_and_up_projs": torch.zeros(
-            4, latent_size, 6
-        ),
+        "model.layers.3.mixer.experts.gate_and_up_projs": torch.zeros(4, latent_size, 6),
         "model.layers.3.mixer.experts.down_projs": torch.zeros(4, 6, latent_size),
         "mtp.layers.0.eh_proj.weight": torch.zeros(2688, 2 * 2688),
         "mtp.layers.0.enorm.weight": torch.zeros(2688),
@@ -443,9 +429,7 @@ def test_nemotron_nano_hidden_width_spec_slices_non_latent_experts() -> None:
         tie_word_embeddings=False,
         moe_latent_size=None,
     )
-    spec = NemotronHModelDescriptor.embedding_pruning_spec(
-        config, widths=(8, 4), alignment=1
-    )
+    spec = NemotronHModelDescriptor.embedding_pruning_spec(config, widths=(8, 4), alignment=1)
     state = {
         "backbone.layers.2.mixer.experts.0.up_proj.weight": torch.zeros(6, 8),
         "backbone.layers.2.mixer.experts.0.down_proj.weight": torch.zeros(8, 6),
@@ -480,13 +464,9 @@ def test_nemotron_capabilities_include_hidden_width_pipeline() -> None:
 
 
 def test_nemotron_moe_variant_axes_cover_scoring_and_materialization() -> None:
-    axes = NemotronHModelDescriptor.puzzletron_capabilities(
-        SimpleNamespace(hidden_size=2688)
-    ).axes
+    axes = NemotronHModelDescriptor.puzzletron_capabilities(SimpleNamespace(hidden_size=2688)).axes
 
-    assert (
-        axes["moe_experts"].runtime_slice_impl == "solution_recipe.moe_expert_reroute"
-    )
+    assert axes["moe_experts"].runtime_slice_impl == "solution_recipe.moe_expert_reroute"
     assert axes["moe_top_k"].materialize_impl == "materialize.config_only_moe_top_k"
 
 
@@ -502,9 +482,7 @@ def test_nemotron_nano_capabilities_exclude_absent_latent_axis() -> None:
     assert "moe_latent_dim" in super_axes
 
 
-def test_nemotron_equivalence_tolerance_accounts_for_bf16_hidden_basis_permutation() -> (
-    None
-):
+def test_nemotron_equivalence_tolerance_accounts_for_bf16_hidden_basis_permutation() -> None:
     assert NemotronHModelDescriptor.checkpoint_equivalence_tolerances() == {
         "max_abs_lm_loss_delta": 5.0e-3,
         "max_kl_div": 1.0e-2,
@@ -530,9 +508,7 @@ def test_gpt_oss_pipeline_patch_restores_native_inner_forward() -> None:
 
 def test_gpt_oss_embedding_spec_preserves_mxfp4_input_channel_blocks() -> None:
     config = SimpleNamespace(hidden_size=64, tie_word_embeddings=False)
-    spec = GptOssModelDescriptor.embedding_pruning_spec(
-        config, widths=(64, 32), alignment=32
-    )
+    spec = GptOssModelDescriptor.embedding_pruning_spec(config, widths=(64, 32), alignment=32)
     state = {
         "model.layers.0.mlp.experts.gate_up_proj_blocks": torch.zeros(2, 128, 2, 16),
         "model.layers.0.mlp.experts.gate_up_proj_scales": torch.zeros(2, 128, 2),
@@ -559,9 +535,7 @@ def test_gpt_oss_embedding_spec_preserves_mxfp4_input_channel_blocks() -> None:
 
 def test_gpt_oss_embedding_spec_slices_post_bypass_fused_experts() -> None:
     config = SimpleNamespace(hidden_size=64, tie_word_embeddings=False)
-    spec = GptOssModelDescriptor.embedding_pruning_spec(
-        config, widths=(64, 32), alignment=32
-    )
+    spec = GptOssModelDescriptor.embedding_pruning_spec(config, widths=(64, 32), alignment=32)
     state = {
         "model.layers.0.mlp.experts.gate_up_proj": torch.zeros(2, 64, 128),
         "model.layers.0.mlp.experts.down_proj": torch.zeros(2, 128, 64),
@@ -650,9 +624,7 @@ def test_gpt_oss_declares_attention_sink_as_query_head_state() -> None:
 def test_generic_window_capability_is_discovered_for_non_gpt_attention() -> None:
     config = _text_config(sliding_window=512)
 
-    axis = LlamaModelDescriptor.puzzletron_capabilities(config).axes[
-        "sliding_window_size"
-    ]
+    axis = LlamaModelDescriptor.puzzletron_capabilities(config).axes["sliding_window_size"]
 
     assert axis.variant_only
     assert axis.vllm_export
@@ -697,12 +669,8 @@ def test_stage_preflight_requires_vllm_control_for_runtime_stats(monkeypatch) ->
         {
             "model": {"force_hf": False},
             "parallel": {"ep": 1},
-            "search_space": {
-                "axes": {"mla_q_lora_rank": {"enabled": True, "values": [384]}}
-            },
-            "calc_subblock_stats": {
-                "runtime_stats": {"enabled": True, "backend": "vllm"}
-            },
+            "search_space": {"axes": {"mla_q_lora_rank": {"enabled": True, "values": [384]}}},
+            "calc_subblock_stats": {"runtime_stats": {"enabled": True, "backend": "vllm"}},
         },
         SimpleNamespace(capabilities=object()),
         stage="library",
@@ -813,7 +781,7 @@ def test_nemotron_updates_remote_read_only_layer_types_through_hybrid_pattern() 
 def test_nemotron_runtime_proxy_supplies_legacy_hybrid_pattern(monkeypatch) -> None:
     captured = {}
 
-    class _CapturedConfig(Exception):
+    class _CapturedConfigError(Exception):
         def __init__(self, hybrid_override_pattern=None, **kwargs):
             captured.update(kwargs)
             captured["hybrid_override_pattern"] = hybrid_override_pattern
@@ -837,11 +805,11 @@ def test_nemotron_runtime_proxy_supplies_legacy_hybrid_pattern(monkeypatch) -> N
         )
     ]
     monkeypatch.setattr(
-        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfig
+        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfigError
     )
     monkeypatch.setattr(NemotronHModelDescriptor, "_runtime_model_cls", lambda: object)
 
-    with pytest.raises(_CapturedConfig):
+    with pytest.raises(_CapturedConfigError):
         NemotronHModelDescriptor.create_runtime_benchmark_model(runtime, blocks)
 
     assert "layers_block_type" not in captured
@@ -864,7 +832,7 @@ def test_nemotron_runtime_proxy_uses_active_mamba_shape_for_global_initializatio
 ) -> None:
     captured = {}
 
-    class _CapturedConfig(Exception):
+    class _CapturedConfigError(Exception):
         def __init__(self, **kwargs):
             captured.update(kwargs)
             raise self
@@ -880,19 +848,15 @@ def test_nemotron_runtime_proxy_uses_active_mamba_shape_for_global_initializatio
         model_config_value=lambda name, default=None: values.get(name, default),
     )
     blocks = [
-        BlockConfig(
-            subblock_configs=(AttentionConfig(num_query_heads=4, num_kv_heads=2),)
-        ),
-        BlockConfig(
-            subblock_configs=(MambaConfig(num_heads=48, head_dim=56, state_dim=96),)
-        ),
+        BlockConfig(subblock_configs=(AttentionConfig(num_query_heads=4, num_kv_heads=2),)),
+        BlockConfig(subblock_configs=(MambaConfig(num_heads=48, head_dim=56, state_dim=96),)),
     ]
     monkeypatch.setattr(
-        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfig
+        NemotronHModelDescriptor, "_runtime_config_cls", lambda: _CapturedConfigError
     )
     monkeypatch.setattr(NemotronHModelDescriptor, "_runtime_model_cls", lambda: object)
 
-    with pytest.raises(_CapturedConfig):
+    with pytest.raises(_CapturedConfigError):
         NemotronHModelDescriptor.create_runtime_benchmark_model(runtime, blocks)
 
     assert captured["mamba_num_heads"] == 48
@@ -901,12 +865,8 @@ def test_nemotron_runtime_proxy_uses_active_mamba_shape_for_global_initializatio
 
 
 def test_llama_requests_scaffold_only_for_cacheless_candidate() -> None:
-    attention = BlockConfig(
-        subblock_configs=(AttentionConfig(no_op=False), FFNConfig(no_op=True))
-    )
-    ffn = BlockConfig(
-        subblock_configs=(AttentionConfig(no_op=True), FFNConfig(no_op=False))
-    )
+    attention = BlockConfig(subblock_configs=(AttentionConfig(no_op=False), FFNConfig(no_op=True)))
+    ffn = BlockConfig(subblock_configs=(AttentionConfig(no_op=True), FFNConfig(no_op=False)))
 
     assert LlamaModelDescriptor.runtime_benchmark_scaffold_policy(attention) == "none"
     assert (
@@ -917,24 +877,16 @@ def test_llama_requests_scaffold_only_for_cacheless_candidate() -> None:
 
 def test_nemotron_requests_attention_scaffold_for_cacheless_candidates() -> None:
     attention = BlockConfig(
-        subblock_configs=(
-            AttentionConfig(no_op=False, num_query_heads=32, num_kv_heads=2),
-        )
+        subblock_configs=(AttentionConfig(no_op=False, num_query_heads=32, num_kv_heads=2),)
     )
     mamba = BlockConfig(
-        subblock_configs=(
-            MambaConfig(no_op=False, num_heads=48, head_dim=64, state_dim=128),
-        )
+        subblock_configs=(MambaConfig(no_op=False, num_heads=48, head_dim=64, state_dim=128),)
     )
     moe = BlockConfig(
-        subblock_configs=(
-            MoEConfig(no_op=False, num_experts=16, expert_intermediate_size=512),
-        )
+        subblock_configs=(MoEConfig(no_op=False, num_experts=16, expert_intermediate_size=512),)
     )
 
-    assert (
-        NemotronHModelDescriptor.runtime_benchmark_scaffold_policy(attention) == "none"
-    )
+    assert NemotronHModelDescriptor.runtime_benchmark_scaffold_policy(attention) == "none"
     assert (
         NemotronHModelDescriptor.runtime_benchmark_scaffold_policy(mamba)
         == "attention_scaffold_per_pp_stage"
@@ -990,12 +942,8 @@ def test_nemotron_runtime_bounding_preserves_native_moe_and_mamba_families() -> 
         subblock_configs=(MambaConfig(num_heads=64, head_dim=32), FFNConfig(no_op=True))
     )
 
-    bounded_moe = NemotronHModelDescriptor._runtime_proxy_block_config(
-        runtime, moe_block
-    )
-    bounded_mamba = NemotronHModelDescriptor._runtime_proxy_block_config(
-        runtime, mamba_block
-    )
+    bounded_moe = NemotronHModelDescriptor._runtime_proxy_block_config(runtime, moe_block)
+    bounded_mamba = NemotronHModelDescriptor._runtime_proxy_block_config(runtime, mamba_block)
 
     moe = bounded_moe.require_subblock("moe")
     assert (
@@ -1010,9 +958,7 @@ def test_nemotron_runtime_bounding_preserves_native_moe_and_mamba_families() -> 
         2,
     )
     assert bounded_moe.require_subblock("attention").no_op is True
-    assert bounded_mamba.require_subblock("mamba") == mamba_block.require_subblock(
-        "mamba"
-    )
+    assert bounded_mamba.require_subblock("mamba") == mamba_block.require_subblock("mamba")
 
 
 def test_nemotron_runtime_uses_exact_moe_dimensions_by_default() -> None:

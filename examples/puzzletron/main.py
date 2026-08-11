@@ -65,12 +65,7 @@ from modelopt.torch.puzzletron.stages.graph import (
 )
 
 if __package__:
-    from .acceptance_resume import (
-        build_payload,
-        check_marker,
-        marker_path,
-        write_marker,
-    )
+    from .acceptance_resume import build_payload, check_marker, marker_path, write_marker
 else:
     from acceptance_resume import build_payload, check_marker, marker_path, write_marker
 
@@ -222,9 +217,7 @@ def _manifest_terminal_state(config: dict, stage: str):
 def _stage_execution_record_patterns(config: dict, stage: str) -> tuple[str, ...]:
     """Validate and return immutable records referenced by a stage manifest."""
 
-    puzzle_dir = Path(
-        config.get("puzzle_dir") or (config.get("experiment") or {})["dir"]
-    )
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
     if not manifest_path.is_file():
         return ()
@@ -232,18 +225,14 @@ def _stage_execution_record_patterns(config: dict, stage: str) -> tuple[str, ...
 
 
 def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
-    puzzle_dir = Path(
-        config.get("puzzle_dir") or (config.get("experiment") or {})["dir"]
-    )
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     upstream = {
         parent: marker_path(puzzle_dir, parent, None, None)
         for parent in configured_parent_stage_ids(stage, config)
     }
     paths = config.get("paths") or {}
     repositories = tuple(
-        Path(paths[key])
-        for key in ("automodel_root", "vllm_root", "aiperf_root")
-        if paths.get(key)
+        Path(paths[key]) for key in ("automodel_root", "vllm_root", "aiperf_root") if paths.get(key)
     )
     return {
         "root": puzzle_dir,
@@ -344,9 +333,7 @@ def run_pipeline(
     is_complete: Callable[[str], bool],
     mark_complete: Callable[[str], None],
     refresh_report: Callable[[str | None], None],
-    command_runner: Callable[
-        [Sequence[str]], subprocess.CompletedProcess
-    ] = subprocess.run,
+    command_runner: Callable[[Sequence[str]], subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     """Run stage workers sequentially, stopping on the first failed worker."""
 
@@ -360,9 +347,7 @@ def run_pipeline(
             stage=stage,
             overrides=overrides,
             gpus_per_node=gpus_per_node,
-            force_single=bool(
-                (config.get("embedding_pruning") or {}).get("enabled", False)
-            )
+            force_single=bool((config.get("embedding_pruning") or {}).get("enabled", False))
             and stage == "replacement_scoring",
         )
         result = command_runner(command)
@@ -373,14 +358,10 @@ def run_pipeline(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run the Puzzletron compression pipeline."
-    )
+    parser = argparse.ArgumentParser(description="Run the Puzzletron compression pipeline.")
     parser.add_argument("--config", required=True, help="Hydra YAML entrypoint.")
     parser.add_argument("--stage", choices=("full", *STAGES))
-    parser.add_argument(
-        "--force", action="store_true", help="Rerun the selected stage(s)."
-    )
+    parser.add_argument("--force", action="store_true", help="Rerun the selected stage(s).")
     parser.add_argument("--gpus-per-node", type=int, default=None)
     parser.add_argument("--override", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--worker-stage", choices=STAGES, help=argparse.SUPPRESS)
@@ -404,12 +385,9 @@ def _run_worker(args: argparse.Namespace) -> None:
         overrides=args.override,
     )
     embedding_root = (
-        bool((cfg.get("embedding_pruning") or {}).get("enabled", False))
-        and not args.scenario_child
+        bool((cfg.get("embedding_pruning") or {}).get("enabled", False)) and not args.scenario_child
     )
-    gpus_per_node = int(
-        args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8)
-    )
+    gpus_per_node = int(args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8))
     runtime = dict(cfg.get("_runtime") or {})
     runtime["gpus_per_node"] = gpus_per_node
     cfg["_runtime"] = runtime
@@ -464,9 +442,7 @@ def _run_worker(args: argparse.Namespace) -> None:
 
 
 def _complete_composite_stage(config: dict, stage: str, outputs: dict):
-    puzzle_dir = Path(
-        config.get("puzzle_dir") or (config.get("experiment") or {})["dir"]
-    )
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
     manifest = StageManifest(stage=stage, inputs={"config": config}, config=config)
     manifest.complete(outputs=outputs)
@@ -485,9 +461,7 @@ def main() -> None:
         _run_worker(args)
         return
 
-    cfg = mtpz.pipeline_config.pipeline_config_from_path(
-        args.config, overrides=args.override
-    )
+    cfg = mtpz.pipeline_config.pipeline_config_from_path(args.config, overrides=args.override)
     execution = cfg.get("execution") or {}
     gpus_per_node = int(args.gpus_per_node or execution.get("gpus_per_node", 8))
     stages = stage_sequence(args.stage, cfg)

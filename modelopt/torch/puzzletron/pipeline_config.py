@@ -228,9 +228,7 @@ def normalize_pipeline_config(config: DictConfig | dict[str, Any]) -> dict[str, 
     _deep_update_missing(convert, "teacher_dir", cfg.get("teacher_dir"))
     _deep_update_missing(sort_sanity, "include_reverse", True)
     _normalize_positive_count(aiperf, "num_best_to_eval", "aiperf")
-    _normalize_positive_count(
-        global_distillation, "num_best_to_distill", "global_distillation"
-    )
+    _normalize_positive_count(global_distillation, "num_best_to_distill", "global_distillation")
     if "dir" in experiment and "teacher_dir" not in convert:
         convert["teacher_dir"] = str(Path(experiment["dir"]) / "ckpts" / "teacher")
 
@@ -367,9 +365,7 @@ def _set_missing(node: DictConfig, key: str, value: Any) -> None:
         node[key] = value
 
 
-def adapt_runtime_hydra_config(
-    hydra_cfg: DictConfig, config: dict[str, Any]
-) -> DictConfig:
+def adapt_runtime_hydra_config(hydra_cfg: DictConfig, config: dict[str, Any]) -> DictConfig:
     """Fill runtime Hydra fields from the unified config boundary.
 
     This adapter exists only at the stage boundary. It keeps the new canonical
@@ -388,9 +384,7 @@ def adapt_runtime_hydra_config(
         or _nested(config, "data", "path")
         or config.get("dataset_path")
     )
-    canonical_data = (
-        PuzzletronDataSpec.from_mapping(config["data"]) if config.get("data") else None
-    )
+    canonical_data = PuzzletronDataSpec.from_mapping(config["data"]) if config.get("data") else None
 
     _set_missing(hydra_cfg, "puzzle_dir", experiment_dir)
     _set_missing(hydra_cfg, "input_hf_model_path", model_source)
@@ -415,20 +409,14 @@ def adapt_runtime_hydra_config(
         _set_missing(
             pruning,
             "activations_log_dir",
-            str(
-                Path(hydra_cfg.puzzle_dir) / "pruning" / "pruning_scores" / "activation"
-            )
+            str(Path(hydra_cfg.puzzle_dir) / "pruning" / "pruning_scores" / "activation")
             if hydra_cfg.get("puzzle_dir") is not None
             else None,
         )
         if "activation_hooks_kwargs" not in pruning:
-            pruning.activation_hooks_kwargs = {
-                "method": calibration.get("ffn_method", "iterative")
-            }
+            pruning.activation_hooks_kwargs = {"method": calibration.get("ffn_method", "iterative")}
         automodel = _ensure_dictconfig_child(pruning, "automodel")
-        _set_missing(
-            automodel, "force_hf", _nested(config, "model", "force_hf", default=True)
-        )
+        _set_missing(automodel, "force_hf", _nested(config, "model", "force_hf", default=True))
         _set_missing(automodel, "use_puzzletron_dataloader", True)
 
     for stage in ("depth", "bypass"):
@@ -454,8 +442,7 @@ def adapt_runtime_hydra_config(
         _set_missing(
             scoring,
             "eval_samples",
-            _nested(config, "replacement_scoring", "num_samples")
-            or data.get("num_samples"),
+            _nested(config, "replacement_scoring", "num_samples") or data.get("num_samples"),
         )
         _set_missing(scoring, "micro_batch_size", data.get("micro_batch_size", 1))
         if canonical_data is not None:
@@ -463,9 +450,7 @@ def adapt_runtime_hydra_config(
             _set_missing(scoring, "varlen", canonical_data.legacy_varlen)
         _set_missing(scoring, "backend", "automodel")
         automodel = _ensure_dictconfig_child(scoring, "automodel")
-        _set_missing(
-            automodel, "force_hf", _nested(config, "model", "force_hf", default=True)
-        )
+        _set_missing(automodel, "force_hf", _nested(config, "model", "force_hf", default=True))
         _set_missing(
             automodel,
             "temperature",
