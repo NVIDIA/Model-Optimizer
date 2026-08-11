@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 import modelopt.torch.puzzletron as mtpz
 from modelopt.torch.puzzletron.manifest import (
-    StageManifest,
     semantic_stage_config,
+    stage_manifest_from_config,
     validate_stage_execution_record,
     write_stage_manifest,
 )
@@ -470,7 +470,7 @@ def _run_worker(args: argparse.Namespace) -> None:
 def _complete_composite_stage(config: dict, stage: str, outputs: dict):
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
-    manifest = StageManifest(stage=stage, inputs={"config": config}, config=config)
+    manifest = stage_manifest_from_config(stage, config)
     manifest.complete(outputs=outputs)
     write_stage_manifest(manifest_path, manifest)
     return mtpz.stage_runner.StageResult(

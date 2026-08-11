@@ -15,12 +15,15 @@
 
 """Tests for tokenize_data cache resolution and stage execution."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from examples.puzzletron.tokenize_data import tokenize_data_stage
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
+from modelopt.torch.puzzletron.orchestration.config import load_experiment_config
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from puzzletron_orchestrator.token_caches import resolve_tokenize_caches
 
 
@@ -109,6 +112,76 @@ def test_tokenize_data_stage_dispatches_derived_train_and_validation_caches(
     ]
     assert all("--trust-remote-code" not in command for command in commands)
     assert stage_is_complete(config, "tokenize_data")
+
+
+def test_tokenize_data_manifest_accepts_equivalent_controller_and_worker_configs(
+    tmp_path, monkeypatch, write_token_cache
+):
+    output = tmp_path / "dataset_cache" / "train.tokens"
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text(
+        f"""\
+defaults: [_self_]
+puzzle_dir: {tmp_path}
+dataset_path: {tmp_path / "dataset"}
+model:
+  source: {tmp_path / "model"}
+  trust_remote_code: false
+convert:
+  teacher_dir: {tmp_path / "teacher"}
+data:
+  modality: text
+  layout: fixed
+  max_sample_length: 8
+search_space:
+  axes:
+    hidden_width:
+      enabled: true
+      values: [256]
+sort_sanity:
+  enabled: false
+width_sanity:
+  enabled: false
+tokenize_data:
+  enabled: true
+  workers: 1
+  caches:
+    - output: {output}
+      split: train
+      num_samples: 1
+      seq_length: 8
+      shuffle_seed: 1
+"""
+    )
+    controller_config = load_experiment_config(experiment)
+    worker_config = pipeline_config_from_path(experiment)
+
+    assert worker_config["sort_sanity"]["include_reverse"] is True
+    assert worker_config["width_sanity"]["target_values"] == {"hidden_width": 256}
+    assert "include_reverse" not in controller_config["sort_sanity"]
+    assert "target_values" not in controller_config["width_sanity"]
+
+    caches = resolve_tokenize_caches(worker_config)
+
+    def _run(command, *, check):
+        assert check is True
+        cache_output = Path(command[command.index("--output") + 1])
+        cache = next(cache for cache in caches if Path(cache["output"]) == cache_output)
+        write_token_cache(worker_config, cache)
+
+    monkeypatch.setattr("examples.puzzletron.tokenize_data.subprocess.run", _run)
+    tokenize_data_stage(worker_config)
+
+    manifest = json.loads((tmp_path / "manifests" / "tokenize_data.json").read_text())
+    assert manifest["semantic_config"]["sort_sanity"] == {"enabled": False}
+    assert manifest["semantic_config"]["width_sanity"] == {"enabled": False}
+    resolved_path = tmp_path / manifest["execution_record"]["resolved_config_path"]
+    resolved_config = json.loads(resolved_path.read_text())["resolved_stage_config"]
+    assert resolved_config["sort_sanity"]["include_reverse"] is True
+    assert resolved_config["width_sanity"]["target_values"] == {"hidden_width": 256}
+    assert stage_is_complete(controller_config, "tokenize_data")
+    controller_config["sort_sanity"]["enabled"] = True
+    assert not stage_is_complete(controller_config, "tokenize_data")
 
 
 def test_tokenize_data_stage_passes_trust_remote_code_only_when_enabled(tmp_path, monkeypatch):

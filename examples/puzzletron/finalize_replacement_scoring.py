@@ -17,7 +17,7 @@ else:
     from embedding_pipeline import finalize_replacement_scoring_diagnostics
 
 from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
-from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
+from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 
 
@@ -93,15 +93,13 @@ def finalize_replacement_scoring(
             scores_dir=puzzle_dir / f"{stem}--validation",
             output_dir=puzzle_dir / "artifacts" / "replacement_scoring",
             granularity=granularity,
-            default_metric=str(
-                scoring.get("default_metric", "normalized_mse_loss_hidden_states")
-            ),
+            default_metric=str(scoring.get("default_metric", "normalized_mse_loss_hidden_states")),
             default_layer_count=int(scoring.get("default_layer_count", 5)),
             anchor_count=int(scoring.get("anchor_count", 3)),
             trend_relative_tolerance=float(scoring.get("trend_relative_tolerance", 0.02)),
         )
 
-    manifest = StageManifest(stage="replacement_scoring", inputs={"config": config}, config=config)
+    manifest = stage_manifest_from_config("replacement_scoring", config)
     manifest.complete(outputs={"report": report})
     write_stage_manifest(
         Path(puzzle_dir) / "manifests" / "replacement_scoring.json",
@@ -117,9 +115,7 @@ def main() -> None:
     args = parser.parse_args()
 
     overrides = [
-        override
-        for override in os.environ.get("FINALIZE_OVERRIDES", "").splitlines()
-        if override
+        override for override in os.environ.get("FINALIZE_OVERRIDES", "").splitlines() if override
     ]
     finalize_replacement_scoring(args.config, args.puzzle_dir, overrides=overrides)
 

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +28,7 @@ from examples.puzzletron.run_axis_diagnostic_worker import (
     _validate_worker_topology,
     _worker_config,
 )
-from modelopt.torch.puzzletron.manifest import StageManifest
+from modelopt.torch.puzzletron.manifest import StageManifest, stage_manifest_from_config
 from modelopt.torch.puzzletron.stages import diagnostics
 from modelopt.torch.puzzletron.stages.diagnostics import _scoring_cfg_for_method
 
@@ -302,6 +303,29 @@ def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: P
         override.startswith("++width_sanity.automodel.parallel.")
         for override in worker.get("_runtime", {}).get("overrides", [])
     )
+
+
+def test_axis_workers_bind_distinct_authored_semantic_configs(tmp_path: Path):
+    config = {
+        "experiment": {"dir": str(tmp_path / "run")},
+        "width_sanity": {"automodel": {"parallel": {"tp": 1}}},
+        "_runtime": {
+            "config_path": str(tmp_path / "experiment.yaml"),
+            "authored_config": {
+                "experiment": {"dir": str(tmp_path / "run")},
+                "width_sanity": {"enabled": False},
+            },
+        },
+    }
+
+    kv_config = _worker_config(deepcopy(config), "kv_groups", tmp_path / "experiment.yaml")
+    ffn_config = _worker_config(deepcopy(config), "ffn_intermediate", tmp_path / "experiment.yaml")
+    kv_manifest = stage_manifest_from_config("width_sanity", kv_config)
+    ffn_manifest = stage_manifest_from_config("width_sanity", ffn_config)
+
+    assert kv_manifest.config["width_sanity"]["axes"] == ["kv_groups"]
+    assert ffn_manifest.config["width_sanity"]["axes"] == ["ffn_intermediate"]
+    assert kv_manifest.semantic_identity != ffn_manifest.semantic_identity
 
 
 def test_axis_worker_excludes_non_sortable_axes_from_width_diagnostics():
