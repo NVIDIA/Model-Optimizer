@@ -288,6 +288,8 @@ def get_args():
             "--sft is mutually exclusive with --data_paths / --use_mock_data: the SFT branch wins "
             "the dataset selection, so those inputs would be silently ignored."
         )
+    if args.sft_dataset_root and not args.sft:
+        raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
 
     print_args(args)
 
@@ -344,8 +346,8 @@ def main(args: argparse.Namespace):
         student_tokenizer = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok)
         student_vocab = student_tokenizer.get_vocab()
         teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
-        # Only student ids ever reach the teacher, so agreement on those is the invariant. A
-        # teacher vocabulary that is a strict superset (extra reserved tokens, say) is fine.
+        # Every student id must mean the same thing to the teacher. This is necessary but not
+        # sufficient: the KD losses also need equal logits width, checked on the providers below.
         conflicts = {t for t, i in student_vocab.items() if teacher_vocab.get(t, i) != i}
         missing = student_vocab.keys() - teacher_vocab.keys()
         if conflicts or missing:
@@ -354,11 +356,6 @@ def main(args: argparse.Namespace):
                 "same ids, so the teacher must map every student token to the same id: "
                 f"{len(conflicts)} conflicting id(s), {len(missing)} token(s) absent from the "
                 "teacher. Student and teacher must share a tokenizer."
-            )
-        if len(teacher_vocab) > len(student_vocab):
-            warn_rank_0(
-                f"Teacher vocabulary has {len(teacher_vocab) - len(student_vocab)} token(s) the "
-                "student lacks; ids agree on every student token, so distillation is well-defined."
             )
 
         _warn_if_bos_missing(student_tokenizer, args.sft_dataset_root)
@@ -407,6 +404,13 @@ def main(args: argparse.Namespace):
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
     teacher_provider = _build_model_provider(args.teacher_hf_path)
+
+    if args.sft and student_provider.vocab_size != teacher_provider.vocab_size:
+        # The KD losses compare logits directly, so the padded vocab dimensions must match.
+        raise ValueError(
+            "--sft distillation needs student and teacher logits of equal width, but their padded "
+            f"vocab sizes differ ({student_provider.vocab_size} vs {teacher_provider.vocab_size})."
+        )
 
     kd_config = ModelOptDistillConfig(
         skip_lm_loss=not args.no_skip_lm_loss, kd_loss_scale=args.kd_loss_scale
