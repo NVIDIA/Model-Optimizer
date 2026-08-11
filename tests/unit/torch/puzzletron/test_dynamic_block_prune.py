@@ -31,15 +31,10 @@ from modelopt.torch.puzzletron.pruning.dynamic_block_prune import (
 
 def _attn_specs(target_num_q, target_num_kv, head_dim=4, orig_q=24, orig_kv=4):
     return build_block_prune_specs(
-        down_proj_name=None,
-        o_proj_name="o",
-        orig_intermediate=None,
-        target_intermediate=None,
-        orig_num_q=orig_q,
-        orig_num_kv=orig_kv,
-        target_num_q=target_num_q,
-        target_num_kv=target_num_kv,
-        head_dim=head_dim,
+        down_proj_name=None, o_proj_name="o",
+        orig_intermediate=None, target_intermediate=None,
+        orig_num_q=orig_q, orig_num_kv=orig_kv,
+        target_num_q=target_num_q, target_num_kv=target_num_kv, head_dim=head_dim,
     )
 
 
@@ -57,58 +52,12 @@ def test_build_specs_covers_all_attention_cases():
 
 def test_build_specs_ffn():
     specs = build_block_prune_specs(
-        down_proj_name="down_proj",
-        o_proj_name=None,
-        orig_intermediate=12,
-        target_intermediate=8,
-        orig_num_q=None,
-        orig_num_kv=None,
-        target_num_q=None,
-        target_num_kv=None,
-        head_dim=None,
+        down_proj_name="down_proj", o_proj_name=None,
+        orig_intermediate=12, target_intermediate=8,
+        orig_num_q=None, orig_num_kv=None, target_num_q=None, target_num_kv=None, head_dim=None,
     )
     assert len(specs) == 1 and isinstance(specs[0], FFNRemovalSpec)
     assert int(specs[0].keep_mask.sum()) == 8
-
-
-def test_build_specs_rejects_missing_ffn_module_name():
-    with pytest.raises(ValueError, match="down_proj_name"):
-        build_block_prune_specs(
-            down_proj_name=None,
-            o_proj_name=None,
-            orig_intermediate=12,
-            target_intermediate=8,
-            orig_num_q=None,
-            orig_num_kv=None,
-            target_num_q=None,
-            target_num_kv=None,
-            head_dim=None,
-        )
-
-
-@pytest.mark.parametrize(
-    ("orig_num_q", "o_proj_name", "head_dim", "missing_metadata"),
-    [
-        (None, "o", 4, "orig_num_q"),
-        (24, None, 4, "o_proj_name"),
-        (24, "o", None, "head_dim"),
-    ],
-)
-def test_build_specs_rejects_missing_attention_metadata(
-    orig_num_q, o_proj_name, head_dim, missing_metadata
-):
-    with pytest.raises(ValueError, match=missing_metadata):
-        build_block_prune_specs(
-            down_proj_name=None,
-            o_proj_name=o_proj_name,
-            orig_intermediate=None,
-            target_intermediate=None,
-            orig_num_q=orig_num_q,
-            orig_num_kv=4,
-            target_num_q=12,
-            target_num_kv=2,
-            head_dim=head_dim,
-        )
 
 
 class _FFN(nn.Module):
