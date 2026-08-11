@@ -350,7 +350,7 @@ examples/puzzletron/configs/
         ├── family.yaml               # descriptors, hooks, and family axes
         └── <model>/
             ├── model.yaml            # checkpoint metadata and legal domains
-            └── runs/default.yaml     # exact end-to-end experiment
+            └── runs/<run>.yaml       # exact end-to-end experiment
 ```
 
 Site-specific paths can be overridden without editing the checked-in config:
@@ -368,9 +368,9 @@ candidate evaluation, filtering, materialization, and distillation with
 
 The focused Qwen 3.5 0.8B example pins the public checkpoint revision. Its
 default model config follows the tracked 0.8B runtime campaign and searches
-only the FFN intermediate sizes `[3072, 2048]`. The default smoke composes that
-config directly. It enables the composite scenario route required by
-named-profile MIP while allowing only the teacher embedding width; depth,
+only the FFN intermediate sizes `[3072, 2048]`. The `mip_smoke.yaml` run
+composes that config directly. It enables the composite scenario route required
+by named-profile MIP while allowing only the teacher embedding width; depth,
 attention, and GDN axes also remain at their teacher values. It is the first
 runtime-validation target.
 
@@ -380,18 +380,18 @@ values are derived from the pinned 0.8B geometry. Those advanced targets were
 not selected from a completed 0.8B campaign and have not been fully
 runtime-validated. In particular, its `gdn_key_head_dim` 128 to 96 target still
 lacks physical-runtime equivalence evidence; that blocker does not apply to the
-default FFN-only smoke.
+FFN-only MIP smoke.
 
 The checked-in one-GPU execution plan ends at `mip`. Bypass, vLLM serving
 statistics, evaluation, AIPerf, and distillation are deliberately outside this
 smoke boundary. CPU plan tests validate composition and scheduling only; the
-opt-in GPU test must pass before treating the default route as runtime-validated.
+opt-in GPU test must pass before treating the MIP smoke route as runtime-validated.
 Review and replace every site placeholder in the runner before submission,
 then inspect the complete plan without launching work:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
-  --experiment examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/default.yaml \
+  --experiment examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_smoke.yaml \
   --runner examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml \
   --execution examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.smoke.yaml \
   --stage full --dry-run

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Opt-in real-checkpoint smoke for the default Qwen 3.5 0.8B MIP route.
+"""Opt-in real-checkpoint smoke for the Qwen 3.5 0.8B MIP route.
 
 This recipe validates the conservative FFN-only search. The broader advanced
 search remains a separate unvalidated follow-up.
@@ -56,7 +56,7 @@ def _save_messages_dataset(path: Path) -> None:
 @pytest.mark.integration
 @pytest.mark.manual(reason="downloads and prunes the real Qwen 3.5 0.8B checkpoint")
 @pytest.mark.timeout(2400)
-def test_qwen3p5_0p8b_default_orchestrated_smoke_completes_at_mip(
+def test_qwen3p5_0p8b_orchestrated_mip_smoke_completes(
     project_root_path: Path,
     tmp_path: Path,
 ) -> None:
@@ -105,7 +105,7 @@ def test_qwen3p5_0p8b_default_orchestrated_smoke_completes_at_mip(
             "--experiment",
             str(
                 project_root_path / "examples/puzzletron/configs/families/qwen3_5/"
-                "qwen3p5_0p8b/runs/default.yaml"
+                "qwen3p5_0p8b/runs/mip_smoke.yaml"
             ),
             "--runner",
             str(runner),
@@ -165,7 +165,7 @@ def test_qwen3p5_0p8b_default_orchestrated_smoke_completes_at_mip(
     run_config = yaml.safe_load(
         (
             project_root_path
-            / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/default.yaml"
+            / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_smoke.yaml"
         ).read_text(encoding="utf-8")
     )
     width_sanity_config = run_config["width_sanity"]

@@ -27,7 +27,8 @@ from puzzletron_orchestrator.compiler import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 RUN_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/default.yaml"
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_smoke.yaml"
 )
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
