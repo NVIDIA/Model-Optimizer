@@ -44,7 +44,8 @@ class PackedTokenMemmapDataset(Dataset):
                 f"packed token cache is incomplete: data={self.path} metadata={metadata_path}. "
                 "Run tokenize_data with caches that write these paths "
                 "(see train_token_cache_path / validation_token_cache_path), "
-                "or remove a stale manifests/tokenize_data.json with status=skipped."
+                "or remove the stale manifest at manifests/tokenize_data.json when it has "
+                "status=skipped."
             )
         self.metadata = json.loads(metadata_path.read_text())
         if self.metadata.get("status") != "complete":

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Scheduler-neutral registry for public Puzzletron pipeline stages."""
 
@@ -7,28 +19,46 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable
 
 __all__ = [
     "LEGACY_POST_MIP_STAGE_IDS",
+    "SHARED_SEMANTIC_CONFIG_SECTIONS",
     "STAGE_REGISTRY",
     "STAGE_SPECS",
     "ArtifactChoice",
+    "StageSkipReason",
     "StageSpec",
+    "StageStatus",
+    "StageTerminalState",
     "configured_parent_stage_ids",
     "configured_stage_ids",
     "distributed_stage_ids",
     "enabled_stage_ids",
     "required_stage_ids",
+    "semantic_stage_config",
     "selected_parent_stage_ids",
     "stage_display_name",
     "stage_ids",
     "stage_is_enabled",
     "stage_spec",
+    "stage_terminal_state",
     "topological_mapping_items",
     "topological_stage_ids",
 ]
+
+SHARED_SEMANTIC_CONFIG_SECTIONS = (
+    "model",
+    "data",
+    "dataset",
+    "parallel",
+    "search_space",
+    "embedding_pruning",
+    "granularity",
+    "capability_validation",
+)
 
 LEGACY_POST_MIP_STAGE_IDS = frozenset(
     {
@@ -70,6 +100,72 @@ class StageSpec:
     distributed: bool = False
     report_order: int = 0
     topology_order: int = 0
+    semantic_config_sections: tuple[str, ...] = ()
+
+
+class StageStatus(str, Enum):
+    """Manifest terminal states accepted by Puzzletron stage consumers."""
+
+    SUCCESS = "success"
+    IMPORTED = "imported"
+    SKIPPED = "skipped"
+
+
+class StageSkipReason(str, Enum):
+    """Reasons that may make a skipped stage an accepted terminal state."""
+
+    DISABLED = "disabled"
+
+
+@dataclass(frozen=True)
+class StageTerminalState:
+    """Typed terminal state shared by workers, manifests, resume, and orchestration."""
+
+    status: StageStatus
+    skip_reason: StageSkipReason | None = None
+
+    @property
+    def produced_artifacts(self) -> bool:
+        """Return whether completion must be backed by stage artifacts."""
+
+        return self.status in {StageStatus.SUCCESS, StageStatus.IMPORTED}
+
+    def allows_completion(self, stage_id: str, config: Mapping[str, Any]) -> bool:
+        """Return whether graph and config semantics allow this terminal state."""
+
+        if self.produced_artifacts:
+            return True
+        return self.skip_reason is StageSkipReason.DISABLED and not stage_is_enabled(
+            stage_id, config
+        )
+
+
+def stage_terminal_state(
+    payload: Mapping[str, Any] | None,
+    *,
+    expected_stage: str | None = None,
+) -> StageTerminalState | None:
+    """Parse one manifest terminal state, returning ``None`` for invalid evidence."""
+
+    if not isinstance(payload, Mapping):
+        return None
+    if expected_stage is not None and payload.get("stage") != expected_stage:
+        return None
+    try:
+        status = StageStatus(payload.get("status"))
+    except (TypeError, ValueError):
+        return None
+    raw_reason = payload.get("skip_reason")
+    if status is StageStatus.SKIPPED:
+        try:
+            reason = StageSkipReason(raw_reason)
+        except (TypeError, ValueError):
+            return None
+    else:
+        if raw_reason not in (None, ""):
+            return None
+        reason = None
+    return StageTerminalState(status=status, skip_reason=reason)
 
 
 def topological_mapping_items(
@@ -113,6 +209,7 @@ def _stage(
     stage_id: str,
     display_name: str,
     *,
+    semantic_config_sections: tuple[str, ...],
     required: bool = False,
     default_enabled: bool = False,
     enabled_when: tuple[str, bool] | None = None,
@@ -129,6 +226,7 @@ def _stage(
         StageSpec(
             stage_id=stage_id,
             display_name=display_name,
+            semantic_config_sections=semantic_config_sections,
             completion_artifacts=completion_artifacts,
             granularity_label=granularity_label,
             required=required,
@@ -148,19 +246,34 @@ def _stage(
 _stage(
     "convert",
     "Convert Checkpoint",
+    semantic_config_sections=("convert",),
     required=True,
     completion_artifacts=("ckpts/teacher/config.json",),
 )
 _stage(
     "tokenize_data",
     "Tokenize Data",
-    required=True,
+    semantic_config_sections=(
+        "tokenize_data",
+        "convert",
+        "data",
+        "dataset_path",
+        "train_token_cache_path",
+        "validation_token_cache_path",
+        "pruning",
+        "replacement_scoring",
+        "depth_importance",
+        "sort_sanity",
+        "width_sanity",
+    ),
+    default_enabled=False,
     parents=("convert",),
     completion_artifacts=("dataset_cache/*.tokens",),
 )
 _stage(
     "vllm_stats",
     "{unit} vLLM Stats",
+    semantic_config_sections=("vllm_stats", "build_library", "library"),
     parents=("convert",),
     completion_artifacts=("artifacts/vllm_stats/summary.json",),
     granularity_label=True,
@@ -168,6 +281,7 @@ _stage(
 _stage(
     "depth_importance",
     "Depth Importance Estimation",
+    semantic_config_sections=("depth_importance", "pruning", "replacement_scoring"),
     parents=("tokenize_data",),
     completion_artifacts=("depth/iterative/trajectory.json",),
     distributed=True,
@@ -175,6 +289,7 @@ _stage(
 _stage(
     "width_importance",
     "Width Importance Estimation",
+    semantic_config_sections=("width_importance", "pruning"),
     required=True,
     parents=("tokenize_data",),
     completion_artifacts=("pruning/pruning_scores/automodel/*/activation_passes_manifest.json",),
@@ -183,6 +298,7 @@ _stage(
 _stage(
     "sort",
     "Sort Checkpoint",
+    semantic_config_sections=("sort", "pruning"),
     required=True,
     parents=("width_importance",),
     completion_artifacts=("ckpts/sorted_teacher/config.json",),
@@ -191,6 +307,13 @@ _stage(
 _stage(
     "sort_sanity",
     "Sort Sanity Check",
+    semantic_config_sections=(
+        "sort_sanity",
+        "sanity",
+        "sort",
+        "pruning",
+        "replacement_scoring",
+    ),
     parents=("sort",),
     completion_artifacts=("artifacts/sort_sanity/summary.json",),
     distributed=True,
@@ -198,6 +321,7 @@ _stage(
 _stage(
     "width_sanity",
     "Width Sanity Check",
+    semantic_config_sections=("width_sanity", "sanity", "pruning", "replacement_scoring"),
     enabled_requires=("sort_sanity",),
     parents=("sort_sanity",),
     completion_artifacts=("artifacts/width_sanity/summary.json",),
@@ -206,6 +330,13 @@ _stage(
 _stage(
     "slicing_sanity",
     "Slicing Sanity Check",
+    semantic_config_sections=(
+        "slicing_sanity",
+        "sanity",
+        "sort",
+        "pruning",
+        "replacement_scoring",
+    ),
     enabled_requires=("width_sanity",),
     parents=("width_sanity",),
     completion_artifacts=("artifacts/slicing_sanity/summary.json",),
@@ -213,6 +344,7 @@ _stage(
 _stage(
     "bypass_sanity",
     "Bypass Sanity Check",
+    semantic_config_sections=("bypass_sanity", "sanity", "bypass", "pruning"),
     parents=("sort",),
     completion_artifacts=("artifacts/bypass_sanity/summary.json",),
     distributed=True,
@@ -220,6 +352,7 @@ _stage(
 _stage(
     "bypass",
     "{unit} Bypass",
+    semantic_config_sections=("bypass", "pruning"),
     parents=("bypass_sanity",),
     completion_artifacts=(
         "artifacts/bypass/dp_observations.jsonl",
@@ -231,6 +364,7 @@ _stage(
 _stage(
     "build_library",
     "Build Block Library",
+    semantic_config_sections=("build_library", "vllm_stats", "library", "bypass"),
     required=True,
     parents=("bypass",),
     conditional_parents=(("vllm_stats", ("vllm_stats.enabled", True)),),
@@ -240,6 +374,12 @@ _stage(
 _stage(
     "replacement_scoring",
     "Replace-one-{unit_lower} Scoring",
+    semantic_config_sections=(
+        "replacement_scoring",
+        "build_library",
+        "library",
+        "pruning",
+    ),
     required=True,
     parents=("build_library",),
     completion_artifacts=("artifacts/replacement_scoring/summary.json",),
@@ -249,6 +389,14 @@ _stage(
 _stage(
     "mip",
     "MIP Search",
+    semantic_config_sections=(
+        "mip",
+        "realize_model",
+        "replacement_scoring",
+        "vllm_stats",
+        "library",
+        "bypass",
+    ),
     required=True,
     parents=("vllm_stats", "depth_importance", "replacement_scoring"),
     completion_artifacts=("mip/profiles/*/mip_grid.json",),
@@ -256,6 +404,7 @@ _stage(
 _stage(
     "zero_shot_evaluation",
     "Zero-shot Evaluation",
+    semantic_config_sections=("zero_shot_evaluation", "convert", "replacement_scoring"),
     parents=("mip",),
     completion_artifacts=("artifacts/zero_shot_evaluation",),
     distributed=True,
@@ -263,12 +412,20 @@ _stage(
 _stage(
     "aiperf",
     "AIPerf",
+    semantic_config_sections=("aiperf", "zero_shot_evaluation"),
     parents=("mip",),
     completion_artifacts=("artifacts/aiperf/**/aiperf_results.json",),
 )
 _stage(
     "global_distillation_sanity",
     "Global Distillation Sanity Check",
+    semantic_config_sections=(
+        "global_distillation_sanity",
+        "sanity",
+        "global_distillation",
+        "replacement_scoring",
+        "calibration",
+    ),
     parents=("mip",),
     completion_artifacts=(
         "artifacts/global_distillation_sanity/**/global_distillation_sanity_summary.json",
@@ -278,6 +435,11 @@ _stage(
 _stage(
     "global_distillation",
     "Global Distillation",
+    semantic_config_sections=(
+        "global_distillation",
+        "zero_shot_evaluation",
+        "replacement_scoring",
+    ),
     parents=("global_distillation_sanity",),
     completion_artifacts=("artifacts/global_distillation/**/global_distillation_summary.json",),
     distributed=True,
@@ -285,13 +447,16 @@ _stage(
 _stage(
     "post_distillation_evaluation",
     "Post Distillation Evaluation",
+    semantic_config_sections=(
+        "post_distillation_evaluation",
+        "global_distillation",
+        "zero_shot_evaluation",
+        "replacement_scoring",
+    ),
     parents=("global_distillation",),
     completion_artifacts=("artifacts/post_distillation_evaluation/**/evaluation_summary.json",),
     distributed=True,
 )
-
-STAGE_SPECS = tuple(_SPECS)
-STAGE_REGISTRY = MappingProxyType({spec.stage_id: spec for spec in STAGE_SPECS})
 
 
 def _registry_for(specs: Iterable[StageSpec]) -> dict[str, StageSpec]:
@@ -301,6 +466,10 @@ def _registry_for(specs: Iterable[StageSpec]) -> dict[str, StageSpec]:
             raise ValueError(f"Duplicate Puzzletron stage ID {spec.stage_id!r}")
         registry[spec.stage_id] = spec
     for spec in registry.values():
+        if spec.stage_id not in spec.semantic_config_sections:
+            raise ValueError(
+                f"stage {spec.stage_id!r} must explicitly include its own semantic config section"
+            )
         unknown_requirements = set(spec.enabled_requires) - set(registry)
         if unknown_requirements:
             raise ValueError(
@@ -315,6 +484,10 @@ def _registry_for(specs: Iterable[StageSpec]) -> dict[str, StageSpec]:
             if parent not in registry:
                 raise ValueError(f"unknown parent {parent!r} for stage {spec.stage_id!r}")
     return registry
+
+
+STAGE_SPECS = tuple(_SPECS)
+STAGE_REGISTRY = MappingProxyType(_registry_for(STAGE_SPECS))
 
 
 def _config_value(config: Mapping[str, Any], path: str, default: Any = False) -> Any:
@@ -339,6 +512,20 @@ def stage_spec(stage_id: str) -> StageSpec:
         return STAGE_REGISTRY[stage_id]
     except KeyError as error:
         raise ValueError(f"Unknown Puzzletron stage {stage_id!r}") from error
+
+
+def semantic_stage_config(config: Mapping[str, Any], stage_id: str) -> dict[str, Any]:
+    """Return configuration that can change the semantic result of one stage.
+
+    Public stages declare their semantic sections alongside their other
+    scheduler-neutral metadata. Dynamic stages that are not in the public
+    registry retain the historical stage-ID section fallback.
+    """
+
+    spec = STAGE_REGISTRY.get(stage_id)
+    stage_sections = (stage_id,) if spec is None else spec.semantic_config_sections
+    sections = dict.fromkeys((*SHARED_SEMANTIC_CONFIG_SECTIONS, *stage_sections))
+    return {key: config[key] for key in sections if key in config}
 
 
 def stage_display_name(stage_id: str, *, granularity: str | None = None) -> str:

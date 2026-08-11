@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron campaign progress report generation."""
+
 import json
 from pathlib import Path
 
@@ -70,6 +72,35 @@ def test_pipeline_state_uses_artifacts_and_completed_takes_precedence(tmp_path: 
     assert _pipeline_state(tmp_path, bypass, {"bypass": {"enabled": False}}) == "completed"
 
 
+def test_pipeline_state_uses_registry_enablement(tmp_path: Path):
+    tokenize_data = STAGE_REGISTRY["tokenize_data"]
+    width_sanity = STAGE_REGISTRY["width_sanity"]
+
+    assert _pipeline_state(tmp_path, tokenize_data, {}) == "disabled"
+    assert (
+        _pipeline_state(
+            tmp_path,
+            width_sanity,
+            {
+                "sort_sanity": {"enabled": False},
+                "width_sanity": {"enabled": True},
+            },
+        )
+        == "disabled"
+    )
+    assert (
+        _pipeline_state(
+            tmp_path,
+            width_sanity,
+            {
+                "sort_sanity": {"enabled": True},
+                "width_sanity": {"enabled": True},
+            },
+        )
+        == "pending"
+    )
+
+
 def _disabled_bypass_report(tmp_path: Path) -> str:
     config = {
         "display_name": "Example Experiment",
@@ -101,7 +132,7 @@ def test_report_has_clean_header_and_completed_required_artifacts(tmp_path: Path
     assert "<span class='required-node'>Required</span>" in document
     assert "<span class='optional-node'>Optional</span>" in document
     assert "dagre.min.js" in document
-    assert 'data-source="convert" data-target="tokenize_data"' in document
+    assert 'data-source="convert" data-target="vllm_stats"' in document
 
 
 def test_pipeline_dag_only_contains_configured_stages(tmp_path: Path):

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for runtime-stat sharding and analytical runtime estimation."""
+
 import pytest
 
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig

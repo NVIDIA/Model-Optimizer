@@ -765,6 +765,7 @@ def bypass_stage(config: dict[str, Any], manifest: StageManifest):
                 "scoring_parent_artifact": str(parent_artifact),
             },
             status="skipped",
+            skip_reason="disabled",
             message="Bypass is disabled.",
         )
         if os.environ.get("RANK") in (None, "", "0"):

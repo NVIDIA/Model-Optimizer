@@ -35,99 +35,8 @@ __all__ = [
 ]
 
 
-_SHARED_SEMANTIC_CONFIG_SECTIONS = (
-    "model",
-    "data",
-    "dataset",
-    "parallel",
-    "search_space",
-    "embedding_pruning",
-    "granularity",
-    "capability_validation",
-)
-
-_STAGE_SEMANTIC_CONFIG_SECTIONS = {
-    "convert": ("convert",),
-    "tokenize_data": (
-        "tokenize_data",
-        "convert",
-        "dataset_path",
-        "pruning",
-        "replacement_scoring",
-    ),
-    "width_importance": ("width_importance", "pruning"),
-    "sort": ("sort", "pruning"),
-    "sort_sanity": ("sort_sanity", "sanity", "sort", "pruning", "replacement_scoring"),
-    "slicing_sanity": (
-        "slicing_sanity",
-        "sanity",
-        "sort",
-        "pruning",
-        "replacement_scoring",
-    ),
-    "width_sanity": ("width_sanity", "sanity", "pruning", "replacement_scoring"),
-    "bypass_sanity": ("bypass_sanity", "sanity", "bypass", "pruning"),
-    "bypass": ("bypass", "pruning"),
-    "depth_importance": ("depth_importance", "pruning", "replacement_scoring"),
-    "vllm_stats": (
-        "vllm_stats",
-        "build_library",
-        "library",
-    ),
-    "build_library": (
-        "build_library",
-        "vllm_stats",
-        "library",
-        "bypass",
-    ),
-    "replacement_scoring": (
-        "replacement_scoring",
-        "build_library",
-        "library",
-        "pruning",
-    ),
-    "mip": (
-        "mip",
-        "realize_model",
-        "replacement_scoring",
-        "vllm_stats",
-        "library",
-        "bypass",
-    ),
-    "zero_shot_evaluation": ("zero_shot_evaluation", "convert", "replacement_scoring"),
-    "aiperf": ("aiperf", "zero_shot_evaluation"),
-    "global_distillation_sanity": (
-        "global_distillation_sanity",
-        "sanity",
-        "global_distillation",
-        "replacement_scoring",
-        "calibration",
-    ),
-    "global_distillation": (
-        "global_distillation",
-        "zero_shot_evaluation",
-        "replacement_scoring",
-    ),
-    "post_distillation_evaluation": (
-        "post_distillation_evaluation",
-        "global_distillation",
-        "zero_shot_evaluation",
-        "replacement_scoring",
-    ),
-}
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def semantic_stage_config(config: dict[str, Any], stage: str) -> dict[str, Any]:
-    """Return configuration that can change the semantic result of one stage."""
-
-    sections = dict.fromkeys(
-        (*_SHARED_SEMANTIC_CONFIG_SECTIONS, *_STAGE_SEMANTIC_CONFIG_SECTIONS.get(stage, (stage,)))
-    )
-    return {key: config[key] for key in sections if key in config}
 
 
 @dataclass
@@ -143,6 +52,7 @@ class StageManifest:
     capability_snapshot: dict[str, Any] | None = None
     semantic_config: dict[str, Any] | None = None
     implementation_provenance: dict[str, Any] = field(default_factory=dict)
+    skip_reason: str | None = None
     stale_reason: str | None = None
     started_at: str = field(default_factory=_now_iso)
     ended_at: str | None = None
@@ -171,18 +81,27 @@ class StageManifest:
         }
         return stable_hash(payload, prefix=f"{self.stage}_semantic")
 
-    def complete(self, *, outputs: dict[str, Any] | None = None, status: str = "success") -> None:
+    def complete(
+        self,
+        *,
+        outputs: dict[str, Any] | None = None,
+        status: str = "success",
+        skip_reason: str | None = None,
+    ) -> None:
         """Mark the stage complete with its validated outputs and final status."""
 
         if outputs is not None:
             self.outputs = outputs
-        self.status = status
+        self.status = str(getattr(status, "value", status))
+        self.skip_reason = (
+            str(getattr(skip_reason, "value", skip_reason)) if skip_reason is not None else None
+        )
         self.ended_at = _now_iso()
 
     def to_dict(self) -> dict[str, Any]:
         """Return the backward-compatible serialized manifest payload."""
 
-        return {
+        payload = {
             "stage": self.stage,
             "version": self.version,
             "status": self.status,
@@ -203,6 +122,9 @@ class StageManifest:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
         }
+        if self.skip_reason is not None:
+            payload["skip_reason"] = self.skip_reason
+        return payload
 
 
 def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:
@@ -221,3 +143,8 @@ def read_stage_manifest(path: str | Path) -> dict[str, Any]:
     """Read a stage manifest while preserving compatibility with older schemas."""
 
     return json.loads(Path(path).read_text())
+
+
+# Import after defining the manifest API because the stages package registers
+# handlers that import StageManifest while its graph submodule is initialized.
+from .stages.graph import semantic_stage_config as semantic_stage_config  # noqa: E402

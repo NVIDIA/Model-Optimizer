@@ -21,7 +21,13 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..identity import artifact_snapshot_identity, hash_payload, mip_input_artifact_paths
+from ..identity import (
+    artifact_snapshot_identity,
+    hash_payload,
+    mip_input_artifact_paths,
+    stable_hash,
+)
+from ..import_contract import imported_stage_manifest_is_complete
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -34,7 +40,8 @@ from ..schema import (
     WorkItem,
     WorkPlan,
 )
-from ..stages import stage_spec
+from ..stages import StageStatus, semantic_stage_config, stage_spec, stage_terminal_state
+from ..token_caches import resolve_tokenize_caches
 from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 
@@ -59,13 +66,28 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
             patterns.append("subblock_library.json")
         return tuple(patterns)
     if stage_id == "tokenize_data":
+        try:
+            configured_caches = resolve_tokenize_caches(config)
+        except (TypeError, ValueError):
+            return ()
+        if not configured_caches:
+            return ()
         return ("dataset_cache/*.tokens", "dataset_cache/*.tokens.json")
-    if stage_id == "sort":
-        return ("ckpts/sorted_teacher/config.json",)
-    if stage_id == "depth_importance":
-        return ("depth/iterative/trajectory.json",)
+    if stage_id == "slicing_sanity":
+        slicing = config.get("slicing_sanity") or {}
+        if slicing.get("backend") == "distributed_parent_sweep":
+            return ("artifacts/slicing_sanity/summary.json",)
+        return (
+            "artifacts/width_slice_equivalence/manifest.json",
+            "artifacts/width_slice_equivalence/summary.json",
+            "artifacts/width_slice_equivalence/cases/**/*.json",
+            "artifacts/width_slice_equivalence/comparisons/*.safetensors",
+        )
     if stage_id == "build_library":
-        patterns = ["replacement_library.json", "candidate_library.json"]
+        stats_name = (config.get("vllm_stats") or {}).get(
+            "subblock_stats_filename", "subblock_stats.json"
+        )
+        patterns = ["replacement_library.json", "candidate_library.json", stats_name]
         embedding = config.get("embedding_pruning") or {}
         if bool(embedding.get("enabled", False)):
             patterns.append("scenarios/width_scenarios.json")
@@ -76,7 +98,7 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
                         f"{scenario}/scenario_manifest.json",
                         f"{scenario}/replacement_library.json",
                         f"{scenario}/candidate_library.json",
-                        f"{scenario}/subblock_stats.json",
+                        f"{scenario}/{stats_name}",
                         f"{scenario}/manifests/build_library.json",
                     )
                 )
@@ -91,25 +113,13 @@ def stage_output_patterns(config: Mapping[str, Any], stage_id: str) -> tuple[str
             patterns.append("artifacts/vllm_stats/measurements/index.json")
             patterns.extend(str(item.relative_stats_path) for item in measurements.values())
         return tuple(patterns)
-    if stage_id == "replacement_scoring":
-        return ("artifacts/replacement_scoring/summary.json",)
     if stage_id == "bypass":
         patterns = ["artifacts/bypass/local_kd_loss_history.json"]
         if bool((config.get("bypass") or {}).get("elastic", False)):
             patterns.append("artifacts/bypass/dp_observations.jsonl")
         return tuple(patterns)
-    if stage_id == "mip":
-        return ("mip/profiles/*/mip_grid.json",)
     if stage_id == "zero_shot_evaluation":
         return ("artifacts/zero_shot_evaluation/**/evaluation_summary.json",)
-    if stage_id == "aiperf":
-        return ("artifacts/aiperf/**/aiperf_results.json",)
-    if stage_id == "global_distillation_sanity":
-        return ("artifacts/global_distillation_sanity/**/global_distillation_sanity_summary.json",)
-    if stage_id == "global_distillation":
-        return ("artifacts/global_distillation/**/global_distillation_summary.json",)
-    if stage_id == "post_distillation_evaluation":
-        return ("artifacts/post_distillation_evaluation/**/evaluation_summary.json",)
     spec = stage_spec(stage_id)
     return spec.completion_artifacts
 
@@ -161,9 +171,135 @@ def _read_mapping(path: Path) -> Mapping[str, Any] | None:
     return payload if isinstance(payload, Mapping) else None
 
 
+def _successful_manifest_is_current(
+    config: Mapping[str, Any],
+    stage_id: str,
+    manifest: Mapping[str, Any],
+) -> bool:
+    """Return whether a successful manifest carries the current semantic identity."""
+
+    recorded_config = manifest.get("semantic_config")
+    expected_config = semantic_stage_config(config, stage_id)
+    expected_config_identity = stable_hash(expected_config, prefix=f"{stage_id}_semantic_cfg")
+    if (
+        stable_hash(recorded_config, prefix=f"{stage_id}_semantic_cfg") != expected_config_identity
+        or manifest.get("semantic_config_identity") != expected_config_identity
+    ):
+        return False
+    expected_semantic_identity = stable_hash(
+        {
+            "stage": stage_id,
+            "semantic_config_identity": expected_config_identity,
+            "capability_snapshot": manifest.get("capability_snapshot"),
+        },
+        prefix=f"{stage_id}_semantic",
+    )
+    return manifest.get("semantic_identity") == expected_semantic_identity
+
+
+def _normalized_path(path: Any) -> Path:
+    return Path(str(path)).expanduser().resolve()
+
+
+def _token_cache_metadata_is_complete(
+    config: Mapping[str, Any],
+    stage_config: Mapping[str, Any],
+    cache: Mapping[str, Any],
+    output: Path,
+    metadata_path: Path,
+) -> bool:
+    metadata = _read_mapping(metadata_path)
+    try:
+        num_samples = int(cache["num_samples"])
+        seq_length = int(cache["seq_length"])
+        shuffle_seed = int(cache["shuffle_seed"])
+        expected_bytes = num_samples * (seq_length + 1) * 4
+        expected_metadata = {
+            "status": "complete",
+            "version": 1,
+            "dataset_path": str(_normalized_path(config["dataset_path"])),
+            "tokenizer_path": str(_normalized_path((config.get("convert") or {})["teacher_dir"])),
+            "split": str(cache["split"]),
+            "content_field": str(stage_config.get("content_field", "messages")),
+            "num_samples": num_samples,
+            "seq_length": seq_length,
+            "shuffle_seed": shuffle_seed,
+            "dtype": "uint32",
+            "bytes": expected_bytes,
+        }
+    except (KeyError, TypeError, ValueError):
+        return False
+    if metadata is None or any(
+        metadata.get(key) != value for key, value in expected_metadata.items()
+    ):
+        return False
+    try:
+        return output.is_file() and output.stat().st_size == expected_bytes
+    except OSError:
+        return False
+
+
+def _token_caches_are_complete(config: Mapping[str, Any], manifest: Mapping[str, Any]) -> bool:
+    """Validate configured token caches against their manifest receipts and metadata."""
+
+    stage_config = config.get("tokenize_data") or {}
+    try:
+        configured = resolve_tokenize_caches(config)
+    except (TypeError, ValueError):
+        return False
+    outputs = manifest.get("outputs")
+    recorded = outputs.get("caches") if isinstance(outputs, Mapping) else None
+    if not isinstance(recorded, (list, tuple)) or len(recorded) != len(configured):
+        return False
+    if not configured:
+        return False
+
+    expected_by_path: dict[Path, tuple[Mapping[str, Any], Path]] = {}
+    for cache in configured:
+        if not isinstance(cache, Mapping) or "output" not in cache:
+            return False
+        output = _normalized_path(cache["output"])
+        metadata_path = output.with_suffix(output.suffix + ".json")
+        if output in expected_by_path:
+            return False
+        expected_by_path[output] = (cache, metadata_path)
+
+    recorded_by_path: dict[Path, tuple[Mapping[str, Any], Path]] = {}
+    for receipt in recorded:
+        if not isinstance(receipt, Mapping):
+            return False
+        try:
+            output = _normalized_path(receipt["path"])
+            metadata_path = _normalized_path(receipt["metadata"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if output in recorded_by_path:
+            return False
+        recorded_by_path[output] = (receipt, metadata_path)
+
+    if set(recorded_by_path) != set(expected_by_path):
+        return False
+    for output, (cache, expected_metadata_path) in expected_by_path.items():
+        receipt, recorded_metadata_path = recorded_by_path[output]
+        if (
+            recorded_metadata_path != expected_metadata_path
+            or receipt.get("split") != str(cache.get("split"))
+            or not _token_cache_metadata_is_complete(
+                config,
+                stage_config,
+                cache,
+                output,
+                expected_metadata_path,
+            )
+        ):
+            return False
+    return True
+
+
 def _stage_manifest_succeeded(puzzle_dir: Path, stage_id: str) -> Mapping[str, Any] | None:
     payload = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
-    if payload is None or payload.get("status") != "success":
+    state = stage_terminal_state(payload, expected_stage=stage_id)
+    if state is None or state.status not in {StageStatus.SUCCESS, StageStatus.IMPORTED}:
         return None
     return payload
 
@@ -534,12 +670,6 @@ def _zero_shot_profiles_are_complete(config: Mapping[str, Any], puzzle_dir: Path
 
 def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {}).get("dir", "."))
-    manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
-    if manifest is not None and manifest.get("status") == "skipped":
-        # A historical skip must not hide a stage the user has since re-enabled.
-        stage_cfg = config.get(stage_id)
-        if not (isinstance(stage_cfg, Mapping) and bool(stage_cfg.get("enabled"))):
-            return True
     if stage_id.startswith("post."):
         node_id = stage_id.split(".", 2)[-1]
         summary = _read_mapping(
@@ -551,6 +681,26 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
             _hf_checkpoint_is_complete(Path(str(checkpoint)))
             for checkpoint in summary.get("checkpoints") or ()
         )
+    manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
+    if manifest is None:
+        return False
+    state = stage_terminal_state(manifest, expected_stage=stage_id)
+    if state is None or not state.allows_completion(stage_id, config):
+        return False
+    if state.status is StageStatus.SKIPPED:
+        return True
+    if state.status is StageStatus.IMPORTED:
+        return imported_stage_manifest_is_complete(
+            puzzle_dir,
+            stage_id,
+            manifest,
+            expected_semantic_config=semantic_stage_config(config, stage_id),
+            stable_hash=stable_hash,
+        )
+    if not _successful_manifest_is_current(config, stage_id, manifest):
+        return False
+    if stage_id == "tokenize_data":
+        return _token_caches_are_complete(config, manifest)
     if stage_id == "depth_importance":
         return _depth_trajectory_is_complete(config, puzzle_dir)
     if stage_id == "width_importance":

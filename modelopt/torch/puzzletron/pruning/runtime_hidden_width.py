@@ -100,10 +100,10 @@ def _explicit_rms_norm_mode(module: torch.nn.Module) -> str | None:
     """Return an explicit RMSNorm recipe when functional_call is unsafe.
 
     ``Float32RMSNorm`` needs float32 accumulation before the affine scale.
-    ``Qwen3NextRMSNorm`` uses one-centered ``(1 + weight)`` and must slice the
-    affine term before the multiply; ``torch.func.functional_call`` can leave the
-    full-envelope weight bound and raise a 768-vs-1024 shape error under nested
-    width cycling.
+    Qwen3-Next and Qwen3.5 RMSNorm variants use one-centered ``(1 + weight)``
+    and must slice the affine term before the multiply;
+    ``torch.func.functional_call`` can leave the full-envelope weight bound and
+    raise a 768-vs-1024 shape error under nested width cycling.
     """
 
     weight = getattr(module, "weight", None)
@@ -112,7 +112,11 @@ def _explicit_rms_norm_mode(module: torch.nn.Module) -> str | None:
     name = type(module).__name__
     if name == "Float32RMSNorm":
         return "scale"
-    if name == "Qwen3NextRMSNorm":
+    mro_names = {cls.__name__ for cls in type(module).__mro__}
+    if "Qwen3NextRMSNorm" in mro_names or name in {
+        "Qwen3_5RMSNorm",
+        "Qwen3_5MoeRMSNorm",
+    }:
         return "offset"
     return None
 

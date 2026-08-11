@@ -13,79 +13,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tokenize the fixed data caches consumed by Puzzletron stages."""
+"""Optionally materialize fixed-token caches ahead of Puzzletron stages."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 from modelopt.torch.puzzletron.stage_runner import StageResult
+from modelopt.torch.puzzletron.stages.graph import StageSkipReason, stage_is_enabled
+from puzzletron_orchestrator.token_caches import resolve_tokenize_caches
 
 __all__ = ["resolve_tokenize_caches", "tokenize_data_stage"]
 
 
-def resolve_tokenize_caches(config: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return explicit tokenize caches, or defaults from campaign token paths."""
-
-    stage_config = config.get("tokenize_data") or {}
-    caches = [dict(cache) for cache in stage_config.get("caches") or ()]
-    if caches:
-        return caches
-
-    data_cfg = config.get("data") or {}
-    calibration = data_cfg.get("calibration") or {}
-    train_samples = int(calibration.get("num_samples") or 32768)
-    train_seq = int(calibration.get("seq_len") or data_cfg.get("max_sample_length") or 4096)
-    scoring = data_cfg.get("replacement_scoring") or {}
-    val_samples = int(scoring.get("num_samples") or 128)
-    configured_seed = (config.get("pruning") or {}).get("shuffle_seed")
-    train_seed = 444 if configured_seed is None else int(configured_seed)
-
-    defaults: list[dict[str, Any]] = []
-    train_path = config.get("train_token_cache_path")
-    if train_path:
-        defaults.append(
-            {
-                "output": str(train_path),
-                "split": "train",
-                "num_samples": train_samples,
-                "seq_length": train_seq,
-                "shuffle_seed": train_seed,
-            }
-        )
-    validation_path = config.get("validation_token_cache_path")
-    if validation_path:
-        defaults.append(
-            {
-                "output": str(validation_path),
-                "split": "validation",
-                "num_samples": val_samples,
-                "seq_length": train_seq,
-                "shuffle_seed": train_seed + 1,
-            }
-        )
-    return defaults
-
-
 def tokenize_data_stage(config: dict) -> StageResult:
-    """Build every configured cache and record a normal stage manifest."""
+    """Materialize every configured fixed-token cache ahead of its consumers."""
 
     stage_config = config.get("tokenize_data") or {}
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     manifest_path = puzzle_dir / "manifests" / "tokenize_data.json"
     manifest = StageManifest(stage="tokenize_data", inputs={"config": config}, config=config)
-    if not bool(stage_config.get("enabled", False)):
-        manifest.complete(outputs={"enabled": False}, status="skipped")
+    if not stage_is_enabled("tokenize_data", config):
+        skip_reason = StageSkipReason.DISABLED
+        manifest.complete(
+            outputs={"enabled": False},
+            status="skipped",
+            skip_reason=skip_reason,
+        )
         write_stage_manifest(manifest_path, manifest)
         return StageResult(
-            "tokenize_data", "skipped", manifest_path, "Data tokenization is disabled."
+            "tokenize_data",
+            "skipped",
+            manifest_path,
+            "Ahead-of-time fixed-token cache materialization is disabled.",
+            skip_reason.value,
         )
 
     caches = resolve_tokenize_caches(config)

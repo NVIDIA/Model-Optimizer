@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for embedding pruning, width masking, and physical-width execution."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -590,14 +592,22 @@ def test_active_prefix_automodel_float32_rmsnorm_matches_physical_gradients():
     assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
 
 
-def test_active_prefix_qwen3_next_rmsnorm_matches_physical_gradients():
-    qwen3_next = pytest.importorskip(
-        "transformers.models.qwen3_next.modeling_qwen3_next",
-        reason="installed Transformers version does not support Qwen3-Next",
+@pytest.mark.parametrize(
+    ("module_path", "class_name"),
+    [
+        ("transformers.models.qwen3_next.modeling_qwen3_next", "Qwen3NextRMSNorm"),
+        ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5RMSNorm"),
+        ("transformers.models.qwen3_5_moe.modeling_qwen3_5_moe", "Qwen3_5MoeRMSNorm"),
+    ],
+)
+def test_active_prefix_qwen_rmsnorm_matches_physical_gradients(module_path, class_name):
+    modeling = pytest.importorskip(
+        module_path,
+        reason=f"installed Transformers version does not support {class_name}",
     )
-    qwen3_next_rmsnorm = getattr(qwen3_next, "Qwen3NextRMSNorm", None)
-    if qwen3_next_rmsnorm is None:
-        pytest.skip("installed Transformers version does not expose Qwen3NextRMSNorm")
+    rmsnorm_cls = getattr(modeling, class_name, None)
+    if rmsnorm_cls is None:
+        pytest.skip(f"installed Transformers version does not expose {class_name}")
 
     spec = EmbeddingPruningSpec(
         hidden_size=4,
@@ -605,9 +615,9 @@ def test_active_prefix_qwen3_next_rmsnorm_matches_physical_gradients():
         alignment=2,
         tensor_rules=(TensorAxisRule(r"^norm\.weight$", (0,), "normalization"),),
     )
-    envelope = qwen3_next_rmsnorm(4).to(dtype=torch.bfloat16)
+    envelope = rmsnorm_cls(4).to(dtype=torch.bfloat16)
     envelope.weight.data.copy_(torch.linspace(0.0, 0.3, 4, dtype=torch.bfloat16))
-    physical = qwen3_next_rmsnorm(2).to(dtype=torch.bfloat16)
+    physical = rmsnorm_cls(2).to(dtype=torch.bfloat16)
     physical.weight.data.copy_(envelope.weight[:2])
     x = torch.tensor(
         [[0.1015625, 0.205078125, 4.0, -3.0]],

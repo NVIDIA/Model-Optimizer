@@ -272,6 +272,9 @@ def run_embedding_stage(
             ),
             check=True,
         )
+        # Workers validate their scenario-local runtime statistics before
+        # building a replacement library, so seed them from the root aggregate.
+        _project_vllm_stats_to_scenarios(config)
         _run_commands(
             scenario_worker_commands(
                 config_path=config_path,

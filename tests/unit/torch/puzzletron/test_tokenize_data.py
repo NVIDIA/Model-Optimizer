@@ -15,9 +15,13 @@
 
 """Tests for tokenize_data cache resolution and stage execution."""
 
+from pathlib import Path
+
 import pytest
 
-from examples.puzzletron.tokenize_data import resolve_tokenize_caches, tokenize_data_stage
+from examples.puzzletron.tokenize_data import tokenize_data_stage
+from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
+from puzzletron_orchestrator.token_caches import resolve_tokenize_caches
 
 
 def test_resolve_tokenize_caches_uses_explicit_entries():
@@ -51,6 +55,10 @@ def test_resolve_tokenize_caches_defaults_from_campaign_paths():
                 "calibration": {"num_samples": 32768, "seq_len": 4096},
                 "replacement_scoring": {"num_samples": 128},
             },
+            "replacement_scoring": {"eval_samples": 192},
+            "depth_importance": {"eval_samples": 256},
+            "sort_sanity": {"enabled": False, "eval_samples": 4096},
+            "width_sanity": {"eval_samples": 512},
             "pruning": {"shuffle_seed": 444},
             "tokenize_data": {"enabled": True, "caches": []},
         }
@@ -58,7 +66,7 @@ def test_resolve_tokenize_caches_defaults_from_campaign_paths():
     assert [cache["split"] for cache in caches] == ["train", "validation"]
     assert caches[0]["num_samples"] == 32768
     assert caches[0]["seq_length"] == 4096
-    assert caches[1]["num_samples"] == 128
+    assert caches[1]["num_samples"] == 512
 
 
 def test_resolve_tokenize_caches_preserves_zero_shuffle_seed():
@@ -73,15 +81,22 @@ def test_resolve_tokenize_caches_preserves_zero_shuffle_seed():
     assert [cache["shuffle_seed"] for cache in caches] == [0, 1]
 
 
-def test_tokenize_data_stage_dispatches_derived_train_and_validation_caches(tmp_path, monkeypatch):
+def test_tokenize_data_stage_dispatches_derived_train_and_validation_caches(
+    tmp_path, monkeypatch, write_token_cache
+):
     commands = []
+    config = _tokenize_stage_config(tmp_path)
+    resolved = resolve_tokenize_caches(config)
 
     def _run(command, *, check):
         assert check is True
         commands.append(tuple(command))
+        output = Path(command[command.index("--output") + 1])
+        cache = next(cache for cache in resolved if Path(cache["output"]) == output)
+        write_token_cache(config, cache)
 
     monkeypatch.setattr("examples.puzzletron.tokenize_data.subprocess.run", _run)
-    result = tokenize_data_stage(_tokenize_stage_config(tmp_path))
+    result = tokenize_data_stage(config)
 
     assert result.status == "success"
     assert [command[command.index("--split") + 1] for command in commands] == [
@@ -93,6 +108,7 @@ def test_tokenize_data_stage_dispatches_derived_train_and_validation_caches(tmp_
         "1",
     ]
     assert all("--trust-remote-code" not in command for command in commands)
+    assert stage_is_complete(config, "tokenize_data")
 
 
 def test_tokenize_data_stage_passes_trust_remote_code_only_when_enabled(tmp_path, monkeypatch):
@@ -127,7 +143,12 @@ def _tokenize_stage_config(tmp_path):
         "dataset_path": str(tmp_path / "dataset"),
         "train_token_cache_path": str(tmp_path / "train.tokens"),
         "validation_token_cache_path": str(tmp_path / "validation.tokens"),
+        "data": {
+            "calibration": {"num_samples": 2, "seq_len": 8},
+            "replacement_scoring": {"num_samples": 1},
+        },
         "pruning": {"shuffle_seed": 0},
         "convert": {"teacher_dir": str(tmp_path / "teacher")},
         "tokenize_data": {"enabled": True, "workers": 2},
+        "width_sanity": {"eval_samples": 2},
     }

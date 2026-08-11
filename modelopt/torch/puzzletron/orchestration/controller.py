@@ -1149,8 +1149,7 @@ class CampaignController:
             "completed": [
                 node.stage_id
                 for node in self.plan.stages
-                if self.store.stage_is_complete(node.stage_id)
-                or stage_is_complete(self.plan.experiment_config, node.stage_id)
+                if stage_is_complete(self.plan.experiment_config, node.stage_id)
             ],
             "failed_stages": sorted(self._failed_stages),
             "failed_log_paths": self._failed_log_paths(self._failed_stages),
