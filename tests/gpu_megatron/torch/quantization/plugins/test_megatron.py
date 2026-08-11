@@ -55,6 +55,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from megatron.core.transformer import MegatronModule, TransformerConfig
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 
@@ -1863,7 +1864,6 @@ def test_output_layer_untied_warns_once_when_args_unavailable():
 
 def test_output_layer_untied_not_stamped_onto_teacher_config():
     """A distillation teacher keeps its own tiedness; the student's answer must not leak in."""
-    from megatron.core.transformer import MegatronModule, TransformerConfig
 
     def _config():
         return TransformerConfig(num_layers=1, hidden_size=8, num_attention_heads=1)

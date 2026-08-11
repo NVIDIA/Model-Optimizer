@@ -141,9 +141,11 @@ def quant_module_get_extra_state(self) -> dict:
     QuantModule's extra_state with QuantModule.get_extra_state()
     which avoids the need to store the full module name.
     """
-    # Megatron requires an unquantized output_layer's extra_state to be empty. Scoped to
-    # output_layer: for every other module this quantizer_state is the only record that its
-    # quantizers were disabled (e.g. by auto_quantize or disable_quantizer), which must survive.
+    # ``GPTModel.sharded_state_dict`` pops ``output_layer._extra_state`` and asserts it carries no
+    # data ("Expected output layer extra state to be empty", mcore models/gpt/gpt_model.py), so an
+    # output_layer with nothing quantized must contribute none. Scoped to output_layer: for every
+    # other module this quantizer_state is the only record that its quantizers were disabled (e.g.
+    # by auto_quantize or disable_quantizer), and dropping it would restore them enabled.
     if (
         getattr(self, "_modelopt_output_layer", False)
         and not isinstance(self, RealQuantLinear)
@@ -280,9 +282,7 @@ def _create_incompatible_method(method_name: str):
 
 def _resolve_output_layer_untied(model: torch.nn.Module) -> bool | None:
     """Whether ``output_layer`` weights are untied from the input embeddings, or None if unknown."""
-    shared = getattr(model, "share_embeddings_and_output_weights", None)
-    if shared is not None:
-        return not bool(shared)
+    # named_modules() yields the root first, so the root's own flag wins when it has one.
     for name, module in model.named_modules():
         # Skip subtrees that do not own the language model's output_layer: the vision tower (never
         # quantized here) and a distillation teacher, which may be tied differently from the
@@ -312,7 +312,11 @@ def _output_layer_untied(config) -> bool:
     except Exception as e:
         # Warn once per config rather than on every save and every load.
         if not getattr(config, "_modelopt_warned_output_layer_untied", False):
-            warn_rank_0(f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}")
+            warn_rank_0(
+                f"Failed to get Megatron arg untie_embeddings_and_output_weights: {e}. "
+                "Treating output_layer as tied; its quantizer state will not be saved or "
+                "restored. If output_layer is in fact untied, it will be exported unquantized."
+            )
             config._modelopt_warned_output_layer_untied = True
         return False
 
