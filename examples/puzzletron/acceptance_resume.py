@@ -67,7 +67,7 @@ class _UnverifiableMarkerError(ValueError):
         self.stale_complete_v3 = stale_complete_v3
 
 
-class _SelectedUpstreamUnverifiable(ValueError):
+class _SelectedUpstreamUnverifiableError(ValueError):
     def __init__(self, stage: str, *, stale_complete_v3: bool = False) -> None:
         super().__init__(f"selected upstream unverifiable: {stage}")
         self.stage = stage
@@ -151,8 +151,14 @@ def _sha256(path: Path) -> str:
 
 def _artifact_record(root: Path, path: Path) -> dict:
     stat = path.stat()
+    try:
+        recorded_path = str(path.relative_to(root))
+    except ValueError:
+        # Exact absolute required patterns bind configured artifacts outside the
+        # campaign root. External globs are deliberately unsupported.
+        recorded_path = str(path)
     record = {
-        "path": str(path.relative_to(root)),
+        "path": recorded_path,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
@@ -175,7 +181,11 @@ def _immutable_artifact_record(root: Path, path: Path) -> dict:
 def _required_artifacts(root: Path, patterns: Iterable[str]) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for pattern in patterns:
-        matches = sorted(path for path in root.glob(pattern) if path.is_file())
+        configured = Path(pattern).expanduser()
+        if configured.is_absolute():
+            matches = [configured] if configured.is_file() else []
+        else:
+            matches = sorted(path for path in root.glob(pattern) if path.is_file())
         if not matches:
             raise FileNotFoundError(f"required artifact pattern has no matches: {pattern}")
         result[str(pattern)] = [_artifact_record(root, path) for path in matches]
@@ -204,7 +214,9 @@ def _current_imported_marker_identity(path: Path, payload: dict[str, Any]) -> st
     if payload.get("version") != 3 or payload.get("completion_kind") != "imported":
         raise _UnverifiableMarkerError(f"completion marker is not imported v3 evidence: {path}")
     if not required_fields.issubset(payload):
-        raise _UnverifiableMarkerError(f"completion marker has incomplete imported evidence: {path}")
+        raise _UnverifiableMarkerError(
+            f"completion marker has incomplete imported evidence: {path}"
+        )
     root = _completion_root(path)
     mode = payload["mode"]
     recorded_artifacts = payload["required_artifacts"]
@@ -299,9 +311,7 @@ def _current_marker_identity(path: Path, active: frozenset[Path] = frozenset()) 
     if any(not isinstance(value, str) or not value for value in identity_fields):
         raise _UnverifiableMarkerError(f"completion marker has invalid v3 evidence: {path}")
     if path in active:
-        raise _UnverifiableMarkerError(
-            f"upstream completion cycle: {path}", stale_complete_v3=True
-        )
+        raise _UnverifiableMarkerError(f"upstream completion cycle: {path}", stale_complete_v3=True)
 
     root = _completion_root(path)
     mode = str(payload["mode"])
@@ -362,9 +372,7 @@ def _named_upstream_markers(
             (str(name), _completion_path_without_symlinks(Path(path)))
             for name, path in sorted(paths.items())
         )
-    return tuple(
-        (Path(path).stem, _completion_path_without_symlinks(Path(path))) for path in paths
-    )
+    return tuple((Path(path).stem, _completion_path_without_symlinks(Path(path))) for path in paths)
 
 
 def _upstream_identities(paths: Iterable[Path] | dict[str, Path]) -> dict[str, str]:
@@ -375,11 +383,11 @@ def _upstream_identities(paths: Iterable[Path] | dict[str, Path]) -> dict[str, s
         try:
             identities[name] = _current_marker_identity(path)
         except _UnverifiableMarkerError as error:
-            raise _SelectedUpstreamUnverifiable(
+            raise _SelectedUpstreamUnverifiableError(
                 name, stale_complete_v3=error.stale_complete_v3
             ) from error
         except (OSError, ValueError) as error:
-            raise _SelectedUpstreamUnverifiable(name) from error
+            raise _SelectedUpstreamUnverifiableError(name) from error
     return identities
 
 
@@ -565,7 +573,7 @@ def check_marker_details(path: Path, **payload_kwargs) -> CompletionCheck:
             stage = message.removeprefix("required upstream marker is missing: ")
             message = f"missing selected upstream completion: {stage}"
         return CompletionCheck(False, "semantic-v3", (message,))
-    except _SelectedUpstreamUnverifiable as error:
+    except _SelectedUpstreamUnverifiableError as error:
         actual_upstream = actual.get("upstream_identities") or {}
         if error.stale_complete_v3 and error.stage in actual_upstream:
             reason = f"changed selected upstream identity: {error.stage}"

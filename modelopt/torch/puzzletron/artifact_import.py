@@ -536,6 +536,10 @@ def _validate_existing_destination(
         target_config_path,
         include_receipt=False,
     )
+    # Mirror artifact_import_contract._receipt_inventory's pre-receipt
+    # compatibility window. The legacy form lacks receipt binding and must be
+    # removed in the first ModelOpt release after Puzzletron v2 GA, once
+    # migration manifests have been regenerated.
     campaign_manifest_path = destination / IMPORT_CAMPAIGN_MANIFEST
     _reject_symlink_ancestors(campaign_manifest_path, label="destination import manifest")
     try:

@@ -140,6 +140,7 @@ def main() -> None:
         "num_samples": args.num_samples,
         "seq_length": args.seq_length,
         "shuffle_seed": args.shuffle_seed,
+        "trust_remote_code": bool(args.trust_remote_code),
         "dtype": "uint32",
         "bytes": expected_bytes,
         "workers": workers,

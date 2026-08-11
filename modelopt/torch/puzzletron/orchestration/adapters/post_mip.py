@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Adapter for campaign-configured post-MIP nodes."""
 
@@ -63,9 +75,7 @@ def _node_root(plan: CampaignPlan, stage_id: str) -> Path:
     return plan.puzzle_dir / "artifacts" / "post_mip" / "nodes" / _node_id(stage_id)
 
 
-def _available_evaluation_candidates(
-    plan: CampaignPlan, stage_id: str, config: dict
-) -> int | None:
+def _available_evaluation_candidates(plan: CampaignPlan, stage_id: str, config: dict) -> int | None:
     input_id = str(config.get("input", "source"))
     ledger = CandidateLedger(plan.puzzle_dir / "artifacts" / "post_mip")
     if input_id == "source":
@@ -77,14 +87,7 @@ def _available_evaluation_candidates(
         flow = plan.experiment_config["post_mip"]["flows"][flow_id]
         candidate_set = ledger.root_set(flow_id, flow["source"])
     else:
-        current = (
-            plan.puzzle_dir
-            / "artifacts"
-            / "post_mip"
-            / "nodes"
-            / input_id
-            / "current.json"
-        )
+        current = plan.puzzle_dir / "artifacts" / "post_mip" / "nodes" / input_id / "current.json"
         if not current.is_file():
             return None
         candidate_set = ledger.load_candidate_set(input_id)
@@ -181,7 +184,9 @@ class PostMIPAdapter(WorkAdapter):
         for override in overrides or ():
             argv.extend(["--override", override])
         log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_{item.shard_index}_{attempt_id}.log"
-        distributed_worker = node_type in {"evaluation", "global_kd"} and node.gpus_per_instance > 1
+        # evaluation/global_kd always call torch.distributed, so even 1-GPU
+        # workers need torchrun to export RANK/WORLD_SIZE.
+        distributed_worker = node_type in {"evaluation", "global_kd"}
         logical_count = int(item.metadata.get("logical_shard_count", 1))
         allocation_nodes, allocation_gpus, topology = packed_allocation(
             node,

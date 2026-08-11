@@ -1,9 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for runtime-stat sharding and analytical runtime estimation."""
 
 import pytest
 
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import (
+    _assigned_runtime_shard_indices,
+)
 from modelopt.torch.puzzletron.subblock_stats.runtime_estimator import (
     candidate_slope,
     effective_repeat_count,
@@ -34,9 +51,7 @@ def test_homogeneous_layout_contains_only_candidate():
 
 
 def test_scaffolded_layout_places_one_scaffold_in_each_pp_chunk():
-    scaffold = BlockConfig(
-        subblock_configs=(AttentionConfig(num_query_heads=8, num_kv_heads=2),)
-    )
+    scaffold = BlockConfig(subblock_configs=(AttentionConfig(num_query_heads=8, num_kv_heads=2),))
     candidate = BlockConfig(subblock_configs=(FFNConfig(intermediate_size=16),))
 
     assert scaffolded_layout(candidate, scaffold, repeat_count=4, pp_size=2) == (
@@ -75,3 +90,29 @@ def test_median_measurement_is_component_wise():
     )
 
     assert result == RuntimeMeasurement(total_ms=3.0, prefill_ms=2.0)
+
+
+def test_runtime_sharding_keeps_paired_measurements_together():
+    keys = [("spec", index) for index in range(6)]
+    ordered_items = [(key, None) for key in keys]
+    pairs = [(keys[0], keys[1]), (keys[2], keys[3]), (keys[4], keys[5])]
+
+    assert _assigned_runtime_shard_indices(
+        ordered_items, shard_count=2, shard_index=0, measurement_pairs=pairs
+    ) == [0, 1, 4, 5]
+    assert _assigned_runtime_shard_indices(
+        ordered_items, shard_count=2, shard_index=1, measurement_pairs=pairs
+    ) == [2, 3]
+
+
+def test_runtime_sharding_rejects_partially_overlapping_measurement_pairs():
+    keys = [("spec", index) for index in range(3)]
+    ordered_items = [(key, None) for key in keys]
+
+    with pytest.raises(ValueError, match="must be disjoint"):
+        _assigned_runtime_shard_indices(
+            ordered_items,
+            shard_count=1,
+            shard_index=0,
+            measurement_pairs=[(keys[0], keys[1]), (keys[1], keys[2])],
+        )

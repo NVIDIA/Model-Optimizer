@@ -22,13 +22,16 @@ import pytest
 
 import modelopt.torch.puzzletron.stage_runner as stage_runner
 import modelopt.torch.puzzletron.stages.convert as convert_stages
+import modelopt.torch.puzzletron.stages.diagnostics as diagnostic_stages
 import modelopt.torch.puzzletron.stages.future as future_stages
+import modelopt.torch.puzzletron.stages.pipeline as pipeline_stages
 from examples.puzzletron import main as puzzletron_main
 from examples.puzzletron import tokenize_data as tokenize_data_module
 from examples.puzzletron.main import _completion_is_valid, _validate_worker_result
 from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
 from modelopt.torch.puzzletron.stage_runner import StageResult, run_stage
+from modelopt.torch.puzzletron.stages.graph import StageSkipReason
 
 
 @pytest.mark.parametrize(
@@ -101,6 +104,50 @@ def test_explicitly_disabled_stage_does_not_call_handler(tmp_path):
     assert result.status == "skipped"
     assert payload["skip_reason"] == "disabled"
     assert _completion_is_valid(config, tmp_path / "config.yaml", "aiperf")
+
+
+@pytest.mark.parametrize(
+    ("stage", "section", "handler"),
+    [
+        ("aiperf", "aiperf", future_stages.aiperf_stage),
+        ("zero_shot_evaluation", "zero_shot_evaluation", future_stages.evaluation_stage),
+        (
+            "global_distillation_sanity",
+            "global_distillation_sanity",
+            future_stages.distillation_overfit_stage,
+        ),
+        ("width_sanity", "width_sanity", diagnostic_stages.activation_diagnostic_stage),
+        (
+            "bypass_diagnostic",
+            "bypass_diagnostic",
+            diagnostic_stages.bypass_diagnostic_stage,
+        ),
+        ("bypass", "bypass", pipeline_stages.bypass_stage),
+    ],
+)
+def test_disabled_stage_handlers_record_canonical_skip_reason(
+    tmp_path, monkeypatch, stage, section, handler
+):
+    runtime_config = SimpleNamespace(puzzle_dir=str(tmp_path))
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.pipeline_config.load_runtime_hydra_config",
+        lambda _config: runtime_config,
+    )
+    monkeypatch.setattr(
+        pipeline_stages,
+        "load_runtime_hydra_config",
+        lambda _config: runtime_config,
+    )
+    monkeypatch.setattr(pipeline_stages, "ensure_scoring_parent", lambda *_args, **_kwargs: None)
+    config = _config(tmp_path, **{section: {"enabled": False}})
+    manifest = StageManifest(stage=stage, config=config)
+
+    result = handler(config, manifest)
+
+    payload = json.loads(result.manifest_path.read_text())
+    assert result.status == "skipped"
+    assert result.skip_reason == StageSkipReason.DISABLED.value
+    assert payload["skip_reason"] == StageSkipReason.DISABLED.value
 
 
 def test_default_worker_emits_accepted_disabled_tokenize_data_skip(tmp_path, monkeypatch):
@@ -224,25 +271,24 @@ def test_direct_tokenize_data_stage_runs_when_enabled(tmp_path, monkeypatch, wri
     assert result.skip_reason is None
 
 
-def test_enabled_tokenize_data_stage_accepts_empty_cache_set(tmp_path):
+def test_enabled_tokenize_data_stage_rejects_empty_success_manifest(
+    tmp_path, write_terminal_manifest
+):
     config = _config(
         tmp_path,
         dataset_path="dataset",
         convert={"teacher_dir": str(tmp_path / "ckpts" / "teacher")},
         tokenize_data={"enabled": True, "caches": []},
     )
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("{}\n")
-    _write_successful_convert_result(tmp_path, config)
-    puzzletron_main._mark_completion(config, config_path, "convert")
+    write_terminal_manifest(
+        tmp_path,
+        "tokenize_data",
+        config=config,
+        outputs={"caches": []},
+    )
 
-    result = tokenize_data_module.tokenize_data_stage(config)
-    _validate_worker_result(config, result)
-    puzzletron_main._mark_completion(config, config_path, "tokenize_data")
-
-    assert result.status == "success"
-    assert stage_is_complete(config, "tokenize_data")
-    assert _completion_is_valid(config, config_path, "tokenize_data")
+    assert not stage_is_complete(config, "tokenize_data")
+    assert not _completion_is_valid(config, tmp_path / "config.yaml", "tokenize_data")
 
 
 @pytest.mark.parametrize(

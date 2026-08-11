@@ -16,10 +16,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..manifest import StageManifest, write_stage_manifest
 from ..stage_runner import StageResult
+
+if TYPE_CHECKING:
+    from .graph import StageSkipReason, StageStatus
 
 __all__ = ["experiment_dir", "stage_manifest_path", "complete_stage"]
 
@@ -40,10 +43,17 @@ def complete_stage(
     manifest: StageManifest,
     *,
     outputs: dict[str, Any] | None = None,
-    status: str = "success",
-    skip_reason: str | None = None,
+    status: str | StageStatus = "success",
+    skip_reason: str | StageSkipReason | None = None,
     message: str | None = None,
 ) -> StageResult:
+    """Persist terminal manifest state and return its normalized stage result.
+
+    ``status`` and ``skip_reason`` are normalized to their string values in the
+    manifest. The returned result reports those same persisted values and the
+    manifest path, including the skip reason for skipped stages.
+    """
+
     manifest.complete(outputs=outputs or {}, status=status, skip_reason=skip_reason)
     path = stage_manifest_path(config, manifest.stage)
     write_stage_manifest(path, manifest)
