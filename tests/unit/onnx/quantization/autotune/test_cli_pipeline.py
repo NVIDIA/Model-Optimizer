@@ -209,3 +209,83 @@ def test_run_autotune_missing_model_exits(tmp_path):
         _run_with_argv(["--onnx_path", str(missing)])
 
     assert exc_info.value.code == 1
+
+
+# --- network_timeout_minutes CLI arg ---
+
+
+def test_run_autotune_network_timeout_default_is_10_minutes(mocked_pipeline, onnx_model_path):
+    """Without ``--network_timeout_minutes`` the default of 10 is forwarded to init."""
+    init_mock, _ = mocked_pipeline
+
+    _run_with_argv(["--onnx_path", onnx_model_path])
+
+    assert init_mock.call_args.kwargs["network_timeout_minutes"] == 10
+
+
+def test_run_autotune_network_timeout_custom_value_forwarded(mocked_pipeline, onnx_model_path):
+    """``--network_timeout_minutes N`` is forwarded verbatim to init_benchmark_instance."""
+    init_mock, _ = mocked_pipeline
+
+    _run_with_argv(["--onnx_path", onnx_model_path, "--network_timeout_minutes", "30"])
+
+    assert init_mock.call_args.kwargs["network_timeout_minutes"] == 30
+
+
+def test_run_autotune_network_timeout_is_integer(mocked_pipeline, onnx_model_path):
+    """The ``--network_timeout_minutes`` argument is parsed as int, not string."""
+    init_mock, _ = mocked_pipeline
+
+    _run_with_argv(["--onnx_path", onnx_model_path, "--network_timeout_minutes", "5"])
+
+    assert isinstance(init_mock.call_args.kwargs["network_timeout_minutes"], int)
+
+
+# --- init_benchmark_instance: minutes-to-seconds conversion ---
+
+
+def test_init_benchmark_instance_converts_minutes_to_seconds():
+    """``network_timeout_minutes`` is multiplied by 60 before reaching ``TrtExecBenchmark``."""
+    try:
+        from modelopt.onnx.quantization.autotune.workflows import init_benchmark_instance
+    except ImportError:
+        pytest.skip("TensorRT not available")
+
+    with patch("modelopt.onnx.quantization.autotune.workflows.TrtExecBenchmark") as mock_benchmark:
+        mock_benchmark.return_value = MagicMock()
+        init_benchmark_instance(use_trtexec=True, network_timeout_minutes=3)
+
+    mock_benchmark.assert_called_once()
+    assert mock_benchmark.call_args.kwargs["network_timeout_seconds"] == 180
+
+
+def test_init_benchmark_instance_default_timeout_is_600_seconds():
+    """Default ``network_timeout_minutes=10`` produces ``network_timeout_seconds=600``."""
+    try:
+        from modelopt.onnx.quantization.autotune.workflows import init_benchmark_instance
+    except ImportError:
+        pytest.skip("TensorRT not available")
+
+    with patch("modelopt.onnx.quantization.autotune.workflows.TrtExecBenchmark") as mock_benchmark:
+        mock_benchmark.return_value = MagicMock()
+        init_benchmark_instance(use_trtexec=True)
+
+    assert mock_benchmark.call_args.kwargs["network_timeout_seconds"] == 600
+
+
+def test_init_benchmark_instance_timeout_not_passed_to_python_api_backend():
+    """``network_timeout_minutes`` is silently ignored for the TensorRT Python API backend."""
+    try:
+        from modelopt.onnx.quantization.autotune.workflows import init_benchmark_instance
+    except ImportError:
+        pytest.skip("TensorRT not available")
+
+    with patch(
+        "modelopt.onnx.quantization.autotune.workflows.TensorRTPyBenchmark"
+    ) as mock_benchmark:
+        mock_benchmark.return_value = MagicMock()
+        init_benchmark_instance(use_trtexec=False, network_timeout_minutes=99)
+
+    mock_benchmark.assert_called_once()
+    call_kwargs = mock_benchmark.call_args.kwargs
+    assert "network_timeout_seconds" not in call_kwargs
