@@ -294,9 +294,10 @@ def _tiny_loader(num_batches: int):
     class _Model(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.forward_calls = 0
 
         def forward(self, **kwargs):
-            pass
+            self.forward_calls += 1
 
     def _collate(samples):
         return {"input_ids": torch.stack([s["input_ids"] for s in samples])}
@@ -308,14 +309,20 @@ def _tiny_loader(num_batches: int):
 
 def test_forward_loop_checkpoints_every_n_steps():
     """checkpoint_fn fires every `checkpoint_every` batches -- 5 batches at every=2 means
-    two fires (after batch 2 and batch 4), not one per batch and not a trailing fire for
-    the final partial group."""
+    two fires, after batch 2 and batch 4, not one per batch and not a trailing fire for
+    the final partial group. Recording the completed forward count (not just a fixed
+    marker) catches fires at the wrong positions, e.g. after batches 1 and 3."""
     calls: list[int] = []
     model, loader = _tiny_loader(5)
 
-    _forward_loop(model, loader, checkpoint_every=2, checkpoint_fn=lambda: calls.append(1))
+    _forward_loop(
+        model,
+        loader,
+        checkpoint_every=2,
+        checkpoint_fn=lambda: calls.append(model.forward_calls),
+    )
 
-    assert len(calls) == 2
+    assert calls == [2, 4]
 
 
 def test_forward_loop_checkpoint_every_zero_never_fires():
