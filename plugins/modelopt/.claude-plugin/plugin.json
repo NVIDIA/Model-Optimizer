@@ -16,5 +16,15 @@
     "evaluation",
     "deployment",
     "llm"
-  ]
+  ],
+  "mcpServers": {
+    "modelopt": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/NVIDIA/Model-Optimizer.git#subdirectory=tools/mcp",
+        "modelopt-mcp"
+      ]
+    }
+  }
 }

@@ -17,6 +17,7 @@
     "llm"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "ModelOpt",
     "shortDescription": "Optimize, deploy, and evaluate models.",
