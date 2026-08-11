@@ -432,6 +432,8 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
 
         resolved = {}
         for path, raw_record in dict(state.collection("default_resolutions") or {}).items():
+            if not isinstance(raw_record, Mapping):
+                raise SetupError(f"Default resolution {path!r} must be a mapping.")
             record = dict(raw_record)
             value = record.get("value")
             resolved[str(path)] = {

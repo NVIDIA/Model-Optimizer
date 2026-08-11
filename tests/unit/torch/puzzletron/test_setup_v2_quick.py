@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import yaml
 
+import puzzletron_setup.v2.bundle as bundle_module
 import puzzletron_setup.v2.cli as cli_module
 import puzzletron_setup.v2.wizard as wizard_module
 from puzzletron_setup import SetupError
@@ -459,11 +460,18 @@ def test_resume_replacement_defaults_file_is_persisted(
     assert WizardState.resume(state.path).defaults_path == replacement.resolve()
 
 
-@pytest.mark.parametrize("contents", [None, "schema_version: 2\n"])
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (None, "Defaults file does not exist"),
+        ("schema_version: 2\n", "Unsupported defaults schema 2; expected 1"),
+    ],
+)
 def test_invalid_resume_replacement_defaults_file_is_not_persisted(
     tmp_path,
     monkeypatch,
     contents,
+    message,
 ):
     state = WizardState.start(
         tmp_path / "campaign",
@@ -477,7 +485,7 @@ def test_invalid_resume_replacement_defaults_file_is_not_persisted(
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
 
-    with pytest.raises(SetupError):
+    with pytest.raises(SetupError, match=message):
         wizard_module.run_wizard_v2(
             resume=state.campaign_dir,
             defaults_path=replacement,
@@ -578,14 +586,17 @@ def test_effective_default_provenance_follows_runtime_collections(tmp_path):
                 "latency": {
                     "solver": {"num_solutions": 7},
                     "objectives": [{"metric": "latency"}],
+                    "constraints": {"latency": {"operator": "<=", "value": 25.0}},
                 },
                 "memory": {
                     "solver": {"num_solutions": 9},
                     "objectives": [{"metric": "memory"}],
+                    "constraints": {"memory": {"operator": "<=", "value": 48.0}},
                 },
             }
         },
     )
+    state.set_collection("stage_resources", {"depth_importance": {"instances": 3}})
     state.set_collection(
         "serving_workloads",
         {
@@ -618,6 +629,15 @@ def test_effective_default_provenance_follows_runtime_collections(tmp_path):
         "latency": ["latency"],
         "memory": ["memory"],
     }
+    assert _effective_default_value(state, "mip.goal_metric", None) == {
+        "latency": ["latency"],
+        "memory": ["memory"],
+    }
+    assert _effective_default_value(state, "mip.goal_value", None) == {
+        "latency": {"latency": {"operator": "<=", "value": 25.0}},
+        "memory": {"memory": {"operator": "<=", "value": 48.0}},
+    }
+    assert _effective_default_value(state, "stages.depth_importance.instances", 1) == 3
     assert _effective_default_value(state, "vllm.enabled", False) is True
     assert _effective_default_value(state, "vllm.max_num_seqs", 1) == {
         "serving": 4,
@@ -633,6 +653,24 @@ def test_effective_default_provenance_follows_runtime_collections(tmp_path):
         "serving": 2,
         "offline": 4,
     }
+
+
+def test_build_bundles_rejects_non_mapping_default_resolution(tmp_path, monkeypatch):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    state.set_collection("default_resolutions", {"broken.path": "invalid"})
+    monkeypatch.setattr(bundle_module, "validate_state", lambda state: ())
+    monkeypatch.setattr(bundle_module, "render_experiment_v2", lambda state, budget: {})
+    monkeypatch.setattr(bundle_module, "render_runner_v2", lambda state, budget: {})
+    monkeypatch.setattr(bundle_module, "render_execution_v2", lambda state, budget: {})
+    monkeypatch.setattr(
+        bundle_module,
+        "validate_bundle",
+        lambda bundle: SimpleNamespace(valid=True, error=None),
+    )
+    monkeypatch.setattr(bundle_module, "dry_run_bundle", lambda bundle: "")
+
+    with pytest.raises(SetupError, match="Default resolution 'broken.path' must be a mapping"):
+        bundle_module.build_bundles_v2(state.campaign_dir, state)
 
 
 def test_legacy_state_without_setup_metadata_resumes_in_full_mode(tmp_path):
