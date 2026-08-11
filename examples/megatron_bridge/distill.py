@@ -47,6 +47,7 @@ from megatron.bridge.training.config import (
 from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
+from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
@@ -145,7 +146,9 @@ def get_args():
         "stripped: no chat template is applied and no BOS is prepended, so if the model expects "
         "role/turn markers or a BOS token, bake them into the fields yourself, and put any "
         "significant separator inside the text as a newline rather than a space. An EOS token is "
-        "appended after the response.",
+        "appended after the response. A record longer than --seq_length is truncated from the "
+        "START of 'input', which drops any BOS, system prompt or opening role marker baked in "
+        "there; pre-filter or pre-truncate the corpus if that matters.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -290,13 +293,53 @@ def get_args():
         )
     if args.sft_dataset_root and not args.sft:
         raise ValueError("--sft_dataset_root requires --sft; without it the SFT path is not used.")
+    if args.sft:
+        # Fail on a mistyped root here rather than after both checkpoints have loaded onto GPUs.
+        required = ["training.jsonl"] + (["validation.jsonl"] if args.eval_iters > 0 else [])
+        absent = [f for f in required if not os.path.isfile(os.path.join(args.sft_dataset_root, f))]
+        if absent:
+            raise ValueError(f"--sft_dataset_root {args.sft_dataset_root} is missing: {absent}.")
+
+    _check_shared_vocabulary(args)
 
     print_args(args)
 
     return args
 
 
-def _warn_if_bos_missing(tokenizer, dataset_root: str) -> None:
+def _check_shared_vocabulary(args) -> None:
+    """Raise when teacher and student do not map every token to the same id.
+
+    The KD losses compare the two models' logits elementwise over the vocab dimension, so a token
+    must mean the same thing to both regardless of how the data reaches them. Equal vocabulary
+    *sizes* are not enough -- Llama-2 and Mistral are both 32000 tokens with different mappings --
+    so compare the mappings. Run before the providers are built so a mismatch costs seconds.
+
+    A tokenizer that cannot be loaded (some VLM repos ship only a processor) is warned about
+    rather than fatal: this guard is not worth failing a run that would otherwise work.
+    """
+    _tok = {"trust_remote_code": args.trust_remote_code}
+    try:
+        student_vocab = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok).get_vocab()
+        teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
+    except Exception as e:
+        warn_rank_0(
+            f"Could not load both tokenizers to verify teacher and student share a vocabulary: {e}. "
+            "Distillation needs them to agree on every token id; check it yourself if in doubt."
+        )
+        return
+    conflicts = {t for t, i in student_vocab.items() if teacher_vocab.get(t, i) != i}
+    missing = student_vocab.keys() - teacher_vocab.keys()
+    if conflicts or missing:
+        raise ValueError(
+            "Distillation scores the teacher on the student's token ids, so the teacher must map "
+            f"every student token to the same id: {len(conflicts)} conflicting id(s), "
+            f"{len(missing)} token(s) absent from the teacher. Student and teacher must share a "
+            "tokenizer."
+        )
+
+
+def _warn_if_bos_missing(args) -> None:
     """Warn when the tokenizer prepends a BOS at inference but the SFT records do not carry one.
 
     ``--sft`` tokenizes both fields verbatim, so the caller owns the BOS. Adding one here is not
@@ -306,6 +349,13 @@ def _warn_if_bos_missing(tokenizer, dataset_root: str) -> None:
     Bounded on purpose: it inspects only the first record of ``training.jsonl``, so a mixed corpus
     whose first record happens to carry a BOS will not be flagged.
     """
+    dataset_root = args.sft_dataset_root
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.student_hf_path, trust_remote_code=args.trust_remote_code
+        )
+    except Exception:
+        return
     bos = getattr(tokenizer, "bos_token", None)
     if not bos:
         return
@@ -336,29 +386,7 @@ def main(args: argparse.Namespace):
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     if args.sft:
-        # SFT tokenizes raw text with the student's tokenizer and scores the teacher on those same
-        # ids, so both models must agree on what every id means. Equal vocabulary *sizes* are not
-        # enough -- Llama-2 and Mistral are both 32000 tokens with different mappings -- so compare
-        # the mappings. Checked before the providers are built so a mismatch costs seconds.
-        # The pretraining path is structurally immune: NullTokenizer plus pre-tokenized
-        # --data_paths means one tokenization feeds both models.
-        _tok = {"trust_remote_code": args.trust_remote_code}
-        student_tokenizer = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok)
-        student_vocab = student_tokenizer.get_vocab()
-        teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
-        # Every student id must mean the same thing to the teacher. This is necessary but not
-        # sufficient: the KD losses also need equal logits width, checked on the providers below.
-        conflicts = {t for t, i in student_vocab.items() if teacher_vocab.get(t, i) != i}
-        missing = student_vocab.keys() - teacher_vocab.keys()
-        if conflicts or missing:
-            raise ValueError(
-                "--sft tokenizes with the student's tokenizer and scores the teacher on those "
-                "same ids, so the teacher must map every student token to the same id: "
-                f"{len(conflicts)} conflicting id(s), {len(missing)} token(s) absent from the "
-                "teacher. Student and teacher must share a tokenizer."
-            )
-
-        _warn_if_bos_missing(student_tokenizer, args.sft_dataset_root)
+        _warn_if_bos_missing(args)
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path, load_weights=True):
@@ -405,11 +433,22 @@ def main(args: argparse.Namespace):
         student_provider.gradient_accumulation_fusion = False
     teacher_provider = _build_model_provider(args.teacher_hf_path)
 
-    if args.sft and student_provider.vocab_size != teacher_provider.vocab_size:
-        # The KD losses compare logits directly, so the padded vocab dimensions must match.
+    # The KD losses compare logits elementwise over the vocab dimension, so the two output layers
+    # must have the same width. That width is the *padded* vocab size, which the providers derive
+    # from their own ``vocab_size`` and ``make_vocab_size_divisible_by``; a shared tokenizer does
+    # not imply it, because the two HF configs can declare different vocab sizes. Independent of
+    # the data path: the pretraining path feeds both models one tokenization, but says nothing
+    # about how wide their output layers are.
+    padded = {
+        name: calculate_padded_vocab_size(
+            p.vocab_size, p.make_vocab_size_divisible_by, p.tensor_model_parallel_size
+        )
+        for name, p in (("student", student_provider), ("teacher", teacher_provider))
+    }
+    if padded["student"] != padded["teacher"]:
         raise ValueError(
-            "--sft distillation needs student and teacher logits of equal width, but their padded "
-            f"vocab sizes differ ({student_provider.vocab_size} vs {teacher_provider.vocab_size})."
+            "Distillation needs student and teacher logits of equal width, but their padded vocab "
+            f"sizes differ ({padded['student']} vs {padded['teacher']})."
         )
 
     kd_config = ModelOptDistillConfig(
@@ -504,9 +543,14 @@ def main(args: argparse.Namespace):
                 "prompt_template": "{input}{output}",
                 "label_key": "output",
                 "truncation_field": "input",
-                # GPTSFTDataset defaults to "right", which truncates the END of the prompt --
-                # the question and whatever turn marker the caller baked in, i.e. exactly the
-                # boundary answer_only_loss starts scoring at. Drop the oldest context instead.
+                # GPTSFTDataset defaults to "right", which is wrong here twice over: within
+                # "input" it drops the END of the prompt -- the question tail and whatever turn
+                # marker the caller baked in, i.e. exactly the boundary answer_only_loss starts
+                # scoring at -- and once the prompt alone cannot absorb the overflow it walks the
+                # template back-to-front and eats "output", the only span the loss is computed on.
+                # "left" drops the oldest context instead. The cost is that a record over
+                # seq_length loses the head of "input", including any BOS baked in there; see
+                # --sft_dataset_root help.
                 "truncation_method": "left",
                 "answer_only_loss": True,
                 "add_bos": False,
@@ -569,7 +613,9 @@ def main(args: argparse.Namespace):
                     # add_bos/add_eos: text_to_ids adds special tokens when this is left at its
                     # default of True, and prompt_template tokenizes "{input}" and "{output}"
                     # separately -- so a BOS-adding tokenizer would inject one at the answer
-                    # boundary, where answer_only_loss starts scoring.
+                    # boundary, where answer_only_loss starts scoring. Consumed by Bridge in
+                    # training/tokenizers/config.py, which reads it out of hf_tokenizer_kwargs;
+                    # it is not forwarded blindly to AutoTokenizer.
                     "include_special_tokens": False,
                 },
             )

@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,43 @@ def test_distill_llm(tmp_path, num_gpus):
 
     assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
+
+
+def test_distill_llm_sft(tmp_path, num_gpus):
+    """--sft distills from prompt-completion jsonl instead of pre-tokenized --data_paths."""
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    train_iters = 2
+    gbs = 4
+    dataset_root = tmp_path / "sft_data"
+    dataset_root.mkdir()
+    # More records than train_iters * gbs so the sampler does not run dry.
+    records = [{"input": f"Q: what follows {i}?\nA:", "output": f" {i + 1}"} for i in range(64)]
+    for split in ("training", "validation"):
+        (dataset_root / f"{split}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n"
+        )
+
+    distill_output_dir = tmp_path / "distill_output"
+    distill_cmd_parts = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        sft_dataset_root=dataset_root,
+        output_dir=distill_output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        seq_length=64,
+        mbs=1,
+        gbs=gbs,
+        train_iters=train_iters,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
+        eval_iters=1,
+        log_interval=1,
+    )
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+
+    assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
 
 
 def test_distill_validate_only(tmp_path, num_gpus):
