@@ -101,3 +101,23 @@ def _test_fsdp2_wrap_mixed_dtypes(rank, size):
 
 def test_fsdp2_wrap_mixed_dtypes(dist_workers):
     dist_workers.run(_test_fsdp2_wrap_mixed_dtypes)
+
+
+def _test_fsdp2_wrap_moves_ignored_params_to_device(rank, size):
+    """A CPU-resident model must end up fully on GPU: fully_shard skips the params it ignores."""
+    model = _mixed_dtype_model(torch.device("cpu"))
+    assert model.model.layers[0].mlp.gate.weight.device.type == "cpu"
+
+    fsdp2_wrap(model)
+
+    # fully_shard moves the params it manages; fsdp2_wrap has to move the rest itself.
+    assert model.model.layers[0].mlp.mlp.up_proj.weight.to_local().device.type == "cuda"
+    assert model.model.layers[0].mlp.gate.weight.device.type == "cuda"
+
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8), device=torch.device(f"cuda:{rank}"))
+    with torch.no_grad():
+        assert model(input_ids=input_ids).logits.shape == (1, 8, VOCAB_SIZE)
+
+
+def test_fsdp2_wrap_moves_ignored_params_to_device(dist_workers):
+    dist_workers.run(_test_fsdp2_wrap_moves_ignored_params_to_device)

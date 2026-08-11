@@ -264,17 +264,42 @@ def _off_dtype_params(model) -> set[torch.nn.Parameter]:
     if len(numel_by_dtype) <= 1:
         return set()
 
+    # Lazy import: logging imports this module at top level (circular).
+    from modelopt.torch.utils.logging import warn_rank_0
+
     dominant = max(numel_by_dtype, key=lambda d: numel_by_dtype[d])
     off_dtype = {n: p for n, p in model.named_parameters() if p.dtype != dominant}
     off_numel = sum(numel_by_dtype[d] for d in numel_by_dtype if d != dominant)
     names = sorted(off_dtype)
-    warn(
+    warn_rank_0(
         f"Model has mixed parameter dtypes {set(numel_by_dtype)}; FSDP2 needs one dtype per shard "
         f"group, so {len(names)} non-{dominant} parameter(s) "
         f"({100 * off_numel / sum(numel_by_dtype.values()):.2f}% of elements) will stay replicated "
         f"rather than sharded: {names[:3]}{' ...' if len(names) > 3 else ''}"
     )
     return set(off_dtype.values())
+
+
+def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
+    """Move ``params`` onto the device FSDP2 chose for ``model``'s shards.
+
+    ``fully_shard`` only moves the params it manages, so ignored ones would be stranded on
+    whatever device the caller built the model on. Meta params are left alone for deferred init.
+    """
+    device = next(
+        (
+            state._fsdp_param_group.device
+            for module in model.modules()
+            if isinstance(module, FSDPModule)
+            and (state := fully_shard.state(module))._fsdp_param_group is not None
+        ),
+        None,
+    )
+    if device is None:
+        return
+    for param in params:
+        if not param.is_meta and param.device != device:
+            param.data = param.data.to(device)
 
 
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
@@ -286,7 +311,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     detection result.
 
     Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
-    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes.
+    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
+    replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
+    params it ignores.
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -313,6 +340,8 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         fully_shard(layer, **fsdp_kwargs)
     if shard_root:
         fully_shard(model, **fsdp_kwargs)
+    if ignored_params:
+        _move_to_fsdp_device(model, ignored_params)
     if config is not None and architectures:
         config.architectures = architectures
 
