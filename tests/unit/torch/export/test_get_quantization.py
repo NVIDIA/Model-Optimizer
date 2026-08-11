@@ -28,16 +28,39 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import get_quantization_format
 from modelopt.torch.export.model_config import (
     QUANTIZATION_FP8,
+    QUANTIZATION_FP8_PB_W8A8,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
 from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 
+# Block-wise FP8 W8A8 on the ".1" linear: weight block + enabled dynamic input quantizer.
+_fp8_pb_w8a8_config = {
+    "quant_cfg": [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*.1.weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "block_sizes": {-1: 128, -2: 128}, "axis": None},
+            "enable": True,
+        },
+        {
+            "quantizer_name": "*.1.input_quantizer",
+            "cfg": {"num_bits": (4, 3), "block_sizes": {-1: 128, "type": "dynamic"}, "axis": None},
+            "enable": True,
+        },
+    ],
+    "algorithm": "max",
+}
+
 
 @pytest.mark.parametrize(
     ("config", "expected"),
-    [(partial_fp8_config, QUANTIZATION_FP8), (partial_w4a8_config, QUANTIZATION_W4A8_AWQ)],
+    [
+        (partial_fp8_config, QUANTIZATION_FP8),
+        (partial_w4a8_config, QUANTIZATION_W4A8_AWQ),
+        (_fp8_pb_w8a8_config, QUANTIZATION_FP8_PB_W8A8),
+    ],
 )
 def test_get_quantization_format(config, expected):
     model = ToyModel()
