@@ -197,6 +197,23 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_init_checkpoint: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Path to an exported draft checkpoint to warm-start from, so training continues "
+            "from published weights instead of a fresh random init. Accepts either a "
+            "directory in the deployment layout this repo exports (``model.safetensors`` "
+            "with no ``dflash_module.`` prefix, alongside ``config.json``) or the "
+            "``model.safetensors`` file itself. Weights are loaded into the draft module "
+            "after it is built, so the architecture still comes from "
+            "``dflash_architecture_config`` — the checkpoint must match it. Any mismatch "
+            "(missing, unexpected, or wrong-shaped tensors) raises rather than silently "
+            "leaving part of the draft randomly initialized. ``embed_tokens``/``lm_head`` "
+            "entries are ignored: the draft takes those from the base model. None "
+            "(default) trains from scratch."
+        ),
+    )
+
     dflash_export_rope_scaling: dict = ModeloptField(
         default={},
         description=(

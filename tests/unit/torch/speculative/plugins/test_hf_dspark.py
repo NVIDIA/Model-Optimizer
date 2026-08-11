@@ -29,7 +29,7 @@ from copy import deepcopy
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
@@ -573,3 +573,106 @@ class TestMarkovHeadKeyRemap:
         assert torch.allclose(
             module.markov_w1.weight, torch.full_like(module.markov_w1.weight, 1.0)
         )
+
+
+class TestInitCheckpoint:
+    """dflash_init_checkpoint warm-starts the draft module from exported weights."""
+
+    def _make_model(self, init_checkpoint=None, **overrides):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = _get_dspark_config()
+        config.update(overrides)
+        if init_checkpoint is not None:
+            config["dflash_init_checkpoint"] = str(init_checkpoint)
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    def _export(self, tmp_path, **overrides):
+        """Train-free export of a converted model, to be reloaded as a warm start."""
+        model = self._make_model(**overrides)
+        # Make the weights distinctive so a silent re-init would be visible.
+        with torch.no_grad():
+            for p in model.dflash_module.parameters():
+                p.fill_(0.125)
+        export_dir = tmp_path / "drafter"
+        model.get_exporter().export(export_dir)
+        return export_dir
+
+    def test_warm_start_loads_exported_weights(self, tmp_path):
+        """Every draft parameter comes from the checkpoint, not a fresh init."""
+        export_dir = self._export(tmp_path)
+        model = self._make_model(init_checkpoint=export_dir)
+        for name, p in model.dflash_module.named_parameters():
+            assert torch.allclose(p, torch.full_like(p, 0.125)), f"{name} was not warm-started"
+
+    def test_accepts_safetensors_file_path(self, tmp_path):
+        """The file itself works, not just its directory."""
+        export_dir = self._export(tmp_path)
+        model = self._make_model(init_checkpoint=export_dir / "model.safetensors")
+        assert torch.allclose(
+            model.dflash_module.fc.weight, torch.full_like(model.dflash_module.fc.weight, 0.125)
+        )
+
+    def test_round_trip_with_sink_and_causal(self, tmp_path):
+        """Warm start carries the sink weights of a causal + sink drafter."""
+        export_dir = self._export(
+            tmp_path, dflash_attention_sink=True, dflash_draft_attention="causal"
+        )
+        model = self._make_model(
+            init_checkpoint=export_dir,
+            dflash_attention_sink=True,
+            dflash_draft_attention="causal",
+        )
+        for layer in model.dflash_module.layers:
+            sink = layer.self_attn.attention_sink_bias
+            assert sink is not None
+            assert torch.allclose(sink, torch.full_like(sink, 0.125))
+
+    def test_default_is_random_init(self, tmp_path):
+        """Without the option nothing is loaded (regression guard for the default path)."""
+        self._export(tmp_path)
+        model = self._make_model()
+        assert not torch.allclose(
+            model.dflash_module.fc.weight, torch.full_like(model.dflash_module.fc.weight, 0.125)
+        )
+
+    def test_missing_path_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="no draft weights"):
+            self._make_model(init_checkpoint=tmp_path / "does_not_exist")
+
+    def test_architecture_mismatch_raises(self, tmp_path):
+        """A checkpoint for a different draft depth must not partially load.
+
+        Depth feeds `fc`'s input width (one target hidden per draft layer), so this trips
+        the shape check; either failure mode is acceptable as long as it raises.
+        """
+        export_dir = self._export(tmp_path)
+        with pytest.raises(ValueError, match=r"shape mismatch|does not match the configured draft"):
+            self._make_model(
+                init_checkpoint=export_dir,
+                dflash_architecture_config={
+                    **_get_dspark_config()["dflash_architecture_config"],
+                    "num_hidden_layers": NUM_DRAFT_LAYERS + 1,
+                },
+            )
+
+    def test_sink_mismatch_raises(self, tmp_path):
+        """Exported-without-sink cannot warm-start a sink-enabled draft."""
+        export_dir = self._export(tmp_path, dflash_attention_sink=False)
+        with pytest.raises(ValueError, match="does not match the configured draft"):
+            self._make_model(init_checkpoint=export_dir, dflash_attention_sink=True)
+
+    def test_nested_head_shape_mismatch_reported(self, tmp_path):
+        """A wrong-shaped tensor is caught even under the nested `markov_head.` layout.
+
+        The shape check has to resolve the module's load hooks first; otherwise a remapped
+        key skips it and fails later with a far less obvious error.
+        """
+        export_dir = self._export(tmp_path)
+        path = export_dir / "model.safetensors"
+        sd = load_file(str(path))
+        sd["markov_head.markov_w1.weight"] = torch.zeros(3, MARKOV_RANK)
+        del sd["markov_w1.weight"]
+        save_file(sd, str(path))
+        with pytest.raises(ValueError, match="shape mismatch"):
+            self._make_model(init_checkpoint=export_dir)

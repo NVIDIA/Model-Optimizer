@@ -72,6 +72,7 @@ Draft model components:
 """
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -470,6 +471,10 @@ class HFDFlashModel(DFlashModel):
         # Factory hook: subclasses (e.g. Domino) override to build an augmented
         # draft module while reusing all of DFlash's modify() setup.
         self.dflash_module = self._build_draft_module(self.dflash_config)
+        # Warm start from an exported draft checkpoint, before the dtype/device move below
+        # so the loaded tensors get cast alongside the rest of the module.
+        if self.dflash_init_checkpoint:
+            self._load_init_checkpoint(self.dflash_init_checkpoint)
         # Match base model dtype/device. Skip if base is on meta (during from_pretrained
         # restore — the model will be moved to the correct device after weight loading).
         if self.dflash_offline:
@@ -489,6 +494,81 @@ class HFDFlashModel(DFlashModel):
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
         return DFlashModule(dflash_config)
+
+    # Draft-module entries that legitimately come from the base model rather than the
+    # exported draft checkpoint, so their absence (or presence) is not an error.
+    _INIT_CKPT_IGNORED_KEYS = ("embed_tokens.weight", "lm_head.weight")
+
+    def _load_init_checkpoint(self, path: str):
+        """Warm-start ``self.dflash_module`` from an exported draft checkpoint.
+
+        Accepts either the export directory (containing ``model.safetensors``) or the
+        safetensors file itself. The architecture is fixed by ``dflash_architecture_config``
+        at this point, so the checkpoint has to match it: any missing, unexpected, or
+        wrong-shaped tensor raises. Loading part of a draft and leaving the rest randomly
+        initialized looks like a warm start but trains from a corrupted starting point, so
+        it is rejected instead of warned about.
+        """
+        from safetensors.torch import load_file
+
+        ckpt = Path(path)
+        if ckpt.is_dir():
+            ckpt = ckpt / "model.safetensors"
+        if not ckpt.is_file():
+            raise FileNotFoundError(
+                f"dflash_init_checkpoint: no draft weights at {ckpt}. Expected an exported "
+                "draft directory containing model.safetensors, or the file itself."
+            )
+
+        state_dict = load_file(str(ckpt))
+        # Tolerate a `dflash_module.` prefix so a raw training checkpoint also works.
+        state_dict = {
+            (k.split("dflash_module.", 1)[1] if "dflash_module." in k else k): v
+            for k, v in state_dict.items()
+        }
+        state_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if k not in self._INIT_CKPT_IGNORED_KEYS and "rotary_emb" not in k
+        }
+
+        # Shape-check against the module's own view of each key. Subclasses may remap keys
+        # on load (DSpark accepts a nested ``markov_head.`` layout), so resolve through the
+        # same hooks first — otherwise a wrong-shaped remapped tensor would skip this check
+        # and fail later with a much less obvious error.
+        module_sd = self.dflash_module.state_dict()
+        resolved = dict(state_dict)
+        for hook in self.dflash_module._load_state_dict_pre_hooks.values():
+            hook(resolved, "", None, True, [], [], [])
+        mismatched = [
+            f"{k}: checkpoint {tuple(v.shape)} vs module {tuple(module_sd[k].shape)}"
+            for k, v in resolved.items()
+            if k in module_sd and v.shape != module_sd[k].shape
+        ]
+        if mismatched:
+            raise ValueError(
+                "dflash_init_checkpoint: shape mismatch between "
+                f"{ckpt} and the configured draft architecture:\n  " + "\n  ".join(mismatched)
+            )
+
+        # strict=False, then check by hand: the module's own load hooks (e.g. DSpark's
+        # markov_head remap) run first, and buffers such as rotary_emb are excluded above.
+        incompatible = self.dflash_module.load_state_dict(state_dict, strict=False)
+        missing = [
+            k
+            for k in incompatible.missing_keys
+            if "rotary_emb" not in k and k not in self._INIT_CKPT_IGNORED_KEYS
+        ]
+        if missing or incompatible.unexpected_keys:
+            raise ValueError(
+                f"dflash_init_checkpoint: {ckpt} does not match the configured draft "
+                "architecture.\n"
+                f"  missing from checkpoint: {sorted(missing)}\n"
+                f"  unexpected in checkpoint: {sorted(incompatible.unexpected_keys)}"
+            )
+        logger.info(
+            "DFlash: warm-started draft module from %s (%d tensors).", ckpt, len(state_dict)
+        )
 
     def get_exporter(self):
         """Get the exporter for the DFlash draft model."""

@@ -51,4 +51,5 @@ class DFlashModel(DynamicModule):
         self.dflash_swa_window_size = config.dflash_swa_window_size
         self.dflash_draft_attention = config.dflash_draft_attention
         self.dflash_attention_sink = config.dflash_attention_sink
+        self.dflash_init_checkpoint = config.dflash_init_checkpoint
         self.dflash_export_rope_scaling = config.dflash_export_rope_scaling
