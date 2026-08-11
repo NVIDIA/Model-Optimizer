@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from collections.abc import Mapping
 from pathlib import Path, PurePath
 from typing import Any
@@ -41,17 +43,36 @@ def _safe_relative_path(raw_path: object, *, description: str) -> Path:
 
 
 def _path_without_symlinks(path: Path, *, description: str) -> Path:
-    absolute = path.expanduser().absolute()
+    expanded = path.expanduser()
+    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
         current /= part
         if current.is_symlink():
             raise ValueError(f"{description} is symlinked: {current}")
-    return absolute
+    return Path(os.path.abspath(absolute))
 
 
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _file_evidence(path: Path, *, description: str) -> dict[str, int | str]:
+    """Return bounded-memory evidence for one regular, non-symlinked file."""
+
+    path = _path_without_symlinks(path, description=description)
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError(f"{description} is not a regular file: {path}")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError as exc:
+        raise ValueError(f"invalid {description}: {path}") from exc
+    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _portable_relative_path(path: PurePath, root: PurePath) -> str:
@@ -62,6 +83,8 @@ def _portable_relative_path(path: PurePath, root: PurePath) -> str:
 
 def _read_mapping(path: Path, *, description: str) -> tuple[dict[str, Any], bytes]:
     try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError(f"invalid {description}: {path}")
         content = path.read_bytes()
         payload = json.loads(content)
     except (OSError, ValueError) as exc:
@@ -69,6 +92,78 @@ def _read_mapping(path: Path, *, description: str) -> tuple[dict[str, Any], byte
     if not isinstance(payload, dict):
         raise ValueError(f"invalid {description}: {path}")
     return payload, content
+
+
+def _validate_immutable_evidence(
+    evidence: object,
+    *,
+    output_pointers: object,
+    root: Path,
+) -> None:
+    if not isinstance(evidence, Mapping):
+        raise ValueError("stage artifact immutable evidence must be a mapping")
+    if not isinstance(output_pointers, Mapping):
+        raise ValueError("stage manifest outputs must be a mapping")
+
+    for key, entry in evidence.items():
+        if not isinstance(key, str) or not key or not isinstance(entry, Mapping):
+            raise ValueError(f"invalid stage output evidence entry: {key!r}")
+        output_pointer = output_pointers.get(key)
+        if not isinstance(output_pointer, str) or not output_pointer:
+            raise ValueError(f"stage output evidence has no matching output pointer: {key!r}")
+
+        evidence_path_value = entry.get("path")
+        if not isinstance(evidence_path_value, str) or not evidence_path_value:
+            raise ValueError(f"invalid stage output evidence path: {evidence_path_value!r}")
+        raw_evidence_path = Path(evidence_path_value)
+        if raw_evidence_path.is_absolute():
+            evidence_path = _path_without_symlinks(
+                raw_evidence_path, description="stage output evidence path"
+            )
+            try:
+                evidence_path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"unsafe stage output evidence path: {evidence_path_value!r}"
+                ) from exc
+        else:
+            relative = _safe_relative_path(
+                evidence_path_value, description="stage output evidence path"
+            )
+            if "\\" in evidence_path_value or relative.as_posix() != evidence_path_value:
+                raise ValueError(
+                    f"stage output evidence path is not portable: {evidence_path_value!r}"
+                )
+            evidence_path = _path_without_symlinks(
+                root / relative, description="stage output evidence path"
+            )
+        pointer_path = Path(output_pointer)
+        if not pointer_path.is_absolute():
+            pointer_path = root / pointer_path
+        pointer_path = _path_without_symlinks(pointer_path, description="stage output pointer path")
+        if pointer_path != evidence_path:
+            raise ValueError(f"stage output evidence path mismatch: {key!r}")
+
+        expected_size = entry.get("size")
+        expected_sha256 = entry.get("sha256")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+        ):
+            raise ValueError(f"invalid stage output evidence size: {key!r}")
+        if (
+            not isinstance(expected_sha256, str)
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+        ):
+            raise ValueError(f"invalid stage output evidence SHA256: {key!r}")
+
+        actual = _file_evidence(evidence_path, description="stage output evidence file")
+        if actual["size"] != expected_size:
+            raise ValueError(f"stage output evidence size mismatch: {key!r}")
+        if actual["sha256"] != expected_sha256:
+            raise ValueError(f"stage output evidence SHA256 mismatch: {key!r}")
 
 
 def stage_manifest_uses_execution_record(manifest: Mapping[str, Any]) -> bool:
@@ -257,6 +352,10 @@ def validate_stage_execution_record(
         raise ValueError("stage artifact canonical-manifest reference mismatch")
     if stage_ref.get("semantic_identity") != pointer.get("semantic_identity"):
         raise ValueError("stage artifact semantic identity mismatch")
-    if artifact.get("canonical_output_pointers") != pointer.get("outputs"):
+    output_pointers = pointer.get("outputs")
+    if artifact.get("canonical_output_pointers") != output_pointers:
         raise ValueError("stage artifact canonical output pointers mismatch")
+    _validate_immutable_evidence(
+        artifact.get("immutable_evidence"), output_pointers=output_pointers, root=root
+    )
     return resolved_relative.as_posix(), artifact_relative.as_posix()

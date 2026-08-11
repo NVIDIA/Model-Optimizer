@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -32,6 +31,7 @@ from typing import Any
 from .execution_record import (
     _EXECUTION_RECORD_MANIFEST_VERSION,
     _EXECUTION_RECORD_SCHEMA,
+    _file_evidence,
     _path_without_symlinks,
     _portable_relative_path,
     _sha256_bytes,
@@ -88,18 +88,6 @@ def _publish_immutable_record(
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
-
-
-def _file_evidence(path: Path) -> dict[str, int | str]:
-    """Return bounded-memory size and digest evidence for one file."""
-
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            size += len(chunk)
-            digest.update(chunk)
-    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _resolved_config_content(config: object) -> Any:
@@ -205,9 +193,18 @@ def write_stage_execution_record(
             if not output_path.is_absolute():
                 output_path = root / output_path
             if output_path.is_file():
+                safe_output_path = _path_without_symlinks(
+                    output_path, description="stage output evidence path"
+                )
+                try:
+                    evidence_path = _portable_relative_path(safe_output_path, root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"stage output evidence file is outside the campaign root: {output_path}"
+                    ) from exc
                 immutable_evidence[str(key)] = {
-                    "path": value,
-                    **_file_evidence(output_path),
+                    "path": evidence_path,
+                    **_file_evidence(output_path, description="stage output evidence file"),
                 }
     artifact_payload = {
         "schema": _EXECUTION_RECORD_SCHEMA,

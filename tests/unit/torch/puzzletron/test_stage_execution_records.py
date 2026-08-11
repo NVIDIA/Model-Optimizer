@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import PureWindowsPath
-from typing import TYPE_CHECKING
+import os
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -33,9 +33,6 @@ from modelopt.torch.puzzletron.manifest import (
     write_stage_manifest,
 )
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _stage_config(tmp_path: Path, config_path: Path) -> dict:
@@ -83,6 +80,19 @@ def _rewrite_json_record(path: Path, payload: dict) -> str:
     content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     path.write_text(content)
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+def _reseal_artifact_record(manifest_path: Path, root: Path, artifact: dict) -> None:
+    pointer = json.loads(manifest_path.read_text())
+    identity_payload = dict(artifact)
+    identity_payload.pop("artifact_manifest_identity", None)
+    artifact_identity = stable_hash(identity_payload, prefix=f"{pointer['stage']}_artifacts")
+    artifact["artifact_manifest_identity"] = artifact_identity
+    record = pointer["execution_record"]
+    record["artifact_manifest_identity"] = artifact_identity
+    artifact_path = root / record["artifact_manifest_path"]
+    record["artifact_manifest_sha256"] = _rewrite_json_record(artifact_path, artifact)
+    _rewrite_json_record(manifest_path, pointer)
 
 
 def test_stage_manifest_persists_path_neutral_resolved_stage_config(
@@ -230,7 +240,7 @@ def test_artifact_manifest_separates_output_pointer_from_immutable_evidence(
     assert artifacts["canonical_output_pointers"] == {"summary_path": str(summary_path)}
     assert artifacts["artifact_contract"] == "stage-manifest-output-pointers/v1"
     assert artifacts["immutable_evidence"]["summary_path"] == {
-        "path": str(summary_path),
+        "path": "artifacts/summary.json",
         "size": len(summary_path.read_bytes()),
         "sha256": hashlib.sha256(summary_path.read_bytes()).hexdigest(),
     }
@@ -242,6 +252,39 @@ def test_artifact_manifest_separates_output_pointer_from_immutable_evidence(
     required_patterns = _resume_kwargs(config, config_path, "convert")["required_patterns"]
     assert record["resolved_config_path"] in required_patterns
     assert record["artifact_manifest_path"] in required_patterns
+
+
+def test_validator_accepts_contained_legacy_absolute_evidence_path(tmp_path: Path) -> None:
+    summary_path = tmp_path / "artifacts" / "summary.json"
+    summary_path.parent.mkdir()
+    summary_path.write_text('{"score": 1}\n')
+    manifest_path, _config_path, _config, manifest = _write_convert_record(
+        tmp_path,
+        outputs={"summary_path": str(summary_path)},
+    )
+    artifact_path = tmp_path / manifest.execution_record["artifact_manifest_path"]
+    artifact = json.loads(artifact_path.read_text())
+    artifact["immutable_evidence"]["summary_path"]["path"] = str(summary_path)
+    _reseal_artifact_record(manifest_path, tmp_path, artifact)
+
+    validate_stage_execution_record(manifest_path, expected_stage="convert")
+
+
+def test_writer_normalizes_contained_output_pointer_parent_segments(tmp_path: Path) -> None:
+    summary_path = tmp_path / "artifacts" / "summary.json"
+    summary_path.parent.mkdir()
+    summary_path.write_text('{"score": 1}\n')
+    output_pointer = "artifacts/../artifacts/summary.json"
+
+    manifest_path, _config_path, _config, manifest = _write_convert_record(
+        tmp_path,
+        outputs={"summary_path": output_pointer},
+    )
+
+    artifact_path = tmp_path / manifest.execution_record["artifact_manifest_path"]
+    artifact = json.loads(artifact_path.read_text())
+    assert artifact["immutable_evidence"]["summary_path"]["path"] == "artifacts/summary.json"
+    validate_stage_execution_record(manifest_path, expected_stage="convert")
 
 
 @pytest.mark.parametrize(
@@ -650,6 +693,153 @@ def test_resume_rejects_tampered_immutable_stage_record(
 
     with pytest.raises(ValueError, match=message):
         _resume_kwargs(config, config_path, "convert")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX named pipes")
+@pytest.mark.parametrize(
+    "record_key",
+    ["resolved_config_path", "artifact_manifest_path"],
+    ids=["resolved-config", "artifact-manifest"],
+)
+def test_validator_rejects_nonregular_execution_record_files(
+    tmp_path: Path,
+    record_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, _config_path, _config, manifest = _write_convert_record(tmp_path)
+    record_path = tmp_path / manifest.execution_record[record_key]
+    record_path.unlink()
+    os.mkfifo(record_path)
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == record_path:
+            pytest.fail("attempted to read a non-regular execution record")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    with pytest.raises(ValueError, match=r"invalid .* record"):
+        validate_stage_execution_record(manifest_path, expected_stage="convert")
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ('{"score": 2}\n', "stage output evidence SHA256 mismatch"),
+        ('{"score": 200}\n', "stage output evidence size mismatch"),
+        (None, "invalid stage output evidence file"),
+    ],
+    ids=["digest", "size", "missing"],
+)
+def test_resume_rejects_modified_evidence_backed_output(
+    tmp_path: Path,
+    replacement: str | None,
+    message: str,
+) -> None:
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text("model: {}\n")
+    summary_path = tmp_path / "artifacts" / "summary.json"
+    summary_path.parent.mkdir()
+    summary_path.write_text('{"score": 1}\n')
+    config = _stage_config(tmp_path, config_path)
+    manifest = StageManifest(stage="convert", config=config)
+    manifest.complete(outputs={"summary_path": str(summary_path)})
+    manifest_path = tmp_path / "manifests" / "convert.json"
+    write_stage_manifest(manifest_path, manifest)
+
+    if replacement is None:
+        summary_path.unlink()
+    else:
+        summary_path.write_text(replacement)
+
+    with pytest.raises(ValueError, match=message):
+        _resume_kwargs(config, config_path, "convert")
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("evidence-type", "immutable evidence must be a mapping"),
+        ("entry-type", "invalid stage output evidence entry"),
+        ("unsafe-path", "unsafe stage output evidence path"),
+        ("nonportable-path", "stage output evidence path is not portable"),
+        ("path-mismatch", "stage output evidence path mismatch"),
+        ("missing-pointer", "stage output evidence has no matching output pointer"),
+        ("size-type", "invalid stage output evidence size"),
+        ("digest-type", "invalid stage output evidence SHA256"),
+    ],
+)
+def test_validator_rejects_malformed_immutable_evidence(
+    tmp_path: Path,
+    case: str,
+    message: str,
+) -> None:
+    summary_path = tmp_path / "artifacts" / "summary.json"
+    summary_path.parent.mkdir()
+    summary_path.write_text('{"score": 1}\n')
+    manifest_path, _config_path, _config, manifest = _write_convert_record(
+        tmp_path,
+        outputs={"summary_path": str(summary_path)},
+    )
+    artifact_path = tmp_path / manifest.execution_record["artifact_manifest_path"]
+    artifact = json.loads(artifact_path.read_text())
+    evidence = artifact["immutable_evidence"]["summary_path"]
+    if case == "evidence-type":
+        artifact["immutable_evidence"] = []
+    elif case == "entry-type":
+        artifact["immutable_evidence"]["summary_path"] = []
+    elif case == "unsafe-path":
+        evidence["path"] = "../summary.json"
+    elif case == "nonportable-path":
+        evidence["path"] = "artifacts\\summary.json"
+    elif case == "path-mismatch":
+        evidence["path"] = "artifacts/other.json"
+    elif case == "missing-pointer":
+        artifact["immutable_evidence"]["forged"] = artifact["immutable_evidence"].pop(
+            "summary_path"
+        )
+    elif case == "size-type":
+        evidence["size"] = True
+    else:
+        evidence["sha256"] = 1
+    _reseal_artifact_record(manifest_path, tmp_path, artifact)
+
+    with pytest.raises(ValueError, match=message):
+        validate_stage_execution_record(manifest_path, expected_stage="convert")
+
+
+def test_validator_rejects_nonregular_evidence_backed_output(tmp_path: Path) -> None:
+    summary_path = tmp_path / "artifacts" / "summary.json"
+    summary_path.parent.mkdir()
+    summary_path.write_text('{"score": 1}\n')
+    manifest_path, _config_path, _config, _manifest = _write_convert_record(
+        tmp_path,
+        outputs={"summary_path": str(summary_path)},
+    )
+    summary_path.unlink()
+    summary_path.mkdir()
+
+    with pytest.raises(ValueError, match="stage output evidence file is not a regular file"):
+        validate_stage_execution_record(manifest_path, expected_stage="convert")
+
+
+@pytest.mark.parametrize("pointer_kind", ["absolute", "relative"])
+def test_writer_rejects_evidence_backed_output_outside_campaign_root(
+    tmp_path: Path,
+    pointer_kind: str,
+) -> None:
+    campaign_root = tmp_path / "campaign"
+    campaign_root.mkdir()
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text('{"score": 1}\n')
+    output_pointer = str(summary_path) if pointer_kind == "absolute" else "../summary.json"
+
+    with pytest.raises(ValueError, match="outside the campaign root"):
+        _write_convert_record(
+            campaign_root,
+            outputs={"summary_path": output_pointer},
+        )
 
 
 def test_writer_rejects_symlinked_execution_record_ancestor(tmp_path: Path) -> None:
