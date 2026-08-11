@@ -67,7 +67,6 @@ quantize:
       cfg:
         num_bits: e4m3
     # MCore lm_head (output_layer) W4A16 4/6 weight-only.
-    - quantizer_name: '*output_layer*weight_quantizer'
+    - quantizer_name: 'output_layer.weight_quantizer'
       enable: true
       cfg: {$import: nvfp4_four_over_six}
-
