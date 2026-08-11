@@ -15,6 +15,7 @@
 """Utility functions for model type detection and classification."""
 
 import re
+from collections import defaultdict
 
 import torch.nn as nn
 
@@ -149,82 +150,63 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     return None
 
 
-def _collect_canonical_tied_patterns(
-    model: nn.Module,
-) -> tuple[list[re.Pattern], list[str]]:
-    """Walk the model and collect canonical-side tied-weight matchers.
+def _build_tied_weight_map(model: nn.Module) -> dict[str, str]:
+    """Map tied parameter aliases to a canonical name before export mutates the model.
 
-    Patterns are submodule-prefixed regexes from each module's
-    ``_tied_weights_keys`` dict-style declaration (the prefix matters
-    for nested models where the dict lives on an inner submodule).
-    Side substrings are dot-separated tokens that appear only on the
-    canonical side of those declarations — needed because modelopt's
-    per-expert unpacking creates post-export keys (e.g.
-    ``…experts.Y.gate_proj.input_scale``) that HF's regexes never knew
-    about. List-style (legacy) declarations are skipped.
+    Ties come only from groups that share the same live :class:`nn.Parameter` object.
+    ``_tied_weights_keys`` and ``tie_word_embeddings`` choose which name to retain; they
+    never create a tie by themselves.
     """
-    patterns: list[re.Pattern] = []
-    alias_token_set: set[str] = set()
-    canonical_token_set: set[str] = set()
+    groups: dict[int, list[str]] = defaultdict(list)
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        groups[id(parameter)].append(name)
 
-    def _tokens(s: str) -> set[str]:
-        """Identifiers in a regex string, with regex specials as separators."""
-        return {tok for tok in re.split(r"[^A-Za-z0-9_]+", s) if tok}
-
-    for name, submodule in model.named_modules():
-        tied = getattr(submodule, "_tied_weights_keys", None)
-        if not isinstance(tied, dict) or not tied:
+    declared_aliases: set[str] = set()
+    for module_name, module in model.named_modules():
+        tied = getattr(module, "_tied_weights_keys", None)
+        if not isinstance(tied, dict):
             continue
-        prefix = f"{name}." if name else ""
-        for alias_pat, canonical_pat in tied.items():
-            patterns.append(re.compile(prefix + canonical_pat))
-            alias_token_set.update(_tokens(prefix + alias_pat))
-            canonical_token_set.update(_tokens(prefix + canonical_pat))
+        prefix = f"{module_name}." if module_name else ""
+        for pattern in tied:
+            try:
+                alias_pattern = re.compile(pattern)
+            except re.error:
+                continue
+            for names in groups.values():
+                for name in names:
+                    if name.startswith(prefix) and alias_pattern.search(name[len(prefix) :]):
+                        declared_aliases.add(name)
 
-    # Tokens unique to the canonical side become substring matchers.
-    side_substrings = sorted(canonical_token_set - alias_token_set)
-    return patterns, side_substrings
+    embedding_canonical: dict[int, str] = {}
+    if getattr(getattr(model, "config", None), "tie_word_embeddings", False):
+        try:
+            input_embeddings = model.get_input_embeddings()
+            output_embeddings = model.get_output_embeddings()
+        except (AttributeError, NotImplementedError):
+            input_embeddings = output_embeddings = None
+        if (
+            input_embeddings is not None
+            and output_embeddings is not None
+            and getattr(input_embeddings, "weight", None)
+            is getattr(output_embeddings, "weight", object())
+        ):
+            parameter = input_embeddings.weight
+            for name in groups.get(id(parameter), []):
+                owner_name = name.rsplit(".", 1)[0] if "." in name else ""
+                try:
+                    owner = model.get_submodule(owner_name) if owner_name else model
+                except AttributeError:
+                    continue
+                if owner is input_embeddings:
+                    embedding_canonical[id(parameter)] = name
+                    break
 
-
-def _reorder_canonical_first(state_dict: dict, model: nn.Module) -> dict:
-    r"""Reorder ``state_dict`` so canonical-side tied keys iterate first.
-
-    Lets the downstream first-wins data_ptr dedup keep canonical names.
-    Uses both regex patterns and substring matchers from
-    :func:`_collect_canonical_tied_patterns`. Gated on the model class
-    name to scope the reorder to DiffusionGemma; other tied
-    encoder-decoder models that ship dict-style ``_tied_weights_keys``
-    can be added to the allowlist here. Mirrors the ``model_type``
-    dispatch used for the Whisper and Nemotron-VL branches elsewhere
-    in ``unified_export_hf.py``.
-    """
-    model_type = type(model).__name__.lower()
-    if "diffusiongemma" not in model_type and "diffusion_gemma" not in model_type:
-        return state_dict
-
-    canonical_patterns, side_substrings = _collect_canonical_tied_patterns(model)
-    if not canonical_patterns and not side_substrings:
-        return state_dict
-
-    def _has_side_substring(key: str) -> bool:
-        # Require the token to appear as a proper dot-separated path
-        # component, not just as a substring of an unrelated identifier.
-        for tok in side_substrings:
-            if (
-                f".{tok}." in key
-                or key.startswith(f"{tok}.")
-                or key.endswith(f".{tok}")
-                or key == tok
-            ):
-                return True
-        return False
-
-    head: dict = {}
-    tail: dict = {}
-    for k, v in state_dict.items():
-        if any(p.search(k) for p in canonical_patterns) or _has_side_substring(k):
-            head[k] = v
-        else:
-            tail[k] = v
-    head.update(tail)
-    return head
+    tied_weight_map: dict[str, str] = {}
+    for parameter_id, names in groups.items():
+        if len(names) < 2:
+            continue
+        canonical = embedding_canonical.get(parameter_id)
+        if canonical is None:
+            canonical = next((name for name in names if name not in declared_aliases), names[0])
+        tied_weight_map.update({name: canonical for name in names if name != canonical})
+    return tied_weight_map

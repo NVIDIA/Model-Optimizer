@@ -685,30 +685,15 @@ class TestExportFusedExpertsTiedDedup:
         if QuantModuleRegistry.get(mod_type) is not None:
             QuantModuleRegistry.unregister(mod_type)
 
-    def test_per_expert_buffers_share_data_ptr_for_tied_fused_experts(self):
-        """Two tied FusedExperts modules: every per-expert .weight + scale buffer shares data_ptr."""
+    def test_tied_fused_experts_are_expanded_independently(self):
         parent = _build_two_moe_blocks(tie=True)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
         try:
             _calibrate_two_moe_blocks(parent)
 
-            # Per-call dedup caches threaded through both export calls; int keys
-            # for per-expert wrapper dedup, tuple keys for module-level dedup.
-            tied_cache: dict = {}
-            moe_tied_cache: dict = {}
-            _export_fused_experts(
-                parent.encoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
-            _export_fused_experts(
-                parent.decoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
+            _export_fused_experts(parent.encoder.experts, torch.float16)
+            _export_fused_experts(parent.decoder.experts, torch.float16)
 
             for idx in range(NUM_EXPERTS):
                 enc_expert = getattr(parent.encoder.experts, str(idx))
@@ -716,49 +701,8 @@ class TestExportFusedExpertsTiedDedup:
                 for proj_name in ("gate_proj", "up_proj", "down_proj"):
                     enc_proj = getattr(enc_expert, proj_name)
                     dec_proj = getattr(dec_expert, proj_name)
-                    assert enc_proj.weight.data_ptr() == dec_proj.weight.data_ptr()
-                    for scale_attr in ("weight_scale", "weight_scale_2"):
-                        if hasattr(enc_proj, scale_attr) and hasattr(dec_proj, scale_attr):
-                            assert (
-                                getattr(enc_proj, scale_attr).data_ptr()
-                                == getattr(dec_proj, scale_attr).data_ptr()
-                            )
-        finally:
-            self._cleanup_registry(expert_type)
-
-    def test_per_expert_buffers_have_independent_data_ptrs_for_untied_fused_experts(self):
-        """Two untied FusedExperts modules: per-expert buffers stay independent (no false-positive alias)."""
-        parent = _build_two_moe_blocks(tie=False)
-        expert_type = type(parent.encoder.experts)
-        self._cleanup_registry(expert_type)
-        try:
-            _calibrate_two_moe_blocks(parent)
-
-            # Same fresh caches as the positive case — confirms that even with
-            # dedup enabled, untied modules with distinct source data_ptrs do
-            # not get falsely aliased.
-            tied_cache: dict = {}
-            moe_tied_cache: dict = {}
-            _export_fused_experts(
-                parent.encoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
-            _export_fused_experts(
-                parent.decoder.experts,
-                torch.float16,
-                _moe_tied_cache=moe_tied_cache,
-                _tied_cache=tied_cache,
-            )
-
-            for idx in range(NUM_EXPERTS):
-                enc_expert = getattr(parent.encoder.experts, str(idx))
-                dec_expert = getattr(parent.decoder.experts, str(idx))
-                for proj_name in ("gate_proj", "up_proj", "down_proj"):
-                    enc_proj = getattr(enc_expert, proj_name)
-                    dec_proj = getattr(dec_expert, proj_name)
-                    assert enc_proj.weight.data_ptr() != dec_proj.weight.data_ptr()
+                    assert enc_proj.weight is not dec_proj.weight
+                    assert torch.equal(enc_proj.weight, dec_proj.weight)
         finally:
             self._cleanup_registry(expert_type)
 

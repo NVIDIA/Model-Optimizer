@@ -34,7 +34,6 @@ from modelopt.torch.export.hf_export_handlers import (
     _prepare_iterable_experts,
 )
 from modelopt.torch.export.registry import (
-    ExportContext,
     ExportModuleRegistry,
     PrepareMoEInputsRegistry,
     _ExportHandlerRegistryCls,
@@ -301,12 +300,3 @@ def test_process_quantized_modules_exports_via_registry():
     for key in fp8_weights:
         weight = state_dict[key.replace("weight_scale", "weight")]
         assert weight.dtype == torch.float8_e4m3fn
-
-
-def test_export_context_caches_are_per_instance():
-    model = nn.Linear(2, 2)
-    ctx_a = ExportContext(model=model, dtype=torch.float16)
-    ctx_b = ExportContext(model=model, dtype=torch.float16)
-    ctx_a.tied_cache[123] = model
-    assert ctx_b.tied_cache == {}
-    assert ctx_b.moe_tied_cache == {}

@@ -92,7 +92,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import _reorder_canonical_first, get_language_model_from_vl, is_multimodal_model
+from .model_utils import _build_tied_weight_map, get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
@@ -570,24 +570,12 @@ def _export_quantized_weight(
     sub_module: nn.Module,
     dtype: torch.dtype,
     weight_name: str = "weight",
-    _tied_cache: dict[int, nn.Module] | None = None,
 ):
     """For the given weight attr of the sub_module, export the quantization info of it.
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
     and registering scaling factors.
 
-    Tied-weight dedup is opt-in via ``_tied_cache``: the setattr below replaces
-    ``.weight`` with a fresh ``nn.Parameter`` wrapping packed bytes, breaking
-    any HF-level tie. When the caller passes a ``_tied_cache`` dict (keyed by
-    the pre-pack ``weight.data_ptr()``), the alias step at the end re-points
-    ``weight`` / ``weight_scale`` / ``weight_scale_2`` at a previously-processed
-    module sharing the same source memory so the downstream data_ptr dedup can
-    collapse them. The cache is owned by the caller (typically
-    ``_export_transformers_checkpoint``) and scoped to one export invocation;
-    when ``_tied_cache`` is ``None`` (the default) the alias step is skipped
-    entirely. Uses memory identity only — no ``_tied_weights_keys`` lookup,
-    no-op for non-tied modules.
     """
     quantization_format = get_quantization_format(sub_module)
     if quantization_format == QUANTIZATION_NONE:
@@ -604,12 +592,6 @@ def _export_quantized_weight(
             "which dispatches to the streaming writer that materialises weights layer-by-layer."
         )
 
-    # Capture source identity BEFORE any tensor-creating operation below.
-    # For HF-tied weights this matches across all modules sharing the
-    # underlying Parameter; the cache lookup at the end of this function
-    # uses it to detect ties whose Python identity is about to be broken
-    # by the setattr on `weight_name` further down.
-    _tied_source_data_ptr = weight.data_ptr()
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
     )
@@ -820,32 +802,6 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
-    # Tied-weight dedup: if a previously-processed module shared the same
-    # source weight memory, alias the packed weight + scale buffers so the
-    # downstream data_ptr dedup in postprocess_state_dict can collapse them.
-    # input_scale is safe to alias because sync_tied_input_amax (earlier in
-    # this export) already max-merged the per-side amaxes. Gated on the
-    # caller-owned _tied_cache so the dedup state is scoped to one export.
-    if _tied_cache is not None:
-        _prior = _tied_cache.get(_tied_source_data_ptr)
-        if _prior is not None and _prior is not sub_module:
-            if hasattr(_prior, weight_name):
-                setattr(sub_module, weight_name, getattr(_prior, weight_name))
-            for _attr in (
-                quantizer_attrs.weight_scale,
-                quantizer_attrs.weight_scale_2,
-                quantizer_attrs.input_scale,
-            ):
-                if not hasattr(_prior, _attr):
-                    continue
-                if _attr in sub_module._buffers:
-                    del sub_module._buffers[_attr]
-                elif hasattr(sub_module, _attr):
-                    delattr(sub_module, _attr)
-                sub_module.register_buffer(_attr, getattr(_prior, _attr))
-        else:
-            _tied_cache[_tied_source_data_ptr] = sub_module
-
     torch.cuda.empty_cache()
 
 
@@ -942,9 +898,6 @@ def _process_quantized_modules(
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
     """
-    # Per-call tied-weight dedup caches inside the context. Created fresh on
-    # every invocation so cache state is scoped to one export and cannot leak
-    # into a later call (see ExportContext).
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     fsdp_module_to_reshard = None
 
@@ -1017,6 +970,10 @@ def _export_transformers_checkpoint(
 
     _warn_on_unsynced_moe_gate_up(model)
 
+    # Packing and fused-MoE expansion replace shared Parameters with independent tensors.
+    # Capture their stable name relationship while the live model still exposes the tie.
+    tied_weight_map = _build_tied_weight_map(model)
+
     # Merge per-side input_quantizer amaxes BEFORE _process_quantized_modules,
     # so the merged value flows into input_scale derivation downstream.
     synced_input = sync_tied_input_amax(model)
@@ -1046,14 +1003,12 @@ def _export_transformers_checkpoint(
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
 
-    # Reorder so canonical-side tied keys (per HF's _tied_weights_keys)
-    # iterate first into postprocess_state_dict's first-wins data_ptr dedup.
-    # Self-gated to DiffusionGemma inside _reorder_canonical_first; no-op
-    # for every other model.
-    quantized_state_dict = _reorder_canonical_first(quantized_state_dict, model)
-
     quantized_state_dict = postprocess_state_dict(
-        quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
+        quantized_state_dict,
+        kv_cache_max_bound,
+        kv_cache_format,
+        is_modelopt_qlora,
+        tied_weight_map=tied_weight_map,
     )
 
     return quantized_state_dict, quant_config

@@ -15,8 +15,6 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
-from collections import OrderedDict
-
 import torch
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
@@ -24,58 +22,141 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import (
-    _collect_canonical_tied_patterns,
-    _reorder_canonical_first,
+from modelopt.torch.export.model_utils import _build_tied_weight_map
+from modelopt.torch.export.quant_utils import (
+    fuse_prequant_layernorm,
+    postprocess_state_dict,
+    sync_tied_input_amax,
 )
-from modelopt.torch.export.quant_utils import fuse_prequant_layernorm, sync_tied_input_amax
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-def test_collect_canonical_tied_patterns_dict_style():
-    """Dict-style _tied_weights_keys yields regex patterns + canonical-side substrings."""
+def test_build_tied_weight_map_uses_parameter_identity_and_declared_direction():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
 
-    patterns, side_substrings = _collect_canonical_tied_patterns(parent)
-
-    assert len(patterns) >= 1
-    # "decoder" is in the canonical RHS but not the alias LHS — must auto-derive.
-    # "encoder" is alias-only and must NOT be returned as canonical (would invert dedup).
-    assert "decoder" in side_substrings
-    assert "encoder" not in side_substrings
+    assert parent.encoder.weight is parent.decoder.weight
+    assert _build_tied_weight_map(parent) == {"encoder.weight": "decoder.weight"}
 
 
-def test_collect_canonical_tied_patterns_list_style_yields_no_canonical_info():
-    """Legacy list-style _tied_weights_keys carries no canonical/alias info — returns empty."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
-
-    patterns, side_substrings = _collect_canonical_tied_patterns(parent)
-
-    assert patterns == []
-    assert side_substrings == []
-
-
-def test_reorder_canonical_first_puts_decoder_keys_before_encoder_keys():
-    """_reorder_canonical_first moves canonical-side state_dict keys ahead of alias-side keys."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-
-    sd = OrderedDict(
-        [
-            ("encoder.weight", torch.zeros(1)),
-            ("unrelated.foo", torch.zeros(1)),
-            ("decoder.weight", torch.zeros(1)),
-        ]
+def test_build_tied_weight_map_does_not_apply_declared_tie():
+    parent = wrap_in_parent_with_tied_keys(
+        torch.nn.Linear(4, 4, bias=False),
+        torch.nn.Linear(4, 4, bias=False),
     )
 
-    reordered = _reorder_canonical_first(sd, parent)
-    keys = list(reordered.keys())
+    assert parent.encoder.weight is not parent.decoder.weight
+    assert _build_tied_weight_map(parent) == {}
 
-    assert keys.index("decoder.weight") < keys.index("encoder.weight")
-    assert set(reordered) == set(sd)  # no drops or additions
+
+def test_build_tied_weight_map_prefers_input_embedding():
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = type("Config", (), {"tie_word_embeddings": True})()
+            self.lm_head = torch.nn.Linear(4, 4, bias=False)
+            self.embed = torch.nn.Embedding(4, 4)
+            self.embed.weight = self.lm_head.weight
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    assert _build_tied_weight_map(Model()) == {"lm_head.weight": "embed.weight"}
+
+
+def test_postprocess_tied_weights_uses_pre_export_names_after_materialization():
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    tied_weight_map = _build_tied_weight_map(parent)
+    state_dict = {
+        "encoder.weight": parent.encoder.weight.detach().clone(),
+        "decoder.weight": parent.decoder.weight.detach().clone(),
+    }
+
+    processed = postprocess_state_dict(state_dict, 448, None, tied_weight_map=tied_weight_map)
+
+    assert set(processed) == {"decoder.weight"}
+
+
+def test_postprocess_tied_weights_drops_quantization_companions_atomically():
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    state_dict = {}
+    for side in ("encoder", "decoder"):
+        state_dict[f"{side}.weight"] = torch.randn(4, 4)
+        state_dict[f"{side}.weight_scale"] = torch.randn(4)
+        state_dict[f"{side}.weight_scale_2"] = torch.randn(1)
+        state_dict[f"{side}.input_scale"] = torch.randn(1)
+
+    processed = postprocess_state_dict(
+        state_dict, 448, None, tied_weight_map=_build_tied_weight_map(parent)
+    )
+
+    assert set(processed) == {
+        "decoder.weight",
+        "decoder.weight_scale",
+        "decoder.weight_scale_2",
+        "decoder.input_scale",
+    }
+
+
+def test_postprocess_tied_weights_keeps_group_if_canonical_companion_is_missing():
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    state_dict = {
+        "encoder.weight": torch.randn(4, 4),
+        "encoder.weight_scale": torch.randn(4),
+        "decoder.weight": torch.randn(4, 4),
+    }
+
+    processed = postprocess_state_dict(
+        state_dict, 448, None, tied_weight_map=_build_tied_weight_map(parent)
+    )
+
+    assert set(processed) == set(state_dict)
+
+
+def test_postprocess_tied_weights_drops_expanded_moe_expert_aliases():
+    parent = torch.nn.Module()
+    parent.encoder = torch.nn.Module()
+    parent.encoder.experts = torch.nn.Module()
+    parent.decoder = torch.nn.Module()
+    parent.decoder.experts = torch.nn.Module()
+    parent.decoder.experts.gate_up_proj = torch.nn.Parameter(torch.randn(2, 8, 4))
+    parent.decoder.experts.down_proj = torch.nn.Parameter(torch.randn(2, 4, 4))
+    parent.encoder.experts.gate_up_proj = parent.decoder.experts.gate_up_proj
+    parent.encoder.experts.down_proj = parent.decoder.experts.down_proj
+    parent._tied_weights_keys = {
+        r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj",
+        r"^encoder\.experts\.down_proj$": "decoder.experts.down_proj",
+    }
+    state_dict = {}
+    for side in ("encoder", "decoder"):
+        for expert in range(2):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                prefix = f"{side}.experts.{expert}.{projection}"
+                state_dict[f"{prefix}.weight"] = torch.randn(4, 4)
+                state_dict[f"{prefix}.weight_scale"] = torch.randn(4)
+
+    processed = postprocess_state_dict(
+        state_dict, 448, None, tied_weight_map=_build_tied_weight_map(parent)
+    )
+
+    assert len(processed) == 12
+    assert all(key.startswith("decoder.experts.") for key in processed)
+
+
+def test_postprocess_state_dict_has_no_pointer_or_storage_fallback():
+    shared = torch.randn(4)
+    state_dict = {"first": shared, "second": shared, "view": shared[:2]}
+
+    processed = postprocess_state_dict(state_dict, 448, None)
+
+    assert set(processed) == set(state_dict)
 
 
 def _quantize_and_get_input_quantizers(parent):
@@ -127,60 +208,34 @@ def _calibrate_through_both_children(parent):
     mtq.quantize(parent, mtq.NVFP4_DEFAULT_CFG, forward_loop=forward_loop)
 
 
-def test_export_quantized_weight_aliases_packed_weight_for_tied_linears():
-    """Tied Linears share data_ptr for packed .weight and scale buffers after export."""
+def test_export_quantized_weight_packs_tied_linears_independently():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec)
     _calibrate_through_both_children(parent)
 
-    # Per-call dedup cache (the production pattern: caller owns the cache, scoped
-    # to one export invocation). Threaded through both sides of the tied pair so
-    # the alias step at the end of _export_quantized_weight catches the dedup.
-    tied_cache: dict = {}
-    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
+    _export_quantized_weight(enc, torch.float16, "weight")
+    _export_quantized_weight(dec, torch.float16, "weight")
 
-    assert enc.weight.data_ptr() == dec.weight.data_ptr()
-    for scale_attr in ("weight_scale", "weight_scale_2"):
-        if hasattr(enc, scale_attr) and hasattr(dec, scale_attr):
-            assert getattr(enc, scale_attr).data_ptr() == getattr(dec, scale_attr).data_ptr()
-
-
-def test_export_quantized_weight_no_alias_for_untied_linears():
-    """Untied Linears keep independent data_ptrs after export — no false-positive aliasing."""
-    parent = torch.nn.Module()
-    parent.encoder = torch.nn.Linear(16, 32, bias=False)
-    parent.decoder = torch.nn.Linear(16, 32, bias=False)
-    assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
-    _calibrate_through_both_children(parent)
-
-    # Same fresh cache shape as the positive case — confirms that even with
-    # dedup enabled, untied modules with distinct source data_ptrs do not get
-    # falsely aliased.
-    tied_cache: dict = {}
-    _export_quantized_weight(parent.encoder, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(parent.decoder, torch.float16, "weight", _tied_cache=tied_cache)
-
-    assert parent.encoder.weight.data_ptr() != parent.decoder.weight.data_ptr()
+    assert enc.weight is not dec.weight
+    assert torch.equal(enc.weight, dec.weight)
 
 
 def test_export_quantized_weight_skips_alias_when_one_tied_side_is_unquantized():
     """Unquantized side early-returns; its .weight stays at the original shared Parameter."""
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec)
-    original_shared_data_ptr = enc.weight.data_ptr()
+    original_shared_weight = enc.weight
 
     _calibrate_through_both_children(parent)
     # is_enabled is a read-only property; .disable() is the canonical bypass.
     dec.weight_quantizer.disable()
 
-    tied_cache: dict = {}
-    _export_quantized_weight(enc, torch.float16, "weight", _tied_cache=tied_cache)
-    _export_quantized_weight(dec, torch.float16, "weight", _tied_cache=tied_cache)
+    _export_quantized_weight(enc, torch.float16, "weight")
+    _export_quantized_weight(dec, torch.float16, "weight")
 
-    assert enc.weight.data_ptr() != original_shared_data_ptr  # encoder got fresh packed
-    assert dec.weight.data_ptr() == original_shared_data_ptr  # decoder untouched
-    assert enc.weight.data_ptr() != dec.weight.data_ptr()
+    assert enc.weight is not original_shared_weight
+    assert dec.weight is original_shared_weight
+    assert enc.weight is not dec.weight
 
 
 def _linear_with_input_quantizer():

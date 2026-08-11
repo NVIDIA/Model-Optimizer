@@ -94,15 +94,7 @@ def wrap_in_parent_with_tied_keys(
       when ``decoder_canonical=True``, list-style (legacy, no canonical/alias
       distinction) when ``decoder_canonical=False``.
 
-    Used by tests for :func:`_collect_canonical_tied_patterns` and
-    :func:`_reorder_canonical_first`. The legacy list-style branch exercises
-    the "no patterns extracted" negative case.
-
-    The parent's class name contains ``DiffusionGemma`` so the model_type
-    gate inside :func:`_reorder_canonical_first` (mirrors the existing
-    whisper / nemotron-vl dispatch in ``unified_export_hf.py``) passes for
-    test parents — without this, the function early-returns before
-    reaching the patterns step.
+    Used by tied-weight name-map and state-dict postprocessing tests.
     """
     parent_cls = type("DiffusionGemmaTestParent", (nn.Module,), {})
     parent = parent_cls()

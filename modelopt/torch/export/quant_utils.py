@@ -1052,6 +1052,7 @@ def postprocess_state_dict(
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
+    tied_weight_map: dict[str, str] | None = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -1060,6 +1061,7 @@ def postprocess_state_dict(
         maxbound: The maximum bound value for the output quantizer.
         quantization: The KV cache quantization format.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        tied_weight_map: Parameter aliases mapped to the canonical name captured before export.
 
     Returns:
         The filtered state_dict without unnecessary keys like '_amax' and non KV cache output quantizers.
@@ -1104,39 +1106,54 @@ def postprocess_state_dict(
     post_state_dict = {k: _maybe_squeeze_scale(k, v) for k, v in post_state_dict.items()}
 
     # remove real quant parameters from the state dict
-    keys_to_delete = []
+    keys_to_delete = set()
     for key, value in post_state_dict.items():
         if any(
             key.endswith("weight_quantizer." + q_key)
             for q_key in RealQuantLinear.list_of_scale_tensors
         ):
-            keys_to_delete.append(key)
+            keys_to_delete.add(key)
 
     # remove LoRA adapters from state dict
     if is_modelopt_qlora:
         for key in post_state_dict:
             if "lora" in key and key not in keys_to_delete:
-                keys_to_delete.append(key)
-    # Check for tied weights and remove duplicates
-    seen_tensors = {}
+                keys_to_delete.add(key)
 
-    # Remove any tied weights if found.
-    for key, value in post_state_dict.items():
-        if isinstance(value, torch.Tensor):
-            # Use tensor data pointer to identify tied weights
-            tensor_id = value.data_ptr()
-            if tensor_id in seen_tensors:
-                # This is a tied weight, mark for deletion and warn
-                keys_to_delete.append(key)
-                logger.warning(
-                    f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "
-                    f"Removing duplicate '{key}' from the exported state dict."
-                )
-            else:
-                seen_tensors[tensor_id] = key
+    tied_groups: dict[str, list[tuple[str, str]]] = {}
+    expanded_prefixes: dict[tuple[str, str], set[str]] = {}
+    for alias, canonical in (tied_weight_map or {}).items():
+        alias_prefix, _, alias_name = alias.rpartition(".")
+        canonical_prefix, _, canonical_name = canonical.rpartition(".")
+        members = tied_groups.setdefault(alias, [])
+
+        if alias_name == canonical_name == "weight":
+            for suffix in ("weight", "weight_scale", "weight_scale_2", "input_scale"):
+                alias_key = f"{alias_prefix}.{suffix}" if alias_prefix else suffix
+                canonical_key = f"{canonical_prefix}.{suffix}" if canonical_prefix else suffix
+                if alias_key in post_state_dict:
+                    members.append((alias_key, canonical_key))
+        elif alias in post_state_dict:
+            members.append((alias, canonical))
+
+        if alias_name == canonical_name and alias_name in {"gate_up_proj", "up_proj", "down_proj"}:
+            expanded_prefixes.setdefault((alias_prefix, canonical_prefix), set()).add(alias_name)
+
+    for (alias_prefix, canonical_prefix), source_names in expanded_prefixes.items():
+        if "down_proj" not in source_names or not source_names & {"gate_up_proj", "up_proj"}:
+            continue
+        members = tied_groups.setdefault(alias_prefix, [])
+        prefix = f"{alias_prefix}." if alias_prefix else ""
+        for key in post_state_dict:
+            if key.startswith(prefix):
+                members.append((key, canonical_prefix + key[len(alias_prefix) :]))
+
+    for members in tied_groups.values():
+        if members and all(canonical in post_state_dict for _, canonical in members):
+            keys_to_delete.update(alias for alias, _ in members)
 
     for key in keys_to_delete:
-        del post_state_dict[key]
+        post_state_dict.pop(key, None)
 
     return post_state_dict
 
@@ -1585,7 +1602,7 @@ def has_quantized_modules(model: nn.Module) -> bool:
 
 
 def sync_tied_input_amax(model: nn.Module) -> int:
-    """Max-merge input_quantizer amaxes across modules sharing a weight ``data_ptr``.
+    """Max-merge input_quantizer amaxes across modules sharing a Parameter.
 
     Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
     affected ``input_quantizer`` with the per-group maximum. Intended to
@@ -1597,13 +1614,12 @@ def sync_tied_input_amax(model: nn.Module) -> int:
     paths see different activation distributions (encoder vs decoder in
     YOCO-style models). Must run BEFORE per-module export so the merged
     amax flows into ``input_scale`` derivation. Handles both dense
-    Linears (keyed by ``weight.data_ptr()``) and fused MoE (keyed by
-    ``(<first_proj>, down_proj)`` data_ptr tuple). Returns the number of
-    tied groups merged.
+    Linears and fused MoE containers, grouped by live Parameter identity.
+    Returns the number of tied groups merged.
     """
     from collections import defaultdict
 
-    by_dp: dict = defaultdict(list)
+    by_parameter: dict = defaultdict(list)
     for _, m in model.named_modules():
         # Fused MoE: 3-D source tensors with shared input quantizers
         first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
@@ -1615,15 +1631,15 @@ def sync_tied_input_amax(model: nn.Module) -> int:
             and hasattr(m, "down_proj")
             and first_proj.dim() == 3
         ):
-            key = ("moe", first_proj.data_ptr(), m.down_proj.data_ptr())
-            by_dp[key].append(m)
+            key = ("moe", id(first_proj), id(m.down_proj))
+            by_parameter[key].append(m)
         # Dense quantized Linear with an input_quantizer
         elif (
             hasattr(m, "input_quantizer")
             and hasattr(m, "weight")
             and isinstance(m.weight, torch.nn.Parameter)
         ):
-            by_dp[("dense", m.weight.data_ptr())].append(m)
+            by_parameter[("dense", id(m.weight))].append(m)
 
     def _merge(quantizers: list) -> bool:
         """Max-merge amaxes across the quantizer list. Returns True on merge."""
@@ -1651,7 +1667,7 @@ def sync_tied_input_amax(model: nn.Module) -> int:
         return True
 
     synced = 0
-    for key, modules in by_dp.items():
+    for key, modules in by_parameter.items():
         if len(modules) < 2:
             continue
         if key[0] == "moe":
