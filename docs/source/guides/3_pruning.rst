@@ -12,9 +12,11 @@ ModelOpt provides three pruning workflows:
   for computer vision subnet search.
 
 Minitron and FastNAS are available through the unified
-:meth:`mtp.prune <modelopt.torch.prune.pruning.prune>` API. Given a model,
-these modes find the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
-from your provided base model with little to no accuracy degradation (depending on how aggressive the pruning is).
+:meth:`mtp.prune <modelopt.torch.prune.pruning.prune>` API. FastNAS and
+Minitron auto pruning find a subnet that meets the given deployment constraints
+(e.g. FLOPs or parameters). Manual Minitron pruning instead applies explicitly
+configured target dimensions. Depending on how aggressive the pruning is, the
+resulting model may have little to no accuracy degradation from the base model.
 These pruning methods support pruning the convolutional and linear layers, and
 attention heads of the model. More details on these pruning modes are as follows:
 

@@ -61,9 +61,10 @@ for advanced campaigns. See [Configuration](#configuration) for the generated
 bundle structure and extension points.
 
 The final review writes `resolved_defaults.yaml`, `README.md`, and validated
-`smoke/` and `production/` bundles transactionally. Both bundles are validated
-and dry-run, but neither is submitted and production is not gated on smoke. The
-wizard never launches the orchestrator.
+`smoke/` and `production/` bundles transactionally. The wizard validates both
+bundles and writes a `dry-run-plan.txt` file in each, but neither bundle is
+submitted and production is not gated on smoke. The wizard never launches the
+orchestrator.
 
 ## Installation
 

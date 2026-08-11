@@ -243,7 +243,7 @@ The script supports three NAS-based pruning targets and one manual export mode:
 | NAS | `--prune_target_memory_mb` | Prune to a target memory footprint in MB (weights + KV-cache) for a given batch size and sequence length assuming BF16 precision |
 | Manual | `--prune_export_config` | Prune directly to a specified architecture config (no NAS). Useful if you want to take top K candidates and do a short knowledge distillation before selecting the best model. |
 
-Multiple NAS targets can be combined, e.g. `--prune_target_params 6e9 --prune_target_memory_mb 12288` finds the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096 assuming BF16 precision.
+Multiple NAS targets can be combined, e.g., `--prune_target_params 6e9 --prune_target_memory_mb 12288`, to find the best model with under 6B params and under 12GB memory footprint at (default) batch size 1 and sequence length 4096, assuming BF16 precision.
 
 **Prune by total parameter count**, prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while skipping pruning of `num_attention_heads` using following defaults:
     1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration,
