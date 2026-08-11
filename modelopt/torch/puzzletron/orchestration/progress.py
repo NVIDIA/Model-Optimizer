@@ -434,6 +434,7 @@ def _post_mip_progress(
 
     labels = {
         "evaluation": "evaluated",
+        "downstream_evaluation": "evaluated",
         "aiperf": "benchmarked",
         "global_kd": "distilled",
         "materialize": "materialized",

@@ -39,6 +39,10 @@ __all__ = ["run_wizard"]
 _MESH_KEYS = ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
 _DEFAULT_MIP_SOLUTION_COUNT = 3
 _DEFAULT_HOMOGENEOUS_SOLUTIONS_PER_SCENARIO = 8
+_DOWNSTREAM_EVALUATION_METRICS_BY_TASK = {
+    "gsm8k": ("exact_match_strict-match",),
+    "ifeval": ("prompt_level_strict_acc_none",),
+}
 
 
 def _default(state: AnswerState, section: str, key: str, fallback: Any) -> Any:
@@ -733,6 +737,128 @@ def _ask_aiperf_config(
     return config
 
 
+def _ask_downstream_evaluation_config(
+    prompts: PromptSession,
+    *,
+    detailed: bool,
+    moe: bool,
+    defaults: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Ask for lmms-eval task and vLLM settings."""
+
+    defaults = defaults or {}
+    tasks = prompts.text(
+        "lmms-eval tasks (comma-separated):",
+        default=str(defaults.get("tasks", "ifeval,gsm8k")),
+    )
+    limit = prompts.integer(
+        "lmms-eval sample limit:",
+        default=int(defaults.get("limit", 128)),
+    )
+    batch_size = prompts.integer(
+        "lmms-eval batch size:",
+        default=int(defaults.get("batch_size", 1)),
+    )
+    topology_defaults = dict(defaults.get("topology") or {})
+    checkpoint = prompts.checkpoint()
+    while True:
+        tp = prompts.integer(
+            "lmms-eval vLLM tensor parallel (TP):",
+            default=int(topology_defaults.get("tensor_parallel_size", 1)),
+        )
+        pp = prompts.integer(
+            "lmms-eval vLLM pipeline parallel (PP):",
+            default=int(topology_defaults.get("pipeline_parallel_size", 1)),
+        )
+        dp = prompts.integer(
+            "lmms-eval vLLM data parallel (DP):",
+            default=int(topology_defaults.get("data_parallel_size", 1)),
+        )
+        prefill_cp = prompts.integer(
+            "lmms-eval vLLM prefill context parallel (CP):",
+            default=int(topology_defaults.get("prefill_context_parallel_size", 1)),
+        )
+        decode_cp = prompts.integer(
+            "lmms-eval vLLM decode context parallel (CP):",
+            default=int(topology_defaults.get("decode_context_parallel_size", 1)),
+        )
+        enable_expert_parallel = (
+            prompts.confirm(
+                (
+                    "Enable lmms-eval vLLM expert parallelism? "
+                    "vLLM effective EP is TP * DP."
+                ),
+                default=bool(
+                    topology_defaults.get("enable_expert_parallel")
+                    or int(topology_defaults.get("expert_parallel_size", 1)) > 1
+                ),
+            )
+            if moe
+            else False
+        )
+        dimensions = {
+            "TP": tp,
+            "PP": pp,
+            "DP": dp,
+            "prefill CP": prefill_cp,
+            "decode CP": decode_cp,
+        }
+        error = None
+        if any(int(value) < 1 for value in dimensions.values()):
+            error = f"lmms-eval vLLM parallel dimensions must be positive: {dimensions}"
+        elif decode_cp > tp or tp % decode_cp:
+            error = f"lmms-eval vLLM decode CP={decode_cp} must divide TP={tp}."
+        if error is None:
+            break
+        print(error)
+        prompts.rewind(checkpoint)
+    topology = {
+        "tensor_parallel_size": tp,
+        "pipeline_parallel_size": pp,
+        "prefill_context_parallel_size": prefill_cp,
+        "decode_context_parallel_size": decode_cp,
+        "data_parallel_size": dp,
+        "enable_expert_parallel": bool(enable_expert_parallel),
+        "distributed_executor_backend": "mp",
+        "gpu_group_size": tp * pp * prefill_cp * dp,
+    }
+    timeout = (
+        prompts.integer(
+            "Per-candidate lmms-eval timeout (seconds):",
+            default=int(defaults.get("timeout_seconds", 3600)),
+        )
+        if detailed
+        else int(defaults.get("timeout_seconds", 3600))
+    )
+    return {
+        "model": "vllm",
+        "tasks": [item.strip() for item in str(tasks).split(",") if item.strip()],
+        "limit": int(limit),
+        "batch_size": int(batch_size),
+        "log_samples": True,
+        "topology": topology,
+        "model_args": {
+            "dtype": "bfloat16",
+            "gpu_memory_utilization": 0.85,
+        },
+        "timeout_seconds": int(timeout),
+    }
+
+
+def _downstream_evaluation_metric_suggestions(node_id: str, config: Mapping[str, Any]) -> list[str]:
+    """Return filter metric names produced by the downstream-evaluation runner."""
+
+    suggestions = []
+    tasks = config.get("tasks") or ()
+    if isinstance(tasks, str):
+        tasks = [item.strip() for item in tasks.split(",") if item.strip()]
+    for task in tasks:
+        task_name = str(task).strip()
+        for metric in _DOWNSTREAM_EVALUATION_METRICS_BY_TASK.get(task_name, ()):
+            suggestions.append(f"{node_id}.{task_name}.{metric}")
+    return suggestions
+
+
 def _default_flow(
     run_id: str,
     run: Mapping[str, Any],
@@ -916,7 +1042,7 @@ def _custom_flow(
                 "global_kd",
                 "manual_filter",
                 ("PTQ (reserved; not executable yet)", "ptq"),
-                ("Downstream evaluation (reserved; not executable yet)", "downstream_evaluation"),
+                "downstream_evaluation",
             ],
             default="filter",
         )
@@ -963,9 +1089,18 @@ def _custom_flow(
                 runtime=runtime,
             )
             available_metrics.append(f"{node_id}.request_throughput")
+        elif node_type == "downstream_evaluation":
+            node["config"] = _ask_downstream_evaluation_config(
+                prompts,
+                detailed=detailed,
+                moe=moe,
+            )
+            available_metrics.extend(
+                _downstream_evaluation_metric_suggestions(node_id, node["config"])
+            )
         elif node_type == "global_kd":
             node["config"] = {"max_steps": prompts.integer("Global KD steps:", default=128)}
-        elif node_type in {"ptq", "downstream_evaluation"}:
+        elif node_type == "ptq":
             print(
                 f"{node_type} records the reserved interface, but current orchestration "
                 "validation will report it as unimplemented."
@@ -1163,6 +1298,11 @@ def _resource_rows(
             "AIPerf",
             post_mip_gpus_per_instance("aiperf", 1),
             post_mip_instances("aiperf", sharded_workers, sharded_workers),
+        ),
+        (
+            "downstream eval",
+            post_mip_gpus_per_instance("downstream_evaluation", 1),
+            post_mip_instances("downstream_evaluation", sharded_workers, sharded_workers),
         ),
         (
             "evaluation",

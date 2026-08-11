@@ -181,6 +181,38 @@ def test_persisted_post_mip_aiperf_topology_is_candidate_checked(tmp_path):
     assert "expert counts [48, 64]" in messages
 
 
+def test_persisted_post_mip_downstream_eval_topology_is_candidate_checked(tmp_path):
+    state = _state(tmp_path)
+    topology = {
+        "tensor_parallel_size": 4,
+        "pipeline_parallel_size": 1,
+        "data_parallel_size": 8,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "enable_expert_parallel": True,
+        "gpu_group_size": 32,
+    }
+    state.set_collection(
+        "post_mip_flows",
+        {
+            "run": {
+                "source": {"run": "run"},
+                "nodes": {
+                    "lmms_eval": {
+                        "type": "downstream_evaluation",
+                        "config": {"tasks": ["ifeval"], "topology": topology},
+                    }
+                },
+            }
+        },
+    )
+
+    messages = _messages(state)
+
+    assert "effective EP=32 (TP * DP)" in messages
+    assert "expert counts [48, 64]" in messages
+
+
 def test_persisted_vllm_measurement_topology_is_candidate_checked(tmp_path):
     state = _state(tmp_path)
     state.set_collection(

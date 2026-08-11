@@ -293,7 +293,13 @@ import vllm
 with open(os.environ["PUZZLETRON_CI_ENVIRONMENT"], encoding="utf-8") as stream:
     ci_environment = json.load(stream)
 
-for package in ("torch", "vllm", "nemo-automodel", "aiperf", "nvidia-modelopt"):
+for package in (
+    "torch",
+    "vllm",
+    "nemo-automodel",
+    "aiperf",
+    "nvidia-modelopt",
+):
     print(package, metadata.version(package))
 
 print("torch CUDA", torch.version.cuda)
@@ -430,6 +436,16 @@ python examples/puzzletron/main.py \
 `--stage full` executes every enabled stage in dependency order. Completed
 stages with valid manifests and acceptance markers are skipped; use `--force`
 only when intentionally invalidating and rerunning the selected work.
+
+Each rank-zero stage result also writes an immutable execution record under
+`<puzzle-dir>/manifests/executions/<stage>/<execution-identity>/`. The
+`resolved_config.json` file contains stage-relevant resolved configuration,
+semantic identities, and authoring provenance. The `artifact_manifest.json`
+separates mutable canonical output pointers from fingerprints of files that
+existed when the record was published; it does not copy stage outputs or claim
+later mutations are immutable. The current `manifests/<stage>.json` points to
+both files, and new acceptance markers require them when they are present. The
+acceptance marker remains the validated inventory of required files.
 
 There is one current orchestration boundary to understand before using
 `--stage full`. The canonical `zero_shot_evaluation` handler evaluates realized
@@ -595,6 +611,26 @@ export PROFILE=runtime-075
 After `mip`, prepare one deduplicated online-evaluation plan. Repeat
 `--profile-id` for every configured profile; aliases ensure that an identical
 architecture is evaluated once while remaining visible in every profile.
+
+Downstream `lmms-eval` nodes use a separate evaluator Python. The reproducible
+example path is pinned to `lmms-eval==0.7.2` by
+`examples/puzzletron/requirements-lmms-eval.txt` and recorded in
+`ci_environment.json`. Keep this separate from the Puzzletron runtime
+environment because `lmms-eval==0.7.2` pins `wandb==0.25.0`, while the pinned
+AutoModel build requires a newer `wandb`.
+
+```bash
+python3 -m venv /workspace/.venv-lmms-eval
+source /workspace/.venv-lmms-eval/bin/activate
+python -m pip install --upgrade pip "setuptools>=80,<81" wheel packaging
+VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 \
+  python -m pip install --no-build-isolation -e "${VLLM_ROOT}"
+python -m pip install -r "${MODEL_OPT_ROOT}/examples/puzzletron/requirements-lmms-eval.txt"
+python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.2"'
+deactivate
+
+export PUZZLETRON_LMMS_EVAL_PYTHON=/workspace/.venv-lmms-eval/bin/python
+```
 
 ```bash
 python examples/puzzletron/run_profile_online_evaluation.py \

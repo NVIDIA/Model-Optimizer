@@ -1,0 +1,68 @@
+# @package _global_
+
+defaults:
+  - default
+  - _self_
+
+# Opt-in downstream lmms-eval workflow for the realized runtime-075 candidate.
+# Use PUZZLETRON_LMMS_EVAL_PYTHON to point at the isolated pinned evaluator env.
+# Non-empty post_mip.flows replaces the legacy post-MIP tail in the v2 orchestrator.
+zero_shot_evaluation:
+  enabled: false
+aiperf:
+  enabled: false
+global_distillation_sanity:
+  enabled: false
+global_distillation:
+  enabled: false
+post_distillation_evaluation:
+  enabled: false
+
+post_mip:
+  flows:
+    runtime-075-lmms-eval:
+      source:
+        run: runtime-075
+        variants: all
+        objectives: all
+      nodes:
+        best_mip:
+          type: filter
+          mode: top_k
+          metric: mip.score
+          direction: minimize
+          top_k: 1
+        materialized:
+          type: materialize
+          input: best_mip
+        lmms_eval:
+          type: downstream_evaluation
+          input: materialized
+          config:
+            command_prefix:
+              - ${oc.env:PUZZLETRON_LMMS_EVAL_PYTHON}
+              - -m
+              - lmms_eval
+            model: vllm
+            checkpoint_arg: model
+            tasks:
+              - ifeval
+              - gsm8k
+            limit: 128
+            batch_size: 1
+            log_samples: true
+            timeout_seconds: 7200
+            topology:
+              tensor_parallel_size: 8
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 8
+            model_args:
+              dtype: bfloat16
+              gpu_memory_utilization: 0.85
+              max_model_len: 262144
+              trust_remote_code: ${model.trust_remote_code}

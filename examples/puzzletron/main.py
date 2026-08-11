@@ -43,6 +43,7 @@ import modelopt.torch.puzzletron as mtpz
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
     semantic_stage_config,
+    validate_stage_execution_record,
     write_stage_manifest,
 )
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import (
@@ -213,6 +214,16 @@ def _manifest_terminal_state(config: dict, stage: str):
     return state
 
 
+def _stage_execution_record_patterns(config: dict, stage: str) -> tuple[str, ...]:
+    """Validate and return immutable records referenced by a stage manifest."""
+
+    puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
+    manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
+    if not manifest_path.is_file():
+        return ()
+    return validate_stage_execution_record(manifest_path, expected_stage=stage)
+
+
 def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     upstream = {
@@ -231,6 +242,7 @@ def _resume_kwargs(config: dict, config_path: str | Path, stage: str) -> dict:
         "depth": None,
         "required_patterns": (
             f"manifests/{stage}.json",
+            *_stage_execution_record_patterns(config, stage),
             *canonical_stage_output_patterns(config, stage),
         ),
         "upstream_markers": upstream,
@@ -244,6 +256,8 @@ def _completion_is_valid(config: dict, config_path: str | Path, stage: str) -> b
     if state is None:
         return False
     if state.status is StageStatus.SKIPPED:
+        # Validation-only: raises if the referenced execution record was tampered with.
+        _stage_execution_record_patterns(config, stage)
         return True
     if not artifacts_are_complete(config, stage):
         return False
@@ -256,6 +270,8 @@ def _mark_completion(config: dict, config_path: str | Path, stage: str) -> None:
     if state is None:
         raise RuntimeError(f"stage {stage!r} did not write an accepted terminal manifest")
     if state.status is StageStatus.SKIPPED:
+        # Validation-only: raises if the referenced execution record was tampered with.
+        _stage_execution_record_patterns(config, stage)
         return
     if not artifacts_are_complete(config, stage):
         raise RuntimeError(f"stage {stage!r} failed canonical artifact validation")
@@ -376,6 +392,9 @@ def _run_worker(args: argparse.Namespace) -> None:
         bool((cfg.get("embedding_pruning") or {}).get("enabled", False)) and not args.scenario_child
     )
     gpus_per_node = int(args.gpus_per_node or (cfg.get("execution") or {}).get("gpus_per_node", 8))
+    runtime = dict(cfg.get("_runtime") or {})
+    runtime["gpus_per_node"] = gpus_per_node
+    cfg["_runtime"] = runtime
     composite_only = {"replacement_scoring", "mip"}
     if not _stage_enabled(cfg, args.worker_stage):
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage, handlers={})
