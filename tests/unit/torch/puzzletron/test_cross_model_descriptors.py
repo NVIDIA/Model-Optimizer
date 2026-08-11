@@ -568,6 +568,7 @@ def test_stage_runtime_receives_inferred_descriptor_without_persisting_override(
         observed["manifest_config"] = manifest.config
         observed["manifest_effective_config"] = manifest.effective_config
         observed["resolution"] = manifest.inputs["descriptor_resolution"]
+        config["_runtime"]["descriptor"] = "mutated-by-handler"
         return StageResult(
             stage="width_importance",
             status="success",

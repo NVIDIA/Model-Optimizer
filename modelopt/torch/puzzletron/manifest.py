@@ -181,8 +181,8 @@ def write_stage_execution_record(
     record_dir = root / "manifests" / "executions" / stage / execution_identity
     resolved_path = record_dir / "resolved_config.json"
     artifact_path = record_dir / "artifact_manifest.json"
-    resolved_relative = str(resolved_path.relative_to(root))
-    artifact_relative = str(artifact_path.relative_to(root))
+    resolved_relative = resolved_path.relative_to(root).as_posix()
+    artifact_relative = artifact_path.relative_to(root).as_posix()
 
     inputs = manifest_payload.get("inputs") or {}
     runtime = effective_config.get("_runtime") if isinstance(effective_config, dict) else {}
@@ -242,7 +242,7 @@ def write_stage_execution_record(
             "sha256": resolved_sha256,
         },
         "stage_manifest": {
-            "path": str(manifest_path.relative_to(root)),
+            "path": manifest_path.relative_to(root).as_posix(),
             "semantic_identity": manifest_payload.get("semantic_identity"),
         },
         "artifact_contract": "stage-manifest-output-pointers/v1",
@@ -557,7 +557,12 @@ class StageManifest:
 
 
 def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:
-    """Atomically write a stage manifest from rank zero."""
+    """Atomically write a stage manifest from rank zero.
+
+    Rank zero publishes the immutable execution record and assigns its reference
+    to ``manifest.execution_record`` before writing the manifest. Other ranks
+    return without writing and leave ``manifest.execution_record`` unchanged.
+    """
 
     if os.environ.get("RANK") not in (None, "", "0"):
         return

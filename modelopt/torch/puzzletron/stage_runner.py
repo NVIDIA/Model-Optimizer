@@ -239,7 +239,7 @@ def run_stage(
             "descriptor_resolution": resolution.to_dict() if resolution else None,
         },
         config=cfg,
-        effective_config=runtime_cfg,
+        effective_config=copy.deepcopy(runtime_cfg),
         capability_snapshot=resolution.capabilities.to_dict() if resolution else None,
     )
 

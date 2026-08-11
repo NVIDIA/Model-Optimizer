@@ -256,6 +256,7 @@ def _completion_is_valid(config: dict, config_path: str | Path, stage: str) -> b
     if state is None:
         return False
     if state.status is StageStatus.SKIPPED:
+        # Validation-only: raises if the referenced execution record was tampered with.
         _stage_execution_record_patterns(config, stage)
         return True
     if not artifacts_are_complete(config, stage):
@@ -269,6 +270,7 @@ def _mark_completion(config: dict, config_path: str | Path, stage: str) -> None:
     if state is None:
         raise RuntimeError(f"stage {stage!r} did not write an accepted terminal manifest")
     if state.status is StageStatus.SKIPPED:
+        # Validation-only: raises if the referenced execution record was tampered with.
         _stage_execution_record_patterns(config, stage)
         return
     if not artifacts_are_complete(config, stage):
