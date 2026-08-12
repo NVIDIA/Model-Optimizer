@@ -14,96 +14,14 @@
 # limitations under the License.
 
 import os
-from pathlib import Path
 
-import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_tokenizer
-from datasets import Dataset, DatasetDict
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerBase
 
-import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 
-__all__ = [
-    "PUZZLETRON_FAMILIES",
-    "create_and_save_small_hf_model",
-    "save_dummy_dataset",
-    "setup_test_model_and_data",
-]
-
-# Shared parametrize tuple for puzzletron GPU integration tests.
-# Fields: (hf_model_name, converter, hybrid_override_pattern, has_moe_layers).
-# To add a new model family, append a single pytest.param row here — every test
-# that imports PUZZLETRON_FAMILIES picks it up automatically.
-PUZZLETRON_FAMILIES = [
-    pytest.param("meta-llama/Llama-3.1-8B-Instruct", "llama", None, False, id="llama-3.1-8B"),
-    pytest.param("meta-llama/Llama-3.2-3B-Instruct", "llama", None, False, id="llama-3.2-3B"),
-    pytest.param(
-        "mistralai/Mistral-Small-24B-Instruct-2501",
-        "mistral_small",
-        None,
-        False,
-        id="mistral-small-24B",
-    ),
-    pytest.param(
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16",
-        "nemotron_h",
-        "*E",
-        True,
-        id="nemotron-3-30B-A3B",
-    ),
-    pytest.param(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2",
-        "nemotron_h_v2",
-        "*-",
-        False,
-        id="nemotron-nano-12B-v2",
-    ),
-    pytest.param("openai/gpt-oss-20b", "gpt_oss", None, True, id="gpt-oss-20b"),
-    pytest.param("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False, id="qwen2.5-7B"),
-    pytest.param("Qwen/Qwen3-8B", "qwen3", None, False, id="qwen3-8B"),
-    pytest.param("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True, id="qwen3-VL-30B-A3B"),
-]
-
-
-def setup_test_model_and_data(
-    tmp_path: Path, rank: int, hf_model_name: str, hybrid_override_pattern: str | None = None
-) -> tuple[Path, Path, Path]:
-    """
-    Setup the test model and data for the puzzletron NAS search.
-
-    Args:
-        tmp_path: the temporary path to use for the test
-        rank: the rank of the process
-        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
-        hybrid_override_pattern: For NemotronH models, the layer type pattern
-
-    Returns:
-        tuple[Path, Path, Path]: the puzzle_dir, hf_checkpoint_path, dataset_path
-    """
-    # Register Hydra custom resolvers (needed for config resolution)
-    mtpz.tools.register_hydra_resolvers()
-
-    puzzle_dir = tmp_path / hf_model_name
-    hf_checkpoint_path = puzzle_dir / f"hf_models/{hf_model_name}"
-    dataset_path = puzzle_dir / "dummy_dataset"
-
-    if rank == 0:
-        save_dummy_dataset(dataset_path)
-
-        # Create a small HF model
-        tokenizer = get_tiny_tokenizer()
-        create_and_save_small_hf_model(
-            output_path=str(hf_checkpoint_path),
-            tokenizer=tokenizer,
-            hf_model_name=hf_model_name,
-            hybrid_override_pattern=hybrid_override_pattern,
-        )
-    dist.barrier()
-
-    return puzzle_dir, hf_checkpoint_path, dataset_path
+__all__ = ["create_and_save_small_hf_model"]
 
 
 def create_and_save_small_hf_model(
@@ -236,44 +154,3 @@ def create_and_save_small_hf_model(
     config.save_pretrained(output_path)
     if hasattr(config, "auto_map") and isinstance(config.auto_map, dict):
         copy_hf_ckpt_remote_code(hf_model_name, output_path)
-
-
-def save_dummy_dataset(dataset_path: Path | str):
-    """
-    Save a dummy dataset for testing purposes.
-    """
-    # dummy sample
-    sample = [
-        {"role": "user", "content": "please cite Lorem Ipsum?"},
-        {
-            "role": "assistant",
-            "content": (
-                "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed in blandit ante. "
-                "Sed tempus erat urna, ac elementum nisl facilisis quis. Aliquam consectetur mollis massa, "
-                "in elementum sem venenatis posuere. Fusce lorem arcu, egestas vel massa sollicitudin, "
-                "dictum mollis purus. Proin in ullamcorper elit. Nam tellus nisi, volutpat a mattis vel, "
-                "pretium in purus. Nunc at lectus facilisis risus scelerisque rhoncus eu nec ex. "
-                "Maecenas semper, tellus non placerat vulputate, urna felis facilisis diam, "
-                "sit amet vestibulum erat sapien nec libero. Praesent non massa velit. Donec faucibus mi eros. "
-                "Nam turpis nulla, congue sit amet mi at, porttitor scelerisque elit. Nunc id sodales lorem, "
-                "nec tincidunt leo. Quisque a neque nec ligula porttitor auctor. "
-                "Nunc accumsan nunc ac tellus congue vehicula. Praesent tellus eros, luctus non gravida dapibus, "
-                "faucibus eu ex. Quisque bibendum leo pharetra, tristique est vitae, hendrerit nunc. "
-                "Duis nec congue dolor. Donec commodo ipsum non efficitur volutpat. "
-                "Nulla risus nulla, efficitur et urna at, imperdiet sodales lorem. "
-                "Suspendisse erat est, sollicitudin at nisl tincidunt, vehicula hendrerit lectus. "
-                "Nam quis nisi ullamcorper, rhoncus massa vel, tempus purus. "
-                "Duis pulvinar eros vel nulla pellentesque, at dapibus justo laoreet. "
-                "Praesent tortor orci, vulputate fermentum dapibus nec, feugiat vitae tortor. "
-                "Donec mollis convallis massa quis iaculis."
-            ),
-        },
-    ]
-
-    # Prepare train and val splits with sample repeated, 2500 samples are for
-    # 128 samples with block-size 8192 and LLama3 tokenizer
-    data = [{"conversation": sample}] * 2500
-
-    # For train-val splits
-    data_dict = DatasetDict({"train": Dataset.from_list(data), "valid": Dataset.from_list(data)})
-    data_dict.save_to_disk(str(dataset_path))
