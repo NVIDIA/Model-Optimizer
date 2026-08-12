@@ -47,6 +47,7 @@ from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
+from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from pydantic import create_model
 from rich.console import Console
 from rich.markup import escape as rich_escape
@@ -973,6 +974,25 @@ class MCoreMinitronModeDescriptor(ModeDescriptor):
         return restore_mcore_minitron
 
 
+def _fused_ln_linears_over_hidden_size(module: nn.Module):
+    """Yield fused-layernorm linears whose layernorm is over ``hidden_size``.
+
+    MLA's Q/KV up-projections are ``TELayerNormColumnParallelLinear`` too, but their layernorm is
+    over the latent rank and MCore unpacks their output as ``(out, bias)``. Setting
+    ``return_layernorm_output`` there makes it ``((out, ln_out), bias)`` and breaks the forward.
+    """
+    up_projs = {
+        id(sub)
+        for m in module.modules()
+        if isinstance(m, MLASelfAttention)
+        for attr in ("linear_q_up_proj", "linear_kv_up_proj")
+        if (sub := getattr(m, attr, None)) is not None
+    }
+    for m in module.modules():
+        if isinstance(m, TELayerNormColumnParallelLinear) and id(m) not in up_projs:
+            yield m
+
+
 class ImportanceEstimatorRegistry:
     """Register importance estimators and forward hooks for all supported modules in the model.
 
@@ -1055,9 +1075,8 @@ class ImportanceEstimatorRegistry:
         self._hooks.clear()
 
         # Unpatch return_layernorm_output on fused TELayerNormColumnParallelLinear modules
-        for m in self.model.modules():
-            if isinstance(m, TELayerNormColumnParallelLinear):
-                m.return_layernorm_output = False
+        for m in _fused_ln_linears_over_hidden_size(self.model):
+            m.return_layernorm_output = False
 
     def get_layer_scores(self) -> dict[int, torch.Tensor]:
         """Get the layer scores (1-indexed) from the model.
@@ -1187,9 +1206,8 @@ def _register_hidden_size_importance(
     # Layernorms are fused into TELayerNormColumnParallelLinear. We temporarily
     # patch return_layernorm_output=True so TE's fused kernel returns the layernorm output.
     # For MoE layers, pre_mlp_layernorm is a separate TENorm — use a regular forward hook.
-    for m in module.modules():
-        if isinstance(m, TELayerNormColumnParallelLinear):
-            m.return_layernorm_output = True
+    for m in _fused_ln_linears_over_hidden_size(module):
+        m.return_layernorm_output = True
 
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):

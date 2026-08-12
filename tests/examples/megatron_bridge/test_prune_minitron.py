@@ -19,6 +19,7 @@ import torch
 from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
+    create_tiny_deepseek_v3_dir,
     create_tiny_gemma3vl_dir,
     create_tiny_nemotron_h_dir,
     create_tiny_qwen3_5_moe_vl_dir,
@@ -51,9 +52,23 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
             {"n_shared_experts": 1},
             id="nemotron_h",
         ),
-        # TODO: Add a DeepSeek-V3 case once MLA pruning supports the Q-LoRA up-projection, which
-        # Megatron-Bridge's DeepSeek mapping requires. candidate_filter is covered by
-        # tests/gpu_megatron/torch/prune/plugins/test_mcore_mamba_minitron_pruning.py.
+        # DeepSeek-V3: MLA (Q-LoRA) + MoE sizing the shared expert as
+        # n_shared_experts * moe_intermediate_size, so it covers candidate_filter end-to-end:
+        # without the filter the search picks a shared size that is not a multiple of the routed
+        # one and the reload below fails on the resulting shape mismatch.
+        pytest.param(
+            # n_group=1 so num_moe_experts stays divisible by it after expert pruning.
+            lambda tmp_path, num_gpus: create_tiny_deepseek_v3_dir(
+                tmp_path,
+                with_tokenizer=True,
+                return_model=True,
+                num_hidden_layers=num_gpus,
+                n_group=1,
+                topk_group=1,
+            ),
+            {"n_shared_experts": 1},
+            id="deepseek_v3",
+        ),
     ],
 )
 def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):
