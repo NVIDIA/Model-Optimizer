@@ -28,6 +28,7 @@ import torch.nn as nn
 from safetensors.torch import load_file, safe_open
 
 DiffusionPipeline: type[Any] | None
+ModularPipeline: type[Any] | None
 ModelMixin: type[Any] | None
 try:  # diffusers is optional for LTX-2 export paths
     from diffusers import DiffusionPipeline as _DiffusionPipeline
@@ -35,9 +36,16 @@ try:  # diffusers is optional for LTX-2 export paths
 
     DiffusionPipeline = _DiffusionPipeline
     ModelMixin = _ModelMixin
+    try:  # ModularPipeline is unavailable in older supported diffusers releases
+        from diffusers import ModularPipeline as _ModularPipeline
+
+        ModularPipeline = _ModularPipeline
+    except Exception:  # pragma: no cover
+        ModularPipeline = None
     _HAS_DIFFUSERS = True
 except Exception:  # pragma: no cover
     DiffusionPipeline = None
+    ModularPipeline = None
     ModelMixin = None
     _HAS_DIFFUSERS = False
 
@@ -69,6 +77,8 @@ def is_diffusers_object(model: Any) -> bool:
     diffusers_types: tuple[type, ...] = ()
     if DiffusionPipeline is not None:
         diffusers_types = (*diffusers_types, DiffusionPipeline)
+    if ModularPipeline is not None:
+        diffusers_types = (*diffusers_types, ModularPipeline)
     if ModelMixin is not None:
         diffusers_types = (*diffusers_types, ModelMixin)
     if TI2VidTwoStagesPipeline is not None:
@@ -78,6 +88,18 @@ def is_diffusers_object(model: Any) -> bool:
         return False
 
     return isinstance(model, diffusers_types)
+
+
+def is_modular_pipeline(model: Any) -> bool:
+    """Return whether *model* is a diffusers ``ModularPipeline``."""
+    return ModularPipeline is not None and isinstance(model, ModularPipeline)
+
+
+def is_diffusers_pipeline(model: Any) -> bool:
+    """Return whether *model* is a standard or modular diffusers pipeline."""
+    return (DiffusionPipeline is not None and isinstance(model, DiffusionPipeline)) or (
+        is_modular_pipeline(model)
+    )
 
 
 def generate_diffusion_dummy_inputs(
@@ -654,6 +676,7 @@ def get_diffusion_components(
 
     Supports:
     - diffusers `DiffusionPipeline`: returns `pipeline.components`
+    - diffusers `ModularPipeline`: returns loaded `pipeline.components`
     - diffusers component `nn.Module` (e.g., UNet / transformer)
     - LTX-2 pipeline (duck-typed): returns stage-1 transformer only as `stage_1_transformer`
 
@@ -680,7 +703,7 @@ def get_diffusion_components(
         return all_components
 
     # diffusers pipeline
-    if _HAS_DIFFUSERS and DiffusionPipeline is not None and isinstance(model, DiffusionPipeline):
+    if _HAS_DIFFUSERS and is_diffusers_pipeline(model):
         # Get all components from the pipeline
         all_components = {name: comp for name, comp in model.components.items() if comp is not None}
 

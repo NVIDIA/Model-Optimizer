@@ -43,6 +43,7 @@ from utils import (
     filter_func_flux_dev,
     filter_func_ltx2_vae,
     filter_func_ltx_video,
+    filter_func_minimax_h3,
     filter_func_qwen_image,
     filter_func_wan_vae,
     filter_func_wan_video,
@@ -64,6 +65,7 @@ class ModelType(str, Enum):
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
     QWEN_IMAGE = "qwen-image"
+    MINIMAX_H3 = "minimax-h3"
 
 
 _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
@@ -74,6 +76,7 @@ _FILTER_FUNC_MAP: dict[ModelType, Callable[[str], bool]] = {
     ModelType.WAN22_T2V_14b: filter_func_wan_video,
     ModelType.WAN22_T2V_5b: filter_func_wan_video,
     ModelType.QWEN_IMAGE: filter_func_qwen_image,
+    ModelType.MINIMAX_H3: filter_func_minimax_h3,
 }
 
 _VAE_FILTER_FUNC_MAP: dict[tuple[ModelType, str], Callable[[str], bool]] = {
@@ -107,6 +110,7 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     ModelType.QWEN_IMAGE: "Qwen/Qwen-Image",
+    ModelType.MINIMAX_H3: "MiniMaxAI/MiniMax-H3",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
@@ -122,6 +126,9 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
     ModelType.QWEN_IMAGE: QwenImagePipeline,
+    # MiniMax-H3 uses ModularPipeline and is created by PipelineManager's
+    # text-to-video-only path. Keep it unavailable to the generic TRT loader.
+    ModelType.MINIMAX_H3: None,
 }
 
 # Shared dataset configurations
@@ -287,6 +294,29 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             "*.img_mod.1",
             "*.txt_mod.1",
         ],
+    },
+    ModelType.MINIMAX_H3: {
+        "backbone": "transformer",
+        "dataset": _OPENVID_DATASET,
+        "svdquant_alpha": 0.8,
+        # MiniMax-H3's guidance-distilled T2V workflow consumes only a prompt;
+        # there is no negative prompt or guidance scale. These are the trained
+        # 16:9 canvas and minimum valid frame count. Calibration-only overrides
+        # (for example 544x960) can be supplied through --extra-param.
+        "inference_extra_args": {
+            "height": 768,
+            "width": 1344,
+            "num_frames": 124,
+        },
+        # Apply this before calibration, especially for SVDQuant: quantize only
+        # transformer blocks 2..49. This keeps the first two blocks and every
+        # projection/embedder/final-layer module outside the block list bit-
+        # identical to the source weights.
+        "block_range": {
+            "exclude_first_n": 2,
+            "exclude_last_n": 0,
+            "block_module": "transformer_blocks",
+        },
     },
 }
 

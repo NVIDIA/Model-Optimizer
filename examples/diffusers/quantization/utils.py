@@ -111,6 +111,25 @@ def filter_func_wan_video(name: str) -> bool:
     return pattern.match(name) is not None
 
 
+# MiniMax-H3 has 50 ``transformer_blocks``. Only blocks 2..49 are
+# quantized: the first two blocks and every module outside the block list stay
+# in their original precision. In particular, this excludes the Diffusers
+# equivalents of ``video_patch_proj``, ``audio_patch_proj``,
+# ``condition_proj``, ``time_embedder``, ``token_refiner`` and
+# ``final_layer`` (``proj_in``, ``audio_proj_in``, ``context_embedder``,
+# ``time_embedder``, ``token_refiner``, ``norm_out``/``proj_out``/
+# ``audio_proj_out``).
+_MINIMAX_H3_BLOCK_RE = re.compile(r"(?:^|\.)transformer_blocks\.(\d+)(?:\.|$)")
+
+
+def filter_func_minimax_h3(name: str) -> bool:
+    """Return ``True`` for MiniMax-H3 modules that must remain unquantized."""
+    match = _MINIMAX_H3_BLOCK_RE.search(name)
+    if match is None:
+        return True
+    return int(match.group(1)) < 2
+
+
 # Qwen-Image's transformer has 60 ``transformer_blocks``. The recipe quantizes
 # only those blocks while keeping the first two and last two -- and everything
 # outside ``transformer_blocks`` -- in original precision. The model-agnostic,

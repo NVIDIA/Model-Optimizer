@@ -15,6 +15,7 @@
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -31,12 +32,15 @@ pytest.importorskip("diffusers")
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+import modelopt.torch.export.diffusers_utils as diffusers_utils
 import modelopt.torch.export.unified_export_hf as unified_export_hf
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.diffusers_utils import (
     generate_diffusion_dummy_inputs,
+    get_diffusion_components,
     hide_quantizers_from_state_dict,
+    is_diffusers_object,
 )
 from modelopt.torch.export.unified_export_hf import _postprocess_safetensors, export_hf_checkpoint
 
@@ -72,6 +76,25 @@ def _read_safetensors_metadata(path):
         return dict(file.metadata() or {})
 
 
+class _FakeConfigComponent:
+    def save_config(self, save_directory):
+        save_directory = Path(save_directory)
+        save_directory.mkdir(parents=True, exist_ok=True)
+        with open(save_directory / "scheduler_config.json", "w") as file:
+            json.dump({"_class_name": type(self).__name__}, file)
+
+
+class _FakeModularPipeline:
+    def __init__(self, components, config, source_path=None):
+        self.components = components
+        self.config = config
+        self._pretrained_model_name_or_path = source_path
+
+    def save_config(self, save_directory):
+        with open(Path(save_directory) / "modular_model_index.json", "w") as file:
+            json.dump(self.config, file, indent=4)
+
+
 @pytest.mark.parametrize(
     "model_factory", [get_tiny_unet, get_tiny_dit, get_tiny_flux, get_tiny_flux2]
 )
@@ -86,6 +109,94 @@ def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
 
     config_data = _load_config(config_path)
     assert "quantization_config" not in config_data
+
+
+@pytest.mark.parametrize("location_key", ["pretrained_model_name_or_path", "repo"])
+def test_export_modular_pipeline_components_and_index(tmp_path, monkeypatch, location_key):
+    """A modular pipeline exports local components and keeps a modular loading index."""
+    monkeypatch.setattr(diffusers_utils, "ModularPipeline", _FakeModularPipeline)
+
+    transformer = get_tiny_dit()
+    scheduler = _FakeConfigComponent()
+    video_processor = _FakeConfigComponent()
+    original_location = "upstream/original-model"
+    config = {
+        "_blocks_class_name": "FakeTextToVideoBlocks",
+        "_class_name": "FakeModularPipeline",
+        "workflow": "text2video",
+        "transformer": [
+            "diffusers",
+            type(transformer).__name__,
+            {
+                location_key: original_location,
+                "subfolder": "transformer",
+                "type_hint": ["diffusers", type(transformer).__name__],
+            },
+        ],
+        "scheduler": [
+            "diffusers",
+            type(scheduler).__name__,
+            {
+                location_key: original_location,
+                "subfolder": "scheduler",
+                "type_hint": ["diffusers", type(scheduler).__name__],
+            },
+        ],
+    }
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source_index = {
+        **config,
+        # The source repository can describe a component belonging to another
+        # workflow even though it is absent from this workflow's active config.
+        "transformer_ref": [
+            "diffusers",
+            type(transformer).__name__,
+            {
+                location_key: original_location,
+                "subfolder": "transformer_ref",
+                "type_hint": ["diffusers", type(transformer).__name__],
+            },
+        ],
+    }
+    with open(source_dir / "modular_model_index.json", "w") as file:
+        json.dump(source_index, file)
+
+    pipe = _FakeModularPipeline(
+        {
+            "transformer": transformer,
+            "scheduler": scheduler,
+            # Config-created components have no modular-index loading entry.
+            "video_processor": video_processor,
+        },
+        config=config,
+        source_path=source_dir,
+    )
+    export_dir = tmp_path / f"modular_export_{location_key}"
+    export_dir.mkdir()
+    # A retry must replace a stale index rather than retain entries from another
+    # workflow/source model.
+    with open(export_dir / "modular_model_index.json", "w") as file:
+        json.dump({**source_index, "workflow": "stale-workflow"}, file)
+
+    assert is_diffusers_object(pipe)
+    assert get_diffusion_components(pipe) == pipe.components
+
+    export_hf_checkpoint(pipe, export_dir=export_dir)
+
+    assert (export_dir / "transformer" / "config.json").exists()
+    assert (export_dir / "scheduler" / "scheduler_config.json").exists()
+    assert not (export_dir / "model_index.json").exists()
+
+    modular_index = _load_config(export_dir / "modular_model_index.json")
+    assert modular_index["workflow"] == "text2video"
+    assert modular_index["_blocks_class_name"] == "FakeTextToVideoBlocks"
+    assert "transformer_ref" not in modular_index
+    assert "video_processor" not in modular_index
+    for component_name in ("transformer", "scheduler"):
+        loading_spec = modular_index[component_name][2]
+        assert loading_spec[location_key] == str(export_dir)
+        assert loading_spec["subfolder"] == component_name
 
 
 def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatch):

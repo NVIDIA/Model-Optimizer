@@ -203,6 +203,30 @@ class Quantizer:
             )
             quant_cfg_list.extend(recipe_rules)
 
+        if self.model_config.model_type == ModelType.MINIMAX_H3:
+            # The requested H3 recipe quantizes Linear weights/inputs only. The
+            # Diffusers NVFP4 preset enables its softmax quantizer by default;
+            # turn every attention-internal quantizer off BEFORE calibration so
+            # excluded blocks/token_refiner never run any quantized MHA path.
+            attention_quantizers = (
+                "q_bmm_quantizer",
+                "k_bmm_quantizer",
+                "v_bmm_quantizer",
+                "softmax_quantizer",
+                "bmm2_output_quantizer",
+            )
+            quant_cfg_list.extend(
+                {
+                    "quantizer_name": f"*{quantizer_name}",
+                    "enable": False,
+                }
+                for quantizer_name in attention_quantizers
+            )
+            self.logger.info(
+                "MiniMax-H3 pre-calibration recipe disables all attention-internal quantizers: %s",
+                attention_quantizers,
+            )
+
         # Per-model SVDQuant exclusions (e.g. Qwen-Image's text-stream linears):
         # matching layers skip the SVDQuant low-rank branch and AWQ smoothing but
         # stay quantized with plain max calibration.
@@ -559,11 +583,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
     quant_group.add_argument(
         "--alpha",
         type=float,
-        default=1.0,
+        default=None,
         help=(
-            "SmoothQuant/SVDQuant migration strength in [0, 1]. For SVDQuant, 1.0 (default) "
-            "migrates outliers fully from activations to weights, letting the SVD low-rank "
-            "branch absorb them."
+            "SmoothQuant/SVDQuant migration strength in [0, 1]. Defaults to 0.8 for "
+            "MiniMax-H3 and 1.0 for other models."
         ),
     )
     quant_group.add_argument("--lowrank", type=int, default=32, help="SVDQuant lowrank parameter")
@@ -622,6 +645,49 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def validate_minimax_h3_configuration(
+    model_config: ModelConfig,
+    quant_config: QuantizationConfig,
+    calib_config: CalibrationConfig,
+    export_config: ExportConfig,
+) -> None:
+    """Validate the deliberately narrow MiniMax-H3 T2V export workflow."""
+    if model_config.model_type != ModelType.MINIMAX_H3:
+        return
+
+    if model_config.backbone != ["transformer"]:
+        raise ValueError(
+            "MiniMax-H3 T2V supports only --backbone transformer; transformer_ref belongs "
+            "to the Ref2VA workflow and must not be loaded or quantized."
+        )
+    if quant_config.format != QuantFormat.FP4 or quant_config.algo not in (
+        QuantAlgo.MAX,
+        QuantAlgo.SVDQUANT,
+    ):
+        raise ValueError(
+            "MiniMax-H3 supports only the requested recipes: '--format fp4 "
+            "--quant-algo max' (NVFP4) or '--format fp4 --quant-algo svdquant'."
+        )
+    if quant_config.quantize_mha:
+        raise ValueError("MiniMax-H3 quantizes transformer linears only; omit --quantize-mha.")
+    if export_config.restore_from is None:
+        if calib_config.batch_size != 1:
+            raise ValueError(
+                "MiniMax-H3's T2V ModularPipeline accepts one prompt string per call; "
+                "set --batch-size 1."
+            )
+        if calib_config.n_steps < 2:
+            raise ValueError(
+                "MiniMax-H3 num_inference_steps includes the terminal sigma=0, so --n-steps "
+                "must be at least 2 to execute a transformer forward."
+            )
+    if export_config.onnx_dir is not None:
+        raise ValueError(
+            "MiniMax-H3 support is calibration + unified HF checkpoint export only; "
+            "--onnx-dir is intentionally unsupported."
+        )
+
+
 def main() -> None:
     from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
 
@@ -664,12 +730,18 @@ def main() -> None:
             extra_params=extra_params,
         )
 
+        # Keep model-specific recipe values alongside the block/filter recipe in
+        # MODEL_DEFAULTS. Models without an override retain the existing 1.0.
+        alpha = args.alpha
+        if alpha is None:
+            alpha = MODEL_DEFAULTS[model_type].get("svdquant_alpha", 1.0)
+
         quant_config = QuantizationConfig(
             format=QuantFormat(args.format),
             algo=QuantAlgo(args.quant_algo),
             percentile=args.percentile,
             collect_method=CollectMethod(args.collect_method),
-            alpha=args.alpha,
+            alpha=alpha,
             lowrank=args.lowrank,
             quantize_mha=args.quantize_mha,
             compress=args.compress,
@@ -705,6 +777,7 @@ def main() -> None:
         export_config.validate()
         if not export_config.restore_from:
             calib_config.validate()
+        validate_minimax_h3_configuration(model_config, quant_config, calib_config, export_config)
 
         pipeline_manager = PipelineManager(model_config, logger)
         pipe = pipeline_manager.create_pipeline()

@@ -18,6 +18,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import torch
 from models_utils import MODEL_DEFAULTS, ModelType
 from pipeline_manager import PipelineManager
 from quantize_config import CalibrationConfig
@@ -50,6 +51,7 @@ class Calibrator:
         self.config = config
         self.model_type = model_type
         self.logger = logger
+        self._minimax_h3_generator: torch.Generator | None = None
 
     def load_and_batch_prompts(self) -> list[list[str]]:
         """
@@ -95,6 +97,8 @@ class Calibrator:
                 elif self.model_type in [ModelType.WAN22_T2V_14b, ModelType.WAN22_T2V_5b]:
                     # Special handling for WAN video models
                     self._run_wan_video_calibration(prompt_batch, extra_args)
+                elif self.model_type == ModelType.MINIMAX_H3:
+                    self._run_minimax_h3_calibration(prompt_batch, extra_args)
                 else:
                     common_args = {
                         "prompt": prompt_batch,
@@ -104,6 +108,43 @@ class Calibrator:
                 pbar.update(1)
                 self.logger.debug(f"Completed calibration batch {i + 1}/{self.config.num_batches}")
         self.logger.info("Calibration completed successfully")
+
+    def _run_minimax_h3_calibration(
+        self, prompt_batch: list[str], extra_args: dict[str, Any]
+    ) -> None:
+        """Calibrate MiniMax-H3 through its prompt-only T2V denoising path."""
+        if len(prompt_batch) != 1:
+            raise ValueError(
+                "MiniMax-H3's T2V ModularPipeline accepts one prompt string per call; "
+                "use --batch-size 1 for calibration."
+            )
+
+        extra_params = self.pipeline_manager.config.extra_params
+        height = int(extra_params.get("height", extra_args["height"]))
+        width = int(extra_params.get("width", extra_args["width"]))
+        num_frames = int(extra_params.get("num_frames", extra_args["num_frames"]))
+        seed = int(extra_params.get("seed", 0))
+        if self._minimax_h3_generator is None:
+            self._minimax_h3_generator = torch.Generator(device="cpu").manual_seed(seed)
+
+        self.logger.debug(
+            "MiniMax-H3 T2V calibration call: height=%d width=%d num_frames=%d "
+            "num_inference_steps=%d seed=%d",
+            height,
+            width,
+            num_frames,
+            self.config.n_steps,
+            seed,
+        )
+        self.pipe(
+            prompt=prompt_batch[0],
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            num_inference_steps=self.config.n_steps,
+            generator=self._minimax_h3_generator,
+            output=["videos", "audio", "sampling_rate"],
+        )
 
     def _run_wan_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]

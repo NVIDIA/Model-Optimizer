@@ -44,6 +44,8 @@ try:
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
         is_diffusers_object,
+        is_diffusers_pipeline,
+        is_modular_pipeline,
         is_qkv_projection,
         merge_diffusion_checkpoint,
     )
@@ -1261,15 +1263,9 @@ def _export_diffusers_checkpoint(
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
     }
 
-    # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
-    is_diffusers_pipe = False
-    if HAS_DIFFUSERS:
-        try:
-            from diffusers import DiffusionPipeline as _DiffusionPipeline
-
-            is_diffusers_pipe = isinstance(pipe, _DiffusionPipeline)
-        except Exception:
-            is_diffusers_pipe = False
+    # Pipeline checks control component subfolders and the pipeline index format.
+    is_diffusers_pipe = is_diffusers_pipeline(pipe)
+    is_modular_pipe = is_modular_pipeline(pipe)
 
     # Export each nn.Module component with quantization handling
     for component_name, component in module_components.items():
@@ -1408,40 +1404,94 @@ def _export_diffusers_checkpoint(
 
             print(f"  Saved to: {component_export_dir}")
 
-    # For pipelines, also save model_index.json
+    # For pipelines, also save the pipeline index.
     if is_diffusers_pipe:
-        model_index_path = export_dir / "model_index.json"
+        model_index_filename = "modular_model_index.json" if is_modular_pipe else "model_index.json"
+        model_index_path = export_dir / model_index_filename
         is_partial_export = components is not None
 
-        # For full export, preserve original model_index.json when possible.
-        # For partial export, skip this to avoid listing non-exported components.
-        if not is_partial_export:
+        # For a standard pipeline, preserve the original index when possible. A
+        # modular pipeline must serialize its active config instead: workflows can
+        # prune components (for example MiniMax-H3 T2V omits transformer_ref), while
+        # the source index still lists components used by other workflows.
+        if not is_partial_export and not is_modular_pipe:
             source_path = getattr(pipe, "name_or_path", None) or getattr(
                 getattr(pipe, "config", None), "_name_or_path", None
             )
             if source_path:
-                candidate_model_index = Path(source_path) / "model_index.json"
+                candidate_model_index = Path(source_path) / model_index_filename
                 if candidate_model_index.exists():
                     with open(candidate_model_index) as file:
                         model_index = json.load(file)
                     with open(model_index_path, "w") as file:
                         json.dump(model_index, file, indent=4)
 
-        # Full-export fallback to Diffusers-native config serialization.
-        # Partial export skips this for the same reason as above.
-        if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
+        # Diffusers-native config serialization preserves workflow metadata. Always
+        # refresh a modular index from the active pipeline, even when retrying into
+        # an existing directory: a stale source/workflow index could otherwise keep
+        # components (for example transformer_ref) that were not loaded or exported.
+        # Modular partial exports are pruned below after serializing the full config.
+        if (
+            is_modular_pipe or (not is_partial_export and not model_index_path.exists())
+        ) and hasattr(pipe, "save_config"):
             pipe.save_config(export_dir)
 
-        # Last resort: synthesize a minimal model_index.json from exported components.
+        # Last resort: synthesize an index from the pipeline config/components.
         if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
-            model_index = {
-                "_class_name": type(pipe).__name__,
-                "_diffusers_version": diffusers.__version__,
-            }
-            for name, comp in all_components.items():
-                module = type(comp).__module__
-                library = module.split(".")[0]
-                model_index[name] = [library, type(comp).__name__]
+            if is_modular_pipe:
+                model_index = dict(pipe.config)
+            else:
+                model_index = {
+                    "_class_name": type(pipe).__name__,
+                    "_diffusers_version": diffusers.__version__,
+                }
+                for name, comp in all_components.items():
+                    module = type(comp).__module__
+                    library = module.split(".")[0]
+                    model_index[name] = [library, type(comp).__name__]
+
+            with open(model_index_path, "w") as file:
+                json.dump(model_index, file, indent=4)
+
+        if is_modular_pipe and model_index_path.exists():
+            with open(model_index_path) as file:
+                model_index = json.load(file)
+
+            pipeline_component_names = set(getattr(pipe, "components", {}))
+            if is_partial_export:
+                for component_name in pipeline_component_names - set(all_components):
+                    model_index.pop(component_name, None)
+
+            # A modular component entry carries its own loading location. Point every
+            # exported component at the newly written local subfolder so reloading the
+            # unified checkpoint cannot silently fetch the original unquantized model.
+            for component_name, component in all_components.items():
+                module = type(component).__module__
+                default_library = module.split(".")[0]
+                entry = model_index.get(component_name)
+                if not (isinstance(entry, (list, tuple)) and len(entry) == 3):
+                    # Components created from config (for example H3's
+                    # video_processor) intentionally have no modular-index entry.
+                    # Adding one would change them to from_pretrained components,
+                    # which can make load_components() call a nonexistent loader.
+                    continue
+
+                library, class_name, loading_spec = entry
+                loading_spec = dict(loading_spec or {})
+                library = library or default_library
+                class_name = class_name or type(component).__name__
+
+                # diffusers 0.35 used ``repo``; newer versions use the more explicit
+                # ``pretrained_model_name_or_path`` field.
+                location_key = (
+                    "repo"
+                    if "repo" in loading_spec
+                    and "pretrained_model_name_or_path" not in loading_spec
+                    else "pretrained_model_name_or_path"
+                )
+                loading_spec[location_key] = str(export_dir)
+                loading_spec["subfolder"] = component_name
+                model_index[component_name] = [library, class_name, loading_spec]
 
             with open(model_index_path, "w") as file:
                 json.dump(model_index, file, indent=4)

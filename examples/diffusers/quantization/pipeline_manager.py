@@ -16,6 +16,7 @@
 import logging
 import warnings
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -43,6 +44,7 @@ class PipelineManager:
         self.pipe_upsample: LTXLatentUpsamplePipeline | None = None  # For LTX-Video upsampling
         self._transformer: torch.nn.Module | None = None
         self._video_decoder: torch.nn.Module | None = None
+        self._components_manager: Any | None = None
 
     @staticmethod
     def create_pipeline_from(
@@ -100,6 +102,11 @@ class PipelineManager:
                 self.logger.info("LTX-2 pipeline created successfully")
                 return self.pipe
 
+            if self.config.model_type == ModelType.MINIMAX_H3:
+                self.pipe = self._create_minimax_h3_pipeline()
+                self.logger.info("MiniMax-H3 T2V modular pipeline created successfully")
+                return self.pipe
+
             pipeline_cls = MODEL_PIPELINE[self.config.model_type]
             if pipeline_cls is None:
                 raise ValueError(
@@ -141,6 +148,14 @@ class PipelineManager:
 
         if self.config.model_type == ModelType.LTX2:
             self.logger.info("Skipping device setup for LTX-2 pipeline (handled internally)")
+            return
+
+        if self.config.model_type == ModelType.MINIMAX_H3:
+            if self.config.cpu_offloading:
+                self.logger.info("MiniMax-H3 ComponentsManager auto CPU offloading is enabled")
+            else:
+                self.logger.info("Moving MiniMax-H3 T2V components to CUDA")
+                self.pipe.to("cuda")
             return
 
         if self.config.cpu_offloading:
@@ -191,6 +206,68 @@ class PipelineManager:
             if module is None:
                 raise RuntimeError(f"Pipeline missing backbone module '{name}'.")
             yield name, module
+
+    def _create_minimax_h3_pipeline(self) -> Any:
+        """Load only MiniMax-H3's prompt-only T2V workflow."""
+        try:
+            from diffusers import ComponentsManager, ModularPipeline
+        except ImportError as exc:
+            raise ImportError(
+                "MiniMax-H3 is not part of a Diffusers release yet. Install Diffusers "
+                "from source with: pip install git+https://github.com/huggingface/diffusers.git"
+            ) from exc
+
+        forbidden_conditioning = {
+            key for key in ("image", "last_image", "references") if key in self.config.extra_params
+        }
+        if forbidden_conditioning:
+            raise ValueError(
+                "MiniMax-H3 calibration supports text-only T2V. Remove conditioning "
+                f"parameters: {sorted(forbidden_conditioning)}"
+            )
+
+        self._components_manager = ComponentsManager()
+        local_files_only = Path(self.config.model_path).exists()
+        pipe = ModularPipeline.from_pretrained(
+            self.config.model_path,
+            workflow="t2va",
+            components_manager=self._components_manager,
+            local_files_only=local_files_only,
+        )
+        # The downloaded modular index records the Hub repository in every
+        # component spec. Override it so a local --override-model-path remains
+        # completely local and cannot silently fetch transformer_ref.
+        pipe.load_components(
+            dtype=self.config.model_dtype,
+            pretrained_model_name_or_path=self.config.model_path,
+            local_files_only=local_files_only,
+        )
+        # Enable offload only after every component has been registered. Enabling
+        # it before load_components() makes ComponentsManager rebuild hooks on
+        # each add and resets the requested reserve margin to its default.
+        if self.config.cpu_offloading:
+            memory_reserve_margin = str(
+                self.config.extra_params.get("memory_reserve_margin", "12GB")
+            )
+            self.logger.info(
+                "Enabling MiniMax-H3 automatic CPU offload with memory reserve margin %s",
+                memory_reserve_margin,
+            )
+            self._components_manager.enable_auto_cpu_offload(
+                device="cuda", memory_reserve_margin=memory_reserve_margin
+            )
+        pipe.set_progress_bar_config(disable=True)
+
+        missing_components = pipe.null_component_names
+        if missing_components:
+            raise RuntimeError(
+                f"MiniMax-H3 T2V failed to load required components: {sorted(missing_components)}"
+            )
+        if getattr(pipe, "transformer_ref", None) is not None:
+            raise RuntimeError("MiniMax-H3 T2V workflow unexpectedly loaded transformer_ref.")
+        loaded_components = sorted(pipe.components)
+        self.logger.info("Loaded MiniMax-H3 T2V components only: %s", loaded_components)
+        return pipe
 
     def _ensure_ltx2_transformer_cached(self) -> None:
         if not self.pipe:
