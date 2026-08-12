@@ -26,16 +26,3 @@ def qwen35_moe_bridge_supported() -> bool:
         return hasattr(model_bridge, "_fuse_per_expert_hf_weight")
     except Exception:
         return False
-
-
-def config_only_hf_export_supported() -> bool:
-    """Whether AutoBridge supports config-only HF export (from_hf_config), i.e. nemo:26.08+.
-
-    Keep in sync with prune_minitron.py. Mount an updated MBridge to run these on 26.06.
-    """
-    try:
-        from megatron.bridge import AutoBridge
-
-        return hasattr(AutoBridge, "from_hf_config")
-    except Exception:
-        return False

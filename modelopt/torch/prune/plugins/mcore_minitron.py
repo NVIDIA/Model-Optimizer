@@ -257,7 +257,8 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
     - `candidate_filter`: Callable rejecting candidate configs the caller cannot use, e.g. ones
         their checkpoint format cannot represent (default: None). Receives every supported hparam,
-        with non-searched ones filled in from the model config.
+        with non-searched ones filled in from the model config. Like `score_func`, it is assumed
+        unchanged when resuming from a `checkpoint`, since rejected candidates are not cached.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
         Only used with the ``memory_mb`` constraint.
@@ -545,17 +546,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 2. Perform grid-search over the search space to find subnets fitting all constraints
-        # Hparams are searched independently, so candidate_filter is the only place a caller can
-        # reject invalid *combinations*. Non-searched hparams keep their model config value.
-        base_config = {
-            hp: getattr(self.model.config, hp)
-            for hp in SUPPORTED_HPARAMS
-            if hasattr(self.model.config, hp)
-        }
-
-        def accept_candidate(ss_config: dict) -> bool:
-            return candidate_filter is None or candidate_filter({**base_config, **ss_config})
-
         constraints_cache_key = tuple((k, max_metrics[k]) for k in active_metric_keys)
         if constraints_cache_key not in self.all_candidates_per_constraint:
             max_num_layers = self.model.get_hparam("num_layers").max
@@ -565,6 +555,13 @@ class MCoreMinitronSearcher(BaseSearcher):
                 max_depth_pruning,
                 hparams_to_skip,
             )
+            # Hparams are searched independently, so this is the only place to reject invalid
+            # *combinations*. Non-searched hparams keep their model config value.
+            base_config = {
+                hp: getattr(self.model.config, hp)
+                for hp in SUPPORTED_HPARAMS
+                if hasattr(self.model.config, hp)
+            }
             selected = []
             num_filtered = 0
             for ss_config in tqdm(
@@ -572,7 +569,9 @@ class MCoreMinitronSearcher(BaseSearcher):
                 desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
-                if not accept_candidate(ss_config):
+                if candidate_filter is not None and not candidate_filter(
+                    {**base_config, **ss_config}
+                ):
                     num_filtered += 1
                     continue
                 candidate_metrics = self._compute_candidate_metrics(ss_config, max_num_layers)
@@ -592,14 +591,6 @@ class MCoreMinitronSearcher(BaseSearcher):
             self.save_search_checkpoint(verbose=True)
         else:
             print_rank_0(f"\nUsing top {top_k} candidates from checkpoint")
-            # Candidates are cached by constraints only, so re-apply the filter in case the
-            # checkpoint was written by a run with a different one (or none).
-            cached = self.all_candidates_per_constraint[constraints_cache_key]
-            kept = [c for c in cached if accept_candidate(c.ss_config)]
-            if len(kept) < len(cached):
-                print_rank_0(f"Rejected {len(cached) - len(kept)} checkpoint candidates.")
-                assert kept, "candidate_filter rejected every candidate from the checkpoint!"
-                self.all_candidates_per_constraint[constraints_cache_key] = kept
         top_k_candidates = self.all_candidates_per_constraint[constraints_cache_key][:top_k]
 
         table = Table(title=f"Top {top_k} Candidates", show_header=True, header_style="bold")

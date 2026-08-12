@@ -16,10 +16,7 @@
 
 import pytest
 import torch
-from _test_utils.examples.megatron_bridge import (
-    config_only_hf_export_supported,
-    qwen35_moe_bridge_supported,
-)
+from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
@@ -42,8 +39,7 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
             id="qwen3",
         ),
         # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid.
-        # MTP heads are enabled so the run covers dropping them during calibration. HF export needs
-        # the config-only bridge (nemo:26.08+), so this is verified locally until CI bumps off 26.06.
+        # MTP heads are enabled so the run covers dropping them during calibration.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_nemotron_h_dir(
                 tmp_path,
@@ -54,15 +50,10 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
             ),
             {"n_shared_experts": 1},
             id="nemotron_h",
-            marks=pytest.mark.skipif(
-                not config_only_hf_export_supported(),
-                reason="Native NemotronH HF export needs config-only bridge (nemo:26.08+)",
-            ),
         ),
-        # TODO: Add a DeepSeek-V3 case covering candidate_filter end-to-end once MLA pruning
-        # supports the Q-LoRA up-projection (Megatron-Bridge's DeepSeek mapping requires
-        # q_lora_rank, which _DynamicMLASelfAttention does not handle). candidate_filter itself is
-        # covered by tests/gpu_megatron/torch/prune/plugins/test_mcore_mamba_minitron_pruning.py.
+        # TODO: Add a DeepSeek-V3 case once MLA pruning supports the Q-LoRA up-projection, which
+        # Megatron-Bridge's DeepSeek mapping requires. candidate_filter is covered by
+        # tests/gpu_megatron/torch/prune/plugins/test_mcore_mamba_minitron_pruning.py.
     ],
 )
 def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):

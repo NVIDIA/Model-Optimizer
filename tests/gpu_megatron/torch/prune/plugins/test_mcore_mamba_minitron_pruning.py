@@ -454,8 +454,8 @@ def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
         **_base_nas_config(ckpt_dir),
         "seq_length": sequence_length,
         "batch_size": 1,
-        # moe_shared_expert_intermediate_size is skipped, so the filter sees it via the searcher's
-        # model config fallback: only routed sizes that divide it survive.
+        # moe_shared_expert_intermediate_size is skipped, so the filter reads it from the model
+        # config: only routed sizes that divide it survive.
         "candidate_filter": _shared_is_multiple_of_routed,
     }
     stdout_capture = io.StringIO()
@@ -484,8 +484,7 @@ def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
     sorted_layers = _get_sorted_layers(searcher_state)
     # fmt: off
     if sorted_layers == [1, 4, 3, 2]:
-        # Every candidate has moe_ffn_hidden_size 16: candidate_filter drops the 12s since they do
-        # not divide the (skipped, so unpruned) moe_shared_expert_intermediate_size of 16.
+        # All moe_ffn_hidden_size 16: the 12s do not divide the unpruned shared size of 16.
         expected_top_k = [
             [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"memory_mb": 0.022613525390625},     124],  # noqa: E501
             [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"memory_mb": 0.022556304931640625},  126],  # noqa: E501

@@ -116,8 +116,7 @@ _SHARED_EXPERT_SIZE_FIELDS = (
 def _is_deepseek_style_moe(text_cfg) -> bool:
     """Whether the shared expert is sized as ``n_shared_experts * moe_intermediate_size``.
 
-    Such configs have no explicit shared expert size field, so only integer multiples of the
-    (also prunable) routed expert size are representable in HF.
+    Such configs can only represent a shared expert size that is a multiple of the routed one.
     """
     return hasattr(text_cfg, "n_shared_experts") and not any(
         hasattr(text_cfg, field) for field in _SHARED_EXPERT_SIZE_FIELDS
@@ -650,8 +649,8 @@ def main(args: argparse.Namespace):
         if hasattr(text_cfg, "n_routed_experts"):
             text_cfg.n_routed_experts = mcore_cfg.num_moe_experts
         # n_shared_experts is a fixed count; only DeepSeek-style configs record the pruned shared
-        # expert size through it and must re-derive it. candidate_filter keeps the search divisible,
-        # so only a --prune_export_config the filter never saw can violate this.
+        # expert size through it. candidate_filter keeps the search divisible, so only a manual
+        # --prune_export_config can violate this.
         if _is_deepseek_style_moe(text_cfg):
             if mcore_cfg.moe_shared_expert_intermediate_size % mcore_cfg.moe_ffn_hidden_size:
                 raise ValueError(
@@ -708,11 +707,16 @@ def main(args: argparse.Namespace):
             if hasattr(text_cfg, field):
                 setattr(text_cfg, field, 0)
 
-        # Preferred path for all non-VLMs: a config-only bridge (hf_keys=None) keeps the embedding
-        # task when transformers' saved key differs from the bridge mapping (NemotronH's
-        # backbone.embedding vs ...embeddings), and builds no dummy model.
-        # VLMs and older builds fall back to a dummy HF model that supplies the expected HF key names.
-        if hasattr(AutoBridge, "from_hf_config") and not is_vlm:
+        # A config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
+        # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings). Only
+        # hybrids need it; elsewhere it drops pruned config fields (e.g. Qwen3's hidden_size), so
+        # everything else uses a dummy HF model to supply the expected key names.
+        use_config_only_export = (
+            hasattr(AutoBridge, "from_hf_config")
+            and isinstance(provider, _HYBRID_PROVIDER_TYPES)
+            and not is_vlm
+        )
+        if use_config_only_export:
             pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
             # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
             # from_hf_config can't infer it since AutoConfig consumes the kwarg.
@@ -721,11 +725,11 @@ def main(args: argparse.Namespace):
                 model, args.output_hf_path, source_path=args.hf_model_name_or_path
             )
         else:
-            if not is_vlm:
+            if isinstance(provider, _HYBRID_PROVIDER_TYPES) and not is_vlm:
                 warn_rank_0(
-                    "Megatron-Bridge lacks config-only HF export (needs nemo:26.08+); falling back "
-                    "to the dummy-model path, which cannot round-trip a pruned native NemotronH "
-                    "config. Use transformers<5 or a newer container if the save fails."
+                    "Megatron-Bridge lacks config-only HF export; falling back to the dummy-model "
+                    "path, which cannot round-trip a pruned native NemotronH config. Use "
+                    "transformers<5 or a newer Megatron-Bridge if the save fails."
                 )
             dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
             dummy_model_cls.from_config(
@@ -759,5 +763,7 @@ if __name__ == "__main__":
     args = get_args()
     try:
         main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()
