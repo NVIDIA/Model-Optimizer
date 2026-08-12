@@ -29,6 +29,8 @@ except ImportError:
 
 transformers = pytest.importorskip("transformers")
 
+from modelopt.torch.quantization.plugins import accelerate as accel_plugin  # noqa: E402
+
 
 def test_linear_with_accelerate_monkey_patched_forward():
     module_test = nn.Linear(16, 16)
@@ -95,8 +97,6 @@ def test_init_quantized_weights_dtype_and_kwargs_routing(monkeypatch):
 
     Drives the real patched `from_pretrained` with the checkpoint I/O stubbed.
     """
-    from modelopt.torch.quantization.plugins import accelerate as accel_plugin
-
     seen: dict[str, dict] = {}
 
     class _StubModel(torch.nn.Module):
