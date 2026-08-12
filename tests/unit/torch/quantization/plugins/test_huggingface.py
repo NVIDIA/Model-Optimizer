@@ -34,7 +34,6 @@ from packaging.version import Version
 import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
-from modelopt.torch.quantization.nn.modules.quant_module import _shared_parameter_storages
 from modelopt.torch.quantization.plugins.huggingface import (
     _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
@@ -103,35 +102,6 @@ def test_hf_parallel_weight_access_restores_dtensor_after_exception(monkeypatch)
         raise RuntimeError("test error")
 
     assert linear.weight is original_weight
-
-
-def test_temporary_fold_detects_tied_dtensor_local_storage():
-    class FakeDTensor:
-        def __init__(self, local):
-            self._local = local
-            self.device = local.device
-            self.is_meta = False
-
-        def numel(self):
-            return self._local.numel()
-
-        def untyped_storage(self):
-            raise RuntimeError("DTensor has no wrapper storage")
-
-        def to_local(self):
-            return self._local
-
-    local = torch.ones(2, 2)
-    first = FakeDTensor(local)
-    second = FakeDTensor(local)
-
-    class TiedModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self._parameters["first"] = first
-            self._parameters["second"] = second
-
-    assert len(_shared_parameter_storages(TiedModel())) == 1
 
 
 def test_convert_conv1d():

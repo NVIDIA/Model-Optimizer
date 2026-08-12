@@ -42,7 +42,7 @@ from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
-from .nn.modules.quant_module import _FoldWeightState, _record_fold_weight_states
+from .nn.modules.quant_module import _record_folded_weights
 from .utils import is_quantized
 
 __all__ = [
@@ -738,14 +738,13 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 
 @contextmanager
 def temporarily_fold_weights(model: nn.Module):
-    """Temporarily fold enabled fake-quant weights for a frozen inference region.
+    """Temporarily fold fake-quant weights for a frozen inference region.
 
     Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. The
     original weights and quantizer runtime state are restored on exit, including after an
     exception. Parameters are restored in place so optimizer and distributed references remain
-    valid. Disabled and non-fake weight quantizers are left untouched. Parameters whose storage is
-    tied across owners are also left unfolded because mutating them could change a disabled owner.
-    Weight ``SequentialQuantizer`` containers are not currently folded.
+    valid. Weight ``SequentialQuantizer`` containers, quantizers shared across separate folding
+    calls, and weights tied across quantized modules are not currently supported.
 
     This context is intended for repeated no-gradient forwards with no optimizer step, such as
     log-probability recomputation over several microbatches. It retains calibration attributes
@@ -757,14 +756,34 @@ def temporarily_fold_weights(model: nn.Module):
         with mtq.temporarily_fold_weights(model):
             outputs = model(inputs)
     """
-    states: list[_FoldWeightState] = []
+    weight_states: list[tuple[torch.Tensor, torch.Tensor]] = []
+    state_attrs = (
+        "_disabled",
+        "_rotate",
+        "_enable_pre_quant_scale",
+        "_input_dtype",
+    )
+    missing = object()
+    quantizer_states = [
+        (module, {name: getattr(module, name, missing) for name in state_attrs})
+        for module in model.modules()
+        if isinstance(module, TensorQuantizer)
+    ]
     try:
-        with _record_fold_weight_states(model, states):
+        with _record_folded_weights(model, weight_states):
             fold_weight(model, keep_attrs=True)
         yield
     finally:
-        for state in reversed(states):
-            state.restore()
+        with torch.no_grad():
+            for weight, original_weight in reversed(weight_states):
+                weight.copy_(original_weight)
+        for quantizer, state in quantizer_states:
+            for name, value in state.items():
+                if value is missing:
+                    if hasattr(quantizer, name):
+                        delattr(quantizer, name)
+                else:
+                    setattr(quantizer, name, value)
 
 
 @torch.no_grad()
