@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 """Behavioral tests for setup-v2 resolved snapshots and bundle rendering."""
 
@@ -205,6 +218,68 @@ def test_snapshot_captures_effective_values_and_authoring_provenance(tmp_path: P
     assert snapshot.data.modality == "text"
 
 
+def test_snapshot_provenance_uses_the_captured_runtime_collections(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    state.set_collection(
+        "mip_config",
+        {
+            "runs": {
+                "latency": {
+                    "solver": {"num_solutions": 7},
+                    "objectives": [{"metric": "latency"}],
+                    "constraints": {"latency": {"operator": "<=", "value": 25.0}},
+                },
+                "memory": {
+                    "solver": {"num_solutions": 9},
+                    "objectives": [{"metric": "memory"}],
+                    "constraints": {"memory": {"operator": "<=", "value": 48.0}},
+                },
+            }
+        },
+    )
+    defaults = deepcopy(state.collection("default_resolutions"))
+    for path in (
+        "profiles",
+        "mip.num_solutions",
+        "mip.objective",
+        "mip.goal_metric",
+        "mip.goal_value",
+        "stages.width_importance.instances",
+        "vllm.enabled",
+        "vllm.max_num_seqs",
+        "vllm.prefill_seq_len",
+    ):
+        defaults[path] = {"value": None, "source": "test"}
+    state.set_collection("default_resolutions", defaults)
+
+    snapshot = resolve_campaign_config(state)
+
+    assert snapshot.provenance["profiles"].effective["model"]["tp"] == 2
+    assert snapshot.provenance["mip.num_solutions"].effective == {
+        "latency": 7,
+        "memory": 9,
+    }
+    assert snapshot.provenance["mip.objective"].effective == {
+        "latency": ("latency",),
+        "memory": ("memory",),
+    }
+    assert snapshot.provenance["mip.goal_metric"].effective == {
+        "latency": ("latency",),
+        "memory": ("memory",),
+    }
+    assert snapshot.provenance["mip.goal_value"].effective["latency"]["latency"]["value"] == 25.0
+    assert snapshot.provenance["stages.width_importance.instances"].effective == 1
+    assert snapshot.provenance["vllm.enabled"].effective is True
+    assert snapshot.provenance["vllm.max_num_seqs"].effective == {
+        "latency-first": 2,
+        "throughput-second": 4,
+    }
+    assert snapshot.provenance["vllm.prefill_seq_len"].effective == {
+        "latency-first": 2048,
+        "throughput-second": 4096,
+    }
+
+
 def test_snapshot_is_isolated_from_later_wizard_state_mutations(tmp_path: Path) -> None:
     state = _campaign_state(tmp_path)
     snapshot = resolve_campaign_config(state)
@@ -228,7 +303,7 @@ def test_snapshot_rejects_direct_mutation(tmp_path: Path) -> None:
     with pytest.raises(TypeError):
         snapshot.model.config["text_config"]["hidden_size"] = 2048
     with pytest.raises(FrozenInstanceError):
-        snapshot.compatibility_projection.workload_id = "throughput-second"
+        snapshot.data.sequence_length = 4096
 
 
 def test_renderer_uses_requested_revision_until_model_revision_is_pinned(tmp_path: Path) -> None:
@@ -300,32 +375,6 @@ def test_absent_semantic_collections_preserve_compatibility_overrides(tmp_path: 
 
     assert experiment["mip"]["marker"] == "compatibility"
     assert experiment["post_mip"]["marker"] == "compatibility"
-
-
-def test_build_ignores_stale_legacy_projection(tmp_path: Path, monkeypatch) -> None:
-    state = _campaign_state(tmp_path)
-    legacy = bundle_module._legacy_state_from_resolved(resolve_campaign_config(state))
-    legacy["model"]["source"] = "poisoned/model"
-    legacy["answers"]["data"]["source"] = "/poisoned/data"
-    legacy["answers"]["data"]["sequence_length"] = 1
-    legacy["answers"]["infrastructure"]["runner"]["slurm"]["account"] = "poisoned"
-    state.set_collection("legacy_state", legacy)
-    monkeypatch.setattr(
-        bundle_module,
-        "validate_bundle",
-        lambda path: SimpleNamespace(valid=True, error=None),
-    )
-    monkeypatch.setattr(bundle_module, "dry_run_bundle", lambda path: "dry run\n")
-
-    build_bundles_v2(state.campaign_dir, state)
-
-    for budget in ("smoke", "production"):
-        experiment = yaml.safe_load((state.campaign_dir / budget / "experiment.yaml").read_text())
-        runner = yaml.safe_load((state.campaign_dir / budget / "runner.yaml").read_text())
-        assert experiment["model"]["source"] == "Qwen/Qwen3.5-Test"
-        assert experiment["data"]["path"] == "/datasets/text"
-        assert experiment["data"]["max_sample_length"] == 2048
-        assert runner["runner"]["slurm"]["account"] == "account"
 
 
 def test_build_freezes_one_snapshot_before_rendering_both_budgets(

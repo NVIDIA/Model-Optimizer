@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 """Immutable resolved campaign configuration for Puzzletron setup v2."""
 
@@ -14,20 +27,13 @@ from typing import TYPE_CHECKING, Any
 
 from puzzletron_setup import SetupError
 
+from .defaults import BUILTIN_DEFAULTS
+
 if TYPE_CHECKING:
     from .state import WizardState
 
 __all__ = [
-    "CompatibilityOverrides",
-    "CompatibilityProjection",
-    "ResolvedAxisConfig",
     "ResolvedCampaignConfig",
-    "ResolvedDataConfig",
-    "ResolvedField",
-    "ResolvedInfrastructureConfig",
-    "ResolvedModelConfig",
-    "ResolvedParallelProfile",
-    "ResolvedStageResource",
     "resolve_campaign_config",
 ]
 
@@ -40,6 +46,7 @@ _PARALLEL_FIELDS = (
     "dp_replicate",
     "sequence_parallel",
 )
+_USE_BUILTIN_DEFAULT = object()
 
 
 def _freeze(value: Any) -> Any:
@@ -89,29 +96,34 @@ def _named_values(values: Any, parts: list[str]) -> dict[str, Any]:
     return resolved
 
 
-def _effective_default_value(state: WizardState, path: str, fallback: Any) -> Any:
+def _effective_default_value(
+    field_records: Mapping[str, Mapping[str, Any]],
+    collections: Mapping[str, Any],
+    path: str,
+    fallback: Any,
+) -> Any:
     """Return the authored consumer value for one resolved default, if present."""
-    record = state.records().get(path)
+    record = field_records.get(path)
     if record is not None:
-        return deepcopy(record.effective)
+        return deepcopy(record.get("effective"))
 
     root, *parts = path.split(".")
-    direct_collection = state.collection(root)
+    direct_collection = collections.get(root)
     if direct_collection is not None:
         found, value = _mapping_path(direct_collection, parts)
         if found:
             return deepcopy(value)
 
     if path == "profiles":
-        profiles = _mapping(state.collection("parallel_profiles"))
+        profiles = _mapping(collections.get("parallel_profiles"))
         return deepcopy(profiles) if profiles else fallback
 
     if root == "stages" and len(parts) == 2 and parts[1] == "instances":
-        found, value = _mapping_path(state.collection("stage_resources"), parts)
+        found, value = _mapping_path(collections.get("stage_resources"), parts)
         return deepcopy(value) if found else fallback
 
     if root == "mip" and len(parts) == 1:
-        runs = _mapping(_mapping(state.collection("mip_config")).get("runs"))
+        runs = _mapping(_mapping(collections.get("mip_config")).get("runs"))
         field = parts[0]
         if field == "num_solutions":
             values = _named_values(runs, ["solver", "num_solutions"])
@@ -139,9 +151,9 @@ def _effective_default_value(state: WizardState, path: str, fallback: Any) -> An
         return values or fallback
 
     if root == "vllm" and len(parts) == 1 and parts[0] == "enabled":
-        return bool(_mapping(state.collection("vllm_measurements")))
+        return bool(_mapping(collections.get("vllm_measurements")))
     if root == "vllm":
-        measurements = state.collection("vllm_measurements")
+        measurements = collections.get("vllm_measurements")
         if len(parts) == 1:
             workload_key = {
                 "batch_size": "batch_size",
@@ -150,7 +162,7 @@ def _effective_default_value(state: WizardState, path: str, fallback: Any) -> An
                 "generation_seq_len": "generation_seq_len",
             }.get(parts[0])
             if workload_key:
-                values = _named_values(state.collection("serving_workloads"), [workload_key])
+                values = _named_values(collections.get("serving_workloads"), [workload_key])
             elif parts[0] == "granularity":
                 values = _named_values(measurements, ["granularity"])
             else:
@@ -162,6 +174,11 @@ def _effective_default_value(state: WizardState, path: str, fallback: Any) -> An
         return values or fallback
 
     return fallback
+
+
+def _builtin_default(path: str) -> Any:
+    found, value = _mapping_path(BUILTIN_DEFAULTS, path.split("."))
+    return deepcopy(value) if found else None
 
 
 @dataclass(frozen=True)
@@ -417,27 +434,6 @@ class CompatibilityOverrides:
 
 
 @dataclass(frozen=True)
-class CompatibilityProjection:
-    """Explicit insertion-order selections required by legacy rendering."""
-
-    workload_id: str
-    first_measurement_id: str | None
-    runtime_measurement_id: str | None
-    first_parallel_profile_name: str | None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "workload_id", str(self.workload_id))
-        for name in (
-            "first_measurement_id",
-            "runtime_measurement_id",
-            "first_parallel_profile_name",
-        ):
-            value = getattr(self, name)
-            if value is not None:
-                object.__setattr__(self, name, str(value))
-
-
-@dataclass(frozen=True)
 class ResolvedCampaignConfig:
     """Immutable semantic authority consumed by setup-v2 bundle generation."""
 
@@ -457,7 +453,6 @@ class ResolvedCampaignConfig:
     result_root: str
     provenance: Mapping[str, ResolvedField]
     compatibility: CompatibilityOverrides
-    compatibility_projection: CompatibilityProjection
 
     def __post_init__(self) -> None:
         for name in (
@@ -542,9 +537,7 @@ def _model(
         num_sublayers=int(inventory.get("num_sublayers", 0)),
         layer_counts=_mapping(inventory.get("layer_counts")),
         facts=_mapping(inventory.get("facts")),
-        axes=tuple(
-            _axis(raw) for raw in inventory.get("axes") or () if isinstance(raw, Mapping)
-        ),
+        axes=tuple(_axis(raw) for raw in inventory.get("axes") or () if isinstance(raw, Mapping)),
         model_extra={key: value for key, value in model.items() if key not in model_keys},
         inventory_extra={
             key: value for key, value in inventory.items() if key not in inventory_keys
@@ -597,34 +590,11 @@ def _stage_resource(stage_id: str, raw: Mapping[str, Any]) -> ResolvedStageResou
         strategy=str(raw.get("strategy", "single")),
         instances=int(raw.get("instances", 1)),
         resource=str(raw.get("resource", "gpu")),
-        gpus_per_node=(
-            int(raw["gpus_per_node"])
-            if raw.get("gpus_per_node") is not None
-            else None
-        ),
+        gpus_per_node=(int(raw["gpus_per_node"]) if raw.get("gpus_per_node") is not None else None),
         partition=(str(raw["partition"]) if raw.get("partition") else None),
         profile_name=(str(raw["profile_name"]) if raw.get("profile_name") else None),
         parallel=_mapping(parallel) if isinstance(parallel, Mapping) else None,
         extra={key: value for key, value in raw.items() if key not in known},
-    )
-
-
-def _compatibility_projection(
-    serving_workloads: Mapping[str, Any],
-    vllm_measurements: Mapping[str, Any],
-    parallel_profiles: Mapping[str, ResolvedParallelProfile],
-) -> CompatibilityProjection:
-    workload_id = str(next(iter(serving_workloads), "serving-default"))
-    first_measurement_id = next(iter(vllm_measurements), None)
-    matching_measurement = _mapping(vllm_measurements.get(workload_id))
-    runtime_measurement_id = (
-        workload_id if matching_measurement else first_measurement_id
-    )
-    return CompatibilityProjection(
-        workload_id=workload_id,
-        first_measurement_id=first_measurement_id,
-        runtime_measurement_id=runtime_measurement_id,
-        first_parallel_profile_name=next(iter(parallel_profiles), None),
     )
 
 
@@ -633,17 +603,15 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     payload = deepcopy(state.payload)
     collections = _mapping(payload.get("collections"))
     field_records = {
-        str(path): {
-            "value": deepcopy(record.value),
-            "source": str(record.source),
-            "requested": deepcopy(record.requested),
-            "effective": deepcopy(record.effective),
-        }
-        for path, record in state.records().items()
+        str(path): deepcopy(record)
+        for path, record in _mapping(payload.get("fields")).items()
+        if isinstance(record, Mapping)
     }
 
-    def effective(path: str, default: Any = None) -> Any:
+    def effective(path: str, default: Any = _USE_BUILTIN_DEFAULT) -> Any:
         record = field_records.get(path)
+        if default is _USE_BUILTIN_DEFAULT:
+            default = _builtin_default(path)
         return deepcopy(record["effective"]) if record is not None else deepcopy(default)
 
     model_payload = _mapping(payload.get("model"))
@@ -651,17 +619,15 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     model = _model(model_payload, inventory_payload, effective("model.source", ""))
 
     selection = _mapping(collections.get("data_subset_selection"))
-    subset_records = [
-        item for item in selection.get("subsets") or () if isinstance(item, Mapping)
-    ]
+    subset_records = [item for item in selection.get("subsets") or () if isinstance(item, Mapping)]
     data_source = effective("data.source")
     data = ResolvedDataConfig(
         source=data_source,
         selected_source=effective("data.selected_source", data_source),
         adapter=effective("data.adapter", "custom"),
         modality=effective("data.modality", "text"),
-        layout=effective("data.layout", "fixed"),
-        sequence_length=int(effective("data.sequence_length", 4096)),
+        layout=effective("data.layout"),
+        sequence_length=int(effective("data.sequence_length")),
         subsets=tuple(str(record["name"]) for record in subset_records),
         subset_revision=(
             str(selection["revision"]) if selection.get("revision") is not None else None
@@ -673,37 +639,25 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     )
 
     infrastructure = ResolvedInfrastructureConfig(
-        runner_kind=str(effective("infrastructure.runner.kind", "slurm")),
+        runner_kind=str(effective("infrastructure.runner.kind")),
         slurm={
-            "account": effective("infrastructure.runner.slurm.account", ""),
-            "partition_interactive": effective(
-                "infrastructure.runner.slurm.partition_interactive", "interactive"
-            ),
-            "partition_batch": effective(
-                "infrastructure.runner.slurm.partition_batch", "batch"
-            ),
-            "partition_cpu": effective("infrastructure.runner.slurm.partition_cpu", None),
-            "time_limit": effective("infrastructure.runner.slurm.time_limit", "4:00:00"),
-            "qos": effective("infrastructure.runner.slurm.qos", None),
-            "max_nodes": effective("infrastructure.runner.slurm.max_nodes", 64),
+            "account": effective("infrastructure.runner.slurm.account"),
+            "partition_interactive": effective("infrastructure.runner.slurm.partition_interactive"),
+            "partition_batch": effective("infrastructure.runner.slurm.partition_batch"),
+            "partition_cpu": effective("infrastructure.runner.slurm.partition_cpu"),
+            "time_limit": effective("infrastructure.runner.slurm.time_limit"),
+            "qos": effective("infrastructure.runner.slurm.qos"),
+            "max_nodes": effective("infrastructure.runner.slurm.max_nodes"),
         },
         execution_contract={
-            "repository": effective(
-                "infrastructure.execution_contract.repository", str(Path.cwd())
-            ),
-            "venv": effective("infrastructure.execution_contract.venv", ".venv"),
-            "container": effective("infrastructure.execution_contract.container", None),
-            "container_mounts": effective(
-                "infrastructure.execution_contract.container_mounts", None
-            ),
-            "prerun_commands": effective(
-                "infrastructure.execution_contract.prerun_commands", []
-            ),
-            "postrun_commands": effective(
-                "infrastructure.execution_contract.postrun_commands", []
-            ),
+            "repository": effective("infrastructure.execution_contract.repository"),
+            "venv": effective("infrastructure.execution_contract.venv"),
+            "container": effective("infrastructure.execution_contract.container"),
+            "container_mounts": effective("infrastructure.execution_contract.container_mounts"),
+            "prerun_commands": effective("infrastructure.execution_contract.prerun_commands"),
+            "postrun_commands": effective("infrastructure.execution_contract.postrun_commands"),
         },
-        gpus_per_node=int(effective("infrastructure.gpus_per_node", 8)),
+        gpus_per_node=int(effective("infrastructure.gpus_per_node")),
     )
 
     profiles = {
@@ -718,12 +672,6 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     }
     serving_workloads = _mapping(collections.get("serving_workloads"))
     vllm_measurements = _mapping(collections.get("vllm_measurements"))
-    compatibility_projection = _compatibility_projection(
-        serving_workloads,
-        vllm_measurements,
-        profiles,
-    )
-
     provenance: dict[str, ResolvedField] = {}
     for path, raw in _mapping(collections.get("default_resolutions")).items():
         if not isinstance(raw, Mapping):
@@ -734,7 +682,8 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
             source=str(raw.get("source", "unknown")),
             requested=deepcopy(raw.get("requested")),
             effective=_effective_default_value(
-                state,
+                field_records,
+                collections,
                 str(path),
                 deepcopy(raw.get("effective", value)),
             ),
@@ -761,9 +710,7 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
         mip=_mapping(collections.get("mip_config")),
         mip_configured=isinstance(collections.get("mip_config"), Mapping),
         post_mip_flows=_mapping(collections.get("post_mip_flows")),
-        post_mip_flows_configured=isinstance(
-            collections.get("post_mip_flows"), Mapping
-        ),
+        post_mip_flows_configured=isinstance(collections.get("post_mip_flows"), Mapping),
         parallel_profiles=profiles,
         stage_resources=resources,
         stage_batches=_mapping(collections.get("stage_batches")),
@@ -773,5 +720,4 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
             experiment=_mapping(collections.get("experiment_overrides")),
             runner=_mapping(collections.get("runner_overrides")),
         ),
-        compatibility_projection=compatibility_projection,
     )

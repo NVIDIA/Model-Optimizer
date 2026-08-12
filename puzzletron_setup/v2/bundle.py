@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 """Render setup-v2 state into existing Puzzletron runtime contracts."""
 
@@ -41,8 +39,7 @@ from puzzletron_setup.bundle import (
     validate_bundle,
 )
 
-from .resolved import ResolvedCampaignConfig, resolve_campaign_config
-from .resolved import _effective_default_value as _effective_default_value
+from .resolved import ResolvedCampaignConfig, _plain, resolve_campaign_config
 from .validation import validate_state
 
 if TYPE_CHECKING:
@@ -70,22 +67,17 @@ def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-def _plain(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
-
-
 def _legacy_state_from_resolved(config: ResolvedCampaignConfig) -> dict[str, Any]:
     """Temporary compatibility adapter from the resolved snapshot to legacy renderers."""
     serving_workloads = _plain(config.serving_workloads)
     measurements = _plain(config.vllm_measurements)
-    projection = config.compatibility_projection
-    workload_id = projection.workload_id
+    workload_id = str(next(iter(serving_workloads), "serving-default"))
     workload = _mapping(serving_workloads.get(workload_id))
-    measurement = _mapping(measurements.get(projection.runtime_measurement_id))
+    first_measurement_id = next(iter(measurements), None)
+    runtime_measurement_id = (
+        workload_id if _mapping(measurements.get(workload_id)) else first_measurement_id
+    )
+    measurement = _mapping(measurements.get(runtime_measurement_id))
     runtime = {
         "vllm_enabled": bool(measurements),
         "granularity": measurement.get("granularity", "subblock"),
@@ -132,16 +124,13 @@ def _legacy_state_from_resolved(config: ResolvedCampaignConfig) -> dict[str, Any
             "sharded": config.infrastructure.gpus_per_node,
         },
     }
-    first_profile_name = projection.first_parallel_profile_name
+    first_profile_name = next(iter(config.parallel_profiles), None)
     first = (
-        config.parallel_profiles.get(first_profile_name)
-        if first_profile_name is not None
-        else None
+        config.parallel_profiles.get(first_profile_name) if first_profile_name is not None else None
     )
     if first is not None:
         mesh = {
-            key: getattr(first, key)
-            for key in ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
+            key: getattr(first, key) for key in ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
         }
         infrastructure["meshes"] = {
             "common": deepcopy(mesh),
@@ -197,9 +186,7 @@ def _render_experiment_v2(
     if measurements:
         rendered.setdefault("vllm_stats", {})["measurements"] = deepcopy(measurements)
         rendered["vllm_stats"]["enabled"] = True
-        first = _mapping(
-            measurements.get(config.compatibility_projection.first_measurement_id)
-        )
+        first = _mapping(measurements.get(next(iter(measurements))))
         rendered["vllm_stats"].update(
             {
                 "prefill_seq_len": int(first.get("prefill_seq_len", 4096)),
@@ -277,9 +264,7 @@ def _render_execution_v2(
             "instances": resource.instances,
             "resource": resource.resource,
             "gpus_per_node": (
-                resource.gpus_per_node
-                if resource.gpus_per_node is not None
-                else default_gpus
+                resource.gpus_per_node if resource.gpus_per_node is not None else default_gpus
             ),
         }
         if resource.partition:

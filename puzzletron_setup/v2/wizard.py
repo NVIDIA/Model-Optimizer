@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 """Ordered, locally customizable Puzzletron setup-v2 wizard."""
 
@@ -590,7 +588,7 @@ def data_section(
                 "from the completed stage configuration."
             )
         else:
-            if not selected_subsets:
+            if not selected_subsets or subset_selection is None or acquisition is None:
                 raise SetupError(
                     "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
                 )
