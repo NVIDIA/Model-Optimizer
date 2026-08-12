@@ -39,6 +39,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ...pruning.compact_runtime import (
+    compact_gated_delta_net_forward,
+    compact_grouped_attention_forward,
+    resolve_compact_grouped_attention_target,
+)
+from ...pruning.gated_delta_net import GDNShape
 from ...pruning.mamba2_surgery import Mamba2TensorLayout, mamba2_projected_prefix_mask
 from .scoring_recipe import ActivationScoringRecipe
 
@@ -73,6 +79,12 @@ def _zero_like_output(output):
 
 def _module_output_zero_hook(module, args, output):
     return _zero_like_output(output)
+
+
+def _module_output_identity_hook(module, args, output):
+    """Bypass generic masking after compact execution produced the reduced geometry."""
+
+    return output
 
 
 @contextmanager
@@ -267,8 +279,7 @@ def _load_split_expert_overlay_tensor(
         value = torch.stack(values, dim=0)
 
     local_slices = tuple(
-        slice(offset, offset + size)
-        for offset, size in zip(global_offset[1:], local_shape[1:])
+        slice(offset, offset + size) for offset, size in zip(global_offset[1:], local_shape[1:])
     )
     value = value[(slice(None), *local_slices)].contiguous()
     if tuple(value.shape) != local_shape:
@@ -371,9 +382,7 @@ def _temporary_parameter_multiplier(
                 "DTensor local parameter shape disagrees with its placement geometry: "
                 f"actual={tuple(local_parameter.shape)} expected={tuple(local_shape)}"
             )
-        full_view = multiplier.reshape((-1,) + (1,) * (len(global_shape) - 1)).expand(
-            global_shape
-        )
+        full_view = multiplier.reshape((-1,) + (1,) * (len(global_shape) - 1)).expand(global_shape)
         local_slices = tuple(
             slice(int(offset), int(offset) + int(size))
             for offset, size in zip(global_offset, local_shape)
@@ -450,9 +459,7 @@ def _masked_native_gate_forward(
         score_func = getattr(self, "score_func", "softmax")
         top_k = int(target_top_k or getattr(self, "topk", 1))
         effective_count = (
-            len(kept_expert_indices)
-            if kept_expert_indices is not None
-            else target_num_experts
+            len(kept_expert_indices) if kept_expert_indices is not None else target_num_experts
         )
         if effective_count is not None:
             top_k = min(top_k, int(effective_count))
@@ -471,7 +478,10 @@ def _masked_native_gate_forward(
                         f"num_experts={scores_for_choice.shape[-1]}"
                     )
                 scores_for_choice = scores_for_choice.index_select(-1, keep)
-            elif target_num_experts is not None and int(target_num_experts) < scores_for_choice.shape[-1]:
+            elif (
+                target_num_experts is not None
+                and int(target_num_experts) < scores_for_choice.shape[-1]
+            ):
                 keep = torch.arange(int(target_num_experts), device=scores_for_choice.device)
                 scores_for_choice = scores_for_choice[..., : int(target_num_experts)]
             else:
@@ -501,7 +511,9 @@ def _masked_native_gate_forward(
             if n_groups > 1:
                 grouped = scores_for_choice.view(x.size(0), n_groups, -1)
                 group_scores = grouped.topk(min(2, grouped.shape[-1]), dim=-1).values.sum(dim=-1)
-                group_idx = group_scores.topk(min(topk_groups, group_scores.shape[-1]), dim=-1).indices
+                group_idx = group_scores.topk(
+                    min(topk_groups, group_scores.shape[-1]), dim=-1
+                ).indices
                 mask = torch.zeros_like(grouped[..., 0]).scatter_(1, group_idx, True)
                 scores_for_choice = (grouped * mask.unsqueeze(-1)).flatten(1)
             compact_indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
@@ -541,8 +553,12 @@ def _masked_native_gate_forward(
                 if correction is None:
                     group_scores = grouped.amax(dim=-1)
                 else:
-                    group_scores = grouped.topk(min(2, grouped.shape[-1]), dim=-1).values.sum(dim=-1)
-                group_idx = group_scores.topk(min(topk_groups, group_scores.shape[-1]), dim=-1).indices
+                    group_scores = grouped.topk(min(2, grouped.shape[-1]), dim=-1).values.sum(
+                        dim=-1
+                    )
+                group_idx = group_scores.topk(
+                    min(topk_groups, group_scores.shape[-1]), dim=-1
+                ).indices
                 mask = torch.zeros_like(grouped[..., 0]).scatter_(1, group_idx, True)
                 scores_for_choice = (grouped * mask.unsqueeze(-1)).flatten(1)
             compact_indices = torch.topk(scores_for_choice, k=top_k, dim=-1).indices
@@ -628,7 +644,9 @@ def _mask_expert_activation(experts, *, orig_intermediate: int, target_intermedi
 
     def masked_activation(gate_and_up_out, route_weight):
         out = orig(gate_and_up_out, route_weight)
-        return out * keep_mask.to(dtype=out.dtype, device=out.device).reshape((1,) * (out.ndim - 1) + (-1,))
+        return out * keep_mask.to(dtype=out.dtype, device=out.device).reshape(
+            (1,) * (out.ndim - 1) + (-1,)
+        )
 
     experts.expert_activation_grouped = masked_activation
     try:
@@ -690,8 +708,7 @@ def _supports_compact_fused_mamba(mamba_module) -> bool:
     """Return whether the module uses the native no-cache fused Mamba path."""
 
     return getattr(mamba_module, "cp", object()) is None and all(
-        hasattr(mamba_module, name)
-        for name in ("in_proj", "conv1d", "norm", "out_proj")
+        hasattr(mamba_module, name) for name in ("in_proj", "conv1d", "norm", "out_proj")
     )
 
 
@@ -768,36 +785,6 @@ def _compact_fused_mamba_forward(
         mamba_module.forward = original_forward
 
 
-def _gdn_prefix_masks(
-    *,
-    orig_groups: int,
-    orig_heads: int,
-    orig_key_dim: int,
-    orig_value_dim: int,
-    target_groups: int,
-    target_heads: int,
-    target_key_dim: int,
-    target_value_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    orig_ratio = orig_heads // orig_groups
-    if target_heads % target_groups:
-        raise ValueError(
-            f"GDN target heads={target_heads} must be divisible by groups={target_groups}"
-        )
-    target_ratio = target_heads // target_groups
-    if target_ratio > orig_ratio:
-        raise ValueError(f"GDN target ratio={target_ratio} exceeds teacher ratio={orig_ratio}")
-    qkeep = torch.zeros(orig_groups, orig_key_dim, dtype=torch.bool)
-    qkeep[:target_groups, :target_key_dim] = True
-    vkeep = torch.zeros(orig_heads, orig_value_dim, dtype=torch.bool)
-    for group in range(target_groups):
-        start = group * orig_ratio
-        vkeep[start : start + target_ratio, :target_value_dim] = True
-    qflat = qkeep.reshape(-1)
-    vflat = vkeep.reshape(-1)
-    return torch.cat((qflat, qflat, vflat)), vflat
-
-
 def _mask_last_dim_forward_hook(mask: torch.Tensor):
     def hook(module, args, output):
         if not torch.is_tensor(output):
@@ -809,80 +796,9 @@ def _mask_last_dim_forward_hook(mask: torch.Tensor):
     return hook
 
 
-def _gdn_norm_dim_prehook(mask: torch.Tensor, scale: float):
-    """Zero tail value-head-dim channels entering the GDN norm and compensate energy.
-
-    Matches the ``_norm_prefix_prehook`` convention in elastic_supernet: the first
-    arg (x, the signal) is zeroed and rescaled; subsequent args (z, gate) are zeroed
-    only, so the norm sees the same per-channel energy as a physically smaller model.
-    """
-    def hook(module, args):
-        out = []
-        for i, a in enumerate(args):
-            if torch.is_tensor(a):
-                m = mask.to(dtype=a.dtype, device=a.device).reshape(
-                    (1,) * (a.ndim - 1) + (-1,)
-                )
-                out.append(a * m * scale if i == 0 else a * m)
-            else:
-                out.append(a)
-        return tuple(out)
-
-    return hook
-
-
-@contextmanager
-def _scale_gdn_kernel_query_output(mamba_module: nn.Module, scale: float):
-    """Match a physically sliced GDN kernel's implicit query scale.
-
-    GDN kernels normalize Q/K internally and derive the query scale from the
-    tensor's last dimension. Runtime masking keeps the teacher tensor shape, so
-    a reduced child key dimension needs an explicit output correction. The
-    recurrent state is independent of the query scale and must remain unchanged.
-    """
-    originals = {}
-
-    def scaled_kernel(kernel):
-        def wrapped(*args, **kwargs):
-            output = kernel(*args, **kwargs)
-            if torch.is_tensor(output):
-                return output * scale
-            if isinstance(output, tuple) and output and torch.is_tensor(output[0]):
-                return (output[0] * scale, *output[1:])
-            if isinstance(output, list) and output and torch.is_tensor(output[0]):
-                return [output[0] * scale, *output[1:]]
-            raise TypeError(
-                f"Unsupported GDN kernel output from {getattr(kernel, '__name__', type(kernel).__name__)}"
-            )
-
-        return wrapped
-
-    for name in ("chunk_gated_delta_rule", "recurrent_gated_delta_rule"):
-        kernel = getattr(mamba_module, name, None)
-        if callable(kernel):
-            originals[name] = kernel
-            setattr(mamba_module, name, scaled_kernel(kernel))
-    try:
-        yield
-    finally:
-        for name, kernel in originals.items():
-            setattr(mamba_module, name, kernel)
-
-
-def _mask_last_dim_forward_hook_scaled(mask: torch.Tensor, scale: float):
-    """Like ``_mask_last_dim_forward_hook`` but multiplies the output by ``scale``."""
-    def hook(module, args, output):
-        if not torch.is_tensor(output):
-            return output
-        return output * mask.to(dtype=output.dtype, device=output.device).reshape(
-            (1,) * (output.ndim - 1) + (-1,)
-        ) * scale
-
-    return hook
-
-
 def _scale_tensor_output_forward_hook(scale: float):
     """Scale a tensor module output without touching any model parameter."""
+
     def hook(module, args, output):
         if not torch.is_tensor(output):
             return output
@@ -1002,8 +918,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                 (
                     part
                     for part in self.model_parts
-                    if getattr(part, "_puzzletron_removed_lm_head_weight", None)
-                    is not None
+                    if getattr(part, "_puzzletron_removed_lm_head_weight", None) is not None
                 ),
                 None,
             )
@@ -1068,11 +983,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
             for name, module in part.named_modules():
                 leaf = name.rsplit(".", 1)[-1]
                 components = set(name.split("."))
-                if (
-                    leaf in final_norm_leafs
-                    and ".layers." not in name
-                    and "mtp" not in components
-                ):
+                if leaf in final_norm_leafs and ".layers." not in name and "mtp" not in components:
                     fallback.append((len(name.split(".")), name, module))
         return min(fallback, default=(None, None, None))[2]
 
@@ -1166,8 +1077,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
             hidden_mask = torch.ones_like(targets, dtype=torch.bool)
         masks = {"ce_mask": ce_mask, "kd_mask": ce_mask, "hidden_mask": hidden_mask}
         return {
-            name: value.to(device) if device is not None else value
-            for name, value in masks.items()
+            name: value.to(device) if device is not None else value for name, value in masks.items()
         }
 
     def current_metric_masks(self) -> dict[str, torch.Tensor | None]:
@@ -1178,8 +1088,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
         hidden = hidden[:valid_rows]
         targets = None if targets is None else targets[:valid_rows]
         masks = {
-            name: None if value is None else value[:valid_rows]
-            for name, value in masks.items()
+            name: None if value is None else value[:valid_rows] for name, value in masks.items()
         }
         return hidden, targets, masks
 
@@ -1206,7 +1115,9 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                 self._captured_hidden = None
                 self._forward_batch(batch)
                 if self.has_outputs:
-                    device = self._captured_hidden.device if self._captured_hidden is not None else None
+                    device = (
+                        self._captured_hidden.device if self._captured_hidden is not None else None
+                    )
                     targets = self._local_targets_for_batch(batch, device=device)
                     self._current_metric_masks = self._metric_masks_for_batch(
                         batch,
@@ -1363,7 +1274,8 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
     ):
         """Make one block behave as pruned for the enclosed forward(s), then restore.
 
-        On the owning PP stage: masks down_proj (FFN removal) / o_proj (attention removal) inputs.
+        On the owning PP stage: masks ``down_proj`` for FFN removal and either executes
+        compact gated-attention projections or masks ``o_proj`` for attention removal.
         No-op on other stages (the pruned
         activations still propagate through the pipeline to the scoring stage). Sorted-teacher
         targets are prefix slices, so removal masks the prefix.
@@ -1398,11 +1310,26 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
             target_num_kv=target_num_kv if o_proj_name is not None else None,
             head_dim=head_dim,
         )
+        compact_attention = resolve_compact_grouped_attention_target(
+            layer,
+            (
+                teacher_block_config.get_subblock("attention")
+                if teacher_block_config is not None
+                else None
+            ),
+            (
+                child_block_config.get_subblock("attention")
+                if child_block_config is not None
+                else None
+            ),
+        )
 
         handles = []
         try:
             for spec in specs:
                 if isinstance(spec, (FFNRemovalSpec, AttnRemovalSpec)):
+                    if isinstance(spec, AttnRemovalSpec) and compact_attention is not None:
+                        continue
                     module = self._maybe_submodule(layer, spec.module_name)
                     if module is not None:
                         handles.append(register_mask_hook(module, spec.keep_mask))
@@ -1452,8 +1379,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                     f"changed_parameters={changed_parameter_details} changed_hooks={changed_hooks}"
                 )
             print(
-                "[solution/automodel] "
-                f"{_rank_tag()} restore verified layer={layer_idx}",
+                f"[solution/automodel] {_rank_tag()} restore verified layer={layer_idx}",
                 flush=True,
             )
 
@@ -1480,7 +1406,11 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
         if descriptor is None:
             raise ValueError("hidden-width scoring requires an AnyModel descriptor")
         config = next(
-            (getattr(part, "config", None) for part in self.model_parts if getattr(part, "config", None)),
+            (
+                getattr(part, "config", None)
+                for part in self.model_parts
+                if getattr(part, "config", None)
+            ),
             None,
         )
         if config is None:
@@ -1535,8 +1465,8 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
 
         These hooks deliberately operate on generic subblock semantics rather
         than model-family names: MoE expert pruning is gate-prefix masking,
-        MoE channel/latent pruning masks intermediate activations, and Mamba
-        head/head-dim pruning masks the sorted inner state before ``out_proj``.
+        MoE channel/latent pruning masks intermediate activations, and native
+        fused Mamba or GDN candidates execute compact geometry when supported.
         """
 
         if teacher_block_config is None or child_block_config is None:
@@ -1584,6 +1514,16 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                 )
             handles.append(attention_module.register_forward_hook(_module_output_zero_hook))
 
+        compact_attention = resolve_compact_grouped_attention_target(
+            layer, teacher_attention, child_attention
+        )
+        if compact_attention is not None:
+            attention_module = compact_attention.pop("module")
+            contexts.append(
+                compact_grouped_attention_forward(attention_module, **compact_attention)
+            )
+            handles.append(attention_module.register_forward_hook(_module_output_identity_hook))
+
         teacher_mla = teacher_block_config.get_subblock("mla")
         child_mla = child_block_config.get_subblock("mla")
         if teacher_mla is not None and child_mla is not None:
@@ -1592,10 +1532,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                 raise RuntimeError(
                     f"MLA candidate requested but no self_attn module was found on {type(layer).__name__}"
                 )
-            if (
-                not getattr(teacher_mla, "no_op", False)
-                and getattr(child_mla, "no_op", False)
-            ):
+            if not getattr(teacher_mla, "no_op", False) and getattr(child_mla, "no_op", False):
                 handles.append(mla_module.register_forward_hook(_module_output_zero_hook))
             else:
                 original_heads = getattr(teacher_mla, "num_heads", None)
@@ -1628,11 +1565,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                 ):
                     original_rank = getattr(teacher_mla, rank_field, None)
                     target_rank = getattr(child_mla, rank_field, None)
-                    if (
-                        original_rank is None
-                        or target_rank is None
-                        or target_rank >= original_rank
-                    ):
+                    if original_rank is None or target_rank is None or target_rank >= original_rank:
                         continue
                     norm = getattr(mla_module, norm_name, None)
                     if norm is None:
@@ -1641,9 +1574,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                             f"{type(mla_module).__name__}"
                         )
                     handles.append(
-                        norm.register_forward_hook(
-                            _prefix_rms_norm_forward_hook(int(target_rank))
-                        )
+                        norm.register_forward_hook(_prefix_rms_norm_forward_hook(int(target_rank)))
                     )
 
         teacher_moe = teacher_block_config.get_subblock("moe")
@@ -1660,18 +1591,22 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                     moe_module = candidate
                     break
             if moe_module is not None:
-                if (
-                    not getattr(teacher_moe, "no_op", False)
-                    and getattr(child_moe, "no_op", False)
-                ):
+                if not getattr(teacher_moe, "no_op", False) and getattr(child_moe, "no_op", False):
                     handles.append(moe_module.register_forward_hook(_module_output_zero_hook))
                 else:
                     orig_experts = getattr(teacher_moe, "num_experts", None)
                     target_experts = getattr(child_moe, "num_experts", None)
                     target_top_k = getattr(child_moe, "top_k", None)
-                    if target_experts is not None and orig_experts is not None and target_experts >= orig_experts:
+                    if (
+                        target_experts is not None
+                        and orig_experts is not None
+                        and target_experts >= orig_experts
+                    ):
                         target_experts = None
-                    if target_top_k is not None and getattr(teacher_moe, "top_k", None) == target_top_k:
+                    if (
+                        target_top_k is not None
+                        and getattr(teacher_moe, "top_k", None) == target_top_k
+                    ):
                         target_top_k = None
                     if target_experts is not None or target_top_k is not None:
                         contexts.append(
@@ -1709,10 +1644,17 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                             for expert in experts:
                                 down = getattr(expert, "down_proj", None)
                                 if down is not None:
-                                    handles.append(down.register_forward_pre_hook(lambda module, args, km=keep_mask: (
-                                        args[0] * km.to(dtype=args[0].dtype, device=args[0].device).reshape((1,) * (args[0].ndim - 1) + (-1,)),
-                                        *args[1:],
-                                    )))
+                                    handles.append(
+                                        down.register_forward_pre_hook(
+                                            lambda module, args, km=keep_mask: (
+                                                args[0]
+                                                * km.to(
+                                                    dtype=args[0].dtype, device=args[0].device
+                                                ).reshape((1,) * (args[0].ndim - 1) + (-1,)),
+                                                *args[1:],
+                                            )
+                                        )
+                                    )
 
                     orig_shared = getattr(teacher_moe, "shared_expert_intermediate_size", None)
                     target_shared = getattr(child_moe, "shared_expert_intermediate_size", None)
@@ -1726,7 +1668,9 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                     ):
                         handles.append(
                             shared_down.register_forward_pre_hook(
-                                lambda module, args, km=_bool_prefix_mask(orig_shared, target_shared): (
+                                lambda module,
+                                args,
+                                km=_bool_prefix_mask(orig_shared, target_shared): (
                                     args[0]
                                     * km.to(dtype=args[0].dtype, device=args[0].device).reshape(
                                         (1,) * (args[0].ndim - 1) + (-1,)
@@ -1774,9 +1718,8 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                 or getattr(layer, "self_attn", None)
             )
             if mamba_module is not None:
-                if (
-                    not getattr(teacher_mamba, "no_op", False)
-                    and getattr(child_mamba, "no_op", False)
+                if not getattr(teacher_mamba, "no_op", False) and getattr(
+                    child_mamba, "no_op", False
                 ):
                     handles.append(mamba_module.register_forward_hook(_module_output_zero_hook))
                 else:
@@ -1790,107 +1733,56 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                     is_gdn = hasattr(mamba_module, "num_k_heads") and hasattr(
                         mamba_module, "in_proj_qkv"
                     )
-                    if is_gdn:
-                        orig_groups = int(getattr(teacher_mamba, "num_groups"))
-                        orig_key_dim = int(getattr(teacher_mamba, "state_dim"))
-                        target_groups = int(getattr(child_mamba, "num_groups") or orig_groups)
-                        target_key_dim = int(getattr(child_mamba, "state_dim") or orig_key_dim)
-                        qkv_keep, value_keep = _gdn_prefix_masks(
-                            orig_groups=orig_groups,
-                            orig_heads=int(orig_heads),
-                            orig_key_dim=orig_key_dim,
-                            orig_value_dim=int(orig_head_dim),
-                            target_groups=target_groups,
-                            target_heads=int(target_heads),
-                            target_key_dim=target_key_dim,
-                            target_value_dim=int(target_head_dim),
-                        )
-                        if not bool(qkv_keep.all()):
-                            handles.append(
-                                mamba_module.in_proj_qkv.register_forward_hook(
-                                    _mask_last_dim_forward_hook(qkv_keep)
-                                )
-                            )
-                        if target_key_dim < orig_key_dim:
-                            contexts.append(
-                                _scale_gdn_kernel_query_output(
-                                    mamba_module,
-                                    (float(orig_key_dim) / float(target_key_dim)) ** 0.5,
-                                )
-                            )
-                        if not bool(value_keep.all()):
-                            handles.append(
-                                mamba_module.in_proj_z.register_forward_hook(
-                                    _mask_last_dim_forward_hook(value_keep)
-                                )
-                            )
-                            handles.append(
-                                mamba_module.out_proj.register_forward_pre_hook(
-                                    lambda module, args, km=value_keep: (
-                                        args[0]
-                                        * km.to(dtype=args[0].dtype, device=args[0].device).reshape(
-                                            (1,) * (args[0].ndim - 1) + (-1,)
-                                        ),
-                                        *args[1:],
-                                    )
-                                )
-                            )
-                        # in_proj_a / in_proj_b output one scalar per value-head;
-                        # derive the head-level keep mask from the flat value mask.
-                        _head_keep = value_keep.reshape(
-                            int(orig_heads), int(orig_head_dim)
-                        ).any(dim=-1)
-                        if not bool(_head_keep.all()):
-                            for _pn in ("in_proj_a", "in_proj_b"):
-                                _pr = getattr(mamba_module, _pn, None)
-                                if _pr is not None:
-                                    handles.append(
-                                        _pr.register_forward_hook(
-                                            _mask_last_dim_forward_hook(_head_keep)
-                                        )
-                                    )
-                        # norm: compensate energy when the value head-dim is reduced so
-                        # the normalisation sees the same per-channel variance as a
-                        # physically smaller model (matches _apply_gdn_prefix_hooks).
-                        if int(target_head_dim) < int(orig_head_dim):
-                            _norm = getattr(mamba_module, "norm", None)
-                            if _norm is not None:
-                                _vd_mask = (
-                                    torch.arange(int(orig_head_dim)) < int(target_head_dim)
-                                )
-                                _scale_in = (
-                                    float(orig_head_dim) / float(target_head_dim)
-                                ) ** 0.5
-                                _scale_out = (
-                                    float(target_head_dim) / float(orig_head_dim)
-                                ) ** 0.5
-                                handles.append(
-                                    _norm.register_forward_pre_hook(
-                                        _gdn_norm_dim_prehook(_vd_mask, _scale_in)
-                                    )
-                                )
-                                handles.append(
-                                    _norm.register_forward_hook(
-                                        _mask_last_dim_forward_hook_scaled(
-                                            _vd_mask, _scale_out
-                                        )
-                                    )
-                                )
-                    if not is_gdn and all(
+                    if is_gdn and all(
                         value is not None
-                        for value in (
-                            orig_heads,
-                            orig_head_dim,
-                            orig_groups,
-                            orig_state_dim,
-                            target_heads,
-                            target_head_dim,
-                            target_state_dim,
+                        for value in (orig_heads, orig_head_dim, orig_groups, orig_state_dim)
+                    ):
+                        teacher_shape = GDNShape(
+                            num_key_heads=int(orig_groups),
+                            num_value_heads=int(orig_heads),
+                            key_head_dim=int(orig_state_dim),
+                            value_head_dim=int(orig_head_dim),
                         )
-                    ) and (
-                        target_heads < orig_heads
-                        or target_head_dim < orig_head_dim
-                        or target_state_dim < orig_state_dim
+                        target_shape = GDNShape(
+                            num_key_heads=int(
+                                getattr(child_mamba, "num_groups", None) or orig_groups
+                            ),
+                            num_value_heads=int(target_heads),
+                            key_head_dim=int(
+                                getattr(child_mamba, "state_dim", None) or orig_state_dim
+                            ),
+                            value_head_dim=int(target_head_dim),
+                        )
+                        if target_shape != teacher_shape:
+                            contexts.append(
+                                compact_gated_delta_net_forward(
+                                    mamba_module,
+                                    teacher_shape=teacher_shape,
+                                    target_shape=target_shape,
+                                )
+                            )
+                            handles.append(
+                                mamba_module.register_forward_hook(_module_output_identity_hook)
+                            )
+                    if (
+                        not is_gdn
+                        and all(
+                            value is not None
+                            for value in (
+                                orig_heads,
+                                orig_head_dim,
+                                orig_groups,
+                                orig_state_dim,
+                                target_heads,
+                                target_head_dim,
+                                target_state_dim,
+                            )
+                        )
+                        and (
+                            target_heads < orig_heads
+                            or target_head_dim < orig_head_dim
+                            or target_state_dim < orig_state_dim
+                        )
                     ):
                         masks = _mamba_prefix_masks(
                             mamba_module,
@@ -1966,8 +1858,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                                     )
                                 )
                             can_scale_output = (
-                                out_proj is not None
-                                and getattr(out_proj, "bias", None) is None
+                                out_proj is not None and getattr(out_proj, "bias", None) is None
                             )
                             if norm_scale != 1.0 and can_scale_output:
                                 handles.append(
@@ -1993,9 +1884,7 @@ class ReplaceBlockScoringRecipe(ActivationScoringRecipe):
                                 getattr(conv1d, "bias", None) if conv1d is not None else None
                             )
                             if conv_bias is not None and not bool(conv_keep.all()):
-                                contexts.append(
-                                    _temporary_parameter_mask(conv_bias, conv_keep)
-                                )
+                                contexts.append(_temporary_parameter_mask(conv_bias, conv_keep))
 
         return handles, contexts
 

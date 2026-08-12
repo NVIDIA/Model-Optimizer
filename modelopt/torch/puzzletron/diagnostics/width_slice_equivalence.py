@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Content-addressed physical-versus-runtime width-slice equivalence."""
 
@@ -25,6 +37,11 @@ from ..candidates import _AXIS_TO_TARGET, _apply_axis_edits, _axis_base_value
 from ..dataset import DataLayout, PuzzletronBatch, batch_from_automodel
 from ..identity import canonicalize, stable_hash
 from ..plugins.automodel.batch_adapter import canonicalize_position_ids, validated_forward_kwargs
+from ..pruning.compact_runtime import (
+    compact_gated_delta_net_forward,
+    compact_grouped_attention_forward,
+    resolve_compact_grouped_attention_target,
+)
 from ..pruning.materialize import materialize_hidden_width_checkpoint, materialize_model_from_sorted
 from ..pruning.runtime_hidden_width import hidden_width_layer_context
 from ..pruning.runtime_ple import ple_layer_context
@@ -198,6 +215,10 @@ def _implementation_provenance(axis: Any, descriptor: Any) -> dict[str, Any]:
         _prune_target,
         recipe.prune_block_context,
         recipe.architecture_context,
+        recipe._typed_subblock_runtime_hooks,
+        resolve_compact_grouped_attention_target,
+        compact_grouped_attention_forward,
+        compact_gated_delta_net_forward,
         hidden_width_layer_context,
         ple_layer_context,
         _runtime_context,
@@ -815,6 +836,24 @@ def _changed_shapes(
     }
 
 
+def _gdn_projection_width(block_config: BlockConfig | None) -> int | None:
+    if block_config is None:
+        return None
+    mamba = block_config.get_subblock("mamba")
+    if mamba is None:
+        return None
+    values = (
+        getattr(mamba, "num_groups", None),
+        getattr(mamba, "state_dim", None),
+        getattr(mamba, "num_heads", None),
+        getattr(mamba, "head_dim", None),
+    )
+    if any(value is None for value in values):
+        return None
+    num_groups, state_dim, num_heads, head_dim = (int(value) for value in values)
+    return 2 * num_groups * state_dim + num_heads * head_dim
+
+
 def _axis_specific_changed_shapes(
     before: Mapping[str, list[int]],
     after: Mapping[str, list[int]],
@@ -823,7 +862,7 @@ def _axis_specific_changed_shapes(
     case: WidthSliceCase,
     num_layers: int,
 ) -> dict[str, dict[str, list[int] | None]]:
-    """Return only descriptor-owned tensor changes with the requested axis ratio."""
+    """Return descriptor-owned changes with the requested ratio or coupled geometry."""
 
     changed = _changed_shapes(before, after)
     pattern = None
@@ -832,22 +871,39 @@ def _axis_specific_changed_shapes(
         pattern = descriptor.layer_name_predicates(num_layers).get(
             f"block_{case.layers[0]}_{category}"
         )
+    gdn_projection_widths = (
+        _gdn_projection_width(case.source_block_config),
+        _gdn_projection_width(case.target_block_config),
+    )
 
-    def has_target_ratio(item: Mapping[str, list[int] | None]) -> bool:
+    def has_expected_geometry(item: Mapping[str, list[int] | None]) -> bool:
         source_shape = item.get("before")
         target_shape = item.get("after")
         if source_shape is None or target_shape is None:
             return True
-        return any(
+        if any(
             int(source_dim) * case.target_value == int(target_dim) * case.source_value
             for source_dim, target_dim in zip(source_shape, target_shape)
             if int(source_dim) > 0 and int(target_dim) > 0 and source_dim != target_dim
+        ):
+            return True
+        source_projection, target_projection = gdn_projection_widths
+        return (
+            case.axis_id in {"gdn_key_head_dim", "gdn_value_head_dim", "gdn_value_heads_per_group"}
+            and source_projection is not None
+            and target_projection is not None
+            and any(
+                source_dim != target_dim
+                and int(source_dim) == source_projection
+                and int(target_dim) == target_projection
+                for source_dim, target_dim in zip(source_shape, target_shape)
+            )
         )
 
     return {
         key: value
         for key, value in changed.items()
-        if (pattern is None or pattern.fullmatch(key)) and has_target_ratio(value)
+        if (pattern is None or pattern.fullmatch(key)) and has_expected_geometry(value)
     }
 
 

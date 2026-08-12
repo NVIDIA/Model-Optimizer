@@ -59,6 +59,7 @@ from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import (
     _temporary_parameter_mask,
 )
 from modelopt.torch.puzzletron.plugins.automodel.teacher_cache import TeacherTargetCache
+from modelopt.torch.puzzletron.pruning.gated_delta_net import GDNShape
 from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
 from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_selections
 
@@ -73,6 +74,108 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
 
     assert solutions == []
     assert pending_ids == []
+
+
+def test_native_automodel_gdn_rejects_compact_runtime_candidate():
+    # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
+    pytest.importorskip("nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn")
+    from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
+    from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+
+    config = Qwen3_5MoeTextConfig(
+        vocab_size=32,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        moe_intermediate_size=32,
+        shared_expert_intermediate_size=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=32,
+        layer_types=["linear_attention"],
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_conv_kernel_dim=4,
+    )
+    gdn = CPAwareGatedDeltaNet(config, layer_idx=0)
+    shape = GDNShape.from_module(gdn)
+    layer = SimpleNamespace(linear_attn=gdn)
+    teacher = BlockConfig(
+        subblock_configs=(
+            MambaConfig(
+                num_heads=shape.num_value_heads,
+                head_dim=shape.value_head_dim,
+                num_groups=shape.num_key_heads,
+                state_dim=shape.key_head_dim,
+            ),
+        )
+    )
+    child = BlockConfig(
+        subblock_configs=(
+            MambaConfig(
+                num_heads=shape.num_value_heads,
+                head_dim=shape.value_head_dim,
+                num_groups=shape.num_key_heads // 2,
+                state_dim=shape.key_head_dim,
+            ),
+        )
+    )
+    original_forward = gdn.forward.__func__
+    original_state = set(vars(gdn))
+    original_forward_hooks = dict(gdn._forward_hooks)
+
+    with pytest.raises(RuntimeError, match="refusing to score reduced geometry"):
+        apply_runtime_candidate(layer, teacher, child)
+
+    assert gdn.forward.__func__ is original_forward
+    assert set(vars(gdn)) == original_state
+    assert dict(gdn._forward_hooks) == original_forward_hooks
+
+
+@pytest.mark.parametrize(
+    ("teacher_mamba", "child_mamba"),
+    [
+        pytest.param(
+            SimpleNamespace(no_op=False, num_heads=4, head_dim=8, state_dim=8),
+            SimpleNamespace(no_op=False, num_heads=4, head_dim=8, num_groups=2, state_dim=8),
+            id="missing-teacher-groups",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                no_op=False,
+                num_heads=4,
+                head_dim=8,
+                num_groups=2,
+                state_dim=8,
+            ),
+            SimpleNamespace(no_op=False, num_heads=4, head_dim=8),
+            id="missing-child-fields",
+        ),
+    ],
+)
+def test_gdn_runtime_hooks_skip_incomplete_shape_metadata(teacher_mamba, child_mamba):
+    def block_config(mamba):
+        return SimpleNamespace(
+            get_subblock=lambda kind: mamba if kind == "mamba" else None,
+        )
+
+    layer = SimpleNamespace(
+        linear_attn=SimpleNamespace(num_k_heads=2, in_proj_qkv=object()),
+    )
+
+    handles, contexts = ReplaceBlockScoringRecipe._typed_subblock_runtime_hooks(
+        layer,
+        teacher_block_config=block_config(teacher_mamba),
+        child_block_config=block_config(child_mamba),
+    )
+
+    assert handles == []
+    assert contexts == []
 
 
 def test_parent_sweep_reports_rank_local_exception_before_collective(capsys):
@@ -97,10 +200,7 @@ def test_parent_sweep_reports_rank_local_exception_before_collective(capsys):
 def test_parent_sweep_resume_recaches_original_teacher(
     role, pending_ids, needs_parent_evaluation, expected
 ):
-    assert (
-        _can_skip_parent_model_load(role, pending_ids, needs_parent_evaluation)
-        is expected
-    )
+    assert _can_skip_parent_model_load(role, pending_ids, needs_parent_evaluation) is expected
 
 
 def test_distributed_config_load_precaches_remote_code_before_import(monkeypatch, tmp_path):
@@ -160,8 +260,12 @@ def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
     from modelopt.torch.puzzletron.distributed_eval.schema import EvaluationRequest
 
     teacher_blocks = [
-        BlockConfig(subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)),
-        BlockConfig(subblock_configs=(MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),)),
+        BlockConfig(
+            subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
+        ),
+        BlockConfig(
+            subblock_configs=(MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),)
+        ),
     ]
     children = [
         BlockConfig(subblock_configs=(MoEConfig(no_op=True),)),
@@ -276,10 +380,7 @@ def test_block_checkpoint_overlay_merges_split_hf_experts_and_restores(tmp_path)
 
     with recipe.block_checkpoint_overlay_context(checkpoint, 0):
         expected_up = torch.stack(
-            [
-                tensors[f"backbone.layers.0.mixer.experts.{idx}.up_proj.weight"].T
-                for idx in range(2)
-            ]
+            [tensors[f"backbone.layers.0.mixer.experts.{idx}.up_proj.weight"].T for idx in range(2)]
         )
         expected_down = torch.stack(
             [
@@ -409,12 +510,12 @@ def test_parent_equivalence_still_gates_hidden_metrics_without_basis_permutation
 
     assert summary["passed"] is False
     assert summary["findings"]
-    assert any("cosine_embedding_loss_hidden_states" in item["message"] for item in summary["findings"])
+    assert any(
+        "cosine_embedding_loss_hidden_states" in item["message"] for item in summary["findings"]
+    )
 
 
-def test_unloadable_realization_is_quarantined_after_first_load_failure(
-    tmp_path, monkeypatch
-):
+def test_unloadable_realization_is_quarantined_after_first_load_failure(tmp_path, monkeypatch):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     (checkpoint / "config.json").write_text("{}\n")
@@ -501,9 +602,7 @@ def test_native_sigmoid_gate_groups_the_compact_expert_prefix():
         target_top_k=2,
     )
 
-    _, indices, _ = gate.forward(
-        torch.tensor([[-10.0, -10.0, 5.0, 6.0, 5.0, -10.0, -10.0, -10.0]])
-    )
+    _, indices, _ = gate.forward(torch.tensor([[-10.0, -10.0, 5.0, 6.0, 5.0, -10.0, -10.0, -10.0]]))
 
     assert set(indices.flatten().tolist()) == {3, 4}
 
@@ -583,20 +682,14 @@ def test_solution_prune_target_uses_prefix_after_parent_experts_are_sorted():
 def test_solution_prune_targets_supports_full_architecture_and_skips_teacher_layers():
     teacher_blocks = [
         BlockConfig(
-            subblock_configs=(
-                MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),
-            )
+            subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
         ),
         BlockConfig(
-            subblock_configs=(
-                MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),
-            )
+            subblock_configs=(MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),)
         ),
     ]
     changed = BlockConfig(
-        subblock_configs=(
-            MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),
-        )
+        subblock_configs=(MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),)
     )
     solution = {
         "chosen_replacements": [
@@ -671,9 +764,7 @@ def test_diagnostic_annotation_records_ranked_expert_ids(tmp_path):
     child = BlockConfig(
         subblock_configs=(MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),)
     )
-    (tmp_path / "sorted_permutations.json").write_text(
-        json.dumps({"moe.experts.0": [3, 1, 0, 2]})
-    )
+    (tmp_path / "sorted_permutations.json").write_text(json.dumps({"moe.experts.0": [3, 1, 0, 2]}))
     diagnostic = {
         "axis": "moe_experts",
         "field": "num_experts",
@@ -721,9 +812,7 @@ def test_score_batch_compares_pruned_student_logits_with_full_width_teacher():
     student_hidden = torch.tensor([[[1.0, 2.0]]])
     student_head = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]])
     teacher_hidden = torch.tensor([[[1.0, 2.0, 3.0]]])
-    teacher_head = torch.tensor(
-        [[1.0, 0.0, 1.0], [0.0, 1.0, -1.0], [1.0, -1.0, 0.5]]
-    )
+    teacher_head = torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, -1.0], [1.0, -1.0, 0.5]])
     hidden_metric_teacher = teacher_hidden[..., :2]
     targets = torch.tensor([[0]])
 
@@ -878,7 +967,9 @@ class _RMSNorm(nn.Module):
         self.variance_epsilon = 1e-6
 
     def forward(self, x):
-        return x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon) * self.weight
+        return (
+            x * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon) * self.weight
+        )
 
 
 class _MLAProjection(nn.Module):
@@ -897,7 +988,9 @@ class _MLAProjection(nn.Module):
     def forward(self, x):
         q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
         compressed = self.kv_a_proj_with_mqa(x)
-        kv, rope = compressed.split((self.kv_lora_rank, compressed.shape[-1] - self.kv_lora_rank), -1)
+        kv, rope = compressed.split(
+            (self.kv_lora_rank, compressed.shape[-1] - self.kv_lora_rank), -1
+        )
         kv = self.kv_b_proj(self.kv_a_layernorm(kv))
         return q, kv, rope
 
@@ -912,12 +1005,8 @@ def test_runtime_mla_prefix_slice_matches_physical_projection_and_restores() -> 
     torch.manual_seed(9)
     layer = _MLALayer()
     x = torch.randn(5, 6, dtype=torch.float64)
-    teacher = BlockConfig(
-        subblock_configs=(MLAConfig(q_lora_rank=4, kv_lora_rank=3),)
-    )
-    child = BlockConfig(
-        subblock_configs=(MLAConfig(q_lora_rank=2, kv_lora_rank=1),)
-    )
+    teacher = BlockConfig(subblock_configs=(MLAConfig(q_lora_rank=4, kv_lora_rank=3),))
+    child = BlockConfig(subblock_configs=(MLAConfig(q_lora_rank=2, kv_lora_rank=1),))
     original = layer.self_attn(x)
 
     handle = apply_runtime_candidate(layer, teacher, child)
@@ -964,12 +1053,8 @@ def test_runtime_mla_head_slice_masks_sorted_o_proj_prefix_and_restores() -> Non
     torch.manual_seed(10)
     layer = _MLAHeadsLayer()
     head_outputs = torch.randn(7, 12, dtype=torch.float64)
-    teacher = BlockConfig(
-        subblock_configs=(MLAConfig(num_heads=4, q_lora_rank=8, kv_lora_rank=6),)
-    )
-    child = BlockConfig(
-        subblock_configs=(MLAConfig(num_heads=2, q_lora_rank=8, kv_lora_rank=6),)
-    )
+    teacher = BlockConfig(subblock_configs=(MLAConfig(num_heads=4, q_lora_rank=8, kv_lora_rank=6),))
+    child = BlockConfig(subblock_configs=(MLAConfig(num_heads=2, q_lora_rank=8, kv_lora_rank=6),))
     original = layer.self_attn(head_outputs)
 
     handle = apply_runtime_candidate(layer, teacher, child)
@@ -1076,7 +1161,7 @@ class _NativeFusedMambaLayer(nn.Module):
 
 @pytest.mark.parametrize(
     ("target_heads", "target_head_dim", "expected_projection", "expected_conv"),
-    ((2, 2, 14, 8), (4, 1, 16, 8)),
+    [(2, 2, 14, 8), (4, 1, 16, 8)],
 )
 def test_runtime_mamba_native_fused_call_uses_physically_compact_geometry(
     monkeypatch: pytest.MonkeyPatch,
@@ -1092,9 +1177,9 @@ def test_runtime_mamba_native_fused_call_uses_physically_compact_geometry(
         conv_weight,
         conv_bias,
         dt_bias,
-        A,
+        A,  # noqa: N803 - external fused-kernel parameter name
         *,
-        D,
+        D,  # noqa: N803 - external fused-kernel parameter name
         rmsnorm_weight,
         rmsnorm_eps,
         outproj_weight,
@@ -1119,9 +1204,7 @@ def test_runtime_mamba_native_fused_call_uses_physically_compact_geometry(
         gate = projected[..., :inner]
         value = projected[..., inner : 2 * inner]
         grouped = value.reshape(*value.shape[:-1], ngroups, -1)
-        grouped = grouped * torch.rsqrt(
-            grouped.square().mean(dim=-1, keepdim=True) + rmsnorm_eps
-        )
+        grouped = grouped * torch.rsqrt(grouped.square().mean(dim=-1, keepdim=True) + rmsnorm_eps)
         normalized = grouped.reshape_as(value) * rmsnorm_weight
         return torch.nn.functional.linear(
             normalized * torch.nn.functional.silu(gate),
@@ -1172,10 +1255,10 @@ def test_runtime_mamba_native_fused_call_uses_physically_compact_geometry(
 
 @pytest.mark.parametrize(
     ("target_heads", "target_head_dim", "keep_indices"),
-    (
+    [
         (2, 2, (0, 1, 4, 5)),
         (4, 1, (0, 2, 4, 6)),
-    ),
+    ],
 )
 def test_runtime_mamba_head_slice_matches_physically_compact_group_norm_and_restores(
     target_heads: int,
@@ -1186,9 +1269,7 @@ def test_runtime_mamba_head_slice_matches_physically_compact_group_norm_and_rest
     layer = _MambaLayer()
     x = torch.randn(7, 3, dtype=torch.float64)
     teacher = BlockConfig(
-        subblock_configs=(
-            MambaConfig(num_heads=4, head_dim=2, num_groups=2, state_dim=1),
-        )
+        subblock_configs=(MambaConfig(num_heads=4, head_dim=2, num_groups=2, state_dim=1),)
     )
     child = BlockConfig(
         subblock_configs=(
@@ -1278,12 +1359,8 @@ def test_runtime_attention_window_change_is_exact_and_reversible(target, expecte
             self.self_attn = Attention()
 
     layer = Layer()
-    teacher = BlockConfig(
-        subblock_configs=(AttentionConfig(sliding_window_size=512),)
-    )
-    child = BlockConfig(
-        subblock_configs=(AttentionConfig(sliding_window_size=target),)
-    )
+    teacher = BlockConfig(subblock_configs=(AttentionConfig(sliding_window_size=512),))
+    child = BlockConfig(subblock_configs=(AttentionConfig(sliding_window_size=target),))
 
     handle = apply_runtime_candidate(layer, teacher, child)
     assert layer.self_attn.sliding_window == expected

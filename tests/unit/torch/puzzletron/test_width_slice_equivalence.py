@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for width-slice equivalence evidence and stage integration."""
 
@@ -19,7 +31,12 @@ from transformers import LlamaForCausalLM
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
     LlamaModelDescriptor,
 )
-from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
+from modelopt.torch.puzzletron.block_config import (
+    AttentionConfig,
+    BlockConfig,
+    FFNConfig,
+    MambaConfig,
+)
 from modelopt.torch.puzzletron.dataset import DataLayout, PuzzletronBatch, batch_from_automodel
 from modelopt.torch.puzzletron.diagnostics import width_slice_equivalence as width_slice_module
 from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence import (
@@ -294,7 +311,7 @@ def test_tiny_qwen_checkpoint_executes_inherited_materialize_and_runtime_hooks(t
         descriptor=FFNOnlyQwenDescriptor,
         sorted_checkpoint_dir=checkpoint,
         batch=batch,
-        artifact_dir=tmp_path / "qwen-artifacts",
+        artifact_dir=tmp_path / "qwen-ffn-artifacts",
         tolerances={
             "loss_atol": 2.0e-3,
             "loss_rtol": 2.0e-3,
@@ -305,6 +322,70 @@ def test_tiny_qwen_checkpoint_executes_inherited_materialize_and_runtime_hooks(t
 
     assert summary["passed"] is True
     assert len(summary["cases"]) == 2
+    assert all(case["target_applied"] for case in summary["cases"])
+    assert all(case["runtime_hook_executions"] > 0 for case in summary["cases"])
+
+
+def test_tiny_qwen_checkpoint_executes_compact_attention_and_gdn_axes(tmp_path: Path):
+    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_converter import Qwen3P5Converter
+    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+        Qwen3P5TextModelDescriptor,
+    )
+
+    checkpoint = create_tiny_qwen3_5_dir(
+        tmp_path,
+        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
+    )
+    config = load_model_config(checkpoint)
+    Qwen3P5TextModelDescriptor.set_block_configs(
+        config,
+        Qwen3P5Converter.create_block_configs_from_main_config(config),
+    )
+    config.block_configs = [block.to_dict() for block in config.block_configs]
+    config.save_pretrained(checkpoint)
+
+    expected_axes = {
+        "gdn_key_groups",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+        "gdn_value_heads_per_group",
+        "kv_groups",
+        "query_heads",
+    }
+
+    class CompactRuntimeQwenDescriptor(Qwen3P5TextModelDescriptor):
+        @classmethod
+        def puzzletron_capabilities(cls, loaded_config):
+            capabilities = super().puzzletron_capabilities(loaded_config)
+            return replace(
+                capabilities,
+                descriptor_name="qwen-compact-runtime-equivalence-test",
+                axes={axis_id: capabilities.axes[axis_id] for axis_id in expected_axes},
+            )
+
+    batch = normalize_width_slice_batch(
+        {
+            "input_ids": torch.tensor([[1, 2, 3, 4]]),
+            "labels": torch.tensor([[1, 2, 3, 4]]),
+            "attention_mask": torch.ones(1, 4, dtype=torch.long),
+        },
+        descriptor=CompactRuntimeQwenDescriptor,
+        checkpoint_config=config,
+        layout=DataLayout.FIXED,
+        sample_ids=("sample-0",),
+        source_metadata={"dataset": "fixture", "revision": "v1"},
+    )
+
+    summary = evaluate_width_slice_equivalence(
+        descriptor=CompactRuntimeQwenDescriptor,
+        sorted_checkpoint_dir=checkpoint,
+        batch=batch,
+        artifact_dir=tmp_path / "qwen-compact-runtime-artifacts",
+    )
+
+    assert summary["passed"] is True
+    assert {case["axis_id"] for case in summary["cases"]} == expected_axes
     assert all(case["target_applied"] for case in summary["cases"])
     assert all(case["runtime_hook_executions"] > 0 for case in summary["cases"])
 
@@ -678,6 +759,73 @@ def test_axis_structure_rejects_unrelated_tensor_shape_change():
     )
 
     assert evidence == {}
+
+
+@pytest.mark.parametrize(
+    ("axis_id", "target_mamba", "source_value", "target_value"),
+    [
+        (
+            "gdn_key_head_dim",
+            MambaConfig(num_heads=4, head_dim=8, num_groups=2, state_dim=4),
+            8,
+            4,
+        ),
+        (
+            "gdn_value_head_dim",
+            MambaConfig(num_heads=4, head_dim=4, num_groups=2, state_dim=8),
+            8,
+            4,
+        ),
+        (
+            "gdn_value_heads_per_group",
+            MambaConfig(num_heads=2, head_dim=8, num_groups=2, state_dim=8),
+            2,
+            1,
+        ),
+    ],
+)
+def test_axis_structure_accepts_coupled_gdn_projection_width(
+    axis_id,
+    target_mamba,
+    source_value,
+    target_value,
+):
+    source = BlockConfig(
+        subblock_configs=(MambaConfig(num_heads=4, head_dim=8, num_groups=2, state_dim=8),)
+    )
+    target = BlockConfig(subblock_configs=(target_mamba,))
+    case = WidthSliceCase(
+        case_identity="gdn-shape",
+        axis_id=axis_id,
+        axis_class="block::hook",
+        scope="global",
+        layers=(0,),
+        source_value=source_value,
+        target_value=target_value,
+        subblock_kind="mamba",
+        field="shape",
+        source_block_config=source,
+        target_block_config=target,
+        expected_structure={},
+        implementation_provenance={},
+    )
+    before = {"model.layers.0.linear_attn.in_proj_qkv.weight": [64, 32]}
+    after = {"model.layers.0.linear_attn.in_proj_qkv.weight": [48, 32]}
+
+    evidence = width_slice_module._axis_specific_changed_shapes(
+        before,
+        after,
+        descriptor=LlamaModelDescriptor,
+        case=case,
+        num_layers=1,
+    )
+
+    assert evidence == {
+        "model.layers.0.linear_attn.in_proj_qkv.weight": {
+            "before": [64, 32],
+            "after": [48, 32],
+        }
+    }
 
 
 def test_artifact_validation_detects_deleted_case(tmp_path: Path):
