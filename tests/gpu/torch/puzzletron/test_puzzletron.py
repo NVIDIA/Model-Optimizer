@@ -410,7 +410,10 @@ def test_tiny_qwen_campaign_uses_current_public_route(
         local_files_only=True,
     ).cuda()
     with torch.no_grad():
-        logits = model(torch.tensor([[1, 2, 3, 4]], device="cuda")).logits
+        logits = model(
+            torch.tensor([[1, 2, 3, 4]], device="cuda"),
+            use_cache=False,
+        ).logits
     assert torch.isfinite(logits).all()
 
     durable_paths = [*manifests, *pass_manifests]
