@@ -1162,7 +1162,9 @@ def quantize_main(
             # Calibration/sparsification will actually take much more memory than regular inference
             # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
             # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
-            sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
+            sample_memory_usage_ratio = (
+                2 if "awq" in args.qformat or "smoothquant" in args.qformat else 1.1
+            )
             # Whisper model expects mel-spectrogram input features of length 3000
             # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
             # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
@@ -1212,9 +1214,9 @@ def quantize_main(
     )
 
     if aq_config is not None:
-        # AutoQuantize (recipe or the deprecated --auto_quantize_* CLI, converted on the fly). For
-        # VL models the search walks the OUTER CausalLM (which carries lm_head and the LM-head
-        # forward path); architecture-specific exclusions come from aq_config.disabled_layers.
+        # AutoQuantize (recipe-driven). For VL models the search walks the OUTER CausalLM (which
+        # carries lm_head and the LM-head forward path); architecture-specific exclusions come
+        # from aq_config.disabled_layers.
         auto_quantize(
             args,
             full_model,

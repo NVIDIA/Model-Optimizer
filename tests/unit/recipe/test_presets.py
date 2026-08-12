@@ -15,16 +15,18 @@
 """Smoke tests for ``modelopt.recipe.presets`` preset discovery.
 
 Guards the eager import-time load shared by the PTQ example scripts: every preset
-under the model/KV dirs must load into a usable ``quant_cfg`` dict, deprecation
-aliases must resolve to their canonical preset, and the KV ``none`` sentinel must
-not collide with a discovered preset. A single malformed preset YAML would
-otherwise break ``import modelopt.recipe.presets`` (and every PTQ example).
+under the model/KV dirs must load into a usable ``quant_cfg`` dict, and the KV
+``none`` sentinel must not collide with a discovered preset. A single malformed
+preset YAML would otherwise break ``import modelopt.recipe.presets`` (and every
+PTQ example).
 """
 
 import pytest
 
-from modelopt.recipe import presets
+import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe, presets
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT
+from modelopt.torch.quantization.config import QuantizeConfig
 
 
 def _yaml_basenames(subdir: str) -> set[str]:
@@ -74,3 +76,18 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
         "*visual*",
         "*vision_tower*",
     } <= disabled_quantizers
+
+
+@pytest.mark.parametrize(
+    ("recipe_name", "cfg_name"),
+    [
+        ("general/ptq/mxfp4_mlp_weight_only", "MXFP4_MLP_WEIGHT_ONLY_CFG"),
+        ("general/ptq/nvfp4_mlp_weight_only", "NVFP4_MLP_WEIGHT_ONLY_CFG"),
+    ],
+)
+def test_mlp_weight_only_recipe_matches_its_mtq_cfg(recipe_name, cfg_name):
+    # examples/gpt-oss migrated from --quant_cfg <CFG> to --recipe <recipe>; pin the
+    # equality so the recipe and the mtq constant cannot drift apart silently.
+    recipe_cfg = load_recipe(recipe_name).quantize.model_dump(exclude_unset=True)
+    mtq_cfg = QuantizeConfig(**getattr(mtq, cfg_name)).model_dump(exclude_unset=True)
+    assert recipe_cfg == mtq_cfg

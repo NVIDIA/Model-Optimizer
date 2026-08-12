@@ -817,7 +817,7 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     @field_validator("layerwise", mode="before")
     @classmethod
     def _coerce_layerwise(cls, value):
-        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        """Coerce ``layerwise=None``/``LayerwiseConfig`` to dict form."""
         return _coerce_layerwise_input(value)
 
     @model_validator(mode="after")
