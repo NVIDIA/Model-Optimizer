@@ -45,6 +45,17 @@ from ..token_caches import resolve_tokenize_caches
 from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 
+if __package__.startswith("puzzletron_orchestrator."):
+    from puzzletron_orchestrator.execution_record import (
+        stage_manifest_uses_execution_record,
+        validate_stage_execution_record,
+    )
+else:
+    from ...execution_record import (
+        stage_manifest_uses_execution_record,
+        validate_stage_execution_record,
+    )
+
 __all__ = [
     "StageCompatAdapter",
     "post_mip_summary_is_current",
@@ -721,6 +732,14 @@ def stage_is_complete(config: Mapping[str, Any], stage_id: str) -> bool:
     manifest = _read_mapping(puzzle_dir / "manifests" / f"{stage_id}.json")
     if manifest is None:
         return False
+    if stage_manifest_uses_execution_record(manifest):
+        try:
+            validate_stage_execution_record(
+                puzzle_dir / "manifests" / f"{stage_id}.json",
+                expected_stage=stage_id,
+            )
+        except ValueError:
+            return False
     state = stage_terminal_state(manifest, expected_stage=stage_id)
     if state is None or not state.allows_completion(stage_id, config):
         return False

@@ -85,7 +85,10 @@ def _register_faulthandler() -> None:
         )
         stack_path.parent.mkdir(parents=True, exist_ok=True)
         stack_log = stack_path.open("a")
-    faulthandler.register(signal.SIGUSR1, file=stack_log, all_threads=True)
+    if stack_log is None:
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    else:
+        faulthandler.register(signal.SIGUSR1, file=stack_log, all_threads=True)
 
 
 _register_faulthandler()
@@ -259,6 +262,7 @@ def _completion_is_valid(config: dict, config_path: str | Path, stage: str) -> b
         # Validation-only: raises if the referenced execution record was tampered with.
         _stage_execution_record_patterns(config, stage)
         return True
+    _stage_execution_record_patterns(config, stage)
     if not artifacts_are_complete(config, stage):
         return False
     kwargs = _resume_kwargs(config, config_path, stage)
@@ -273,6 +277,7 @@ def _mark_completion(config: dict, config_path: str | Path, stage: str) -> None:
         # Validation-only: raises if the referenced execution record was tampered with.
         _stage_execution_record_patterns(config, stage)
         return
+    _stage_execution_record_patterns(config, stage)
     if not artifacts_are_complete(config, stage):
         raise RuntimeError(f"stage {stage!r} failed canonical artifact validation")
     kwargs = _resume_kwargs(config, config_path, stage)
@@ -383,6 +388,33 @@ def _embedding_followup_stage(stage: str) -> bool:
     return stage == "build_library"
 
 
+def _run_embedding_stage(
+    *,
+    config_path: str | Path,
+    config: dict,
+    stage: str,
+    gpus_per_node: int,
+) -> dict:
+    # The package and standalone entry points require different import paths.
+    if __package__:
+        from .embedding_pipeline import run_embedding_stage as package_run_embedding_stage
+
+        return package_run_embedding_stage(
+            config_path=config_path,
+            config=config,
+            stage=stage,
+            gpus_per_node=gpus_per_node,
+        )
+    from embedding_pipeline import run_embedding_stage as script_run_embedding_stage
+
+    return script_run_embedding_stage(
+        config_path=config_path,
+        config=config,
+        stage=stage,
+        gpus_per_node=gpus_per_node,
+    )
+
+
 def _run_worker(args: argparse.Namespace) -> None:
     cfg = mtpz.pipeline_config.pipeline_config_from_path(
         args.config,
@@ -406,12 +438,7 @@ def _run_worker(args: argparse.Namespace) -> None:
 
         result = tokenize_data_stage(cfg)
     elif embedding_root and args.worker_stage in composite_only:
-        if __package__:
-            from .embedding_pipeline import run_embedding_stage
-        else:
-            from embedding_pipeline import run_embedding_stage
-
-        outputs = run_embedding_stage(
+        outputs = _run_embedding_stage(
             config_path=args.config,
             config=cfg,
             stage=args.worker_stage,
@@ -421,12 +448,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     else:
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage)
         if embedding_root and _embedding_followup_stage(args.worker_stage):
-            if __package__:
-                from .embedding_pipeline import run_embedding_stage
-            else:
-                from embedding_pipeline import run_embedding_stage
-
-            outputs = run_embedding_stage(
+            outputs = _run_embedding_stage(
                 config_path=args.config,
                 config=cfg,
                 stage=args.worker_stage,

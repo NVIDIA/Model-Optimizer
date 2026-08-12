@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -29,6 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .execution_record import (
+    _EXECUTION_RECORD_MANIFEST_VERSION,
+    _EXECUTION_RECORD_SCHEMA,
+    _file_evidence,
+    _path_without_symlinks,
+    _portable_relative_path,
+    _read_file_bytes,
+    _read_mapping,
+    _sha256_bytes,
+    validate_stage_execution_record,
+)
 from .identity import canonicalize, stable_hash
 
 if TYPE_CHECKING:
@@ -44,15 +54,19 @@ __all__ = [
 ]
 
 
-_EXECUTION_RECORD_SCHEMA = "puzzletron.stage-execution/v1"
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(canonicalize(payload), indent=2, sort_keys=True) + "\n").encode()
+
+
+def _immutable_record_matches(path: Path, expected: bytes) -> bool:
+    try:
+        return _read_file_bytes(path, description="stage execution record path") == expected
+    except ValueError:
+        return False
 
 
 def _publish_immutable_record(
@@ -76,7 +90,7 @@ def _publish_immutable_record(
         mismatches = [
             name
             for name, content in files.items()
-            if not (record_dir / name).is_file() or (record_dir / name).read_bytes() != content
+            if not _immutable_record_matches(record_dir / name, content)
         ]
         if mismatches:
             raise FileExistsError(
@@ -86,41 +100,6 @@ def _publish_immutable_record(
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
-
-
-def _safe_relative_path(raw_path: object, *, description: str) -> Path:
-    if not isinstance(raw_path, str) or not raw_path:
-        raise ValueError(f"invalid {description}: {raw_path!r}")
-    path = Path(raw_path)
-    if path.is_absolute() or ".." in path.parts:
-        raise ValueError(f"unsafe {description}: {raw_path!r}")
-    return path
-
-
-def _path_without_symlinks(path: Path, *, description: str) -> Path:
-    absolute = path.expanduser().absolute()
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        if current.is_symlink():
-            raise ValueError(f"{description} is symlinked: {current}")
-    return absolute
-
-
-def _sha256_bytes(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
-
-def _file_evidence(path: Path) -> dict[str, int | str]:
-    """Return bounded-memory size and digest evidence for one file."""
-
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            size += len(chunk)
-            digest.update(chunk)
-    return {"size": size, "sha256": digest.hexdigest()}
 
 
 def _resolved_config_content(config: object) -> Any:
@@ -184,8 +163,8 @@ def write_stage_execution_record(
     record_dir = root / "manifests" / "executions" / stage / execution_identity
     resolved_path = record_dir / "resolved_config.json"
     artifact_path = record_dir / "artifact_manifest.json"
-    resolved_relative = resolved_path.relative_to(root).as_posix()
-    artifact_relative = artifact_path.relative_to(root).as_posix()
+    resolved_relative = _portable_relative_path(resolved_path, root)
+    artifact_relative = _portable_relative_path(artifact_path, root)
 
     inputs = manifest_payload.get("inputs") or {}
     runtime = effective_config.get("_runtime") if isinstance(effective_config, dict) else {}
@@ -226,9 +205,18 @@ def write_stage_execution_record(
             if not output_path.is_absolute():
                 output_path = root / output_path
             if output_path.is_file():
+                safe_output_path = _path_without_symlinks(
+                    output_path, description="stage output evidence path"
+                )
+                try:
+                    evidence_path = _portable_relative_path(safe_output_path, root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"stage output evidence file is outside the campaign root: {output_path}"
+                    ) from exc
                 immutable_evidence[str(key)] = {
-                    "path": value,
-                    **_file_evidence(output_path),
+                    "path": evidence_path,
+                    **_file_evidence(output_path, description="stage output evidence file"),
                 }
     artifact_payload = {
         "schema": _EXECUTION_RECORD_SCHEMA,
@@ -245,7 +233,7 @@ def write_stage_execution_record(
             "sha256": resolved_sha256,
         },
         "stage_manifest": {
-            "path": manifest_path.relative_to(root).as_posix(),
+            "path": _portable_relative_path(manifest_path, root),
             "semantic_identity": manifest_payload.get("semantic_identity"),
         },
         "artifact_contract": "stage-manifest-output-pointers/v1",
@@ -273,198 +261,6 @@ def write_stage_execution_record(
         "artifact_manifest_identity": artifact_identity,
         "artifact_manifest_sha256": artifact_sha256,
     }
-
-
-def _read_mapping(path: Path, *, description: str) -> tuple[dict[str, Any], bytes]:
-    try:
-        content = path.read_bytes()
-        payload = json.loads(content)
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"invalid {description}: {path}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"invalid {description}: {path}")
-    return payload, content
-
-
-def validate_stage_execution_record(
-    manifest_path: str | Path,
-    *,
-    expected_stage: str | None = None,
-) -> tuple[str, ...]:
-    """Validate the canonical pointer and every immutable record it references.
-
-    Historical stage manifests without ``execution_record`` remain readable. Any
-    manifest that opts into the execution-record schema is checked fail closed.
-    """
-
-    path = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
-    if path.parent.name != "manifests":
-        raise ValueError(f"stage manifest is outside the expected layout: {path}")
-    root = path.parent.parent
-    pointer, _ = _read_mapping(path, description="stage manifest")
-    stage = pointer.get("stage")
-    if not isinstance(stage, str) or Path(stage).name != stage or stage in {".", ".."}:
-        raise ValueError(f"invalid stage identifier in stage manifest: {stage!r}")
-    if expected_stage is not None and stage != expected_stage:
-        raise ValueError(
-            f"stage manifest identity mismatch: expected {expected_stage!r}, found {stage!r}"
-        )
-
-    pointer_config = pointer.get("config")
-    if not isinstance(pointer_config, Mapping):
-        raise ValueError("stage manifest config must be a mapping")
-    expected_config_identity = stable_hash(pointer_config, prefix=f"{stage}_cfg")
-    if pointer.get("config_identity") != expected_config_identity:
-        raise ValueError("stage manifest config identity mismatch")
-
-    pointer_semantic_config = pointer.get("semantic_config")
-    if not isinstance(pointer_semantic_config, Mapping):
-        raise ValueError("stage manifest semantic config must be a mapping")
-    expected_semantic_config_identity = stable_hash(
-        pointer_semantic_config, prefix=f"{stage}_semantic_cfg"
-    )
-    if pointer.get("semantic_config_identity") != expected_semantic_config_identity:
-        raise ValueError("stage manifest semantic config identity mismatch")
-    expected_semantic_identity = stable_hash(
-        {
-            "stage": stage,
-            "semantic_config_identity": expected_semantic_config_identity,
-            "capability_snapshot": pointer.get("capability_snapshot"),
-        },
-        prefix=f"{stage}_semantic",
-    )
-    if pointer.get("semantic_identity") != expected_semantic_identity:
-        raise ValueError("stage manifest semantic identity mismatch")
-
-    if "execution_record" not in pointer:
-        return ()
-    record = pointer.get("execution_record")
-    if not isinstance(record, Mapping) or record.get("schema") != _EXECUTION_RECORD_SCHEMA:
-        raise ValueError(f"invalid stage execution record: {record!r}")
-    execution_identity = record.get("execution_identity")
-    if not isinstance(execution_identity, str) or not execution_identity:
-        raise ValueError("invalid stage execution identity")
-
-    resolved_relative = _safe_relative_path(
-        record.get("resolved_config_path"), description="stage execution record path"
-    )
-    artifact_relative = _safe_relative_path(
-        record.get("artifact_manifest_path"), description="stage execution record path"
-    )
-    expected_parent = Path("manifests") / "executions" / stage / execution_identity
-    for relative, filename in (
-        (resolved_relative, "resolved_config.json"),
-        (artifact_relative, "artifact_manifest.json"),
-    ):
-        if relative.parent != expected_parent or relative.name != filename:
-            raise ValueError(f"stage execution record path does not match identity: {relative}")
-
-    resolved_path = _path_without_symlinks(
-        root / resolved_relative, description="stage execution record path"
-    )
-    artifact_path = _path_without_symlinks(
-        root / artifact_relative, description="stage execution record path"
-    )
-    resolved, resolved_bytes = _read_mapping(
-        resolved_path, description="resolved stage configuration record"
-    )
-    artifact, artifact_bytes = _read_mapping(artifact_path, description="stage artifact record")
-    resolved_sha256 = _sha256_bytes(resolved_bytes)
-    if record.get("resolved_config_sha256") != resolved_sha256:
-        raise ValueError("resolved stage configuration SHA256 mismatch")
-    if record.get("artifact_manifest_sha256") != _sha256_bytes(artifact_bytes):
-        raise ValueError("stage artifact record SHA256 mismatch")
-
-    for label, payload in (("resolved", resolved), ("artifact", artifact)):
-        if payload.get("schema") != _EXECUTION_RECORD_SCHEMA or payload.get("schema_version") != 1:
-            raise ValueError(f"invalid {label} stage execution record schema")
-        if payload.get("stage") != stage or payload.get("execution_identity") != execution_identity:
-            raise ValueError(f"{label} stage execution identity mismatch")
-        for key in ("status", "skip_reason", "started_at", "ended_at"):
-            if payload.get(key) != pointer.get(key):
-                raise ValueError(f"{label} stage execution {key} mismatch")
-
-    resolved_identity = stable_hash(
-        resolved.get("resolved_stage_config"), prefix=f"{stage}_resolved_cfg"
-    )
-    if (
-        resolved.get("resolved_config_identity") != resolved_identity
-        or record.get("resolved_config_identity") != resolved_identity
-    ):
-        raise ValueError("resolved stage configuration identity mismatch")
-    for key in (
-        "authored_config_identity",
-        "semantic_config_identity",
-        "semantic_identity",
-    ):
-        pointer_key = "config_identity" if key == "authored_config_identity" else key
-        if resolved.get(key) != pointer.get(pointer_key):
-            raise ValueError(f"resolved stage {key} mismatch")
-
-    resolved_provenance = resolved.get("provenance") or {}
-    if not isinstance(resolved_provenance, Mapping):
-        raise ValueError("resolved stage provenance must be a mapping")
-    implementation = resolved_provenance.get("implementation") or {}
-    pointer_implementation = pointer.get("implementation_provenance") or {}
-    if implementation != pointer_implementation:
-        raise ValueError("resolved implementation provenance mismatch")
-    pointer_inputs = pointer.get("inputs") or {}
-    if not isinstance(pointer_inputs, Mapping):
-        raise ValueError("stage manifest inputs must be a mapping")
-    if resolved.get("semantic_config") != pointer_semantic_config:
-        raise ValueError("resolved stage semantic config mismatch")
-    if resolved_provenance.get("descriptor_resolution") != pointer_inputs.get(
-        "descriptor_resolution"
-    ):
-        raise ValueError("resolved descriptor input provenance mismatch")
-    if resolved_provenance.get("capability_snapshot") != pointer.get("capability_snapshot"):
-        raise ValueError("resolved capability provenance mismatch")
-
-    expected_execution_identity = stable_hash(
-        {
-            "stage": stage,
-            "status": resolved.get("status"),
-            "skip_reason": resolved.get("skip_reason"),
-            "started_at": resolved.get("started_at"),
-            "ended_at": resolved.get("ended_at"),
-            "authored_config_identity": resolved.get("authored_config_identity"),
-            "resolved_config_identity": resolved_identity,
-            "semantic_config_identity": resolved.get("semantic_config_identity"),
-            "semantic_identity": resolved.get("semantic_identity"),
-            "capability_snapshot": resolved_provenance.get("capability_snapshot"),
-            "implementation_provenance": implementation,
-        },
-        prefix=f"{stage}_execution",
-    )
-    if expected_execution_identity != execution_identity:
-        raise ValueError("stage execution identity does not match record content")
-
-    artifact_identity_payload = dict(artifact)
-    artifact_identity = artifact_identity_payload.pop("artifact_manifest_identity", None)
-    expected_artifact_identity = stable_hash(artifact_identity_payload, prefix=f"{stage}_artifacts")
-    if (
-        artifact_identity != expected_artifact_identity
-        or record.get("artifact_manifest_identity") != expected_artifact_identity
-    ):
-        raise ValueError("stage artifact record identity mismatch")
-    resolved_ref = artifact.get("resolved_config")
-    if not isinstance(resolved_ref, Mapping) or resolved_ref != {
-        "path": resolved_relative.as_posix(),
-        "identity": resolved_identity,
-        "sha256": resolved_sha256,
-    }:
-        raise ValueError("stage artifact resolved-configuration reference mismatch")
-    stage_ref = artifact.get("stage_manifest")
-    if (
-        not isinstance(stage_ref, Mapping)
-        or stage_ref.get("path") != path.relative_to(root).as_posix()
-    ):
-        raise ValueError("stage artifact canonical-manifest reference mismatch")
-    if stage_ref.get("semantic_identity") != pointer.get("semantic_identity"):
-        raise ValueError("stage artifact semantic identity mismatch")
-    if artifact.get("canonical_output_pointers") != pointer.get("outputs"):
-        raise ValueError("stage artifact canonical output pointers mismatch")
-    return resolved_relative.as_posix(), artifact_relative.as_posix()
 
 
 @dataclass
@@ -570,6 +366,7 @@ def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:
     if os.environ.get("RANK") not in (None, "", "0"):
         return
     path = Path(path)
+    manifest.version = _EXECUTION_RECORD_MANIFEST_VERSION
     execution_payload = manifest.to_dict()
     execution_payload["effective_config"] = canonicalize(manifest.effective_config)
     manifest.execution_record = write_stage_execution_record(path, execution_payload)
@@ -582,7 +379,8 @@ def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:
 def read_stage_manifest(path: str | Path) -> dict[str, Any]:
     """Read a stage manifest while preserving compatibility with older schemas."""
 
-    return json.loads(Path(path).read_text())
+    payload, _ = _read_mapping(Path(path), description="stage manifest")
+    return payload
 
 
 # Import after defining the manifest API because the stages package registers
