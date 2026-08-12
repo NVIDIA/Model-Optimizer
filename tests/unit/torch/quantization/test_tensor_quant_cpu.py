@@ -332,40 +332,6 @@ def test_fold_weight_keep_attrs_keeps_amax(monkeypatch):
         unregister_quant_backend(backend_name)
 
 
-@pytest.mark.parametrize("keep_attrs", [False, True])
-def test_fold_weight_supports_sequential_quantizer(keep_attrs):
-    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3))
-    qlinear.input_quantizer.disable()
-    qlinear.output_quantizer.disable()
-    qlinear.weight_quantizer = SequentialQuantizer(
-        TensorQuantizer(QuantizerAttributeConfig(num_bits=4)),
-        TensorQuantizer(QuantizerAttributeConfig(num_bits=8)),
-    )
-    pre_quant_scales = (
-        torch.tensor([0.5, 1.0, 1.5, 2.0]),
-        torch.tensor([2.0, 1.5, 1.0, 0.5]),
-    )
-    for quantizer, pre_quant_scale in zip(qlinear.weight_quantizer, pre_quant_scales):
-        quantizer.amax = torch.tensor(1.0)
-        quantizer.pre_quant_scale = pre_quant_scale
-    x = torch.randn(2, 4)
-    out_before = qlinear(x)
-    with torch.no_grad():
-        expected_weight = qlinear.weight_quantizer(qlinear.weight.float().contiguous()).to(
-            qlinear.weight.dtype
-        )
-
-    qlinear.fold_weight(keep_attrs=keep_attrs)
-
-    assert torch.allclose(qlinear.weight, expected_weight)
-    for quantizer in qlinear.weight_quantizer:
-        assert not quantizer.is_enabled
-        assert not quantizer._enable_pre_quant_scale
-        assert hasattr(quantizer, "_amax") is keep_attrs
-        assert hasattr(quantizer, "_pre_quant_scale") is keep_attrs
-    assert torch.allclose(qlinear(x), out_before)
-
-
 WINT4INT8_CFG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},

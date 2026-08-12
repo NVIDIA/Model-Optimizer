@@ -25,7 +25,7 @@ from _test_utils.torch.quantization.quantize_common import quantize_model_and_fo
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
-from modelopt.torch.quantization.nn import GroupedQuantizer, QuantModule, SequentialQuantizer
+from modelopt.torch.quantization.nn import GroupedQuantizer, QuantModule
 
 
 class TELinear(nn.Module):
@@ -119,26 +119,19 @@ def test_quantize(model_cls, config):
 
 
 @pytest.mark.parametrize("share_weight_quantizer", [False, True])
-@pytest.mark.parametrize("sequential_weight_quantizer", [False, True])
-def test_fold_weight_grouped_linear(share_weight_quantizer, sequential_weight_quantizer):
+def test_fold_weight_grouped_linear(share_weight_quantizer):
     model = TEGroupedLinear().cuda()
     calib_data = [model.get_input().cuda()]
     quantize_model_and_forward(model, mtq.INT8_DEFAULT_CFG, calib_data)
 
     grouped_linear = model.net
     assert isinstance(grouped_linear.weight_quantizer, GroupedQuantizer)
-    if sequential_weight_quantizer:
-        grouped_linear.weight_quantizer = GroupedQuantizer(
-            *(
-                SequentialQuantizer(quantizer, copy.deepcopy(quantizer))
-                for quantizer in grouped_linear.weight_quantizer
-            )
-        )
     if share_weight_quantizer:
         grouped_linear.weight_quantizer = grouped_linear.weight_quantizer[0]
     weights = [getattr(grouped_linear, f"weight{i}") for i in range(grouped_linear.num_gemms)]
     quantizers = [quantizer for _, quantizer in grouped_linear.iter_weights_for_calibration()]
     with torch.no_grad():
+        output_before = model(calib_data[0])
         expected_weights = [
             quantizer(weight.float().contiguous()).to(weight.dtype)
             for weight, quantizer in zip(weights, quantizers)
@@ -146,14 +139,17 @@ def test_fold_weight_grouped_linear(share_weight_quantizer, sequential_weight_qu
 
     mtq.fold_weight(model)
 
+    with torch.no_grad():
+        output_after = model(calib_data[0])
+    if isinstance(output_before, tuple):
+        output_before = output_before[0]
+        output_after = output_after[0]
+    assert torch.allclose(output_after, output_before)
+
     for weight, expected_weight, quantizer in zip(weights, expected_weights, quantizers):
         assert torch.allclose(weight, expected_weight)
         assert not quantizer.is_enabled
-        tensor_quantizers = (
-            quantizer if isinstance(quantizer, SequentialQuantizer) else (quantizer,)
-        )
-        for tensor_quantizer in tensor_quantizers:
-            assert not hasattr(tensor_quantizer, "_amax")
+        assert not hasattr(quantizer, "_amax")
 
 
 def test_quantize_forward_backward():
