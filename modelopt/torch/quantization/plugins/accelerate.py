@@ -222,12 +222,26 @@ def init_quantized_weights(
                 pretrained_model_name_or_path, trust_remote_code=trust_remote_code
             )
 
+        # Model-construction kwargs must not reach load_checkpoint_and_dispatch(),
+        # which does not accept them (e.g. attn_implementation -> TypeError).
+        attn_implementation = kwargs.pop("attn_implementation", None)
+
         with init_empty_weights():
             # Fix torch_dtype to match original model
             torch_dtype = kwargs.get(
                 "dtype", kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
             )
-            model = cls.from_config(config, dtype=torch_dtype)
+            from_config_kwargs = {}
+            if attn_implementation is not None:
+                from_config_kwargs["attn_implementation"] = attn_implementation
+            model = cls.from_config(config, dtype=torch_dtype, **from_config_kwargs)
+
+        # Tied parameters (e.g. lm_head.weight tied to embeddings) are absent
+        # from the checkpoint, so without tie_weights() they stay on meta and
+        # dispatch_model()'s .to() raises "Cannot copy out of meta tensor".
+        # accelerate documents tie_weights() as a prerequisite of
+        # load_checkpoint_and_dispatch().
+        model.tie_weights()
 
         mtq.quantize(model, quant_cfg)
         mtq.compress(model, config=mtq.CompressConfig(quant_gemm=quant_gemm))
