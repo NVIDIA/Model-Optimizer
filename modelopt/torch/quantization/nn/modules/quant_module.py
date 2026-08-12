@@ -141,11 +141,16 @@ class QuantModule(DynamicModule):
         per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
         view while disabling and dropping its calibration attrs exactly once.
         """
-        if not quantizer.fake_quant or not quantizer.is_enabled:
+        if not quantizer.fake_quant:
             return
 
-        for weight in weights:
-            weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
+        if (
+            quantizer.is_enabled
+            or quantizer.pre_quant_scale is not None
+            or quantizer.rotate_is_enabled
+        ):
+            for weight in weights:
+                weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
         if hasattr(quantizer, "_pre_quant_scale"):
@@ -160,11 +165,12 @@ class QuantModule(DynamicModule):
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
 
-        Every enabled fake-quant weight quantizer is folded. The folded transform is baked into
-        the stored weight and then disabled, so subsequent forwards use the stored weight directly.
-        Calibration buffers (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``.
-        A retained pre-quant scale remains stored but is made inactive because it has already been
-        applied to the folded weight.
+        Every fake-quant weight quantizer is folded, including disabled quantizers whose pre-quant
+        scale or rotation remains active. The folded transform is baked into the stored weight and
+        then disabled, so subsequent forwards use the stored weight directly. Calibration buffers
+        (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``. A retained pre-quant
+        scale remains stored but is made inactive because it has already been applied to the folded
+        weight.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):

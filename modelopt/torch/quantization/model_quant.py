@@ -742,9 +742,10 @@ def temporarily_fold_weights(
 ):
     """Temporarily fold fake-quant weights for a frozen inference region.
 
-    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. Enabled
-    fake-quant weights and their quantizer runtime state are restored on exit, including after an
-    exception. Weights are restored in place so optimizer and distributed references remain valid.
+    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation.
+    Fake-quant weights affected by quantization, pre-quant scaling, or rotation and all fake-quant
+    runtime states are restored on exit, including after an exception. Weights are restored in
+    place so optimizer and distributed references remain valid.
 
     This context is intended for repeated no-gradient forwards with no optimizer step, such as
     log-probability recomputation over several microbatches. It retains calibration attributes
@@ -763,7 +764,7 @@ def temporarily_fold_weights(
         snapshot_device: Device used to store parameter snapshots. ``None`` keeps each snapshot
             on the parameter's device; ``"cpu"`` avoids the additional accelerator memory.
     """
-    active_pairs = []
+    fold_pairs = []
     for module in model.modules():
         if not isinstance(module, QuantModule):
             continue
@@ -774,26 +775,27 @@ def temporarily_fold_weights(
                 raise NotImplementedError(
                     "temporarily_fold_weights does not support SequentialQuantizer"
                 )
-            local_weight = weight.to_local() if hasattr(weight, "to_local") else weight
-            if not (
-                isinstance(quantizer, TensorQuantizer)
-                and quantizer.fake_quant
-                and quantizer.is_enabled
-            ):
+            if not isinstance(quantizer, TensorQuantizer) or not quantizer.fake_quant:
                 continue
-            active_pairs.append((local_weight, quantizer))
+            local_weight = weight.to_local() if hasattr(weight, "to_local") else weight
+            fold_pairs.append((local_weight, quantizer))
 
     weight_snapshots = {}
     quantizer_states = {}
-    for weight, quantizer in active_pairs:
-        weight_id = id(weight)
-        if weight_id not in weight_snapshots:
-            weight_snapshots[weight_id] = (
-                weight,
-                weight.detach().clone()
-                if snapshot_device is None
-                else weight.detach().to(snapshot_device, copy=True),
-            )
+    for weight, quantizer in fold_pairs:
+        if (
+            quantizer.is_enabled
+            or quantizer.pre_quant_scale is not None
+            or quantizer.rotate_is_enabled
+        ):
+            weight_id = id(weight)
+            if weight_id not in weight_snapshots:
+                weight_snapshots[weight_id] = (
+                    weight,
+                    weight.detach().clone()
+                    if snapshot_device is None
+                    else weight.detach().to(snapshot_device, copy=True),
+                )
         quantizer_states.setdefault(
             quantizer,
             (
