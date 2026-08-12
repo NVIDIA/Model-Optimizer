@@ -280,18 +280,6 @@ def get_quant_config(args: argparse.Namespace) -> dict:
     return mtq_config
 
 
-_MTP_HF_CONFIG_FIELDS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "mtp_num_layers")
-
-
-def _hf_config_has_mtp(hf_cfg) -> bool:
-    """Whether an HF config declares MTP heads (checked top-level and under ``text_config``)."""
-    return any(
-        cfg is not None and getattr(cfg, field, 0)
-        for cfg in (getattr(hf_cfg, "text_config", None), hf_cfg)
-        for field in _MTP_HF_CONFIG_FIELDS
-    )
-
-
 def main(args: argparse.Namespace):
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
@@ -301,7 +289,6 @@ def main(args: argparse.Namespace):
             "pipeline_model_parallel_size": args.pp_size,
             "expert_model_parallel_size": args.ep_size,
             "context_parallel_size": args.cp_size,
-            "mtp_num_layers": 0,  # MTP not supported during calibration
             "expert_tensor_parallel_size": 1,  # Expert tensor parallelism is not supported
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
@@ -309,13 +296,6 @@ def main(args: argparse.Namespace):
         },
         init_model_parallel=True,
     )
-
-    if _hf_config_has_mtp(bridge.hf_pretrained.config):
-        warn_rank_0(
-            "Dropping Multi-Token Prediction (MTP): calibration does not support it. The exported "
-            "checkpoint will not contain MTP weights and standard autoregressive inference is "
-            "unaffected. To use MTP speculative decoding, run a separate phase with mtp_num_layers>0."
-        )
 
     # Only the language model is quantized (vision tower + projector stay full precision)
     language_model = getattr(unwrapped_model, "language_model", unwrapped_model)

@@ -374,9 +374,6 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
-        if args.student_megatron_path is not None:
-            # Match quantize.py, which drops MTP heads because calibration does not support them.
-            provider.mtp_num_layers = 0
         if args.sft:
             # The SFT loss mask covers only the response tokens, so the reduction must be
             # per-token for it to combine correctly across context-parallel ranks. This lands on
