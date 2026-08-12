@@ -41,10 +41,19 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 
 
 def get_conversation_input_ids(tokenizer, conversations):
-    """Return the chat-template token ids, unwrapping the transformers>=5 BatchEncoding."""
-    input_ids = tokenizer.apply_chat_template(conversations, add_generation_prompt=False)
+    """Return the chat-template token ids as a flat list[int]."""
+    input_ids = tokenizer.apply_chat_template(
+        conversations, add_generation_prompt=False, tokenize=True, return_tensors=None
+    )
     if hasattr(input_ids, "input_ids"):
         input_ids = input_ids.input_ids  # transformers>=5 returns a BatchEncoding
+    if isinstance(input_ids, torch.Tensor):
+        input_ids = input_ids.squeeze(0).tolist()
+    if input_ids and isinstance(input_ids[0], list | tuple):
+        input_ids = list(input_ids[0])  # unwrap a single-conversation batch dim
+    assert not input_ids or isinstance(input_ids[0], int), (
+        f"expected flat token ids, got {input_ids[:1]}"
+    )
     return input_ids
 
 
