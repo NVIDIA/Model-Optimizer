@@ -16,6 +16,7 @@
 """Utils for quantization including scaling factors adjustments."""
 
 import logging
+from collections import defaultdict
 from collections.abc import Generator
 from types import SimpleNamespace
 from typing import Any
@@ -1138,6 +1139,7 @@ def postprocess_state_dict(
     # the same module (an independent bias, or an untied projection of a partially-tied
     # experts container) is never swept up. Works under the FSDP full-state-dict gather /
     # offload, where tied tensors are materialized at distinct addresses.
+    dropped_dense_prefixes: set[str] = set()
     if tied_map is not None and tied_map.alias_to_canonical:
         # --- The one place a tied parameter is expanded into its EXPORTED state-dict keys ---
         # A {alias: canonical} entry names a *pre-pack* parameter; export then renames/splits
@@ -1146,7 +1148,15 @@ def postprocess_state_dict(
         # `weight_suffixes` / `proj_splits` HERE -- nothing else needs to change.
         #
         # A dense quantized weight exports as these keys; a `X.weight` tie covers exactly them.
-        weight_suffixes = ("weight", "weight_scale", "weight_scale_2", "input_scale")
+        # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed from
+        # input_quantizer._pre_quant_scale in the KV-cache pass above.)
+        weight_suffixes = (
+            "weight",
+            "weight_scale",
+            "weight_scale_2",
+            "input_scale",
+            "pre_quant_scale",
+        )
         # A tied 3-D fused projection splits into these per-expert 2-D projection names.
         proj_splits = {
             "gate_up_proj": ("gate_proj", "up_proj"),
@@ -1156,6 +1166,8 @@ def postprocess_state_dict(
 
         # group name -> [(alias_key, canonical_key), ...]; dropped atomically (all or none).
         alias_groups: dict[str, list[tuple[str, str]]] = {}
+        # Dense group name -> its module prefix, for the post-drop leftover-companion check.
+        dense_prefixes: dict[str, str] = {}
         # Fused-MoE containers: (alias_prefix, canonical_prefix) -> set of tied per-expert
         # projection names (the split names, e.g. {"gate_proj", "up_proj", "down_proj"}).
         moe_containers: dict[tuple[str, str], set[str]] = {}
@@ -1172,6 +1184,7 @@ def postprocess_state_dict(
                 members = [(ak, ck) for ak, ck in members if ak in post_state_dict]
                 if members:
                     alias_groups[alias] = members
+                    dense_prefixes[alias] = a_pre
             elif a_name in proj_splits and a_name == c_name:
                 # Fused-MoE projection: export splits the 3-D container into per-expert keys not
                 # present in the declaration. Record the per-expert projection names it becomes.
@@ -1208,44 +1221,75 @@ def postprocess_state_dict(
                 continue
             for ak, _ in members:
                 keys_to_delete.append(ak)
+            if gk in dense_prefixes:
+                dropped_dense_prefixes.add(dense_prefixes[gk])
             logger.warning(
                 f"Tied weight (declared): dropping {len(members)} alias key(s) for '{gk}'; "
                 f"canonical kept."
             )
 
-    # Address backstop: collapse two keys that still point at the SAME storage.
+    # Address backstop: break any remaining physical STORAGE share the name pass didn't handle.
     #
-    # A net for *undeclared* shares the name pass can't see, and only for unquantized/unpacked
-    # ones -- quantized ties pack into distinct storage and are collapsed by name above.
-    # safetensors save_file rejects any two keys sharing storage, so these must be collapsed
-    # here or the write fails. The key mirrors safetensors' own grouping
-    # (device, storage_ptr, storage_size), so a base tensor and a view of it collapse rather
-    # than crash the write; keying on extent (numel*element_size) would split that pair, and
-    # two live tensors can't share a data_ptr without sharing storage, so it never
-    # false-collapses independents. Meta (zero-ptr) tensors and already-marked aliases are skipped.
+    # Declared ties are handled above and quantized weights pack into distinct storage, so what
+    # can reach here is an UNDECLARED share still aliasing one storage: either the same tensor
+    # under two names (an unquantized tied embedding), or two DISTINCT views of one storage
+    # (unquantized fused-expert slices at different offsets). safetensors save_file rejects ANY
+    # two keys sharing storage, so every share must be broken -- but only a genuine duplicate may
+    # be DROPPED; a distinct view must be CLONED (own storage) or its data is lost. This mirrors
+    # safetensors' own save_model: drop exact duplicates, clone distinct views. Meta (zero-ptr)
+    # tensors and already-marked declared aliases are skipped.
     already_marked = set(keys_to_delete)
-    seen_tensors = {}
+    first_on_storage: dict = {}
     for key, value in post_state_dict.items():
         if key in already_marked:
             continue
-        if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
-            tensor_id = (value.device, storage_ptr(value), storage_size(value))
-            if tensor_id in seen_tensors:
-                keys_to_delete.append(key)
-                logger.warning(
-                    f"Shared-storage weight: '{key}' shares memory with "
-                    f"'{seen_tensors[tensor_id]}'; dropping '{key}'. This is expected only "
-                    f"for an unquantized/unpacked tied weight. If '{key}' is a quantized "
-                    f"weight, its tie was not declared in _tied_weights_keys / "
-                    f"tie_word_embeddings and was not caught by the name-based dedup."
-                )
-            else:
-                seen_tensors[tensor_id] = key
+        if not isinstance(value, torch.Tensor) or value.data_ptr() == 0:
+            continue
+        sid = (value.device, storage_ptr(value), storage_size(value))
+        first = first_on_storage.get(sid)
+        if first is None:
+            first_on_storage[sid] = (key, value)
+            continue
+        fk, fv = first
+        if (
+            value.shape == fv.shape
+            and value.stride() == fv.stride()
+            and value.storage_offset() == fv.storage_offset()
+            and value.dtype == fv.dtype
+        ):
+            # Same tensor under two names -> a true duplicate -> drop.
+            keys_to_delete.append(key)
+            logger.warning(
+                f"Shared-storage duplicate: '{key}' is identical to '{fk}'; dropping '{key}'. "
+                f"Expected only for an undeclared unquantized share; a quantized weight here means "
+                f"its tie was not declared and was not caught by the name-based dedup."
+            )
+        else:
+            # Distinct view of the same storage -> clone to break the share (no crash, no data loss).
+            post_state_dict[key] = value.clone()
+            logger.warning(
+                f"'{key}' shares storage with '{fk}' but is a distinct view; cloning it so both "
+                f"can be serialized without losing data."
+            )
 
     # dict.fromkeys dedups while preserving order, so a key marked by both passes is
     # deleted once (avoids a KeyError on the second delete).
     for key in dict.fromkeys(keys_to_delete):
         post_state_dict.pop(key, None)
+
+    # Surface an un-enumerated companion: if a dense tie was dropped but a non-`bias` key still
+    # remains under its module prefix, it is likely a new quantizer companion missing from
+    # `weight_suffixes` (which would otherwise leak as an orphan) -- warn so it gets added.
+    for pre in dropped_dense_prefixes:
+        leftovers = [
+            k for k in post_state_dict if k.startswith(f"{pre}.") and k.rsplit(".", 1)[-1] != "bias"
+        ]
+        if leftovers:
+            logger.warning(
+                f"Tied weight '{pre}.weight' was deduped but companion key(s) {leftovers} remain "
+                f"under '{pre}.'; likely an un-enumerated quantizer companion -- add its suffix to "
+                f"weight_suffixes in postprocess_state_dict so it is dropped with the tie."
+            )
 
     return post_state_dict
 
@@ -1709,8 +1753,6 @@ def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = No
     while resident, so it can't collide like a reused ``data_ptr``. Returns the number of
     groups merged; pass ``tied_map`` to reuse one, else it is built from ``model``.
     """
-    from collections import defaultdict
-
     if tied_map is None:
         tied_map = TiedWeightMap(model)
 
