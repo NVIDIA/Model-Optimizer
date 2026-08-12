@@ -85,6 +85,7 @@ _RESERVED_EXTRA_ARG_FLAGS = frozenset(
 DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 _PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
+_TIMEOUT_ERRORS = (TimeoutError, asyncio.TimeoutError)
 
 
 class LmmsEvalTimeoutError(TimeoutError):
@@ -272,7 +273,7 @@ def _extra_args(settings: Mapping[str, Any]) -> list[str]:
         return []
     if isinstance(raw, str):
         values = shlex.split(raw)
-    elif isinstance(raw, Sequence):
+    elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
         values = [str(item) for item in raw]
     else:
         raise TypeError("evaluation settings.extra_args must be a string or sequence")
@@ -573,15 +574,15 @@ async def _run_process_async(
         )
         try:
             await asyncio.wait_for(process.wait(), timeout)
-        except TimeoutError as error:
+        except _TIMEOUT_ERRORS as error:
             _signal_process_group(process, signal.SIGTERM)
             try:
                 await asyncio.wait_for(process.wait(), _PROCESS_CLEANUP_TIMEOUT_SECONDS)
-            except TimeoutError:
+            except _TIMEOUT_ERRORS:
                 _signal_process_group(process, signal.SIGKILL)
                 try:
                     await asyncio.wait_for(process.wait(), _PROCESS_CLEANUP_TIMEOUT_SECONDS)
-                except TimeoutError:
+                except _TIMEOUT_ERRORS:
                     pass
             if _process_group_exists(process):
                 _signal_process_group(process, signal.SIGKILL)
@@ -701,7 +702,7 @@ def run_lmms_eval_checkpoint(
     summary = {
         "checkpoint": str(checkpoint_path),
         "metrics": metrics,
-        "result_path": str(result_path),
+        "raw_result_path": str(result_path),
         "sample_counts": sample_counts,
     }
     summary_path = _atomic_json(output / "summary.json", summary)

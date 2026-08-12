@@ -15,8 +15,10 @@
 
 """Tests for the reusable lmms-eval checkpoint backend."""
 
+import asyncio
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -216,6 +218,16 @@ def test_command_rejects_reserved_extra_args_setting(tmp_path, extra_args, expec
     assert expected in str(exc_info.value)
 
 
+@pytest.mark.parametrize("extra_args", [b"--verbosity DEBUG", bytearray(b"--verbosity DEBUG")])
+def test_command_rejects_byte_string_extra_args(tmp_path, extra_args):
+    with pytest.raises(TypeError, match="extra_args must be a string or sequence"):
+        lmms._build_command(
+            {**_settings("ifeval"), "extra_args": extra_args},
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
 def test_timeout_kills_ignored_process_group_members(monkeypatch, tmp_path):
     script = (
@@ -237,6 +249,53 @@ def test_timeout_kills_ignored_process_group_members(monkeypatch, tmp_path):
     assert exc_info.value.timeout == 1.0
     assert exc_info.value.output == "partial stdout\n"
     assert exc_info.value.stderr == ""
+
+
+def test_legacy_asyncio_timeout_is_classified(monkeypatch, tmp_path):
+    class LegacyAsyncioTimeoutError(Exception):
+        pass
+
+    class Process:
+        pid = 123
+        returncode = None
+
+        async def wait(self):
+            return self.returncode
+
+    process = Process()
+    wait_calls = 0
+
+    async def create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    async def wait_for(awaitable, _timeout):
+        nonlocal wait_calls
+        wait_calls += 1
+        awaitable.close()
+        if wait_calls == 1:
+            raise LegacyAsyncioTimeoutError
+        process.returncode = -signal.SIGTERM
+        return process.returncode
+
+    monkeypatch.setattr(
+        lmms,
+        "_TIMEOUT_ERRORS",
+        (TimeoutError, LegacyAsyncioTimeoutError),
+    )
+    monkeypatch.setattr(lmms.asyncio, "create_subprocess_exec", create_subprocess_exec)
+    monkeypatch.setattr(lmms.asyncio, "wait_for", wait_for)
+    monkeypatch.setattr(lmms, "_signal_process_group", lambda *_args: None)
+    monkeypatch.setattr(lmms, "_process_group_exists", lambda _process: False)
+
+    with pytest.raises(lmms.LmmsEvalTimeoutError):
+        asyncio.run(
+            lmms._run_process_async(
+                [sys.executable, "-c", "pass"],
+                cwd=str(tmp_path),
+                env=os.environ.copy(),
+                timeout=1.0,
+            )
+        )
 
 
 def test_run_checkpoint_flattens_metrics_and_preserves_artifacts(monkeypatch, tmp_path):
@@ -275,6 +334,8 @@ def test_run_checkpoint_flattens_metrics_and_preserves_artifacts(monkeypatch, tm
     assert Path(result["stderr_path"]).read_text() == ""
     summary = json.loads(Path(result["result_path"]).read_text())
     assert summary["checkpoint"] == str(checkpoint.resolve())
+    assert summary["raw_result_path"] == result["raw_result_path"]
+    assert "result_path" not in summary
     assert summary["sample_counts"] == {"gsm8k": 4.0, "ifeval": 4.0}
 
 

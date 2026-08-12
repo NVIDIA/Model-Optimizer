@@ -336,7 +336,8 @@ The default one-GPU smoke evaluates eight samples each from IFEval and GSM8K.
 Qwen 3.5 checkpoints are configured automatically. See
 [checkpoint evaluation](docs/checkpoint_evaluation.md) to choose tasks, run a
 full evaluation, find results, or override model detection. For options not
-covered by the convenience command, use the native `python -m lmms_eval` CLI.
+covered by the convenience command, append `--lmms-eval-args` followed by the
+native lmms-eval options.
 
 ## Run with an agent
 

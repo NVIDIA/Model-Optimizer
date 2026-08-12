@@ -53,6 +53,7 @@ def test_cli_help_explains_qwen_profile_and_native_escape_hatch():
     assert "--model-profile {auto,none}" in help_text
     assert "Qwen 3.5" in help_text
     assert "reasoning_parser=qwen3" in help_text
+    assert "--lmms-eval-args" in help_text
     assert "python -m lmms_eval --help" in normalized_help
 
 
@@ -223,6 +224,37 @@ def test_cli_full_run_and_runtime_overrides_are_wired(tmp_path):
     assert settings["topology"]["gpu_group_size"] == 2
     assert settings["model_args"]["reasoning_parser"] == "qwen3"
     assert settings["model_args"]["trust_remote_code"] is True
+
+
+def test_cli_forwards_native_lmms_eval_options_with_compatibility_path(tmp_path):
+    checkpoint = tmp_path / "teacher"
+    checkpoint.mkdir()
+    compatibility_tasks_root = tmp_path / "task-configs"
+
+    args = evaluate_lmms_checkpoint._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(checkpoint),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--lmms-eval-args",
+            "--verbosity",
+            "DEBUG",
+            "--apply_chat_template",
+        ]
+    )
+
+    settings = evaluate_lmms_checkpoint._settings(
+        args,
+        compatibility_tasks_root=compatibility_tasks_root,
+    )
+    assert settings["extra_args"] == [
+        "--verbosity",
+        "DEBUG",
+        "--apply_chat_template",
+        "--include_path",
+        str(compatibility_tasks_root),
+    ]
 
 
 def test_cli_maps_gsm8k_to_namespaced_compatibility_task(tmp_path):

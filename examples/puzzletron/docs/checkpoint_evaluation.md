@@ -46,8 +46,8 @@ code. After the smoke succeeds, use `--full` with a separate output directory
 to evaluate the complete task datasets. Use `--timeout-seconds` if the full run
 needs a different limit.
 
-For options not exposed by this convenience command, use
-`python -m lmms_eval --help` and the native lmms-eval CLI.
+Pass additional native options after `--lmms-eval-args`, which must be the last
+wrapper option. See `python -m lmms_eval --help` for the available options.
 
 ## Results and troubleshooting
 

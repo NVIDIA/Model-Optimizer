@@ -221,6 +221,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow reviewed checkpoint-provided Python code (disabled by default).",
     )
+    parser.add_argument(
+        "--lmms-eval-args",
+        nargs=argparse.REMAINDER,
+        default=[],
+        metavar="ARG",
+        help="Forward remaining arguments to lmms-eval; this option must be last.",
+    )
     return parser
 
 
@@ -265,8 +272,11 @@ def _settings(
         },
         "model_args": model_args,
     }
+    extra_args = list(args.lmms_eval_args)
     if compatibility_tasks_root is not None:
-        settings["extra_args"] = ["--include_path", str(compatibility_tasks_root)]
+        extra_args.extend(["--include_path", str(compatibility_tasks_root)])
+    if extra_args:
+        settings["extra_args"] = extra_args
     return settings
 
 
