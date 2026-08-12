@@ -25,6 +25,7 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 from examples.puzzletron.main import _completion_is_valid, _mark_completion, _resume_kwargs
+from modelopt.torch.puzzletron import execution_record
 from modelopt.torch.puzzletron.execution_record import _portable_relative_path
 from modelopt.torch.puzzletron.identity import stable_hash
 from modelopt.torch.puzzletron.manifest import (
@@ -697,13 +698,17 @@ def test_resume_rejects_tampered_immutable_stage_record(
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX named pipes")
 @pytest.mark.parametrize(
-    "record_key",
-    ["resolved_config_path", "artifact_manifest_path"],
+    ("record_key", "message"),
+    [
+        ("resolved_config_path", "invalid resolved stage configuration record"),
+        ("artifact_manifest_path", "invalid stage artifact record"),
+    ],
     ids=["resolved-config", "artifact-manifest"],
 )
 def test_validator_rejects_nonregular_execution_record_files(
     tmp_path: Path,
     record_key: str,
+    message: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest_path, _config_path, _config, manifest = _write_convert_record(tmp_path)
@@ -719,7 +724,49 @@ def test_validator_rejects_nonregular_execution_record_files(
 
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
-    with pytest.raises(ValueError, match=r"invalid .* record"):
+    with pytest.raises(ValueError, match=f"^{message}:"):
+        validate_stage_execution_record(manifest_path, expected_stage="convert")
+
+
+@pytest.mark.skipif(
+    not (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in getattr(os, "supports_dir_fd", set())
+    ),
+    reason="requires descriptor-rooted no-follow traversal",
+)
+@pytest.mark.parametrize("swap_location", ["ancestor", "leaf"])
+def test_validator_rejects_execution_record_symlink_swap_after_path_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_location: str,
+) -> None:
+    manifest_path, _config_path, _config, manifest = _write_convert_record(tmp_path)
+    record_path = tmp_path / manifest.execution_record["resolved_config_path"]
+    original_path_without_symlinks = execution_record._path_without_symlinks
+    swapped = False
+
+    def swap_after_check(path: Path, *, description: str) -> Path:
+        nonlocal swapped
+        checked = original_path_without_symlinks(path, description=description)
+        if not swapped and description == "resolved stage configuration record":
+            if swap_location == "ancestor":
+                stage_dir = record_path.parent.parent
+                external_stage_dir = stage_dir.with_name("external-convert")
+                stage_dir.rename(external_stage_dir)
+                stage_dir.symlink_to(external_stage_dir, target_is_directory=True)
+            else:
+                external_file = tmp_path / "external-resolved-config.json"
+                external_file.write_bytes(record_path.read_bytes())
+                record_path.unlink()
+                record_path.symlink_to(external_file)
+            swapped = True
+        return checked
+
+    monkeypatch.setattr(execution_record, "_path_without_symlinks", swap_after_check)
+
+    with pytest.raises(ValueError, match="invalid resolved stage configuration record"):
         validate_stage_execution_record(manifest_path, expected_stage="convert")
 
 

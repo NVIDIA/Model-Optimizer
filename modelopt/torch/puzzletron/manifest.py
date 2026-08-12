@@ -34,6 +34,8 @@ from .execution_record import (
     _file_evidence,
     _path_without_symlinks,
     _portable_relative_path,
+    _read_file_bytes,
+    _read_mapping,
     _sha256_bytes,
     validate_stage_execution_record,
 )
@@ -57,6 +59,13 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return (json.dumps(canonicalize(payload), indent=2, sort_keys=True) + "\n").encode()
 
 
+def _immutable_record_matches(path: Path, expected: bytes) -> bool:
+    try:
+        return _read_file_bytes(path, description="stage execution record path") == expected
+    except ValueError:
+        return False
+
+
 def _publish_immutable_record(
     record_dir: Path,
     files: dict[str, bytes],
@@ -78,7 +87,7 @@ def _publish_immutable_record(
         mismatches = [
             name
             for name, content in files.items()
-            if not (record_dir / name).is_file() or (record_dir / name).read_bytes() != content
+            if not _immutable_record_matches(record_dir / name, content)
         ]
         if mismatches:
             raise FileExistsError(
@@ -367,7 +376,8 @@ def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:
 def read_stage_manifest(path: str | Path) -> dict[str, Any]:
     """Read a stage manifest while preserving compatibility with older schemas."""
 
-    return json.loads(Path(path).read_text())
+    payload, _ = _read_mapping(Path(path), description="stage manifest")
+    return payload
 
 
 # Import after defining the manifest API because the stages package registers

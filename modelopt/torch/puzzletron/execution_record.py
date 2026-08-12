@@ -21,9 +21,10 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path, PurePath
-from typing import Any
+from typing import Any, BinaryIO
 
 from .identity import stable_hash
 
@@ -31,6 +32,13 @@ __all__ = ["stage_manifest_uses_execution_record", "validate_stage_execution_rec
 
 _EXECUTION_RECORD_SCHEMA = "puzzletron.stage-execution/v1"
 _EXECUTION_RECORD_MANIFEST_VERSION = "2"
+_DESCRIPTOR_ROOTED_OPEN_SUPPORTED = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in getattr(os, "supports_dir_fd", set())
+)
+_READ_ONLY_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+_FINAL_READ_FLAGS = _READ_ONLY_FLAGS | getattr(os, "O_NONBLOCK", 0)
 
 
 def _safe_relative_path(raw_path: object, *, description: str) -> Path:
@@ -53,6 +61,51 @@ def _path_without_symlinks(path: Path, *, description: str) -> Path:
     return Path(os.path.abspath(absolute))
 
 
+@contextmanager
+def _open_regular_file(path: Path, *, description: str) -> Iterator[BinaryIO]:
+    """Open one regular file without following a checked path through symlinks."""
+
+    path = _path_without_symlinks(path, description=description)
+    descriptor: int | None = None
+    directory_descriptor: int | None = None
+    try:
+        if _DESCRIPTOR_ROOTED_OPEN_SUPPORTED:
+            directory_flags = _READ_ONLY_FLAGS | os.O_DIRECTORY
+            directory_descriptor = os.open(path.anchor, directory_flags)
+            for part in path.parts[1:-1]:
+                previous_descriptor = directory_descriptor
+                directory_descriptor = os.open(
+                    part,
+                    directory_flags | os.O_NOFOLLOW,
+                    dir_fd=previous_descriptor,
+                )
+                os.close(previous_descriptor)
+            descriptor = os.open(
+                path.name,
+                _FINAL_READ_FLAGS | os.O_NOFOLLOW,
+                dir_fd=directory_descriptor,
+            )
+        else:
+            descriptor = os.open(path, _FINAL_READ_FLAGS)
+            _path_without_symlinks(path, description=description)
+            if not os.path.samestat(os.fstat(descriptor), path.lstat()):
+                raise ValueError(f"{description} changed while opening: {path}")
+
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"{description} is not a regular file: {path}")
+        stream = os.fdopen(descriptor, "rb")
+        descriptor = None
+        with stream:
+            yield stream
+    except OSError as exc:
+        raise ValueError(f"invalid {description}: {path}") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+
+
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -60,18 +113,12 @@ def _sha256_bytes(content: bytes) -> str:
 def _file_evidence(path: Path, *, description: str) -> dict[str, int | str]:
     """Return bounded-memory evidence for one regular, non-symlinked file."""
 
-    path = _path_without_symlinks(path, description=description)
-    try:
-        if not stat.S_ISREG(path.lstat().st_mode):
-            raise ValueError(f"{description} is not a regular file: {path}")
-        digest = hashlib.sha256()
-        size = 0
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                size += len(chunk)
-                digest.update(chunk)
-    except OSError as exc:
-        raise ValueError(f"invalid {description}: {path}") from exc
+    digest = hashlib.sha256()
+    size = 0
+    with _open_regular_file(path, description=description) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
     return {"size": size, "sha256": digest.hexdigest()}
 
 
@@ -81,11 +128,14 @@ def _portable_relative_path(path: PurePath, root: PurePath) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _read_file_bytes(path: Path, *, description: str) -> bytes:
+    with _open_regular_file(path, description=description) as stream:
+        return stream.read()
+
+
 def _read_mapping(path: Path, *, description: str) -> tuple[dict[str, Any], bytes]:
     try:
-        if not stat.S_ISREG(path.lstat().st_mode):
-            raise ValueError(f"invalid {description}: {path}")
-        content = path.read_bytes()
+        content = _read_file_bytes(path, description=description)
         payload = json.loads(content)
     except (OSError, ValueError) as exc:
         raise ValueError(f"invalid {description}: {path}") from exc
