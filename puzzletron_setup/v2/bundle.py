@@ -39,7 +39,12 @@ from puzzletron_setup.bundle import (
     validate_bundle,
 )
 
-from .resolved import ResolvedCampaignConfig, _plain, resolve_campaign_config
+from .resolved import (
+    ResolvedCampaignConfig,
+    ResolvedParallelProfile,
+    _plain,
+    resolve_campaign_config,
+)
 from .validation import validate_state
 
 if TYPE_CHECKING:
@@ -51,6 +56,15 @@ __all__ = [
     "render_experiment_v2",
     "render_runner_v2",
 ]
+
+_LEGACY_MESH_FIELDS = ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
+_LEGACY_COMMON_CONSUMERS = (
+    "width_importance",
+    "depth_importance",
+    "sort_sanity",
+    "width_sanity",
+    "replacement_scoring",
+)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -65,6 +79,59 @@ def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str,
         else:
             merged[key] = deepcopy(value)
     return merged
+
+
+def _post_mip_consumers(config: ResolvedCampaignConfig, node_type: str) -> tuple[str, ...]:
+    consumers = []
+    for flow_id, flow in config.post_mip_flows.items():
+        for node_id, node in _mapping(_mapping(flow).get("nodes")).items():
+            if _mapping(node).get("type") == node_type:
+                consumers.append(f"post.{flow_id}.{node_id}")
+    return tuple(sorted(consumers))
+
+
+def _profile_for_consumers(
+    config: ResolvedCampaignConfig,
+    consumers: tuple[str, ...],
+) -> ResolvedParallelProfile | None:
+    for consumer in consumers:
+        resource = config.stage_resources.get(consumer)
+        if resource is not None and resource.profile_name is not None:
+            profile = config.parallel_profiles.get(resource.profile_name)
+            if profile is not None:
+                return profile
+    for consumer in consumers:
+        for name in sorted(config.parallel_profiles):
+            profile = config.parallel_profiles[name]
+            if consumer in profile.consumers:
+                return profile
+    return None
+
+
+def _legacy_meshes(config: ResolvedCampaignConfig) -> dict[str, dict[str, Any]]:
+    default_mesh = dict.fromkeys(_LEGACY_MESH_FIELDS, 1)
+    common_consumers = (*_LEGACY_COMMON_CONSUMERS, *_post_mip_consumers(config, "evaluation"))
+    common = _profile_for_consumers(config, common_consumers)
+    if common is None and config.parallel_profiles:
+        common = config.parallel_profiles[sorted(config.parallel_profiles)[0]]
+
+    profiles = {
+        "common": common,
+        "bypass": _profile_for_consumers(config, ("bypass", "bypass_sanity")) or common,
+        "global_kd": _profile_for_consumers(
+            config,
+            ("global_kd", *_post_mip_consumers(config, "global_kd")),
+        )
+        or common,
+    }
+    return {
+        name: (
+            {key: getattr(profile, key) for key in _LEGACY_MESH_FIELDS}
+            if profile is not None
+            else deepcopy(default_mesh)
+        )
+        for name, profile in profiles.items()
+    }
 
 
 def _legacy_state_from_resolved(config: ResolvedCampaignConfig) -> dict[str, Any]:
@@ -93,50 +160,12 @@ def _legacy_state_from_resolved(config: ResolvedCampaignConfig) -> dict[str, Any
         },
         "execution_contract": _plain(config.infrastructure.execution_contract),
         "gpus_per_node": config.infrastructure.gpus_per_node,
-        "meshes": {
-            "common": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-                "ep": 1,
-            },
-            "bypass": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-                "ep": 1,
-            },
-            "global_kd": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-                "ep": 1,
-            },
-        },
+        "meshes": _legacy_meshes(config),
         "workers": {
             "pool": config.infrastructure.gpus_per_node,
             "sharded": config.infrastructure.gpus_per_node,
         },
     }
-    first_profile_name = next(iter(config.parallel_profiles), None)
-    first = (
-        config.parallel_profiles.get(first_profile_name) if first_profile_name is not None else None
-    )
-    if first is not None:
-        mesh = {
-            key: getattr(first, key) for key in ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
-        }
-        infrastructure["meshes"] = {
-            "common": deepcopy(mesh),
-            "bypass": deepcopy(mesh),
-            "global_kd": deepcopy(mesh),
-        }
     return {
         "schema_version": 1,
         "wizard_version": "1",

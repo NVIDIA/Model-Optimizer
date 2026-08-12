@@ -21,7 +21,6 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -165,7 +164,7 @@ def _campaign_state(tmp_path: Path) -> WizardState:
         "serving_workloads": workloads,
         "vllm_measurements": measurements,
         "mip_config": {"runs": {}, "marker": "named"},
-        "post_mip_flows": {"selection": {"source": {"run": "default"}, "nodes": {}}},
+        "post_mip_flows": {},
         "parallel_profiles": profiles,
         "stage_resources": {
             "width_importance": {
@@ -216,6 +215,18 @@ def test_snapshot_captures_effective_values_and_authoring_provenance(tmp_path: P
     assert snapshot.model.facts["hidden_size"] == 1024
     assert snapshot.model.descriptor == "qwen3_5"
     assert snapshot.data.modality == "text"
+
+
+def test_snapshot_normalizes_incomplete_resumed_field_records(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    payload = yaml.safe_load(state.path.read_text())
+    payload["fields"]["data.sequence_length"].pop("effective")
+    state.path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    snapshot = resolve_campaign_config(WizardState.resume(state.path))
+
+    assert snapshot.data.sequence_length == 2048
+    assert snapshot.provenance["data.sequence_length"].effective == 2048
 
 
 def test_snapshot_provenance_uses_the_captured_runtime_collections(tmp_path: Path) -> None:
@@ -365,6 +376,65 @@ def test_execution_uses_resolved_stage_resource_and_parallel_profile(tmp_path: P
     }
 
 
+def test_legacy_meshes_follow_bound_consumer_profiles(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    state.set_collection(
+        "parallel_profiles",
+        {
+            "distillation": {
+                "tp": 8,
+                "cp": 1,
+                "pp": 1,
+                "dp_shard": 1,
+                "dp_replicate": 1,
+                "ep": 1,
+                "consumers": ["post.selection.distill"],
+            },
+            "bypass": {
+                "tp": 4,
+                "cp": 1,
+                "pp": 1,
+                "dp_shard": 1,
+                "dp_replicate": 1,
+                "ep": 1,
+                "consumers": ["bypass"],
+            },
+            "model": {
+                "tp": 2,
+                "cp": 1,
+                "pp": 1,
+                "dp_shard": 1,
+                "dp_replicate": 1,
+                "ep": 1,
+                "consumers": ["width_importance"],
+            },
+        },
+    )
+    state.set_collection(
+        "stage_resources",
+        {
+            "width_importance": {"profile_name": "model"},
+            "bypass": {"profile_name": "bypass"},
+            "post.selection.distill": {"profile_name": "distillation"},
+        },
+    )
+    state.set_collection(
+        "post_mip_flows",
+        {
+            "selection": {
+                "source": {"run": "default"},
+                "nodes": {"distill": {"type": "global_kd"}},
+            }
+        },
+    )
+
+    legacy = bundle_module._legacy_state_from_resolved(resolve_campaign_config(state))
+
+    assert {
+        name: mesh["tp"] for name, mesh in legacy["answers"]["infrastructure"]["meshes"].items()
+    } == {"common": 2, "bypass": 4, "global_kd": 8}
+
+
 def test_absent_semantic_collections_preserve_compatibility_overrides(tmp_path: Path) -> None:
     state = _campaign_state(tmp_path)
     state.payload["collections"].pop("mip_config")
@@ -383,7 +453,9 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
 ) -> None:
     state = _campaign_state(tmp_path)
 
-    def mutate_state_after_smoke(path: Path) -> SimpleNamespace:
+    real_validate_bundle = bundle_module.validate_bundle
+
+    def mutate_state_after_smoke(path: Path):
         if path.name == "smoke":
             state.set_field("stages.width_importance.batch", 99, source="user")
             state.set_collection("stage_batches", {"pruning.micro_batch_size": 99})
@@ -398,15 +470,13 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
                 "runner_overrides",
                 {"runner": {"slurm": {"partition": "mutated"}}},
             )
-        return SimpleNamespace(valid=True, error=None)
+        return real_validate_bundle(path)
 
     monkeypatch.setattr(
         bundle_module,
         "validate_bundle",
         mutate_state_after_smoke,
     )
-    monkeypatch.setattr(bundle_module, "dry_run_bundle", lambda path: "dry run\n")
-
     build_bundles_v2(state.campaign_dir, state)
 
     assert state.get_field("stages.width_importance.batch") == 99
