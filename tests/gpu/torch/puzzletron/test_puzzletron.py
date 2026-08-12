@@ -30,6 +30,7 @@ from _test_utils.torch.puzzletron.tiny_qwen_campaign import (
     TinyQwenCampaign,
     build_tiny_qwen_campaign,
 )
+
 from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
 from modelopt.torch.puzzletron.orchestration.state import CampaignStateStore
