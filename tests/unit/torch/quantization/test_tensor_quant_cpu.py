@@ -463,14 +463,14 @@ def test_temporarily_fold_weights_rejects_quantizer_shared_across_modules(monkey
         unregister_quant_backend(backend_name)
 
 
-def test_temporarily_fold_weights_rejects_tied_parameter():
+def test_temporarily_fold_weights_rejects_shared_parameter_storage():
     first = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
     second = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
     second.weight = torch.nn.Parameter(first.weight.detach().T)
     second.weight_quantizer._fake_quant = False
     original_weight = first.weight.detach().clone()
     with (
-        pytest.raises(RuntimeError, match="weight tied across modules"),
+        pytest.raises(RuntimeError, match="parameters sharing storage across modules"),
         mtq.temporarily_fold_weights(torch.nn.ModuleList([first, second])),
     ):
         pass

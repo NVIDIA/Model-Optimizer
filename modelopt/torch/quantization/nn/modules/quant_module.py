@@ -212,7 +212,7 @@ class QuantModule(DynamicModule):
             weight_keys = set(unique_weights)
             if any(_tensor_storage_key(weight) in tied_weight_storages for weight in weights):
                 raise RuntimeError(
-                    "temporarily_fold_weights does not support a weight tied across modules"
+                    "temporarily_fold_weights does not support parameters sharing storage across modules"
                 )
             if not weight_keys.isdisjoint(folded_weight_keys):
                 raise RuntimeError(

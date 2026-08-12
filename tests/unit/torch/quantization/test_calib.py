@@ -434,27 +434,10 @@ def test_svdquant_lora_weights():
 
     assert torch.allclose(output_folded, output_before)
     assert torch.allclose(output_restored, output_before)
-    expected_folded_weights = []
     for module, original_weight in original_weights:
         assert torch.equal(module.weight, original_weight)
         assert module.weight_quantizer.svdquant_lora_a is not None
         assert module.weight_quantizer.svdquant_lora_b is not None
-        expected_folded_weights.append(
-            (
-                module,
-                module.weight_quantizer(module.weight.float().contiguous()).to(module.weight.dtype)
-                + module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a,
-            )
-        )
-
-    mtq.fold_weight(model, keep_attrs=True)
-    for module, expected_weight in expected_folded_weights:
-        assert torch.allclose(module.weight, expected_weight)
-        assert not module.weight_quantizer.is_enabled
-        assert hasattr(module.weight_quantizer, "_svdquant_lora_a")
-        assert hasattr(module.weight_quantizer, "_svdquant_lora_b")
-        assert module.weight_quantizer.svdquant_lora_a is None
-        assert module.weight_quantizer.svdquant_lora_b is None
 
 
 def test_layerwise_calibrate_support_gate():

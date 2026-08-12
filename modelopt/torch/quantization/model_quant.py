@@ -744,7 +744,7 @@ def temporarily_fold_weights(model: nn.Module):
     original weights and quantizer runtime state are restored on exit, including after an
     exception. Parameters are restored in place so optimizer and distributed references remain
     valid. Weight ``SequentialQuantizer`` containers, quantizers shared across separate folding
-    calls, and weights tied across quantized modules are not currently supported.
+    calls, and parameters sharing storage across modules are not currently supported.
 
     This context is intended for repeated no-gradient forwards with no optimizer step, such as
     log-probability recomputation over several microbatches. It retains calibration attributes

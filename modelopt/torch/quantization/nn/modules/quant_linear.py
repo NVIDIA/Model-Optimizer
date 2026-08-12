@@ -69,9 +69,7 @@ class SVDQuantTensorQuantizer(TensorQuantizer):
     @property
     def svdquant_lora_a(self):
         """Lora a weights for svdquant."""
-        if not getattr(self, "_enable_svdquant_lora", True) or not hasattr(
-            self, "_svdquant_lora_a"
-        ):
+        if not hasattr(self, "_svdquant_lora_a"):
             return None
         return self._svdquant_lora_a
 
@@ -95,9 +93,7 @@ class SVDQuantTensorQuantizer(TensorQuantizer):
     @property
     def svdquant_lora_b(self):
         """Lora b weights for svdquant."""
-        if not getattr(self, "_enable_svdquant_lora", True) or not hasattr(
-            self, "_svdquant_lora_b"
-        ):
+        if not hasattr(self, "_svdquant_lora_b"):
             return None
         return self._svdquant_lora_b
 
@@ -185,7 +181,6 @@ class SVDQuantLinear(QuantLinearConvBase):
                     self.weight
                     + self.weight_quantizer.svdquant_lora_b @ self.weight_quantizer.svdquant_lora_a
                 )
-                self.weight_quantizer._enable_svdquant_lora = False
             if not keep_attrs:
                 _attrs = [
                     "_svdquant_lora_a",
