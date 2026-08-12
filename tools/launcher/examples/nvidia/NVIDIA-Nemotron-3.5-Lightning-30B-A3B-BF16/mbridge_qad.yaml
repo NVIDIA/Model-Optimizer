@@ -48,7 +48,7 @@ pipeline:
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 1
-      time: "08:00:00"
+      time: "04:00:00"
 
   # 2) NVFP4 PTQ. Produces the quantized Megatron checkpoint that seeds the QAD student.
   #    TP=EP=PP=1 leaves pure DP=4, so each rank calibrates on its own shard of the samples.
