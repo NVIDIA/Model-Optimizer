@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update
 
+from .hf_weight_export import _export_quantized_weight
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .model_config import QUANTIZATION_NONE
 from .moe_utils import _export_fused_experts
@@ -41,10 +42,6 @@ def _export_weight(
     ctx: ExportContext,
     weight_name: str = "weight",
 ) -> None:
-    # Imported lazily to avoid a cycle: unified_export_hf imports this module to
-    # install the built-in handlers while retaining this legacy helper's import path.
-    from .unified_export_hf import _export_quantized_weight
-
     _export_quantized_weight(module, ctx.dtype, weight_name, _tied_cache=ctx.tied_cache)
 
 

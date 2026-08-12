@@ -20,7 +20,7 @@ import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import (
+from modelopt.torch.export.hf_weight_export import (
     _export_quantized_weight,
     _process_quantized_modules,
 )

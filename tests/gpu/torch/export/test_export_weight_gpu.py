@@ -23,8 +23,8 @@ from torch.nn import functional as F
 from torch.nn import init
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.hf_weight_export import _export_quantized_weight
 from modelopt.torch.export.quant_utils import postprocess_state_dict
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
 from modelopt.torch.quantization.tensor_quant import QUANT_DESC_8BIT_PER_TENSOR

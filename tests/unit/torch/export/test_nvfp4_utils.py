@@ -27,7 +27,7 @@ from modelopt.torch.export.diffusers_utils import (
     pad_nvfp4_weights,
     swizzle_nvfp4_scales,
 )
-from modelopt.torch.export.unified_export_hf import _postprocess_safetensors
+from modelopt.torch.export.unified_export_diffusers import _postprocess_safetensors
 
 
 def _make_nvfp4_state_dict(rows=32, cols=64):

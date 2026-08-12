@@ -224,7 +224,7 @@ quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 quant_cfg["quant_cfg"]["*multi_modal_projector*"] = {"enable": False}
 ```
 
-**Known VLM export issue**: The export step (`requantize_resmooth_fused_llm_layers` in `unified_export_hf.py`) may try to run a dummy forward pass on the full VLM instead of the language model backbone. This currently only handles Nemotron VLMs. If hit, patch the export to use `is_multimodal_model()` for the VLM check instead of model-specific string matching.
+**Known VLM export issue**: The export step (`requantize_resmooth_fused_llm_layers` in `hf_export_prep.py`) may try to run a dummy forward pass on the full VLM instead of the language model backbone. This currently only handles Nemotron VLMs. If hit, patch the export to use `is_multimodal_model()` for the VLM check instead of model-specific string matching.
 
 ## Pattern 5: FP8 Checkpoint Handling
 

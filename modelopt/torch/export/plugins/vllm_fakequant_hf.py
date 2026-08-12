@@ -41,9 +41,9 @@ from modelopt.torch.quantization.utils.core_utils import enable_weight_access_an
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name, safe_save
 
+from ..hf_export_prep import collect_shared_input_modules
 from ..layer_utils import get_experts_list, is_moe
 from ..quant_utils import get_quantization_format
-from ..unified_export_hf import collect_shared_input_modules
 
 __all__ = [
     "export_hf_vllm_fq_checkpoint",
