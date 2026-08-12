@@ -144,13 +144,8 @@ class QuantModule(DynamicModule):
         if not quantizer.fake_quant:
             return
 
-        if (
-            quantizer.is_enabled
-            or quantizer.pre_quant_scale is not None
-            or quantizer.rotate_is_enabled
-        ):
-            for weight in weights:
-                weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
+        for weight in weights:
+            weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
         if hasattr(quantizer, "_pre_quant_scale"):

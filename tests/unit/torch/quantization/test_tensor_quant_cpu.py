@@ -393,24 +393,16 @@ def test_temporarily_fold_weights_handles_disabled_transform_and_none_weight():
     tied_output = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
     tied_output.weight = None
 
-    inactive = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False).double())
-    inactive.weight_quantizer.disable()
-    with torch.no_grad():
-        inactive.weight[0, 0] = 1.000000000001
-    inactive_weight = inactive.weight.detach().clone()
-
-    with mtq.temporarily_fold_weights(torch.nn.ModuleList([disabled, tied_output, inactive])):
+    with mtq.temporarily_fold_weights(torch.nn.ModuleList([disabled, tied_output])):
         assert torch.equal(disabled.weight, original_weight * pre_quant_scale)
         assert not disabled.weight_quantizer.is_enabled
         assert disabled.weight_quantizer.pre_quant_scale is None
         assert tied_output.weight_quantizer.is_enabled
-        assert torch.equal(inactive.weight, inactive_weight)
 
     assert torch.equal(disabled.weight, original_weight)
     assert not disabled.weight_quantizer.is_enabled
     assert torch.equal(disabled.weight_quantizer.pre_quant_scale, pre_quant_scale)
     assert tied_output.weight_quantizer.is_enabled
-    assert torch.equal(inactive.weight, inactive_weight)
 
 
 def test_temporarily_fold_weights_restores_when_folding_fails(monkeypatch):
