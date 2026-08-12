@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import types
 from collections import deque
@@ -635,6 +636,13 @@ class _WeightedObjectiveMixin:
         if self.dist_env.is_main:
             from pathlib import Path
 
+            consolidated = Path(checkpoint_path, "model", "consolidated")
+            config_path = consolidated / "config.json"
+            config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+            if config.get("block_configs"):
+                from ..utils.vllm_adapter import refresh_realized_checkpoint_config
+
+                refresh_realized_checkpoint_config(consolidated)
             Path(checkpoint_path, "saving_completed").touch()
         if torch.distributed.is_initialized():
             torch.distributed.barrier()

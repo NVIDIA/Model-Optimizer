@@ -30,10 +30,10 @@ from _test_utils.torch.puzzletron.tiny_qwen_campaign import (
     TinyQwenCampaign,
     build_tiny_qwen_campaign,
 )
-from transformers import AutoModelForCausalLM
-
+from modelopt.torch.puzzletron.anymodel.registry import resolve_descriptor_from_pretrained
 from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_is_complete
 from modelopt.torch.puzzletron.orchestration.state import CampaignStateStore
+from modelopt.torch.puzzletron.plugins.automodel.load import load_anymodel_for_scoring
 from modelopt.torch.puzzletron.post_mip.records import ArtifactKind, CandidateLedger, CandidateSet
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 
@@ -374,6 +374,12 @@ def _assert_post_mip_and_final_checkpoint(
         assert (checkpoint / "config.json").is_file()
         assert list(checkpoint.glob("*.safetensors"))
         assert (checkpoint.parents[1] / "saving_completed").is_file()
+        parent = ledger.revisions[revision.parent_revision_id]
+        block_configs = _json(checkpoint / "config.json")["block_configs"]
+        assert block_configs
+        assert block_configs == _json(Path(parent.artifact["checkpoint"]) / "config.json")[
+            "block_configs"
+        ]
         kd_paths.extend(
             [
                 summary_path,
@@ -461,11 +467,35 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     assert all(_json(path)["status"] == "success" for path in manifest_paths)
     pruning_paths = _assert_pruning_and_mip_artifacts(campaign)
     final_checkpoint, post_paths = _assert_post_mip_and_final_checkpoint(campaign)
-    model = AutoModelForCausalLM.from_pretrained(
-        final_checkpoint,
-        dtype=torch.bfloat16,
+    resolution = resolve_descriptor_from_pretrained(str(final_checkpoint))
+    selected_config = _json(final_checkpoint / "config.json")
+    assert selected_config["architectures"] == ["AnyModel"]
+    assert selected_config["base_architecture"] == "Qwen3_5ForCausalLM"
+    selected_block_configs = selected_config["block_configs"]
+    selected_ffn_widths = []
+    for block_config in selected_block_configs:
+        widths = _nested_values(block_config, "intermediate_size")
+        assert len(widths) == 1
+        selected_ffn_widths.append(int(widths[0]))
+    per_layer_config = (selected_config.get("text_config") or selected_config)[
+        "per_layer_config"
+    ]
+    assert [
+        int(
+            per_layer_config.get(str(index), {}).get(
+                "intermediate_size", selected_config["intermediate_size"]
+            )
+        )
+        for index in range(len(selected_block_configs))
+    ] == selected_ffn_widths
+    model = load_anymodel_for_scoring(
+        str(final_checkpoint),
+        anymodel_descriptor=resolution.name,
+        force_hf=True,
+        torch_dtype=torch.bfloat16,
         local_files_only=True,
     ).cuda()
+    assert [layer.mlp.down_proj.in_features for layer in model.model.layers] == selected_ffn_widths
     with torch.no_grad():
         logits = model(
             torch.tensor([[1, 2, 3, 4]], device="cuda"),

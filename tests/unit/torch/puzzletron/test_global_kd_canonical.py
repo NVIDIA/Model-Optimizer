@@ -740,10 +740,11 @@ def test_gradient_groups_are_observed_at_optimizer_step():
     assert all(value.item() > 0 for value in recipe._gradient_squared.values())
 
 
-def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
+def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     calls = []
+    refreshes = []
 
     class BaseRecipe:
         def save_checkpoint(
@@ -755,7 +756,12 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
             best_metric_key="default",
         ):
             calls.append((epoch, step, train_loss, val_loss, best_metric_key))
-            (tmp_path / f"epoch_{epoch}_step_{step}").mkdir()
+            checkpoint = tmp_path / f"epoch_{epoch}_step_{step}"
+            consolidated = checkpoint / "model/consolidated"
+            consolidated.mkdir(parents=True)
+            (consolidated / "config.json").write_text(
+                json.dumps({"block_configs": [{"subblock_configs": []}]})
+            )
             return "saved"
 
     class Recipe(_WeightedObjectiveMixin, BaseRecipe):
@@ -768,6 +774,12 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
         {"config": type("Config", (), {"checkpoint_dir": tmp_path})()},
     )()
     recipe.dist_env = type("DistEnv", (), {"is_main": True})()
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda path: refreshes.append(
+            (path, (tmp_path / "epoch_2_step_17/saving_completed").exists())
+        ),
+    )
 
     result = recipe.save_checkpoint(
         2,
@@ -779,6 +791,7 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
 
     assert result == "saved"
     assert calls == [(2, 17, 0.5, {"lm_loss": 0.25}, "lm_loss")]
+    assert refreshes == [(tmp_path / "epoch_2_step_17/model/consolidated", False)]
     assert (tmp_path / "epoch_2_step_17" / "saving_completed").is_file()
 
 
