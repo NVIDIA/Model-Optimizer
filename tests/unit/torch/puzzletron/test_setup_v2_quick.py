@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Guided profiles, defaults, navigation, and bundle output for Puzzletron setup v2."""
 
@@ -14,6 +26,7 @@ import yaml
 import puzzletron_setup.v2.bundle as bundle_module
 import puzzletron_setup.v2.cli as cli_module
 import puzzletron_setup.v2.wizard as wizard_module
+import puzzletron_setup.v2.wizard_common as wizard_common_module
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
@@ -45,6 +58,33 @@ from puzzletron_setup.v2.wizard import (
 
 _QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
 _NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
+
+
+def test_common_helpers_remain_available_from_wizard_facade():
+    names = (
+        "BUILTINS",
+        "CANONICAL_STAGE_STRATEGIES",
+        "STATIC_MODEL_BATCH_PATHS",
+        "STATIC_MODEL_STAGES",
+        "_default_axis_values",
+        "_depth_granularity_choices",
+        "_guided_integer_default",
+        "_integer_field",
+        "_mapping_copy",
+        "_nested_records",
+        "_plain_review_value",
+        "_print_default_decisions",
+        "_record_default",
+        "_replacement_granularity_choices",
+        "_resolved",
+        "_resolver",
+        "_section_action",
+        "_text_field",
+        "_vllm_granularity_choices",
+    )
+
+    for name in names:
+        assert getattr(wizard_module, name) is getattr(wizard_common_module, name)
 
 
 def _qwen_inventory(

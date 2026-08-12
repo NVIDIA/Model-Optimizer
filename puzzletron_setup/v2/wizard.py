@@ -26,7 +26,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped, unused-ignore]
 
 from puzzletron_orchestrator.mesh import vllm_topology_to_mesh
 from puzzletron_setup import (
@@ -41,7 +41,7 @@ from puzzletron_setup.inspection import (
     normalize_dataset_source,
     normalize_model_source,
 )
-from puzzletron_setup.profiles import CandidateCounts, count_candidate_options
+from puzzletron_setup.profiles import count_candidate_options
 
 from .bundle import build_bundles_v2
 from .defaults import DefaultsResolver, load_defaults
@@ -53,7 +53,7 @@ from .hf_datasets import (
 )
 from .parallel_validation import validate_automodel_parallelism, validate_vllm_parallelism
 from .post_mip import FlowDraft, NodeDraft, PostMIPFlowEditor, recommended_flow
-from .presets import QUICK_SETUP_PRESETS, SetupPreset, get_setup_preset
+from .presets import QUICK_SETUP_PRESETS, get_setup_preset
 from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
 from .resources import (
     ParallelProfile,
@@ -64,103 +64,27 @@ from .resources import (
 )
 from .session import WizardSession
 from .state import WizardState
+from .wizard_common import BUILTINS as BUILTINS
+from .wizard_common import CANONICAL_STAGE_STRATEGIES as CANONICAL_STAGE_STRATEGIES
+from .wizard_common import STATIC_MODEL_BATCH_PATHS as STATIC_MODEL_BATCH_PATHS
+from .wizard_common import STATIC_MODEL_STAGES as STATIC_MODEL_STAGES
+from .wizard_common import _default_axis_values as _default_axis_values
+from .wizard_common import _depth_granularity_choices as _depth_granularity_choices
+from .wizard_common import _guided_integer_default as _guided_integer_default
+from .wizard_common import _integer_field as _integer_field
+from .wizard_common import _mapping_copy as _mapping_copy
+from .wizard_common import _nested_records as _nested_records
+from .wizard_common import _plain_review_value as _plain_review_value
+from .wizard_common import _print_default_decisions as _print_default_decisions
+from .wizard_common import _record_default as _record_default
+from .wizard_common import _replacement_granularity_choices as _replacement_granularity_choices
+from .wizard_common import _resolved as _resolved
+from .wizard_common import _resolver as _resolver
+from .wizard_common import _section_action as _section_action
+from .wizard_common import _text_field as _text_field
+from .wizard_common import _vllm_granularity_choices as _vllm_granularity_choices
 
 __all__ = ["SECTION_BUILDERS", "run_wizard_v2"]
-
-BUILTINS = {
-    "data": {"layout": "fixed", "sequence_length": 4096},
-    "infrastructure": {
-        "gpus_per_node": 8,
-        "execution_contract": {
-            "repository": WORKER_REPOSITORY_PLACEHOLDER,
-            "venv": WORKER_VENV_PLACEHOLDER,
-            "container": None,
-            "container_mounts": None,
-            "prerun_commands": [],
-            "postrun_commands": [],
-        },
-        "runner": {
-            "kind": "slurm",
-            "slurm": {
-                "account": "",
-                "partition_interactive": "interactive",
-                "partition_batch": "batch",
-                "partition_cpu": None,
-                "time_limit": "4:00:00",
-                "qos": None,
-                "max_nodes": 64,
-            },
-        },
-    },
-    "pruning": {
-        "depth_granularity": "subblock",
-        "depth_remove": 4,
-        "replacement_granularity": "subblock",
-        "width_importance_samples": 32768,
-        "sort_sanity": False,
-        "sort_sanity_samples": 128,
-        "width_sanity": False,
-        "width_sanity_samples": 128,
-        "width_sanity_layer_count": 3,
-        "width_sanity_targets_per_axis": 2,
-        "slicing_sanity": False,
-        "replacement_samples": 128,
-        "bypass": {
-            "enabled": True,
-            "granularity": "subblock",
-            "samples": 4096,
-            "sequence_length": 4096,
-            "batch_size": 8,
-            "grad_accumulation_steps": 1,
-        },
-    },
-    "vllm": {
-        "enabled": False,
-        "granularity": "subblock",
-        "prefill_seq_len": 4096,
-        "generation_seq_len": 1024,
-        "batch_size": 1,
-        "max_num_seqs": 1,
-        "topology": {
-            "tensor_parallel_size": 1,
-            "pipeline_parallel_size": 1,
-            "data_parallel_size": 1,
-            "prefill_context_parallel_size": 1,
-            "decode_context_parallel_size": 1,
-            "enable_expert_parallel": False,
-            "distributed_executor_backend": "mp",
-        },
-    },
-    "mip": {
-        "goal_metric": "params",
-        "goal_value": "75%",
-        "objective": "metrics.cosine_embedding_loss_hidden_states",
-        "num_solutions": 8,
-    },
-}
-
-STATIC_MODEL_STAGES = (
-    "depth_importance",
-    "width_importance",
-    "bypass",
-    "replacement_scoring",
-)
-STATIC_MODEL_BATCH_PATHS = {
-    "depth_importance": "depth_importance.micro_batch_size",
-    "width_importance": "pruning.micro_batch_size",
-    "sort_sanity": "sort_sanity.micro_batch_size",
-    "width_sanity": "width_sanity.micro_batch_size",
-    "bypass": "bypass.training.micro_batch_size",
-    "replacement_scoring": "replacement_scoring.micro_batch_size",
-}
-CANONICAL_STAGE_STRATEGIES = {
-    "depth_importance": "persistent_pool",
-    "width_importance": "single",
-    "sort_sanity": "single",
-    "width_sanity": "single",
-    "bypass": "single",
-    "replacement_scoring": "persistent_pool",
-}
 
 _CUSTOM_MODEL_SOURCE = "__custom_model_source__"
 _DEFAULT_MODEL_SOURCE = "__default_model_source__"
@@ -392,244 +316,6 @@ def _select_hf_subsets(
         selected_names = [str(name) for name in selected]
     weights = proportional_subset_weights(catalog, selected_names)
     return catalog, selected_names, weights
-
-
-def _nested_records(state: WizardState) -> dict[str, Any]:
-    nested: dict[str, Any] = {}
-    for path, record in state.records().items():
-        current = nested
-        parts = path.split(".")
-        for part in parts[:-1]:
-            current = current.setdefault(part, {})
-        current[parts[-1]] = deepcopy(record.effective)
-    return nested
-
-
-def _resolver(
-    state: WizardState,
-    defaults_path: Path | None,
-    preset: SetupPreset | None = None,
-    family_config: str | Path | None = None,
-    model_inventory: Any | None = None,
-) -> DefaultsResolver:
-    preset_defaults = {}
-    model_profile_defaults = {}
-    if preset is not None and family_config is not None:
-        preset_defaults, model_profile_defaults = preset.resolved_default_layers(
-            family_config,
-            model_inventory,
-        )
-    return DefaultsResolver(
-        builtins=BUILTINS,
-        model_derived={},
-        preset_defaults=preset_defaults,
-        model_profile_defaults=model_profile_defaults,
-        file_defaults=load_defaults(defaults_path),
-        preserved=_nested_records(state),
-    )
-
-
-def _resolved(
-    state: WizardState,
-    resolver: DefaultsResolver,
-    path: str,
-    fallback: Any = None,
-) -> Any:
-    value = resolver.resolve(path, fallback)
-    print(f"  {path}: {value.value!r} ({value.source})")
-    return value
-
-
-def _record_default(
-    state: WizardState,
-    resolver: DefaultsResolver,
-    path: str,
-    fallback: Any = None,
-    *,
-    dependencies: tuple[str, ...] = (),
-) -> Any:
-    resolved = resolver.resolve_default(path, fallback)
-    state.set_field(
-        path,
-        resolved.value,
-        source=resolved.source,
-        dependencies=dependencies,
-    )
-    return resolved.value
-
-
-def _section_action(
-    session: WizardSession,
-    section: str,
-    summary: str,
-    defaults: Mapping[str, Any],
-    *,
-    prompt_in_guided: bool = False,
-) -> Any:
-    session.begin(section)
-    if session.guided and not prompt_in_guided:
-        return "defaults"
-    print(f"\n[{section}] {summary}")
-    _print_default_decisions(defaults)
-    return session.select(
-        f"{section}.action",
-        f"{section.replace('_', ' ').title()}:",
-        [
-            ("Use defaults shown above", "defaults"),
-            ("Customize", "customize"),
-        ],
-        default="defaults",
-    )
-
-
-def _print_default_decisions(defaults: Mapping[str, Any]) -> None:
-    print("  Resolved defaults:")
-    rendered = yaml.safe_dump(
-        _plain_review_value(defaults),
-        sort_keys=False,
-        default_flow_style=False,
-    ).rstrip()
-    for line in rendered.splitlines():
-        print(f"    {line}")
-
-
-def _plain_review_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _plain_review_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_review_value(item) for item in value]
-    return value
-
-
-def _vllm_granularity_choices(counts: CandidateCounts) -> list[tuple[str, str]]:
-    width_count = counts.effective_vllm_width_count
-    if width_count == 1:
-        return [
-            (
-                f"Sublayer — {counts.vllm_subblock_total} unique configurations",
-                "subblock",
-            ),
-            (
-                f"Whole block — {counts.vllm_block_total} unique configurations",
-                "block",
-            ),
-        ]
-    return [
-        (
-            f"Sublayer — {counts.vllm_subblock} configurations/width, "
-            f"{counts.vllm_subblock_total} total across {width_count} widths",
-            "subblock",
-        ),
-        (
-            f"Whole block — {counts.vllm_block} configurations/width, "
-            f"{counts.vllm_block_total} total across {width_count} widths",
-            "block",
-        ),
-    ]
-
-
-def _replacement_granularity_choices(
-    counts: CandidateCounts,
-) -> list[tuple[str, str]]:
-    width_count = counts.width_count
-
-    def label(name: str, per_width: int, total: int) -> str:
-        if width_count == 1:
-            return f"{name} — {total} options"
-        return f"{name} — {per_width} options/width, {total} total across {width_count} widths"
-
-    return [
-        (
-            label(
-                "One sublayer at a time",
-                counts.replacement_subblock_per_width,
-                counts.replacement_subblock_total,
-            ),
-            "subblock",
-        ),
-        (
-            label(
-                "One layer at a time",
-                counts.replacement_block_per_width,
-                counts.replacement_block_total,
-            ),
-            "block",
-        ),
-    ]
-
-
-def _depth_granularity_choices(inventory: Any) -> list[tuple[str, str]]:
-    return [
-        (f"Sublayer — {inventory.num_sublayers} available", "subblock"),
-        (f"Whole layer — {inventory.num_layers} available", "block"),
-    ]
-
-
-def _default_axis_values(axis: Any) -> list[int]:
-    legal_values = tuple(int(value) for value in axis.values)
-    teacher = int(axis.teacher_value)
-    half = min(
-        legal_values,
-        key=lambda value: (abs(value - teacher // 2), -value),
-    )
-    return list(dict.fromkeys((teacher, half)))
-
-
-def _text_field(
-    session: WizardSession,
-    resolver: DefaultsResolver,
-    path: str,
-    label: str,
-    fallback: str = "",
-    *,
-    validate: Callable[[Any], bool | str] | None = None,
-) -> Any:
-    resolved = _resolved(session.state, resolver, path, fallback)
-    value = session.text(
-        path,
-        label,
-        default=str(resolved.value or ""),
-        validate=validate,
-    )
-    if value is not BACK:
-        session.state.set_field(path, value, source="user")
-    return value
-
-
-def _integer_field(
-    session: WizardSession,
-    resolver: DefaultsResolver,
-    path: str,
-    label: str,
-    fallback: int,
-    *,
-    minimum: int = 1,
-    maximum: int | None = None,
-) -> Any:
-    resolved = _resolved(session.state, resolver, path, fallback)
-    value = session.integer(
-        path,
-        label,
-        default=int(resolved.value),
-        minimum=minimum,
-        maximum=maximum,
-    )
-    if value is not BACK:
-        session.state.set_field(path, value, source="user")
-    return value
-
-
-def _guided_integer_default(value: Any, path: str, *, minimum: int) -> int:
-    """Validate one non-interactive integer default with an actionable error."""
-    try:
-        parsed = int(str(value))
-    except (TypeError, ValueError) as error:
-        raise SetupError(
-            f"Guided setup default {path} must be an integer; got {value!r}."
-        ) from error
-    if parsed < minimum:
-        raise SetupError(f"Guided setup default {path} must be at least {minimum}; got {value!r}.")
-    return parsed
 
 
 def _select_model_source(
@@ -897,6 +583,7 @@ def data_section(
         }
 
     if adapter is not None:
+        assert acquisition is not None
         if adapter == _PUZZLE_KD_ADAPTER:
             print(
                 "  Puzzle-KD train and validation row counts will be inferred "
@@ -907,6 +594,7 @@ def data_section(
                 raise SetupError(
                     "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
                 )
+            assert subset_selection is not None
             subset_media_shards = {
                 record["name"]: record["num_media_shards"]
                 for record in subset_selection["subsets"]
@@ -1204,7 +892,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
     if action is BACK:
         return False
 
-    defaults = deepcopy(BUILTINS["pruning"])
+    defaults: dict[str, Any] = deepcopy(BUILTINS["pruning"])
     defaults["width_importance_samples"] = int(
         resolver.resolve_default(
             "pruning.width_importance_samples",
@@ -1519,7 +1207,7 @@ def _profile_prompt(
 
 
 def _pruning_payload(state: WizardState) -> dict[str, Any]:
-    payload = deepcopy(BUILTINS["pruning"])
+    payload: dict[str, Any] = deepcopy(BUILTINS["pruning"])
     current = state.collection("pruning")
     if not isinstance(current, Mapping):
         return payload
@@ -2511,10 +2199,6 @@ def pre_mip_stages_section(
     session.state.set_collection("stage_resources", resources)
     session.state.set_collection("stage_batches", batches)
     return True
-
-
-def _mapping_copy(value: Any) -> dict[str, Any]:
-    return deepcopy(dict(value)) if isinstance(value, Mapping) else {}
 
 
 def _identifier_validation(value: str) -> bool | str:
@@ -3931,8 +3615,8 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
             )
             if BACK in (node_id, input_id):
                 return False
-            selector = {}
-            config = {}
+            selector: dict[str, Any] = {}
+            config: dict[str, Any] = {}
             if node_type == "filter":
                 metric = session.text(
                     f"post_mip.{run_id}.node.metric",
@@ -4117,7 +3801,7 @@ def _vllm_topology_prompt(
     """Ask for and validate one complete vLLM parallel topology."""
     topology_defaults = _mapping_copy(defaults)
     while True:
-        topology = {}
+        topology: dict[str, Any] = {}
         for name, label in (
             ("tensor_parallel_size", f"{label_prefix} tensor parallel (TP):"),
             ("pipeline_parallel_size", f"{label_prefix} pipeline parallel (PP):"),
