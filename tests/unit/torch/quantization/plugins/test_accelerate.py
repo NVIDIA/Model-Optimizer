@@ -80,3 +80,51 @@ def test_tensor_quantizer_modelopt_state_with_accelerate_hook():
 
     # The state dict must be picklable (torch.save uses pickle internally)
     pickle.dumps(state)
+
+
+def test_init_quantized_weights_dtype_resolution():
+    """dtype/torch_dtype must not leak into load_checkpoint_and_dispatch().
+
+    Both are model-construction kwargs: `load_checkpoint_and_dispatch()`
+    accepts `dtype` but not `torch_dtype`, so forwarding kwargs verbatim
+    raised TypeError for callers using the legacy alias. The fallback also has
+    to survive `config.torch_dtype` being a deprecated alias that returns None
+    instead of being absent, which defeats a `getattr(..., default)` fallback.
+    """
+    from transformers import PretrainedConfig
+
+    def resolve(kwargs: dict, config) -> torch.dtype:
+        """Mirror of the resolution order in accelerate.patched_from_pretrained."""
+        dtype_kwarg = kwargs.pop("dtype", None)
+        legacy_dtype_kwarg = kwargs.pop("torch_dtype", None)
+        config_dtype = getattr(config, "dtype", None)
+        if config_dtype is None:
+            config_dtype = getattr(config, "torch_dtype", None)
+        return (
+            dtype_kwarg
+            if dtype_kwarg is not None
+            else legacy_dtype_kwarg
+            if legacy_dtype_kwarg is not None
+            else config_dtype
+            if config_dtype is not None
+            else torch.float16
+        )
+
+    config = PretrainedConfig()
+
+    # Explicit kwargs win, in precedence order, and are consumed.
+    kwargs = {"dtype": torch.bfloat16, "attn_implementation": "sdpa"}
+    assert resolve(kwargs, config) is torch.bfloat16
+    assert "dtype" not in kwargs and "torch_dtype" not in kwargs
+
+    kwargs = {"torch_dtype": torch.bfloat16}
+    assert resolve(kwargs, config) is torch.bfloat16
+    assert "torch_dtype" not in kwargs
+
+    # A config carrying no dtype must fall back to float16, not None.
+    assert resolve({}, config) is torch.float16
+
+    # A config that does carry one is respected.
+    config_with_dtype = PretrainedConfig()
+    config_with_dtype.dtype = torch.bfloat16
+    assert resolve({}, config_with_dtype) is torch.bfloat16

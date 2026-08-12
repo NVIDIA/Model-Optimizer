@@ -232,13 +232,23 @@ def init_quantized_weights(
         legacy_dtype_kwarg = kwargs.pop("torch_dtype", None)
 
         with init_empty_weights():
-            # Fix torch_dtype to match original model
+            # Fix dtype to match original model.
+            # `config.torch_dtype` is a deprecated alias of `config.dtype` in
+            # transformers >= 5, and it RETURNS None rather than being absent
+            # when unset -- so `getattr(config, "torch_dtype", torch.float16)`
+            # yields None and the float16 fallback never fires. Read `dtype`
+            # first, then the alias, then fall back explicitly.
+            config_dtype = getattr(config, "dtype", None)
+            if config_dtype is None:
+                config_dtype = getattr(config, "torch_dtype", None)
             torch_dtype = (
                 dtype_kwarg
                 if dtype_kwarg is not None
                 else legacy_dtype_kwarg
                 if legacy_dtype_kwarg is not None
-                else getattr(config, "torch_dtype", torch.float16)
+                else config_dtype
+                if config_dtype is not None
+                else torch.float16
             )
             from_config_kwargs = {}
             if attn_implementation is not None:
