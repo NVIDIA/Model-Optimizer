@@ -50,6 +50,7 @@ def get_conversation_input_ids(tokenizer, conversations):
     if isinstance(input_ids, torch.Tensor):
         input_ids = input_ids.squeeze(0).tolist()
     if input_ids and isinstance(input_ids[0], list | tuple):
+        assert len(input_ids) == 1, f"expected a single conversation, got {len(input_ids)}"
         input_ids = list(input_ids[0])  # unwrap a single-conversation batch dim
     assert not input_ids or isinstance(input_ids[0], int), (
         f"expected flat token ids, got {input_ids[:1]}"
@@ -59,11 +60,7 @@ def get_conversation_input_ids(tokenizer, conversations):
 
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
-    conversations = tokenizer.apply_chat_template(text)
-    # Transformers5.x returns a BatchEncoding from apply_chat_template
-    if hasattr(conversations, "input_ids"):
-        conversations = conversations.input_ids
-    counter = Counter(conversations)
+    counter = Counter(get_conversation_input_ids(tokenizer, text))
     vocab = counter.most_common(target_vocab_size)
     mapping = torch.zeros(target_vocab_size, dtype=torch.int64)
     assert len(vocab) == target_vocab_size, (
