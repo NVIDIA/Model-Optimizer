@@ -20,7 +20,6 @@ import os
 os.environ["TLLM_LOG_LEVEL"] = "error"
 import argparse
 import asyncio
-from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -31,24 +30,11 @@ from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig, SaveHiddenStates
 from tqdm import tqdm as tqdm
 from transformers import AutoConfig, AutoTokenizer
 
+from modelopt.torch.speculative.utils import get_conversation_input_ids
+
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
 )
-
-
-def get_conversation_input_ids(tokenizer, conversations):
-    """Tokenize ``conversations`` and return the flat sequence of input token ids.
-
-    ``tokenizer.apply_chat_template`` returns a ``BatchEncoding``/dict (carrying an
-    ``input_ids`` field) on newer ``transformers`` versions rather than a plain list of
-    token ids. Callers rely on ``len(...)`` / ``.shape`` reflecting the token count, so
-    unwrap the mapping. Without this, ``len(...)`` is the number of dict keys (2), which
-    makes every conversation look ~empty and get dropped by the length filter.
-    """
-    input_ids = tokenizer.apply_chat_template(conversations, add_generation_prompt=False)
-    if isinstance(input_ids, Mapping):
-        input_ids = input_ids["input_ids"]
-    return input_ids
 
 
 def parse_args() -> argparse.Namespace:
@@ -280,9 +266,7 @@ def main(args: argparse.Namespace) -> None:
                 continue
 
             input_ids = get_conversation_input_ids(tokenizer, conversations)
-            num_input_tokens = (
-                input_ids.shape[1] if isinstance(input_ids, torch.Tensor) else len(input_ids)
-            )
+            num_input_tokens = len(input_ids)
             if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
                 num_skipped_too_long += 1
                 continue

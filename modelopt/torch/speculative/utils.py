@@ -40,6 +40,14 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 )
 
 
+def get_conversation_input_ids(tokenizer, conversations):
+    """Return the chat-template token ids, unwrapping the transformers>=5 BatchEncoding."""
+    input_ids = tokenizer.apply_chat_template(conversations, add_generation_prompt=False)
+    if hasattr(input_ids, "input_ids"):
+        input_ids = input_ids.input_ids  # transformers>=5 returns a BatchEncoding
+    return input_ids
+
+
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
     conversations = tokenizer.apply_chat_template(text)
