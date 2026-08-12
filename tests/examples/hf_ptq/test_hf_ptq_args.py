@@ -63,7 +63,13 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
-    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "weight"}
+    # The shared base cost-excluded unit is spliced into every general AutoQuantize recipe, so it
+    # reaches mtq under constraints.cost (VL vision tower / MTP out of the bit-budget denominator).
+    assert inputs["constraints"] == {
+        "effective_bits": 5.4,
+        "cost_model": "weight",
+        "cost": {"excluded_module_name_patterns": ["*visual*", "*mtp*", "*vision_tower*"]},
+    }
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
     assert inputs["score_size"] == 128

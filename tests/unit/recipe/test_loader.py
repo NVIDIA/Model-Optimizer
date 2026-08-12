@@ -1916,3 +1916,8 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
+    # Both shared base units must be spliced in: the removed --auto_quantize_* CLI shim appended
+    # them unconditionally, so a general recipe is the migration target and must match it. Without
+    # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
+    assert "*output_layer*" in recipe.auto_quantize.disabled_layers
+    assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
