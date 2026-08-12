@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 """Explicit defaults-file loading and value provenance for setup v2."""
 
@@ -28,9 +26,86 @@ from typing import Any
 
 import yaml
 
-from puzzletron_setup import SetupError
+from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOLDER, SetupError
 
-__all__ = ["DefaultsResolver", "ResolvedDefault", "load_defaults", "validate_defaults"]
+__all__ = [
+    "DefaultsResolver",
+    "ResolvedDefault",
+    "load_defaults",
+    "validate_defaults",
+]
+
+BUILTIN_DEFAULTS: dict[str, Any] = {
+    "data": {"layout": "fixed", "sequence_length": 4096},
+    "infrastructure": {
+        "gpus_per_node": 8,
+        "execution_contract": {
+            "repository": WORKER_REPOSITORY_PLACEHOLDER,
+            "venv": WORKER_VENV_PLACEHOLDER,
+            "container": None,
+            "container_mounts": None,
+            "prerun_commands": [],
+            "postrun_commands": [],
+        },
+        "runner": {
+            "kind": "slurm",
+            "slurm": {
+                "account": "",
+                "partition_interactive": "interactive",
+                "partition_batch": "batch",
+                "partition_cpu": None,
+                "time_limit": "4:00:00",
+                "qos": None,
+                "max_nodes": 64,
+            },
+        },
+    },
+    "pruning": {
+        "depth_granularity": "subblock",
+        "depth_remove": 4,
+        "replacement_granularity": "subblock",
+        "width_importance_samples": 32768,
+        "sort_sanity": False,
+        "sort_sanity_samples": 128,
+        "width_sanity": False,
+        "width_sanity_samples": 128,
+        "width_sanity_layer_count": 3,
+        "width_sanity_targets_per_axis": 2,
+        "slicing_sanity": False,
+        "replacement_samples": 128,
+        "bypass": {
+            "enabled": True,
+            "granularity": "subblock",
+            "samples": 4096,
+            "sequence_length": 4096,
+            "batch_size": 8,
+            "grad_accumulation_steps": 1,
+        },
+    },
+    "vllm": {
+        "enabled": False,
+        "granularity": "subblock",
+        "prefill_seq_len": 4096,
+        "generation_seq_len": 1024,
+        "batch_size": 1,
+        "max_num_seqs": 1,
+        "topology": {
+            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": 1,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "enable_expert_parallel": False,
+            "distributed_executor_backend": "mp",
+        },
+    },
+    "mip": {
+        "goal_metric": "params",
+        "goal_value": "75%",
+        "objective": "metrics.cosine_embedding_loss_hidden_states",
+        "num_solutions": 8,
+    },
+}
 
 
 class _AnyMapping:

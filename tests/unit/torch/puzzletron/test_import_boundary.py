@@ -53,6 +53,26 @@ def test_lightweight_puzzletron_import_does_not_require_automodel() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_resolved_setup_config_is_available_only_from_its_explicit_module() -> None:
+    result = _run_without_automodel(
+        "import puzzletron_setup.v2 as setup_v2; "
+        "from puzzletron_setup.v2.resolved import ResolvedCampaignConfig; "
+        "assert not hasattr(setup_v2, 'ResolvedCampaignConfig')"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_resolved_setup_config_import_does_not_initialize_torch() -> None:
+    result = _run_without_automodel(
+        "from puzzletron_setup.v2.resolved import ResolvedCampaignConfig; "
+        "assert 'torch' not in sys.modules; "
+        "assert not any(name.startswith('modelopt.torch') for name in sys.modules)"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_automodel_recipe_loader_reports_missing_dependency() -> None:
     result = _run_without_automodel(
         "from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence "

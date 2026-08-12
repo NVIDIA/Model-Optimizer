@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 """Render setup-v2 state into existing Puzzletron runtime contracts."""
 
@@ -31,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, SetupError
+from puzzletron_setup import SetupError
 from puzzletron_setup.bundle import (
     BundleResult,
     dry_run_bundle,
@@ -41,6 +39,12 @@ from puzzletron_setup.bundle import (
     validate_bundle,
 )
 
+from .resolved import (
+    ResolvedCampaignConfig,
+    ResolvedParallelProfile,
+    _plain,
+    resolve_campaign_config,
+)
 from .validation import validate_state
 
 if TYPE_CHECKING:
@@ -52,6 +56,15 @@ __all__ = [
     "render_experiment_v2",
     "render_runner_v2",
 ]
+
+_LEGACY_MESH_FIELDS = ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
+_LEGACY_COMMON_CONSUMERS = (
+    "width_importance",
+    "depth_importance",
+    "sort_sanity",
+    "width_sanity",
+    "replacement_scoring",
+)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -68,113 +81,118 @@ def _deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-def _plain(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
+def _post_mip_consumers(config: ResolvedCampaignConfig, node_type: str) -> tuple[str, ...]:
+    consumers = []
+    for flow_id, flow in config.post_mip_flows.items():
+        for node_id, node in _mapping(_mapping(flow).get("nodes")).items():
+            if _mapping(node).get("type") == node_type:
+                consumers.append(f"post.{flow_id}.{node_id}")
+    return tuple(sorted(consumers))
 
 
-def _mapping_path(value: Any, parts: list[str]) -> tuple[bool, Any]:
-    for part in parts:
-        if not isinstance(value, Mapping) or part not in value:
-            return False, None
-        value = value[part]
-    return True, value
+def _profile_for_consumers(
+    config: ResolvedCampaignConfig,
+    consumers: tuple[str, ...],
+) -> ResolvedParallelProfile | None:
+    for consumer in consumers:
+        resource = config.stage_resources.get(consumer)
+        if resource is not None and resource.profile_name is not None:
+            profile = config.parallel_profiles.get(resource.profile_name)
+            if profile is not None:
+                return profile
+    for consumer in consumers:
+        for name in sorted(config.parallel_profiles):
+            profile = config.parallel_profiles[name]
+            if consumer in profile.consumers:
+                return profile
+    return None
 
 
-def _named_values(values: Any, parts: list[str]) -> dict[str, Any]:
-    resolved = {}
-    for name, value in _mapping(values).items():
-        found, effective = _mapping_path(value, parts)
-        if found:
-            resolved[str(name)] = deepcopy(effective)
-    return resolved
+def _legacy_meshes(config: ResolvedCampaignConfig) -> dict[str, dict[str, Any]]:
+    default_mesh = dict.fromkeys(_LEGACY_MESH_FIELDS, 1)
+    common_consumers = (*_LEGACY_COMMON_CONSUMERS, *_post_mip_consumers(config, "evaluation"))
+    common = _profile_for_consumers(config, common_consumers)
+    if common is None and config.parallel_profiles:
+        common = config.parallel_profiles[sorted(config.parallel_profiles)[0]]
 
-
-def _effective_default_value(state: WizardState, path: str, fallback: Any) -> Any:
-    """Return the authored consumer value for one resolved default, if present."""
-    record = state.records().get(path)
-    if record is not None:
-        return deepcopy(record.effective)
-
-    root, *parts = path.split(".")
-    direct_collection = state.collection(root)
-    if direct_collection is not None:
-        found, value = _mapping_path(direct_collection, parts)
-        if found:
-            return deepcopy(value)
-
-    if path == "profiles":
-        profiles = _mapping(state.collection("parallel_profiles"))
-        return deepcopy(profiles) if profiles else fallback
-
-    if root == "stages" and len(parts) == 2 and parts[1] == "instances":
-        found, value = _mapping_path(state.collection("stage_resources"), parts)
-        return deepcopy(value) if found else fallback
-
-    if root == "mip" and len(parts) == 1:
-        runs = _mapping(_mapping(state.collection("mip_config")).get("runs"))
-        field = parts[0]
-        if field == "num_solutions":
-            values = _named_values(runs, ["solver", "num_solutions"])
-        elif field == "objective":
-            values = {
-                str(name): [
-                    item["metric"]
-                    for item in _mapping(run).get("objectives", ())
-                    if isinstance(item, Mapping) and "metric" in item
-                ]
-                for name, run in runs.items()
-            }
-        elif field == "goal_metric":
-            values = {
-                str(name): list(_mapping(_mapping(run).get("constraints")))
-                for name, run in runs.items()
-            }
-        elif field == "goal_value":
-            values = {
-                str(name): deepcopy(_mapping(_mapping(run).get("constraints")))
-                for name, run in runs.items()
-            }
-        else:
-            values = {}
-        return values or fallback
-
-    if root == "vllm" and len(parts) == 1 and parts[0] == "enabled":
-        return bool(_mapping(state.collection("vllm_measurements")))
-    if root == "vllm":
-        measurements = state.collection("vllm_measurements")
-        if len(parts) == 1:
-            workload_key = {
-                "batch_size": "batch_size",
-                "max_num_seqs": "max_num_seqs",
-                "prefill_seq_len": "prefill_seq_len",
-                "generation_seq_len": "generation_seq_len",
-            }.get(parts[0])
-            if workload_key:
-                values = _named_values(state.collection("serving_workloads"), [workload_key])
-            elif parts[0] == "granularity":
-                values = _named_values(measurements, ["granularity"])
-            else:
-                values = {}
-        elif len(parts) == 2 and parts[0] == "topology":
-            values = _named_values(measurements, ["runtime_stats", "topology", parts[1]])
-        else:
-            values = {}
-        return values or fallback
-
-    return fallback
-
-
-def _legacy_state(state: WizardState) -> Mapping[str, Any]:
-    legacy = state.collection("legacy_state")
-    if not isinstance(legacy, Mapping):
-        raise SetupError(
-            "The v2 authoring state is incomplete: no canonical campaign sections were recorded."
+    profiles = {
+        "common": common,
+        "bypass": _profile_for_consumers(config, ("bypass", "bypass_sanity")) or common,
+        "global_kd": _profile_for_consumers(
+            config,
+            ("global_kd", *_post_mip_consumers(config, "global_kd")),
         )
-    return legacy
+        or common,
+    }
+    return {
+        name: (
+            {key: getattr(profile, key) for key in _LEGACY_MESH_FIELDS}
+            if profile is not None
+            else deepcopy(default_mesh)
+        )
+        for name, profile in profiles.items()
+    }
+
+
+def _legacy_state_from_resolved(config: ResolvedCampaignConfig) -> dict[str, Any]:
+    """Temporary compatibility adapter from the resolved snapshot to legacy renderers."""
+    serving_workloads = _plain(config.serving_workloads)
+    measurements = _plain(config.vllm_measurements)
+    workload_id = str(next(iter(serving_workloads), "serving-default"))
+    workload = _mapping(serving_workloads.get(workload_id))
+    first_measurement_id = next(iter(measurements), None)
+    runtime_measurement_id = (
+        workload_id if _mapping(measurements.get(workload_id)) else first_measurement_id
+    )
+    measurement = _mapping(measurements.get(runtime_measurement_id))
+    runtime = {
+        "vllm_enabled": bool(measurements),
+        "granularity": measurement.get("granularity", "subblock"),
+        "workload_id": workload_id,
+        "isl": int(workload.get("prefill_seq_len", config.data.sequence_length)),
+        "osl": int(workload.get("generation_seq_len", 1024)),
+        "concurrency": int(workload.get("max_num_seqs", 1)),
+    }
+    infrastructure = {
+        "runner": {
+            "kind": config.infrastructure.runner_kind,
+            "slurm": _plain(config.infrastructure.slurm),
+        },
+        "execution_contract": _plain(config.infrastructure.execution_contract),
+        "gpus_per_node": config.infrastructure.gpus_per_node,
+        "meshes": _legacy_meshes(config),
+        "workers": {
+            "pool": config.infrastructure.gpus_per_node,
+            "sharded": config.infrastructure.gpus_per_node,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "wizard_version": "1",
+        "detailed": True,
+        "model": config.model._legacy_model(),
+        "inventory": config.model._legacy_inventory(),
+        "answers": {
+            "data": {
+                "source": config.data.source,
+                "selected_source": config.data.selected_source,
+                "adapter": config.data.adapter,
+                "modality": config.data.modality,
+                "layout": config.data.layout,
+                "sequence_length": config.data.sequence_length,
+                "subsets": list(config.data.subsets),
+                "subset_revision": config.data.subset_revision,
+                "subset_weights": _plain(config.data.subset_weights),
+                "acquisition": _plain(config.data.acquisition),
+            },
+            "pruning": _plain(config.pruning),
+            "runtime": runtime,
+            "mip": _plain(config.mip) or {"runs": {}},
+            "post_mip": {"flows": _plain(config.post_mip_flows)},
+            "infrastructure": infrastructure,
+            "output": {"result_root": config.result_root},
+        },
+    }
 
 
 def _set_dotted(config: dict[str, Any], dotted: str, value: Any) -> None:
@@ -185,18 +203,19 @@ def _set_dotted(config: dict[str, Any], dotted: str, value: Any) -> None:
     current[parts[-1]] = deepcopy(value)
 
 
-def render_experiment_v2(state: WizardState, budget: str) -> dict[str, Any]:
-    """Render algorithms, named measurements, MIP, and post-MIP flows."""
-    legacy = _legacy_state(state)
+def _render_experiment_v2(
+    config: ResolvedCampaignConfig,
+    budget: str,
+) -> dict[str, Any]:
+    legacy = _legacy_state_from_resolved(config)
     rendered = render_experiment(legacy, budget)
-    rendered = _deep_merge(rendered, _mapping(state.collection("experiment_overrides")))
+    rendered = _deep_merge(rendered, _plain(config.compatibility.experiment))
 
-    measurements = _mapping(state.collection("vllm_measurements"))
+    measurements = _plain(config.vllm_measurements)
     if measurements:
         rendered.setdefault("vllm_stats", {})["measurements"] = deepcopy(measurements)
         rendered["vllm_stats"]["enabled"] = True
-        first = next(iter(measurements.values()))
-        first = _mapping(first)
+        first = _mapping(measurements.get(next(iter(measurements))))
         rendered["vllm_stats"].update(
             {
                 "prefill_seq_len": int(first.get("prefill_seq_len", 4096)),
@@ -208,18 +227,16 @@ def render_experiment_v2(state: WizardState, budget: str) -> dict[str, Any]:
             deepcopy(_mapping(first.get("runtime_stats")))
         )
 
-    mip = state.collection("mip_config")
-    if isinstance(mip, Mapping):
+    mip = _plain(config.mip)
+    if config.mip_configured:
         rendered["mip"] = _deep_merge(rendered.get("mip") or {}, mip)
         rendered["mip"]["enabled"] = True
-    flows = state.collection("post_mip_flows")
-    if isinstance(flows, Mapping):
-        rendered["post_mip"] = {"flows": deepcopy(dict(flows))}
+    flows = _plain(config.post_mip_flows)
+    if config.post_mip_flows_configured:
+        rendered["post_mip"] = {"flows": deepcopy(flows)}
 
-    for dotted, value in _mapping(state.collection("stage_batches")).items():
+    for dotted, value in config.stage_batches.items():
         _set_dotted(rendered, str(dotted), value)
-    resources = _mapping(state.collection("stage_resources"))
-    profiles = _mapping(state.collection("parallel_profiles"))
     parallel_paths = {
         "depth_importance": "depth_importance.automodel.parallel",
         "width_importance": "pruning.automodel.parallel",
@@ -229,78 +246,70 @@ def render_experiment_v2(state: WizardState, budget: str) -> dict[str, Any]:
         "replacement_scoring": "replacement_scoring.automodel.parallel",
     }
     for stage_id, dotted in parallel_paths.items():
-        profile_name = _mapping(resources.get(stage_id)).get("profile_name")
-        profile = _mapping(profiles.get(str(profile_name)))
-        if not profile:
+        resource = config.stage_resources.get(stage_id)
+        profile = (
+            config.parallel_profiles.get(resource.profile_name)
+            if resource is not None and resource.profile_name is not None
+            else None
+        )
+        if profile is None or not profile.source_nonempty:
             continue
         _set_dotted(
             rendered,
             dotted,
-            {
-                key: profile[key]
-                for key in (
-                    "tp",
-                    "cp",
-                    "pp",
-                    "ep",
-                    "dp_shard",
-                    "dp_replicate",
-                    "sequence_parallel",
-                )
-                if key in profile
-            },
+            profile._parallel(),
         )
     return rendered
+
+
+def render_experiment_v2(state: WizardState, budget: str) -> dict[str, Any]:
+    """Render algorithms, named measurements, MIP, and post-MIP flows."""
+    return _render_experiment_v2(resolve_campaign_config(state), budget)
+
+
+def _render_runner_v2(config: ResolvedCampaignConfig, budget: str) -> dict[str, Any]:
+    rendered = render_runner(_legacy_state_from_resolved(config), budget)
+    return _deep_merge(rendered, _plain(config.compatibility.runner))
 
 
 def render_runner_v2(state: WizardState, budget: str) -> dict[str, Any]:
     """Render a canonical runner with explicit v2 overrides."""
-    rendered = render_runner(_legacy_state(state), budget)
-    return _deep_merge(rendered, _mapping(state.collection("runner_overrides")))
+    return _render_runner_v2(resolve_campaign_config(state), budget)
+
+
+def _render_execution_v2(
+    config: ResolvedCampaignConfig,
+    budget: str,
+    experiment: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if experiment is None:
+        experiment = _render_experiment_v2(config, budget)
+    rendered = render_execution(_legacy_state_from_resolved(config), experiment, budget)
+    stages = rendered["execution"]["stages"]
+    default_gpus = config.infrastructure.gpus_per_node
+    for stage_id, resource in config.stage_resources.items():
+        entry = {
+            "strategy": resource.strategy,
+            "instances": resource.instances,
+            "resource": resource.resource,
+            "gpus_per_node": (
+                resource.gpus_per_node if resource.gpus_per_node is not None else default_gpus
+            ),
+        }
+        if resource.partition:
+            entry["partition"] = resource.partition
+        if resource.profile_name:
+            profile = config.parallel_profiles.get(resource.profile_name)
+            entry["parallel"] = profile._parallel() if profile is not None else {}
+        elif resource.parallel is not None:
+            entry["parallel"] = _plain(resource.parallel)
+        stages[str(stage_id)] = entry
+    return rendered
 
 
 def render_execution_v2(state: WizardState, budget: str) -> dict[str, Any]:
     """Render every static and dynamic stage resource card independently."""
-    experiment = render_experiment_v2(state, budget)
-    rendered = render_execution(_legacy_state(state), experiment, budget)
-    stages = rendered["execution"]["stages"]
-    resources = _mapping(state.collection("stage_resources"))
-    profiles = _mapping(state.collection("parallel_profiles"))
-    default_gpus = int(
-        _mapping(_mapping(_legacy_state(state).get("answers")).get("infrastructure")).get(
-            "gpus_per_node", 8
-        )
-    )
-    for stage_id, raw in resources.items():
-        resource = _mapping(raw)
-        entry = {
-            "strategy": str(resource.get("strategy", "single")),
-            "instances": int(resource.get("instances", 1)),
-            "resource": str(resource.get("resource", "gpu")),
-            "gpus_per_node": int(resource.get("gpus_per_node", default_gpus)),
-        }
-        if resource.get("partition"):
-            entry["partition"] = str(resource["partition"])
-        profile_name = resource.get("profile_name")
-        if profile_name:
-            profile = _mapping(profiles.get(str(profile_name)))
-            entry["parallel"] = {
-                key: profile[key]
-                for key in (
-                    "tp",
-                    "cp",
-                    "pp",
-                    "ep",
-                    "dp_shard",
-                    "dp_replicate",
-                    "sequence_parallel",
-                )
-                if key in profile
-            }
-        elif isinstance(resource.get("parallel"), Mapping):
-            entry["parallel"] = deepcopy(dict(resource["parallel"]))
-        stages[str(stage_id)] = entry
-    return rendered
+    return _render_execution_v2(resolve_campaign_config(state), budget)
 
 
 def _write_yaml(path: Path, payload: Mapping[str, Any]) -> None:
@@ -414,6 +423,7 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
         details = "\n".join(f"- {issue.path}: {issue.message}" for issue in issues)
         raise SetupError(f"Setup v2 validation failed:\n{details}")
 
+    config = resolve_campaign_config(state)
     campaign_dir = Path(campaign_dir).expanduser().resolve()
     campaign_dir.mkdir(parents=True, exist_ok=True)
     temp_root = Path(tempfile.mkdtemp(prefix=".puzzletron-v2-", dir=str(campaign_dir.parent)))
@@ -421,50 +431,34 @@ def build_bundles_v2(campaign_dir: Path, state: WizardState) -> BundleResult:
         validations = {}
         for budget in ("smoke", "production"):
             bundle = temp_root / budget
-            _write_yaml(bundle / "experiment.yaml", render_experiment_v2(state, budget))
-            _write_yaml(bundle / "runner.yaml", render_runner_v2(state, budget))
-            _write_yaml(bundle / "execution.yaml", render_execution_v2(state, budget))
+            experiment = _render_experiment_v2(config, budget)
+            runner = _render_runner_v2(config, budget)
+            execution = _render_execution_v2(config, budget, experiment)
+            _write_yaml(bundle / "experiment.yaml", experiment)
+            _write_yaml(bundle / "runner.yaml", runner)
+            _write_yaml(bundle / "execution.yaml", execution)
             validation = validate_bundle(bundle)
             if not validation.valid:
                 raise SetupError(f"{budget} bundle is invalid: {validation.error}")
             validations[budget] = validation
             (bundle / "dry-run-plan.txt").write_text(dry_run_bundle(bundle))
 
-        resolved = {}
-        for path, raw_record in dict(state.collection("default_resolutions") or {}).items():
-            if not isinstance(raw_record, Mapping):
-                raise SetupError(f"Default resolution {path!r} must be a mapping.")
-            record = dict(raw_record)
-            value = record.get("value")
-            resolved[str(path)] = {
-                "value": value,
-                "requested": None,
-                "effective": _effective_default_value(state, str(path), value),
-                "source": record.get("source"),
+        provenance = {
+            path: {
+                "value": _plain(record.value),
+                "requested": _plain(record.requested),
+                "effective": _plain(record.effective),
+                "source": record.source,
             }
-        resolved.update(
-            {
-                path: {
-                    "value": record.value,
-                    "requested": record.requested,
-                    "effective": record.effective,
-                    "source": record.source,
-                }
-                for path, record in state.records().items()
-            }
-        )
-        _write_yaml(temp_root / "resolved_defaults.yaml", resolved)
-        repository = str(
-            state.get_field(
-                "infrastructure.execution_contract.repository",
-                WORKER_REPOSITORY_PLACEHOLDER,
-            )
-        )
+            for path, record in config.provenance.items()
+        }
+        _write_yaml(temp_root / "resolved_defaults.yaml", provenance)
+        repository = str(config.infrastructure.execution_contract["repository"])
         (temp_root / "README.md").write_text(
             _bundle_readme(
                 campaign_dir,
                 repository,
-                state.collection("data_acquisition"),
+                config.data.acquisition,
             )
         )
 

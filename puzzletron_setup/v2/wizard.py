@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 """Ordered, locally customizable Puzzletron setup-v2 wizard."""
 
@@ -590,7 +588,7 @@ def data_section(
                 "from the completed stage configuration."
             )
         else:
-            if not selected_subsets:
+            if not selected_subsets or subset_selection is None or acquisition is None:
                 raise SetupError(
                     "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
                 )
@@ -4531,138 +4529,6 @@ def _select_setup_preset(
     )
 
 
-def _refresh_legacy_state(state: WizardState) -> None:
-    pruning = deepcopy(state.collection("pruning") or {})
-    subset_selection = _mapping_copy(state.collection("data_subset_selection"))
-    subset_records = [_mapping_copy(item) for item in subset_selection.get("subsets") or ()]
-    serving_workloads = _mapping_copy(state.collection("serving_workloads"))
-    measurements = _mapping_copy(state.collection("vllm_measurements"))
-    first_workload = next(
-        iter(serving_workloads.items()),
-        ("serving-default", {}),
-    )
-    workload_id, workload = first_workload
-    measurement = _mapping_copy(measurements.get(workload_id))
-    if not measurement and measurements:
-        measurement = _mapping_copy(next(iter(measurements.values())))
-    runtime = {
-        "vllm_enabled": bool(measurements),
-        "granularity": measurement.get("granularity", "subblock"),
-        "workload_id": workload_id,
-        "isl": int(workload.get("prefill_seq_len", state.get_field("data.sequence_length", 4096))),
-        "osl": int(workload.get("generation_seq_len", 1024)),
-        "concurrency": int(workload.get("max_num_seqs", 1)),
-    }
-    infrastructure = {
-        "runner": {
-            "kind": state.get_field("infrastructure.runner.kind", "slurm"),
-            "slurm": {
-                "account": state.get_field("infrastructure.runner.slurm.account", ""),
-                "partition_interactive": state.get_field(
-                    "infrastructure.runner.slurm.partition_interactive", "interactive"
-                ),
-                "partition_batch": state.get_field(
-                    "infrastructure.runner.slurm.partition_batch", "batch"
-                ),
-                "partition_cpu": state.get_field("infrastructure.runner.slurm.partition_cpu", None),
-                "time_limit": state.get_field("infrastructure.runner.slurm.time_limit", "4:00:00"),
-                "qos": state.get_field("infrastructure.runner.slurm.qos", None),
-                "max_nodes": state.get_field("infrastructure.runner.slurm.max_nodes", 64),
-            },
-        },
-        "execution_contract": {
-            "repository": state.get_field(
-                "infrastructure.execution_contract.repository", WORKER_REPOSITORY_PLACEHOLDER
-            ),
-            "venv": state.get_field(
-                "infrastructure.execution_contract.venv", WORKER_VENV_PLACEHOLDER
-            ),
-            "container": state.get_field("infrastructure.execution_contract.container", None),
-            "container_mounts": state.get_field(
-                "infrastructure.execution_contract.container_mounts", None
-            ),
-            "prerun_commands": state.get_field(
-                "infrastructure.execution_contract.prerun_commands", []
-            ),
-            "postrun_commands": state.get_field(
-                "infrastructure.execution_contract.postrun_commands", []
-            ),
-        },
-        "gpus_per_node": state.get_field("infrastructure.gpus_per_node", 8),
-        "meshes": {
-            "common": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-                "ep": 1,
-            },
-            "bypass": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-                "ep": 1,
-            },
-            "global_kd": {
-                "tp": 1,
-                "cp": 1,
-                "pp": 1,
-                "dp_shard": 1,
-                "dp_replicate": 1,
-                "ep": 1,
-            },
-        },
-        "workers": {
-            "pool": state.get_field("infrastructure.gpus_per_node", 8),
-            "sharded": state.get_field("infrastructure.gpus_per_node", 8),
-        },
-    }
-    profiles = _mapping_copy(state.collection("parallel_profiles"))
-    if profiles:
-        first = next(iter(profiles.values()))
-        mesh = {
-            key: first.get(key, 1) for key in ("tp", "cp", "pp", "dp_shard", "dp_replicate", "ep")
-        }
-        infrastructure["meshes"] = {
-            "common": deepcopy(mesh),
-            "bypass": deepcopy(mesh),
-            "global_kd": deepcopy(mesh),
-        }
-    legacy = {
-        "schema_version": 1,
-        "wizard_version": "1",
-        "detailed": True,
-        "model": deepcopy(state.payload.get("model") or {}),
-        "inventory": deepcopy(state.payload.get("inventory") or {}),
-        "answers": {
-            "data": {
-                "source": state.get_field("data.source"),
-                "selected_source": state.get_field(
-                    "data.selected_source", state.get_field("data.source")
-                ),
-                "adapter": state.get_field("data.adapter", "custom"),
-                "modality": state.get_field("data.modality", "text"),
-                "layout": state.get_field("data.layout", "fixed"),
-                "sequence_length": state.get_field("data.sequence_length", 4096),
-                "subsets": [record["name"] for record in subset_records],
-                "subset_revision": subset_selection.get("revision"),
-                "subset_weights": {record["name"]: record["weight"] for record in subset_records},
-                "acquisition": deepcopy(state.collection("data_acquisition") or {}),
-            },
-            "pruning": pruning,
-            "runtime": runtime,
-            "mip": deepcopy(state.collection("mip_config") or {"runs": {}}),
-            "post_mip": {"flows": deepcopy(state.collection("post_mip_flows") or {})},
-            "infrastructure": infrastructure,
-            "output": {"result_root": state.get_field("output.result_root")},
-        },
-    }
-    state.set_collection("legacy_state", legacy)
-
-
 def run_wizard_v2(
     *,
     resume: Path | None,
@@ -4775,6 +4641,5 @@ def run_wizard_v2(
             for path, resolved in resolver.resolutions().items()
         },
     )
-    _refresh_legacy_state(state)
     build_bundles_v2(state.campaign_dir, state)
     return state.campaign_dir
