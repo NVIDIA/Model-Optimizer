@@ -22,6 +22,7 @@ import pytest
 import torch
 
 from modelopt.torch.puzzletron.security_policy import require_boolean_policy
+from modelopt.torch.puzzletron.stages.future import aiperf_stage, evaluation_stage
 
 
 @pytest.mark.parametrize("value", ["false", 0, 1, None], ids=["string", "zero", "one", "none"])
@@ -53,10 +54,8 @@ def test_security_policy_rejects_non_boolean_values(value):
     ],
 )
 def test_aiperf_stage_rejects_non_boolean_security_policy(config, path):
-    from modelopt.torch.puzzletron.stages import future
-
     with pytest.raises(ValueError) as error:
-        future.aiperf_stage(config, object())
+        aiperf_stage(config, object())
     assert str(error.value) == f"{path} must be a boolean"
 
 
@@ -66,8 +65,6 @@ def test_aiperf_stage_rejects_non_boolean_security_policy(config, path):
     ids=["string", "integer", "mapping"],
 )
 def test_evaluation_stage_rejects_non_list_or_tuple_checkpoints(configured):
-    from modelopt.torch.puzzletron.stages import future
-
     config = {
         "zero_shot_evaluation": {
             "enabled": True,
@@ -78,7 +75,7 @@ def test_evaluation_stage_rejects_non_list_or_tuple_checkpoints(configured):
         ValueError,
         match=r"^zero_shot_evaluation\.checkpoints must be a list or tuple$",
     ):
-        future.evaluation_stage(config, object())
+        evaluation_stage(config, object())
 
 
 def test_distillation_sanity_accepts_packed_cache_without_raw_dataset(tmp_path):
