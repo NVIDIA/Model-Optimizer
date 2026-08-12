@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,11 @@ pytestmark = pytest.mark.skipif(
 
 
 def _run_without_automodel(script: str) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    # These probes validate fresh-interpreter import behavior. Coverage
+    # auto-start traces the entire child import graph and exceeds the unit
+    # suite's 60-second cap before the probe can return.
+    environment.pop("COVERAGE_PROCESS_START", None)
     return subprocess.run(
         [
             sys.executable,
@@ -38,6 +44,7 @@ def _run_without_automodel(script: str) -> subprocess.CompletedProcess[str]:
             "import sys; sys.modules['nemo_automodel'] = None; " + script,
         ],
         cwd=REPOSITORY_ROOT,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,

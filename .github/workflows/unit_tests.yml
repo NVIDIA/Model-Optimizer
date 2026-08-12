@@ -13,6 +13,7 @@ on:
       - "pyproject.toml"
       - "puzzletron_orchestrator/**"
       - "puzzletron_setup/**"
+      - "tests/_test_utils/torch/distributed/**"
       - "tests/unit/**"
       - "tools/launcher/**"
       - ".agents/skills/**"
@@ -71,6 +72,7 @@ jobs:
             modelopt/**
             noxfile.py
             pyproject.toml
+            tests/_test_utils/torch/distributed/**
             tests/unit/**
             tools/launcher/**
             .agents/skills/**
@@ -94,6 +96,7 @@ jobs:
             pyproject.toml
             puzzletron_orchestrator/**
             puzzletron_setup/**
+            tests/_test_utils/torch/distributed/**
             tests/unit/torch/puzzletron/**
   puzzletron_v2:
     name: Puzzletron v2 CPU tests

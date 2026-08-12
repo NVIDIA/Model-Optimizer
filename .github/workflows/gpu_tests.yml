@@ -27,6 +27,7 @@ jobs:
         modelopt/**
         noxfile.py
         pyproject.toml
+        tests/_test_utils/torch/distributed/**
         tests/gpu/**
         tests/gpu_megatron/**
         tests/gpu_trtllm/**
