@@ -271,7 +271,8 @@ def test_direct_tokenize_data_stage_runs_when_enabled(tmp_path, monkeypatch, wri
     assert result.skip_reason is None
 
 
-def test_enabled_tokenize_data_stage_rejects_empty_success_manifest(tmp_path):
+def test_enabled_tokenize_data_stage_rejects_empty_success_manifest(tmp_path, monkeypatch):
+    monkeypatch.setenv("RANK", "0")
     config = _config(
         tmp_path,
         dataset_path="dataset",
@@ -280,7 +281,9 @@ def test_enabled_tokenize_data_stage_rejects_empty_success_manifest(tmp_path):
     )
     manifest = StageManifest(stage="tokenize_data", config=config)
     manifest.complete(outputs={"caches": []})
-    write_stage_manifest(tmp_path / "manifests" / "tokenize_data.json", manifest)
+    manifest_path = tmp_path / "manifests" / "tokenize_data.json"
+    write_stage_manifest(manifest_path, manifest)
+    assert manifest_path.exists()
 
     assert not stage_is_complete(config, "tokenize_data")
     assert not _completion_is_valid(config, tmp_path / "config.yaml", "tokenize_data")

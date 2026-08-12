@@ -150,7 +150,7 @@ def test_spawn_multiprocess_job_reaps_children_when_join_is_interrupted(
         "get_context",
         lambda _method: SimpleNamespace(Process=make_process),
     )
-    monkeypatch.setattr(utils.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(utils, "monotonic", lambda: 0)
 
     with pytest.raises(TimeoutError, match="join interrupted"):
         utils.spawn_multiprocess_job(2, lambda *_args: None)
@@ -276,7 +276,7 @@ def test_spawn_multiprocess_job_restores_coverage_after_partial_start(
         "get_context",
         lambda _method: SimpleNamespace(Process=make_process),
     )
-    monkeypatch.setattr(utils.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(utils, "monotonic", lambda: 0)
 
     with pytest.raises(RuntimeError, match="start failed"):
         utils.spawn_multiprocess_job(2, lambda *_args: None)
@@ -321,7 +321,7 @@ def test_spawn_multiprocess_job_reaps_siblings_after_worker_failure(monkeypatch)
         "get_context",
         lambda _method: SimpleNamespace(Process=make_process),
     )
-    monkeypatch.setattr(utils.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(utils, "monotonic", lambda: 0)
 
     with pytest.raises(RuntimeError, match="distributed worker exited with code 1"):
         utils.spawn_multiprocess_job(2, lambda *_args: None)

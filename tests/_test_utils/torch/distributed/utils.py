@@ -15,9 +15,9 @@
 
 import os
 import socket
-import time
 import traceback
 from contextlib import contextmanager, nullcontext
+from time import monotonic
 
 import torch
 import torch.distributed as dist
@@ -68,15 +68,15 @@ def _reap_processes(processes, timeout=10):
     for process in processes:
         if process.is_alive():
             process.terminate()
-    deadline = time.monotonic() + timeout
+    deadline = monotonic() + timeout
     for process in processes:
-        process.join(timeout=max(0, deadline - time.monotonic()))
+        process.join(timeout=max(0, deadline - monotonic()))
     stubborn_processes = [process for process in processes if process.is_alive()]
     for process in stubborn_processes:
         process.kill()
-    deadline = time.monotonic() + timeout
+    deadline = monotonic() + timeout
     for process in stubborn_processes:
-        process.join(timeout=max(0, deadline - time.monotonic()))
+        process.join(timeout=max(0, deadline - monotonic()))
 
 
 @contextmanager
