@@ -85,7 +85,8 @@ def test_runtime_modelopt_install_cannot_resolve_dependencies(project_root_path)
 
 def test_gpu_workflow_routes_the_pinned_image_to_the_existing_nox_session(project_root_path):
     workflow_path = project_root_path / ".github/workflows/puzzletron_gpu_tests.yml"
-    workflow = yaml.safe_load(workflow_path.read_text())
+    workflow_text = workflow_path.read_text()
+    workflow = yaml.safe_load(workflow_text)
 
     assert workflow["on"]["push"]["branches"] == ["pull-request/[0-9]+"]
     jobs = workflow["jobs"]
@@ -93,6 +94,8 @@ def test_gpu_workflow_routes_the_pinned_image_to_the_existing_nox_session(projec
     assert jobs["gpu-puzzletron"]["container"]["image"] == (
         "${{ needs.resolve-image.outputs.image }}"
     )
+    assert "credentials" not in jobs["gpu-puzzletron"]["container"]
+    assert "NGC_API_KEY" not in workflow_text
     assert jobs["gpu-puzzletron"]["steps"][-1]["run"] == "nox -s gpu_puzzletron"
 
     assert jobs["resolve-image"]["permissions"]["contents"] == "read"

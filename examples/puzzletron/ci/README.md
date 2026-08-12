@@ -33,8 +33,9 @@ docker run --gpus device=0 --ipc=host --rm \
   nox -s gpu_puzzletron
 ```
 
-Publishing the reviewed image is a separate registry operation. After
-publication, configure `PUZZLETRON_GPU_CI_IMAGE` with the complete immutable
-`nvcr.io/...@sha256:...` reference and provide the pull-only `NGC_API_KEY`
-secret. The workflow rejects tags and non-NVCR references before allocating a
-GPU runner.
+Publishing the reviewed image is a separate registry operation. Publish it with
+anonymous pull access, then configure `PUZZLETRON_GPU_CI_IMAGE` with the
+complete immutable `nvcr.io/...@sha256:...` reference. The workflow
+intentionally does not expose registry credentials to copied pull-request
+branches, and rejects tags and non-NVCR references before allocating a GPU
+runner.

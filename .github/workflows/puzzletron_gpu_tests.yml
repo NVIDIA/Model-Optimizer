@@ -66,9 +66,6 @@ jobs:
     timeout-minutes: 50
     container:
       image: ${{ needs.resolve-image.outputs.image }}
-      credentials:
-        username: "$oauthtoken"
-        password: ${{ secrets.NGC_API_KEY }}
       options: --shm-size=16gb
       env:
         GIT_DEPTH: 1000
