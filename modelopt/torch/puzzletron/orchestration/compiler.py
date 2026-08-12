@@ -61,6 +61,8 @@ __all__ = [
     "resolve_stage_execution_specs",
 ]
 
+_CONTROLLER_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
@@ -268,6 +270,19 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"YAML root must be a mapping: {path}")
     return payload
+
+
+def _worker_experiment_path(path: Path, runner: RunnerEnvironment) -> str:
+    """Map a checked-in config to the repository path visible to workers."""
+
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(_CONTROLLER_REPOSITORY_ROOT)
+    except ValueError:
+        # Generated campaign bundles normally live on shared storage outside
+        # the checkout and retain that explicitly configured absolute path.
+        return str(resolved)
+    return str(Path(runner.contract.repository) / relative)
 
 
 def load_runner_config(path: str | Path) -> RunnerEnvironment:
@@ -574,7 +589,7 @@ def compile_campaign_plan(
 
     contract_hash = execution_contract_hash(runner)
     return CampaignPlan(
-        experiment_config_path=str(experiment_path.resolve()),
+        experiment_config_path=_worker_experiment_path(experiment_path, runner),
         puzzle_dir=puzzle_dir,
         experiment_config=experiment_config,
         runner=runner,

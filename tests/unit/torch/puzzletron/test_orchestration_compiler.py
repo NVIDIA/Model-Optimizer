@@ -138,6 +138,21 @@ def test_compile_campaign_plan_packs_vllm_stats_instances(tmp_configs):
     assert vllm_node.total_gpus == 16
 
 
+def test_external_campaign_config_keeps_shared_absolute_path(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    runner_payload = yaml.safe_load(runner_path.read_text())
+    runner_payload["runner"]["execution_contract"]["repository"] = "/worker/modelopt"
+    runner_path.write_text(yaml.safe_dump(runner_payload))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+
+    assert plan.experiment_config_path == str(experiment_path.resolve())
+
+
 def test_compile_campaign_plan_preserves_drain_halt_policy(tmp_configs):
     experiment_path, runner_path, execution_path = tmp_configs
     runner = load_runner_config(runner_path)
