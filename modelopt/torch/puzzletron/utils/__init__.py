@@ -15,7 +15,6 @@
 
 """Shared utilities for Puzzletron."""
 
-from .checkpoint_manager import *
 from .data import *
 from .dummy_modules import *
 from .misc import *

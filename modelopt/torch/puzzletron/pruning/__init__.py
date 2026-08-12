@@ -21,7 +21,6 @@ from .ffn_intermediate_pruning_mixin import *
 from .kv_heads_pruning_mixin import *
 from .moe_mamba_pruning_mixin import *
 from .ple_pruning import PLEPruningSpec
-from .pruning_ckpts import *
 from .pruning_mixin import *
 from .pruning_utils import *
 from .runtime_ple import ple_layer_context
