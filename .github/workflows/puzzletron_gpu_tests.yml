@@ -1,0 +1,105 @@
+name: Puzzletron GPU tests
+
+on:
+  push:
+    branches: ["pull-request/[0-9]+"]
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+    # On-demand
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  pr-gate:
+    uses: ./.github/workflows/_pr_gate.yml
+    permissions:
+      checks: read
+    secrets: inherit
+    with:
+      files: |
+        .github/workflows/_pr_gate.yml
+        .github/workflows/puzzletron_gpu_tests.yml
+        .github/actions/cache-extensions/**
+        examples/puzzletron/**/*.py
+        examples/puzzletron/**/*.sh
+        examples/puzzletron/**/*.yaml
+        examples/puzzletron/ci/**
+        examples/puzzletron/ci_environment.json
+        examples/puzzletron/requirements.txt
+        modelopt/torch/puzzletron/**
+        noxfile.py
+        puzzletron_orchestrator/**
+        puzzletron_setup/**
+        pyproject.toml
+        tests/conftest.py
+        tests/_test_utils/torch/puzzletron/**
+        tests/_test_utils/torch/transformers_models.py
+        tests/gpu/torch/puzzletron/**
+
+  resolve-image:
+    needs: [pr-gate]
+    if: needs.pr-gate.outputs.run_tests == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      cache_key: ${{ steps.image.outputs.cache_key }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Resolve immutable Puzzletron image
+        id: image
+        env:
+          PUZZLETRON_GPU_CI_IMAGE: ${{ vars.PUZZLETRON_GPU_CI_IMAGE }}
+        run: python examples/puzzletron/ci/resolve_ci_image.py >> "${GITHUB_OUTPUT}"
+
+  gpu-puzzletron:
+    needs: [resolve-image]
+    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+    timeout-minutes: 50
+    container:
+      image: ${{ needs.resolve-image.outputs.image }}
+      credentials:
+        username: "$oauthtoken"
+        password: ${{ secrets.NGC_API_KEY }}
+      options: --shm-size=16gb
+      env:
+        GIT_DEPTH: 1000
+        PIP_CONSTRAINT: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: nv-gha-runners/setup-proxy-cache@main
+      - uses: ./.github/actions/cache-extensions
+        with:
+          cache-key: rtxpro6000-puzzletron-${{ needs.resolve-image.outputs.cache_key }}
+      - name: Run the Puzzletron lifecycle gate
+        run: nox -s gpu_puzzletron
+
+  gpu-puzzletron-required-check:
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
+    needs: [pr-gate, resolve-image, gpu-puzzletron]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report intentionally scoped Puzzletron GPU tests
+        if: needs.pr-gate.outputs.run_tests != 'true'
+        run: |
+          echo "## Puzzletron GPU tests were not required" >> "${GITHUB_STEP_SUMMARY}"
+          echo >> "${GITHUB_STEP_SUMMARY}"
+          echo "No Puzzletron lifecycle path changed in this pull request." >> "${GITHUB_STEP_SUMMARY}"
+      - name: Required Puzzletron GPU tests did not succeed
+        if: >-
+          ${{ needs.pr-gate.result != 'success' ||
+            (needs.pr-gate.outputs.run_tests == 'true' &&
+            (needs.resolve-image.result != 'success' ||
+            needs.gpu-puzzletron.result != 'success')) }}
+        run: exit 1
