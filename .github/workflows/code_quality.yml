@@ -35,9 +35,10 @@ jobs:
           extra_args: --results=verified,unknown
       - name: Run changed-file code quality checks
         if: github.event_name == 'pull_request' && github.base_ref == 'feature/puzzletron_v2'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: pip install nox uv && nox -s pre_commit_diff -- "$BASE_SHA" HEAD
+        # The pull-request payload can retain an older base SHA after the target branch advances.
+        # actions/checkout checks out GitHub's current synthetic merge, whose first parent is the
+        # exact target snapshot used to build that merge.
+        run: pip install nox uv && nox -s pre_commit_diff -- HEAD^1 HEAD
       - name: Run all-file code quality checks
         if: github.event_name != 'pull_request' || github.base_ref != 'feature/puzzletron_v2'
         run: pip install nox uv && nox -s pre_commit_all
