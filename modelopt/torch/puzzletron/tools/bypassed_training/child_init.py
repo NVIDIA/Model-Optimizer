@@ -14,7 +14,7 @@
 # limitations under the License.
 # mypy: ignore-errors
 
-"""Core logic for creating pruned child model state dicts from parent models. Used by init_child_from_parent."""
+"""Create pruned child-model state dictionaries from parent models."""
 
 import concurrent.futures
 import dataclasses
