@@ -61,10 +61,12 @@ acceptance or customization of infrastructure-specific worker and cluster
 defaults.
 
 For a first-class hosted dataset, setup records a worker-visible local output
-path and writes the exact acquisition command under **Prepare dataset** in the
-generated campaign `README.md`. The wizard inspects dataset metadata but does
-not download or materialize rows. Run that generated command after installing
-the full worker environment and before launching the campaign. A custom local
+path. The explicitly selected campaign directory contains one generated
+`README.md` runbook beside its smoke and production bundles; resuming setup
+updates that same runbook rather than creating one per launch. Under **Prepare
+dataset**, it contains the exact acquisition command. The wizard inspects
+dataset metadata but does not download or materialize rows. Run that command
+from the full worker environment before launching the campaign. A custom local
 dataset is treated as already prepared and is referenced directly.
 
 Start the wizard with the repository's example defaults file:
@@ -113,18 +115,21 @@ extension against that same installation; mixing PyTorch or CUDA builds can
 cause import failures or incorrect GPU execution. AIPerf uses the official PyPI
 package; no custom AIPerf fork is required.
 
-### 1. Start from the CUDA development image
+### 1. Choose a compatible worker environment
 
-Use this image for local containers and cluster jobs:
+For a reproducible public bootstrap, start with:
 
 ```text
 nvcr.io/nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04
 ```
 
-The `devel` image is intentional: editable installs and optional
-model-specific kernels may compile C++ or CUDA extensions and need the CUDA
-headers and compiler toolchain that a runtime-only image omits. CUDA 12.9 also
-matches the `cu129` PyTorch and patched vLLM installation below.
+This image is a bootstrap example, not a required runner image. For a Slurm
+campaign, set `runner.execution_contract.container` to an image or path accepted
+at your site, or leave it unset to execute directly in the worker environment.
+Bare-metal runners use the host environment selected by
+`runner.execution_contract.venv`. In either case, keep the CUDA and PyTorch
+combination compatible with the pinned `cu129` packages below and run the
+environment checks before launch.
 
 For example:
 
@@ -347,13 +352,10 @@ Site-specific paths can be overridden without editing the checked-in config:
 export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
 ```
 
-`PUZZLETRON_RUN_ROOT` is the user-facing shell variable referenced by the
-checked-in experiment YAMLs; it resolves the campaign's `puzzle_dir`, where
-artifacts, logs, manifests, and controller state are stored. Generated bundles
-normally write their chosen `puzzle_dir` directly. Do not export `PUZZLE_DIR`:
-that is an internal environment variable assigned by the orchestrator to some
-persistent-pool workers, and it may temporarily name a scenario subdirectory
-rather than the campaign root.
+`PUZZLETRON_RUN_ROOT` is a convenience used by the checked-in experiment YAMLs
+to resolve `puzzle_dir`. Generated bundles write their chosen `puzzle_dir`
+directly. In both cases, `puzzle_dir` is the canonical location for artifacts,
+logs, manifests, and controller state.
 
 Independent runs, variants, solution pools, resource constraints, and
 homogeneous search are documented in [MIP runs](docs/mip_profiles.md). Configure
@@ -475,13 +477,15 @@ selected finalists. Use site-specific runner and execution configs, then run
 the prerequisite DAG through MIP by temporarily disabling the downstream
 stages:
 
-The Nano experiment already pins its public model source and revision. It
-inherits a repository-relative `dataset_path` from `base.yaml`, so a real run
-must override that value with a compatible, materialized Hugging Face dataset
-directory visible at the same path on every worker. Dataset materialization is
-also outside the dependency-light setup and controller environments. Prepare
-Puzzle-KD from the full worker environment (or use an existing compatible
-`datasets.save_to_disk` directory) before starting the controller:
+The repository already provides the bounded materializer, and setup emits the
+command that invokes it. The Nano experiment pins its public model source and
+revision but inherits a repository-relative `dataset_path` from `base.yaml`, so
+a real run must override that value with a compatible, materialized Hugging Face
+dataset directory visible at the same path on every worker. Dataset
+materialization is outside the dependency-light setup and controller
+environments. If you do not already have a compatible `datasets.save_to_disk`
+directory, prepare Puzzle-KD from the full worker environment before starting
+the controller:
 
 ```bash
 export PUZZLETRON_DATASET=/shared/datasets/puzzle-kd-v2
