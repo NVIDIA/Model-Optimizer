@@ -39,57 +39,20 @@ __all__ = [
 ]
 
 
-_fold_weight_recorder: ContextVar[
-    tuple[list[tuple[torch.Tensor, torch.Tensor]], set[TensorQuantizer], set[tuple], set[tuple]]
-    | None
-] = ContextVar("fold_weight_recorder", default=None)
-
-
-def _tensor_view_key(tensor: torch.Tensor) -> tuple:
-    """Identify an exact tensor view, including aliases backed by distinct tensor objects."""
-    try:
-        return (
-            tensor.device,
-            tensor.untyped_storage().data_ptr(),
-            tensor.storage_offset(),
-            tuple(tensor.shape),
-            tuple(tensor.stride()),
-        )
-    except (AttributeError, RuntimeError, NotImplementedError):
-        try:
-            local_tensor = tensor.to_local()
-            if local_tensor is not tensor:
-                return _tensor_view_key(local_tensor)
-        except (AttributeError, RuntimeError, NotImplementedError):
-            pass
-        return (id(tensor),)
-
-
-def _tensor_storage_key(tensor: torch.Tensor) -> tuple:
-    view_key = _tensor_view_key(tensor)
-    return view_key[:2] if len(view_key) > 1 else view_key
-
-
-def _tied_parameter_storages(model: nn.Module) -> set[tuple]:
-    counts: dict[tuple, int] = {}
-    for _, parameter in model.named_parameters(remove_duplicate=False):
-        key = _tensor_storage_key(parameter)
-        counts[key] = counts.get(key, 0) + 1
-    return {key for key, count in counts.items() if count > 1}
+_temporary_weight_fold_active = ContextVar("temporary_weight_fold_active", default=False)
 
 
 @contextlib.contextmanager
-def _record_folded_weights(model: nn.Module, states: list[tuple[torch.Tensor, torch.Tensor]]):
-    """Record weights immediately before module-specific folding mutates them."""
-    token = _fold_weight_recorder.set((states, set(), set(), _tied_parameter_storages(model)))
+def _temporary_weight_fold_context():
+    token = _temporary_weight_fold_active.set(True)
     try:
         yield
     finally:
-        _fold_weight_recorder.reset(token)
+        _temporary_weight_fold_active.reset(token)
 
 
 def _is_temporary_weight_fold() -> bool:
-    return _fold_weight_recorder.get() is not None
+    return _temporary_weight_fold_active.get()
 
 
 class QuantModule(DynamicModule):
@@ -195,32 +158,8 @@ class QuantModule(DynamicModule):
         per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
         view while disabling and dropping its calibration attrs exactly once.
         """
-        weights = tuple(weights)
-        if recorder := _fold_weight_recorder.get():
-            if not quantizer.fake_quant:
-                return
-            states, folded_quantizers, folded_weight_keys, tied_weight_storages = recorder
-            if quantizer in folded_quantizers:
-                raise RuntimeError(
-                    "temporarily_fold_weights does not support a weight quantizer shared across "
-                    "multiple fold_weight calls"
-                )
-            unique_weights = {}
-            for weight in weights:
-                unique_weights.setdefault(_tensor_view_key(weight), weight)
-            weights = tuple(unique_weights.values())
-            weight_keys = set(unique_weights)
-            if any(_tensor_storage_key(weight) in tied_weight_storages for weight in weights):
-                raise RuntimeError(
-                    "temporarily_fold_weights does not support parameters sharing storage across modules"
-                )
-            if not weight_keys.isdisjoint(folded_weight_keys):
-                raise RuntimeError(
-                    "temporarily_fold_weights does not support a weight shared across quantized modules"
-                )
-            folded_quantizers.add(quantizer)
-            folded_weight_keys.update(weight_keys)
-            states.extend((weight, weight.detach().clone()) for weight in weights)
+        if _is_temporary_weight_fold() and (not quantizer.fake_quant or not quantizer.is_enabled):
+            return
 
         for weight in weights:
             weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))

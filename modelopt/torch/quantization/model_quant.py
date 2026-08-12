@@ -42,7 +42,7 @@ from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
-from .nn.modules.quant_module import _record_folded_weights
+from .nn.modules.quant_module import _temporary_weight_fold_context
 from .utils import is_quantized
 
 __all__ = [
@@ -737,14 +737,18 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 
 
 @contextmanager
-def temporarily_fold_weights(model: nn.Module):
+def temporarily_fold_weights(
+    model: nn.Module,
+    snapshot_device: torch.device | str | None = None,
+    snapshot_weights: bool = True,
+):
     """Temporarily fold fake-quant weights for a frozen inference region.
 
-    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. The
-    original weights and quantizer runtime state are restored on exit, including after an
-    exception. Parameters are restored in place so optimizer and distributed references remain
-    valid. Weight ``SequentialQuantizer`` containers, quantizers shared across separate folding
-    calls, and parameters sharing storage across modules are not currently supported.
+    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. When
+    ``snapshot_weights=True``, enabled fake-quant weights and their quantizer runtime state are
+    restored on exit, including after an exception. Weights are restored in place so optimizer and
+    distributed references remain valid. Reusing one weight or weight quantizer across modules is
+    rejected before folding.
 
     This context is intended for repeated no-gradient forwards with no optimizer step, such as
     log-probability recomputation over several microbatches. It retains calibration attributes
@@ -753,37 +757,81 @@ def temporarily_fold_weights(model: nn.Module):
 
     Example::
 
-        with mtq.temporarily_fold_weights(model):
+        with mtq.temporarily_fold_weights(model, snapshot_device="cpu"):
             outputs = model(inputs)
+
+    Args:
+        model: Quantized model whose weights will be temporarily folded.
+        snapshot_device: Device used to store parameter snapshots. ``None`` keeps each snapshot
+            on the parameter's device; ``"cpu"`` avoids the additional accelerator memory.
+        snapshot_weights: Snapshot and restore folded weights and quantizer state. If ``False``,
+            the model remains folded after the context exits and folding errors are not rolled back.
     """
-    weight_states: list[tuple[torch.Tensor, torch.Tensor]] = []
-    state_attrs = (
-        "_disabled",
-        "_rotate",
-        "_enable_pre_quant_scale",
-        "_input_dtype",
-    )
-    missing = object()
-    quantizer_states = [
-        (module, {name: getattr(module, name, missing) for name in state_attrs})
-        for module in model.modules()
-        if isinstance(module, TensorQuantizer)
-    ]
+    active_pairs = []
+    quantizer_owners = {}
+    weight_owners = {}
+    for module in model.modules():
+        if not isinstance(module, QuantModule):
+            continue
+        for weight, quantizer in module.iter_weights_for_calibration():
+            if not isinstance(weight, torch.Tensor):
+                continue
+            local_weight = weight.to_local() if hasattr(weight, "to_local") else weight
+            try:
+                storage_id = (local_weight.device, local_weight.untyped_storage().data_ptr())
+            except (RuntimeError, NotImplementedError):
+                storage_id = id(local_weight)
+            weight_owner = weight_owners.setdefault(storage_id, module)
+            if weight_owner is not module:
+                raise ValueError("A weight is shared across quantized modules")
+            if not (
+                isinstance(quantizer, TensorQuantizer)
+                and quantizer.fake_quant
+                and quantizer.is_enabled
+            ):
+                continue
+            quantizer_owner = quantizer_owners.setdefault(id(quantizer), module)
+            if quantizer_owner is not module:
+                raise ValueError("A weight quantizer is shared across quantized modules")
+            active_pairs.append((local_weight, quantizer))
+
+    weight_snapshots = {}
+    quantizer_states = {}
+    if snapshot_weights:
+        for weight, quantizer in active_pairs:
+            weight_id = id(weight)
+            if weight_id not in weight_snapshots:
+                weight_snapshots[weight_id] = (
+                    weight,
+                    weight.detach().clone()
+                    if snapshot_device is None
+                    else weight.detach().to(snapshot_device, copy=True),
+                )
+            quantizer_states.setdefault(
+                quantizer,
+                (
+                    quantizer._disabled,
+                    quantizer._rotate,
+                    quantizer._enable_pre_quant_scale,
+                    quantizer._input_dtype,
+                ),
+            )
     try:
-        with _record_folded_weights(model, weight_states):
+        with _temporary_weight_fold_context():
             fold_weight(model, keep_attrs=True)
         yield
     finally:
-        with torch.no_grad():
-            for weight, original_weight in reversed(weight_states):
-                weight.copy_(original_weight)
-        for quantizer, state in quantizer_states:
-            for name, value in state.items():
-                if value is missing:
-                    if hasattr(quantizer, name):
-                        delattr(quantizer, name)
-                else:
-                    setattr(quantizer, name, value)
+        if snapshot_weights:
+            with torch.no_grad():
+                for weight, snapshot in weight_snapshots.values():
+                    weight.copy_(snapshot)
+            for quantizer, state in quantizer_states.items():
+                (
+                    quantizer._disabled,
+                    quantizer._rotate,
+                    quantizer._enable_pre_quant_scale,
+                    quantizer._input_dtype,
+                ) = state
 
 
 @torch.no_grad()

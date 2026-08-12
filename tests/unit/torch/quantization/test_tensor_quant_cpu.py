@@ -359,7 +359,10 @@ def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
         inputs = torch.randn(2, 4)
         output_before = qlinear(inputs)
 
-        with pytest.raises(RuntimeError, match="test error"), mtq.temporarily_fold_weights(qlinear):
+        with (
+            pytest.raises(RuntimeError, match="test error"),
+            mtq.temporarily_fold_weights(qlinear, snapshot_device="cpu"),
+        ):
             assert not torch.equal(qlinear.weight, original_weight)
             assert qlinear.weight.data_ptr() == original_storage
             assert not quantizer.is_enabled
@@ -439,45 +442,20 @@ def test_temporarily_fold_weights_skips_non_fake_override():
         assert quantizer.is_enabled
 
 
-def test_temporarily_fold_weights_rejects_quantizer_shared_across_modules(monkeypatch):
+def test_temporarily_fold_weights_without_snapshot_leaves_model_folded(monkeypatch):
     calls = []
-    backend_name = "test_temporary_fold_shared_quantizer_backend"
-    first = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
-    second = QuantModuleRegistry.convert(torch.nn.Linear(4, 3))
-    second.input_quantizer.disable()
-    second.output_quantizer.disable()
-    second.weight_quantizer = first.weight_quantizer
-    quantizer = first.weight_quantizer
-    original_weights = [first.weight.detach().clone(), second.weight.detach().clone()]
+    backend_name = "test_temporary_fold_without_snapshot"
+    qlinear = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
+    original_weight = qlinear.weight.detach().clone()
     try:
-        with (
-            pytest.raises(RuntimeError, match="weight quantizer shared"),
-            mtq.temporarily_fold_weights(torch.nn.ModuleList([first, second])),
-        ):
-            pass
+        with mtq.temporarily_fold_weights(qlinear, snapshot_weights=False):
+            assert not torch.equal(qlinear.weight, original_weight)
+            assert not qlinear.weight_quantizer.is_enabled
 
-        assert quantizer.is_enabled
-        assert torch.equal(first.weight, original_weights[0])
-        assert torch.equal(second.weight, original_weights[1])
+        assert not torch.equal(qlinear.weight, original_weight)
+        assert not qlinear.weight_quantizer.is_enabled
     finally:
         unregister_quant_backend(backend_name)
-
-
-def test_temporarily_fold_weights_rejects_shared_parameter_storage():
-    first = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
-    second = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
-    second.weight = torch.nn.Parameter(first.weight.detach().T)
-    second.weight_quantizer._fake_quant = False
-    original_weight = first.weight.detach().clone()
-    with (
-        pytest.raises(RuntimeError, match="parameters sharing storage across modules"),
-        mtq.temporarily_fold_weights(torch.nn.ModuleList([first, second])),
-    ):
-        pass
-
-    assert torch.equal(first.weight, original_weight)
-    assert first.weight_quantizer.is_enabled
-    assert second.weight_quantizer.is_enabled
 
 
 WINT4INT8_CFG = {

@@ -619,6 +619,12 @@ class _TransposedExpertsCalibMixin:
             weight = getattr(self, weight_name)
             yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
 
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold expert weights in the same transposed orientation used by the forward."""
+        for weight, quantizer in self.iter_weights_for_calibration():
+            if isinstance(quantizer, TensorQuantizer) and quantizer.fake_quant:
+                QuantModule._fold_weight_quantizer(quantizer, (weight,), keep_attrs)
+
 
 class _QuantSparseSequentialMoe(QuantModule):
     """Quantization wrapper for HuggingFace sparse MoE blocks.
