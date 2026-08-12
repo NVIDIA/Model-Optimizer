@@ -257,6 +257,9 @@ def _off_dtype_params(model) -> set[torch.nn.Parameter]:
 
     FSDP2 needs one dtype per shard group, but HF models routinely keep a few params in fp32 for
     stability (e.g. MoE router gates). Pass these to ``fully_shard(ignored_params=...)``.
+
+    TODO: Drop this and shard the off-dtype params once a stable PyTorch release includes FSDP2
+    mixed-precision parameter dtype support (already on nightly).
     """
     numel_by_dtype: dict[torch.dtype, int] = {}
     for param in model.parameters():
