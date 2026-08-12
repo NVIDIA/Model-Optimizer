@@ -75,7 +75,7 @@ def test_build_tied_alias_map_warns_when_declared_tie_unformed_under_fsdp(monkey
     same case is silent off FSDP (it is just an unapplied tie)."""
     import warnings as _warnings
 
-    import modelopt.torch.utils.distributed as dist_mod
+    import modelopt.torch.export.model_utils as mu
     from modelopt.torch.export.model_utils import _build_tied_alias_map as build
 
     class _Untied(torch.nn.Module):
@@ -92,8 +92,8 @@ def test_build_tied_alias_map_warns_when_declared_tie_unformed_under_fsdp(monkey
         assert build(_Untied()) == {}
     assert not any("shared-parameter group" in str(w.message) for w in rec)
 
-    # Under FSDP2: warn.
-    monkeypatch.setattr(dist_mod, "is_fsdp2_model", lambda m: True)
+    # Under FSDP2: warn. (is_fsdp2_model is imported into model_utils, so patch it there.)
+    monkeypatch.setattr(mu, "is_fsdp2_model", lambda m: True)
     with _warnings.catch_warnings(record=True) as rec:
         _warnings.simplefilter("always")
         assert build(_Untied()) == {}
@@ -479,19 +479,65 @@ def test_postprocess_partially_tied_container_dedups_only_tied_projections():
     )
 
 
-def test_postprocess_state_dict_collapses_view_and_base_sharing_storage():
-    """A base tensor and a view into it share storage, so safetensors ``save_file`` would
-    reject them. The address backstop keys on storage identity (like safetensors), so it
-    collapses the pair here rather than letting both survive and crash the write."""
+def test_postprocess_backstop_clones_distinct_views_no_data_loss():
+    """Two DISTINCT views of one storage (different shapes) both survive: the later is cloned
+    so safetensors can serialize both without losing data (dropping one would lose data)."""
+    from safetensors.torch import storage_ptr
+
     storage = torch.arange(4)
-    state_dict = {"short": storage[:2], "long": storage}
-    assert state_dict["short"].data_ptr() == state_dict["long"].data_ptr()
+    sd = {"short": storage[:2], "long": storage}  # share storage, different shapes
+    assert storage_ptr(sd["short"]) == storage_ptr(sd["long"])
 
-    processed = postprocess_state_dict(state_dict, maxbound=448, quantization=None)
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None)
 
-    # Exactly one side survives (first-wins), so no shared-storage pair reaches save_file.
-    assert len(processed) == 1
-    assert "short" in processed  # first-iterated key seeds the map; the later share is dropped
+    assert set(out) == {"short", "long"}  # both survive
+    assert torch.equal(out["short"], torch.arange(2))
+    assert torch.equal(out["long"], torch.arange(4))  # no data lost
+    assert storage_ptr(out["short"]) != storage_ptr(out["long"])  # share broken
+
+
+def test_postprocess_backstop_keeps_both_non_overlapping_slices():
+    """Two non-overlapping slices of one storage are distinct tensors; both must survive."""
+    from safetensors.torch import storage_ptr
+
+    base = torch.arange(4)
+    sd = {"first": base[:2], "second": base[2:]}  # [0,1] and [2,3], same storage
+    assert storage_ptr(sd["first"]) == storage_ptr(sd["second"])
+
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None)
+
+    assert torch.equal(out["first"], torch.tensor([0, 1]))
+    assert torch.equal(out["second"], torch.tensor([2, 3]))  # not lost
+    assert storage_ptr(out["first"]) != storage_ptr(out["second"])
+
+
+def test_postprocess_backstop_drops_true_duplicate():
+    """The same tensor under two names is a true duplicate: one copy is dropped."""
+    t = torch.arange(4)
+    sd = {"a": t, "b": t}  # identical view under two names
+
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None)
+
+    assert len(out) == 1 and "a" in out
+    assert torch.equal(out["a"], torch.arange(4))
+
+
+def test_postprocess_dense_tie_drops_pre_quant_scale_companion():
+    """An AWQ-style dense tie drops ``pre_quant_scale`` with the weight (no orphaned companion)."""
+    enc, dec = make_tied_linear_pair()
+    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+    tied_map = TiedWeightMap(parent)
+    sd = {
+        "encoder.weight": torch.randn(4, 4),
+        "encoder.pre_quant_scale": torch.randn(4),
+        "decoder.weight": torch.randn(4, 4),
+        "decoder.pre_quant_scale": torch.randn(4),
+    }
+
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
+
+    assert "encoder.weight" not in out and "encoder.pre_quant_scale" not in out  # both dropped
+    assert "decoder.weight" in out and "decoder.pre_quant_scale" in out  # canonical kept
 
 
 def test_postprocess_state_dict_preserves_zero_pointer_tensors():

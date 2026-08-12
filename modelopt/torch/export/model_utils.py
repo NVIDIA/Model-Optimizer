@@ -20,6 +20,9 @@ from collections import defaultdict
 
 import torch.nn as nn
 
+from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils.distributed import is_fsdp2_model
+
 MODEL_NAME_TO_TYPE = {
     "GPT2": "gpt",
     "Mllama": "mllama",
@@ -240,9 +243,6 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
     # future torch change can't disable dedup quietly.
     unrealized = declared_aliases - set(alias_to_canonical)
     if unrealized:
-        from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
-        from modelopt.torch.utils.distributed import is_fsdp2_model
-
         if is_fsdp2_model(model) or has_accelerate_offload(model):
             warnings.warn(
                 f"{len(unrealized)} declared tied-weight alias(es) did not form a shared-parameter "
