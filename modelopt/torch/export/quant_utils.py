@@ -1055,7 +1055,7 @@ def postprocess_state_dict(
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
-    resolver: "TiedWeightMap | None" = None,
+    tied_map: "TiedWeightMap | None" = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -1064,7 +1064,7 @@ def postprocess_state_dict(
         maxbound: The maximum bound value for the output quantizer.
         quantization: The KV cache quantization format.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
-        resolver: Optional :class:`TiedWeightMap`. When provided, tied-weight
+        tied_map: Optional :class:`TiedWeightMap`. When provided, tied-weight
             dedup is authoritative and name-based: a declared alias key whose canonical
             counterpart is present is dropped, independent of tensor address. This is
             what makes dedup correct under the FSDP full-state-dict gather (and offload),
@@ -1135,8 +1135,8 @@ def postprocess_state_dict(
     # declared-alias key when its canonical counterpart is present. Works under the
     # FSDP full-state-dict gather / offload, where tied tensors are materialized at
     # distinct addresses so the address pass below cannot see the tie.
-    if resolver is not None:
-        alias_prefixes = resolver.alias_prefix_pairs()
+    if tied_map is not None:
+        alias_prefixes = tied_map.alias_prefix_pairs()
         if alias_prefixes:
             # Dedup each tie ATOMICALLY per alias prefix: drop the group only when EVERY key
             # has a canonical counterpart. Tied sides can differ in quant state (alias
@@ -1145,10 +1145,10 @@ def postprocess_state_dict(
             # an untied sibling under the same prefix.
             alias_groups: dict[str, list[tuple[str, str | None]]] = {}
             for key in post_state_dict:
-                a_base = resolver.matched_alias_prefix(key, alias_prefixes)
+                a_base = tied_map.matched_alias_prefix(key, alias_prefixes)
                 if a_base is None:
                     continue
-                canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
+                canonical_key = tied_map.canonical_state_dict_key(key, alias_prefixes)
                 alias_groups.setdefault(a_base, []).append((key, canonical_key))
 
             # No bidirectional/chain guard is needed: ties are id-groups, so if A<->B and
@@ -1653,7 +1653,7 @@ def has_quantized_modules(model: nn.Module) -> bool:
     )
 
 
-def sync_tied_input_amax(model: nn.Module, resolver: "TiedWeightMap | None" = None) -> int:
+def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = None) -> int:
     """Max-merge ``input_quantizer`` amaxes across modules that share a weight, in place.
 
     Tied modules whose forward paths see different activation ranges (encoder vs decoder in
@@ -1667,12 +1667,12 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedWeightMap | None" = No
     postprocess address backstop will collapse it, so its amaxes must merge here too or the
     kept ``input_scale`` won't cover the dropped side. Identity is read here only, pre-pack
     while resident, so it can't collide like a reused ``data_ptr``. Returns the number of
-    groups merged; pass ``resolver`` to reuse one, else it is built from ``model``.
+    groups merged; pass ``tied_map`` to reuse one, else it is built from ``model``.
     """
     from collections import defaultdict
 
-    if resolver is None:
-        resolver = TiedWeightMap(model)
+    if tied_map is None:
+        tied_map = TiedWeightMap(model)
 
     by_group: dict = defaultdict(list)
     for name, m in model.named_modules():
@@ -1686,7 +1686,7 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedWeightMap | None" = No
             and hasattr(m, "down_proj")
             and first_proj.dim() == 3
         ):
-            gk = resolver.container_group_key(name, first_proj_attr)
+            gk = tied_map.container_group_key(name, first_proj_attr)
             if gk is not None:
                 by_group[("moe", gk)].append(m)
         # Dense quantized Linear with an input_quantizer
@@ -1695,7 +1695,7 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedWeightMap | None" = No
             and hasattr(m, "weight")
             and isinstance(m.weight, torch.nn.Parameter)
         ):
-            gk = resolver.group_key(f"{name}.weight" if name else "weight")
+            gk = tied_map.group_key(f"{name}.weight" if name else "weight")
             if gk is not None:
                 by_group[("dense", gk)].append(m)
             else:

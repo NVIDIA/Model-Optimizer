@@ -908,7 +908,7 @@ def _process_quantized_modules(
             If True, modules with base_layer attribute are skipped.
     """
     # There is no per-module dedup cache; tied-weight duplicates are dropped by name in
-    # postprocess_state_dict, driven by the resolver the driver owns.
+    # postprocess_state_dict, driven by the tied_map the driver owns.
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     fsdp_module_to_reshard = None
 
@@ -953,11 +953,11 @@ def _export_transformers_checkpoint(
         NotImplementedError: if the model has accelerate offload hooks.
     """
     dtype = _resolve_export_dtype(model, dtype)
-    # One name-based tied-weight resolver for the whole export, built once and used by the
+    # One name-based tied-weight tied_map for the whole export, built once and used by the
     # amax sync and the final dedup in postprocess_state_dict (its only two consumers). It
     # resolves ties from the model's declarations (stable across FSDP resharding / offload
     # / packing).
-    resolver = TiedWeightMap(model)
+    tied_map = TiedWeightMap(model)
     _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
 
     # Resmooth and requantize fused layers
@@ -990,7 +990,7 @@ def _export_transformers_checkpoint(
     # merged value flows into input_scale derivation. Still required with name-based
     # dedup: the tied group collapses to one retained weight whose single input_scale
     # must cover every side's activation range (else the dropped side clips at inference).
-    synced_input = sync_tied_input_amax(model, resolver)
+    synced_input = sync_tied_input_amax(model, tied_map)
     if synced_input:
         print(
             f"sync_tied_input_amax: max-merged input_quantizer amaxes across "
@@ -1022,7 +1022,7 @@ def _export_transformers_checkpoint(
         kv_cache_max_bound,
         kv_cache_format,
         is_modelopt_qlora,
-        resolver=resolver,
+        tied_map=tied_map,
     )
 
     return quantized_state_dict, quant_config

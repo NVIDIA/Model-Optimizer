@@ -209,8 +209,8 @@ def _export_transformers_checkpoint_streaming(
       and does NOT use :class:`TiedWeightMap`. It therefore only handles the
       ``tie_word_embeddings`` embedding tie; dict-style / per-expert MoE ties (e.g.
       DiffusionGemma) are NOT deduped here, so the offloaded export can emit both sides of
-      such a tie where the resident path emits one. Threading the resolver in is tracked as
-      a follow-up; until then such models should use the resident (non-offloaded) path.
+      such a tie where the resident path emits one. Threading the ``TiedWeightMap`` in is
+      tracked as a follow-up; until then such models should use the resident path.
     - Conversion mappings that need tensor-level splits cannot be reversed one tensor at a
       time, so they are rejected up front rather than exported incorrectly.
 
