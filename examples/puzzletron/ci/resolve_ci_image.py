@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path
 
+__all__ = ["resolve_image_reference", "validate_repository_contract"]
+
 _NVCR_IMAGE = re.compile(
     r"nvcr\.io/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+@sha256:(?P<digest>[0-9a-f]{64})"
 )

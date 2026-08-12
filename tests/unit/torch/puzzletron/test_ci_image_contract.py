@@ -49,6 +49,7 @@ def test_gpu_image_uses_the_recorded_immutable_base(project_root_path):
     assert "bash /opt/puzzletron/setup_env.sh --verify" in dockerfile
 
     resolver = _load_image_resolver(project_root_path)
+    assert resolver.__all__ == ["resolve_image_reference", "validate_repository_contract"]
     resolver.validate_repository_contract(project_root_path)
 
 
@@ -84,10 +85,11 @@ def test_runtime_modelopt_install_cannot_resolve_dependencies(project_root_path)
 
 def test_gpu_workflow_routes_the_pinned_image_to_the_existing_nox_session(project_root_path):
     workflow_path = project_root_path / ".github/workflows/puzzletron_gpu_tests.yml"
-    workflow = yaml.load(workflow_path.read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.safe_load(workflow_path.read_text())
 
     assert workflow["on"]["push"]["branches"] == ["pull-request/[0-9]+"]
     jobs = workflow["jobs"]
+    assert "secrets" not in jobs["pr-gate"]
     assert jobs["gpu-puzzletron"]["container"]["image"] == (
         "${{ needs.resolve-image.outputs.image }}"
     )
@@ -96,10 +98,10 @@ def test_gpu_workflow_routes_the_pinned_image_to_the_existing_nox_session(projec
     assert jobs["resolve-image"]["permissions"]["contents"] == "read"
     resolve_steps = jobs["resolve-image"]["steps"]
     assert resolve_steps[0]["uses"] == "actions/checkout@v6"
-    assert resolve_steps[0]["with"]["persist-credentials"] == "false"
+    assert resolve_steps[0]["with"]["persist-credentials"] is False
     resolve_step = resolve_steps[1]
     assert resolve_step["run"] == (
         'python examples/puzzletron/ci/resolve_ci_image.py >> "${GITHUB_OUTPUT}"'
     )
     assert "PUZZLETRON_GPU_CI_IMAGE" in resolve_step["env"]
-    assert jobs["gpu-puzzletron"]["timeout-minutes"] == "50"
+    assert jobs["gpu-puzzletron"]["timeout-minutes"] == 50
