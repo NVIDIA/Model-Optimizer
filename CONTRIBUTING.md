@@ -65,10 +65,9 @@ and conciseness.
   Prefer making the code self-explanatory first. Use comments only for non-obvious
   intent or constraints that remain unclear from the code. Apply this guidance to new
   comments only; do not rewrite or delete existing comments just for style.
-  Keep comments and docstrings to one or two lines. A docstring is a one-line summary plus
-  only the args/returns whose meaning isn't obvious from the signature — not a restatement
-  of it. Design rationale, benchmark numbers, and root-cause analysis belong in the PR
-  description, not the source.
+  Keep comments to one or two lines. Keep docstrings to a one-line summary with optionally a short
+  description plus only the `Args:`/`Returns:` entries whose meaning isn't obvious from the signature.
+  Benchmark numbers and root-cause analysis belong in the PR description, not the source.
 - **Document public APIs.** Public and higher-level APIs should have docstrings, including examples when useful.
   Internal helpers should usually be self-documenting through clear names and structure.
 - **Fix the bug cause, not the side effect.** For bug fixes, find the root cause instead of patching for its side effect.

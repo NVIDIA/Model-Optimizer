@@ -54,8 +54,9 @@ These instructions apply to AI-assisted work in this repository.
   changed and what they need to do. No internal bug numbers (e.g. NVBug IDs),
   root-cause analysis, or implementation detail — that belongs in the PR
   description. File features under the matching `**New Features**` sub-section
-  (`*Quantization*`, `*Speculative Decoding*`,
-  `*Megatron Framework (M-LM / M-Bridge)*`, `*Misc*`).
+  used by recent releases (e.g. `*Quantization*`, `*Speculative Decoding*`,
+  `*Megatron Framework (M-LM / M-Bridge)*`, `*Misc*`) rather than relabeling
+  existing ones.
 
 ## Responding to PR review feedback
 
