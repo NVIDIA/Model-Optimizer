@@ -597,12 +597,84 @@ class GPTModelExporter:
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
 
     def _get_mtp_state_dict(self) -> dict[str, torch.Tensor]:
-        """Export the MTP module.
+        """Export the MTP (Multi-Token Prediction) module.
 
-        Currently, we copy the BF16 MTP weights from the pretrained model if the pretrained model has MTP layers.
+        Walks the live MCore ``model.mtp`` module and applies the same quantization
+        rules used for the base decoder, so the exported draft head reflects the
+        actual (quantized / co-trained) weights. Falls back to copying the BF16 MTP
+        weights from the pretrained model only when the live model has no ``mtp``
+        module (e.g. exporting a base-only checkpoint that grafts a pretrained head).
         """
-        # TODO Implement MTP export for quantized MTP
-        # Hacky version for now: copy MTP weights from pretrained model
+        mtp = getattr(self.model, "mtp", None)
+        if mtp is None or not hasattr(mtp, "layers") or len(mtp.layers) == 0:
+            return self._copy_mtp_state_dict_from_pretrained()
+
+        # The MTP inner attention / MoE layers are structurally identical to the base
+        # decoder layers, so we reuse the base layer walker. We alias the ``mtp.*``
+        # naming rules onto the standard rule keys for the duration of the walk so the
+        # walker emits ``mtp.layers.{}.`` HF keys instead of ``backbone.layers.{}.``.
+        # A *restricted* alias set is used on purpose: any base rule key the walker
+        # references but that has no ``mtp.`` variant is simply absent (and its call is
+        # guarded), rather than silently emitting a wrong ``backbone.`` prefix.
+        mtp_rules = {
+            key[len("mtp.") :]: rule for key, rule in self.rules.items() if key.startswith("mtp.")
+        }
+
+        saved_rules = self.rules
+        saved_state_dict = self._state_dict
+        self.rules = mtp_rules
+        self._state_dict = OrderedDict()
+        try:
+            for mtp_layer in mtp.layers:
+                inner_layers = mtp_layer.mtp_model_layer.layers
+                first_id = inner_layers[0].layer_number - 1
+                last_id = inner_layers[-1].layer_number - 1
+
+                # Outer predictor projections attach to the first inner HF index.
+                if "enorm" in self.rules:
+                    self.rules["enorm"](mtp_layer.enorm, first_id)
+                if "hnorm" in self.rules:
+                    self.rules["hnorm"](mtp_layer.hnorm, first_id)
+                if "eh_proj" in self.rules:
+                    self.rules["eh_proj"](mtp_layer.eh_proj, first_id)
+
+                # Inner hybrid stack (e.g. [attention, MoE] for the ``*E`` pattern)
+                # reuses the base decoder walker with the aliased mtp rules.
+                for inner in inner_layers:
+                    hf_layer_id = inner.layer_number - 1
+                    if isinstance(inner, MambaLayer):
+                        self._get_mamba_layer_state_dict(inner, hf_layer_id)
+                    elif isinstance(inner, TransformerLayer):
+                        self._get_transformer_layer_state_dict(inner, hf_layer_id)
+                    else:
+                        raise ValueError(
+                            "Only TransformerLayer or MambaLayer are supported in the MTP block."
+                        )
+
+                # The MTP block's own final layernorm attaches to the last inner HF index.
+                final_layernorm = getattr(mtp_layer, "final_layernorm", None)
+                if (
+                    "final_layernorm" in self.rules
+                    and final_layernorm is not None
+                    and not isinstance(final_layernorm, IdentityOp)
+                ):
+                    self.rules["final_layernorm"](final_layernorm, last_id)
+
+            mtp_state_dict = self._state_dict
+        finally:
+            self.rules = saved_rules
+            self._state_dict = saved_state_dict
+
+        if len(mtp_state_dict) > 0:
+            print(f"Exported {len(mtp_state_dict)} MTP tensors from the live model")
+        return mtp_state_dict
+
+    def _copy_mtp_state_dict_from_pretrained(self) -> dict[str, torch.Tensor]:
+        """Fallback: copy the BF16 MTP weights from the pretrained model.
+
+        Used only when the live model has no ``mtp`` module. This does not reflect any
+        quantization or co-training applied to the MTP head.
+        """
         mtp_state_dict = {}
         if not self._hf_pretrained_model_name:
             return mtp_state_dict
