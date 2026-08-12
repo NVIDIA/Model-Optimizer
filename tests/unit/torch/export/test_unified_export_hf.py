@@ -69,6 +69,37 @@ def test_build_tied_alias_map_skips_declared_but_unapplied_tie():
     assert _build_tied_alias_map(parent) == {}
 
 
+def test_build_tied_alias_map_warns_when_declared_tie_unformed_under_fsdp(monkeypatch):
+    """Under FSDP2/offload, a declared alias whose id-group did not form (identity may have
+    been split by sharding) must warn -- fail loud so dedup can't be silently skipped. The
+    same case is silent off FSDP (it is just an unapplied tie)."""
+    import warnings as _warnings
+
+    import modelopt.torch.utils.distributed as dist_mod
+    from modelopt.torch.export.model_utils import _build_tied_alias_map as build
+
+    class _Untied(torch.nn.Module):
+        _tied_weights_keys = {r"^lm_head\.weight$": "embed.weight"}
+
+        def __init__(self):
+            super().__init__()
+            self.embed = torch.nn.Linear(4, 4, bias=False)
+            self.lm_head = torch.nn.Linear(4, 4, bias=False)  # distinct object
+
+    # Off FSDP: no warning.
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        assert build(_Untied()) == {}
+    assert not any("shared-parameter group" in str(w.message) for w in rec)
+
+    # Under FSDP2: warn.
+    monkeypatch.setattr(dist_mod, "is_fsdp2_model", lambda m: True)
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        assert build(_Untied()) == {}
+    assert any("shared-parameter group" in str(w.message) for w in rec)
+
+
 def test_tied_group_resolver_group_key_is_shared_and_order_independent():
     """Both sides of a declared tie map to the same key; untied params map to None."""
     enc, dec = make_tied_linear_pair()
@@ -163,12 +194,16 @@ def test_tied_group_resolver_parallel_pattern_declaration():
         )
         == "model.decoder.layers.0.experts"
     )
-    # post-export per-expert split key rewrites to the decoder canonical (so it is dropped)
-    prefixes = tied_map.alias_prefix_pairs()
-    got = tied_map.canonical_state_dict_key(
-        "model.encoder.language_model.layers.0.experts.3.gate_proj.weight", prefixes
-    )
-    assert got == "model.decoder.layers.0.experts.3.gate_proj.weight"
+    # post-export per-expert split keys of the (fully tied) container are dropped by name.
+    enc = "model.encoder.language_model.layers.0.experts"
+    dec = "model.decoder.layers.0.experts"
+    sd = {
+        f"{enc}.3.gate_proj.weight": torch.randn(4, 4),
+        f"{dec}.3.gate_proj.weight": torch.randn(4, 4),
+    }
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
+    assert f"{enc}.3.gate_proj.weight" not in out  # alias split key dropped
+    assert f"{dec}.3.gate_proj.weight" in out  # canonical kept
 
 
 def _quantize_and_get_input_quantizers(parent):
@@ -284,7 +319,6 @@ def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
     tied_map = TiedWeightMap(_Bi())
     # Both sides are declared aliases -> no unambiguous canonical -> not deduped.
     assert tied_map.alias_to_canonical == {}
-    assert tied_map.alias_prefix_pairs() == {}
 
     sd = {"a.weight": torch.randn(4, 4), "b.weight": torch.randn(4, 4)}
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
@@ -343,7 +377,10 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
 
     parent = _Parent()
     tied_map = TiedWeightMap(parent)
-    assert tied_map.alias_prefix_pairs() == {"encoder.experts": "decoder.experts"}
+    assert tied_map.alias_to_canonical == {
+        "encoder.experts.gate_up_proj": "decoder.experts.gate_up_proj",
+        "encoder.experts.down_proj": "decoder.experts.down_proj",
+    }
 
     # Craft exported-style per-expert keys with distinct storages on both sides.
     sd = {}
@@ -358,6 +395,88 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
     assert not any(k.startswith("encoder.experts.") for k in out)  # all aliases dropped
     assert all(k.startswith("decoder.experts.") for k in out)  # only canonical remains
     assert len(out) == 2 * 3 * 2  # 2 experts * 3 projections * (weight + weight_scale)
+
+
+def test_postprocess_keeps_independent_bias_under_tied_weight():
+    """A weight tie must not drop an independent bias sharing the module prefix.
+
+    Two Linears with tied weights but distinct biases: dropping ``A.bias`` because ``B.bias``
+    exists is the NVBug 6525352 failure class reached by name. Targeted per-parameter
+    expansion (weight + its scales only) leaves the bias untouched.
+    """
+
+    class _TwoLinear(torch.nn.Module):
+        _tied_weights_keys = {r"^A\.weight$": "B.weight"}
+
+        def __init__(self):
+            super().__init__()
+            self.A = torch.nn.Linear(4, 4, bias=True)
+            self.B = torch.nn.Linear(4, 4, bias=True)
+            self.A.weight = self.B.weight  # weights tied; biases independent
+
+    tied_map = TiedWeightMap(_TwoLinear())
+    sd = {
+        "A.weight": torch.randn(4, 4),
+        "A.bias": torch.randn(4),
+        "B.weight": torch.randn(4, 4),
+        "B.bias": torch.randn(4),
+    }
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
+
+    assert "A.weight" not in out  # tied weight dropped
+    assert "A.bias" in out  # independent bias survives
+    assert "B.weight" in out and "B.bias" in out
+
+
+def test_postprocess_partially_tied_container_dedups_only_tied_projections():
+    """Only ``gate_up_proj`` of a fused-experts container is tied (``down_proj`` independent).
+
+    Per-projection matching dedups exactly the tied projections' per-expert keys (gate_proj /
+    up_proj), while the untied ``down_proj`` AND a non-projection child (a router) under the
+    same container survive.
+    """
+
+    class _Parent(torch.nn.Module):
+        _tied_weights_keys = {r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj"}
+
+        def __init__(self):
+            super().__init__()
+            self.encoder = torch.nn.Module()
+            self.encoder.experts = torch.nn.Module()
+            self.decoder = torch.nn.Module()
+            self.decoder.experts = torch.nn.Module()
+            gup = torch.nn.Parameter(torch.zeros(2, 4, 4))
+            self.decoder.experts.gate_up_proj = gup
+            self.encoder.experts.gate_up_proj = gup  # tied
+            # down_proj is a distinct Parameter on each side (untied)
+            self.decoder.experts.down_proj = torch.nn.Parameter(torch.zeros(2, 4, 4))
+            self.encoder.experts.down_proj = torch.nn.Parameter(torch.zeros(2, 4, 4))
+
+    tied_map = TiedWeightMap(_Parent())
+    assert tied_map.alias_to_canonical == {
+        "encoder.experts.gate_up_proj": "decoder.experts.gate_up_proj"
+    }
+
+    sd = {}
+    for side in ("encoder", "decoder"):
+        for e in range(2):
+            for proj in ("gate_proj", "up_proj", "down_proj"):
+                sd[f"{side}.experts.{e}.{proj}.weight"] = torch.randn(4, 4)
+        sd[f"{side}.experts.router.weight"] = torch.randn(4, 4)  # non-projection child
+
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
+
+    # Tied gate_up_proj (splits to gate_proj/up_proj) is deduped on the encoder (alias) side.
+    assert not any(".gate_proj." in k or ".up_proj." in k for k in out if k.startswith("encoder."))
+    # Untied down_proj and the router survive on both sides.
+    assert all(f"encoder.experts.{e}.down_proj.weight" in out for e in range(2))
+    assert "encoder.experts.router.weight" in out and "decoder.experts.router.weight" in out
+    # Decoder (canonical) side fully kept.
+    assert all(
+        f"decoder.experts.{e}.{p}.weight" in out
+        for e in range(2)
+        for p in ("gate_proj", "up_proj", "down_proj")
+    )
 
 
 def test_postprocess_state_dict_collapses_view_and_base_sharing_storage():
