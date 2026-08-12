@@ -36,8 +36,6 @@ from modelopt.torch.fastgen.methods.pdd import (
     PDDOutputProjection,
     PDDPipeline,
     convert_to_pdd_output_projection,
-    get_module_by_path,
-    replace_module_by_path,
 )
 
 _CORE_SOURCES = (
@@ -93,17 +91,15 @@ def test_core_pdd_symbols_are_exported_from_the_public_package() -> None:
         "PDDPipeline": PDDPipeline,
         "convert_to_pdd_output_projection": convert_to_pdd_output_projection,
         "fusion_coefficients": fusion_coefficients,
-        "get_module_by_path": get_module_by_path,
         "integrate_interval_velocities": integrate_interval_velocities,
         "load_pdd_config": load_pdd_config,
         "make_shifted_flow_grid": make_shifted_flow_grid,
-        "replace_module_by_path": replace_module_by_path,
     }
 
     assert {name: getattr(fastgen, name) for name in expected} == expected
 
 
-def test_fresh_core_import_does_not_load_model_plugins_or_frameworks() -> None:
+def test_fresh_core_import_does_not_require_external_frameworks() -> None:
     repository = Path(__file__).resolve().parents[4]
     script = r"""
 import importlib.abc
@@ -139,7 +135,6 @@ for prefix in (
     "diffusers",
     "fastgen",
     "nemo_automodel",
-    "modelopt.torch.fastgen.plugins.qwen_image",
     "transformers",
 ):
     assert not any(name == prefix or name.startswith(prefix + ".") for name in loaded), (

@@ -33,10 +33,10 @@ from modelopt.torch.fastgen.plugins.qwen_image import build_img_shapes, pack_lat
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QWEN_IMAGE_PDD_EXECUTION,
     QWEN_IMAGE_PDD_LAYER_SPEC,
-    adopt_qwen_image_mr210_forward,
     convert_qwen_image_to_pdd,
-    freeze_qwen_image_mr210_unused_parameters,
-    require_qwen_image_mr210_forward,
+    enable_qwen_image_pdd_forward,
+    freeze_qwen_image_pdd_unused_parameters,
+    require_qwen_image_pdd_forward,
 )
 
 
@@ -46,7 +46,7 @@ class _QwenImageTestDouble(nn.Module):
 
 @pytest.fixture(autouse=True)
 def _allow_qwen_image_test_doubles(monkeypatch):
-    require_production_forward = qwen_image_pdd_plugin.require_qwen_image_mr210_forward
+    require_production_forward = qwen_image_pdd_plugin.require_qwen_image_pdd_forward
 
     def require_forward(model: nn.Module) -> str:
         if isinstance(model, _QwenImageTestDouble):
@@ -54,13 +54,11 @@ def _allow_qwen_image_test_doubles(monkeypatch):
                 getattr(model, "_modelopt_qwen_image_pdd_execution", None)
                 != QWEN_IMAGE_PDD_EXECUTION
             ):
-                raise RuntimeError(
-                    "Qwen-Image PDD requires the bound FastGen MR210 forward execution."
-                )
+                raise RuntimeError("Qwen-Image PDD requires its masked joint-attention forward.")
             return QWEN_IMAGE_PDD_EXECUTION
         return require_production_forward(model)
 
-    monkeypatch.setattr(qwen_image_pdd_plugin, "require_qwen_image_mr210_forward", require_forward)
+    monkeypatch.setattr(qwen_image_pdd_plugin, "require_qwen_image_pdd_forward", require_forward)
 
 
 class _TinyQwenTransformer(_QwenImageTestDouble):
@@ -647,7 +645,7 @@ def _tiny_diffusers_qwen():
 def test_mr210_freezes_exactly_the_structurally_unused_parameters() -> None:
     student = _tiny_diffusers_qwen()
 
-    frozen_names = freeze_qwen_image_mr210_unused_parameters(student)
+    frozen_names = freeze_qwen_image_pdd_unused_parameters(student)
 
     assert set(frozen_names) == {
         "transformer_blocks.0.attn.to_add_out.weight",
@@ -729,7 +727,7 @@ def test_mr210_real_qwen_loss_and_backward_match_independent_graph() -> None:
 
     torch.manual_seed(20260716)
     base = _tiny_diffusers_qwen().eval()
-    actual_student = adopt_qwen_image_mr210_forward(copy.deepcopy(base))
+    actual_student = enable_qwen_image_pdd_forward(copy.deepcopy(base))
     actual_student.enable_gradient_checkpointing()
     actual_teacher = copy.deepcopy(actual_student).eval().requires_grad_(False)
     oracle_student = copy.deepcopy(base)
@@ -854,15 +852,15 @@ def test_conversion_preserves_the_ordinary_diffusers_qwen_root() -> None:
     assert dict(student.config) == config
 
 
-def test_mr210_adoption_accepts_a_dynamic_qwen_subclass() -> None:
+def test_qwen_pdd_forward_binding_accepts_a_dynamic_qwen_subclass() -> None:
     student = _tiny_diffusers_qwen().eval()
     student.__class__ = type("FSDPQwenImageTransformer2DModel", (type(student),), {})
 
-    assert adopt_qwen_image_mr210_forward(student) is student
-    assert require_qwen_image_mr210_forward(student) == QWEN_IMAGE_PDD_EXECUTION
+    assert enable_qwen_image_pdd_forward(student) is student
+    assert require_qwen_image_pdd_forward(student) == QWEN_IMAGE_PDD_EXECUTION
 
 
-def test_mr210_adoption_preserves_root_state_and_deepcopy_binding() -> None:
+def test_qwen_pdd_forward_binding_preserves_root_state_and_deepcopy() -> None:
     source = _tiny_diffusers_qwen().eval()
     source_type = type(source)
     source_state = {name: value.detach().clone() for name, value in source.state_dict().items()}
@@ -873,7 +871,7 @@ def test_mr210_adoption_preserves_root_state_and_deepcopy_binding() -> None:
     source.custom_attribute = custom_attribute
     hook = source.register_forward_pre_hook(lambda *_args: None)
 
-    adopted = adopt_qwen_image_mr210_forward(source)
+    adopted = enable_qwen_image_pdd_forward(source)
 
     assert adopted is source
     assert type(adopted) is source_type
@@ -888,7 +886,7 @@ def test_mr210_adoption_preserves_root_state_and_deepcopy_binding() -> None:
     )
     assert hook.id in adopted._forward_pre_hooks
     assert adopted.custom_attribute is custom_attribute
-    assert adopt_qwen_image_mr210_forward(adopted) is adopted
+    assert enable_qwen_image_pdd_forward(adopted) is adopted
 
     round_trip = copy.deepcopy(adopted)
     with torch.no_grad():
@@ -903,28 +901,28 @@ def test_mr210_adoption_preserves_root_state_and_deepcopy_binding() -> None:
     assert teacher.forward.__func__ is adopted.forward.__func__
     assert teacher.forward.__self__ is teacher
     assert teacher.forward.__self__ is not adopted
-    require_qwen_image_mr210_forward(teacher)
+    require_qwen_image_pdd_forward(teacher)
 
     tampered = copy.deepcopy(adopted)
     tampered.forward = MethodType(lambda self, **_kwargs: self, tampered)
-    with pytest.raises(RuntimeError, match="MR210 forward execution"):
-        require_qwen_image_mr210_forward(tampered)
+    with pytest.raises(RuntimeError, match="masked joint-attention forward"):
+        require_qwen_image_pdd_forward(tampered)
 
     conflicting = _tiny_diffusers_qwen()
     conflicting.forward = MethodType(lambda self, **_kwargs: self, conflicting)
     with pytest.raises(RuntimeError, match="instance-level forward override"):
-        adopt_qwen_image_mr210_forward(conflicting)
+        enable_qwen_image_pdd_forward(conflicting)
 
     forged = _tiny_diffusers_qwen()
     forged._modelopt_qwen_image_pdd_execution = QWEN_IMAGE_PDD_EXECUTION
-    with pytest.raises(RuntimeError, match="bound FastGen MR210 forward"):
-        qwen_image_pdd_plugin.require_qwen_image_mr210_forward(forged)
+    with pytest.raises(RuntimeError, match="masked joint-attention forward"):
+        qwen_image_pdd_plugin.require_qwen_image_pdd_forward(forged)
 
 
 def test_mr210_qwen_conversion_preserves_every_initialized_head() -> None:
     base = _tiny_diffusers_qwen().eval().to(torch.bfloat16)
     student = copy.deepcopy(base)
-    student = adopt_qwen_image_mr210_forward(student)
+    student = enable_qwen_image_pdd_forward(student)
     config = _config()
     generator = torch.Generator().manual_seed(20260715)
     state = torch.randn(2, 2, 4, 4, generator=generator)
@@ -960,7 +958,7 @@ def test_mr210_qwen_conversion_preserves_every_initialized_head() -> None:
 def test_mr210_joint_mask_ignores_padded_token_values() -> None:
     canonical = _tiny_diffusers_qwen().eval().to(torch.bfloat16)
     student = copy.deepcopy(canonical)
-    student = adopt_qwen_image_mr210_forward(student)
+    student = enable_qwen_image_pdd_forward(student)
     config = _config()
     convert_qwen_image_to_pdd(student, config)
     adapter = QwenImagePDDAdapter(config)
@@ -1027,7 +1025,7 @@ def test_mr210_joint_mask_ignores_padded_token_values() -> None:
 
 
 def test_mr210_preserves_diffusers_output_and_harmless_call_contract() -> None:
-    student = adopt_qwen_image_mr210_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
+    student = enable_qwen_image_pdd_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
     generator = torch.Generator().manual_seed(20260716)
     kwargs = {
         "hidden_states": pack_latents(torch.randn(2, 2, 4, 4, generator=generator)).to(
@@ -1051,7 +1049,7 @@ def test_mr210_preserves_diffusers_output_and_harmless_call_contract() -> None:
 
 
 def test_mr210_time_embed_receives_fp32_grid_value() -> None:
-    student = adopt_qwen_image_mr210_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
+    student = enable_qwen_image_pdd_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
     config = _config()
     convert_qwen_image_to_pdd(student, config)
     captured: list[torch.Tensor] = []
@@ -1081,7 +1079,7 @@ def test_mr210_time_embed_receives_fp32_grid_value() -> None:
 
 
 def test_mr210_qwen_teacher_cfg_matches_per_token_reference() -> None:
-    teacher = adopt_qwen_image_mr210_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
+    teacher = enable_qwen_image_pdd_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
     config = _config(guidance_scale=4.0)
     adapter = QwenImagePDDAdapter(config)
     generator = torch.Generator().manual_seed(20260716)
@@ -1223,7 +1221,7 @@ def test_qwen_pdd_rejects_unsupported_config_condition_and_call_contracts() -> N
     unmarked = _TinyQwenTransformer()
     delattr(unmarked, "_modelopt_qwen_image_pdd_execution")
     convert_qwen_image_to_pdd(unmarked, config)
-    with pytest.raises(RuntimeError, match="MR210 forward execution"):
+    with pytest.raises(RuntimeError, match="masked joint-attention forward"):
         adapter.student_all_heads(unmarked, state, time, condition=condition)
 
 

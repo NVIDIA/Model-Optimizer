@@ -18,16 +18,13 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import torch
 import torch.distributed as dist
 from huggingface_hub import snapshot_download
 from torch import nn
-from torch.distributed.fsdp import MixedPrecisionPolicy
 
 try:
     import nemo_automodel.recipes.diffusion.train as automodel_diffusion_train
@@ -43,42 +40,11 @@ except ImportError as exc:
 from modelopt.torch.fastgen import PDDConfig, PDDPipeline
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QwenImagePDDAdapter,
-    adopt_qwen_image_mr210_forward,
-    freeze_qwen_image_mr210_unused_parameters,
+    enable_qwen_image_pdd_forward,
 )
 
+from .compat import automodel_pdd_setup
 from .training import PDDFlowMatchingStepAdapter
-
-
-@contextmanager
-def _preserve_fp32_timestep_inputs() -> Iterator[None]:
-    """Keep Qwen's continuous timestep in FP32 while FSDP computes in BF16."""
-    original_builder = automodel_diffusion_train._build_diffusion_parallel_manager_args
-
-    def build_manager_args(**kwargs: Any) -> dict[str, Any]:
-        manager_args = original_builder(**kwargs)
-        if manager_args.get("_manager_type") != "fsdp2":
-            return manager_args
-
-        compute_dtype = kwargs.get("compute_dtype") or kwargs["dtype"]
-        current_policy = manager_args.get("mp_policy")
-        manager_args["mp_policy"] = MixedPrecisionPolicy(
-            param_dtype=getattr(
-                current_policy,
-                "param_dtype",
-                None if kwargs["lora_enabled"] else compute_dtype,
-            ),
-            reduce_dtype=getattr(current_policy, "reduce_dtype", torch.float32),
-            output_dtype=getattr(current_policy, "output_dtype", compute_dtype),
-            cast_forward_inputs=False,
-        )
-        return manager_args
-
-    automodel_diffusion_train._build_diffusion_parallel_manager_args = build_manager_args
-    try:
-        yield
-    finally:
-        automodel_diffusion_train._build_diffusion_parallel_manager_args = original_builder
 
 
 def _config_mapping(value: Any) -> dict[str, Any]:
@@ -112,47 +78,19 @@ def _validate_prepared_student(model: nn.Module, config: PDDConfig) -> None:
         )
 
 
-@contextmanager
-def _freeze_unused_qwen_parameters_before_optimizer() -> Iterator[None]:
-    """Freeze unused Qwen outputs before AutoModel collects optimizer parameters."""
-    pipeline_cls = automodel_diffusion_train.NeMoAutoDiffusionPipeline
-    original_descriptor = pipeline_cls.__dict__["from_pretrained"]
-    original_from_pretrained = pipeline_cls.from_pretrained
-
-    def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
-        del cls
-        pipe, managers = original_from_pretrained(*args, **kwargs)
-        if not kwargs.get("load_for_training", False):
-            return pipe, managers
-        model = pipe.transformer
-        frozen_names = freeze_qwen_image_mr210_unused_parameters(model)
-        logging.info(
-            "[PDD] Full training excludes %d unused final-block text-output tensors: %s",
-            len(frozen_names),
-            ", ".join(frozen_names),
-        )
-        return pipe, managers
-
-    pipeline_cls.from_pretrained = classmethod(from_pretrained)
-    try:
-        yield
-    finally:
-        pipeline_cls.from_pretrained = original_descriptor
-
-
 class PDDDiffusionRecipe(TrainDiffusionRecipe):
     """Use AutoModel's native lifecycle with a PDD loss and frozen teacher."""
 
     def setup(self) -> None:
-        with _preserve_fp32_timestep_inputs(), _freeze_unused_qwen_parameters_before_optimizer():
+        with automodel_pdd_setup():
             super().setup()
 
             raw_pdd = _config_mapping(self.cfg.get("pdd", {}))
             self.pdd_config = PDDConfig.model_validate(raw_pdd)
 
             # The student artifact is widened before AutoModel creates FSDP and optimizer state.
-            # Binding the MR210 forward here changes behavior only; it creates no parameters.
-            adopt_qwen_image_mr210_forward(self.model)
+            # Binding the Qwen PDD forward here changes behavior only; it creates no parameters.
+            enable_qwen_image_pdd_forward(self.model)
             _validate_prepared_student(self.model, self.pdd_config)
             self.model.enable_gradient_checkpointing()
 
@@ -214,6 +152,6 @@ class PDDDiffusionRecipe(TrainDiffusionRecipe):
             )
         teacher = pipe.transformer
         del pipe
-        adopt_qwen_image_mr210_forward(teacher)
+        enable_qwen_image_pdd_forward(teacher)
         teacher.eval().requires_grad_(False)
         return teacher

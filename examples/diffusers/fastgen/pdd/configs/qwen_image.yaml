@@ -73,7 +73,7 @@ fsdp:
   cp_size: 1
   pp_size: 1
   ep_size: 1
-  # The PDD recipe enables Qwen's native block checkpointing after binding the MR210 forward.
+  # The PDD recipe enables Qwen's native block checkpointing after binding the PDD forward.
   activation_checkpointing: false
 
 data:

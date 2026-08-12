@@ -67,14 +67,7 @@ from .methods.dmd import *
 from .methods.pdd import *
 from .pipeline import *
 
-
-def __getattr__(name: str):
-    """Load optional model plugins only when the public namespace is requested."""
-    if name != "plugins":
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    import importlib
-
-    loaded = importlib.import_module(f"{__name__}.plugins")
-    globals()[name] = loaded
-    return loaded
+# isort: off
+# Plugins must be imported after the core exports so plugin hooks can reference
+# the public pipeline types; this matches the ordering used by modelopt.torch.distill.
+from . import plugins

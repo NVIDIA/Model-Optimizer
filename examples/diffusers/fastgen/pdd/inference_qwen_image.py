@@ -36,7 +36,7 @@ for path in (_REPO_ROOT, _FASTGEN_DIR):
 from modelopt.torch.fastgen import PDDConfig, PDDPipeline  # noqa: E402
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (  # noqa: E402
     QwenImagePDDAdapter,
-    adopt_qwen_image_mr210_forward,
+    enable_qwen_image_pdd_forward,
     restore_qwen_image_pdd_projection,
 )
 
@@ -124,7 +124,7 @@ def main() -> None:
         low_cpu_mem_usage=True,
     )
     restore_qwen_image_pdd_projection(transformer, config)
-    adopt_qwen_image_mr210_forward(transformer)
+    enable_qwen_image_pdd_forward(transformer)
     transformer.eval()
 
     pipe = QwenImagePipeline.from_pretrained(

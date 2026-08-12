@@ -48,8 +48,6 @@ __all__ = [
     "PDDOutputProjection",
     "PDDPipeline",
     "convert_to_pdd_output_projection",
-    "get_module_by_path",
-    "replace_module_by_path",
 ]
 
 PDDHeadLayout = Literal["channel_major", "patch_major"]
@@ -335,7 +333,7 @@ class PDDOutputProjection(nn.Linear):
         return F.linear(input, fused_weight, fused_bias)
 
 
-def get_module_by_path(model: nn.Module, path: str) -> nn.Module:
+def _get_module_by_path(model: nn.Module, path: str) -> nn.Module:
     """Return an already registered nested module at ``path``."""
     if not isinstance(model, nn.Module):
         raise TypeError(f"model must be nn.Module, got {type(model).__name__}.")
@@ -349,13 +347,13 @@ def get_module_by_path(model: nn.Module, path: str) -> nn.Module:
         ) from error
 
 
-def replace_module_by_path(model: nn.Module, path: str, replacement: nn.Module) -> nn.Module:
+def _replace_module_by_path(model: nn.Module, path: str, replacement: nn.Module) -> nn.Module:
     """Replace an existing nested module and return the previous module."""
     if not isinstance(replacement, nn.Module):
         raise TypeError(f"replacement must be nn.Module, got {type(replacement).__name__}.")
-    previous = get_module_by_path(model, path)
+    previous = _get_module_by_path(model, path)
     parent_path, _, name = path.rpartition(".")
-    parent = get_module_by_path(model, parent_path) if parent_path else model
+    parent = _get_module_by_path(model, parent_path) if parent_path else model
     setattr(parent, name, replacement)
     return previous
 
@@ -366,7 +364,7 @@ def convert_to_pdd_output_projection(
     grid_size: int,
 ) -> PDDOutputProjection:
     """Explicitly replace ``layer_spec.projection_path`` with a PDD projection."""
-    current = get_module_by_path(model, layer_spec.projection_path)
+    current = _get_module_by_path(model, layer_spec.projection_path)
     if not isinstance(current, nn.Linear):
         raise TypeError(
             f"PDD projection at {layer_spec.projection_path!r} must be nn.Linear, "
@@ -374,7 +372,7 @@ def convert_to_pdd_output_projection(
         )
     projection = PDDOutputProjection.from_linear(current, grid_size, layer_spec)
     if projection is not current:
-        replaced = replace_module_by_path(model, layer_spec.projection_path, projection)
+        replaced = _replace_module_by_path(model, layer_spec.projection_path, projection)
         if replaced is not current:
             raise RuntimeError("projection changed during synchronous PDD conversion.")
     return projection

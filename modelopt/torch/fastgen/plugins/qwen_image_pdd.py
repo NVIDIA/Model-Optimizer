@@ -1,5 +1,6 @@
 # Adapted from the Qwen-Image implementation in Diffusers:
 # https://github.com/huggingface/diffusers/blob/275869dcae4ebcfee6a80253fdabc56033335020/src/diffusers/models/transformers/transformer_qwenimage.py
+# The masked joint-attention execution follows FastGen merge request 210.
 # SPDX-FileCopyrightText: Copyright (c) 2025 Qwen-Image Team, The HuggingFace Team. All rights reserved.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -37,14 +38,14 @@ __all__ = [
     "QWEN_IMAGE_PDD_EXECUTION",
     "QWEN_IMAGE_PDD_LAYER_SPEC",
     "QwenImagePDDAdapter",
-    "adopt_qwen_image_mr210_forward",
     "convert_qwen_image_to_pdd",
-    "freeze_qwen_image_mr210_unused_parameters",
-    "require_qwen_image_mr210_forward",
+    "enable_qwen_image_pdd_forward",
+    "freeze_qwen_image_pdd_unused_parameters",
+    "require_qwen_image_pdd_forward",
     "restore_qwen_image_pdd_projection",
 ]
 
-QWEN_IMAGE_PDD_EXECUTION = "fastgen_mr210"
+QWEN_IMAGE_PDD_EXECUTION = "qwen_image_pdd_masked_joint_attention_v1"
 
 QWEN_IMAGE_PDD_LAYER_SPEC = PDDLayerSpec(
     projection_path="transformer.proj_out",
@@ -67,7 +68,7 @@ _CONTROLLED_MODEL_KWARGS = {
 }
 
 _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE = "_modelopt_qwen_image_pdd_execution"
-_QWEN_IMAGE_MR210_CHILDREN = (
+_QWEN_IMAGE_PDD_CHILDREN = (
     "pos_embed",
     "time_text_embed",
     "txt_norm",
@@ -99,7 +100,7 @@ def _config_value(transformer: nn.Module, name: str, default: Any = None) -> Any
     return getattr(config, name, default)
 
 
-def _qwen_image_mr210_forward(
+def _qwen_image_pdd_forward(
     self: nn.Module,
     hidden_states: torch.Tensor,
     encoder_hidden_states: torch.Tensor | None = None,
@@ -114,64 +115,64 @@ def _qwen_image_mr210_forward(
     additional_t_cond: torch.Tensor | None = None,
     return_dict: bool = True,
 ) -> Any:
-    """Run the regular-output Qwen forward used by FastGen MR210."""
+    """Run Qwen-Image with the masked joint-attention contract required by PDD."""
     if hidden_states.ndim != 3 or hidden_states.dtype != torch.bfloat16:
-        raise TypeError("Qwen MR210 hidden_states must be packed BF16 [B, P, C].")
+        raise TypeError("Qwen PDD hidden_states must be packed BF16 [B, P, C].")
     if (
         not isinstance(encoder_hidden_states, torch.Tensor)
         or encoder_hidden_states.ndim != 3
         or encoder_hidden_states.dtype != torch.bfloat16
     ):
-        raise TypeError("Qwen MR210 encoder_hidden_states must be BF16 [B, S, D].")
+        raise TypeError("Qwen PDD encoder_hidden_states must be BF16 [B, S, D].")
     if not isinstance(encoder_hidden_states_mask, torch.Tensor):
-        raise TypeError("Qwen MR210 requires encoder_hidden_states_mask.")
+        raise TypeError("Qwen PDD requires encoder_hidden_states_mask.")
     if not isinstance(timestep, torch.Tensor) or timestep.dtype != torch.float32:
-        raise TypeError("Qwen MR210 timestep must remain FP32 at transformer entry.")
+        raise TypeError("Qwen PDD timestep must remain FP32 at transformer entry.")
     batch_size = hidden_states.shape[0]
     if encoder_hidden_states.shape[0] != batch_size:
-        raise ValueError("Qwen MR210 image and text batch sizes must match.")
+        raise ValueError("Qwen PDD image and text batch sizes must match.")
     if timestep.shape != (batch_size,):
-        raise ValueError("Qwen MR210 timestep must contain one value per batch item.")
+        raise ValueError("Qwen PDD timestep must contain one value per batch item.")
     if img_shapes is None or len(img_shapes) != batch_size:
-        raise ValueError("Qwen MR210 img_shapes must contain one entry per batch item.")
+        raise ValueError("Qwen PDD img_shapes must contain one entry per batch item.")
     if attention_kwargs:
-        raise ValueError("Qwen MR210 PDD does not support nonempty attention_kwargs.")
+        raise ValueError("Qwen PDD does not support nonempty attention_kwargs.")
     if guidance is not None:
-        raise ValueError("Qwen MR210 PDD does not support transformer guidance embeddings.")
+        raise ValueError("Qwen PDD does not support transformer guidance embeddings.")
     if controlnet_block_samples is not None:
-        raise ValueError("Qwen MR210 PDD does not support ControlNet block samples.")
+        raise ValueError("Qwen PDD does not support ControlNet block samples.")
     if additional_t_cond is not None:
-        raise ValueError("Qwen MR210 PDD does not support additional timestep conditioning.")
+        raise ValueError("Qwen PDD does not support additional timestep conditioning.")
     if type(return_dict) is not bool:
-        raise TypeError("Qwen MR210 return_dict must be a bool.")
+        raise TypeError("Qwen PDD return_dict must be a bool.")
     if encoder_hidden_states_mask.ndim != 2 or tuple(encoder_hidden_states_mask.shape) != tuple(
         encoder_hidden_states.shape[:2]
     ):
-        raise ValueError("Qwen MR210 mask must match the text batch and sequence dimensions.")
+        raise ValueError("Qwen PDD mask must match the text batch and sequence dimensions.")
     if encoder_hidden_states_mask.device != encoder_hidden_states.device:
-        raise ValueError("Qwen MR210 mask and text embeddings must share a device.")
+        raise ValueError("Qwen PDD mask and text embeddings must share a device.")
     if (
         encoder_hidden_states_mask.dtype.is_floating_point
         or encoder_hidden_states_mask.dtype.is_complex
     ):
-        raise TypeError("Qwen MR210 mask must use an integer or boolean dtype.")
-    _require_binary_mask(encoder_hidden_states_mask, name="Qwen MR210")
+        raise TypeError("Qwen PDD mask must use an integer or boolean dtype.")
+    _require_binary_mask(encoder_hidden_states_mask, name="Qwen PDD")
     expected_max_txt_seq_len = int(
         encoder_hidden_states_mask.sum(dim=1).max().to(torch.int32).item()
     )
     if txt_seq_lens is not None:
         expected_txt_seq_lens = encoder_hidden_states_mask.sum(dim=1).to(torch.int32).tolist()
         if txt_seq_lens != expected_txt_seq_lens:
-            raise ValueError("Qwen MR210 txt_seq_lens must equal the valid mask lengths.")
+            raise ValueError("Qwen PDD txt_seq_lens must equal the valid mask lengths.")
     if max_txt_seq_len is None:
         max_txt_seq_len = expected_max_txt_seq_len
     elif max_txt_seq_len != expected_max_txt_seq_len:
-        raise ValueError("Qwen MR210 max_txt_seq_len must equal the maximum valid mask length.")
+        raise ValueError("Qwen PDD max_txt_seq_len must equal the maximum valid mask length.")
 
     hidden_states = self.img_in(hidden_states)
     encoder_hidden_states = self.txt_in(self.txt_norm(encoder_hidden_states))
     if timestep.dtype != torch.float32:
-        raise RuntimeError("Qwen MR210 timestep was rounded before time_text_embed.")
+        raise RuntimeError("Qwen PDD timestep was rounded before time_text_embed.")
     temb = self.time_text_embed(timestep, hidden_states)
     image_rotary_emb = self.pos_embed(
         img_shapes,
@@ -220,28 +221,28 @@ def _qwen_image_mr210_forward(
     return Transformer2DModelOutput(sample=output)
 
 
-def _is_qwen_image_mr210_forward(model: nn.Module) -> bool:
+def _is_qwen_image_pdd_forward(model: nn.Module) -> bool:
     forward = model.__dict__.get("forward")
     return (
         isinstance(forward, types.MethodType)
-        and forward.__func__ is _qwen_image_mr210_forward
+        and forward.__func__ is _qwen_image_pdd_forward
         and forward.__self__ is model
         and getattr(model, _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE, None) == QWEN_IMAGE_PDD_EXECUTION
     )
 
 
-def require_qwen_image_mr210_forward(model: nn.Module) -> str:
-    """Require and return the semantic label for the exact bound MR210 forward."""
-    if not isinstance(model, nn.Module) or not _is_qwen_image_mr210_forward(model):
-        raise RuntimeError("Qwen-Image PDD requires the bound FastGen MR210 forward execution.")
+def require_qwen_image_pdd_forward(model: nn.Module) -> str:
+    """Require and return the semantic label for the bound Qwen PDD forward."""
+    if not isinstance(model, nn.Module) or not _is_qwen_image_pdd_forward(model):
+        raise RuntimeError("Qwen-Image PDD requires its masked joint-attention forward.")
     return QWEN_IMAGE_PDD_EXECUTION
 
 
-def freeze_qwen_image_mr210_unused_parameters(transformer: nn.Module) -> tuple[str, ...]:
-    """Freeze final-block text outputs that the MR210 forward does not consume."""
+def freeze_qwen_image_pdd_unused_parameters(transformer: nn.Module) -> tuple[str, ...]:
+    """Freeze final-block text outputs that the Qwen PDD forward does not consume."""
     blocks = getattr(transformer, "transformer_blocks", None)
     if not isinstance(blocks, nn.ModuleList) or not blocks:
-        raise RuntimeError("Qwen MR210 requires a nonempty transformer_blocks ModuleList.")
+        raise RuntimeError("Qwen PDD requires a nonempty transformer_blocks ModuleList.")
 
     final_block = blocks[-1]
     local_names = (
@@ -258,18 +259,18 @@ def freeze_qwen_image_mr210_unused_parameters(transformer: nn.Module) -> tuple[s
             parameter = final_block.get_parameter(local_name)
         except AttributeError as error:
             raise RuntimeError(
-                f"Qwen MR210 final block is missing required parameter {local_name!r}."
+                f"Qwen PDD final block is missing required parameter {local_name!r}."
             ) from error
         parameter.requires_grad_(False)
         frozen_names.append(f"transformer_blocks.{len(blocks) - 1}.{local_name}")
     return tuple(frozen_names)
 
 
-def adopt_qwen_image_mr210_forward(transformer: nn.Module) -> nn.Module:
-    """Bind FastGen MR210's regular Qwen forward to the loaded root in place."""
+def enable_qwen_image_pdd_forward(transformer: nn.Module) -> nn.Module:
+    """Bind the masked joint-attention PDD forward to a loaded Qwen transformer."""
     if not isinstance(transformer, nn.Module):
         raise TypeError(f"transformer must be nn.Module, got {type(transformer).__name__}.")
-    if _is_qwen_image_mr210_forward(transformer):
+    if _is_qwen_image_pdd_forward(transformer):
         return transformer
 
     # Diffusers is an optional dependency used only by the Qwen example.
@@ -277,7 +278,7 @@ def adopt_qwen_image_mr210_forward(transformer: nn.Module) -> nn.Module:
 
     if not isinstance(transformer, QwenImageTransformer2DModel):
         raise TypeError(
-            "MR210 forward adoption requires the supported QwenImageTransformer2DModel, "
+            "Qwen PDD forward binding requires QwenImageTransformer2DModel, "
             f"got {type(transformer).__name__}."
         )
     existing_forward = transformer.__dict__.get("forward")
@@ -285,29 +286,29 @@ def adopt_qwen_image_mr210_forward(transformer: nn.Module) -> nn.Module:
         raise RuntimeError("Qwen root already has a different instance-level forward override.")
     missing = [
         name
-        for name in _QWEN_IMAGE_MR210_CHILDREN
+        for name in _QWEN_IMAGE_PDD_CHILDREN
         if not isinstance(getattr(transformer, name, None), nn.Module)
     ]
     if missing:
-        raise RuntimeError(f"Qwen root is missing required MR210 modules: {missing}.")
+        raise RuntimeError(f"Qwen root is missing required PDD forward modules: {missing}.")
     if (
         not isinstance(transformer.transformer_blocks, nn.ModuleList)
         or not transformer.transformer_blocks
     ):
-        raise RuntimeError("Qwen MR210 requires a nonempty transformer_blocks ModuleList.")
+        raise RuntimeError("Qwen PDD requires a nonempty transformer_blocks ModuleList.")
     if _config_guidance_embeds(transformer):
-        raise ValueError("Qwen MR210 PDD does not support transformer guidance embeddings.")
+        raise ValueError("Qwen PDD does not support transformer guidance embeddings.")
     if getattr(transformer, "peft_config", None):
-        raise ValueError("Qwen MR210 PDD does not support active PEFT adapters.")
+        raise ValueError("Qwen PDD does not support active PEFT adapters.")
     if any(getattr(module, "fused_projections", False) for module in transformer.modules()):
-        raise ValueError("Qwen MR210 PDD does not support fused QKV projections.")
+        raise ValueError("Qwen PDD does not support fused QKV projections.")
     for name in ("zero_cond_t", "use_additional_t_cond", "use_layer3d_rope"):
         if bool(_config_value(transformer, name, False)):
-            raise ValueError(f"Qwen MR210 PDD requires {name}=False.")
+            raise ValueError(f"Qwen PDD requires {name}=False.")
 
-    transformer.forward = types.MethodType(_qwen_image_mr210_forward, transformer)
+    transformer.forward = types.MethodType(_qwen_image_pdd_forward, transformer)
     setattr(transformer, _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE, QWEN_IMAGE_PDD_EXECUTION)
-    require_qwen_image_mr210_forward(transformer)
+    require_qwen_image_pdd_forward(transformer)
     return transformer
 
 
@@ -531,7 +532,7 @@ class QwenImagePDDAdapter:
         condition_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self._validate_state_and_time(state, time)
-        require_qwen_image_mr210_forward(model)
+        require_qwen_image_pdd_forward(model)
         if _config_guidance_embeds(model):
             raise ValueError("Qwen-Image PDD does not support transformer guidance embeddings.")
         encoder_hidden_states, attention_mask = self._parse_condition(
@@ -570,9 +571,9 @@ class QwenImagePDDAdapter:
         batch_size, _, height, width = state.shape
         model_dtype = self._model_dtype(model, state.dtype)
         if model_dtype != torch.bfloat16:
-            raise TypeError("Qwen MR210 PDD execution requires BF16 compute.")
+            raise TypeError("Qwen PDD execution requires BF16 compute.")
         if time.dtype != torch.float32:
-            raise TypeError("Qwen MR210 PDD execution requires FP32 time.")
+            raise TypeError("Qwen PDD execution requires FP32 time.")
         packed_state = pack_latents(state).to(model_dtype)
         encoder_hidden_states = encoder_hidden_states.to(model_dtype)
         max_txt_seq_len = int(attention_mask.sum(dim=1).max().to(torch.int32).item())

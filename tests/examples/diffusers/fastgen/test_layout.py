@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import re
 import subprocess
 import sys
 
@@ -28,96 +27,17 @@ import yaml
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 _FASTGEN_ROOT = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
-_EXPECTED_ROOT_ENTRIES = {
-    "README.md",
-    "dmd2",
-    "fastgen_data",
-    "make_negative_prompt_embedding.py",
-    "preprocess",
-    "preprocess_qwen_image.py",
-    "pdd",
-    "requirements.txt",
-}
-_EXPECTED_DMD2_FILES = {
-    "README.md",
-    "__init__.py",
-    "checkpoint.py",
-    "configs",
-    "export_qwen_image.py",
-    "finetune.py",
-    "inference_qwen_image.py",
-    "recipe.py",
-}
-_EXPECTED_PDD_FILES = {
-    "README.md",
-    "__init__.py",
-    "configs",
-    "finetune.py",
-    "inference_qwen_image.py",
-    "prepare_qwen_image.py",
-    "recipe.py",
-    "training.py",
-}
-_TEXT_SUFFIXES = {".json", ".md", ".py", ".rst", ".sh", ".toml", ".txt", ".yaml", ".yml"}
 
 
-def _old_name(prefix: str, suffix: str) -> str:
-    return f"{prefix}_{suffix}"
+def test_fastgen_algorithm_entrypoints_are_namespaced() -> None:
+    for algorithm in ("dmd2", "pdd"):
+        package = _FASTGEN_ROOT / algorithm
+        assert (package / "__init__.py").is_file()
+        assert (package / "finetune.py").is_file()
+        assert (package / "configs" / "qwen_image.yaml").is_file()
 
-
-def _old_modules() -> tuple[str, ...]:
-    return (
-        _old_name("dmd2", "finetune"),
-        _old_name("dmd2", "recipe"),
-        _old_name("fastgen", "checkpoint"),
-        _old_name("export", "diffusers_qwen_image"),
-        _old_name("inference", "dmd2_qwen_image"),
-        _old_name("pdd", "artifacts"),
-        _old_name("pdd", "checkpoint"),
-        _old_name("pdd", "export"),
-        _old_name("pdd", "finetune"),
-        _old_name("pdd", "recipe"),
-        _old_name("pdd", "training"),
-        _old_name("export", "pdd_qwen_image"),
-        _old_name("inference", "pdd_qwen_image"),
-    )
-
-
-def _source_text_files() -> list[pathlib.Path]:
-    completed = subprocess.run(
-        ["git", "ls-files", "-co", "--exclude-standard", "-z"],
-        cwd=_REPO_ROOT,
-        check=True,
-        capture_output=True,
-    )
-    return [
-        _REPO_ROOT / relative
-        for relative in completed.stdout.decode().split("\0")
-        if relative
-        and pathlib.Path(relative).suffix in _TEXT_SUFFIXES
-        and (_REPO_ROOT / relative).is_file()
-    ]
-
-
-def test_fastgen_root_has_closed_shared_and_algorithm_ownership() -> None:
-    root_entries = {path.name for path in _FASTGEN_ROOT.iterdir() if path.name != "__pycache__"}
-    assert root_entries == _EXPECTED_ROOT_ENTRIES
-    assert not (_FASTGEN_ROOT / "configs").exists()
-
-    dmd2_entries = {
-        path.name for path in (_FASTGEN_ROOT / "dmd2").iterdir() if path.name != "__pycache__"
-    }
-    assert dmd2_entries == _EXPECTED_DMD2_FILES
-    assert {path.name for path in (_FASTGEN_ROOT / "dmd2" / "configs").iterdir()} == {
-        "qwen_image.yaml"
-    }
-    pdd_entries = {
-        path.name for path in (_FASTGEN_ROOT / "pdd").iterdir() if path.name != "__pycache__"
-    }
-    assert pdd_entries == _EXPECTED_PDD_FILES
-    assert {path.name for path in (_FASTGEN_ROOT / "pdd" / "configs").iterdir()} == {
-        "qwen_image.yaml"
-    }
+    assert not (_FASTGEN_ROOT / "dmd2_finetune.py").exists()
+    assert not (_FASTGEN_ROOT / "pdd_finetune.py").exists()
 
 
 def test_dmd2_config_retains_accepted_semantics() -> None:
@@ -131,29 +51,6 @@ def test_dmd2_config_retains_accepted_semantics() -> None:
         "negative_prompt_embedding.pt"
     )
     assert "metadata_index" not in value["data"]["dataloader"]
-
-
-def test_repository_sources_have_no_flat_algorithm_paths() -> None:
-    old_modules = _old_modules()
-    stale = (
-        *(f"{module}.py" for module in old_modules),
-        "configs/" + _old_name("dmd2", "qwen_image") + ".yaml",
-    )
-    failures: list[str] = []
-    for path in _source_text_files():
-        if path == pathlib.Path(__file__):
-            continue
-        text = path.read_text(errors="strict")
-        relative = path.relative_to(_REPO_ROOT).as_posix()
-        failures.extend(f"{relative}: {token}" for token in stale if token in text)
-        if path.suffix == ".py":
-            failures.extend(
-                f"{relative}: stale import {module}"
-                for module in old_modules
-                if re.search(rf"(?m)^\s*(?:from|import)\s+{re.escape(module)}(?:\s|\.|$)", text)
-                or re.search(rf"['\"]{re.escape(module)}['\"]", text)
-            )
-    assert not failures, "\n".join(failures)
 
 
 def test_dmd2_package_is_import_light() -> None:

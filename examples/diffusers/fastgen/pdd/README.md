@@ -29,6 +29,11 @@ clipping, optimizer and learning-rate state, step scheduling, SIGTERM handling, 
 `LATEST`, and resume. The example does not define a custom training loop or checkpoint manager and
 does not modify AutoModel, Diffusers, or Qwen source.
 
+The example pins AutoModel 0.5.0. That release does not expose setup hooks for preserving Qwen's
+FP32 timestep input or freezing parameters before optimizer construction, so `pdd/compat.py`
+temporarily adapts those two setup calls inside a serialized context and restores them immediately
+after `TrainDiffusionRecipe.setup()`.
+
 ## Prepare the student
 
 Widen the Qwen output projection before AutoModel constructs FSDP and the optimizer:

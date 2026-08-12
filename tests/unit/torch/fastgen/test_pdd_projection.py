@@ -30,8 +30,6 @@ from modelopt.torch.fastgen import (
     PDDLayerSpec,
     PDDOutputProjection,
     convert_to_pdd_output_projection,
-    get_module_by_path,
-    replace_module_by_path,
 )
 
 
@@ -149,32 +147,19 @@ def test_layer_spec_rejects_unsupported_layout_metadata(kwargs):
 def test_nested_conversion_is_explicit_idempotent_and_conflict_safe():
     model = _NestedModel()
     spec = _spec("channel_major")
-    original = get_module_by_path(model, spec.projection_path)
+    original = model.get_submodule(spec.projection_path)
 
     projection = convert_to_pdd_output_projection(model, spec, grid_size=3)
     repeated = convert_to_pdd_output_projection(model, spec, grid_size=3)
 
     assert projection is repeated
-    assert get_module_by_path(model, spec.projection_path) is projection
+    assert model.get_submodule(spec.projection_path) is projection
     assert original is not projection
     with pytest.raises(ValueError, match="incompatible"):
         convert_to_pdd_output_projection(model, spec, grid_size=4)
     with pytest.raises(ValueError, match="incompatible"):
         convert_to_pdd_output_projection(model, _spec("patch_major"), grid_size=3)
-    assert get_module_by_path(model, spec.projection_path) is projection
-
-
-def test_nested_module_helpers_require_existing_registered_modules():
-    model = _NestedModel()
-    replacement = nn.Linear(2, 6)
-    previous = replace_module_by_path(model, "transformer.blocks.1", replacement)
-
-    assert isinstance(previous, nn.Linear)
-    assert get_module_by_path(model, "transformer.blocks.1") is replacement
-    with pytest.raises(ValueError, match="does not resolve"):
-        get_module_by_path(model, "transformer.missing")
-    with pytest.raises(ValueError, match="non-empty dotted"):
-        get_module_by_path(model, "")
+    assert model.get_submodule(spec.projection_path) is projection
 
 
 @pytest.mark.parametrize("layout", ["channel_major", "patch_major"])

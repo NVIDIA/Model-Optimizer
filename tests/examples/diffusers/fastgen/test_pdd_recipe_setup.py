@@ -30,12 +30,8 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-from pdd import recipe as pdd_recipe
-from pdd.recipe import (
-    _freeze_unused_qwen_parameters_before_optimizer,
-    _preserve_fp32_timestep_inputs,
-    _validate_prepared_student,
-)
+from pdd import compat as pdd_compat
+from pdd.recipe import _validate_prepared_student
 from pdd.training import PDDFlowMatchingStepAdapter
 
 from modelopt.torch.fastgen import PDDConfig
@@ -146,12 +142,12 @@ def test_pdd_fsdp_preserves_fp32_timestep_inputs(monkeypatch) -> None:
         return {"_manager_type": "fsdp2"}
 
     monkeypatch.setattr(
-        pdd_recipe.automodel_diffusion_train,
+        pdd_compat.automodel_diffusion_train,
         "_build_diffusion_parallel_manager_args",
         build_manager_args,
     )
-    with _preserve_fp32_timestep_inputs():
-        manager_args = pdd_recipe.automodel_diffusion_train._build_diffusion_parallel_manager_args(
+    with pdd_compat.automodel_pdd_setup():
+        manager_args = pdd_compat.automodel_diffusion_train._build_diffusion_parallel_manager_args(
             dtype=torch.float32,
             compute_dtype=torch.bfloat16,
             lora_enabled=False,
@@ -163,7 +159,7 @@ def test_pdd_fsdp_preserves_fp32_timestep_inputs(monkeypatch) -> None:
     assert policy.output_dtype == torch.bfloat16
     assert policy.cast_forward_inputs is False
     assert (
-        pdd_recipe.automodel_diffusion_train._build_diffusion_parallel_manager_args
+        pdd_compat.automodel_diffusion_train._build_diffusion_parallel_manager_args
         is build_manager_args
     )
 
@@ -176,15 +172,16 @@ def test_unused_final_text_outputs_are_frozen_before_optimizer_collection(monkey
             return SimpleNamespace(transformer=_PreparedQwenStudent(out_features=32)), {}
 
     monkeypatch.setattr(
-        pdd_recipe.automodel_diffusion_train,
+        pdd_compat.automodel_diffusion_train,
         "NeMoAutoDiffusionPipeline",
         _Pipeline,
     )
 
     original_descriptor = _Pipeline.__dict__["from_pretrained"]
-    with _freeze_unused_qwen_parameters_before_optimizer():
-        student, _ = _Pipeline.from_pretrained("student", load_for_training=True)
-        teacher, _ = _Pipeline.from_pretrained("teacher", load_for_training=False)
+    with pdd_compat.automodel_pdd_setup():
+        setup_pipeline = pdd_compat.automodel_diffusion_train.NeMoAutoDiffusionPipeline
+        student, _ = setup_pipeline.from_pretrained("student", load_for_training=True)
+        teacher, _ = setup_pipeline.from_pretrained("teacher", load_for_training=False)
 
     frozen_names = {
         name
@@ -201,6 +198,17 @@ def test_unused_final_text_outputs_are_frozen_before_optimizer_collection(monkey
     }
     assert all(parameter.requires_grad for parameter in teacher.transformer.parameters())
     assert _Pipeline.__dict__["from_pretrained"] is original_descriptor
+    assert pdd_compat.automodel_diffusion_train.NeMoAutoDiffusionPipeline is _Pipeline
+
+
+def test_automodel_setup_rejects_an_unvalidated_release(monkeypatch) -> None:
+    monkeypatch.setattr(pdd_compat.nemo_automodel, "__version__", "0.6.0")
+
+    with (
+        pytest.raises(RuntimeError, match=r"requires nemo_automodel release 0\.5\.0"),
+        pdd_compat.automodel_pdd_setup(),
+    ):
+        pass
 
 
 @pytest.mark.parametrize("guidance_scale", [None, 4.0])
