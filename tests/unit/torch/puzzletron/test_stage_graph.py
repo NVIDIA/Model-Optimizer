@@ -28,15 +28,21 @@ from modelopt.torch.puzzletron.stages.graph import (
     topological_stage_ids,
 )
 
-# Frozen compatibility oracle copied from the removed semantic-section table.
-_PRIOR_SEMANTIC_CONFIG_SECTIONS = {
+# Frozen compatibility oracle for the reviewed semantic projection contract.
+_EXPECTED_SEMANTIC_CONFIG_SECTIONS = {
     "convert": ("convert",),
     "tokenize_data": (
         "tokenize_data",
         "convert",
+        "data",
         "dataset_path",
+        "train_token_cache_path",
+        "validation_token_cache_path",
         "pruning",
         "replacement_scoring",
+        "depth_importance",
+        "sort_sanity",
+        "width_sanity",
     ),
     "width_importance": ("width_importance", "pruning"),
     "sort": ("sort", "pruning"),
@@ -114,14 +120,14 @@ def test_registry_owns_explicit_semantic_sections_and_preserves_projection() -> 
     sections = set(SHARED_SEMANTIC_CONFIG_SECTIONS)
     sections.update(
         section
-        for stage_sections in _PRIOR_SEMANTIC_CONFIG_SECTIONS.values()
+        for stage_sections in _EXPECTED_SEMANTIC_CONFIG_SECTIONS.values()
         for section in stage_sections
     )
     config = {section: {"value": section} for section in sections}
     config["report"] = {"excluded": True}
 
-    assert set(_PRIOR_SEMANTIC_CONFIG_SECTIONS) == set(STAGE_REGISTRY)
-    for stage_id, expected_sections in _PRIOR_SEMANTIC_CONFIG_SECTIONS.items():
+    assert set(_EXPECTED_SEMANTIC_CONFIG_SECTIONS) == set(STAGE_REGISTRY)
+    for stage_id, expected_sections in _EXPECTED_SEMANTIC_CONFIG_SECTIONS.items():
         spec = STAGE_REGISTRY[stage_id]
         assert spec.semantic_config_sections == expected_sections
         expected_projection = {

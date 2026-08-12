@@ -13,6 +13,7 @@ on:
       - "pyproject.toml"
       - "puzzletron_orchestrator/**"
       - "puzzletron_setup/**"
+      - "tests/_test_utils/torch/distributed/**"
       - "tests/unit/**"
       - "tools/launcher/**"
       - ".agents/skills/**"
@@ -40,7 +41,7 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-latest
     outputs:
-      any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
+      any_changed: ${{ steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed }}
       puzzletron_changed: >-
         ${{ steps.puzzletron_base.outputs.any_changed ||
           steps.puzzletron_changed.outputs.any_modified ||
@@ -71,6 +72,7 @@ jobs:
             modelopt/**
             noxfile.py
             pyproject.toml
+            tests/_test_utils/torch/distributed/**
             tests/unit/**
             tools/launcher/**
             .agents/skills/**
@@ -94,6 +96,7 @@ jobs:
             pyproject.toml
             puzzletron_orchestrator/**
             puzzletron_setup/**
+            tests/_test_utils/torch/distributed/**
             tests/unit/torch/puzzletron/**
   puzzletron_v2:
     name: Puzzletron v2 CPU tests

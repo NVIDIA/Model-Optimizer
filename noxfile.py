@@ -274,6 +274,8 @@ def pre_commit_diff(session):
     if changed_python_files:
         session.run(
             "mypy",
+            "--cache-dir",
+            os.devnull,
             "--follow-imports=skip",
             "--ignore-missing-imports",
             *changed_python_files,

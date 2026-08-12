@@ -16,6 +16,8 @@
 import os
 import socket
 import traceback
+from contextlib import contextmanager, nullcontext
+from time import monotonic
 
 import torch
 import torch.distributed as dist
@@ -46,27 +48,89 @@ def init_process(rank, size, job=None, backend="gloo", port=None):
     os.environ["MASTER_PORT"] = port
 
     dist.init_process_group(backend, rank=rank, world_size=size)
-    if backend == "nccl" and torch.cuda.is_available():
-        torch.cuda.set_device(rank)
-    torch.manual_seed(1234)
-    if job is not None:
-        job(rank, size)
+    try:
+        if backend == "nccl" and torch.cuda.is_available():
+            torch.cuda.set_device(rank)
+        torch.manual_seed(1234)
+        if job is not None:
+            job(rank, size)
+    finally:
+        # ``job is None`` is the fixture mode: its caller owns the process
+        # group and tears it down after yielding. Spawned one-shot workers own
+        # their group here and must not leave Gloo/NCCL resources behind.
+        if job is not None and dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _reap_processes(processes, timeout=10):
+    """Terminate and reap every started child without masking an active error."""
+
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    deadline = monotonic() + timeout
+    for process in processes:
+        process.join(timeout=max(0, deadline - monotonic()))
+    stubborn_processes = [process for process in processes if process.is_alive()]
+    for process in stubborn_processes:
+        process.kill()
+    deadline = monotonic() + timeout
+    for process in stubborn_processes:
+        process.join(timeout=max(0, deadline - monotonic()))
+
+
+@contextmanager
+def _without_subprocess_coverage():
+    """Keep spawned Gloo workers below the unit timeout while preserving parent coverage."""
+
+    key = "COVERAGE_PROCESS_START"
+    previous = os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if previous is not None:
+            os.environ[key] = previous
+        else:
+            os.environ.pop(key, None)
 
 
 def spawn_multiprocess_job(size, job, backend="gloo"):
     port = get_free_port()
     ctx = mp.get_context("spawn")
     processes = []
-    for rank in range(size):
-        p = ctx.Process(target=init_process, args=(rank, size, job, backend, port))
-        p.start()
-        processes.append(p)
+    try:
+        # Coverage auto-start makes these short-lived CPU workers trace their
+        # full import graph and pushes each Gloo test beyond the 60-second unit
+        # cap. The parent remains covered and validates every worker result;
+        # other backends retain their existing child-coverage behavior.
+        coverage_context = _without_subprocess_coverage() if backend == "gloo" else nullcontext()
+        with coverage_context:
+            for rank in range(size):
+                process = ctx.Process(
+                    target=init_process,
+                    args=(rank, size, job, backend, port),
+                )
+                process.start()
+                processes.append(process)
 
-    for p in processes:
-        p.join()
-
-        # Ensure that all processes have exited successfully
-        assert not p.exitcode
+        for process in processes:
+            process.join()
+            if process.exitcode != 0:
+                raise RuntimeError(f"distributed worker exited with code {process.exitcode}")
+    except BaseException as primary_error:
+        # pytest-timeout and worker failures can interrupt ``join``. Always
+        # reap the remaining children so one failed test cannot poison the
+        # rest of the suite with orphaned process groups.
+        try:
+            _reap_processes(processes)
+        except BaseException as cleanup_error:
+            if hasattr(primary_error, "add_note"):
+                primary_error.add_note(f"distributed child cleanup also failed: {cleanup_error!r}")
+            else:
+                primary_error.__cause__ = cleanup_error
+        raise
+    else:
+        _reap_processes(processes)
 
 
 def default_worker_teardown(rank, world_size):
