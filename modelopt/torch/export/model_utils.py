@@ -167,50 +167,38 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
 
 def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
-    r"""Map each tied *alias* parameter full-name to its *canonical* full-name.
+    r"""Map each tied *alias* parameter name to its *canonical* name.
 
-    A tie is detected by **shared object identity**: parameters registered under more than
-    one name that are the *same* live :class:`~torch.nn.Parameter`. The map is built before
-    export packs/splits weights (which replace shared Parameters with independent tensors),
-    while every parameter is resident — so identity is reliable and cannot be forged by a
-    freed-then-reused address the way ``data_ptr`` can. The returned map is by *name*, so it
-    stays valid after packing / FSDP gather / offload, when the drop runs on the
-    materialized state dict.
+    Ties are detected by **object identity** — parameters registered under more than one
+    name that are the same live :class:`~torch.nn.Parameter`. Built before export packs or
+    splits weights (which break the shared object), while all params are resident, so
+    identity is reliable; the map is keyed by *name*, so it survives the later packing /
+    FSDP gather / offload when the drop actually runs.
 
-    Declarations never *create* a tie; they only choose which member of a genuinely shared
-    group is canonical (kept):
+    Declarations do not *create* ties — they only pick the canonical (kept) member of a
+    shared group:
 
-    - **dict-style** ``_tied_weights_keys`` on any submodule: a name matching an alias
-      ``{alias_regex: ...}`` key (relative to the declaring submodule) is marked as an alias
-      side; the canonical is a non-alias member of the same id-group. **Only the alias
-      pattern is used** — the canonical-side value is never parsed, so parallel-pattern /
-      backreference declarations (e.g. DiffusionGemma) need no special handling. Fused MoE
-      experts declare the tie on the 3-D container Parameter (``…experts.gate_up_proj`` /
-      ``…experts.down_proj``); each shared container is one id-group.
-    - **``tie_word_embeddings=True``**: the input-embedding name is canonical for the shared
-      embedding Parameter.
+    - dict-style ``_tied_weights_keys``: a name matching an alias key (relative to the
+      declaring submodule) is an alias side; the canonical is a non-alias group member.
+      Only the alias pattern is matched — the canonical-side value is never parsed, so
+      parallel-pattern / backref declarations (DiffusionGemma) need no special handling.
+    - ``tie_word_embeddings=True``: the input-embedding name is canonical.
 
-    Because detection is by identity, a declared-but-*unapplied* tie (e.g. ``lm_head`` <->
-    ``embed_tokens`` with ``tie_word_embeddings=False``, where the two are distinct
-    Parameters) never forms a group and is never dropped. An *undeclared* shared Parameter
-    (no matching alias, not the embedding pair) is intentionally left alone: the exported
-    config carries no declaration for the loader to re-tie it, so dropping it would lose a
-    weight. If such a share still physically aliases storage it is caught by the address
-    backstop in :func:`postprocess_state_dict`, not here. A group whose members are *all*
-    declared aliases (ambiguous canonical) is likewise skipped, so both sides survive.
+    Groups left untouched (both sides kept): a declared-but-unapplied tie can't form
+    (distinct objects never group); an *undeclared* share or an all-alias group has no
+    canonical the loader could re-tie from, so it is not dropped. An undeclared share that
+    still aliases storage is caught by the address backstop in :func:`postprocess_state_dict`.
     """
-    # Group parameter NAMES by shared-object identity. remove_duplicate=False so a shared
-    # (tied) Parameter appears under EVERY name it is registered as — both the tie signal
-    # and the canonical/alias names are read from these groups.
+    # Group names by object identity. remove_duplicate=False so a shared Parameter appears
+    # under every name -- that gives both the tie signal and the canonical/alias names.
     groups: dict[int, list[str]] = defaultdict(list)
     param_names: list[str] = []
     for name, parameter in model.named_parameters(remove_duplicate=False):
         groups[id(parameter)].append(name)
         param_names.append(name)
 
-    # From dict-style _tied_weights_keys, mark which names are declared *aliases* (the drop
-    # side). Only the alias pattern (dict key) is compiled/matched; the canonical-side value
-    # is never parsed — identity already tells us the canonical member.
+    # Mark declared alias names (the drop side). Only the alias pattern (dict key) is
+    # matched; the canonical-side value is never parsed.
     declared_aliases: set[str] = set()
     for mod_name, submodule in model.named_modules():
         tied = getattr(submodule, "_tied_weights_keys", None)
@@ -244,7 +232,7 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
             if in_name is not None:
                 embedding_canonical[id(in_weight)] = f"{in_name}.weight" if in_name else "weight"
 
-    # Emit {alias -> canonical} only for genuinely shared groups that are declared re-tiable.
+    # Emit {alias -> canonical} for shared groups that have a clear, declared canonical.
     alias_to_canonical: dict[str, str] = {}
     for parameter_id, names in groups.items():
         if len(names) < 2:
@@ -252,8 +240,7 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
         canonical = embedding_canonical.get(parameter_id)
         if canonical is None or canonical not in names:
             non_aliases = [name for name in names if name not in declared_aliases]
-            # Undeclared share (no alias member) or all-alias group (no clear canonical):
-            # do not drop — keep every side.
+            # No canonical to keep: undeclared share (all non-alias) or all-alias group.
             if len(non_aliases) == len(names) or not non_aliases:
                 continue
             canonical = non_aliases[0]
@@ -264,15 +251,12 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
 
 
 class TiedWeightMap:
-    """Serves stable, name-based tied-weight *group keys* to every export site.
+    """Name-based lookups over the ``{alias: canonical}`` map from :func:`_build_tied_alias_map`.
 
-    Built once per export from :func:`_build_tied_alias_map`, which detects ties by
-    shared object identity (pre-pack, while resident) but records them as an
-    ``{alias_name: canonical_name}`` map. Every export site that used to key dedup on
-    ``data_ptr`` asks this resolver for a group key instead: two parameters in the same
-    tie return the same key; a parameter in no declared tie returns ``None`` (exported in
-    full, never aliased). Because the key is a *name*, it survives packing, FSDP
-    resharding, offload, and allocator reuse — the failure modes ``data_ptr`` cannot.
+    A thin, immutable view built once per export. Export sites that once keyed dedup on
+    ``data_ptr`` ask for a *group key* instead: both sides of a tie share one key, an untied
+    parameter returns ``None``. The key is a name, so it survives packing, FSDP resharding,
+    offload, and allocator reuse — where ``data_ptr`` does not.
     """
 
     def __init__(self, model: nn.Module) -> None:
