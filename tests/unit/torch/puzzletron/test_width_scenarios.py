@@ -46,9 +46,7 @@ from modelopt.torch.puzzletron.scenarios import ScenarioKey
 from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
 
-def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(
-    tmp_path, monkeypatch
-):
+def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(tmp_path, monkeypatch):
     config_path = tmp_path / "experiment.yaml"
     config_path.touch()
     root_override = "+replacement_scoring.automodel.lm_head_backend=streaming"

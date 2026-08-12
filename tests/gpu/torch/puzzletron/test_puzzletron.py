@@ -311,9 +311,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     replacement_node = next(
         node for node in compiled_plan.stages if node.stage_id == "replacement_scoring"
     )
-    replacement_work = adapter_for_stage(replacement_node).plan(
-        compiled_plan, replacement_node
-    )
+    replacement_work = adapter_for_stage(replacement_node).plan(compiled_plan, replacement_node)
     assert replacement_node.instances == 1
     assert replacement_node.gpus_per_instance == 1
     assert replacement_node.total_gpus == 1
