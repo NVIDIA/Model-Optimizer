@@ -269,7 +269,7 @@ git -C "${AUTOMODEL_ROOT}" rev-parse HEAD
 ```
 
 ```bash
-python - <<'PY'
+PYTHONPATH="${MODEL_OPT_ROOT}" python - <<'PY'
 import importlib.metadata as metadata
 import json
 import os

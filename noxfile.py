@@ -233,10 +233,12 @@ def gpu(session):
     )
 
 
+# Manual one-GPU runner for the focused Puzzletron lifecycle test.
 # Container: dedicated Puzzletron v2 GPU image with the pinned ci_environment.json runtime.
 @nox.session(venv_backend="none")
 def gpu_puzzletron(session):
-    """Run the focused Puzzletron suite in its pinned one-GPU image."""
+    """Verify the pinned runtime, then run the focused Puzzletron lifecycle GPU test."""
+    session.env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
     _verify_puzzletron_v2_environment(session)
     session.run(
         "python",

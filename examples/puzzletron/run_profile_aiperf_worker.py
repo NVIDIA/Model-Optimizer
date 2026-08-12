@@ -188,6 +188,8 @@ def run_worker(
     concurrencies: tuple[int, ...] | None = None,
     request_count: int | None = None,
     benchmark_timeout: float = 7200,
+    trust_remote_code: bool = False,
+    allow_aiperf_v011_online_tokenizer_resolution: bool = False,
 ) -> Path:
     # Worker execution needs the GPU stack; result merging intentionally remains
     # usable by the dependency-light login-node orchestrator.
@@ -241,6 +243,10 @@ def run_worker(
             seed=42,
             gpu_telemetry="pynvml",
             benchmark_timeout=benchmark_timeout,
+            trust_remote_code=trust_remote_code,
+            allow_aiperf_v011_online_tokenizer_resolution=(
+                allow_aiperf_v011_online_tokenizer_resolution
+            ),
         )
         rows.extend(result.model_dump(mode="json") for result in results)
     selection_suffix = ""
@@ -335,6 +341,11 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, action="append", default=[])
     parser.add_argument("--request-count", type=int)
     parser.add_argument("--benchmark-timeout", type=float, default=7200)
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--allow-aiperf-v011-online-tokenizer-resolution",
+        action="store_true",
+    )
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--merge", action="store_true")
     args = parser.parse_args()
@@ -370,6 +381,10 @@ def main() -> None:
             concurrencies=tuple(args.concurrency) or None,
             request_count=args.request_count,
             benchmark_timeout=args.benchmark_timeout,
+            trust_remote_code=args.trust_remote_code,
+            allow_aiperf_v011_online_tokenizer_resolution=(
+                args.allow_aiperf_v011_online_tokenizer_resolution
+            ),
         )
     print(output)
 

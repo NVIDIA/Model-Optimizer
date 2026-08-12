@@ -249,6 +249,7 @@ def test_run_worker_consumes_task_launcher_identity(
         check=True,
         capture_output=True,
         text=True,
+        timeout=10,
     )
 
     assert f"--nnodes {group_size}" in result.stdout

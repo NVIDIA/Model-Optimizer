@@ -1,3 +1,5 @@
+"""Tests for Puzzletron vLLM geometry and checkpoint interchange contracts."""
+
 from types import SimpleNamespace
 
 from modelopt.torch.puzzletron.block_config import (
@@ -8,7 +10,36 @@ from modelopt.torch.puzzletron.block_config import (
     MoEConfig,
 )
 from modelopt.torch.puzzletron.candidates import build_candidate_library
+from modelopt.torch.puzzletron.utils import vllm_adapter
 from modelopt.torch.puzzletron.utils.vllm_adapter import convert_block_configs_to_per_layer_config
+
+
+def test_checkpoint_config_refresh_does_not_trust_remote_code_by_default(
+    tmp_path, monkeypatch
+) -> None:
+    observed = []
+    config = SimpleNamespace(to_json_string=lambda **_kwargs: "{}\n")
+
+    def load_config(path, **kwargs):
+        observed.append((path, kwargs))
+        return config
+
+    monkeypatch.setattr("transformers.AutoConfig.from_pretrained", load_config)
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.anymodel.registry.resolve_descriptor",
+        lambda _config: SimpleNamespace(descriptor=object()),
+    )
+    monkeypatch.setattr(vllm_adapter, "configure_anymodel_metadata", lambda *_args: True)
+    monkeypatch.setattr(
+        vllm_adapter,
+        "convert_block_configs_to_per_layer_config",
+        lambda *_args, **_kwargs: True,
+    )
+
+    config_path = vllm_adapter.refresh_realized_checkpoint_config(tmp_path)
+
+    assert observed == [(tmp_path, {"trust_remote_code": False})]
+    assert config_path.read_text() == "{}\n"
 
 
 def test_mla_search_axes_create_cartesian_typed_candidates() -> None:
@@ -285,12 +316,10 @@ def test_qwen35_moe_descriptor_exposes_bounded_runtime_benchmark_contract() -> N
     flat_text_config = SimpleNamespace(hidden_size=2048)
     nested_vlm_config = SimpleNamespace(text_config=flat_text_config)
     assert (
-        Qwen3P5MoeVLModelDescriptor.get_language_model_config(flat_text_config)
-        is flat_text_config
+        Qwen3P5MoeVLModelDescriptor.get_language_model_config(flat_text_config) is flat_text_config
     )
     assert (
-        Qwen3P5MoeVLModelDescriptor.get_language_model_config(nested_vlm_config)
-        is flat_text_config
+        Qwen3P5MoeVLModelDescriptor.get_language_model_config(nested_vlm_config) is flat_text_config
     )
     base = Qwen3P5MoeTextModelDescriptor.runtime_benchmark_base_block_config(runtime)
     assert base.require_subblock("attention").num_query_heads == 16

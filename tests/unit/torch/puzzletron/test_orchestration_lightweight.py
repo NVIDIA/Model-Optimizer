@@ -354,8 +354,6 @@ def test_depth_completeness_requires_matching_complete_trajectory(
 def test_build_library_requires_its_own_complete_outputs(
     tmp_path: Path, write_terminal_manifest
 ) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
     config = {"puzzle_dir": str(tmp_path)}
     write_terminal_manifest(tmp_path, "build_library", config=config)
     (tmp_path / "subblock_stats.json").write_text("{}")
@@ -370,8 +368,6 @@ def test_build_library_requires_its_own_complete_outputs(
 def test_build_library_completion_accepts_equivalent_loader_and_worker_configs(
     tmp_path: Path, write_terminal_manifest
 ) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
     experiment = tmp_path / "experiment.yaml"
     experiment.write_text(
         f"""\

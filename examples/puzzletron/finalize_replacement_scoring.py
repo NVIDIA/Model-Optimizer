@@ -32,11 +32,20 @@ from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
 from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 
+__all__ = [
+    "finalization_marker_is_current",
+    "finalize_replacement_scoring",
+    "main",
+    "write_finalization_marker",
+]
+
 
 def _successful_manifest_identity(manifest_path: str | Path) -> str | None:
     try:
         manifest = json.loads(Path(manifest_path).read_text())
     except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
         return None
     if manifest.get("stage") != "replacement_scoring" or manifest.get("status") != "success":
         return None

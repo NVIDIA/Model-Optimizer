@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
+from puzzletron_orchestrator.adapters.post_mip import ManualInputRequired
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.adapters.stage_compat import (
     stage_is_complete as artifacts_are_complete,
@@ -823,6 +824,61 @@ def test_controller_propagates_aggregation_programming_errors(tmp_path: Path, mo
 
     with pytest.raises(TypeError, match="aggregation programming error"):
         controller._finalize_stage(node)
+
+
+def test_controller_preserves_repeated_manual_input_request(tmp_path: Path, monkeypatch):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+
+    class _Controls:
+        enabled = True
+
+        @staticmethod
+        def choose_revisions(_prompt, revision_ids):
+            return revision_ids
+
+    controller = CampaignController(
+        plan,
+        executor=_FakeExecutor(),
+        terminal_controls=_Controls(),
+    )
+    decision_dir = plan.puzzle_dir / "artifacts/post_mip/nodes/manual"
+    decision_dir.mkdir(parents=True)
+
+    class _RepeatedManualAdapter:
+        aggregate_count = 0
+
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def aggregate(self, *, plan, node, work_plan):
+            del plan, node, work_plan
+            self.aggregate_count += 1
+            raise ManualInputRequired(
+                "manual",
+                ("revision-a",),
+                "Select a revision",
+                f"execution-{self.aggregate_count}",
+            )
+
+    adapter = _RepeatedManualAdapter()
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.adapter_for_stage",
+        lambda _node: adapter,
+    )
+
+    assert controller._finalize_stage(node) is False
+    assert adapter.aggregate_count == 2
+    assert controller._manual_waiting is not None
+    assert controller._manual_waiting.execution_identity == "execution-2"
+    assert controller._finalization_failures == {}
 
 
 @pytest.mark.parametrize("aggregation_failure", [False, True])

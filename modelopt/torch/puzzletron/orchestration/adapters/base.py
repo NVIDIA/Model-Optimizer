@@ -22,7 +22,11 @@ from ..schema import (
     WorkPlan,
 )
 
-__all__ = ["WorkAdapter"]
+__all__ = ["ExecutionIdentityProjectionUnavailable", "WorkAdapter"]
+
+
+class ExecutionIdentityProjectionUnavailable(RuntimeError):
+    """The current upstream state does not yet define an adapter identity projection."""
 
 
 class WorkAdapter(ABC):
@@ -70,6 +74,30 @@ class WorkAdapter(ABC):
         work_plan: WorkPlan,
     ) -> PublishedOutput | None:
         return None
+
+    def execution_identity_projection(
+        self,
+        *,
+        plan: CampaignPlan,
+        node: StagePlanNode,
+        work_plan: WorkPlan,
+    ) -> Mapping[str, Any]:
+        """Return adapter-owned, currently resolvable execution inputs."""
+
+        return {}
+
+    def prepare_execution_identity_projection(
+        self,
+        *,
+        plan: CampaignPlan,
+        node: StagePlanNode,
+    ) -> None:
+        """Prepare mutable adapter inputs immediately before a new attempt is bound.
+
+        The default is intentionally empty. Read-only currentness checks call only
+        :meth:`execution_identity_projection`; adapters that require preparation
+        must implement it here instead of mutating from their projection method.
+        """
 
     def classify_failure(
         self,

@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from .adapters.base import ExecutionIdentityProjectionUnavailable
 from .adapters.post_mip import ManualInputRequired
 from .adapters.registry import adapter_for_stage
 from .adapters.stage_compat import stage_is_complete
@@ -333,8 +334,11 @@ class CampaignController:
         node: StagePlanNode,
         attempts: list[dict[str, Any]],
     ) -> list[dict[str, Any]] | None:
-        work_plan = adapter_for_stage(node).plan(self.plan, node)
-        stage_execution_identity = self._stage_execution_identity(node, work_plan)
+        try:
+            work_plan = adapter_for_stage(node).plan(self.plan, node)
+            stage_execution_identity = self._stage_execution_identity(node, work_plan)
+        except ExecutionIdentityProjectionUnavailable:
+            return None
         completed: list[dict[str, Any]] = []
         for item in work_plan.items:
             matches = [
@@ -369,34 +373,38 @@ class CampaignController:
         node: StagePlanNode,
         work_plan: WorkPlan | None = None,
     ) -> str:
-        work_plan = work_plan or adapter_for_stage(node).plan(self.plan, node)
+        adapter = adapter_for_stage(node)
+        work_plan = work_plan or adapter.plan(self.plan, node)
         compiled_node = next(
             stage
             for stage in plan_to_dict(self.plan)["stages"]
             if stage["stage_id"] == node.stage_id
         )
-        return stable_hash(
-            {
-                "execution_contract_hash": self.plan.contract_hash,
-                "semantic_config": semantic_stage_config(
-                    self.plan.experiment_config, node.stage_id
-                ),
-                "compiled_node": compiled_node,
-                "root_overrides": list(self.plan.overrides),
-                "work_items": [
-                    {
-                        "work_id": item.work_id,
-                        "shard_index": item.shard_index,
-                        "shard_count": item.shard_count,
-                        "gpus_per_instance": item.gpus_per_instance,
-                        "local_gpu_ids": list(item.local_gpu_ids),
-                        "metadata": dict(item.metadata),
-                    }
-                    for item in work_plan.items
-                ],
-            },
-            prefix=f"{node.stage_id}_execution",
+        payload = {
+            "execution_contract_hash": self.plan.contract_hash,
+            "semantic_config": semantic_stage_config(self.plan.experiment_config, node.stage_id),
+            "compiled_node": compiled_node,
+            "root_overrides": list(self.plan.overrides),
+            "work_items": [
+                {
+                    "work_id": item.work_id,
+                    "shard_index": item.shard_index,
+                    "shard_count": item.shard_count,
+                    "gpus_per_instance": item.gpus_per_instance,
+                    "local_gpu_ids": list(item.local_gpu_ids),
+                    "metadata": dict(item.metadata),
+                }
+                for item in work_plan.items
+            ],
+        }
+        adapter_projection = adapter.execution_identity_projection(
+            plan=self.plan,
+            node=node,
+            work_plan=work_plan,
         )
+        if adapter_projection:
+            payload["adapter_projection"] = dict(adapter_projection)
+        return stable_hash(payload, prefix=f"{node.stage_id}_execution")
 
     def _bind_attempt_to_stage_execution(
         self,
@@ -502,7 +510,12 @@ class CampaignController:
     def _recover_failed_stages(self) -> None:
         for node in self.plan.stages:
             record = self.store.load_stage_record(node.stage_id)
-            stage_execution_identity = self._stage_execution_identity(node)
+            if record is None or record.status != JobState.FAILED.value or not record.attempts:
+                continue
+            try:
+                stage_execution_identity = self._stage_execution_identity(node)
+            except ExecutionIdentityProjectionUnavailable:
+                continue
             current_failure = bool(record and record.attempts) and all(
                 attempt.contract_hash == self.plan.contract_hash
                 and (attempt.metadata or {}).get("stage_execution_identity")
@@ -514,12 +527,9 @@ class CampaignController:
                 and (attempt.metadata or {}).get("stage_execution_identity_incompatible") is True
                 for attempt in record.attempts
             )
-            if (
-                record is None
-                or record.status != JobState.FAILED.value
-                or not record.attempts
-                or not (current_failure or legacy_incompatibility)
-                or stage_is_complete(self.plan.experiment_config, node.stage_id)
+            if not (current_failure or legacy_incompatibility) or stage_is_complete(
+                self.plan.experiment_config,
+                node.stage_id,
             ):
                 continue
             finalization_failures = [
@@ -556,6 +566,10 @@ class CampaignController:
         legacy_attempts = self._legacy_completed_attempts(node, attempts)
         if not legacy_attempts:
             return False
+        try:
+            stage_execution_identity = self._stage_execution_identity(node)
+        except ExecutionIdentityProjectionUnavailable:
+            return False
         persisted_attempts = [
             PersistedAttempt(
                 attempt_id=attempt["attempt_id"],
@@ -589,7 +603,7 @@ class CampaignController:
                 "stage_id": node.stage_id,
                 "failure_class": FailureClass.CONFIG.value,
                 "contract_hash": self.plan.contract_hash,
-                "stage_execution_identity": self._stage_execution_identity(node),
+                "stage_execution_identity": stage_execution_identity,
                 "attempt_ids": [attempt.attempt_id for attempt in persisted_attempts],
                 "incompatibility": "missing_stage_execution_identity",
                 "reason": reason,
@@ -614,6 +628,7 @@ class CampaignController:
         if self._stage_has_active_or_completed_work(node):
             return False
         adapter = adapter_for_stage(node)
+        adapter.prepare_execution_identity_projection(plan=self.plan, node=node)
         work_plan = adapter.plan(self.plan, node)
         handles: list[tuple[JobHandle, str, str]] = []
         available_nodes = self._available_nodes()
@@ -688,6 +703,18 @@ class CampaignController:
             self._last_states[handle.handle_id] = JobState.RUNNING
         return bool(handles)
 
+    def _wait_for_manual_input(
+        self,
+        node: StagePlanNode,
+        request: ManualInputRequired,
+    ) -> bool:
+        self._manual_waiting = request
+        self.logger.wait(
+            f"{node.stage_id}: manual review is ready; write manual_decision.json "
+            "and rerun the controller"
+        )
+        return False
+
     def _finalize_stage(self, node: StagePlanNode) -> bool:
         adapter = adapter_for_stage(node)
         work_plan = adapter.plan(self.plan, node)
@@ -696,12 +723,7 @@ class CampaignController:
             aggregate = adapter.aggregate(plan=self.plan, node=node, work_plan=work_plan)
         except ManualInputRequired as request:
             if not self.terminal_controls.enabled:
-                self._manual_waiting = request
-                self.logger.wait(
-                    f"{node.stage_id}: manual review is ready; write manual_decision.json "
-                    "and rerun the controller"
-                )
-                return False
+                return self._wait_for_manual_input(node, request)
             selected = self.terminal_controls.choose_revisions(request.prompt, request.revision_ids)
             decision_path = (
                 self.plan.puzzle_dir
@@ -725,6 +747,8 @@ class CampaignController:
             temporary.replace(decision_path)
             try:
                 aggregate = adapter.aggregate(plan=self.plan, node=node, work_plan=work_plan)
+            except ManualInputRequired as request:
+                return self._wait_for_manual_input(node, request)
             except (OSError, ValueError, RuntimeError) as error:
                 return self._record_stage_aggregation_failure(
                     node,
@@ -1401,7 +1425,11 @@ class CampaignController:
                         if node.stage_id in self._failed_stages:
                             continue
                         stage_attempts = self.store.list_attempts(node.stage_id)
-                        if stage_attempts and not self._stage_is_active(node.stage_id):
+                        if (
+                            stage_attempts
+                            and not self._stage_is_active(node.stage_id)
+                            and self._parents_ready(node)
+                        ):
                             if self._required_work_is_completed(node, stage_attempts):
                                 finalized = self._finalize_stage(node)
                                 if not finalized and self._manual_waiting is None:

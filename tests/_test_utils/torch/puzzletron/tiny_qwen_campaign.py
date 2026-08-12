@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reusable hermetic tiny-Qwen campaign for Puzzletron integration tests."""
+"""Reusable local-data tiny-Qwen campaign for Puzzletron integration tests."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_setup.v2.wizard import _DEFAULT_DATA_SOURCE, _DEFAULT_MODEL_SOURCE, run_wizard_v2
+from puzzletron_setup.v2.wizard import run_wizard_v2
 
 __all__ = ["TinyQwenCampaign", "build_tiny_qwen_campaign"]
 
@@ -51,9 +51,11 @@ class _DefaultsBackend:
 
     def __init__(self, campaign_dir: Path) -> None:
         self.campaign_dir = campaign_dir
+        self.answered: set[str] = set()
 
     def text(self, message: str, default: str) -> Any:
         if message == "Campaign directory:":
+            self.answered.add(message)
             return str(self.campaign_dir)
         return default
 
@@ -63,10 +65,14 @@ class _DefaultsBackend:
         choices: Sequence[PromptChoice],
         default: Any,
     ) -> Any:
-        if message == "Model:":
-            return _DEFAULT_MODEL_SOURCE
-        if message == "Dataset:":
-            return _DEFAULT_DATA_SOURCE
+        if message in {"Model:", "Dataset:"}:
+            defaults = [choice.value for choice in choices if choice.title.startswith("Default —")]
+            if len(defaults) != 1:
+                raise AssertionError(
+                    f"expected one resolved default for {message!r}, found {len(defaults)}"
+                )
+            self.answered.add(message)
+            return defaults[0]
         if default is not None:
             return default
         return next(choice.value for choice in choices if choice.disabled is None)
@@ -181,6 +187,7 @@ def _post_mip_overrides(flow_id: str) -> tuple[str, ...]:
         f"{prefix}.online_eval.config.eval_samples=2",
         f"{prefix}.best_lm.top_k=3",
         f"{prefix}.serving.config.request_count=4",
+        f"+{prefix}.serving.config.allow_aiperf_v011_online_tokenizer_resolution=true",
         f"{prefix}.fastest.top_k=2",
         f"{prefix}.short_kd.config.max_steps=2",
         f"{prefix}.short_kd.config.global_batch_size=1",
@@ -280,11 +287,15 @@ def build_tiny_qwen_campaign(
         )
     )
 
+    backend = _DefaultsBackend(campaign_dir)
     generated = run_wizard_v2(
         resume=None,
         defaults_path=defaults_path,
-        backend=_DefaultsBackend(campaign_dir),
+        backend=backend,
     )
+    expected_prompts = {"Campaign directory:", "Model:", "Dataset:"}
+    if backend.answered != expected_prompts:
+        raise AssertionError(f"wizard prompt contract changed; answered {sorted(backend.answered)}")
     smoke_bundle = generated / "smoke"
     experiment = yaml.safe_load((smoke_bundle / "experiment.yaml").read_text())
     flows = dict((experiment.get("post_mip") or {}).get("flows") or {})
@@ -293,6 +304,9 @@ def build_tiny_qwen_campaign(
     flow_id = next(iter(flows))
     overrides = _post_mip_overrides(flow_id)
     config = pipeline_config_from_path(smoke_bundle / "experiment.yaml", overrides=overrides)
+    serving_config = config["post_mip"]["flows"][flow_id]["nodes"]["serving"]["config"]
+    if serving_config.get("allow_aiperf_v011_online_tokenizer_resolution") is not True:
+        raise AssertionError("tiny-Qwen AIPerf compatibility policy override was not composed")
     compiled_plan = compile_campaign_plan(
         experiment_config_path=smoke_bundle / "experiment.yaml",
         runner=load_runner_config(smoke_bundle / "runner.yaml"),

@@ -270,6 +270,7 @@ class AutoModelReplaceBlockExecutor:
         )
 
     def _score(self, prune_target: dict | list[dict] | None) -> dict | None:
+        # Keep framework imports lazy so this executor remains dependency-light until setup.
         import torch
         import torch.distributed as torch_dist
 

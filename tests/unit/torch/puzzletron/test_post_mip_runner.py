@@ -213,6 +213,7 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
                 "minimum_request_count": 4,
                 "requests_per_concurrency": 2,
                 "best_selection_mode": "individual_best",
+                "allow_aiperf_v011_online_tokenizer_resolution": True,
                 "input_tokens": 1024,
                 "output_tokens": 128,
                 "topology": {"gpu_group_size": 1},
@@ -225,7 +226,7 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     )
 
     result = runner._aiperf(
-        {"puzzle_dir": str(tmp_path)},
+        {"puzzle_dir": str(tmp_path), "model": {"trust_remote_code": True}},
         node,
         source,
         "execution",
@@ -234,6 +235,8 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     assert captured["checkpoint"] == str(tmp_path / "checkpoint")
     assert captured["concurrencies"] == (8,)
     assert captured["request_counts"] == {8: 23}
+    assert captured["trust_remote_code"] is True
+    assert captured["allow_aiperf_v011_online_tokenizer_resolution"] is True
     assert "request_count" not in captured
     assert "minimum_request_count" not in captured
     assert "requests_per_concurrency" not in captured

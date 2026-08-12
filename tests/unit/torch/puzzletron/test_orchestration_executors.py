@@ -619,6 +619,53 @@ def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert "run_depth_pool.sh" in script
 
 
+def test_legacy_aiperf_worker_receives_explicit_security_policy(tmp_path: Path):
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="aiperf",
+        strategy=ExecutionStrategy.SHARDED,
+        instances=1,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={},
+        gpus_per_instance=1,
+        gpus_per_node=8,
+        nodes=1,
+        total_gpus=1,
+        exclusive=False,
+        parents=("mip",),
+        distributed=False,
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={
+            "model": {"trust_remote_code": True},
+            "aiperf": {"allow_aiperf_v011_online_tokenizer_resolution": True},
+        },
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+    adapter = adapter_for_stage(node)
+    work_plan = adapter.plan(plan, node)
+
+    attempt = adapter.command(
+        plan=plan,
+        node=node,
+        item=work_plan.items[0],
+        attempt_id="a1",
+        runner=runner,
+    )
+
+    assert "--trust-remote-code" in attempt.command.argv
+    assert "--allow-aiperf-v011-online-tokenizer-resolution" in attempt.command.argv
+
+
 def test_depth_pool_packs_four_two_gpu_workers_per_node(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",

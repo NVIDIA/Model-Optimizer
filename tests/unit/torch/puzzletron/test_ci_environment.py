@@ -31,6 +31,50 @@ class _Distribution:
         return json.dumps(self.payload)
 
 
+_EXPECTED_SOURCE = {
+    "repository": "https://github.com/Separius/Automodel.git",
+    "commit": "b22cd029d806197e249f2cc4a42c5de91713b772",
+}
+
+
+def _pep610_source(repository: str, commit: str) -> dict:
+    return {
+        "url": repository,
+        "vcs_info": {"vcs": "git", "commit_id": commit},
+    }
+
+
+def test_pep610_exact_source_is_accepted(monkeypatch):
+    monkeypatch.setattr(
+        ci_environment.metadata,
+        "distribution",
+        lambda _package: _Distribution(
+            _pep610_source(_EXPECTED_SOURCE["repository"], _EXPECTED_SOURCE["commit"])
+        ),
+    )
+
+    ci_environment.verify_installed_vcs_source("nemo-automodel", _EXPECTED_SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("repository", "commit"),
+    [
+        ("https://github.com/example/Automodel.git", _EXPECTED_SOURCE["commit"]),
+        (_EXPECTED_SOURCE["repository"], "0" * 40),
+    ],
+    ids=("repository", "commit"),
+)
+def test_pep610_vcs_source_mismatch_is_rejected(monkeypatch, repository, commit):
+    monkeypatch.setattr(
+        ci_environment.metadata,
+        "distribution",
+        lambda _package: _Distribution(_pep610_source(repository, commit)),
+    )
+
+    with pytest.raises(RuntimeError, match="source mismatch"):
+        ci_environment.verify_installed_vcs_source("nemo-automodel", _EXPECTED_SOURCE)
+
+
 def test_editable_pinned_dependency_must_be_clean(monkeypatch):
     monkeypatch.setattr(
         ci_environment.metadata,
@@ -55,8 +99,5 @@ def test_editable_pinned_dependency_must_be_clean(monkeypatch):
     with pytest.raises(RuntimeError, match="dependency 'nemo-automodel' is dirty"):
         ci_environment.verify_installed_vcs_source(
             "nemo-automodel",
-            {
-                "repository": "https://github.com/Separius/Automodel.git",
-                "commit": "b22cd029d806197e249f2cc4a42c5de91713b772",
-            },
+            _EXPECTED_SOURCE,
         )

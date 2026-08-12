@@ -382,6 +382,13 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
         for index in range(0, len(visible), group_size)
     ]
     output_dir = Path(stage_cfg.get("output_dir", puzzle_dir / "artifacts" / "aiperf"))
+    model_cfg = dict(config.get("model") or {})
+    trust_remote_code = bool(
+        stage_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False))
+    )
+    allow_aiperf_v011_online_tokenizer_resolution = bool(
+        stage_cfg.get("allow_aiperf_v011_online_tokenizer_resolution", False)
+    )
     work = _aiperf_checkpoint_work(checkpoints, list(stage_cfg.get("concurrency", [1, 2, 4, 8])))
     pool: Queue[str] = Queue()
     for gpu_group in gpu_groups:
@@ -414,6 +421,10 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
                 extra_inputs=dict(stage_cfg.get("extra_inputs") or {}),
                 use_server_token_count=bool(stage_cfg.get("use_server_token_count", True)),
                 seed=int(stage_cfg.get("seed", 42)),
+                trust_remote_code=trust_remote_code,
+                allow_aiperf_v011_online_tokenizer_resolution=(
+                    allow_aiperf_v011_online_tokenizer_resolution
+                ),
             )
         finally:
             pool.put(gpu_ids)

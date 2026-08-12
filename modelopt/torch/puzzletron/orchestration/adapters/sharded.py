@@ -217,11 +217,11 @@ class ShardedStageAdapter(WorkAdapter):
         measurement_id = item.metadata.get("measurement_id")
         name_suffix = f"_{measurement_id}" if measurement_id else ""
         log_path = str(
-            log_dir
-            / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
+            log_dir / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
         )
         if node.stage_id == "aiperf":
             aiperf = plan.experiment_config.get("aiperf") or {}
+            model = plan.experiment_config.get("model") or {}
             argv = [
                 "python",
                 str(script_path),
@@ -236,6 +236,10 @@ class ShardedStageAdapter(WorkAdapter):
                 "--output-tokens",
                 str(aiperf.get("output_tokens", 1024)),
             ]
+            if bool(aiperf.get("trust_remote_code", model.get("trust_remote_code", False))):
+                argv.append("--trust-remote-code")
+            if bool(aiperf.get("allow_aiperf_v011_online_tokenizer_resolution", False)):
+                argv.append("--allow-aiperf-v011-online-tokenizer-resolution")
         else:
             argv = ["python", str(script_path), "--config", plan.experiment_config_path]
             argv.extend(extra_args)

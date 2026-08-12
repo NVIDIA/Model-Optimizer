@@ -46,7 +46,11 @@ __all__ = ["run_aiperf_benchmark", "run_aiperf_sweep"]
 _CHECKPOINT_PREPARE_LOCK = Lock()
 
 
-def _prepare_vllm_checkpoint(checkpoint_dir: Path) -> bool:
+def _prepare_vllm_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    trust_remote_code: bool = False,
+) -> bool:
     """Restore AnyModel metadata lost by generic HF checkpoint consolidation."""
     with _CHECKPOINT_PREPARE_LOCK:
         config = json.loads((checkpoint_dir / "config.json").read_text())
@@ -57,7 +61,10 @@ def _prepare_vllm_checkpoint(checkpoint_dir: Path) -> bool:
             return False
         from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
-        refresh_realized_checkpoint_config(checkpoint_dir)
+        refresh_realized_checkpoint_config(
+            checkpoint_dir,
+            trust_remote_code=trust_remote_code,
+        )
         return True
 
 
@@ -309,6 +316,39 @@ def _profile_command(
     return command
 
 
+def _vllm_server_command(
+    *,
+    checkpoint_dir: Path,
+    port: int,
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    topology: dict[str, Any],
+    trust_remote_code: bool,
+) -> list[str]:
+    """Build the vLLM command under the caller's explicit code-trust policy."""
+
+    command = [
+        "vllm",
+        "serve",
+        str(checkpoint_dir),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--served-model-name",
+        model_name,
+        "--max-model-len",
+        str(_server_max_model_len(input_tokens, output_tokens, topology)),
+    ]
+    if trust_remote_code:
+        command.append("--trust-remote-code")
+    command.extend(_topology_vllm_args(topology))
+    command.extend(_descriptor_vllm_args(checkpoint_dir))
+    command.extend(str(arg) for arg in topology.get("extra_vllm_args", ()))
+    return command
+
+
 def _clean_subprocess_environment(
     gpu_ids: str, *, architecture_id: str, topology_id: str
 ) -> dict[str, str]:
@@ -355,11 +395,17 @@ def _clean_subprocess_environment(
     return env
 
 
-def _aiperf_subprocess_environment(env: dict[str, str]) -> dict[str, str]:
-    """Avoid AIPerf's offline resolver for an explicit local tokenizer path."""
+def _aiperf_subprocess_environment(
+    env: dict[str, str],
+    *,
+    allow_aiperf_v011_online_tokenizer_resolution: bool = False,
+) -> dict[str, str]:
+    """Optionally relax AIPerf v0.11's offline local-tokenizer resolution."""
+
     resolved = dict(env)
-    resolved.pop("HF_HUB_OFFLINE", None)
-    resolved.pop("TRANSFORMERS_OFFLINE", None)
+    if allow_aiperf_v011_online_tokenizer_resolution:
+        resolved.pop("HF_HUB_OFFLINE", None)
+        resolved.pop("TRANSFORMERS_OFFLINE", None)
     return resolved
 
 
@@ -384,13 +430,18 @@ def run_aiperf_sweep(
     readiness_timeout: float = 1200,
     benchmark_timeout: float = 600,
     gpu_telemetry: str | None = "pynvml",
+    trust_remote_code: bool = False,
+    allow_aiperf_v011_online_tokenizer_resolution: bool = False,
 ) -> list[BenchmarkResult]:
-    """Run multiple concurrencies against one persistent vLLM server."""
+    """Run a serving sweep while preserving offline and remote-code policy by default."""
 
     checkpoint_dir = Path(checkpoint_dir).resolve()
     artifact_dir = Path(artifact_dir).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    _prepare_vllm_checkpoint(checkpoint_dir)
+    _prepare_vllm_checkpoint(
+        checkpoint_dir,
+        trust_remote_code=trust_remote_code,
+    )
     concurrency_values = tuple(int(value) for value in concurrencies)
     if not concurrency_values or len(set(concurrency_values)) != len(concurrency_values):
         raise ValueError("AIPerf concurrencies must be non-empty and unique")
@@ -413,23 +464,15 @@ def run_aiperf_sweep(
     model_name = f"puzzletron-{architecture_id[:16]}"
     tokenizer_dir = _short_tokenizer_alias(checkpoint_dir, artifact_dir)
     server_log = artifact_dir / "vllm_server.log"
-    server_cmd = [
-        "vllm",
-        "serve",
-        str(checkpoint_dir),
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--served-model-name",
-        model_name,
-        "--max-model-len",
-        str(_server_max_model_len(input_tokens, output_tokens, topology)),
-        "--trust-remote-code",
-    ]
-    server_cmd.extend(_topology_vllm_args(topology))
-    server_cmd.extend(_descriptor_vllm_args(checkpoint_dir))
-    server_cmd.extend(str(arg) for arg in topology.get("extra_vllm_args", ()))
+    server_cmd = _vllm_server_command(
+        checkpoint_dir=checkpoint_dir,
+        port=port,
+        model_name=model_name,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        topology=topology,
+        trust_remote_code=trust_remote_code,
+    )
     executable = _resolve_executable(executable)
     env = _clean_subprocess_environment(
         gpu_ids,
@@ -438,7 +481,12 @@ def run_aiperf_sweep(
     )
     for key, value in (topology.get("env") or {}).items():
         env[str(key)] = str(value)
-    aiperf_env = _aiperf_subprocess_environment(env)
+    aiperf_env = _aiperf_subprocess_environment(
+        env,
+        allow_aiperf_v011_online_tokenizer_resolution=(
+            allow_aiperf_v011_online_tokenizer_resolution
+        ),
+    )
     cached: dict[int, BenchmarkResult] = {}
     missing: list[tuple[int, Path, list[str], str]] = []
     for concurrency in concurrency_values:
@@ -472,6 +520,10 @@ def run_aiperf_sweep(
                 "endpoint_type": endpoint_type,
                 "extra_inputs": _exact_length_extra_inputs(extra_inputs, output_tokens),
                 "use_server_token_count": use_server_token_count,
+                "trust_remote_code": trust_remote_code,
+                "allow_aiperf_v011_online_tokenizer_resolution": (
+                    allow_aiperf_v011_online_tokenizer_resolution
+                ),
                 "revisions": revisions,
             },
             prefix="aiperf_result",
