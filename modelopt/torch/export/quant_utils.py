@@ -70,7 +70,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedGroupResolver
+from .model_utils import TiedWeightMap
 
 logger = logging.getLogger(__name__)
 
@@ -1053,7 +1053,7 @@ def postprocess_state_dict(
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
-    resolver: "TiedGroupResolver | None" = None,
+    resolver: "TiedWeightMap | None" = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -1062,7 +1062,7 @@ def postprocess_state_dict(
         maxbound: The maximum bound value for the output quantizer.
         quantization: The KV cache quantization format.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
-        resolver: Optional :class:`TiedGroupResolver`. When provided, tied-weight
+        resolver: Optional :class:`TiedWeightMap`. When provided, tied-weight
             dedup is authoritative and name-based: a declared alias key whose canonical
             counterpart is present is dropped, independent of tensor address. This is
             what makes dedup correct under the FSDP full-state-dict gather (and offload),
@@ -1672,7 +1672,7 @@ def has_quantized_modules(model: nn.Module) -> bool:
     )
 
 
-def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" = None) -> int:
+def sync_tied_input_amax(model: nn.Module, resolver: "TiedWeightMap | None" = None) -> int:
     """Max-merge input_quantizer amaxes across modules in the same declared tie.
 
     Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
@@ -1686,7 +1686,7 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" 
     YOCO-style models). Must run BEFORE per-module export so the merged
     amax flows into ``input_scale`` derivation.
 
-    Grouping is name-based via :class:`TiedGroupResolver`, resolved from the
+    Grouping is name-based via :class:`TiedWeightMap`, resolved from the
     model's own ``_tied_weights_keys`` / ``tie_word_embeddings`` declarations —
     so it is unaffected by allocator address reuse or FSDP resharding, which
     can make tied Parameters share or diverge ``data_ptr`` unpredictably. Handles
@@ -1706,7 +1706,7 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" 
     from collections import defaultdict
 
     if resolver is None:
-        resolver = TiedGroupResolver(model)
+        resolver = TiedWeightMap(model)
 
     by_group: dict = defaultdict(list)
     for name, m in model.named_modules():
