@@ -1,11 +1,84 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Future-stage configuration and artifact-selection contracts."""
 
 import json
 from pathlib import Path
 
 import pytest
 import torch
+
+from modelopt.torch.puzzletron.security_policy import require_boolean_policy
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None], ids=["string", "zero", "one", "none"])
+def test_security_policy_rejects_non_boolean_values(value):
+    with pytest.raises(ValueError, match="^policy must be a boolean$"):
+        require_boolean_policy(value, path="policy")
+
+
+@pytest.mark.parametrize(
+    ("config", "path"),
+    [
+        (
+            {"aiperf": {"enabled": True, "trust_remote_code": "false"}},
+            "aiperf.trust_remote_code",
+        ),
+        (
+            {
+                "aiperf": {
+                    "enabled": True,
+                    "allow_aiperf_v011_online_tokenizer_resolution": "false",
+                }
+            },
+            "aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+        ),
+        (
+            {"aiperf": {"enabled": True}, "model": {"trust_remote_code": "false"}},
+            "aiperf.trust_remote_code",
+        ),
+    ],
+)
+def test_aiperf_stage_rejects_non_boolean_security_policy(config, path):
+    from modelopt.torch.puzzletron.stages import future
+
+    with pytest.raises(ValueError) as error:
+        future.aiperf_stage(config, object())
+    assert str(error.value) == f"{path} must be a boolean"
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ["/checkpoint", 7, {"student": "/checkpoint"}],
+    ids=["string", "integer", "mapping"],
+)
+def test_evaluation_stage_rejects_non_list_or_tuple_checkpoints(configured):
+    from modelopt.torch.puzzletron.stages import future
+
+    config = {
+        "zero_shot_evaluation": {
+            "enabled": True,
+            "checkpoints": configured,
+        }
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"^zero_shot_evaluation\.checkpoints must be a list or tuple$",
+    ):
+        future.evaluation_stage(config, object())
 
 
 def test_distillation_sanity_accepts_packed_cache_without_raw_dataset(tmp_path):
@@ -72,9 +145,7 @@ def test_evaluation_descriptor_honors_explicit_legacy_override(monkeypatch, tmp_
     )
 
 
-def test_scenario_grid_kd_builds_one_isolated_config_per_realized_checkpoint(
-    monkeypatch, tmp_path
-):
+def test_scenario_grid_kd_builds_one_isolated_config_per_realized_checkpoint(monkeypatch, tmp_path):
     from modelopt.torch.puzzletron.stages import future
 
     puzzle_dir = tmp_path / "model"
@@ -226,12 +297,8 @@ def test_bounded_map_does_not_queue_work_after_failure():
         observed.append(value)
         raise RuntimeError("stop")
 
-    try:
+    with pytest.raises(RuntimeError, match="^stop$"):
         future._bounded_map(fail_first, range(5), max_workers=1)
-    except RuntimeError as error:
-        assert str(error) == "stop"
-    else:
-        raise AssertionError("worker failure must propagate")
     assert observed == [0]
 
 

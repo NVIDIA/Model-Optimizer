@@ -417,6 +417,7 @@ def _run_embedding_stage(
 
 def _run_tokenize_data_stage(config: dict):
     """Run tokenization from either the package or standalone entry point."""
+    # The package and standalone entry points require different import paths.
     if __package__:
         from .tokenize_data import tokenize_data_stage as package_tokenize_data_stage
 

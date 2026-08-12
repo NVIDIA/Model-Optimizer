@@ -18,6 +18,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.future as future_stages
@@ -242,6 +243,43 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     assert "requests_per_concurrency" not in captured
     assert "best_selection_mode" not in captured
     assert result["metrics"] == {}
+
+
+@pytest.mark.parametrize(
+    ("config", "settings", "path"),
+    [
+        (
+            {"model": {"trust_remote_code": "false"}},
+            {},
+            "post_mip.aiperf.config.trust_remote_code",
+        ),
+        (
+            {},
+            {"trust_remote_code": "false"},
+            "post_mip.aiperf.config.trust_remote_code",
+        ),
+        (
+            {},
+            {"allow_aiperf_v011_online_tokenizer_resolution": "false"},
+            "post_mip.aiperf.config.allow_aiperf_v011_online_tokenizer_resolution",
+        ),
+    ],
+)
+def test_aiperf_rejects_non_boolean_security_policy(config, settings, path, tmp_path):
+    node = SimpleNamespace(
+        node_id="serving",
+        flow_id="params",
+        config={"config": settings},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+    config = {"puzzle_dir": str(tmp_path), **config}
+
+    with pytest.raises(ValueError) as error:
+        runner._aiperf(config, node, source, "execution")
+    assert str(error.value) == f"{path} must be a boolean"
 
 
 def test_downstream_evaluation_delegates_to_generic_checkpoint_evaluator(monkeypatch, tmp_path):

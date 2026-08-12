@@ -23,6 +23,7 @@ import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..executors.slurm import SlurmExecutor
 from ..schema import (
@@ -42,6 +43,13 @@ from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import stage_is_complete, stage_output_patterns
+
+if TYPE_CHECKING:
+    from ...security_policy import require_boolean_policy
+elif __package__.startswith("puzzletron_orchestrator."):
+    from puzzletron_orchestrator.security_policy import require_boolean_policy
+else:
+    from ...security_policy import require_boolean_policy
 
 __all__ = ["ShardedStageAdapter"]
 
@@ -249,9 +257,17 @@ class ShardedStageAdapter(WorkAdapter):
                 "--output-tokens",
                 str(aiperf.get("output_tokens", 1024)),
             ]
-            if bool(aiperf.get("trust_remote_code", model.get("trust_remote_code", False))):
+            trust_remote_code = require_boolean_policy(
+                aiperf.get("trust_remote_code", model.get("trust_remote_code", False)),
+                path="aiperf.trust_remote_code",
+            )
+            allow_online_tokenizer_resolution = require_boolean_policy(
+                aiperf.get("allow_aiperf_v011_online_tokenizer_resolution", False),
+                path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+            )
+            if trust_remote_code:
                 argv.append("--trust-remote-code")
-            if bool(aiperf.get("allow_aiperf_v011_online_tokenizer_resolution", False)):
+            if allow_online_tokenizer_resolution:
                 argv.append("--allow-aiperf-v011-online-tokenizer-resolution")
         else:
             argv = ["python", str(script_path), "--config", plan.experiment_config_path]

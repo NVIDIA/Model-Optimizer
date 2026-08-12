@@ -31,6 +31,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from ..evaluation import DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS, run_lmms_eval_checkpoint
 from ..identity import canonicalize, stable_hash
+from ..security_policy import require_boolean_policy
 from .base import CompiledPostMIPNode, NodeKind, compile_post_mip_flows
 from .filters import apply_filter
 from .identity import (
@@ -445,11 +446,16 @@ def _aiperf(
         for concurrency in concurrencies
     }
     topology = dict(settings.pop("topology", {}) or {})
-    trust_remote_code = bool(
+    trust_remote_code = require_boolean_policy(
         settings.pop(
             "trust_remote_code",
             (config.get("model") or {}).get("trust_remote_code", False),
-        )
+        ),
+        path="post_mip.aiperf.config.trust_remote_code",
+    )
+    allow_online_tokenizer_resolution = require_boolean_policy(
+        settings.pop("allow_aiperf_v011_online_tokenizer_resolution", False),
+        path="post_mip.aiperf.config.allow_aiperf_v011_online_tokenizer_resolution",
     )
     gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not gpu_ids:
@@ -468,6 +474,7 @@ def _aiperf(
         solution_id=source.architecture_id,
         profile_id=node.flow_id,
         trust_remote_code=trust_remote_code,
+        allow_aiperf_v011_online_tokenizer_resolution=allow_online_tokenizer_resolution,
         **settings,
     )
     metrics = {}

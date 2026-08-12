@@ -33,6 +33,7 @@ from ..distillation.global_automodel import (
     build_global_kd_config,
     run_global_kd,
 )
+from ..security_policy import require_boolean_policy
 from .common import complete_stage
 from .graph import StageSkipReason
 
@@ -300,6 +301,15 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
             skip_reason=StageSkipReason.DISABLED,
             message="AIPerf is disabled.",
         )
+    model_cfg = dict(config.get("model") or {})
+    trust_remote_code = require_boolean_policy(
+        stage_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False)),
+        path="aiperf.trust_remote_code",
+    )
+    allow_aiperf_v011_online_tokenizer_resolution = require_boolean_policy(
+        stage_cfg.get("allow_aiperf_v011_online_tokenizer_resolution", False),
+        path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+    )
     from ..benchmarks import run_aiperf_sweep, write_aiperf_report
 
     experiment_dir = (config.get("experiment") or {}).get("dir")
@@ -385,13 +395,6 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
         for index in range(0, len(visible), group_size)
     ]
     output_dir = Path(stage_cfg.get("output_dir", puzzle_dir / "artifacts" / "aiperf"))
-    model_cfg = dict(config.get("model") or {})
-    trust_remote_code = bool(
-        stage_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False))
-    )
-    allow_aiperf_v011_online_tokenizer_resolution = bool(
-        stage_cfg.get("allow_aiperf_v011_online_tokenizer_resolution", False)
-    )
     work = _aiperf_checkpoint_work(checkpoints, list(stage_cfg.get("concurrency", [1, 2, 4, 8])))
     pool: Queue[str] = Queue()
     for gpu_group in gpu_groups:
@@ -453,6 +456,9 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
             skip_reason=StageSkipReason.DISABLED,
             message="Zero-shot evaluation is disabled.",
         )
+    configured = stage_cfg.get("checkpoints")
+    if configured is not None and not isinstance(configured, (list, tuple)):
+        raise ValueError("zero_shot_evaluation.checkpoints must be a list or tuple")
     from omegaconf import OmegaConf
 
     import modelopt.torch.utils.distributed as dist
@@ -466,7 +472,6 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     from .pipeline import _distributed
 
     puzzle_dir = Path((config.get("experiment") or {})["dir"])
-    configured = stage_cfg.get("checkpoints")
     raw_checkpoint_entries: list[tuple[str, str | Path]]
     if configured:
         raw_checkpoint_entries = [(Path(path).name, Path(path)) for path in configured]

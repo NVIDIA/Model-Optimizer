@@ -19,6 +19,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 import puzzletron_orchestrator.adapters.sharded as sharded_module
@@ -49,6 +50,42 @@ from puzzletron_orchestrator.schema import (
     TaskTopology,
     WorkPlan,
 )
+
+
+def _legacy_aiperf_plan(
+    tmp_path: Path, experiment_config: dict
+) -> tuple[CampaignPlan, StagePlanNode]:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="aiperf",
+        strategy=ExecutionStrategy.SHARDED,
+        instances=1,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={},
+        gpus_per_instance=1,
+        gpus_per_node=8,
+        nodes=1,
+        total_gpus=1,
+        exclusive=False,
+        parents=("mip",),
+        distributed=False,
+    )
+    return (
+        CampaignPlan(
+            experiment_config_path=str(tmp_path / "experiment.yaml"),
+            puzzle_dir=tmp_path / "run",
+            experiment_config=experiment_config,
+            runner=runner,
+            execution_defaults={"gpus_per_node": 8},
+            stages=(node,),
+            contract_hash="contract",
+        ),
+        node,
+    )
 
 
 def test_local_executor_runs_successful_command(tmp_path: Path):
@@ -620,36 +657,12 @@ def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
 
 
 def test_legacy_aiperf_worker_receives_explicit_security_policy(tmp_path: Path):
-    runner = RunnerEnvironment(
-        kind="slurm",
-        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
-    )
-    node = StagePlanNode(
-        stage_id="aiperf",
-        strategy=ExecutionStrategy.SHARDED,
-        instances=1,
-        failure_policy=FailurePolicy.STRICT,
-        mesh={},
-        gpus_per_instance=1,
-        gpus_per_node=8,
-        nodes=1,
-        total_gpus=1,
-        exclusive=False,
-        parents=("mip",),
-        distributed=False,
-    )
-    plan = CampaignPlan(
-        experiment_config_path=str(tmp_path / "experiment.yaml"),
-        puzzle_dir=tmp_path / "run",
-        experiment_config={
+    plan, node = _legacy_aiperf_plan(
+        tmp_path,
+        {
             "model": {"trust_remote_code": True},
             "aiperf": {"allow_aiperf_v011_online_tokenizer_resolution": True},
         },
-        runner=runner,
-        execution_defaults={"gpus_per_node": 8},
-        stages=(node,),
-        contract_hash="contract",
     )
     adapter = adapter_for_stage(node)
     work_plan = adapter.plan(plan, node)
@@ -659,11 +672,53 @@ def test_legacy_aiperf_worker_receives_explicit_security_policy(tmp_path: Path):
         node=node,
         item=work_plan.items[0],
         attempt_id="a1",
-        runner=runner,
+        runner=plan.runner,
     )
 
     assert "--trust-remote-code" in attempt.command.argv
     assert "--allow-aiperf-v011-online-tokenizer-resolution" in attempt.command.argv
+
+
+def test_legacy_aiperf_worker_keeps_security_policies_disabled_by_default(tmp_path: Path):
+    plan, node = _legacy_aiperf_plan(tmp_path, {})
+    adapter = adapter_for_stage(node)
+    default_attempt = adapter.command(
+        plan=plan,
+        node=node,
+        item=adapter.plan(plan, node).items[0],
+        attempt_id="a2",
+        runner=plan.runner,
+    )
+    assert "--trust-remote-code" not in default_attempt.command.argv
+    assert "--allow-aiperf-v011-online-tokenizer-resolution" not in default_attempt.command.argv
+
+
+@pytest.mark.parametrize(
+    ("experiment_config", "path"),
+    [
+        ({"model": {"trust_remote_code": "false"}}, "aiperf.trust_remote_code"),
+        ({"aiperf": {"trust_remote_code": "false"}}, "aiperf.trust_remote_code"),
+        (
+            {"aiperf": {"allow_aiperf_v011_online_tokenizer_resolution": "false"}},
+            "aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+        ),
+    ],
+)
+def test_legacy_aiperf_worker_rejects_non_boolean_security_policy(
+    tmp_path: Path, experiment_config: dict, path: str
+):
+    plan, node = _legacy_aiperf_plan(tmp_path, experiment_config)
+    adapter = adapter_for_stage(node)
+
+    with pytest.raises(ValueError) as error:
+        adapter.command(
+            plan=plan,
+            node=node,
+            item=adapter.plan(plan, node).items[0],
+            attempt_id="invalid",
+            runner=plan.runner,
+        )
+    assert str(error.value) == f"{path} must be a boolean"
 
 
 def test_depth_pool_packs_four_two_gpu_workers_per_node(tmp_path: Path):

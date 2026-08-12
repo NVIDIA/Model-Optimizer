@@ -56,6 +56,10 @@ def test_lightweight_package_does_not_import_torch() -> None:
 
 
 def test_pipeline_config_import_does_not_cycle_through_post_mip() -> None:
+    environment = dict(os.environ)
+    # This subprocess checks cold importability, not subprocess coverage collection.
+    environment.pop("COVERAGE_PROCESS_START", None)
+    environment.pop("COVERAGE_FILE", None)
     result = subprocess.run(
         [
             sys.executable,
@@ -64,6 +68,7 @@ def test_pipeline_config_import_does_not_cycle_through_post_mip() -> None:
             "assert callable(pipeline_config_from_path)",
         ],
         cwd=REPOSITORY_ROOT,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
