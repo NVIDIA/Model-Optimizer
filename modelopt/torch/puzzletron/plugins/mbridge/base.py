@@ -38,6 +38,8 @@ from megatron.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
 
+from ..mbridge_schema import build_mcore_heterogeneous_config
+
 # Monkey-patch: add get_config_for_layer to TransformerConfig if missing
 # (needed for non-heterogeneous teacher models in this container version)
 if not hasattr(TransformerConfig, "get_config_for_layer"):
@@ -103,7 +105,7 @@ class HeterogeneousBridgeMixin:
         parent_provider = super().provider_bridge(hf_pretrained)  # type: ignore[misc]
 
         # If no block_configs, fall back to standard (non-heterogeneous) provider.
-        if not (hasattr(hf_pretrained.config, "block_configs")):
+        if not getattr(hf_pretrained.config, "block_configs", None):
             return parent_provider
 
         provider_kwargs = dataclasses.asdict(parent_provider)
@@ -132,27 +134,8 @@ class HeterogeneousBridgeMixin:
         """Build heterogeneous layers config JSON from HF config."""
 
         hf_config_dict = json.loads(hf_config.to_json_string())
-
-        mcore_block_configs = [
-            self._convert_block_config(block) for block in hf_config_dict["block_configs"]
-        ]
-        return json.dumps({"block_configs": mcore_block_configs}, ensure_ascii=False)
-
-    def _convert_block_config(self, block: dict) -> dict:
-        """Convert a single block config from HF format to MCore format."""
-        return {
-            "attention": self._convert_attention_config(block["attention"]),
-            "ffn": self._convert_ffn_config(block["ffn"]),
-        }
-
-    def _convert_attention_config(self, attention_config: dict) -> dict:
-        """Convert attention config from HF format to MCore format."""
-        attention_config = attention_config.copy()
-        attention_config["num_query_groups"] = attention_config.pop("num_key_value_heads")
-        return attention_config
-
-    def _convert_ffn_config(self, ffn_config: dict) -> dict:
-        """Convert FFN/MLP config from HF format to MCore format."""
-        ffn_config = ffn_config.copy()
-        ffn_config["ffn_hidden_size"] = ffn_config.pop("intermediate_size")
-        return ffn_config
+        mcore_config = build_mcore_heterogeneous_config(
+            hf_config_dict["block_configs"],
+            num_attention_heads=hf_config_dict["num_attention_heads"],
+        )
+        return json.dumps(mcore_config, ensure_ascii=False)
