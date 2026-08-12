@@ -76,7 +76,7 @@ _DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
     "aiperf": ExecutionStrategy.SHARDED,
 }
 
-_POST_MIP_NODE_METADATA = {
+_POST_MIP_NODE_METADATA: dict[str, dict[str, Any]] = {
     "filter": {"kind": "selector", "accepts": {"config", "checkpoint"}},
     "manual_filter": {"kind": "selector", "accepts": {"config", "checkpoint"}},
     "materialize": {

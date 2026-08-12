@@ -118,12 +118,12 @@ def write_stage_execution_record(
 ) -> dict[str, Any]:
     """Persist immutable resolved config and artifact metadata for one execution."""
 
-    manifest_path = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
-    if manifest_path.parent.name != "manifests":
+    manifest_file = _path_without_symlinks(Path(manifest_path), description="stage manifest path")
+    if manifest_file.parent.name != "manifests":
         raise ValueError(
-            f"stage manifest must use the campaign manifests directory: {manifest_path}"
+            f"stage manifest must use the campaign manifests directory: {manifest_file}"
         )
-    root = manifest_path.parent.parent
+    root = manifest_file.parent.parent
     stage = str(manifest_payload.get("stage") or "")
     if not stage or Path(stage).name != stage or stage in {".", ".."}:
         raise ValueError(f"invalid stage identifier for execution record: {stage!r}")
@@ -235,7 +235,7 @@ def write_stage_execution_record(
             "sha256": resolved_sha256,
         },
         "stage_manifest": {
-            "path": _portable_relative_path(manifest_path, root),
+            "path": _portable_relative_path(manifest_file, root),
             "semantic_identity": manifest_payload.get("semantic_identity"),
         },
         "artifact_contract": "stage-manifest-output-pointers/v1",

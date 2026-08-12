@@ -23,7 +23,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from pathlib import Path
 from queue import Queue
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ..anymodel.model_descriptor import ModelDescriptorFactory
 from ..anymodel.registry import resolve_descriptor_from_pretrained
@@ -197,11 +197,11 @@ def _select_evaluated_candidates(
 
 
 def _with_teacher_checkpoint(
-    teacher_dir: str | Path | None, candidates: list[tuple[str, str | Path]]
+    teacher_dir: str | Path | None, candidates: Sequence[tuple[str, str | Path]]
 ) -> list[tuple[str, str | Path]]:
     """Prepend the configured teacher while keeping downstream checkpoints unique."""
     if teacher_dir is None:
-        return candidates
+        return list(candidates)
     teacher_key = str(teacher_dir)
     return [("teacher", teacher_dir)] + [
         (name, checkpoint)
@@ -302,7 +302,10 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
         )
     from ..benchmarks import run_aiperf_sweep, write_aiperf_report
 
-    puzzle_dir = Path((config.get("experiment") or {}).get("dir"))
+    experiment_dir = (config.get("experiment") or {}).get("dir")
+    if experiment_dir is None:
+        raise ValueError("AIPerf requires experiment.dir")
+    puzzle_dir = Path(experiment_dir)
     teacher_dir = (config.get("convert") or {}).get("teacher_dir")
     checkpoint_root = Path(
         stage_cfg.get(
@@ -310,7 +313,7 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
             puzzle_dir / "mip" / "puzzle_solutions" / "depth_tournament" / "solutions--checkpoints",
         )
     )
-    checkpoints = []
+    checkpoints: list[tuple[str, str | Path]] = []
     if stage_cfg.get("checkpoint_source") == "global_kd":
         checkpoints.extend(_scenario_grid_global_kd_checkpoints(puzzle_dir))
     elif stage_cfg.get("checkpoint_source") == "scenario_grid":
@@ -464,20 +467,21 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
 
     puzzle_dir = Path((config.get("experiment") or {})["dir"])
     configured = stage_cfg.get("checkpoints")
+    raw_checkpoint_entries: list[tuple[str, str | Path]]
     if configured:
-        checkpoint_entries = [(Path(path).name, Path(path)) for path in configured]
+        raw_checkpoint_entries = [(Path(path).name, Path(path)) for path in configured]
     elif stage_cfg.get("checkpoint_source") == "global_kd":
-        checkpoint_entries = _scenario_grid_global_kd_checkpoints(puzzle_dir)
+        raw_checkpoint_entries = _scenario_grid_global_kd_checkpoints(puzzle_dir)
     else:
-        checkpoint_entries = [
+        raw_checkpoint_entries = [
             (name, checkpoint)
             for name, checkpoint in _profile_solution_checkpoints(
                 puzzle_dir, stage_cfg.get("profile_id")
             )
             if name != "teacher"
         ]
-        if not checkpoint_entries:
-            checkpoint_entries = [
+        if not raw_checkpoint_entries:
+            raw_checkpoint_entries = [
                 (path.parent.name, path.parent)
                 for path in sorted(
                     (puzzle_dir / "scenarios").glob(
@@ -488,7 +492,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     teacher_dir = (config.get("convert") or {}).get("teacher_dir")
     checkpoint_entries = [
         (name, Path(checkpoint))
-        for name, checkpoint in _with_teacher_checkpoint(teacher_dir, checkpoint_entries)
+        for name, checkpoint in _with_teacher_checkpoint(teacher_dir, raw_checkpoint_entries)
     ]
     if len(checkpoint_entries) == 1 and teacher_dir is None:
         raise FileNotFoundError("exact evaluation found no scenario checkpoints")

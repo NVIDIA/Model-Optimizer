@@ -23,14 +23,21 @@ import json
 import os
 from pathlib import Path
 
-if __package__:
-    from .embedding_pipeline import finalize_replacement_scoring_diagnostics
-else:
-    from embedding_pipeline import finalize_replacement_scoring_diagnostics
-
 from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
 from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
+
+
+def finalize_replacement_scoring_diagnostics(config: dict):
+    """Preserve the finalizer seam across package and script entry points."""
+    if __package__:
+        from .embedding_pipeline import finalize_replacement_scoring_diagnostics as package_finalize
+
+        return package_finalize(config)
+    from embedding_pipeline import finalize_replacement_scoring_diagnostics as script_finalize
+
+    return script_finalize(config)
+
 
 __all__ = [
     "finalization_marker_is_current",

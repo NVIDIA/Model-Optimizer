@@ -852,7 +852,7 @@ def render_execution(
     pool_workers = int(workers.get("pool", 1))
     sharded_workers = int(workers.get("sharded", 1))
     embedding_widths = list(_mapping(experiment.get("embedding_pruning")).get("widths") or ())
-    stages = {
+    stages: dict[str, dict[str, Any]] = {
         "convert": {"strategy": "single", "instances": 1, "parallel": single_gpu},
         "tokenize_data": {"strategy": "single", "instances": 1},
         "vllm_stats": {

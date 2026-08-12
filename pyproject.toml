@@ -101,6 +101,7 @@ dev-lint = [
     "pre-commit==4.3.0",
     "ruff==0.12.11",
     "types-docutils==0.22.3.20260724",
+    "types-PyYAML==6.0.12.20260724",
 ]
 dev-docs = [
     "autodoc_pydantic>=2.1.0",

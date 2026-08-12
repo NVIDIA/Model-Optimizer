@@ -415,6 +415,17 @@ def _run_embedding_stage(
     )
 
 
+def _run_tokenize_data_stage(config: dict):
+    """Run tokenization from either the package or standalone entry point."""
+    if __package__:
+        from .tokenize_data import tokenize_data_stage as package_tokenize_data_stage
+
+        return package_tokenize_data_stage(config)
+    from tokenize_data import tokenize_data_stage as script_tokenize_data_stage
+
+    return script_tokenize_data_stage(config)
+
+
 def _run_worker(args: argparse.Namespace) -> None:
     cfg = mtpz.pipeline_config.pipeline_config_from_path(
         args.config,
@@ -431,12 +442,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     if not _stage_enabled(cfg, args.worker_stage):
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage, handlers={})
     elif args.worker_stage == "tokenize_data":
-        if __package__:
-            from .tokenize_data import tokenize_data_stage
-        else:
-            from tokenize_data import tokenize_data_stage
-
-        result = tokenize_data_stage(cfg)
+        result = _run_tokenize_data_stage(cfg)
     elif embedding_root and args.worker_stage in composite_only:
         outputs = _run_embedding_stage(
             config_path=args.config,

@@ -67,6 +67,14 @@ def _replacement_puzzle_dir(plan: CampaignPlan, width: int | None) -> Path:
     return plan.puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
 
 
+def _replacement_work_id(stage_id: str, width: int | None, width_count: int) -> str:
+    if width_count == 1:
+        return f"{stage_id}:gang"
+    if width is None:
+        raise RuntimeError("multi-width replacement scoring requires concrete widths")
+    return f"{stage_id}:width-{width:04d}"
+
+
 def _replacement_environment(plan: CampaignPlan, puzzle_dir: Path) -> dict[str, str]:
     scoring = plan.experiment_config.get("replacement_scoring") or {}
     granularity = str(scoring.get("granularity", "block"))
@@ -177,11 +185,7 @@ class PersistentPoolAdapter(WorkAdapter):
             workers_per_width, remainder = divmod(node.instances, len(widths))
             items = tuple(
                 WorkItem(
-                    work_id=(
-                        f"{node.stage_id}:gang"
-                        if len(widths) == 1
-                        else f"{node.stage_id}:width-{int(width):04d}"
-                    ),
+                    work_id=_replacement_work_id(node.stage_id, width, len(widths)),
                     stage_id=node.stage_id,
                     shard_index=index,
                     shard_count=len(widths),

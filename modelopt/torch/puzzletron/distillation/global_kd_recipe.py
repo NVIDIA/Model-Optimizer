@@ -33,7 +33,7 @@ import os
 import types
 from collections import deque
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, Callable
 
 import torch
 from nemo_automodel.components.distributed.config import DistributedSetup
@@ -205,7 +205,7 @@ def install_pp_checkpoint_state_dict_support() -> None:
                     )
             return _original(*args, options=relaxed(options), **kwargs)
 
-        non_strict._puzzletron_pp_non_strict = True
+        setattr(non_strict, "_puzzletron_pp_non_strict", True)
         setattr(stateful_wrappers, name, non_strict)
 
 
@@ -233,23 +233,23 @@ def _attach_global_kd_gdn_traces(parts, *, prefix: str, trace_backward: bool = F
             def _forward_end(_module, _args, output, *, layer_idx=layer_idx):
                 _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_forward_end")
                 if trace_backward and isinstance(output, torch.Tensor) and output.requires_grad:
-                    output.register_hook(
-                        lambda grad, layer_idx=layer_idx: (
-                            _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_backward_begin"),
-                            grad,
-                        )[1]
-                    )
+
+                    def trace_backward_begin(grad, *, layer_idx=layer_idx):
+                        _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_backward_begin")
+                        return grad
+
+                    output.register_hook(trace_backward_begin)
 
             module.register_forward_hook(_forward_end)
             if trace_backward:
                 parameter = next(module.parameters(), None)
                 if parameter is not None and parameter.requires_grad:
-                    parameter.register_hook(
-                        lambda grad, layer_idx=layer_idx: (
-                            _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_parameter_grad"),
-                            grad,
-                        )[1]
-                    )
+
+                    def trace_parameter_grad(grad, *, layer_idx=layer_idx):
+                        _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_parameter_grad")
+                        return grad
+
+                    parameter.register_hook(trace_parameter_grad)
 
 
 def _instantiate(node):
@@ -593,6 +593,23 @@ def _split_output(output, model):
 
 
 class _WeightedObjectiveMixin:
+    """Objective behavior shared by the LLM and VLM AutoModel recipe bases."""
+
+    cfg: Any
+    checkpointer: Any
+    device_mesh: Any
+    dist_env: Any
+    loss_fn: Any
+    metric_logger_train: Any
+    model_parts: Any
+    optimizer: Any
+    pp: Any
+    pp_enabled: bool
+    teacher_model: Any
+    _ce_loss_buffer: list[torch.Tensor]
+    _kd_loss_buffer: list[torch.Tensor]
+    _dp_allreduce: Callable[..., torch.Tensor]
+
     def _configure_objective(self):
         objective = self.cfg.get("objective", {})
         self.objective = {
@@ -634,7 +651,7 @@ class _WeightedObjectiveMixin:
     ):
         """Publish a completion marker only after model and optimizer DCP succeed."""
 
-        result = super().save_checkpoint(
+        result = super().save_checkpoint(  # type: ignore[misc]
             epoch,
             step,
             train_loss,
@@ -716,20 +733,23 @@ class _WeightedObjectiveMixin:
         }
         if not torch.distributed.is_initialized():
             return local
-        gathered = [None] * torch.distributed.get_world_size()
+        gathered: list[dict[str, Any] | None] = [None] * torch.distributed.get_world_size()
         torch.distributed.all_gather_object(gathered, local)
-        roles = set().union(*(item["vision_by_role"] for item in gathered))
+        observations = [item for item in gathered if item is not None]
+        if len(observations) != len(gathered):
+            raise RuntimeError("Missing global KD observability metadata from a distributed rank")
+        roles = set().union(*(item["vision_by_role"] for item in observations))
         return {
-            "vision_forward_count": sum(item["vision_forward_count"] for item in gathered),
+            "vision_forward_count": sum(item["vision_forward_count"] for item in observations),
             "vision_by_role": {
-                role: sum(item["vision_by_role"].get(role, 0) for item in gathered)
+                role: sum(item["vision_by_role"].get(role, 0) for item in observations)
                 for role in sorted(roles)
             },
             "vision_output_checksums": sorted(
-                checksum for item in gathered for checksum in item["vision_output_checksums"]
+                checksum for item in observations for checksum in item["vision_output_checksums"]
             ),
             "media_input_checksums": sorted(
-                set(checksum for item in gathered for checksum in item["media_input_checksums"])
+                set(checksum for item in observations for checksum in item["media_input_checksums"])
             ),
         }
 
@@ -812,7 +832,7 @@ class _WeightedObjectiveMixin:
             return None
         if getattr(self, "_puzzletron_global_kd_domain", None) == "llm":
             self._remove_text_inactive_optimizer_parameters()
-        return super().load_checkpoint(restore_from or "LATEST")
+        return super().load_checkpoint(restore_from or "LATEST")  # type: ignore[misc]
 
     def _install_gradient_norm_observers(self):
         self._gradient_squared = {
@@ -1219,8 +1239,12 @@ class _WeightedObjectiveMixin:
                     phase = f"mtp_depth_{depth}_chunk_{start}_{stop}"
                     _trace_global_kd_phase(f"{phase}_student_head_begin")
                     if student_is_hidden:
+                        if student_head is None:
+                            raise RuntimeError("MTP hidden-state projection is missing its lm_head")
                         s_chunk = _align_dtensor_to_module_mesh(s_chunk, student_head)
-                    s_logits = student_head(s_chunk) if student_is_hidden else s_chunk
+                        s_logits = student_head(s_chunk)
+                    else:
+                        s_logits = s_chunk
                     _trace_global_kd_phase(f"{phase}_student_head_end")
                     zero = self._local_zero(s_logits)
                     _trace_global_kd_phase(f"{phase}_ce_begin")
