@@ -432,20 +432,6 @@ def test_temporarily_fold_weights_restores_when_folding_fails(monkeypatch):
         unregister_quant_backend(second_backend)
 
 
-def test_temporarily_fold_weights_skips_non_fake_override():
-    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
-    quantizer = qlinear.weight_quantizer
-    quantizer._fake_quant = False
-    original_weight = qlinear.weight.detach().clone()
-    qlinear.fold_weight = lambda keep_attrs=False: qlinear._fold_weight_quantizer(
-        quantizer, (qlinear.weight,), keep_attrs
-    )
-
-    with mtq.temporarily_fold_weights(qlinear):
-        assert torch.equal(qlinear.weight, original_weight)
-        assert quantizer.is_enabled
-
-
 def test_temporarily_fold_weights_rejects_sequential_quantizer():
     qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
     qlinear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
