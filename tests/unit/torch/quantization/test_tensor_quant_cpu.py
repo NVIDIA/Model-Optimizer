@@ -442,20 +442,13 @@ def test_temporarily_fold_weights_skips_non_fake_override():
         assert quantizer.is_enabled
 
 
-def test_temporarily_fold_weights_without_snapshot_leaves_model_folded(monkeypatch):
-    calls = []
-    backend_name = "test_temporary_fold_without_snapshot"
-    qlinear = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
-    original_weight = qlinear.weight.detach().clone()
-    try:
-        with mtq.temporarily_fold_weights(qlinear, snapshot_weights=False):
-            assert not torch.equal(qlinear.weight, original_weight)
-            assert not qlinear.weight_quantizer.is_enabled
+def test_temporarily_fold_weights_rejects_sequential_quantizer():
+    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    qlinear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
 
-        assert not torch.equal(qlinear.weight, original_weight)
-        assert not qlinear.weight_quantizer.is_enabled
-    finally:
-        unregister_quant_backend(backend_name)
+    with pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"):
+        with mtq.temporarily_fold_weights(qlinear):
+            pass
 
 
 WINT4INT8_CFG = {

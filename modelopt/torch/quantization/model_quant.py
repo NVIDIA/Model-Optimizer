@@ -41,7 +41,7 @@ from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher,
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
-from .nn import QuantModule, TensorQuantizer
+from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import is_quantized
 
 __all__ = [
@@ -739,20 +739,19 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
 def temporarily_fold_weights(
     model: nn.Module,
     snapshot_device: torch.device | str | None = None,
-    snapshot_weights: bool = True,
 ):
     """Temporarily fold fake-quant weights for a frozen inference region.
 
-    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. When
-    ``snapshot_weights=True``, enabled fake-quant weights and their quantizer runtime state are
-    restored on exit, including after an exception. Weights are restored in place so optimizer and
-    distributed references remain valid.
+    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. Enabled
+    fake-quant weights and their quantizer runtime state are restored on exit, including after an
+    exception. Weights are restored in place so optimizer and distributed references remain valid.
 
     This context is intended for repeated no-gradient forwards with no optimizer step, such as
     log-probability recomputation over several microbatches. It retains calibration attributes
     while folded; a retained weight ``pre_quant_scale`` is inactive inside the context because its
     value is already baked into the temporary weight. Sharing a weight or weight quantizer across
-    multiple :class:`QuantModule` instances is not supported.
+    multiple :class:`QuantModule` instances and using :class:`SequentialQuantizer` are not
+    supported.
 
     Example::
 
@@ -763,8 +762,6 @@ def temporarily_fold_weights(
         model: Quantized model whose weights will be temporarily folded.
         snapshot_device: Device used to store parameter snapshots. ``None`` keeps each snapshot
             on the parameter's device; ``"cpu"`` avoids the additional accelerator memory.
-        snapshot_weights: Snapshot and restore folded weights and quantizer state. If ``False``,
-            the model remains folded after the context exits and folding errors are not rolled back.
     """
     active_pairs = []
     for module in model.modules():
@@ -773,6 +770,10 @@ def temporarily_fold_weights(
         for weight, quantizer in module.iter_weights_for_calibration():
             if not isinstance(weight, torch.Tensor):
                 continue
+            if isinstance(quantizer, SequentialQuantizer):
+                raise NotImplementedError(
+                    "temporarily_fold_weights does not support SequentialQuantizer"
+                )
             local_weight = weight.to_local() if hasattr(weight, "to_local") else weight
             if not (
                 isinstance(quantizer, TensorQuantizer)
@@ -784,40 +785,38 @@ def temporarily_fold_weights(
 
     weight_snapshots = {}
     quantizer_states = {}
-    if snapshot_weights:
-        for weight, quantizer in active_pairs:
-            weight_id = id(weight)
-            if weight_id not in weight_snapshots:
-                weight_snapshots[weight_id] = (
-                    weight,
-                    weight.detach().clone()
-                    if snapshot_device is None
-                    else weight.detach().to(snapshot_device, copy=True),
-                )
-            quantizer_states.setdefault(
-                quantizer,
-                (
-                    quantizer._disabled,
-                    quantizer._rotate,
-                    quantizer._enable_pre_quant_scale,
-                    quantizer._input_dtype,
-                ),
+    for weight, quantizer in active_pairs:
+        weight_id = id(weight)
+        if weight_id not in weight_snapshots:
+            weight_snapshots[weight_id] = (
+                weight,
+                weight.detach().clone()
+                if snapshot_device is None
+                else weight.detach().to(snapshot_device, copy=True),
             )
+        quantizer_states.setdefault(
+            quantizer,
+            (
+                quantizer._disabled,
+                quantizer._rotate,
+                quantizer._enable_pre_quant_scale,
+                quantizer._input_dtype,
+            ),
+        )
     try:
         fold_weight(model, keep_attrs=True)
         yield
     finally:
-        if snapshot_weights:
-            with torch.no_grad():
-                for weight, snapshot in weight_snapshots.values():
-                    weight.copy_(snapshot)
-            for quantizer, state in quantizer_states.items():
-                (
-                    quantizer._disabled,
-                    quantizer._rotate,
-                    quantizer._enable_pre_quant_scale,
-                    quantizer._input_dtype,
-                ) = state
+        with torch.no_grad():
+            for weight, snapshot in weight_snapshots.values():
+                weight.copy_(snapshot)
+        for quantizer, state in quantizer_states.items():
+            (
+                quantizer._disabled,
+                quantizer._rotate,
+                quantizer._enable_pre_quant_scale,
+                quantizer._input_dtype,
+            ) = state
 
 
 @torch.no_grad()

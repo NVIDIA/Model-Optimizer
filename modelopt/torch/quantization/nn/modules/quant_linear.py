@@ -167,6 +167,7 @@ class SVDQuantLinear(QuantLinearConvBase):
         should_fold = (
             hasattr(self, "weight_quantizer")
             and hasattr(self, "weight")
+            and isinstance(self.weight, torch.Tensor)
             and isinstance(self.weight_quantizer, TensorQuantizer)
             and self.weight_quantizer.fake_quant
             and self.weight_quantizer.is_enabled
