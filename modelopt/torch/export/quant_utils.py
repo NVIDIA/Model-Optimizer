@@ -23,6 +23,7 @@ from warnings import warn
 
 import torch
 import torch.nn as nn
+from safetensors.torch import storage_ptr, storage_size
 
 from modelopt import __version__
 from modelopt.torch.quantization.model_calib import (
@@ -1131,45 +1132,75 @@ def postprocess_state_dict(
         for key in post_state_dict:
             if "lora" in key and key not in keys_to_delete:
                 keys_to_delete.append(key)
-    # Name-based tied-weight dedup (authoritative; address-independent). Drops a
-    # declared-alias key when its canonical counterpart is present. Works under the
-    # FSDP full-state-dict gather / offload, where tied tensors are materialized at
-    # distinct addresses so the address pass below cannot see the tie.
-    if tied_map is not None:
-        alias_prefixes = tied_map.alias_prefix_pairs()
-        if alias_prefixes:
-            # Dedup each tie ATOMICALLY per alias prefix: drop the group only when EVERY key
-            # has a canonical counterpart. Tied sides can differ in quant state (alias
-            # quantized, canonical not), so dropping just the keys with a twin would orphan
-            # weight_scale/input_scale on a gone weight; the all-or-nothing rule also spares
-            # an untied sibling under the same prefix.
-            alias_groups: dict[str, list[tuple[str, str | None]]] = {}
-            for key in post_state_dict:
-                a_base = tied_map.matched_alias_prefix(key, alias_prefixes)
-                if a_base is None:
-                    continue
-                canonical_key = tied_map.canonical_state_dict_key(key, alias_prefixes)
-                alias_groups.setdefault(a_base, []).append((key, canonical_key))
+    # Name-based tied-weight dedup (authoritative; address-independent). For each declared
+    # {alias: canonical} tie, drop the alias's OWN exported keys when the canonical twin is
+    # present. Expansion is per-parameter, NOT per-module-prefix, so an untied sibling under
+    # the same module (an independent bias, or an untied projection of a partially-tied
+    # experts container) is never swept up. Works under the FSDP full-state-dict gather /
+    # offload, where tied tensors are materialized at distinct addresses.
+    if tied_map is not None and tied_map.alias_to_canonical:
+        # A quantized weight exports as these keys; a tie on ``X.weight`` covers exactly them.
+        weight_suffixes = ("weight", "weight_scale", "weight_scale_2", "input_scale")
+        moe_projs = {"gate_up_proj", "up_proj", "down_proj"}
 
-            # No bidirectional/chain guard is needed: ties are id-groups, so if A<->B and
-            # B<->C were both shared, A, B and C would be one group -- a canonical is never
-            # also an alias of another group, so alias->canonical->alias chains cannot form.
-            for a_base, members in alias_groups.items():
-                # Atomic completeness: every alias key must have its canonical counterpart present.
-                missing = [k for k, ck in members if ck is None or ck not in post_state_dict]
-                if missing:
-                    logger.warning(
-                        f"Skipping name-based dedup of alias prefix '{a_base}': tied sides have "
-                        f"mismatched keys (e.g. '{missing[0]}' has no canonical counterpart, likely "
-                        f"differing quantization state); keeping both sides to avoid orphaned tensors."
-                    )
-                    continue
-                for k, _ in members:
-                    keys_to_delete.append(k)
+        # group name -> [(alias_key, canonical_key), ...]; dropped atomically (all or none).
+        alias_groups: dict[str, list[tuple[str, str]]] = {}
+        # Fused-MoE containers: (alias_prefix, canonical_prefix) -> set of tied projection names.
+        moe_containers: dict[tuple[str, str], set[str]] = {}
+
+        for alias, canonical in tied_map.alias_to_canonical.items():
+            a_pre, _, a_name = alias.rpartition(".")
+            c_pre, _, c_name = canonical.rpartition(".")
+            if a_name == c_name == "weight":
+                # Dense tie: expand to the weight and its own scale companions only.
+                members = [
+                    (f"{a_pre}.{s}" if a_pre else s, f"{c_pre}.{s}" if c_pre else s)
+                    for s in weight_suffixes
+                ]
+                members = [(ak, ck) for ak, ck in members if ak in post_state_dict]
+                if members:
+                    alias_groups[alias] = members
+            elif a_name in moe_projs and a_name == c_name:
+                # Fused-MoE projection: export SPLITS the 3-D container into per-expert keys
+                # not present in the declaration, so they are matched by container prefix --
+                # but only when the container is FULLY tied (see below).
+                moe_containers.setdefault((a_pre, c_pre), set()).add(a_name)
+            elif alias in post_state_dict:
+                alias_groups[alias] = [(alias, canonical)]
+
+        for (a_pre, c_pre), projs in moe_containers.items():
+            # Rewrite the container's per-expert keys only when it is fully tied (a gate/up
+            # projection AND down_proj declared), so a partially-tied container never drops
+            # its independent projection.
+            if "down_proj" not in projs or not projs & {"gate_up_proj", "up_proj"}:
+                continue
+            prefix = f"{a_pre}." if a_pre else ""
+            members = [
+                (key, c_pre + key[len(a_pre) :])
+                for key in post_state_dict
+                if key.startswith(prefix)
+            ]
+            if members:
+                alias_groups[a_pre] = members
+
+        # Atomic drop: remove a group only when every alias key has its canonical twin present,
+        # so mixed quant state (alias quantized, canonical not) never orphans scales. No chain
+        # guard needed: ties are id-groups, so a canonical is never also an alias.
+        for gk, members in alias_groups.items():
+            missing = [ak for ak, ck in members if ck not in post_state_dict]
+            if missing:
                 logger.warning(
-                    f"Tied weight (declared): dropping {len(members)} alias key(s) under "
-                    f"'{a_base}'; canonical '{alias_prefixes[a_base]}' kept."
+                    f"Skipping name-based dedup of '{gk}': tied sides have mismatched keys "
+                    f"(e.g. '{missing[0]}' has no canonical counterpart, likely differing "
+                    f"quantization state); keeping both sides to avoid orphaned tensors."
                 )
+                continue
+            for ak, _ in members:
+                keys_to_delete.append(ak)
+            logger.warning(
+                f"Tied weight (declared): dropping {len(members)} alias key(s) for '{gk}'; "
+                f"canonical kept."
+            )
 
     # Address backstop: collapse two keys that still point at the SAME storage.
     #
@@ -1181,8 +1212,6 @@ def postprocess_state_dict(
     # than crash the write; keying on extent (numel*element_size) would split that pair, and
     # two live tensors can't share a data_ptr without sharing storage, so it never
     # false-collapses independents. Meta (zero-ptr) tensors and already-marked aliases are skipped.
-    from safetensors.torch import storage_ptr, storage_size
-
     already_marked = set(keys_to_delete)
     seen_tensors = {}
     for key, value in post_state_dict.items():
