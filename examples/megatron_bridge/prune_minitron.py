@@ -105,6 +105,25 @@ def _hf_config_has_mtp(hf_cfg) -> bool:
     )
 
 
+# HF names the shared expert size with or without the ``moe_`` prefix depending on the model
+# (e.g. Qwen3.5-MoE uses ``shared_expert_intermediate_size``).
+_SHARED_EXPERT_SIZE_FIELDS = (
+    "moe_shared_expert_intermediate_size",
+    "shared_expert_intermediate_size",
+)
+
+
+def _is_deepseek_style_moe(text_cfg) -> bool:
+    """Whether the shared expert is sized as ``n_shared_experts * moe_intermediate_size``.
+
+    Such configs have no explicit shared expert size field, so only integer multiples of the
+    (also prunable) routed expert size are representable in HF.
+    """
+    return hasattr(text_cfg, "n_shared_experts") and not any(
+        hasattr(text_cfg, field) for field in _SHARED_EXPERT_SIZE_FIELDS
+    )
+
+
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
@@ -544,6 +563,17 @@ def main(args: argparse.Namespace):
         pruning_config["max_width_pruning"] = args.max_width_pruning
         pruning_config["max_depth_pruning"] = args.max_depth_pruning
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
+        # DeepSeek-style MoE configs size the shared expert as n_shared_experts * moe_intermediate_size,
+        # so only candidates whose shared size is a multiple of the routed one can be saved to HF.
+        src_hf_cfg = bridge.hf_pretrained.config
+        if _is_deepseek_style_moe(getattr(src_hf_cfg, "text_config", src_hf_cfg)):
+            warn_rank_0(
+                "DeepSeek-style MoE config detected: restricting the search to candidates whose "
+                "moe_shared_expert_intermediate_size is a multiple of moe_ffn_hidden_size."
+            )
+            pruning_config["candidate_filter"] = lambda cfg: (
+                cfg["moe_shared_expert_intermediate_size"] % cfg["moe_ffn_hidden_size"] == 0
+            )
         pruning_config["top_k"] = args.top_k
         # memory_mb constraint requires batch_size and seq_length
         pruning_config["batch_size"] = args.inference_batch_size
@@ -610,24 +640,25 @@ def main(args: argparse.Namespace):
             text_cfg.mamba_head_dim = mcore_cfg.mamba_head_dim
         if hasattr(text_cfg, "moe_intermediate_size"):
             text_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
-        # HF names this field with or without the ``moe_`` prefix depending on the model
-        # (e.g. Qwen3.5-MoE uses ``shared_expert_intermediate_size``).
-        has_explicit_shared_size = False
-        for shared_expert_field in (
-            "moe_shared_expert_intermediate_size",
-            "shared_expert_intermediate_size",
-        ):
+        for shared_expert_field in _SHARED_EXPERT_SIZE_FIELDS:
             if hasattr(text_cfg, shared_expert_field):
                 setattr(
                     text_cfg, shared_expert_field, mcore_cfg.moe_shared_expert_intermediate_size
                 )
-                has_explicit_shared_size = True
         if hasattr(text_cfg, "num_experts"):
             text_cfg.num_experts = mcore_cfg.num_moe_experts
         if hasattr(text_cfg, "n_routed_experts"):
             text_cfg.n_routed_experts = mcore_cfg.num_moe_experts
-        # n_shared_experts is a fixed count; only DeepSeek-style configs re-derive it from sizes.
-        if hasattr(text_cfg, "n_shared_experts") and not has_explicit_shared_size:
+        # n_shared_experts is a fixed count; only DeepSeek-style configs record the pruned shared
+        # expert size through it and must re-derive it. candidate_filter keeps the search divisible,
+        # so only a --prune_export_config the filter never saw can violate this.
+        if _is_deepseek_style_moe(text_cfg):
+            if mcore_cfg.moe_shared_expert_intermediate_size % mcore_cfg.moe_ffn_hidden_size:
+                raise ValueError(
+                    f"{mcore_cfg.moe_shared_expert_intermediate_size=} must be a multiple of "
+                    f"{mcore_cfg.moe_ffn_hidden_size=} for this config, which stores the shared "
+                    "expert size as n_shared_experts * moe_intermediate_size. "
+                )
             text_cfg.n_shared_experts = (
                 mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
             )
@@ -677,18 +708,25 @@ def main(args: argparse.Namespace):
             if hasattr(text_cfg, field):
                 setattr(text_cfg, field, 0)
 
-        # Config-only bridge (hf_keys=None) so the embedding task is not dropped when transformers'
-        # saved key differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
+        # Preferred path for all non-VLMs: a config-only bridge (hf_keys=None) keeps the embedding
+        # task when transformers' saved key differs from the bridge mapping (NemotronH's
+        # backbone.embedding vs ...embeddings), and builds no dummy model.
         # VLMs and older builds fall back to a dummy HF model that supplies the expected HF key names.
-        if (
-            hasattr(AutoBridge, "from_hf_config")
-            and hasattr(AutoBridge, "from_auto_config")
-            and not is_vlm
-        ):
-            AutoBridge.from_hf_config(hf_cfg).save_hf_pretrained(
+        if hasattr(AutoBridge, "from_hf_config") and not is_vlm:
+            pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
+            # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
+            # from_hf_config can't infer it since AutoConfig consumes the kwarg.
+            pruned_bridge.trust_remote_code = args.trust_remote_code
+            pruned_bridge.save_hf_pretrained(
                 model, args.output_hf_path, source_path=args.hf_model_name_or_path
             )
         else:
+            if not is_vlm:
+                warn_rank_0(
+                    "Megatron-Bridge lacks config-only HF export (needs nemo:26.08+); falling back "
+                    "to the dummy-model path, which cannot round-trip a pruned native NemotronH "
+                    "config. Use transformers<5 or a newer container if the save fails."
+                )
             dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
             dummy_model_cls.from_config(
                 hf_cfg, trust_remote_code=args.trust_remote_code

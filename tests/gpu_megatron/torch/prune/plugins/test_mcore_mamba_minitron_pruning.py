@@ -446,13 +446,32 @@ def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
     )
     memory_threshold = baseline_memory_mb * 0.7
 
+    def _shared_is_multiple_of_routed(ss_cfg):
+        return ss_cfg["moe_shared_expert_intermediate_size"] % ss_cfg["moe_ffn_hidden_size"] == 0
+
     constraints = {"memory_mb": memory_threshold}
     config = {
         **_base_nas_config(ckpt_dir),
         "seq_length": sequence_length,
         "batch_size": 1,
+        # moe_shared_expert_intermediate_size is skipped, so the filter sees it via the searcher's
+        # model config fallback: only routed sizes that divide it survive.
+        "candidate_filter": _shared_is_multiple_of_routed,
     }
-    model, searcher_state = prune_minitron(model, constraints, config, _NAS_CHANNEL_DIVISOR)
+    stdout_capture = io.StringIO()
+    with contextlib.redirect_stdout(stdout_capture):
+        model, searcher_state = prune_minitron(model, constraints, config, _NAS_CHANNEL_DIVISOR)
+
+    shared_size = _NAS_MODEL_KWARGS["moe_shared_expert_intermediate_size"]
+    (candidates,) = searcher_state["all_candidates_per_constraint"].values()
+    assert all(shared_size % c.ss_config["moe_ffn_hidden_size"] == 0 for c in candidates)
+    if rank == 0:
+        # Half of the 512-combo search space: moe_ffn_hidden_size is [12, 16] and only 16 divides the
+        # (skipped, so unpruned) moe_shared_expert_intermediate_size of 16.
+        output = stdout_capture.getvalue()
+        match = re.search(r"Rejected (\d+) candidates", output)
+        assert match, f"candidate_filter rejected nothing:\n{output}"
+        assert int(match.group(1)) == 256, output
 
     pruned_params, _ = mcore_param_count(
         model.config,
@@ -465,17 +484,19 @@ def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
     sorted_layers = _get_sorted_layers(searcher_state)
     # fmt: off
     if sorted_layers == [1, 4, 3, 2]:
+        # Every candidate has moe_ffn_hidden_size 16: candidate_filter drops the 12s since they do
+        # not divide the (skipped, so unpruned) moe_shared_expert_intermediate_size of 16.
         expected_top_k = [
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, {"memory_mb": 0.0226287841796875},    114],  # noqa: E501
             [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"memory_mb": 0.022613525390625},     124],  # noqa: E501
             [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, {"memory_mb": 0.022556304931640625},  126],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, {"memory_mb": 0.022541046142578125},  113],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    112],  # noqa: E501
             [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    116],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    113],  # noqa: E501
             [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    117],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    114],  # noqa: E501
             [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    118],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, {"memory_mb": 0.0225067138671875},    119],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 28}, {"memory_mb": 0.022480010986328125},  119],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 28}, {"memory_mb": 0.022430419921875},     120],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 6, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 28}, {"memory_mb": 0.022373199462890625},  122],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 12, "num_moe_experts": 8, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 24}, {"memory_mb": 0.022247314453125},     116],  # noqa: E501
         ]
     else:
         raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers=}")

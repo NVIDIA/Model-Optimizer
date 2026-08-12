@@ -42,9 +42,8 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
             id="qwen3",
         ),
         # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid.
-        # MTP heads are enabled so the run covers dropping them during calibration. HF export of a
-        # native NemotronH needs the config-only bridge (nemo:26.08+); the older dummy-model path
-        # does not round-trip the pruned config.
+        # MTP heads are enabled so the run covers dropping them during calibration. HF export needs
+        # the config-only bridge (nemo:26.08+), so this is verified locally until CI bumps off 26.06.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_nemotron_h_dir(
                 tmp_path,
@@ -60,6 +59,10 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 reason="Native NemotronH HF export needs config-only bridge (nemo:26.08+)",
             ),
         ),
+        # TODO: Add a DeepSeek-V3 case covering candidate_filter end-to-end once MLA pruning
+        # supports the Q-LoRA up-projection (Megatron-Bridge's DeepSeek mapping requires
+        # q_lora_rank, which _DynamicMLASelfAttention does not handle). candidate_filter itself is
+        # covered by tests/gpu_megatron/torch/prune/plugins/test_mcore_mamba_minitron_pruning.py.
     ],
 )
 def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):

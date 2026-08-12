@@ -255,6 +255,9 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
+    - `candidate_filter`: Callable rejecting candidate configs the caller cannot use, e.g. ones
+        their checkpoint format cannot represent (default: None). Receives every supported hparam,
+        with non-searched ones filled in from the model config.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
         Only used with the ``memory_mb`` constraint.
@@ -280,6 +283,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
             "hparams_to_skip": None,
+            "candidate_filter": None,
             "top_k": 10,
             # Memory footprint config (only used with memory_mb constraint)
             "seq_length": 4096,
@@ -521,6 +525,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         max_width_pruning = self.config["max_width_pruning"]
         max_depth_pruning = self.config["max_depth_pruning"]
         hparams_to_skip = self.config["hparams_to_skip"]
+        candidate_filter = self.config["candidate_filter"]
         top_k = self.config["top_k"]
         constraints_str = ", ".join(f"{self._fmt_metric(v, k)} {k}" for k, v in max_metrics.items())
         print_rank_0(f"\nSearching for the best pruned architecture under {constraints_str}...")
@@ -540,6 +545,17 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 2. Perform grid-search over the search space to find subnets fitting all constraints
+        # Hparams are searched independently, so candidate_filter is the only place a caller can
+        # reject invalid *combinations*. Non-searched hparams keep their model config value.
+        base_config = {
+            hp: getattr(self.model.config, hp)
+            for hp in SUPPORTED_HPARAMS
+            if hasattr(self.model.config, hp)
+        }
+
+        def accept_candidate(ss_config: dict) -> bool:
+            return candidate_filter is None or candidate_filter({**base_config, **ss_config})
+
         constraints_cache_key = tuple((k, max_metrics[k]) for k in active_metric_keys)
         if constraints_cache_key not in self.all_candidates_per_constraint:
             max_num_layers = self.model.get_hparam("num_layers").max
@@ -550,11 +566,15 @@ class MCoreMinitronSearcher(BaseSearcher):
                 hparams_to_skip,
             )
             selected = []
+            num_filtered = 0
             for ss_config in tqdm(
                 search_space_configs,
                 desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
+                if not accept_candidate(ss_config):
+                    num_filtered += 1
+                    continue
                 candidate_metrics = self._compute_candidate_metrics(ss_config, max_num_layers)
                 if all(candidate_metrics[k] <= max_metrics[k] for k in active_metric_keys):
                     selected.append(
@@ -562,6 +582,8 @@ class MCoreMinitronSearcher(BaseSearcher):
                             ss_config, {k: candidate_metrics[k] for k in active_metric_keys}, None
                         )
                     )
+            if num_filtered:
+                print_rank_0(f"Rejected {num_filtered} candidates via candidate_filter.")
             assert len(selected) > 0, "No subnets found fitting the constraints!"
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
             self.all_candidates_per_constraint[constraints_cache_key] = sorted(
@@ -570,6 +592,14 @@ class MCoreMinitronSearcher(BaseSearcher):
             self.save_search_checkpoint(verbose=True)
         else:
             print_rank_0(f"\nUsing top {top_k} candidates from checkpoint")
+            # Candidates are cached by constraints only, so re-apply the filter in case the
+            # checkpoint was written by a run with a different one (or none).
+            cached = self.all_candidates_per_constraint[constraints_cache_key]
+            kept = [c for c in cached if accept_candidate(c.ss_config)]
+            if len(kept) < len(cached):
+                print_rank_0(f"Rejected {len(cached) - len(kept)} checkpoint candidates.")
+                assert kept, "candidate_filter rejected every candidate from the checkpoint!"
+                self.all_candidates_per_constraint[constraints_cache_key] = kept
         top_k_candidates = self.all_candidates_per_constraint[constraints_cache_key][:top_k]
 
         table = Table(title=f"Top {top_k} Candidates", show_header=True, header_style="bold")
