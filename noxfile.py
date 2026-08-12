@@ -375,6 +375,8 @@ def _run_mypy(session, checkout, paths, cache_dir):
 
 
 def _run_changed_file_mypy(session, from_ref, to_ref):
+    """Run mypy on the base and head snapshots and report only new diagnostics."""
+
     changed_file_output = session.run(
         "git",
         "diff",

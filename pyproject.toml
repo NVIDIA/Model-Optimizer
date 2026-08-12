@@ -307,7 +307,7 @@ skips = [
 # Show a short test summary info for all except passed tests with -ra flag
 # print execution time for 50 slowest tests and generate coverage reports
 addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=50 --strict-markers"
-pythonpath = ["tests/"]
+pythonpath = ["tests/", "."]
 # Apply per-test timeouts (see tests/conftest.py) to the test call only, not fixture setup/teardown
 timeout_func_only = true
 markers = [

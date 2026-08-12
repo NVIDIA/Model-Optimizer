@@ -17,9 +17,13 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from contextlib import nullcontext
 from pathlib import Path
+
+import pytest
+import yaml
 
 from noxfile import (
     _ChangedPythonFile,
@@ -60,6 +64,11 @@ def test_parse_changed_python_files_tracks_paths_across_statuses():
         _ChangedPythonFile(base_path="old.py", head_path="renamed.py"),
         _ChangedPythonFile(base_path=None, head_path="copied.py"),
     )
+
+
+def test_parse_changed_python_files_rejects_unsupported_status():
+    with pytest.raises(ValueError, match="Unsupported git name-status line"):
+        _parse_changed_python_files("D\tdeleted.py")
 
 
 def test_new_mypy_diagnostics_preserves_inherited_errors_after_line_shift():
@@ -134,9 +143,9 @@ def test_merge_parent_avoids_target_only_files_selected_by_stale_event_base(tmp_
     (tmp_path / "target_only.py").write_text("target = True\n", encoding="utf-8")
     _git(tmp_path, "add", "target_only.py")
     _git(tmp_path, "commit", "-m", "advance target")
-    current_base = _git(tmp_path, "rev-parse", "HEAD")
     _git(tmp_path, "merge", "--no-ff", "topic", "-m", "synthetic pull request merge")
     merge_head = _git(tmp_path, "rev-parse", "HEAD")
+    current_base = _git(tmp_path, "rev-parse", f"{merge_head}^1")
 
     stale_output = _git(
         tmp_path,
@@ -164,16 +173,36 @@ def test_merge_parent_avoids_target_only_files_selected_by_stale_event_base(tmp_
 
 
 def test_code_quality_uses_checked_out_pull_request_merge_parent():
-    workflow = (REPOSITORY_ROOT / ".github/workflows/code_quality.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load(
+        (REPOSITORY_ROOT / ".github/workflows/code_quality.yml").read_text(encoding="utf-8")
+    )
+    changed_file_step = next(
+        step
+        for step in workflow["jobs"]["code-quality"]["steps"]
+        if step.get("name") == "Run changed-file code quality checks"
+    )
+    command = shlex.split(changed_file_step["run"])
 
-    assert "nox -s pre_commit_diff -- HEAD^1 HEAD" in workflow
-    assert "github.event.pull_request.base.sha" not in workflow
+    assert command[-6:] == ["nox", "-s", "pre_commit_diff", "--", "HEAD^1", "HEAD"]
+    assert "github.event.pull_request.base.sha" not in changed_file_step["run"]
 
 
 def test_mypy_hook_pins_stubs_and_disables_automatic_installation():
-    config = (REPOSITORY_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    config = yaml.safe_load(
+        (REPOSITORY_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    )
+    hook = next(
+        hook
+        for repository in config["repos"]
+        for hook in repository["hooks"]
+        if hook["id"] == "mypy"
+    )
+    dependencies = hook["additional_dependencies"]
 
-    assert "args: [--no-install-types, --interactive]" in config
-    assert "nox==2026.4.10" in config
-    assert "types-docutils==0.22.3.20260724" in config
-    assert "types-PyYAML==6.0.12.20260724" in config
+    assert hook["args"] == ["--no-install-types", "--interactive"]
+    assert {dependency.split("==", maxsplit=1)[0] for dependency in dependencies} == {
+        "nox",
+        "types-docutils",
+        "types-PyYAML",
+    }
+    assert all(dependency.count("==") == 1 for dependency in dependencies)
