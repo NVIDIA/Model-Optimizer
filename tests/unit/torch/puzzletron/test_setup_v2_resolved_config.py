@@ -21,12 +21,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
 import puzzletron_setup.v2.bundle as bundle_module
-from puzzletron_setup.bundle import BundleValidation
 from puzzletron_setup.v2.bundle import (
     build_bundles_v2,
     render_execution_v2,
@@ -35,6 +35,9 @@ from puzzletron_setup.v2.bundle import (
 )
 from puzzletron_setup.v2.resolved import resolve_campaign_config
 from puzzletron_setup.v2.state import WizardState
+
+if TYPE_CHECKING:
+    from puzzletron_setup.bundle import BundleValidation
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
