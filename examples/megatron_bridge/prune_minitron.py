@@ -118,7 +118,7 @@ def _is_deepseek_style_moe(text_cfg) -> bool:
 
     Such configs can only represent a shared expert size that is a multiple of the routed one.
     """
-    return hasattr(text_cfg, "n_shared_experts") and not any(
+    return getattr(text_cfg, "n_shared_experts", None) is not None and not any(
         hasattr(text_cfg, field) for field in _SHARED_EXPERT_SIZE_FIELDS
     )
 
@@ -620,7 +620,10 @@ def main(args: argparse.Namespace):
         print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
 
         # Build the pruned HF config field-by-field from the pruned Megatron config, then stream weights.
-        bridge.hf_pretrained.save_artifacts(args.output_hf_path)
+        # Rank 0 only: a late write from another rank would leave config.json stale.
+        if dist.is_master():
+            bridge.hf_pretrained.save_artifacts(args.output_hf_path)
+        dist.barrier()
         hf_cfg = AutoConfig.from_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
         )
@@ -707,10 +710,8 @@ def main(args: argparse.Namespace):
             if hasattr(text_cfg, field):
                 setattr(text_cfg, field, 0)
 
-        # A config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
-        # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings). Only
-        # hybrids need it; elsewhere it drops pruned config fields (e.g. Qwen3's hidden_size), so
-        # everything else uses a dummy HF model to supply the expected key names.
+        # Config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
+        # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
         use_config_only_export = (
             hasattr(AutoBridge, "from_hf_config")
             and isinstance(provider, _HYBRID_PROVIDER_TYPES)

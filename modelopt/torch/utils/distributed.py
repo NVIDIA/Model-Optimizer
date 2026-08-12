@@ -218,7 +218,8 @@ def cleanup():
 
     The barrier is skipped when unwinding from an error, since peers may be blocked in a collective
     this rank will never reach. ``SystemExit`` is treated as a clean exit (every rank reaches it).
-    Prefer :func:`abort` on error paths.
+    That is not sufficient on its own -- ``destroy_process_group`` below blocks for the same reason
+    -- so error paths must call :func:`abort` before reaching this ``finally``.
     """
     if is_initialized():
         exc = sys.exc_info()[1]

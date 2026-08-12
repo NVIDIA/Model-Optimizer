@@ -258,7 +258,8 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
     - `candidate_filter`: Callable rejecting candidate configs the caller cannot use, e.g. ones
         their checkpoint format cannot represent (default: None). Receives every supported hparam,
-        with non-searched ones filled in from the model config. Like `score_func`, it is assumed
+        with non-searched ones filled in from the model config (unset ones are omitted, so a
+        filter using them raises `KeyError`). Like `score_func`, it is assumed
         unchanged when resuming from a `checkpoint`, since rejected candidates are not cached.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
@@ -556,12 +557,11 @@ class MCoreMinitronSearcher(BaseSearcher):
                 max_depth_pruning,
                 hparams_to_skip,
             )
-            # Hparams are searched independently, so this is the only place to reject invalid
-            # *combinations*. Non-searched hparams keep their model config value.
+            # Only place to reject invalid hparam *combinations*; unsearched ones come from config.
             base_config = {
                 hp: getattr(self.model.config, hp)
                 for hp in SUPPORTED_HPARAMS
-                if hasattr(self.model.config, hp)
+                if getattr(self.model.config, hp, None) is not None
             }
             selected = []
             num_filtered = 0
@@ -584,7 +584,9 @@ class MCoreMinitronSearcher(BaseSearcher):
                     )
             if num_filtered:
                 print_rank_0(f"Rejected {num_filtered} candidates via candidate_filter.")
-            assert len(selected) > 0, "No subnets found fitting the constraints!"
+            assert len(selected) > 0, "No subnets found fitting the constraints!" + (
+                f" candidate_filter rejected all {num_filtered} candidates." if num_filtered else ""
+            )
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
             self.all_candidates_per_constraint[constraints_cache_key] = sorted(
                 selected, key=lambda x: x.metrics[primary_key], reverse=True
