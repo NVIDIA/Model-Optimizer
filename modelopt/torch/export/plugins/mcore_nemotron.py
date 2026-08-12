@@ -155,9 +155,26 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     # Grouped local experts (TEGroupedMLP: fused per-expert weights)
     "experts.linear_fc1": GroupedMLPSlicing("backbone.layers.{}.mixer.experts.{{}}.up_proj"),
     "experts.linear_fc2": GroupedMLPSlicing("backbone.layers.{}.mixer.experts.{{}}.down_proj"),
-    # MTP
+    # MTP predictor projections (outer MultiTokenPredictionLayer)
     "mtp.enorm": NameRemapping("mtp.layers.{}.enorm."),
     "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm."),
     "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj."),
     "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm."),
+    # MTP inner attention / MoE layers. Structurally identical to the backbone hybrid
+    # layers, so these mirror the base rules above with the `mtp.layers.{}` prefix; the
+    # `mtp.` namespace is aliased onto the standard rule keys by _get_mtp_state_dict.
+    "mtp.input_layernorm": NameRemapping("mtp.layers.{}.norm."),
+    "mtp.fused_norm": NameRemapping("mtp.layers.{}.norm.weight"),
+    "mtp.linear_qkv": QKVSlicing("mtp.layers.{}.mixer."),
+    "mtp.linear_proj": NameRemapping("mtp.layers.{}.mixer.o_proj."),
+    "mtp.pre_mlp_layernorm": NameRemapping("mtp.layers.{}.norm."),
+    "mtp.router": NameRemapping(
+        "mtp.layers.{}.mixer.gate.", {"mapping": {"expert_bias": "e_score_correction_bias"}}
+    ),
+    "mtp.shared_experts.linear_fc1": NameRemapping("mtp.layers.{}.mixer.shared_experts.up_proj."),
+    "mtp.shared_experts.linear_fc2": NameRemapping("mtp.layers.{}.mixer.shared_experts.down_proj."),
+    "mtp.local_experts.linear_fc1": NameRemapping("mtp.layers.{}.mixer.experts.{}.up_proj."),
+    "mtp.local_experts.linear_fc2": NameRemapping("mtp.layers.{}.mixer.experts.{}.down_proj."),
+    "mtp.experts.linear_fc1": GroupedMLPSlicing("mtp.layers.{}.mixer.experts.{{}}.up_proj"),
+    "mtp.experts.linear_fc2": GroupedMLPSlicing("mtp.layers.{}.mixer.experts.{{}}.down_proj"),
 }
