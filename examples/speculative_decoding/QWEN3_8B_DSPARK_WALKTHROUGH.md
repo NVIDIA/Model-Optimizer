@@ -45,18 +45,31 @@ the launcher YAMLs below only override data and schedule fields.
   [launcher docs](../../tools/launcher/docs/configuration.md)).
 - `Qwen/Qwen3-8B` present under the launcher's `/hf-local/` mount.
 - Two container images: a vLLM image (serve + training) and a TensorRT-LLM image
-  (dataset build). Both are pinned in the YAMLs.
+  (dataset build). Both are pinned in the YAMLs. If your cluster's enroot cannot
+  pull `nvcr.io` (it resolves against Docker Hub and 401s, surfacing only as
+  `spank_pyxis.so: task_init() failed`), point `container:` at a local `.sqsh`.
+- An `HF_TOKEN` with access to the prompt corpus — the dataset Step 1 ships with
+  is gated, and without a token it fails as `DatasetNotFoundError`, which reads
+  like a wrong name rather than a missing credential.
 
 Set your cluster environment once:
 
 ```bash
-export SLURM_HOST=localhost          # run on the login node
+export SLURM_HOST=$(hostname)        # NOT localhost: the launcher stages files
+                                     # over SSH even when it submits locally
 export SLURM_ACCOUNT=<your_account>
 export SLURM_PARTITION=<your_partition>
 export SLURM_HF_LOCAL=<hf_models_dir>
-export SLURM_JOB_DIR=<experiments_dir>
+export SLURM_JOB_DIR=<experiments_dir>   # must already exist
 export NEMORUN_HOME=$PWD
+export HF_TOKEN=<your_hf_token>
+
+mkdir -p $SLURM_JOB_DIR
+cd tools/launcher && uv pip install -e .   # launch.py imports modelopt_launcher
 ```
+
+Pass `identity=<ssh_key>` on every `launch.py` call (the key the staging SSH
+uses). All commands below omit it for brevity.
 
 ---
 
@@ -74,7 +87,10 @@ runs a Slurm **array job**. Each task starts its own `vllm serve` on one node an
 calls [`common/query.py`](../../tools/launcher/common/query.py) on its own shard
 of the dataset. `query.py` replays each sample's user turns, generates a fresh
 assistant reply, **discards the original assistant turns**, and writes
-`train-{shard}-{total}.jsonl`.
+`shard_{id}.jsonl` plus a `shard_{id}.done` sentinel.
+
+Budget for this: a shard is tens of thousands of samples at 1-2 samples/s, so
+**hours per shard**. Size the array and the job time limit accordingly.
 
 The knobs worth knowing:
 
@@ -83,21 +99,26 @@ The knobs worth knowing:
 | `--data` | Input prompt corpus (HF id or local path). Ships pointing at `nvidia/Speculative-Decoding-Multilingual-Prompt-v2`. |
 | `--save` | Output dir. Set `output_dir` in `global_vars`. |
 | `--num-shards` / `array` | Shard count and the array range. Keep them consistent. |
-| `--num-proc` | Per-worker request concurrency. |
+| `--num-proc` | Per-worker request concurrency. Defaults to 32; not set in the YAML. |
 | `--tensor-parallel-size` | Must match `gpus_per_node`. |
 
 Practical notes, mostly learned the hard way:
 
-- **Resumable by construction.** A shard whose output file already exists is
-  skipped, so a requeued or re-dispatched job picks up where it stopped. Write
-  `--save` to a persistent mount, not to scratch.
+- **Resume is per whole shard.** A shard is skipped only when *both* its
+  `.jsonl` and its `.done` sentinel exist; output is written once at the end. An
+  interrupted shard leaves nothing behind and restarts from zero. Write `--save`
+  to a persistent mount, not to scratch.
 - **Concurrency vs. yield.** Pushing `--num-proc` very high can *lower* total
   yield: requests start timing out under the stampede and those samples come out
   user-only. If you see a yield dip, lower it before raising it.
 - **Reasoning models need context headroom.** With `--max-model-len` too tight,
   any prompt longer than the generation cap gets a 400 back and is dropped. This
   loss is *systematic* — it removes the longest, hardest prompts and quietly
-  biases the corpus short. Keep `max-model-len >= max_prompt + max_output`.
+  biases the corpus short. Keep `max-model-len >= max_prompt + max_output`. The
+  shipped 4096 is *not* enough headroom for this corpus at a 1024-token cap;
+  raise it, or accept the drop. Grep the job log for `Error code: 400` to size
+  it — those 400s are also mangled by an unrelated `APIStatusError` unpickling
+  bug that kills a result-handler thread without stopping the run.
 - **Check yield before training.** Count records that actually have an assistant
   turn. A corpus that is silently 60% prompt-only will train, and the result will
   just be mysteriously bad.
@@ -155,9 +176,12 @@ uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_streaming_dspark.yaml --dryrun
 ### The fields that actually matter
 
 **Capture ids.** `EAGLE_CAPTURE_IDS` selects which target layers the serve
-captures. The draft consumes 5 evenly-spaced layers plus the final hidden state.
-For Qwen3-8B (36 layers), `build_target_layer_ids(36,5) = [1,9,17,25,33]`; vLLM's
-ids are those **+1**, plus the final layer:
+captures. The draft consumes one evenly-spaced layer per draft layer, plus the
+final hidden state — so this list is tied to
+`dflash_architecture_config.num_hidden_layers` and must be recomputed if you
+change draft depth. For Qwen3-8B (36 layers) with 5 draft layers,
+`build_target_layer_ids(36,5) = [1,9,17,25,33]`; vLLM's ids are those **+1**,
+plus the final layer:
 
 ```text
 EAGLE_CAPTURE_IDS: "[2,10,18,26,34,36]"
@@ -234,9 +258,12 @@ without applying the Markov head, so its number describes the backbone rather
 than the model you trained. Acceptance length comes from the vLLM smoke test or
 the offline [specdec_bench](../specdec_bench/) harness.
 
-`task_2` needs a vLLM build with DSpark support. If your image predates it,
-startup fails on the `--speculative-config` method name; pin a newer nightly, or
-set `skip: true` and use specdec_bench on `/scratchspace/export`.
+`task_2` needs a vLLM build whose DSpark path supports a non-DeepSeek backbone.
+On an older image the failure is not a clean rejection of the method name: the
+loader routes into the DeepSeek-V4 DSpark model and dies mid-load on a config
+field the Qwen3 drafter has no reason to carry (`AttributeError: 'Qwen3Config'
+object has no attribute 'hc_mult'`). Pin a newer nightly, or set `skip: true`
+and use specdec_bench on `/scratchspace/export`.
 
 Reading the numbers: training accuracy, acceptance length, and accepted-fraction
 are three different things and are easy to confuse. Acceptance length is the
@@ -248,9 +275,10 @@ deployment-facing one.
 
 | Symptom | Likely cause |
 |---|---|
-| Training hangs before step 1, no error | Corpus schema issue — a prompt-only `messages` field can stall the streaming dataset silently. Inspect one record. |
+| Training starts but every batch is dropped | Corpus schema — entries without a usable `conversations`/`messages` list are skipped silently. Inspect one record. |
 | Loss curve healthy, acceptance length plateaus | Wrong final capture id (see above). |
 | Trainer OOM on the serve node | Lower `SERVE_GPU_MEM_UTIL`, `SERVE_MAX_MODEL_LEN`, `SERVE_MAX_NUM_SEQS`. |
+| Trainer stuck at "waiting for serve address" | The serve died. Its log is `/scratchspace/vllm_serve.<n>.log`, not the task log — read that for the real error. |
 | Serve never becomes ready | Raise `SERVE_READY_TIMEOUT`; large models load slowly on cold cache. |
 | `export FOO=value` splitting | A space in an env value. Remove it. |
 | Synthesis yield well under 100% | Lower `--num-proc`, or raise `--max-model-len`. |

@@ -74,7 +74,8 @@ pipeline:
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
-      - data.mode=streaming
+      # Streaming is selected by data.streaming_server_url, which the launcher
+      # script injects once the serve is up — not by a data.mode= key.
       - data.data_path=/scratchspace/data/train.jsonl
       - training.output_dir=/scratchspace/dspark
       - training.training_seq_len=4096
@@ -98,10 +99,11 @@ pipeline:
       # The vLLM serve container has no tensorboard -> trainer init crash.
       - training.report_to=none
       # Semi-AR generation block; must divide training_seq_len. dspark.yaml ships
-      # 16 (the Kimi/M3 runs use 8); loss_decay_factor is the matching gamma.
+      # 16 (the Kimi/M3 runs use 8). No dflash_loss_decay_factor override here:
+      # dflash_loss_objective defaults to 'dpace', which derives per-position
+      # weights from draft confidence and ignores the decay gamma outright.
       - dflash.dflash_block_size=16
       - dflash.dflash_num_anchors=512
-      - dflash.dflash_loss_decay_factor=7
       # Qwen3 has no native mask token; 151669 is an unused id.
       - dflash.dflash_mask_token_id=151669
       - dflash.dflash_architecture_config.num_hidden_layers=5
