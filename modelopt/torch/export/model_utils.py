@@ -294,23 +294,15 @@ class TiedWeightMap:
     def container_group_key(self, container_name: str, first_proj_attr: str) -> str | None:
         """Return a group key for a fused-experts container, or ``None`` if untied.
 
-        The tie is declared on the container's 3-D projection Parameters (e.g.
-        ``…experts.gate_up_proj``); resolving the first projection and stripping its
+        The tie is on the container's 3-D projection Parameter (e.g.
+        ``…experts.gate_up_proj``); the canonical is the *same* projection on another
+        container (they are one id-group), so it carries the same suffix. Stripping that
         suffix yields one key shared by all of the container's projections.
         """
         gk = self.group_key(f"{container_name}.{first_proj_attr}")
         if gk is None:
             return None
-        suffix = f".{first_proj_attr}"
-        if not gk.endswith(suffix):
-            # A misresolved canonical (a differently-named canonical projection, or a
-            # mangled re.sub fallback) would make removesuffix a silent no-op, returning a
-            # full parameter name as the container key. That key won't match the one from
-            # the container's other projection, so sync_tied_input_amax would put the two
-            # tied containers in different groups and skip the merge -- under-covering the
-            # retained input_scale. Degrade to "untied" instead of grouping incorrectly.
-            return None
-        return gk.removesuffix(suffix)
+        return gk.removesuffix(f".{first_proj_attr}")
 
     def alias_prefix_pairs(self) -> dict[str, str]:
         """Map each alias *module* prefix to its canonical *module* prefix.
