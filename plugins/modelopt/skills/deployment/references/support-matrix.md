@@ -3,8 +3,12 @@
 ## Unified HF Checkpoint — Framework Compatibility
 
 **Do not maintain a copy of the matrix here.** The single source of truth is
-`docs/source/deployment/3_unified_hf.rst` ("Model Support Matrix"), and every validated entry in it
-is backed by `tests/examples/hf_ptq/test_deploy.py`.
+`docs/source/deployment/3_unified_hf.rst` ("Model Support Matrix"), and every entry in it is drawn
+from `tests/examples/hf_ptq/test_deploy.py`.
+
+Read that doc's legend before reporting a model as supported: the cases are marked `release` and do
+not run on PR CI, and each is a load-and-generate smoke check on the text path — so an entry is
+declared coverage, not proof the combination serves correctly.
 
 To answer "is model X supported on framework Y", read one of those two files — `test_deploy.py` is
 the more precise answer, since it also carries the exact checkpoint, tensor-parallel size, and
@@ -40,11 +44,11 @@ Nemotron Omni), EAGLE3/Medusa drafters, and diffusion models.
 
 ## Models not in the matrix
 
-The matrix covers officially validated combinations, not the full set of what will run. For unlisted models:
+The matrix covers the combinations modelopt tracks, not the full set of what will run. For unlisted models:
 
 1. **Check the framework's own docs** — vLLM and SGLang support many HuggingFace models natively. Use WebSearch to check `vllm supported models` or `sglang supported models`.
 2. **Try it** — if the model uses standard `nn.Linear` layers and has `hf_quant_config.json`, vLLM/SGLang will likely work with `--quantization modelopt`.
-3. **Ask the user** — if unsure, ask: "This model isn't in the validated support matrix. Would you like to try deploying it anyway?"
+3. **Ask the user** — if unsure, ask: "This model isn't in the support matrix. Would you like to try deploying it anyway?"
 
 ## Notes
 

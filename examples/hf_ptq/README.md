@@ -587,16 +587,20 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 
 ### Unified HF Checkpoint Deployment Model Support Matrix
 
-The deployment support matrix — which model families and quantization formats are validated on
+The deployment support matrix — which model families and quantization formats are covered on
 TRT-LLM, vLLM, and SGLang, including vision-language models, speculative decoding drafters, and
 diffusion models — lives in the documentation so there is a single copy to keep current:
 
 **[Unified HF Checkpoint → Model Support Matrix](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html#model-support-matrix)**
 
-Every validated entry there is backed by [`tests/examples/hf_ptq/test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py),
-which loads the exported checkpoint in each framework and runs generation. That file is also the
-place to look for the exact checkpoint, tensor-parallel size, and minimum SM version behind each
-entry.
+Each entry there is drawn from [`tests/examples/hf_ptq/test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py),
+which loads the exported checkpoint in each framework and generates from short text prompts. That
+file is also the place to look for the exact checkpoint, tensor-parallel size, and minimum SM
+version behind each entry.
+
+> *Note: those cases are marked `release` and run out-of-band — no workflow currently passes
+> `--run-release` — and each is a load-and-generate smoke check on the text path. Read the legend in
+> the docs before treating an entry as verified support.*
 
 > *Note: the matrix records what modelopt validates, not the full set of what will run. vLLM, SGLang,
 > and TRT-LLM load unified HF checkpoints generically, so unlisted models frequently deploy without
