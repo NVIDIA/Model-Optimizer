@@ -158,3 +158,15 @@ def test_qwen3p5_0p8b_runner_requires_an_explicit_site_contract() -> None:
     assert runner.contract.container.startswith("REPLACE_WITH_")
     assert runner.contract.container_mounts is not None
     assert runner.contract.container_mounts.startswith("REPLACE_WITH_")
+
+
+def test_qwen3p5_0p8b_plan_uses_worker_visible_experiment_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = _compile_plan(monkeypatch, tmp_path)
+    expected = Path(plan.runner.contract.repository) / RUN_PATH.resolve().relative_to(
+        REPOSITORY_ROOT.resolve()
+    )
+
+    assert plan.experiment_config_path == str(expected)
