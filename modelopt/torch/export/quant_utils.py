@@ -24,7 +24,6 @@ from warnings import warn
 
 import torch
 import torch.nn as nn
-from safetensors.torch import storage_ptr, storage_size
 
 from modelopt import __version__
 from modelopt.torch.quantization.model_calib import (
@@ -1228,54 +1227,32 @@ def postprocess_state_dict(
                 f"canonical kept."
             )
 
-    # Address backstop: break any remaining physical STORAGE share the name pass didn't handle.
-    #
-    # Declared ties are handled above and quantized weights pack into distinct storage, so what
-    # can reach here is an UNDECLARED share still aliasing one storage: either the same tensor
-    # under two names (an unquantized tied embedding), or two DISTINCT views of one storage
-    # (unquantized fused-expert slices at different offsets). safetensors save_file rejects ANY
-    # two keys sharing storage, so every share must be broken -- but only a genuine duplicate may
-    # be DROPPED; a distinct view must be CLONED (own storage) or its data is lost. This mirrors
-    # safetensors' own save_model: drop exact duplicates, clone distinct views. Meta (zero-ptr)
-    # tensors and already-marked declared aliases are skipped.
-    already_marked = set(keys_to_delete)
-    first_on_storage: dict = {}
-    for key, value in post_state_dict.items():
-        if key in already_marked:
-            continue
-        if not isinstance(value, torch.Tensor) or value.data_ptr() == 0:
-            continue
-        sid = (value.device, storage_ptr(value), storage_size(value))
-        first = first_on_storage.get(sid)
-        if first is None:
-            first_on_storage[sid] = (key, value)
-            continue
-        fk, fv = first
-        if (
-            value.shape == fv.shape
-            and value.stride() == fv.stride()
-            and value.storage_offset() == fv.storage_offset()
-            and value.dtype == fv.dtype
-        ):
-            # Same tensor under two names -> a true duplicate -> drop.
-            keys_to_delete.append(key)
-            logger.warning(
-                f"Shared-storage duplicate: '{key}' is identical to '{fk}'; dropping '{key}'. "
-                f"Expected only for an undeclared unquantized share; a quantized weight here means "
-                f"its tie was not declared and was not caught by the name-based dedup."
-            )
-        else:
-            # Distinct view of the same storage -> clone to break the share (no crash, no data loss).
-            post_state_dict[key] = value.clone()
-            logger.warning(
-                f"'{key}' shares storage with '{fk}' but is a distinct view; cloning it so both "
-                f"can be serialized without losing data."
-            )
-
-    # dict.fromkeys dedups while preserving order, so a key marked by both passes is
-    # deleted once (avoids a KeyError on the second delete).
+    # Apply the name-based (and quant / LoRA) drops first, so the address pass below runs on the
+    # already-reduced dict and never re-processes a declared alias. dict.fromkeys dedups while
+    # preserving order (a key marked twice is deleted once).
     for key in dict.fromkeys(keys_to_delete):
         post_state_dict.pop(key, None)
+
+    # Address backstop (pre-existing postprocess dedup, unchanged): drop any remaining keys that
+    # still share a data_ptr. Declared ties are already gone by name above, so this only catches
+    # an UNDECLARED same-address share (an unquantized/unpacked tied weight). A quantized tie packs
+    # to distinct storage and never reaches here. Zero-pointer (meta) tensors are left for
+    # serialization to handle.
+    seen_tensors: dict = {}
+    backstop_delete = []
+    for key, value in post_state_dict.items():
+        if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
+            tensor_id = value.data_ptr()
+            if tensor_id in seen_tensors:
+                backstop_delete.append(key)
+                logger.warning(
+                    f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "
+                    f"Removing duplicate '{key}' from the exported state dict."
+                )
+            else:
+                seen_tensors[tensor_id] = key
+    for key in backstop_delete:
+        del post_state_dict[key]
 
     # Surface an un-enumerated companion: if a dense tie was dropped but a non-`bias` key still
     # remains under its module prefix, it is likely a new quantizer companion missing from
