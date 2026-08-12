@@ -34,57 +34,13 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_setup.v2.wizard import run_wizard_v2
 
 __all__ = ["TinyQwenCampaign", "build_tiny_qwen_campaign"]
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from pathlib import Path
 
     from puzzletron_orchestrator.schema import CampaignPlan
-    from puzzletron_setup.v2.prompts import PromptChoice
-
-
-class _DefaultsBackend:
-    """Select resolved guided defaults while supplying the campaign directory."""
-
-    def __init__(self, campaign_dir: Path) -> None:
-        self.campaign_dir = campaign_dir
-        self.answered: set[str] = set()
-
-    def text(self, message: str, default: str) -> Any:
-        if message == "Campaign directory:":
-            self.answered.add(message)
-            return str(self.campaign_dir)
-        return default
-
-    def select(
-        self,
-        message: str,
-        choices: Sequence[PromptChoice],
-        default: Any,
-    ) -> Any:
-        if message in {"Model:", "Dataset:"}:
-            defaults = [choice.value for choice in choices if choice.title.startswith("Default —")]
-            if len(defaults) != 1:
-                raise AssertionError(
-                    f"expected one resolved default for {message!r}, found {len(defaults)}"
-                )
-            self.answered.add(message)
-            return defaults[0]
-        if default is not None:
-            return default
-        return next(choice.value for choice in choices if choice.disabled is None)
-
-    def checkbox(
-        self,
-        message: str,
-        choices: Sequence[PromptChoice],
-        defaults: Sequence[Any],
-    ) -> Any:
-        del message, choices
-        return list(defaults)
 
 
 @dataclass(frozen=True)
@@ -287,16 +243,30 @@ def build_tiny_qwen_campaign(
         )
     )
 
-    backend = _DefaultsBackend(campaign_dir)
-    generated = run_wizard_v2(
-        resume=None,
-        defaults_path=defaults_path,
-        backend=backend,
+    setup = subprocess.run(
+        [
+            sys.executable,
+            str(project_root / "examples/puzzletron/puzzletron_setup_v2.py"),
+            "--defaults",
+            str(defaults_path),
+            "--campaign-dir",
+            str(campaign_dir),
+            "--profile",
+            "balanced",
+            "--non-interactive",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    expected_prompts = {"Campaign directory:", "Model:", "Dataset:"}
-    if backend.answered != expected_prompts:
-        raise AssertionError(f"wizard prompt contract changed; answered {sorted(backend.answered)}")
-    smoke_bundle = generated / "smoke"
+    if setup.returncode != 0:
+        raise AssertionError(
+            "Tiny Qwen Puzzletron setup failed.\n"
+            f"stdout:\n{setup.stdout[-12000:]}\n"
+            f"stderr:\n{setup.stderr[-12000:]}"
+        )
+    smoke_bundle = campaign_dir / "smoke"
     experiment = yaml.safe_load((smoke_bundle / "experiment.yaml").read_text())
     flows = dict((experiment.get("post_mip") or {}).get("flows") or {})
     if len(flows) != 1:

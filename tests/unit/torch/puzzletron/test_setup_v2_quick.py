@@ -36,6 +36,7 @@ from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
 from puzzletron_setup.v2.prompts import (
     BACK,
     InteractiveBackend,
+    NonInteractiveBackend,
     PromptChoice,
     ScriptedBackend,
     _bind_escape_back,
@@ -44,7 +45,6 @@ from puzzletron_setup.v2.session import WizardSession
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
     _CUSTOM_DATA_SOURCE,
-    _CUSTOM_MODEL_SOURCE,
     _PUZZLE_KD_DATA_SOURCE,
     _acquisition_sample_requirements,
     _fresh_state,
@@ -364,6 +364,17 @@ def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
     assert _parser().parse_args(["--full"]).full is True
 
 
+def test_non_interactive_backend_uses_semantic_defaults() -> None:
+    backend = NonInteractiveBackend()
+    choices = [PromptChoice("First", "first"), PromptChoice("Second", "second")]
+
+    assert backend.text("Path:", "/resolved/path") == "/resolved/path"
+    assert backend.select("Choice:", choices, "second") == "second"
+    assert backend.checkbox("Choices:", choices, ["first"]) == ["first"]
+    with pytest.raises(SetupError, match="requires a default"):
+        backend.text("Path:", "")
+
+
 def test_cli_forwards_full_to_the_wizard(monkeypatch, tmp_path):
     captured = {}
 
@@ -375,6 +386,37 @@ def test_cli_forwards_full_to_the_wizard(monkeypatch, tmp_path):
 
     assert cli_module.main(["--full"]) == 0
     assert captured["full"] is True
+
+
+def test_cli_forwards_non_interactive_campaign_contract(monkeypatch, tmp_path):
+    captured = {}
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text("schema_version: 1\n")
+    campaign = tmp_path / "campaign"
+
+    def run_wizard_v2(**kwargs):
+        captured.update(kwargs)
+        return campaign
+
+    monkeypatch.setattr(wizard_module, "run_wizard_v2", run_wizard_v2)
+
+    assert (
+        cli_module.main(
+            [
+                "--defaults",
+                str(defaults),
+                "--campaign-dir",
+                str(campaign),
+                "--profile",
+                "smoke",
+                "--non-interactive",
+            ]
+        )
+        == 0
+    )
+    assert captured["campaign_dir"] == campaign
+    assert captured["setup_profile"] == "smoke"
+    assert isinstance(captured["backend"], NonInteractiveBackend)
 
 
 @pytest.mark.parametrize("full", [False, True])
@@ -872,29 +914,38 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         "infer_dataset_modality",
         lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
     )
-    backend = ScriptedBackend(
-        [
-            "smoke",
-            str(campaign),
-            _CUSTOM_MODEL_SOURCE,
-            str(model_path),
-            _CUSTOM_DATA_SOURCE,
-            str(dataset),
-            "defaults",
-            "/worker/modelopt",
-            "/worker/venv",
-            True,
-        ]
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "model": {"source": str(model_path)},
+                "data": {
+                    "source": str(dataset),
+                    "modality": "text",
+                    "layout": "fixed",
+                    "sequence_length": 32,
+                },
+                "infrastructure": {
+                    "execution_contract": {
+                        "repository": "/worker/modelopt",
+                        "venv": "/worker/venv",
+                    }
+                },
+            },
+            sort_keys=False,
+        )
     )
 
     result = wizard_module.run_wizard_v2(
         resume=None,
-        defaults_path=None,
-        backend=backend,
+        defaults_path=defaults,
+        backend=NonInteractiveBackend(),
+        campaign_dir=campaign,
+        setup_profile="smoke",
     )
 
     assert result == campaign.resolve()
-    assert backend.remaining == 0
     assert (campaign / "smoke" / "experiment.yaml").is_file()
     assert (campaign / "production" / "experiment.yaml").is_file()
     assert (campaign / "resolved_defaults.yaml").is_file()

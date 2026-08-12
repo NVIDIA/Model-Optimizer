@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BACK",
     "InteractiveBackend",
+    "NonInteractiveBackend",
     "PromptBackend",
     "PromptChoice",
     "ScriptedBackend",
@@ -200,6 +201,60 @@ class InteractiveBackend:
         if values is BACK:
             return BACK
         return list(values)
+
+
+class NonInteractiveBackend:
+    """Accept resolved prompt defaults without depending on prompt ordering or labels."""
+
+    def text(self, message: str, default: str) -> Any:
+        """Return a non-empty resolved text default."""
+        if not str(default).strip():
+            raise SetupError(f"Non-interactive setup requires a default for {message!r}.")
+        return default
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        default: Any,
+    ) -> Any:
+        """Return the enabled resolved choice default."""
+        enabled = [choice for choice in choices if choice.disabled is None]
+        if default is None:
+            if len(enabled) == 1:
+                return enabled[0].value
+            raise SetupError(f"Non-interactive setup requires a default for {message!r}.")
+        selected = next((choice for choice in choices if choice.value == default), None)
+        if selected is None:
+            raise SetupError(
+                f"Non-interactive default {default!r} is not a choice for {message!r}."
+            )
+        if selected.disabled is not None:
+            raise SetupError(
+                f"Non-interactive default {default!r} is unavailable for {message!r}: "
+                f"{selected.disabled}"
+            )
+        return selected.value
+
+    def checkbox(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        defaults: Sequence[Any],
+    ) -> Any:
+        """Return the enabled resolved checkbox defaults."""
+        for value in defaults:
+            choice = next((item for item in choices if item.value == value), None)
+            if choice is None:
+                raise SetupError(
+                    f"Non-interactive default {value!r} is not a choice for {message!r}."
+                )
+            if choice.disabled is not None:
+                raise SetupError(
+                    f"Non-interactive default {value!r} is unavailable for {message!r}: "
+                    f"{choice.disabled}"
+                )
+        return list(defaults)
 
 
 class ScriptedBackend:

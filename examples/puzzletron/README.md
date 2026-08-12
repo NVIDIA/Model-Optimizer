@@ -85,6 +85,21 @@ The defaults file is loaded only when passed explicitly and takes precedence
 over the selected profile. To expose every per-section and nested setting, use
 the advanced flow explicitly:
 
+Automation can use the same setup entry point without answering prompts. The
+defaults file must provide every required value that has no built-in default:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py \
+  --defaults /path/to/setup-v2-defaults.yaml \
+  --campaign-dir /path/to/campaign \
+  --profile smoke \
+  --non-interactive
+```
+
+Non-interactive setup fails instead of guessing when a required answer has no
+resolved default. It generates and validates the same smoke and production
+bundles as the interactive wizard.
+
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py --full
 ```
