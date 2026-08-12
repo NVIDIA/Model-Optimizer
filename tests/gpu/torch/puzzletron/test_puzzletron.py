@@ -378,9 +378,10 @@ def _assert_post_mip_and_final_checkpoint(
         parent = ledger.revisions[revision.parent_revision_id]
         block_configs = _json(checkpoint / "config.json")["block_configs"]
         assert block_configs
-        assert block_configs == _json(Path(parent.artifact["checkpoint"]) / "config.json")[
-            "block_configs"
-        ]
+        assert (
+            block_configs
+            == _json(Path(parent.artifact["checkpoint"]) / "config.json")["block_configs"]
+        )
         kd_paths.extend(
             [
                 summary_path,
@@ -478,9 +479,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
         widths = _nested_values(block_config, "intermediate_size")
         assert len(widths) == 1
         selected_ffn_widths.append(int(widths[0]))
-    per_layer_config = (selected_config.get("text_config") or selected_config)[
-        "per_layer_config"
-    ]
+    per_layer_config = (selected_config.get("text_config") or selected_config)["per_layer_config"]
     assert [
         int(
             per_layer_config.get(str(index), {}).get(
