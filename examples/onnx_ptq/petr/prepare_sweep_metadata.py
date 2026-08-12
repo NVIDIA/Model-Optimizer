@@ -52,10 +52,7 @@ num_sweep = 5
 
 info_path = args.output or os.path.join(data_root, f"mmdet3d_nuscenes_30f_infos_{info_prefix}.pkl")
 key_infos = pickle.load(open(os.path.join(data_root, f"nuscenes_infos_{info_prefix}.pkl"), "rb"))
-if info_prefix == "test":
-    nuscenes_version = "v1.0-test"
-else:
-    nuscenes_version = "v1.0-trainval"
+nuscenes_version = "v1.0-test" if info_prefix == "test" else "v1.0-trainval"
 nuscenes = NuScenes(nuscenes_version, data_root)
 
 
@@ -105,10 +102,9 @@ def add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
     intrinsic = np.array(sweep_cam["cam_intrinsic"])
     viewpad = np.eye(4)
     viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic
-    lidar2img_rt = viewpad @ lidar2cam_rt.T
     sweep_cam["intrinsics"] = viewpad.astype(np.float32)
     sweep_cam["extrinsics"] = lidar2cam_rt.astype(np.float32)
-    sweep_cam["lidar2img"] = lidar2img_rt.astype(np.float32)
+    sweep_cam["lidar2img"] = (viewpad @ lidar2cam_rt.T).astype(np.float32)
 
     pop_keys = [
         "ego2global_translation",
