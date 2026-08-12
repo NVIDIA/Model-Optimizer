@@ -27,7 +27,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
+import yaml  # type: ignore[import-untyped, unused-ignore]
 
 from puzzletron_setup import SetupError
 from puzzletron_setup.bundle import (
@@ -235,8 +235,15 @@ def _render_experiment_v2(
     if config.post_mip_flows_configured:
         rendered["post_mip"] = {"flows": deepcopy(flows)}
 
+    batch_mirrors = {
+        "pruning.micro_batch_size": "data.calibration.micro_batch_size",
+        "replacement_scoring.micro_batch_size": "data.replacement_scoring.micro_batch_size",
+    }
     for dotted, value in config.stage_batches.items():
         _set_dotted(rendered, str(dotted), value)
+        mirrored = batch_mirrors.get(str(dotted))
+        if mirrored is not None:
+            _set_dotted(rendered, mirrored, value)
     parallel_paths = {
         "depth_importance": "depth_importance.automodel.parallel",
         "width_importance": "pruning.automodel.parallel",

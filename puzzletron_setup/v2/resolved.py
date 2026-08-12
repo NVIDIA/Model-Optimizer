@@ -603,13 +603,7 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     payload = deepcopy(state.payload)
     collections = _mapping(payload.get("collections"))
     field_records = {
-        str(path): {
-            "value": deepcopy(record.value),
-            "source": str(record.source),
-            "requested": deepcopy(record.requested),
-            "effective": deepcopy(record.effective),
-        }
-        for path, record in state.records().items()
+        str(path): record.to_dict() for path, record in state.records().items()
     }
 
     def effective(path: str, default: Any = _USE_BUILTIN_DEFAULT) -> Any:
