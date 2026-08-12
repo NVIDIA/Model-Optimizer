@@ -135,7 +135,7 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
     score_tensors = [
         tensor
         for score_file in score_files
-        for tensor in _tensor_values(torch.load(score_file, map_location="cpu", weights_only=False))
+        for tensor in _tensor_values(torch.load(score_file, map_location="cpu", weights_only=True))
     ]
     assert score_tensors
     assert all(tensor.numel() and torch.isfinite(tensor).all() for tensor in score_tensors)
@@ -510,7 +510,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     }
     durable_paths = [*manifest_paths, *pruning_paths, *post_paths]
     before_resume = _artifact_digests(durable_paths)
-    resumed = campaign.run()
+    resumed = campaign.run(timeout=300)
     resumed_result = campaign.require_success(resumed)
     assert tuple(resumed_result["completed"]) == stage_ids
     assert resumed_result["failed_stages"] == []

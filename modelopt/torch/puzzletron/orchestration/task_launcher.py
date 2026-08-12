@@ -272,7 +272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         binding=binding,
         gpus_per_task=args.gpus_per_task,
     )
-    os.execvpe(command[0], command, env)
+    # Replace this launcher with the already compiled task argv.
+    os.execvpe(command[0], command, env)  # nosec B606
     return 0
 
 

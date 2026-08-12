@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import json
-import subprocess
+
+# Aggregation uses an explicit argv without a shell.
+import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
 
@@ -261,7 +263,8 @@ class PostMIPAdapter(WorkAdapter):
         ]
         for override in plan.overrides:
             argv.extend(["--override", override])
-        result = subprocess.run(
+        # The argv starts with the fixed Python entry point and never uses a shell.
+        result = subprocess.run(  # nosec B603
             argv,
             cwd=repo,
             capture_output=True,
