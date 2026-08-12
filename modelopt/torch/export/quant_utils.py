@@ -1150,19 +1150,10 @@ def postprocess_state_dict(
                 canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
                 alias_groups.setdefault(a_base, []).append((key, canonical_key))
 
+            # No bidirectional/chain guard is needed: ties are id-groups, so if A<->B and
+            # B<->C were both shared, A, B and C would be one group -- a canonical is never
+            # also an alias of another group, so alias->canonical->alias chains cannot form.
             for a_base, members in alias_groups.items():
-                # Bidirectional tie A<->B: the canonical side is itself a declared alias, so
-                # both sides would be marked and the checkpoint would contain neither. Keep both.
-                if any(
-                    ck is not None
-                    and resolver.canonical_state_dict_key(ck, alias_prefixes) is not None
-                    for _, ck in members
-                ):
-                    logger.warning(
-                        f"Skipping name-based dedup of alias prefix '{a_base}': its canonical "
-                        f"is itself a declared alias (bidirectional tie); keeping both sides."
-                    )
-                    continue
                 # Atomic completeness: every alias key must have its canonical counterpart present.
                 missing = [k for k, ck in members if ck is None or ck not in post_state_dict]
                 if missing:
