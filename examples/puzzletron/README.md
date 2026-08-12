@@ -34,6 +34,14 @@ Hugging Face model configuration and generates self-contained smoke and
 production experiment, runner, and execution bundles. Its setup environment
 does not require PyTorch or model weights.
 
+The repository-root [`puzzletron_setup`](../../puzzletron_setup/) package keeps
+this configuration-only flow outside `modelopt.torch`, so starting the wizard
+does not initialize the ModelOpt or PyTorch runtime. At the **Model** prompt,
+provide an existing local checkpoint/config path or a Hugging Face model URL or
+repository ID; the wizard reads configuration metadata, not model weights. At
+the **Dataset** prompt, provide an existing local dataset path or a Hugging Face
+dataset URL or repository ID.
+
 Install the setup dependencies:
 
 ```bash
@@ -51,6 +59,15 @@ model family's `setup_v2_defaults.yaml`, including geometry-specific refinements
 when available. Setup then asks for the model and dataset and requires explicit
 acceptance or customization of infrastructure-specific worker and cluster
 defaults.
+
+For a first-class hosted dataset, setup records a worker-visible local output
+path. The explicitly selected campaign directory contains one generated
+`README.md` runbook beside its smoke and production bundles; resuming setup
+updates that same runbook rather than creating one per launch. Under **Prepare
+dataset**, it contains the exact acquisition command. The wizard inspects
+dataset metadata but does not download or materialize rows. Run that command
+from the full worker environment before launching the campaign. A custom local
+dataset is treated as already prepared and is referenced directly.
 
 Start the wizard with the repository's example defaults file:
 
@@ -98,13 +115,27 @@ extension against that same installation; mixing PyTorch or CUDA builds can
 cause import failures or incorrect GPU execution. AIPerf uses the official PyPI
 package; no custom AIPerf fork is required.
 
-### 1. Start from the CUDA development image
+### 1. Choose a compatible worker environment
 
-Use this image for local containers and cluster jobs:
+For a reproducible public bootstrap, start with:
 
 ```text
 nvcr.io/nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04
 ```
+
+This image is a bootstrap example, not a required runner image. For a Slurm
+campaign, set `runner.execution_contract.container` to an image or path accepted
+at your site, or leave it unset to execute directly in the worker environment.
+Bare-metal runners use the host environment selected by
+`runner.execution_contract.venv`. In either case, keep the CUDA and PyTorch
+combination compatible with the pinned `cu129` packages below and run the
+environment checks before launch.
+
+The bootstrap commands below assume a container. For bare-metal runners, skip
+the Docker example and the `/workspace` and `apt-get` steps. Install equivalent
+Python and build dependencies through your site's host-environment tooling,
+then create or select the worker virtual environment referenced by
+`runner.execution_contract.venv` and adapt the remaining paths accordingly.
 
 For example:
 
@@ -327,6 +358,11 @@ Site-specific paths can be overridden without editing the checked-in config:
 export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
 ```
 
+`PUZZLETRON_RUN_ROOT` is a convenience used by the checked-in experiment YAMLs
+to resolve `puzzle_dir`. Generated bundles write their chosen `puzzle_dir`
+directly. In both cases, `puzzle_dir` is the canonical location for artifacts,
+logs, manifests, and controller state.
+
 Independent runs, variants, solution pools, resource constraints, and
 homogeneous search are documented in [MIP runs](docs/mip_profiles.md). Configure
 candidate evaluation, filtering, materialization, and distillation with
@@ -393,9 +429,13 @@ and is launched through
 - runner infrastructure (`--runner`, Slurm or bare-metal inventory plus container/venv);
 - execution semantics (`--execution`, per-stage strategy, `instances`, and optional mesh overrides).
 
-The controller import path is independent of `modelopt.torch`; it requires only
-Python 3.10+, PyYAML, and Rich. This lets it run on a Slurm login node while GPU jobs
-use the full environment declared by the runner:
+The repository-root
+[`puzzletron_orchestrator`](../../puzzletron_orchestrator/) package is a
+dependency-light facade over that canonical implementation. The CLI imports
+through the facade instead of `modelopt.torch`, avoiding ModelOpt's eager
+PyTorch initialization. It requires only Python 3.10+, PyYAML, and Rich. This
+lets it run on a Slurm login node while GPU jobs use the full environment
+declared by the runner:
 
 ```bash
 python3 -m venv .venv-orchestrator
@@ -443,17 +483,42 @@ selected finalists. Use site-specific runner and execution configs, then run
 the prerequisite DAG through MIP by temporarily disabling the downstream
 stages:
 
+The repository already provides the bounded materializer, and setup emits the
+command that invokes it. The Nano experiment pins its public model source and
+revision but inherits a repository-relative `dataset_path` from `base.yaml`, so
+a real run must override that value with a compatible, materialized Hugging Face
+dataset directory visible at the same path on every worker. Dataset
+materialization is outside the dependency-light setup and controller
+environments. If you do not already have a compatible `datasets.save_to_disk`
+directory, prepare Puzzle-KD from the full worker environment before starting
+the controller:
+
+```bash
+export PUZZLETRON_DATASET=/shared/datasets/puzzle-kd-v2
+
+python examples/puzzletron/materialize_dataset.py puzzle_kd_v2 \
+  --output "$PUZZLETRON_DATASET" \
+  --train-samples 8192 \
+  --validation-samples 1024 \
+  --seed 408
+```
+
+Pass the same `dataset_path` override to every controller invocation so plan
+compilation and worker commands resolve the same input:
+
 ```bash
 PUZZLETRON_EXPERIMENT=examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
 PUZZLETRON_RUNNER=/path/to/runner.yaml
 PUZZLETRON_EXECUTION=/path/to/execution.yaml
 export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
+export PUZZLETRON_DATASET=/shared/datasets/puzzle-kd-v2
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$PUZZLETRON_EXPERIMENT" \
   --runner "$PUZZLETRON_RUNNER" \
   --execution "$PUZZLETRON_EXECUTION" \
   --stage full \
+  --override "dataset_path=$PUZZLETRON_DATASET" \
   --override zero_shot_evaluation.enabled=false \
   --override aiperf.enabled=false \
   --override global_distillation_sanity.enabled=false \
@@ -480,7 +545,8 @@ python examples/puzzletron/orchestrate.py \
   --experiment "$PUZZLETRON_EXPERIMENT" \
   --runner "$PUZZLETRON_RUNNER" \
   --execution "$PUZZLETRON_EXECUTION" \
-  --stage zero_shot_evaluation
+  --stage zero_shot_evaluation \
+  --override "dataset_path=$PUZZLETRON_DATASET"
 ```
 
 Materialize the evaluated finalists for the Nano example's configured AIPerf
@@ -514,12 +580,14 @@ PUZZLETRON_EXPERIMENT=examples/puzzletron/configs/families/nemotron3/nano_30b_a3
 PUZZLETRON_RUNNER=/path/to/runner.yaml
 PUZZLETRON_EXECUTION=/path/to/execution.yaml
 export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
+export PUZZLETRON_DATASET=/shared/datasets/puzzle-kd-v2
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$PUZZLETRON_EXPERIMENT" \
   --runner "$PUZZLETRON_RUNNER" \
   --execution "$PUZZLETRON_EXECUTION" \
-  --stage full
+  --stage full \
+  --override "dataset_path=$PUZZLETRON_DATASET"
 ```
 
 For the legacy Nano experiment, the final `--stage full` resumes from the
