@@ -22,12 +22,8 @@ number of dict fields (2) instead of the real token count, so every conversation
 tripped the ``num_input_tokens <= 10`` length filter and was silently dropped --
 producing zero ``.pt`` files and failing offline EAGLE3 training with
 ``No .pt files found``.
-
-Lives in the trtllm example lane because ``compute_hidden_states_trtllm`` imports
-``tensorrt_llm`` at module load.
 """
 
-import importlib
 import sys
 from collections.abc import Mapping
 
@@ -38,20 +34,14 @@ from transformers import AutoTokenizer
 
 pytest.importorskip("tensorrt_llm")
 
+_EXAMPLE_DIR = MODELOPT_ROOT / "examples" / "speculative_decoding" / "collect_hidden_states"
+sys.path.insert(0, str(_EXAMPLE_DIR))
+import compute_hidden_states_trtllm
 
-@pytest.fixture(scope="module")
-def compute_hidden_states_trtllm():
-    """Import the TRT-LLM hidden-state dump example module."""
-    example_dir = MODELOPT_ROOT / "examples" / "speculative_decoding" / "collect_hidden_states"
-    sys.path.insert(0, str(example_dir))
-    try:
-        yield importlib.import_module("compute_hidden_states_trtllm")
-    finally:
-        sys.path.remove(str(example_dir))
-        sys.modules.pop("compute_hidden_states_trtllm", None)
+sys.path.remove(str(_EXAMPLE_DIR))
 
 
-def test_get_conversation_input_ids_returns_token_sequence(tmp_path, compute_hidden_states_trtllm):
+def test_get_conversation_input_ids_returns_token_sequence(tmp_path):
     model_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     conversations = [
@@ -64,16 +54,16 @@ def test_get_conversation_input_ids_returns_token_sequence(tmp_path, compute_hid
 
     input_ids = compute_hidden_states_trtllm.get_conversation_input_ids(tokenizer, conversations)
 
-    # Must be a flat token-id sequence, never a BatchEncoding/dict -- otherwise len() is
-    # the field count (2), which trips the dump's `num_input_tokens <= 10` filter and
-    # silently drops every conversation.
+    # Never a BatchEncoding/dict -- len() would be the field count (2), which trips the
+    # dump's `num_input_tokens <= 10` filter and silently drops every conversation.
     assert not isinstance(input_ids, Mapping)
-    num_tokens = input_ids.shape[1] if hasattr(input_ids, "shape") else len(input_ids)
-    assert num_tokens > 10
 
-    # And it reflects the real token count of the rendered chat prompt.
+    # The extracted ids must match the real token ids of the rendered chat prompt -- the
+    # values, not merely the length.
+    actual_ids = input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
     rendered = tokenizer.apply_chat_template(
         conversations, add_generation_prompt=False, tokenize=False
     )
-    expected = len(tokenizer(rendered, add_special_tokens=False)["input_ids"])
-    assert num_tokens == expected
+    expected_ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
+    assert actual_ids == expected_ids
+    assert len(actual_ids) > 10
