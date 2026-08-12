@@ -46,8 +46,10 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.06
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       nodes: 1
+      # One process (the tokenizer is single-process), but a full node: clusters
+      # commonly enforce a minimum GPU count per job (QOSMinGRES).
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: 4
       time: "04:00:00"
 
   # 2) NVFP4 PTQ. Produces the quantized Megatron checkpoint that seeds the QAD student.
