@@ -26,7 +26,6 @@ It provides comprehensive TensorRT utilities including:
 - TensorRTPyBenchmark: Uses TensorRT Python API for direct engine profiling
 """
 
-import contextlib
 import ctypes
 import importlib.util
 import os
@@ -495,31 +494,7 @@ class TrtExecBenchmark(Benchmark):
                     self.logger.error(f"Failed to push engine to remote device: {result.stderr}")
                     return float("inf")
 
-                @contextlib.contextmanager
-                def cleanup_remote_engine():
-                    try:
-                        yield
-                    finally:
-                        # Cleanup remote engine file after benchmarking to avoid disk filling up
-                        cleanup_cmd = [
-                            "ssh",
-                            "-p",
-                            str(self.remote_port),
-                            "-oStrictHostKeyChecking=accept-new",
-                            f"{self.remote_user}@{self.remote_ip}",
-                            f"rm -f {shlex.quote(self.remote_engine_path)}",
-                        ]
-                        try:
-                            subprocess.run(
-                                cleanup_cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=self.network_timeout_seconds,
-                            )  # nosec B603
-                        except Exception as e:
-                            self.logger.warning(f"Error during remote engine cleanup: {e}")
-
-                with cleanup_remote_engine():
+                try:
                     ld_path = (
                         f"LD_LIBRARY_PATH={shlex.quote(self.remote_lib_path)}:$LD_LIBRARY_PATH"
                     )
@@ -563,6 +538,26 @@ class TrtExecBenchmark(Benchmark):
                             timeout=self.network_timeout_seconds,
                         )  # nosec B603
                         latency_pattern = _STD_PATTERN
+                finally:
+                    # Cleanup remote engine file after benchmarking to avoid disk filling up
+                    cleanup_cmd = [
+                        "ssh",
+                        "-p",
+                        str(self.remote_port),
+                        "-oStrictHostKeyChecking=accept-new",
+                        f"{self.remote_user}@{self.remote_ip}",
+                        f"rm -f {shlex.quote(self.remote_engine_path)}",
+                    ]
+                    try:
+                        subprocess.run(
+                            cleanup_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=self.network_timeout_seconds,
+                        )  # nosec B603
+                    except Exception as e:
+                        self.logger.warning(f"Error during remote engine cleanup: {e}")
+
             if result.returncode != 0:
                 self.logger.error(
                     f"Failed to run trtexec_safe or trtexec with '--safe'\n{result.stdout}\n{result.stderr}"
