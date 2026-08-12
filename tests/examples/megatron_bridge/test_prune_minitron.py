@@ -16,7 +16,10 @@
 
 import pytest
 import torch
-from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
+from _test_utils.examples.megatron_bridge import (
+    config_only_hf_export_supported,
+    qwen35_moe_bridge_supported,
+)
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
@@ -28,20 +31,20 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 
 @pytest.mark.parametrize(
-    ("create_teacher", "megatron_format"),
+    ("create_teacher", "expected_pruned_config"),
     [
-        # Dense Qwen3 LM, exported back to HF (reloadable to verify the pruned param count).
+        # Dense Qwen3 LM.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_qwen3_dir(
                 tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
             ),
-            False,
+            {},
             id="qwen3",
         ),
-        # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid. Saved in Megatron checkpoint
-        # format because HF export of a pruned NemotronH requires transformers<5.
-        # MTP heads are enabled so the run covers dropping them during calibration and the
-        # hybrid pattern MCore builds for them.
+        # NemotronH (nemotron-3-nano): Mamba + attention + MoE hybrid.
+        # MTP heads are enabled so the run covers dropping them during calibration. HF export of a
+        # native NemotronH needs the config-only bridge (nemo:26.08+); the older dummy-model path
+        # does not round-trip the pruned config.
         pytest.param(
             lambda tmp_path, num_gpus: create_tiny_nemotron_h_dir(
                 tmp_path,
@@ -50,26 +53,26 @@ from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
                 num_nextn_predict_layers=1,
                 mtp_hybrid_override_pattern="*E",
             ),
-            True,
+            {"n_shared_experts": 1},
             id="nemotron_h",
+            marks=pytest.mark.skipif(
+                not config_only_hf_export_supported(),
+                reason="Native NemotronH HF export needs config-only bridge (nemo:26.08+)",
+            ),
         ),
     ],
 )
-def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
+def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_config):
     teacher_hf_path, teacher_model = create_teacher(tmp_path, num_gpus)
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
-    output_kwarg = (
-        {"output_megatron_path": pruned_path}
-        if megatron_format
-        else {"output_hf_path": pruned_path}
-    )
     # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
         hf_model_name_or_path=teacher_hf_path,
+        output_hf_path=pruned_path,
         pp_size=num_gpus,
         calib_dataset_name="cnn_dailymail",
         calib_num_samples=8,
@@ -80,17 +83,14 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, megatron_format):
         ss_channel_divisor=4,
         hparams_to_skip="num_attention_heads",
         top_k=1,
-        **output_kwarg,
     )
     run_example_command(prune_command_parts, example_path="megatron_bridge")
 
-    if megatron_format:
-        # HF reload of a pruned NemotronH needs transformers<5; just verify the Megatron checkpoint.
-        assert (pruned_path / "latest_checkpointed_iteration.txt").exists()
-    else:
-        assert (pruned_path / "config.json").exists()
-        pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
-        assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
+    assert (pruned_path / "config.json").exists()
+    pruned_model = AutoModelForCausalLM.from_pretrained(pruned_path)
+    assert sum(p.numel() for p in pruned_model.parameters()) <= prune_target_params
+    for field, expected in expected_pruned_config.items():
+        assert getattr(pruned_model.config, field) == expected
 
 
 @pytest.mark.parametrize(

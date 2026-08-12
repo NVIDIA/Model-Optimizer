@@ -400,7 +400,9 @@ def main(args: argparse.Namespace):
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
             "seq_length": args.seq_length,
-            "mtp_num_layers": 0,  # MTP is not supported during calibration
+            # MTP is not supported during calibration; drop it
+            "mtp_num_layers": 0,
+            "mtp_hybrid_override_pattern": None,
         },
         init_model_parallel=True,
         moe_grouped_gemm=not args.no_moe_grouped_gemm,
@@ -588,9 +590,7 @@ def main(args: argparse.Namespace):
     else:
         print_rank_0(f"Saving pruned model to {args.output_hf_path} in HF checkpoint format")
 
-        # [WAR] Save the pruned HF model by hand until Megatron-Bridge natively supports it.
-        # TODO: Replace this whole block with ``AutoBridge.from_auto_config(...).save_hf_weights(...)``
-        #     once the Megatron-Bridge fix ships (nemo:26.08).
+        # Build the pruned HF config field-by-field from the pruned Megatron config, then stream weights.
         bridge.hf_pretrained.save_artifacts(args.output_hf_path)
         hf_cfg = AutoConfig.from_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
@@ -612,6 +612,7 @@ def main(args: argparse.Namespace):
             text_cfg.moe_intermediate_size = mcore_cfg.moe_ffn_hidden_size
         # HF names this field with or without the ``moe_`` prefix depending on the model
         # (e.g. Qwen3.5-MoE uses ``shared_expert_intermediate_size``).
+        has_explicit_shared_size = False
         for shared_expert_field in (
             "moe_shared_expert_intermediate_size",
             "shared_expert_intermediate_size",
@@ -620,11 +621,13 @@ def main(args: argparse.Namespace):
                 setattr(
                     text_cfg, shared_expert_field, mcore_cfg.moe_shared_expert_intermediate_size
                 )
+                has_explicit_shared_size = True
         if hasattr(text_cfg, "num_experts"):
             text_cfg.num_experts = mcore_cfg.num_moe_experts
         if hasattr(text_cfg, "n_routed_experts"):
             text_cfg.n_routed_experts = mcore_cfg.num_moe_experts
-        if hasattr(text_cfg, "n_shared_experts"):
+        # n_shared_experts is a fixed count; only DeepSeek-style configs re-derive it from sizes.
+        if hasattr(text_cfg, "n_shared_experts") and not has_explicit_shared_size:
             text_cfg.n_shared_experts = (
                 mcore_cfg.moe_shared_expert_intermediate_size // mcore_cfg.moe_ffn_hidden_size
             )
@@ -658,8 +661,11 @@ def main(args: argparse.Namespace):
                     "distillation cannot recover this vision-path change -- consider full VLM "
                     "training/distillation instead of LM-only to recover vision quality."
                 )
-        if isinstance(provider, _HYBRID_PROVIDER_TYPES) and hasattr(
-            text_cfg, "hybrid_override_pattern"
+        # Only older remote-code configs need this; native configs carry the cadence in layer_types.
+        if (
+            isinstance(provider, _HYBRID_PROVIDER_TYPES)
+            and not hasattr(text_cfg, "layer_types")
+            and hasattr(text_cfg, "hybrid_override_pattern")
         ):
             # MCore's pattern can carry an MTP suffix (``/...``) and PP boundaries (``|``) which we need to remove
             text_cfg.hybrid_override_pattern = "".join(
@@ -671,15 +677,26 @@ def main(args: argparse.Namespace):
             if hasattr(text_cfg, field):
                 setattr(text_cfg, field, 0)
 
-        # Save dummy pruned HF model to get the correct bridge for saving pruned weights
-        dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
-        dummy_model_cls.from_config(
-            hf_cfg, trust_remote_code=args.trust_remote_code
-        ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
-        pruned_bridge = AutoBridge.from_hf_pretrained(
-            args.output_hf_path, trust_remote_code=args.trust_remote_code
-        )
-        pruned_bridge.save_hf_weights(model, args.output_hf_path)
+        # Config-only bridge (hf_keys=None) so the embedding task is not dropped when transformers'
+        # saved key differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
+        # VLMs and older builds fall back to a dummy HF model that supplies the expected HF key names.
+        if (
+            hasattr(AutoBridge, "from_hf_config")
+            and hasattr(AutoBridge, "from_auto_config")
+            and not is_vlm
+        ):
+            AutoBridge.from_hf_config(hf_cfg).save_hf_pretrained(
+                model, args.output_hf_path, source_path=args.hf_model_name_or_path
+            )
+        else:
+            dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
+            dummy_model_cls.from_config(
+                hf_cfg, trust_remote_code=args.trust_remote_code
+            ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
+            pruned_bridge = AutoBridge.from_hf_pretrained(
+                args.output_hf_path, trust_remote_code=args.trust_remote_code
+            )
+            pruned_bridge.save_hf_weights(model, args.output_hf_path)
 
         copy_hf_ckpt_remote_code(args.hf_model_name_or_path, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
