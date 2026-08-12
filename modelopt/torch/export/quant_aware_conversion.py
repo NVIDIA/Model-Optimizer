@@ -94,10 +94,18 @@ class QuantConversionUnsupportedError(Exception):
 
 @dataclass(frozen=True)
 class RenameRule:
-    """Reverse of a ``WeightRenaming``: ``re.sub(pattern, repl, key)`` on every key."""
+    """Reverse of a ``WeightRenaming``: ``re.sub(pattern, repl, key)`` on every key.
+
+    ``scope_prefixes`` mirrors transformers' ``WeightTransform._scoped_match``: a rule
+    collected from a *sub-model* carries the sub-module path it was scoped to, and its
+    patterns are written relative to that sub-model's own root. Such a rule must only be
+    applied to keys under one of these prefixes, with the prefix stripped before the
+    match and re-attached after. Empty tuple means the rule is unscoped (whole-model).
+    """
 
     pattern: str
     repl: str
+    scope_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -157,6 +165,35 @@ def _apply_split_rule(state_dict: dict[str, torch.Tensor], rule: SplitRule) -> N
             state_dict[target_key] = _split_leaf_tensor(leaf, tensor, n, idx, rule.dim)
 
 
+def _compile_rename_rules(rename_rules: list[RenameRule]):
+    """Pre-compile rename rules into ``(compiled_pattern, repl, scope_prefixes)`` triples."""
+    return [(re.compile(r.pattern), r.repl, r.scope_prefixes) for r in rename_rules]
+
+
+def _sub_scoped(pattern: re.Pattern, repl: str, key: str, scope_prefixes: tuple[str, ...]) -> str:
+    """Apply one rename rule to ``key``, honoring the rule's sub-model scope.
+
+    Mirrors transformers' ``WeightTransform._scoped_match``: for a scoped rule, the first
+    matching prefix is stripped, the pattern is applied to the remaining suffix, and the
+    prefix is re-attached. A scoped rule that matches no prefix never applies -- this is
+    what keeps a sub-model's rule (e.g. the vision tower's "add ``vision_model.``" prefix
+    change) from rewriting sibling namespaces of the parent multimodal model.
+    """
+    if not scope_prefixes:
+        return pattern.sub(repl, key)
+    for prefix in scope_prefixes:
+        if key.startswith(prefix):
+            return prefix + pattern.sub(repl, key[len(prefix) :])
+    return key
+
+
+def _apply_rename_rules(key: str, compiled) -> str:
+    """Apply all compiled rename rules to ``key``, in order."""
+    for pattern, repl, scope_prefixes in compiled:
+        key = _sub_scoped(pattern, repl, key, scope_prefixes)
+    return key
+
+
 def apply_reverse_rules(
     state_dict: dict[str, torch.Tensor],
     split_rules: list[SplitRule],
@@ -171,12 +208,10 @@ def apply_reverse_rules(
     for rule in split_rules:
         _apply_split_rule(out, rule)
 
-    compiled = [(re.compile(r.pattern), r.repl) for r in rename_rules]
+    compiled = _compile_rename_rules(rename_rules)
     renamed: dict[str, torch.Tensor] = {}
     for key, value in out.items():
-        new_key = key
-        for pattern, repl in compiled:
-            new_key = pattern.sub(repl, new_key)
+        new_key = _apply_rename_rules(key, compiled)
         if new_key in renamed:
             raise QuantConversionUnsupportedError(f"rename collision on '{new_key}'")
         renamed[new_key] = value
@@ -218,7 +253,7 @@ def build_reverse_name_mapper(model):
     _, rename_rules, _ = _build_reverse_rules(model)
     if not rename_rules:
         return None
-    compiled = [(re.compile(r.pattern), r.repl) for r in rename_rules]
+    compiled = _compile_rename_rules(rename_rules)
     # The rename patterns are anchored on full weight keys and use ``.`` (any char) as a
     # path separator, so a trailing glob wildcard in an exclude pattern would be consumed
     # (e.g. ``...mlp.shared_experts.`` -> ``...`` would eat the ``*``). Append a sentinel
@@ -227,9 +262,7 @@ def build_reverse_name_mapper(model):
     _sentinel = ".\x00modelopt_name_sentinel"
 
     def _apply(text: str) -> str:
-        for pattern, repl in compiled:
-            text = pattern.sub(repl, text)
-        return text
+        return _apply_rename_rules(text, compiled)
 
     def _map(name: str) -> str:
         base, suffix = name, ""
@@ -287,6 +320,32 @@ def _assert_experts_pre_expanded(
             )
 
 
+def _scope_prefixes(rev) -> tuple[str, ...]:
+    """Candidate key prefixes a scoped sub-model transform may apply under.
+
+    transformers tags a conversion collected from a sub-model with ``scope_prefix`` (the
+    sub-module path) and ``base_model_prefix``, then matches keys against
+    ``base_model_prefix.scope_prefix.`` first and ``scope_prefix.`` second (see
+    ``WeightTransform._scoped_match``). Returned in that same priority order, each with a
+    trailing dot. Empty tuple when the transform is unscoped (owned by the root model),
+    in which case its patterns already address the full key space.
+    """
+    scope = getattr(rev, "scope_prefix", None)
+    if scope is None:
+        return ()
+    scope_dot = f"{scope}." if scope != "" else ""
+    base = getattr(rev, "base_model_prefix", None) or ""
+    base_dot = f"{base}." if base != "" else ""
+    # Deduplicate while preserving order. An empty candidate is kept: it only arises for
+    # ``scope_prefix == ""`` and, matching transformers, acts as the always-matching
+    # fallback that applies the pattern to the whole key.
+    seen: list[str] = []
+    for c in (base_dot + scope_dot, scope_dot):
+        if c not in seen:
+            seen.append(c)
+    return tuple(seen)
+
+
 def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[RenameRule]:
     """Drop child-model reverse renames when the child namespace already exists.
 
@@ -294,6 +353,13 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     ``model.language_model.*`` reverse can also reach its parent VLM. In that model,
     ``model.language_model`` is already registered and applying the rule globally
     would capture both that namespace and siblings such as ``model.visual``.
+
+    Only rules that are genuinely confined are skipped. A rule is confined when every
+    one of its ``scope_prefixes`` is non-empty, because :func:`_sub_scoped` then applies
+    it solely under that prefix and it cannot reach a sibling namespace. An *empty*
+    candidate (which ``scope_prefix == ""`` produces) matches every key, so such a rule
+    has the reach of an unscoped one and must still face this heuristic -- otherwise a
+    root-scoped nested-text rename would bypass the guard added for NVBug 6525534.
     """
     named_modules = getattr(model, "named_modules", None)
     if not callable(named_modules):
@@ -303,6 +369,11 @@ def _drop_shadowed_prefix_renames(model, rules: list[RenameRule]) -> list[Rename
     probe_suffix = ".\x00modelopt_namespace_probe"
     kept: list[RenameRule] = []
     for rule in rules:
+        # `all(...)` matters: an empty candidate matches every key, so a rule carrying one
+        # is not actually confined and still needs the check below.
+        if rule.scope_prefixes and all(rule.scope_prefixes):
+            kept.append(rule)
+            continue
         pattern = re.compile(rule.pattern)
         shadowed = False
         for module_name in module_names:
@@ -375,9 +446,24 @@ def _build_reverse_rules(model) -> tuple[list[SplitRule], list[RenameRule], list
     for conv in conversions:
         rev = conv.reverse_transform()  # hub<-in-memory; reversed name patterns + ops
         if isinstance(rev, WeightRenaming):
+            scope_prefixes = _scope_prefixes(rev)
             for pattern, repl in zip(_as_list(rev.source_patterns), _as_list(rev.target_patterns)):
-                weight_renamings.append(RenameRule(pattern=pattern, repl=repl))
+                weight_renamings.append(
+                    RenameRule(pattern=pattern, repl=repl, scope_prefixes=scope_prefixes)
+                )
         elif isinstance(rev, WeightConverter):
+            # Converter-derived rules (expert leaf renames, dense split) are matched by
+            # module suffix, not by an anchored pattern, so they carry no scope and would
+            # reach identically-named modules in sibling namespaces. No current model
+            # scopes a WeightConverter -- transformers only scopes WeightRenaming /
+            # PrefixChange -- so rather than emit rules we cannot scope, refuse the
+            # conversion and let the caller fall back to in-memory names. That is a
+            # warning plus unchanged names, instead of a silently mis-named checkpoint.
+            if _scope_prefixes(rev):
+                raise QuantConversionUnsupportedError(
+                    f"scoped WeightConverter (scope_prefix="
+                    f"{getattr(rev, 'scope_prefix', None)!r}) cannot be reversed scope-aware"
+                )
             ops = list(rev.operations)
             if any(isinstance(op, SplitModulelist) for op in ops):
                 # Expert converter: ModelOpt already un-stacked/un-fused experts to

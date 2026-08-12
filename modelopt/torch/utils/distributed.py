@@ -18,7 +18,9 @@
 import functools
 import io
 import os
+import sys
 import time
+import traceback
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import timedelta
@@ -212,11 +214,37 @@ def setup(timeout: timedelta | None = None):
 
 
 def cleanup():
-    """Cleans up the distributed environment."""
+    """Cleans up the distributed environment.
+
+    The barrier is skipped when unwinding from an error, since peers may be blocked in a collective
+    this rank will never reach. ``SystemExit`` is treated as a clean exit (every rank reaches it).
+    That is not sufficient on its own -- ``destroy_process_group`` below blocks for the same reason
+    -- so error paths must call :func:`abort` before reaching this ``finally``.
+    """
     if is_initialized():
-        with suppress(Exception):
-            barrier()
+        exc = sys.exc_info()[1]
+        if exc is None or isinstance(exc, SystemExit):
+            with suppress(Exception):
+                barrier()
         torch.distributed.destroy_process_group()
+
+
+def abort(exit_code: int = 1) -> None:
+    """Print the active exception and exit this rank immediately.
+
+    Call from an ``except`` block in a distributed entrypoint. Both a barrier and
+    ``destroy_process_group`` stall when peers are blocked in a collective this rank will never
+    reach, and the traceback only prints once the enclosing ``finally`` returns -- so the run looks
+    hung rather than failed. Exiting lets the launcher (e.g. torchrun) terminate the peers.
+    ``SystemExit`` is re-raised instead, since every rank reaches an intentional exit.
+    """
+    exc = sys.exc_info()[1]
+    if isinstance(exc, SystemExit):
+        raise exc
+    traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
 
 
 def is_fsdp2_model(model) -> bool:

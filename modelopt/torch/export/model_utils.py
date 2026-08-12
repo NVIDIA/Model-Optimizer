@@ -44,7 +44,6 @@ MODEL_NAME_TO_TYPE = {
     "phi3small": "phi3small",
     "phi3": "phi3",
     "PhiMoEForCausalLM": "phi3",
-    "Phi4MMForCausalLM": "phi4mm",
     "phi": "phi",
     "TLGv4ForCausalLM": "phi",
     "MixtralForCausalLM": "llama",
@@ -88,10 +87,6 @@ def is_multimodal_model(model):
     This function detects various multimodal model architectures by checking for:
     - Standard vision configurations (vision_config)
     - Language model attributes (language_model)
-    - Specific multimodal model types (phi4mm)
-    - Vision LoRA configurations
-    - Audio processing capabilities
-    - Image embedding layers
     - Nemotron-Parse conditional generation models
 
     Args:
@@ -104,10 +99,6 @@ def is_multimodal_model(model):
         >>> model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
         >>> is_multimodal_model(model)
         True
-
-        >>> model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-4-multimodal-instruct")
-        >>> is_multimodal_model(model)
-        True
     """
     config = model.config
 
@@ -118,12 +109,6 @@ def is_multimodal_model(model):
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or hasattr(model, "language_model")  # Language model attribute (e.g., LLaVA)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or is_nemotron_parse  # Nemotron-Parse conditional generation model
     )
 

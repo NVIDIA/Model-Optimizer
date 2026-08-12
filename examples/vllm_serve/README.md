@@ -4,7 +4,7 @@ This is a simple example to demonstrate calibrating and serving ModelOpt fakequa
 
 Compared with realquant, fakequant is 2-5x slower, but doesn't require dedicated kernel support and facilitates research.
 
-The general fakequant example is tested with vLLM 0.9.0 and 0.19.1. The compact
+The general fakequant example is tested with vLLM 0.9.0, 0.19.1, and 0.26.0. The compact
 NVFP4 attention worker documented below requires vLLM 0.15.0 or newer.
 
 ## Prepare environment

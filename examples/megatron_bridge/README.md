@@ -365,9 +365,6 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 > [!NOTE]
 > Multi-token-prediction (MTP) heads (e.g. Qwen3.5) are not pruned yet — they are dropped for the prune run and the saved checkpoint has no MTP. Autoregressive inference is unaffected; for speculative decoding, run a short MTP SFT on the pruned model.
 
-> [!NOTE]
-> If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
-
 ### Vision-Language Models (VLMs)
 
 For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `prune_minitron.py` automatically prunes only the **language model** and leaves the vision tower intact, then saves the full VLM back. All the pruning modes above (parameter count, active parameter count, memory footprint, and manual `export_config`) work unchanged, with two VLM-specific caveats:

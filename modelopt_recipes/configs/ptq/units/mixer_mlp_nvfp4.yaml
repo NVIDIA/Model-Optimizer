@@ -13,22 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# QuantizerCfgList snippet of disabled quantizers for Phi-4-Multimodal.
-# Splices in the standard `default_disabled_quantizers` exclusions and appends
-# Phi-4-MM-specific ones so that only the language model is quantized;
-# speech/audio/image/vision branches are skipped. Recipes that import this
-# should NOT also import `default_disabled_quantizers`.
+# QuantizerCfgList snippet that enables dynamic NVFP4 on dense MLP projections
+# registered directly under a ``mixer`` module.
 
 # modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
 imports:
-  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
 ---
-  - $import: default_disabled_quantizers
-  - quantizer_name: '*speech*'
-    enable: false
-  - quantizer_name: '*audio*'
-    enable: false
-  - quantizer_name: '*image*'
-    enable: false
-  - quantizer_name: '*vision*'
-    enable: false
+  - quantizer_name: '*.mixer.up_proj.weight_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*.mixer.up_proj.input_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*.mixer.down_proj.weight_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*.mixer.down_proj.input_quantizer'
+    cfg:
+      $import: nvfp4
