@@ -131,6 +131,12 @@ Bare-metal runners use the host environment selected by
 combination compatible with the pinned `cu129` packages below and run the
 environment checks before launch.
 
+The bootstrap commands below assume a container. For bare-metal runners, skip
+the Docker example and the `/workspace` and `apt-get` steps. Install equivalent
+Python and build dependencies through your site's host-environment tooling,
+then create or select the worker virtual environment referenced by
+`runner.execution_contract.venv` and adapt the remaining paths accordingly.
+
 For example:
 
 ```bash
