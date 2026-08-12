@@ -9,7 +9,7 @@ is backed by `tests/examples/hf_ptq/test_deploy.py`.
 To answer "is model X supported on framework Y", read one of those two files — `test_deploy.py` is
 the more precise answer, since it also carries the exact checkpoint, tensor-parallel size, and
 minimum SM version per entry. It covers language models, VLMs (Qwen2.5-VL, Qwen3-VL,
-Phi-4-multimodal, Nemotron Omni), EAGLE3/Medusa drafters, and diffusion models.
+Nemotron Omni), EAGLE3/Medusa drafters, and diffusion models.
 
 ## Supported Quantization Formats
 

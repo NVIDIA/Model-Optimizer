@@ -108,7 +108,6 @@ Qwen 2.5                                      FP8             ⚠             �
 Qwen 2.5                                      NVFP4           ⚠             ⚠       \-
 QwQ-32B                                       FP8             ⚠             ⚠       ⚠
 QwQ-32B                                       NVFP4           ⚠             ⚠       \-
-Phi-4 reasoning-plus                          FP8, NVFP4      ✅             ✅       ✅
 Gemma 4 31B                                   NVFP4           ✅             ✅       ✅
 Gemma 4 26B-A4B                               NVFP4           \-            ✅       \-
 GLM-4.7, GLM-5, GLM-5.2                       NVFP4           ✅             ✅       ✅
@@ -133,7 +132,6 @@ Model                                         Quant format    TensorRT-LLM  vLLM
 ============================================  ==============  ============  ======  ========
 Qwen 2.5-VL 7B                                FP8, NVFP4      ✅             ✅       ✅
 Qwen 3-VL 235B-A22B                           NVFP4           ✅             ✅       ✅
-Phi-4-multimodal                              FP8, NVFP4      ✅             ✅       ✅
 Nemotron 3 Nano Omni 30B-A3B                  FP8, NVFP4      ✅             ✅       ✅
 ============================================  ==============  ============  ======  ========
 
