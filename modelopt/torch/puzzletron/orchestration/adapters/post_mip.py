@@ -223,16 +223,19 @@ class PostMIPAdapter(WorkAdapter):
     ) -> PublishedOutput | None:
         repo = Path(plan.runner.contract.repository)
         script = repo / "examples" / "puzzletron" / "run_post_mip_node.py"
+        argv = [
+            "python",
+            str(script),
+            "--config",
+            plan.experiment_config_path,
+            "--stage-id",
+            node.stage_id,
+            "--aggregate",
+        ]
+        for override in plan.overrides:
+            argv.extend(["--override", override])
         result = subprocess.run(
-            (
-                "python",
-                str(script),
-                "--config",
-                plan.experiment_config_path,
-                "--stage-id",
-                node.stage_id,
-                "--aggregate",
-            ),
+            argv,
             cwd=repo,
             capture_output=True,
             text=True,
