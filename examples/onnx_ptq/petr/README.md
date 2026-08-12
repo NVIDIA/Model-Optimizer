@@ -179,7 +179,7 @@ The backbone quantizer preserves the accuracy-sensitive final VoVNet stage and F
 
 ## 5. Build and evaluate TensorRT engines
 
-Build quantized graphs as strongly typed engines:
+Build the quantized backbone as a strongly typed engine:
 
 ```bash
 precision=int8
@@ -189,12 +189,9 @@ trtexec \
   --saveEngine="engines/${model}.backbone.${precision}.engine" \
   --stronglyTyped \
   --skipInference
-trtexec \
-  --onnx="onnx_files/sim_${model}.pts_bbox_head.forward.${precision}.onnx" \
-  --saveEngine="engines/${model}.head.${precision}.engine" \
-  --stronglyTyped \
-  --skipInference
 ```
+
+If `--quantize-head` was used, build the generated head graph with the same `trtexec` options. Otherwise, use the FP16 head engine from step 3.
 
 Evaluate any backbone/head pairing. For example, INT8 backbone with FP16 head:
 
@@ -227,14 +224,8 @@ Results below use TensorRT 11.1.0.106 on an NVIDIA RTX 6000 Ada Generation GPU. 
 | PETRv1-vov-p4-800x320 | FP16 | FP16 | TensorRT 11.1 | 14.507 | 0.3781 |
 | PETRv1-vov-p4-800x320 | INT8 | FP16 | TensorRT 11.1 | 9.992 | 0.3711 |
 | PETRv1-vov-p4-800x320 | FP8 | FP16 | TensorRT 11.1 | 11.455 | 0.3757 |
-| PETRv1-vov-p4-800x320 | INT8 | INT8 | TensorRT 11.1 | 5.877 | 0.1779 |
-| PETRv1-vov-p4-800x320 | FP8 | FP8 | TensorRT 11.1 | 8.749 | 0.2071 |
 | PETRv2-vov-p4-800x320 | FP16 | FP16 | TensorRT 11.1 | 19.349 | 0.4105 |
 | PETRv2-vov-p4-800x320 | INT8 | FP16 | TensorRT 11.1 | 14.468 | 0.4017 |
 | PETRv2-vov-p4-800x320 | FP8 | FP16 | TensorRT 11.1 | 16.242 | 0.4092 |
-| PETRv2-vov-p4-800x320 | INT8 | INT8 | TensorRT 11.1 | 6.724 | 0.2093 |
-| PETRv2-vov-p4-800x320 | FP8 | FP8 | TensorRT 11.1 | 12.261 | 0.2568 |
 
 TensorRT engines are specific to the TensorRT version and GPU architecture used to build them. These x86 results are not directly comparable with the DRIVE Orin measurements in the DL4AGX reference.
-
-Quantizing only the backbone retains substantially more accuracy than quantizing the detection head. Fully quantized head results are included to show the measured tradeoff rather than as recommended configurations.
