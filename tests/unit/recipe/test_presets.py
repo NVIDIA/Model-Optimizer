@@ -55,13 +55,6 @@ def test_every_discovered_preset_loads(choices, preset_dir):
         assert "quant_cfg" in cfg, f"{name} is missing the 'quant_cfg' key"
 
 
-def test_aliases_resolve_to_their_canonical_preset():
-    for alias, target in presets.QFORMAT_ALIASES.items():
-        assert alias in presets.QUANT_CFG_CHOICES, f"alias {alias!r} not exposed"
-        assert target in presets.QUANT_CFG_CHOICES, f"alias target {target!r} missing"
-        assert presets.QUANT_CFG_CHOICES[alias] == presets.QUANT_CFG_CHOICES[target]
-
-
 def test_kv_none_sentinel_is_not_a_discovered_preset():
     # The scripts branch on ``kv_cache_qformat != KV_CACHE_NONE``; a real preset named
     # "none" would make that branch ambiguous.
@@ -81,10 +74,3 @@ def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
         "*visual*",
         "*vision_tower*",
     } <= disabled_quantizers
-
-
-def test_load_quant_cfg_choices_rejects_stale_alias():
-    with pytest.raises(ValueError, match="does-not-exist"):
-        presets.load_quant_cfg_choices(
-            presets.MODEL_QUANT_PRESET_DIR, {"bad_alias": "does-not-exist"}
-        )

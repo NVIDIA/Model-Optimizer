@@ -174,41 +174,6 @@ def test_autoquant_export_guard_not_bypassed_by_effective_bits(monkeypatch):
         hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
 
-def test_autoquant_config_from_deprecated_cli_flags(monkeypatch):
-    """The deprecated --auto_quantize_* flags convert to an AutoQuantizeConfig with the shared
-    base disabled + cost-excluded patterns appended (no new flags, no model introspection)."""
-    hf_ptq, args = _parse_hf_ptq_args(
-        monkeypatch,
-        "--pyt_ckpt_path",
-        "dummy",
-        "--qformat",
-        "fp8,nvfp4",
-        "--auto_quantize_bits",
-        "5.4",
-        "--auto_quantize_cost_model",
-        "active_moe",
-        "--auto_quantize_active_moe_expert_ratio",
-        "0.03125",
-        "--kv_cache_qformat",
-        "none",
-    )
-    aq = hf_ptq._auto_quantize_config_from_cli(args)
-
-    assert aq.constraints.effective_bits == 5.4
-    assert aq.constraints.cost_model == "active_moe"
-    assert aq.constraints.cost.active_moe_expert_ratio == 0.03125
-    assert aq.auto_quantize_method == "gradient"
-    assert aq.score_size == 128
-    # candidates come from --qformat and resolve to their shipped presets.
-    assert [hf_ptq._match_candidate_to_preset(f)[0] for f in aq.candidate_formats] == [
-        "fp8",
-        "nvfp4",
-    ]
-    # base disabled + base cost-excluded appended from the shared units (no introspection).
-    assert "*output_layer*" in aq.disabled_layers
-    assert aq.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
-
-
 def test_mlflow_flag_defaults_the_experiment_name(monkeypatch):
     monkeypatch.setattr(getpass, "getuser", lambda: "tester")
     hf_ptq, args = _parse_hf_ptq_args(

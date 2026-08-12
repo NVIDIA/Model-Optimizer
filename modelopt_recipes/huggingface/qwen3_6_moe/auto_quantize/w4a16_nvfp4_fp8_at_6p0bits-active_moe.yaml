@@ -15,8 +15,7 @@
 
 # Qwen3.6 MoE AutoQuantize: mixed FP8 + NVFP4 weight-only at 6.0 effective bits, active-MoE
 # cost model. Carries the architecture's disabled-layer patterns explicitly in the recipe
-# (the set kept in sync with example_utils._get_auto_quantize_disabled_layers for a Qwen model;
-# pinned by tests/examples/llm_ptq/test_hf_ptq_args.py).
+# (pinned by tests/examples/hf_ptq/test_hf_ptq_args.py).
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:

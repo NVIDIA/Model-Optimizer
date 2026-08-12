@@ -25,6 +25,12 @@ Changelog
 **Backward Breaking Changes**
 
 - Move the Mistral Medium 3.5 checkpoint-mirror recipe from ``huggingface/models/nvidia/Mistral-Medium-3.5-128B-NVFP4/ptq/nvfp4-max-calib`` to ``huggingface/models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib``, keying it by the canonical Hugging Face base model. Update any saved ``--recipe`` paths to the new location.
+- Remove the ``--auto_quantize_bits``, ``--auto_quantize_method``, ``--auto_quantize_score_size``, ``--auto_quantize_cost_model`` and ``--auto_quantize_active_moe_expert_ratio`` flags from ``examples/hf_ptq`` (deprecated in 0.46). Use an AutoQuantize ``--recipe`` from ``modelopt_recipes/general/auto_quantize/`` instead.
+- Remove the ``examples/llm_ptq`` symlink and the ``examples/vlm_ptq`` forwarder (both deprecated in 0.46). Use ``examples/hf_ptq``, passing ``--vlm`` for vision-language models.
+- Remove the backward-compat ``--qformat`` / ``--quant_cfg`` short names ``int8_sq``, ``int8_wo``, ``w4a8_awq``, ``nvfp4_awq``, ``nvfp4_mse``, ``nvfp4_local_hessian``, ``fp8_pb_wo`` and ``fp8_pc_pt`` (deprecated in 0.45). Use the preset basename under ``modelopt_recipes/configs/ptq/presets/model/`` instead: ``int8_smoothquant``, ``int8_weight_only``, ``w4a8_awq_beta``, ``nvfp4_awq_lite``, ``nvfp4_w4a4_weight_mse_fp8_sweep``, ``nvfp4_w4a4_weight_local_hessian``, ``fp8_2d_blockwise_weight_only`` and ``fp8_per_channel_per_token``.
+- Remove the legacy ``layerwise`` bool form, its ``use_sequential`` alias, and the top-level ``layerwise_checkpoint_dir`` key from calibration algorithm configs (deprecated in 0.45). Use the nested form, e.g. ``layerwise: {enable: true, checkpoint_dir: /path}``.
+- Remove in-trainer quantization via ``QuantizationArguments.quant_cfg`` / ``--quant_cfg`` (deprecated in 0.45); use ``--recipe``. New recipes ``general/ptq/mxfp4_mlp_weight_only`` and ``general/ptq/nvfp4_mlp_weight_only`` replace ``MXFP4_MLP_WEIGHT_ONLY_CFG`` / ``NVFP4_MLP_WEIGHT_ONLY_CFG`` in the ``examples/gpt-oss`` QAT flow.
+- Remove the ``QuantizationArgumentsWithConfig`` alias in ``modelopt.torch.quantization.plugins.transformers_trainer`` (deprecated in 0.45). Use ``QuantizationArguments``.
 - Transformer Engine ``TEGroupedMLP`` (fused MoE experts) now uses **per-expert** weight quantization (one ``amax`` per expert) instead of a single shared ``amax``, so ModelOpt checkpoints containing quantized ``TEGroupedMLP`` modules saved before 0.47 are **not compatible** with 0.47. Re-run PTQ to regenerate compatible checkpoints.
 
 **Deprecations**

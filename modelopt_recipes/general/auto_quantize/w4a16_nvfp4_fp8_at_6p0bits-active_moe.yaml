@@ -14,9 +14,7 @@
 # limitations under the License.
 
 # AutoQuantize recipe: per-layer search over {FP8 (W8A8), NVFP4 weight-only (W4A16)}
-# at 6.0 effective bits, active-MoE cost model. Recipe form of the CLI command:
-#   --qformat fp8,w4a16_nvfp4 --auto_quantize_bits 6.0 --auto_quantize_method gradient
-#   --auto_quantize_cost_model active_moe --auto_quantize_active_moe_expert_ratio 0.03125
+# at 6.0 effective bits, active-MoE cost model with a 0.03125 routed-expert active ratio.
 
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:

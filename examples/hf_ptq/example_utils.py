@@ -1134,37 +1134,30 @@ def copy_custom_model_files(
         print("No checkpoint sidecar files found to copy")
 
 
-def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
-    """Return ``("flat"/"nested", checkpoint_dir)`` for the layerwise checkpoint dir, or None."""
+def _layerwise_checkpoint_dir(algorithm) -> str | None:
+    """Return the nested ``layerwise.checkpoint_dir``, or None."""
     if not isinstance(algorithm, dict):
         return None
-    flat = algorithm.get("layerwise_checkpoint_dir")
-    if flat is not None:
-        return "flat", flat
     nested = algorithm.get("layerwise") or {}
-    ckpt = nested.get("checkpoint_dir") if isinstance(nested, dict) else None
-    return ("nested", ckpt) if ckpt is not None else None
+    return nested.get("checkpoint_dir") if isinstance(nested, dict) else None
 
 
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
     """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
-    return _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm")) is not None
+    return _layerwise_checkpoint_dir(quant_cfg.get("algorithm")) is not None
 
 
 def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]:
     """Append a unique ``<model_name>_<config_hash>`` subdirectory to the layerwise checkpoint_dir.
 
     Allows a single recipe to be reused across models without checkpoint collisions.
-    Supports both the legacy flat ``layerwise_checkpoint_dir`` and the nested
-    ``layerwise.checkpoint_dir`` shape, writing back to whichever the user provided.
     Must only be called when :func:`needs_checkpoint_path_update` returns True.
 
     Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
     reference the resolved path without re-deriving the dict shape.
     """
-    location = _layerwise_checkpoint_dir_location(quant_cfg["algorithm"])
-    assert location is not None  # guaranteed by needs_checkpoint_path_update
-    shape, base_dir = location
+    base_dir = _layerwise_checkpoint_dir(quant_cfg["algorithm"])
+    assert base_dir is not None  # guaranteed by needs_checkpoint_path_update
 
     name = model_path.rstrip("/")
     if "/" in name and not os.path.isabs(name):
@@ -1176,11 +1169,7 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     resolved = os.path.join(base_dir, f"{name}_{config_hash}")
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    algo = quant_cfg["algorithm"]
-    if "layerwise_checkpoint_dir" in algo:
-        algo["layerwise_checkpoint_dir"] = resolved
-    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
-        algo["layerwise"]["checkpoint_dir"] = resolved
+    quant_cfg["algorithm"]["layerwise"]["checkpoint_dir"] = resolved
     return quant_cfg, resolved
 
 
