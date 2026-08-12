@@ -232,6 +232,23 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
         for name in names:
             if name != canonical:
                 alias_to_canonical[name] = canonical
+
+    # Fail loud, don't fail silent under sharding: a declared alias whose param did NOT join a
+    # shared id-group is either an unapplied tie (fine) or -- under FSDP2 / offload -- a tie
+    # whose object identity the wrapper may have split into distinct sharded params, which would
+    # silently skip dedup. Detection here rests on id(parameter); warn only in that context so a
+    # future torch change can't disable dedup quietly.
+    unrealized = declared_aliases - set(alias_to_canonical)
+    if unrealized:
+        from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+        from modelopt.torch.utils.distributed import is_fsdp2_model
+
+        if is_fsdp2_model(model) or has_accelerate_offload(model):
+            warnings.warn(
+                f"{len(unrealized)} declared tied-weight alias(es) did not form a shared-parameter "
+                f"group under FSDP2/offload (e.g. {sorted(unrealized)[0]!r}); their duplicates may "
+                f"not be deduplicated. If these are genuinely tied, gather/unshard before export."
+            )
     return alias_to_canonical
 
 
@@ -272,64 +289,3 @@ class TiedWeightMap:
         if gk is None:
             return None
         return gk.removesuffix(f".{first_proj_attr}")
-
-    def alias_prefix_pairs(self) -> dict[str, str]:
-        """Map each alias *module* prefix to its canonical *module* prefix.
-
-        Each declared alias is a full parameter name (``encoder.X.weight`` or a fused
-        ``encoder…experts.gate_up_proj``); stripping the trailing parameter component
-        yields the owning-module prefix. State-dict dedup rewrites any exported key
-        under an alias prefix — packed weight, ``weight_scale`` / ``weight_scale_2`` /
-        ``input_scale``, and per-expert splits like ``…experts.3.gate_proj.weight`` —
-        to its canonical counterpart by prefix substitution, so it is independent of
-        tensor address and works under the FSDP full-state-dict gather (where tied
-        tensors are cloned to distinct addresses).
-        """
-        pairs: dict[str, str] = {}
-        for alias, canonical in self.alias_to_canonical.items():
-            a_base = alias.rsplit(".", 1)[0] if "." in alias else alias
-            c_base = canonical.rsplit(".", 1)[0] if "." in canonical else canonical
-            if a_base and c_base and a_base != c_base:
-                # An alias module prefix should map to exactly one canonical module prefix.
-                # A collision (two projections of one container declared tied to different
-                # canonical containers) would let the last mapping silently overwrite the
-                # first and misroute per-key rewrites; warn and keep the first instead.
-                prev = pairs.get(a_base)
-                if prev is not None and prev != c_base:
-                    warnings.warn(
-                        f"Ambiguous tied-weight prefix: alias module {a_base!r} maps to both "
-                        f"{prev!r} and {c_base!r}; keeping {prev!r}. Declared per-key rewrites "
-                        f"under this prefix may be incorrect."
-                    )
-                    continue
-                pairs[a_base] = c_base
-        return pairs
-
-    def canonical_state_dict_key(self, key: str, alias_prefixes: dict[str, str]) -> str | None:
-        """Rewrite a state-dict ``key`` under an alias prefix to its canonical key.
-
-        Returns the canonical key if ``key`` lies under a declared alias module prefix
-        (longest match wins, for nested ties), else ``None``. ``alias_prefixes`` is
-        :meth:`alias_prefix_pairs`, passed in so callers build it once.
-        """
-        parts = key.split(".")
-        for i in range(len(parts), 0, -1):
-            cand = ".".join(parts[:i])
-            if cand in alias_prefixes:
-                canonical = alias_prefixes[cand] + key[len(cand) :]
-                return canonical if canonical != key else None
-        return None
-
-    def matched_alias_prefix(self, key: str, alias_prefixes: dict[str, str]) -> str | None:
-        """Return the alias *module* prefix ``key`` falls under (longest match), or None.
-
-        Companion to :meth:`canonical_state_dict_key`: identifies which declared alias a
-        state-dict key belongs to, so every key of one tie can be deduped atomically
-        (all-or-nothing) rather than per key.
-        """
-        parts = key.split(".")
-        for i in range(len(parts), 0, -1):
-            cand = ".".join(parts[:i])
-            if cand in alias_prefixes and alias_prefixes[cand] + key[len(cand) :] != key:
-                return cand
-        return None
