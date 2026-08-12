@@ -74,11 +74,11 @@ def test_tied_group_resolver_group_key_is_shared_and_order_independent():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
 
-    resolver = TiedWeightMap(parent)
+    tied_map = TiedWeightMap(parent)
 
-    assert resolver.group_key("encoder.weight") == resolver.group_key("decoder.weight")
-    assert resolver.group_key("encoder.weight") == "decoder.weight"  # canonical wins
-    assert resolver.group_key("unrelated.weight") is None
+    assert tied_map.group_key("encoder.weight") == tied_map.group_key("decoder.weight")
+    assert tied_map.group_key("encoder.weight") == "decoder.weight"  # canonical wins
+    assert tied_map.group_key("unrelated.weight") is None
 
 
 def test_tied_group_resolver_per_layer_backreference():
@@ -104,20 +104,20 @@ def test_tied_group_resolver_per_layer_backreference():
                 self.encoder.layers[i].experts.gate_up_proj = p
 
     parent = _Parent()
-    resolver = TiedWeightMap(parent)
+    tied_map = TiedWeightMap(parent)
 
     assert (
-        resolver.container_group_key("encoder.layers.0.experts", "gate_up_proj")
+        tied_map.container_group_key("encoder.layers.0.experts", "gate_up_proj")
         == "decoder.layers.0.experts"
     )
     assert (
-        resolver.container_group_key("encoder.layers.1.experts", "gate_up_proj")
+        tied_map.container_group_key("encoder.layers.1.experts", "gate_up_proj")
         == "decoder.layers.1.experts"
     )
     # Encoder layer 0 must not collapse into decoder layer 1.
-    assert resolver.container_group_key(
+    assert tied_map.container_group_key(
         "encoder.layers.0.experts", "gate_up_proj"
-    ) != resolver.container_group_key("encoder.layers.1.experts", "gate_up_proj")
+    ) != tied_map.container_group_key("encoder.layers.1.experts", "gate_up_proj")
 
 
 def test_tied_group_resolver_parallel_pattern_declaration():
@@ -154,18 +154,18 @@ def test_tied_group_resolver_parallel_pattern_declaration():
             super().__init__()
             self.model = _Model()
 
-    resolver = TiedWeightMap(_Root())
+    tied_map = TiedWeightMap(_Root())
 
     # container group key: encoder side resolves to the decoder canonical container
     assert (
-        resolver.container_group_key(
+        tied_map.container_group_key(
             "model.encoder.language_model.layers.0.experts", "gate_up_proj"
         )
         == "model.decoder.layers.0.experts"
     )
     # post-export per-expert split key rewrites to the decoder canonical (so it is dropped)
-    prefixes = resolver.alias_prefix_pairs()
-    got = resolver.canonical_state_dict_key(
+    prefixes = tied_map.alias_prefix_pairs()
+    got = tied_map.canonical_state_dict_key(
         "model.encoder.language_model.layers.0.experts.3.gate_proj.weight", prefixes
     )
     assert got == "model.decoder.layers.0.experts.3.gate_proj.weight"
@@ -240,13 +240,13 @@ def test_postprocess_name_based_drops_alias_across_distinct_addresses():
     """
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-    resolver = TiedWeightMap(parent)
+    tied_map = TiedWeightMap(parent)
 
     # Distinct storages (different data_ptr): the address pass could never collapse these.
     sd = {"encoder.weight": torch.randn(4, 4), "decoder.weight": torch.randn(4, 4)}
     assert sd["encoder.weight"].data_ptr() != sd["decoder.weight"].data_ptr()
 
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     assert "decoder.weight" in out  # canonical kept
     assert "encoder.weight" not in out  # alias dropped by name
@@ -256,10 +256,10 @@ def test_postprocess_name_based_keeps_alias_when_canonical_absent():
     """An alias is NOT dropped when its canonical counterpart is missing (no orphaning)."""
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-    resolver = TiedWeightMap(parent)
+    tied_map = TiedWeightMap(parent)
 
     sd = {"encoder.weight": torch.randn(4, 4)}  # canonical decoder.weight absent
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     assert "encoder.weight" in out
 
@@ -281,13 +281,13 @@ def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
             self.b = torch.nn.Linear(4, 4, bias=False)
             self.b.weight = self.a.weight  # genuinely shared, declared both ways
 
-    resolver = TiedWeightMap(_Bi())
+    tied_map = TiedWeightMap(_Bi())
     # Both sides are declared aliases -> no unambiguous canonical -> not deduped.
-    assert resolver.alias_to_canonical == {}
-    assert resolver.alias_prefix_pairs() == {}
+    assert tied_map.alias_to_canonical == {}
+    assert tied_map.alias_prefix_pairs() == {}
 
     sd = {"a.weight": torch.randn(4, 4), "b.weight": torch.randn(4, 4)}
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     assert "a.weight" in out and "b.weight" in out  # neither side dropped
 
@@ -300,7 +300,7 @@ def test_postprocess_keeps_both_sides_when_tied_quant_state_differs():
     """
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-    resolver = TiedWeightMap(parent)
+    tied_map = TiedWeightMap(parent)
 
     sd = {
         # alias (encoder) exported as quantized: weight + companion scales
@@ -311,7 +311,7 @@ def test_postprocess_keeps_both_sides_when_tied_quant_state_differs():
         "decoder.weight": torch.randn(4, 4),
     }
 
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     # Mismatched companion keys -> keep the whole alias group; no orphaned scales.
     assert set(out) == set(sd)
@@ -342,8 +342,8 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
             self.encoder.experts.down_proj = dp
 
     parent = _Parent()
-    resolver = TiedWeightMap(parent)
-    assert resolver.alias_prefix_pairs() == {"encoder.experts": "decoder.experts"}
+    tied_map = TiedWeightMap(parent)
+    assert tied_map.alias_prefix_pairs() == {"encoder.experts": "decoder.experts"}
 
     # Craft exported-style per-expert keys with distinct storages on both sides.
     sd = {}
@@ -353,7 +353,7 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
                 sd[f"{side}.experts.{e}.{proj}.weight"] = torch.randn(4, 4)
                 sd[f"{side}.experts.{e}.{proj}.weight_scale"] = torch.randn(4)
 
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     assert not any(k.startswith("encoder.experts.") for k in out)  # all aliases dropped
     assert all(k.startswith("decoder.experts.") for k in out)  # only canonical remains

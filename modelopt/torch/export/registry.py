@@ -48,7 +48,7 @@ class ExportContext:
     :class:`TiedWeightMap` and feeds it to ``sync_tied_input_amax`` and
     ``postprocess_state_dict`` directly. Both dense and fused-MoE tied weights are packed
     independently and their duplicate keys are dropped by name there, so the context
-    carries no resolver (handlers never consulted it).
+    carries no tied-weight map (handlers never consulted it).
     """
 
     model: nn.Module
