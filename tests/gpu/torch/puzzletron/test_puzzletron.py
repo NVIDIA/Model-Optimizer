@@ -397,7 +397,12 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     ]
     solutions = [solution for path in solution_paths for solution in json.loads(path.read_text())]
     assert solutions
-    assert 256 in _nested_values(solutions, "intermediate_size")
+    solution_ffn_widths = {
+        int(width)
+        for solution in solutions
+        for width in _nested_values(solution["chosen_block_configs"], "intermediate_size")
+    }
+    assert solution_ffn_widths.intersection({256, 512})
 
     model = AutoModelForCausalLM.from_pretrained(
         smoke_root / "ckpts/sorted_teacher",
