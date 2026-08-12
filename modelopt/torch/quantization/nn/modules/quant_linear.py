@@ -28,7 +28,6 @@ from .quant_module import (
     QuantLinearConvBase,
     QuantModule,
     QuantModuleRegistry,
-    _is_temporary_weight_fold,
     _LegacyQuantLinearConvBaseMixin,
 )
 from .tensor_quantizer import TensorQuantizer
@@ -165,14 +164,17 @@ class SVDQuantLinear(QuantLinearConvBase):
 
     def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
-        super().fold_weight(keep_attrs)
-        if (
+        should_fold = (
             hasattr(self, "weight_quantizer")
             and hasattr(self, "weight")
+            and isinstance(self.weight_quantizer, TensorQuantizer)
             and self.weight_quantizer.fake_quant
-        ):
+            and self.weight_quantizer.is_enabled
+        )
+        super().fold_weight(keep_attrs)
+        if should_fold:
             if (
-                not _is_temporary_weight_fold()
+                not keep_attrs
                 and self._not_sequential_quantizers()
                 and self.weight_quantizer.svdquant_lora_a is not None
                 and self.weight_quantizer.svdquant_lora_b is not None

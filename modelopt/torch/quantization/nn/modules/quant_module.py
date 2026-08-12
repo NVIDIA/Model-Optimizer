@@ -18,7 +18,6 @@
 import contextlib
 import warnings
 from collections.abc import Iterable
-from contextvars import ContextVar
 from typing import Any
 
 import torch
@@ -37,22 +36,6 @@ __all__ = [
     "QuantModule",
     "QuantModuleRegistry",
 ]
-
-
-_temporary_weight_fold_active = ContextVar("temporary_weight_fold_active", default=False)
-
-
-@contextlib.contextmanager
-def _temporary_weight_fold_context():
-    token = _temporary_weight_fold_active.set(True)
-    try:
-        yield
-    finally:
-        _temporary_weight_fold_active.reset(token)
-
-
-def _is_temporary_weight_fold() -> bool:
-    return _temporary_weight_fold_active.get()
 
 
 class QuantModule(DynamicModule):
@@ -158,7 +141,7 @@ class QuantModule(DynamicModule):
         per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
         view while disabling and dropping its calibration attrs exactly once.
         """
-        if _is_temporary_weight_fold() and (not quantizer.fake_quant or not quantizer.is_enabled):
+        if not quantizer.fake_quant or not quantizer.is_enabled:
             return
 
         for weight in weights:
@@ -177,11 +160,11 @@ class QuantModule(DynamicModule):
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
 
-        Every fake-quant weight quantizer is folded regardless of its enabled state. The folded
-        transform is baked into the stored weight and then disabled, so subsequent forwards use
-        the stored weight directly. Calibration buffers (``_pre_quant_scale``, ``_amax``) are
-        dropped unless ``keep_attrs``. A retained pre-quant scale remains stored but is made
-        inactive because it has already been applied to the folded weight.
+        Every enabled fake-quant weight quantizer is folded. The folded transform is baked into
+        the stored weight and then disabled, so subsequent forwards use the stored weight directly.
+        Calibration buffers (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``.
+        A retained pre-quant scale remains stored but is made inactive because it has already been
+        applied to the folded weight.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):

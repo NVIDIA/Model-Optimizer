@@ -42,7 +42,6 @@ from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
-from .nn.modules.quant_module import _temporary_weight_fold_context
 from .utils import is_quantized
 
 __all__ = [
@@ -747,13 +746,13 @@ def temporarily_fold_weights(
     Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. When
     ``snapshot_weights=True``, enabled fake-quant weights and their quantizer runtime state are
     restored on exit, including after an exception. Weights are restored in place so optimizer and
-    distributed references remain valid. Reusing one weight or weight quantizer across modules is
-    rejected before folding.
+    distributed references remain valid.
 
     This context is intended for repeated no-gradient forwards with no optimizer step, such as
     log-probability recomputation over several microbatches. It retains calibration attributes
     while folded; a retained weight ``pre_quant_scale`` is inactive inside the context because its
-    value is already baked into the temporary weight.
+    value is already baked into the temporary weight. Sharing a weight or weight quantizer across
+    multiple :class:`QuantModule` instances is not supported.
 
     Example::
 
@@ -768,8 +767,6 @@ def temporarily_fold_weights(
             the model remains folded after the context exits and folding errors are not rolled back.
     """
     active_pairs = []
-    quantizer_owners = {}
-    weight_owners = {}
     for module in model.modules():
         if not isinstance(module, QuantModule):
             continue
@@ -777,22 +774,12 @@ def temporarily_fold_weights(
             if not isinstance(weight, torch.Tensor):
                 continue
             local_weight = weight.to_local() if hasattr(weight, "to_local") else weight
-            try:
-                storage_id = (local_weight.device, local_weight.untyped_storage().data_ptr())
-            except (RuntimeError, NotImplementedError):
-                storage_id = id(local_weight)
-            weight_owner = weight_owners.setdefault(storage_id, module)
-            if weight_owner is not module:
-                raise ValueError("A weight is shared across quantized modules")
             if not (
                 isinstance(quantizer, TensorQuantizer)
                 and quantizer.fake_quant
                 and quantizer.is_enabled
             ):
                 continue
-            quantizer_owner = quantizer_owners.setdefault(id(quantizer), module)
-            if quantizer_owner is not module:
-                raise ValueError("A weight quantizer is shared across quantized modules")
             active_pairs.append((local_weight, quantizer))
 
     weight_snapshots = {}
@@ -817,8 +804,7 @@ def temporarily_fold_weights(
                 ),
             )
     try:
-        with _temporary_weight_fold_context():
-            fold_weight(model, keep_attrs=True)
+        fold_weight(model, keep_attrs=True)
         yield
     finally:
         if snapshot_weights:
