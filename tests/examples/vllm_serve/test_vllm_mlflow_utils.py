@@ -33,6 +33,10 @@ import yaml
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "vllm_serve"
 
 URI = "https://mlflow.example.com"
+# Fake credentials for the redaction test. TruffleHog's URI detector flags any
+# scheme://user:pass@host, so the marker sits on the definition; this test exists
+# precisely to prove such credentials are masked.
+CREDS_URI = "https://alice:s3cret@mlflow.example.com"  # trufflehog:ignore
 
 # What the launcher publishes plus what it reads, cleared between tests so one case cannot
 # leak tracking configuration into the next.
@@ -253,6 +257,18 @@ def test_bad_uri_from_the_environment_serves_untracked(mlflow_utils, monkeypatch
     assert "MLFLOW_TRACKING_URI" not in os.environ
 
 
+def test_printed_uri_carries_no_credentials(mlflow_utils, monkeypatch, capsys):
+    """This line lands in the worker log that the run uploads, so it has to be masked the
+    same way MlflowRunLogger masks every URI it prints."""
+    _resolve(mlflow_utils, monkeypatch, mlflow=CREDS_URI)
+
+    printed = capsys.readouterr().out
+    assert "s3cret" not in printed and "alice" not in printed
+    assert "https://mlflow.example.com" in printed
+    # Only the display is masked; the workers still need the credentials to authenticate.
+    assert os.environ["MLFLOW_TRACKING_URI"] == CREDS_URI
+
+
 def test_environment_uri_is_best_effort_not_required(mlflow_utils, monkeypatch):
     monkeypatch.setenv("MLFLOW_TRACKING_URI", URI)
     _resolve(mlflow_utils, monkeypatch)
@@ -351,6 +367,44 @@ def test_quant_config_is_uploaded_before_calibration(mlflow_utils, monkeypatch, 
 
     # Present while the run was still open, so a crash during calibration keeps it.
     assert yaml.safe_load(uploaded) == {"quant_cfg": {"*weight_quantizer": {"num_bits": 4}}}
+
+
+def test_a_best_effort_start_failure_leaves_no_staging_directory(
+    mlflow_utils, monkeypatch, fake_mlflow
+):
+    """start() reports an unusable server by disabling itself rather than raising, and every
+    later method returns before the cleanup -- so the temp dir would outlive the process."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", URI)  # from the environment, so not required
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.set_experiment = explode
+    tracker = mlflow_utils.FakeQuantMlflowTracker(_worker(), QUANT_CONFIG)
+
+    tracker.start()
+
+    assert not tracker.enabled  # downgraded to untracked, the serve carries on
+    assert tracker._staging is None
+    tracker.finish("FINISHED")  # still safe to call
+
+
+def test_an_explicit_flag_start_failure_leaves_no_staging_directory(
+    mlflow_utils, monkeypatch, fake_mlflow
+):
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", URI)
+    monkeypatch.setenv("MODELOPT_MLFLOW_REQUIRED", "1")  # --mlflow, so failure is fatal
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.set_experiment = explode
+    tracker = mlflow_utils.FakeQuantMlflowTracker(_worker(), QUANT_CONFIG)
+
+    with pytest.raises(ConnectionError):
+        tracker.start()
+
+    assert tracker._staging is None
 
 
 def test_a_recipe_run_does_not_duplicate_the_config(mlflow_utils, monkeypatch, fake_mlflow):

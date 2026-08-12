@@ -38,9 +38,12 @@ import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
+import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.utils.mlflow import (
     MlflowRunLogger,
     command_text,
@@ -151,7 +154,19 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
     )
     if args.mlflow_run_name:
         os.environ[RUN_NAME_ENV] = args.mlflow_run_name
-    print(f"[mlflow] tracking to {uri}, experiment {os.environ[EXPERIMENT_ENV]}")
+    print(
+        f"[mlflow] tracking to {_without_credentials(uri)}, experiment {os.environ[EXPERIMENT_ENV]}"
+    )
+
+
+def _without_credentials(uri: str) -> str:
+    """Strip any ``user:token@`` from *uri*, for printing.
+
+    ``MlflowRunLogger`` masks the same thing in every URI it prints or uploads, and this
+    line ends up in the worker log that the run itself uploads, so it has to match.
+    """
+    parsed = urlparse(uri)
+    return parsed._replace(netloc=parsed.netloc.rpartition("@")[2]).geturl()
 
 
 def quant_variant() -> str:
@@ -224,6 +239,11 @@ class FakeQuantMlflowTracker:
             # An explicit --mlflow is fatal here by design; leave no staging directory behind.
             self._discard_staging()
             raise
+        if not self._logger.enabled:
+            # A URI from the environment is best-effort: start() reports an unusable server
+            # by disabling itself rather than raising, and every later method -- finish()
+            # included -- returns before reaching the cleanup. So clean up here instead.
+            self._discard_staging()
 
     def log_quant_config(self, quant_cfg: Any) -> None:
         """Upload the merged ``QUANT_CFG``/``KV_QUANT_CFG`` config, when that is what ran.
@@ -253,8 +273,6 @@ class FakeQuantMlflowTracker:
         """Stage the per-quantizer summary for upload; a no-op when untracked."""
         if not self._logger.enabled or self._staging is None:
             return
-        import modelopt.torch.quantization as mtq
-
         # Writes .quant_summary.txt and prints only its path, so the console copy the caller
         # already printed is not repeated.
         mtq.print_quant_summary(model, output_dir=str(self._staging))
@@ -299,8 +317,6 @@ class FakeQuantMlflowTracker:
         if recipe_path := self._quant_config.get("recipe_path"):
             # The resolved recipe, not the source file: a recipe may be a directory or use
             # $imports, and only the resolved form stands alone.
-            from modelopt.recipe import load_recipe
-
             texts["recipe/resolved_recipe.yaml"] = _dump_yaml(
                 load_recipe(recipe_path).model_dump(mode="json")
             )
