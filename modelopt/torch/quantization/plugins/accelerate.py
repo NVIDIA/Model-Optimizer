@@ -224,12 +224,21 @@ def init_quantized_weights(
 
         # Model-construction kwargs must not reach load_checkpoint_and_dispatch(),
         # which does not accept them (e.g. attn_implementation -> TypeError).
+        # Both dtype aliases are popped: torch_dtype is not a parameter of
+        # load_checkpoint_and_dispatch() either, and the resolved value is
+        # passed back explicitly below.
         attn_implementation = kwargs.pop("attn_implementation", None)
+        dtype_kwarg = kwargs.pop("dtype", None)
+        legacy_dtype_kwarg = kwargs.pop("torch_dtype", None)
 
         with init_empty_weights():
             # Fix torch_dtype to match original model
-            torch_dtype = kwargs.get(
-                "dtype", kwargs.get("torch_dtype", getattr(config, "torch_dtype", torch.float16))
+            torch_dtype = (
+                dtype_kwarg
+                if dtype_kwarg is not None
+                else legacy_dtype_kwarg
+                if legacy_dtype_kwarg is not None
+                else getattr(config, "torch_dtype", torch.float16)
             )
             from_config_kwargs = {}
             if attn_implementation is not None:
@@ -251,6 +260,10 @@ def init_quantized_weights(
             model,
             checkpoint=pretrained_model_name_or_path,
             device_map=_device_map,
+            # Passed explicitly because both aliases were popped above;
+            # load_checkpoint_and_dispatch() accepts `dtype` but not
+            # `torch_dtype`, so forwarding kwargs verbatim was unsafe.
+            dtype=torch_dtype,
             *args,
             **kwargs,
         )
