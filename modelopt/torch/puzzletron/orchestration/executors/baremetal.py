@@ -102,8 +102,7 @@ class GpuLeaseManager:
             slices = [
                 tuple(free[index : index + topology.gpus_per_task])
                 for index in range(0, len(free), topology.gpus_per_task)
-                if len(free[index : index + topology.gpus_per_task])
-                == topology.gpus_per_task
+                if len(free[index : index + topology.gpus_per_task]) == topology.gpus_per_task
             ]
             if not slices:
                 continue
@@ -179,9 +178,7 @@ class BareMetalSSHExecutor(Executor):
         return str(path.with_name(f"{path.stem}.task-{task_index:04d}{path.suffix}"))
 
     @staticmethod
-    def _launcher_argv(
-        attempt: AttemptSpec, topology: ResolvedTaskTopology
-    ) -> tuple[str, ...]:
+    def _launcher_argv(attempt: AttemptSpec, topology: ResolvedTaskTopology) -> tuple[str, ...]:
         payload = attempt.command.argv
         if attempt.command.shell:
             payload = ("bash", "-lc", " ".join(shlex.quote(part) for part in payload))
@@ -224,9 +221,7 @@ class BareMetalSSHExecutor(Executor):
         topology = resolve_task_topology(attempt)
         leases = self.leases.acquire_topology(attempt.attempt_id, topology)
         task_hosts = tuple(dict.fromkeys(lease.hostname for lease in leases))
-        launcher = " ".join(
-            shlex.quote(part) for part in self._launcher_argv(attempt, topology)
-        )
+        launcher = " ".join(shlex.quote(part) for part in self._launcher_argv(attempt, topology))
         contract = self.runner.contract
         hooks: list[str] = []
         if contract.setup_env:
@@ -264,7 +259,7 @@ class BareMetalSSHExecutor(Executor):
                 )
                 payload = (
                     f"{postrun_trap}set +e; {launcher}; status=$?; "
-                    f"printf '%s\\n' \"$status\" > {shlex.quote(exit_path)}; exit \"$status\""
+                    f'printf \'%s\\n\' "$status" > {shlex.quote(exit_path)}; exit "$status"'
                 )
                 remote_command = (
                     f"set -Eeuo pipefail; cd {shlex.quote(working_directory)}; "
@@ -331,7 +326,7 @@ class BareMetalSSHExecutor(Executor):
             exit_path = shlex.quote(str(record["exit_path"]))
             probe_command = (
                 f"if [[ -f {exit_path} ]]; then printf 'DONE '; cat {exit_path}; "
-                f"elif [[ -f {pid_path} ]] && kill -0 \"$(cat {pid_path})\" "
+                f'elif [[ -f {pid_path} ]] && kill -0 "$(cat {pid_path})" '
                 ">/dev/null 2>&1; then echo RUNNING; else echo LOST; fi"
             )
             probe = _run_command(

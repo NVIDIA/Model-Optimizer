@@ -178,10 +178,7 @@ def _stage_artifact_present(root: Path, spec: StageSpec) -> bool:
 def _pipeline_state(root: Path, spec: StageSpec, config: dict[str, Any]) -> str:
     """Return the report state from the manifest, artifacts, and configuration."""
 
-    if (
-        (config.get("post_mip") or {}).get("flows")
-        and spec.stage_id in LEGACY_POST_MIP_STAGE_IDS
-    ):
+    if (config.get("post_mip") or {}).get("flows") and spec.stage_id in LEGACY_POST_MIP_STAGE_IDS:
         return "disabled"
     if is_correctness_sanity_stage(spec.stage_id):
         manifest = _manifest(root, spec.stage_id)
@@ -287,11 +284,7 @@ def _sort_table(summary: dict[str, Any]) -> str:
             f"{reverse_cell}"
             "</tr>"
         )
-    gate = (
-        "passed"
-        if summary.get("passed") is True
-        else "failed (blocking correctness)"
-    )
+    gate = "passed" if summary.get("passed") is True else "failed (blocking correctness)"
     gate_label = "passed" if summary.get("passed") is True else "failed"
     findings = list(summary.get("findings") or ())
     finding_notes = ""
@@ -301,8 +294,7 @@ def _sort_table(summary: dict[str, Any]) -> str:
             str(item.get("message") or "Measured result needs review.") for item in findings
         )
         gate_attributes = (
-            " warning-value' tabindex='0' "
-            f"data-warning='{html.escape(messages, quote=True)}"
+            f" warning-value' tabindex='0' data-warning='{html.escape(messages, quote=True)}"
         )
         finding_notes = (
             "<p class='note'>"
@@ -414,9 +406,7 @@ def _activation_diagnostic_summary(root: Path) -> dict[str, Any]:
     if not slicing_findings:
         slicing_findings = [
             asdict(finding)
-            for finding in descriptor_realization_findings(
-                slicing.get("axis_summaries") or {}
-            )
+            for finding in descriptor_realization_findings(slicing.get("axis_summaries") or {})
         ]
     return {
         "rows": rows,
@@ -429,7 +419,10 @@ def _activation_diagnostic_summary(root: Path) -> dict[str, Any]:
         ),
         "width_findings": width_findings,
         "slicing_findings": slicing_findings,
-        "sort_findings": list((_load_optional(root / "artifacts" / "sort_sanity" / "summary.json")).get("findings") or ()),
+        "sort_findings": list(
+            (_load_optional(root / "artifacts" / "sort_sanity" / "summary.json")).get("findings")
+            or ()
+        ),
     }
 
 
@@ -455,9 +448,7 @@ def _cell_finding_messages(
         evidence = finding.get("evidence") or {}
         group = evidence.get("group") or {}
         methods = {
-            str(evidence[key])
-            for key in _FINDING_METHOD_KEYS
-            if evidence.get(key) is not None
+            str(evidence[key]) for key in _FINDING_METHOD_KEYS if evidence.get(key) is not None
         }
         if (
             str(group.get("axis")) == str(axis)
@@ -471,9 +462,11 @@ def _cell_finding_messages(
 
 
 def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
-    findings = list(summary.get("width_findings") or ()) + list(
-        summary.get("slicing_findings") or ()
-    ) + list(summary.get("sort_findings") or ())
+    findings = (
+        list(summary.get("width_findings") or ())
+        + list(summary.get("slicing_findings") or ())
+        + list(summary.get("sort_findings") or ())
+    )
     rows = _activation_diagnostic_rows(summary)
     gates = []
     if summary.get("width_present"):
@@ -552,11 +545,7 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
                 metric=first_metric,
                 method=method,
             )
-            attributes = (
-                " class='warning-cell'"
-                if messages
-                else ""
-            )
+            attributes = " class='warning-cell'" if messages else ""
             formatted = html.escape(_fmt(value)) if value is not None else "N/A"
             if messages:
                 formatted = (
@@ -564,9 +553,7 @@ def _activation_diagnostic_section(summary: dict[str, Any]) -> str:
                     f"data-warning='{html.escape(chr(10).join(messages), quote=True)}'>"
                     f"{formatted}</span>"
                 )
-            cells.append(
-                f"<td{attributes}>{formatted}</td>"
-            )
+            cells.append(f"<td{attributes}>{formatted}</td>")
         body.append(
             "<tr>"
             f"<th>{html.escape(label)}</th><td>{html.escape(_fmt(target))}</td>"
@@ -696,9 +683,7 @@ def _bypass_overfit_data(root: Path) -> dict[str, Any]:
         mode: _bypass_overfit_mode_data(root, mode)
         for mode in ("smallest_fixed", "diverse_resampled")
     }
-    granularities = {
-        data.get("granularity") for data in modes.values() if data.get("records")
-    }
+    granularities = {data.get("granularity") for data in modes.values() if data.get("records")}
     granularity = "subblock" if "subblock" in granularities else "block"
     units = sorted(
         {unit for data in modes.values() for unit in data.get("units", ())},
@@ -740,15 +725,11 @@ def _overfit_summary_card(mode: str, data: dict[str, Any]) -> str:
     findings = list(summary.get("findings") or ())
     warning_attributes = ""
     if findings:
-        warning_attributes = (
-            " warning-value' tabindex='0' data-warning='"
-            + html.escape(
-                "\n".join(
-                    str(item.get("message") or "Measured result needs review.")
-                    for item in findings
-                ),
-                quote=True,
-            )
+        warning_attributes = " warning-value' tabindex='0' data-warning='" + html.escape(
+            "\n".join(
+                str(item.get("message") or "Measured result needs review.") for item in findings
+            ),
+            quote=True,
         )
     return (
         f"<article class='probe-summary {'passed' if passed else 'failed'}{warning_attributes}'>"
@@ -770,8 +751,7 @@ def _bypass_overfit_section(data: dict[str, Any]) -> str:
     if not units or not any(mode.get("records") for mode in modes.values()):
         return "<p class='empty'>Pending bypass overfit.</p>"
     options = "".join(
-        f"<option value='{html.escape(unit)}'>layer_{html.escape(unit)}</option>"
-        for unit in units
+        f"<option value='{html.escape(unit)}'>layer_{html.escape(unit)}</option>" for unit in units
     )
     unit_label = "Subblock" if data.get("granularity") == "subblock" else "Layer"
     cards = "".join(
@@ -830,9 +810,7 @@ def _report_candidate_config(config: Any) -> Any:
         kv_heads = _finite_number(normalized.get("num_kv_heads"))
         if query_heads is not None and kv_heads is not None and kv_heads > 0:
             ratio = query_heads / kv_heads
-            normalized["num_query_heads_per_kv_head"] = (
-                int(ratio) if ratio.is_integer() else ratio
-            )
+            normalized["num_query_heads_per_kv_head"] = int(ratio) if ratio.is_integer() else ratio
     return normalized
 
 
@@ -856,7 +834,12 @@ def _compact_nested_bypass_observations(
                 missing_catalog_entries += 1
         active_params = _finite_number(observation.get("active_params"))
         teacher_params = _finite_number(observation.get("teacher_params"))
-        if active_params is None or active_params < 0 or teacher_params is None or teacher_params <= 0:
+        if (
+            active_params is None
+            or active_params < 0
+            or teacher_params is None
+            or teacher_params <= 0
+        ):
             row["parameter_ratio"] = None
             invalid_parameter_counts += 1
         else:
@@ -919,8 +902,8 @@ def _nested_bypass_data(root: Path) -> dict[str, Any]:
         history_path.with_name("candidate_catalog.json"),
     )
     raw_candidate_catalog = _load_optional(catalog_path)
-    observations, candidate_catalog, observation_diagnostics = (
-        _compact_nested_bypass_observations(observations, raw_candidate_catalog)
+    observations, candidate_catalog, observation_diagnostics = _compact_nested_bypass_observations(
+        observations, raw_candidate_catalog
     )
     layers = sorted(
         {str(layer_idx) for row in records for layer_idx in (row.get("per_layer_loss") or {})},
@@ -1003,7 +986,9 @@ def _nested_bypass_section(data: dict[str, Any]) -> str:
         )
     missing_catalog_entries = int(diagnostics.get("missing_catalog_entries") or 0)
     if missing_catalog_entries:
-        subject = "observation references" if missing_catalog_entries == 1 else "observations reference"
+        subject = (
+            "observation references" if missing_catalog_entries == 1 else "observations reference"
+        )
         warning_messages.append(
             f"{missing_catalog_entries} {subject} a candidate missing from the catalog"
         )
@@ -1164,10 +1149,7 @@ def _mamba_family_hint(root: Path) -> str | None:
 
     for stage in ("build_library", "vllm_stats", "width_importance", "convert"):
         manifest = _load_optional(root / "manifests" / f"{stage}.json")
-        axes = (
-            ((manifest.get("config") or {}).get("search_space") or {}).get("axes")
-            or {}
-        )
+        axes = ((manifest.get("config") or {}).get("search_space") or {}).get("axes") or {}
         names = {str(axis) for axis in axes}
         has_gdn = any(name.startswith("gdn_") for name in names)
         has_mamba = any(name.startswith("mamba_") for name in names)
@@ -1265,10 +1247,7 @@ def _subblock_axes(
         consumed.update({"num_kv_heads", "num_query_heads", "qk_head_dim", "sliding_window_size"})
     elif (
         kind == "mamba"
-        and _semantic_subblock_family(
-            subblock, mamba_family_hint=mamba_family_hint
-        )
-        == "gdn"
+        and _semantic_subblock_family(subblock, mamba_family_hint=mamba_family_hint) == "gdn"
     ):
         groups = subblock.get("num_groups")
         heads = subblock.get("num_heads")
@@ -1311,9 +1290,7 @@ def _subblock_axes(
     return axes
 
 
-def _block_axes(
-    block: dict[str, Any], *, mamba_family_hint: str | None = None
-) -> dict[str, Any]:
+def _block_axes(block: dict[str, Any], *, mamba_family_hint: str | None = None) -> dict[str, Any]:
     axes: dict[str, Any] = {}
     for subblock in _config_subblocks(block):
         axes.update(_subblock_axes(subblock, mamba_family_hint=mamba_family_hint))
@@ -1332,9 +1309,7 @@ def _axis_sort_key(axis: str) -> tuple[int, str]:
     return (_AXIS_ORDER.index(axis) if axis in _AXIS_ORDER else len(_AXIS_ORDER), axis)
 
 
-def _library_scenario(
-    path: Path, *, mamba_family_hint: str | None = None
-) -> dict[str, Any]:
+def _library_scenario(path: Path, *, mamba_family_hint: str | None = None) -> dict[str, Any]:
     payload = _load_optional(path)
     entries = [entry for entry in payload.get("entries", ()) if isinstance(entry, dict)]
     by_signature: dict[tuple[str, ...], dict[int, dict[str, dict[str, Any]]]] = {}
@@ -1352,9 +1327,7 @@ def _library_scenario(
         active = [value for value in subblocks if value.get("no_op") is not True]
         signature = tuple(
             sorted(
-                _semantic_subblock_family(
-                    value, mamba_family_hint=mamba_family_hint
-                )
+                _semantic_subblock_family(value, mamba_family_hint=mamba_family_hint)
                 for value in (active or subblocks)
             )
         )
@@ -1376,9 +1349,7 @@ def _library_scenario(
             axis_values: dict[str, set[str]] = {}
             decoded_values: dict[str, dict[str, Any]] = {}
             for block in configs:
-                for axis, value in _block_axes(
-                    block, mamba_family_hint=mamba_family_hint
-                ).items():
+                for axis, value in _block_axes(block, mamba_family_hint=mamba_family_hint).items():
                     encoded = _canonical_json(value)
                     axis_values.setdefault(axis, set()).add(encoded)
                     decoded_values.setdefault(axis, {})[encoded] = value
@@ -1451,9 +1422,7 @@ def _library_data(root: Path) -> dict[str, Any]:
     if not paths and (root / "replacement_library.json").is_file():
         paths = [root / "replacement_library.json"]
     mamba_family_hint = _mamba_family_hint(root)
-    scenarios = [
-        _library_scenario(path, mamba_family_hint=mamba_family_hint) for path in paths
-    ]
+    scenarios = [_library_scenario(path, mamba_family_hint=mamba_family_hint) for path in paths]
     total_entries = sum(int(scenario["entries"]) for scenario in scenarios)
     unique_runtime_configs = sum(int(row["unique_runtime_configs"]) for row in scenarios)
     formula = "Pending library creation"
@@ -1506,12 +1475,8 @@ def _library_section(data: dict[str, Any]) -> str:
     )
 
 
-def _compact_runtime_config(
-    config: dict[str, Any], *, mamba_family_hint: str | None = None
-) -> str:
-    kind = _semantic_subblock_family(
-        config, mamba_family_hint=mamba_family_hint
-    )
+def _compact_runtime_config(config: dict[str, Any], *, mamba_family_hint: str | None = None) -> str:
+    kind = _semantic_subblock_family(config, mamba_family_hint=mamba_family_hint)
     ignored = {"kind", "name", "no_op", "conv_kernel_size"}
     values = ", ".join(
         f"{key.replace('intermediate_size', 'dim').replace('num_', '')}={value}"
@@ -1562,8 +1527,7 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
     for scenario in source_scenarios:
         width = scenario.get("hidden_width")
         stats_path = Path(
-            scenario.get("stats_path")
-            or Path(scenario["path"]).with_name("subblock_stats.json")
+            scenario.get("stats_path") or Path(scenario["path"]).with_name("subblock_stats.json")
         )
         if not stats_path.is_file() and (root / "subblock_stats.json").is_file():
             stats_path = root / "subblock_stats.json"
@@ -1572,7 +1536,8 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
             [
                 row
                 for row in payload
-                if isinstance(row, dict) and (row.get("args") or {}).get("runtime_stats") is True
+                if isinstance(row, dict)
+                and (row.get("args") or {}).get("runtime_stats") is True
                 and (
                     width is None
                     or (row.get("args") or {}).get("n_embd") is None
@@ -1651,9 +1616,7 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
                         ),
                         "axes": {
                             "hidden_width": width,
-                            **_subblock_axes(
-                                config, mamba_family_hint=mamba_family_hint
-                            ),
+                            **_subblock_axes(config, mamba_family_hint=mamba_family_hint),
                         },
                         "metrics": metrics,
                         "profile": args,
@@ -1664,11 +1627,7 @@ def _vllm_data(root: Path, library: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
         expected = int(scenario.get("unique_runtime_configs", 0))
-        invalid = sum(
-            1
-            for warning in warnings
-            if warning.get("hidden_width") == width
-        )
+        invalid = sum(1 for warning in warnings if warning.get("hidden_width") == width)
         scenarios.append(
             {
                 "hidden_width": width,
@@ -1816,8 +1775,7 @@ def _subblock_replacement_record(
         (
             subblock
             for subblock in _config_subblocks(block)
-            if str(subblock.get("kind")) == kind
-            and str(subblock.get("name", kind)) == name
+            if str(subblock.get("kind")) == kind and str(subblock.get("name", kind)) == name
         ),
         None,
     )
@@ -1869,9 +1827,7 @@ def _replacement_data(root: Path) -> dict[str, Any]:
         manifest = _load_optional(scenario_dir / "scenario_manifest.json")
         width = manifest.get("hidden_width")
         subblock_definitions_path = scenario_dir / "single_subblock_replacement_solutions.json"
-        subblock_result_dir = (
-            scenario_dir / "single_subblock_replacement_solutions--validation"
-        )
+        subblock_result_dir = scenario_dir / "single_subblock_replacement_solutions--validation"
         if subblock_definitions_path.is_file() and subblock_result_dir.is_dir():
             granularity = "subblock"
             definitions = json.loads(subblock_definitions_path.read_text())
@@ -2102,9 +2058,7 @@ _MIP_FAMILY_COLUMNS = {
 }
 
 
-def _mip_supported_columns(
-    names: set[str], *, family_presence: dict[str, bool]
-) -> list[str]:
+def _mip_supported_columns(names: set[str], *, family_presence: dict[str, bool]) -> list[str]:
     def hidden(name: str) -> bool:
         return any(name == base or name.startswith(f"{base}@") for base in _MIP_HIDDEN_COLUMNS)
 
@@ -2212,9 +2166,7 @@ def _mip_data(root: Path) -> dict[str, Any]:
                         "hidden_width": width,
                         "removed_sublayers": depth,
                         "rank": rank,
-                        "outputs": _mip_outputs(
-                            solution, runtime_profile=runtime_profile
-                        ),
+                        "outputs": _mip_outputs(solution, runtime_profile=runtime_profile),
                         "solution_path": scenario.get("solution_path"),
                     }
                 )
@@ -2279,9 +2231,7 @@ def _mip_data(root: Path) -> dict[str, Any]:
         )
     columns = [name for name in _MIP_COLUMN_ORDER if name in available_columns]
     columns.extend(sorted(available_columns - set(columns)))
-    homogeneous_columns = [
-        name for name in _MIP_COLUMN_ORDER if name in homogeneous_output_columns
-    ]
+    homogeneous_columns = [name for name in _MIP_COLUMN_ORDER if name in homogeneous_output_columns]
     homogeneous_columns.extend(sorted(homogeneous_output_columns - set(homogeneous_columns)))
     return {
         "profiles": profiles,
@@ -2446,7 +2396,8 @@ def _evaluation_data(root: Path) -> dict[str, Any]:
                     **raw,
                     "label": style.get("label", raw.get("label", solution_id)),
                     "color": style.get(
-                        "color", raw.get("color", _EVALUATION_PALETTE[index % len(_EVALUATION_PALETTE)])
+                        "color",
+                        raw.get("color", _EVALUATION_PALETTE[index % len(_EVALUATION_PALETTE)]),
                     ),
                     "marker": {
                         "teacher": "star",
@@ -2841,8 +2792,7 @@ def _distillation_overfit_section(data: dict[str, Any]) -> str:
             "<p class='gate warning warning-value' tabindex='0' data-warning='"
             + html.escape(
                 "\n".join(
-                    str(item.get("message") or "Measured result needs review.")
-                    for item in findings
+                    str(item.get("message") or "Measured result needs review.") for item in findings
                 ),
                 quote=True,
             )
@@ -2954,10 +2904,7 @@ def _proper_distillation_section(data: dict[str, Any]) -> str:
     progress = ""
     if run.get("partial"):
         latest_step = max(
-            (
-                int(row.get("step", row.get("global_step", 0)))
-                for row in run.get("records", ())
-            ),
+            (int(row.get("step", row.get("global_step", 0))) for row in run.get("records", ())),
             default=0,
         )
         progress = (
@@ -2965,8 +2912,7 @@ def _proper_distillation_section(data: dict[str, Any]) -> str:
             f"{latest_step} / {html.escape(str(run.get('max_steps', 'N/A')))} optimizer steps.</p>"
         )
     return (
-        progress
-        + "<p class='note'>Fresh shuffled data · "
+        progress + "<p class='note'>Fresh shuffled data · "
         f"{html.escape(str(run.get('max_steps', 'N/A')))} optimizer steps · sequence length "
         f"{html.escape(str(run.get('sequence_length', 'N/A')))} · global batch "
         f"{html.escape(str(run.get('global_batch_size', 'N/A')))}.</p>"
@@ -3183,12 +3129,16 @@ def _experiment_summary_section(data: dict[str, Any]) -> str:
         ("Best models for AIPerf", "aiperf_candidates"),
         ("Best models for distillation", "distillation_candidates"),
     )
-    return "<div class='summary-grid'>" + "".join(
-        "<article><span>{}</span><strong>{}</strong></article>".format(
-            html.escape(label), html.escape(_fmt(data.get(key) or "unknown"))
+    return (
+        "<div class='summary-grid'>"
+        + "".join(
+            "<article><span>{}</span><strong>{}</strong></article>".format(
+                html.escape(label), html.escape(_fmt(data.get(key) or "unknown"))
+            )
+            for label, key in labels
         )
-        for label, key in labels
-    ) + "</div>"
+        + "</div>"
+    )
 
 
 def _stage_dag(
@@ -3206,28 +3156,24 @@ def _stage_dag(
         dynamic_post_mip_stage_ids=dynamic,
     )
     specs_by_id = {spec.stage_id: spec for spec in STAGE_SPECS}
-    specs = {
-        stage_id: specs_by_id[stage_id]
-        for stage_id in configured
-        if stage_id not in dynamic
-    }
-    parents = {
-        stage_id: configured_parent_stage_ids(stage_id, merged_config)
-        for stage_id in specs
-    }
-    parents.update(
-        {stage_id: node.dependency_stage_ids for stage_id, node in dynamic.items()}
-    )
+    specs = {stage_id: specs_by_id[stage_id] for stage_id in configured if stage_id not in dynamic}
+    parents = {stage_id: configured_parent_stage_ids(stage_id, merged_config) for stage_id in specs}
+    parents.update({stage_id: node.dependency_stage_ids for stage_id, node in dynamic.items()})
     levels: dict[str, int] = {}
     pending = set(specs) | set(dynamic)
     while pending:
-        ready = [stage_id for stage_id in pending if all(parent in levels for parent in parents[stage_id])]
+        ready = [
+            stage_id
+            for stage_id in pending
+            if all(parent in levels for parent in parents[stage_id])
+        ]
         if not ready:
             ready = list(pending)
         for stage_id in sorted(
             ready,
             key=lambda value: (
-                specs[value].topology_order if value in specs else len(specs), value
+                specs[value].topology_order if value in specs else len(specs),
+                value,
             ),
         ):
             levels[stage_id] = max((levels[parent] + 1 for parent in parents[stage_id]), default=0)
@@ -3422,9 +3368,7 @@ def _section_source_selector(
     section_id: str,
     stage_ids: tuple[str, ...],
 ) -> Callable[[Path, bool], Iterable[Path]]:
-    return lambda root, completed: _report_source_paths(
-        root, section_id, stage_ids, completed
-    )
+    return lambda root, completed: _report_source_paths(root, section_id, stage_ids, completed)
 
 
 def _report_section_specs() -> tuple[_ReportSectionSpec, ...]:
@@ -3558,9 +3502,7 @@ def _report_section_specs() -> tuple[_ReportSectionSpec, ...]:
     )
 
 
-def _report_campaign_identity(
-    root: Path, model_name: str, merged_config: dict[str, Any]
-) -> str:
+def _report_campaign_identity(root: Path, model_name: str, merged_config: dict[str, Any]) -> str:
     return stable_digest(
         {
             "report_contract": 1,
@@ -3630,9 +3572,7 @@ def generate_campaign_progress_report(
 
     post_mip_nodes = compile_post_mip_flows(merged_config)
     granularity_data = _granularity_data(root, merged_config)
-    statuses = {
-        spec.stage_id: _pipeline_state(root, spec, merged_config) for spec in STAGE_SPECS
-    }
+    statuses = {spec.stage_id: _pipeline_state(root, spec, merged_config) for spec in STAGE_SPECS}
     post_mip_payloads = build_post_mip_report_payloads(root, post_mip_nodes)
     post_mip_report_bodies = {}
     for node in post_mip_nodes:
@@ -3666,8 +3606,7 @@ def generate_campaign_progress_report(
             hash_contents=completed,
         )
         dependencies = {
-            dependency: section_data[dependency]
-            for dependency in section_spec.dependencies
+            dependency: section_data[dependency] for dependency in section_spec.dependencies
         }
         dependency_identities = {
             dependency: section_results[dependency].snapshot.input_digest
@@ -3723,9 +3662,7 @@ def generate_campaign_progress_report(
         stage_id in configured_stages and present[stage_id]
         for stage_id in ("width_sanity", "slicing_sanity")
     )
-    has_bypass_overfit = (
-        "bypass_sanity" in configured_stages and present["bypass_sanity"]
-    )
+    has_bypass_overfit = "bypass_sanity" in configured_stages and present["bypass_sanity"]
     has_nested_bypass = "bypass" in configured_stages and present["bypass"]
     has_depth = "depth_importance" in configured_stages and present["depth_importance"]
     has_library = "build_library" in configured_stages and present["build_library"]
@@ -3734,20 +3671,15 @@ def generate_campaign_progress_report(
         present["replacement_scoring"] or bool(replacement_data.get("records"))
     )
     has_mip = "mip" in configured_stages and present["mip"]
-    has_evaluation = (
-        "zero_shot_evaluation" in configured_stages
-        and present["zero_shot_evaluation"]
-    )
+    has_evaluation = "zero_shot_evaluation" in configured_stages and present["zero_shot_evaluation"]
     has_aiperf = "aiperf" in configured_stages and (
         present["aiperf"] or bool(aiperf_data.get("profiles"))
     )
     has_distillation_overfit = (
-        "global_distillation_sanity" in configured_stages
-        and present["global_distillation_sanity"]
+        "global_distillation_sanity" in configured_stages and present["global_distillation_sanity"]
     )
-    has_proper_distillation = (
-        "global_distillation" in configured_stages
-        and bool(proper_distillation_data.get("runs"))
+    has_proper_distillation = "global_distillation" in configured_stages and bool(
+        proper_distillation_data.get("runs")
     )
     has_post_distillation_evaluation = (
         "post_distillation_evaluation" in configured_stages
@@ -3787,12 +3719,8 @@ def generate_campaign_progress_report(
         stage_targets["post_distillation_evaluation"] = "post-distillation-evaluation"
     for node in post_mip_nodes:
         if node.stage_id in post_mip_report_bodies:
-            stage_targets[node.stage_id] = str(
-                post_mip_payloads[node.stage_id]["section_id"]
-            )
-    dag = _stage_dag(
-        root, merged_config, statuses, stage_targets, post_mip_nodes=post_mip_nodes
-    )
+            stage_targets[node.stage_id] = str(post_mip_payloads[node.stage_id]["section_id"])
+    dag = _stage_dag(root, merged_config, statuses, stage_targets, post_mip_nodes=post_mip_nodes)
     vllm_title = stage_display_name(
         "vllm_stats", granularity=_stage_granularity(root, "vllm_stats", merged_config)
     )

@@ -730,9 +730,7 @@ def _ask_aiperf_config(
         },
     }
     if detailed:
-        config["input_tokens"] = prompts.integer(
-            "AIPerf ISL:", default=int(config["input_tokens"])
-        )
+        config["input_tokens"] = prompts.integer("AIPerf ISL:", default=int(config["input_tokens"]))
         config["output_tokens"] = prompts.integer(
             "AIPerf OSL:", default=int(config["output_tokens"])
         )
@@ -757,7 +755,6 @@ def _ask_downstream_evaluation_config(
     defaults: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Ask for lmms-eval task and vLLM settings."""
-
     defaults = defaults or {}
     tasks = prompts.text(
         "lmms-eval tasks (comma-separated):",
@@ -796,10 +793,7 @@ def _ask_downstream_evaluation_config(
         )
         enable_expert_parallel = (
             prompts.confirm(
-                (
-                    "Enable lmms-eval vLLM expert parallelism? "
-                    "vLLM effective EP is TP * DP."
-                ),
+                ("Enable lmms-eval vLLM expert parallelism? vLLM effective EP is TP * DP."),
                 default=bool(
                     topology_defaults.get("enable_expert_parallel")
                     or int(topology_defaults.get("expert_parallel_size", 1)) > 1
@@ -859,7 +853,6 @@ def _ask_downstream_evaluation_config(
 
 def _downstream_evaluation_metric_suggestions(node_id: str, config: Mapping[str, Any]) -> list[str]:
     """Return filter metric names produced by the downstream-evaluation runner."""
-
     suggestions = []
     tasks = config.get("tasks") or ()
     if isinstance(tasks, str):

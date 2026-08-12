@@ -56,7 +56,9 @@ def test_diagnostic_scoring_config_uses_explicit_checkpoint_roles(tmp_path: Path
     assert cfg.scoring.target_teacher_dir == str(teacher)
 
 
-def test_diagnostic_sorted_parent_runs_the_distributed_sort_on_every_rank(monkeypatch, tmp_path: Path):
+def test_diagnostic_sorted_parent_runs_the_distributed_sort_on_every_rank(
+    monkeypatch, tmp_path: Path
+):
     calls = []
     monkeypatch.setattr(diagnostics.dist, "is_master", lambda: False)
     monkeypatch.setattr(diagnostics.dist, "barrier", lambda: calls.append("barrier"))
@@ -142,9 +144,7 @@ def test_sort_equivalence_summary_records_blocking_drift(tmp_path: Path):
     assert summary["verdict"] == "failed"
 
 
-def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(
-    monkeypatch, tmp_path: Path
-):
+def test_sort_equivalence_uses_master_failure_verdict_on_every_rank(monkeypatch, tmp_path: Path):
     config = {"experiment": {"dir": str(tmp_path)}}
     manifest = StageManifest(stage="sort_sanity", config=config)
     summary_path = tmp_path / "artifacts" / "sort_sanity" / "summary.json"
@@ -348,9 +348,7 @@ def test_axis_worker_accepts_pp2_ep2_overlay_on_four_ranks(monkeypatch, tmp_path
     monkeypatch.setattr(
         axis_worker,
         "load_runtime_hydra_config",
-        lambda _config: OmegaConf.create(
-            {"width_sanity": {"automodel": {"parallel": parallel}}}
-        ),
+        lambda _config: OmegaConf.create({"width_sanity": {"automodel": {"parallel": parallel}}}),
     )
 
     _validate_worker_topology(config, "kv_groups")
@@ -371,9 +369,7 @@ def test_axis_worker_accepts_the_stage_owned_super_mesh(monkeypatch) -> None:
     monkeypatch.setattr(
         axis_worker,
         "load_runtime_hydra_config",
-        lambda _config: OmegaConf.create(
-            {"width_sanity": {"automodel": {"parallel": parallel}}}
-        ),
+        lambda _config: OmegaConf.create({"width_sanity": {"automodel": {"parallel": parallel}}}),
     )
 
     _validate_worker_topology(config, "moe_experts")

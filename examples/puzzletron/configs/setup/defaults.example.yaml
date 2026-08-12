@@ -7,10 +7,10 @@ infrastructure:
     venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
     # Optional. Set to an image/path accepted by the cluster's srun container plugin.
     # Leave null to execute directly in the worker environment.
-    container: null
+    container:
     # Optional and used only with a container. Use comma-separated
     # /host/path:/container/path entries, for example /data:/data,/models:/models.
-    container_mounts: null
+    container_mounts:
     # Optional shell commands run in order before virtualenv activation.
     # Example: ["module load cuda", "export HF_HOME=/data/huggingface"]
     prerun_commands: []
@@ -20,4 +20,4 @@ infrastructure:
       # Add the required Slurm account for your site before using this file.
       # account: REPLACE_WITH_SLURM_ACCOUNT
       # Optional. CPU/IO stages use the regular partition when unset.
-      partition_cpu: null
+      partition_cpu:

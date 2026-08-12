@@ -11,7 +11,7 @@ runner:
     partition_interactive: interactive
     partition_batch: batch
     # Optional. CPU/IO stages use the regular one-node partition when unset.
-    partition_cpu: null
+    partition_cpu:
     interactive_max_nodes: 2
     max_nodes: 20
     time_limit: "4:00:00"

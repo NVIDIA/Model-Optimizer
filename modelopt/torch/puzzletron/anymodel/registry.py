@@ -151,7 +151,9 @@ def infer_descriptor_name(
     text_config = _get(config, "text_config", None)
     text_model_type = _get(text_config, "model_type", None)
     if text_model_type in _MODEL_TYPE_TO_DESCRIPTOR:
-        return _MODEL_TYPE_TO_DESCRIPTOR[text_model_type], f"text_config.model_type is {text_model_type}"
+        return _MODEL_TYPE_TO_DESCRIPTOR[
+            text_model_type
+        ], f"text_config.model_type is {text_model_type}"
 
     # Aliases are metadata discovered by a campaign preflight. They are deliberately
     # consulted only after every built-in architecture/model-type mapping, so a stale

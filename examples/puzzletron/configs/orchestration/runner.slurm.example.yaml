@@ -13,7 +13,7 @@ runner:
     partition_interactive: interactive
     partition_batch: batch
     # Optional. CPU/IO stages use the regular one-node partition when unset.
-    partition_cpu: null
+    partition_cpu:
     interactive_max_nodes: 2
     time_limit: "4:00:00"
     log_dir: puzzle_runs/logs
@@ -24,10 +24,10 @@ runner:
     venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
     # Optional. Set to an image/path accepted by the cluster's srun container plugin.
     # Leave null to execute directly in the worker environment.
-    container: null
+    container:
     # Optional and used only with a container. Use comma-separated
     # /host/path:/container/path entries, for example /data:/data,/models:/models.
-    container_mounts: null
+    container_mounts:
     # Optional shell commands run in order before virtualenv activation.
     # Example: ["module load cuda", "export HF_HOME=/data/huggingface"]
     prerun_commands: []

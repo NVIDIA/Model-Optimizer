@@ -207,8 +207,7 @@ def test_stage_dashboard_display_name_uses_downstream_evaluation_node_type():
     }
 
     assert (
-        _stage_dashboard_display_name(config, "post.params-75.lmms_eval")
-        == "Downstream Evaluation"
+        _stage_dashboard_display_name(config, "post.params-75.lmms_eval") == "Downstream Evaluation"
     )
 
 

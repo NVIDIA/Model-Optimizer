@@ -144,9 +144,7 @@ def _kd_runs(
     observations: list[dict[str, Any]],
     revisions: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    by_architecture = {
-        _architecture_id(row, revisions): row for row in observations
-    }
+    by_architecture = {_architecture_id(row, revisions): row for row in observations}
     architecture_ids = set(by_architecture)
     checkpoint_root = execution_root / "checkpoints" if execution_root else None
     if checkpoint_root and checkpoint_root.is_dir():
@@ -164,9 +162,7 @@ def _kd_runs(
             if architecture_root is not None
             else []
         )
-        revision_id = str(
-            row.get("input_revision_id") or row.get("source_revision_id") or ""
-        )
+        revision_id = str(row.get("input_revision_id") or row.get("source_revision_id") or "")
         runs.append(
             {
                 "architecture_id": architecture_id,
@@ -223,9 +219,7 @@ def build_post_mip_report_payloads(
         payload = raw[node.stage_id]
         observations = []
         for row in payload["observations"]:
-            revision_id = str(
-                row.get("input_revision_id") or row.get("source_revision_id") or ""
-            )
+            revision_id = str(row.get("input_revision_id") or row.get("source_revision_id") or "")
             architecture_id = _architecture_id(row, revisions)
             observations.append(
                 {
@@ -245,9 +239,7 @@ def build_post_mip_report_payloads(
             "observations": observations,
             "runs": (
                 _kd_runs(
-                    Path(payload["execution_root"])
-                    if payload["execution_root"]
-                    else None,
+                    Path(payload["execution_root"]) if payload["execution_root"] else None,
                     observations,
                     revisions,
                 )
@@ -278,8 +270,7 @@ def _status_summary(payload: Mapping[str, Any]) -> str:
         status = str(row.get("status") or "pending")
         counts[status] = counts.get(status, 0) + 1
     outcomes = " · ".join(
-        f"{_text(status.replace('_', ' '))}={count}"
-        for status, count in sorted(counts.items())
+        f"{_text(status.replace('_', ' '))}={count}" for status, count in sorted(counts.items())
     )
     status = _text(payload.get("status") or "pending")
     return f"<p>status={status}{f' · {outcomes}' if outcomes else ''}</p>"
@@ -323,11 +314,7 @@ def render_evaluation_report(section_id: str, payload: Mapping[str, Any]) -> str
         if metric_names
         else ""
     )
-    return (
-        "<h3>Candidate evaluation</h3>"
-        f"{_status_summary(payload)}"
-        f"{plot}{table}"
-    )
+    return f"<h3>Candidate evaluation</h3>{_status_summary(payload)}{plot}{table}"
 
 
 def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:

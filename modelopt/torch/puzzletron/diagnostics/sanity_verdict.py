@@ -104,9 +104,7 @@ def complete_sanity_stage(
     )
     fail_on_warnings = bool((config.get("sanity") or {}).get("fail_on_warnings", False))
     status = (
-        "failed"
-        if correctness_failure or (fail_on_warnings and not verdict.passed)
-        else "success"
+        "failed" if correctness_failure or (fail_on_warnings and not verdict.passed) else "success"
     )
     return complete_stage(
         config,

@@ -337,10 +337,6 @@ def test_hugging_face_subset_selection_accepts_revision_locked_metadata(tmp_path
         },
     )
 
-    issues = [
-        issue
-        for issue in validate_state(state)
-        if issue.path.startswith("data.subsets")
-    ]
+    issues = [issue for issue in validate_state(state) if issue.path.startswith("data.subsets")]
 
     assert issues == []
