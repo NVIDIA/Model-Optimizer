@@ -45,7 +45,7 @@ class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
     Tied-weight dedup is not a handler concern: the driver builds one name-based
-    :class:`TiedGroupResolver` and feeds it to ``sync_tied_input_amax`` and
+    :class:`TiedWeightMap` and feeds it to ``sync_tied_input_amax`` and
     ``postprocess_state_dict`` directly. Both dense and fused-MoE tied weights are packed
     independently and their duplicate keys are dropped by name there, so the context
     carries no resolver (handlers never consulted it).

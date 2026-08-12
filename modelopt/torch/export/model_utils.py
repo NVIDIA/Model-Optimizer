@@ -16,6 +16,7 @@
 
 import re
 import warnings
+from collections import defaultdict
 
 import torch.nn as nn
 
@@ -150,99 +151,47 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     return None
 
 
-def _canonical_via_pattern_pair(alias_pat: str, canonical_pat: str, name: str) -> str | None:
-    r"""Rewrite ``name`` into its canonical form for a *parallel-pattern* tie declaration.
-
-    Some models (e.g. DiffusionGemma) declare ``_tied_weights_keys`` as
-    ``{alias_regex: canonical_regex}`` where the value is **not** a ``re.sub`` template
-    but a second regex that is structurally identical to the alias except for a leading
-    literal segment, e.g.::
-
-        r"encoder.language_model.layers\.(?:[^.]+\.)*gate_up_proj"
-        -> r"decoder.layers\.(?:[^.]+\.)*gate_up_proj"
-
-    The shared trailing structure is copied verbatim from ``name``; only the differing
-    literal head (``encoder.language_model.`` -> ``decoder.``) is swapped. Returns ``None``
-    when the declaration is not of this form (e.g. a genuine ``\1`` backreference
-    template), so the caller can fall back to ``re.sub``.
-    """
-    # Longest common suffix of the two pattern strings.
-    i = 0
-    while (
-        i < len(alias_pat) and i < len(canonical_pat) and alias_pat[-1 - i] == canonical_pat[-1 - i]
-    ):
-        i += 1
-    alias_head = alias_pat[: len(alias_pat) - i]
-    canon_head = canonical_pat[: len(canonical_pat) - i]
-    # The heads must be literal path prefixes (a backreference template will not be):
-    # any regex metacharacter means this is not the parallel-pattern form.
-    if not alias_head or not name.startswith(alias_head):
-        return None
-    if any(c in alias_head or c in canon_head for c in r"\()[]{}*+?|^$"):
-        return None
-    candidate = canon_head + name[len(alias_head) :]
-    # The character-based common-suffix split can land mid-token, yielding a name the
-    # canonical pattern would never actually match. Confirm the rewrite is accepted by
-    # ``canonical_pat``; if not, signal the caller to fall back to ``re.sub`` rather than
-    # emit a bogus canonical name.
-    try:
-        if re.fullmatch(canonical_pat, candidate) is None:
-            return None
-    except re.error:
-        return None
-    return candidate
-
-
 def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
-    r"""Map each declared *alias* parameter full-name to its *canonical* full-name.
+    r"""Map each tied *alias* parameter name to its *canonical* name.
 
-    Identity is resolved from the model's own declarations, never from memory
-    address or object ``id`` — so the map is stable across FSDP resharding, CPU
-    offload, device moves, tensor views, and allocator address reuse, which are
-    exactly the cases where address/``id`` identity misfires.
+    Ties are detected by **object identity** — parameters registered under more than one
+    name that are the same live :class:`~torch.nn.Parameter`. Built before export packs or
+    splits weights (which break the shared object), while all params are resident, so
+    identity is reliable; the map is keyed by *name*, so it survives the later packing /
+    FSDP gather / offload when the drop actually runs.
 
-    Sources, in priority order:
+    Declarations do not *create* ties — they only pick the canonical (kept) member of a
+    shared group:
 
-    - **dict-style** ``_tied_weights_keys`` on any submodule:
-      ``{alias_regex: canonical_template}``, matched against parameter names
-      *relative to the declaring submodule*. Regex backreferences in the template
-      are expanded, so per-layer declarations
-      (``r"encoder\\.layers\\.(\\d+)\\.experts\\.gate_up_proj"`` ->
-      ``r"decoder.layers.\\1.experts.gate_up_proj"``) resolve per layer. Fused
-      MoE experts declare their tie on the 3-D container Parameter
-      (``…experts.gate_up_proj`` / ``…experts.down_proj``), which is captured here.
-      Each candidate entry is confirmed by **object identity**: the alias and canonical
-      names must resolve to the *same* live Parameter. A class-level dict declares the
-      tie regardless of config (e.g. ``lm_head`` <-> ``embed_tokens`` when
-      ``tie_word_embeddings=False``), so a name-only match would drop an independent
-      weight; the identity check is safe because the map is built before packing, while
-      all Parameters are resident (no freed-then-reused address can forge a match).
-    - **``tie_word_embeddings=True``**: the output embedding (e.g. ``lm_head``) is
-      aliased to the input embedding (e.g. ``…embed_tokens``). Best-effort — only
-      applied when both embedding modules resolve to distinct parameter names.
+    - dict-style ``_tied_weights_keys``: a name matching an alias key (relative to the
+      declaring submodule) is an alias side; the canonical is a non-alias group member.
+      Only the alias pattern is matched — the canonical-side value is never parsed, so
+      parallel-pattern / backref declarations (DiffusionGemma) need no special handling.
+    - ``tie_word_embeddings=True``: the input-embedding name is canonical.
 
-    List-style ``_tied_weights_keys`` carries no canonical/alias distinction and is
-    skipped. Undeclared shared Parameters are intentionally *not* resolved: deduping a
-    tie that cannot be declared in the exported config would drop a key the loader
-    cannot re-tie.
+    Groups left untouched (both sides kept): a declared-but-unapplied tie can't form
+    (distinct objects never group); an *undeclared* share or an all-alias group has no
+    canonical the loader could re-tie from, so it is not dropped. An undeclared share that
+    still aliases storage is caught by the address backstop in :func:`postprocess_state_dict`.
     """
-    alias_to_canonical: dict[str, str] = {}
-    # remove_duplicate=False is essential: a genuinely shared (tied) Parameter would
-    # otherwise appear under only its first-registered name, hiding the alias name when
-    # the canonical side is registered first and leaving the tie undetected. The same
-    # listing gives each name's Parameter object, used below to confirm a declared tie is
-    # actually applied (identical object) before trusting it.
-    named_params = list(model.named_parameters(remove_duplicate=False))
-    param_names = [name for name, _ in named_params]
-    param_by_name = dict(named_params)
+    # Group names by object identity. remove_duplicate=False so a shared Parameter appears
+    # under every name -- that gives both the tie signal and the canonical/alias names.
+    groups: dict[int, list[str]] = defaultdict(list)
+    param_names: list[str] = []
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        groups[id(parameter)].append(name)
+        param_names.append(name)
 
+    # Mark declared alias names (the drop side). Only the alias pattern (dict key) is
+    # matched; the canonical-side value is never parsed.
+    declared_aliases: set[str] = set()
     for mod_name, submodule in model.named_modules():
         tied = getattr(submodule, "_tied_weights_keys", None)
         if not isinstance(tied, dict) or not tied:
             continue
         prefix = f"{mod_name}." if mod_name else ""
         plen = len(prefix)
-        for alias_pat, canonical_tmpl in tied.items():
+        for alias_pat in tied:
             try:
                 alias_re = re.compile(alias_pat)
             except re.error:
@@ -250,67 +199,49 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
             for full_name in param_names:
                 if prefix and not full_name.startswith(prefix):
                     continue
-                rel = full_name[plen:]
-                if not alias_re.search(rel):
-                    continue
-                # Two declaration flavors: a parallel canonical *pattern* (swap the
-                # differing literal head, copy the shared structure) or a ``re.sub``
-                # *template* (expand backreferences). Try the pattern-pair form first;
-                # fall back to ``sub`` for backreference templates and plain-name canonicals.
-                canonical_rel = _canonical_via_pattern_pair(alias_pat, canonical_tmpl, rel)
-                if canonical_rel is None:
-                    # A template referencing a group the pattern lacks raises re.error.
-                    try:
-                        canonical_rel = alias_re.sub(canonical_tmpl, rel)
-                    except re.error:
-                        continue
-                canonical_full = prefix + canonical_rel
-                if canonical_full == full_name:
-                    continue
-                # A class-level ``_tied_weights_keys`` dict is declared regardless of
-                # config (e.g. ``lm_head`` <-> ``embed_tokens`` even when
-                # ``tie_word_embeddings=False``), so a name-only match could drop an
-                # independent weight. The resolver is built before packing, while every
-                # Parameter is resident and alive, so identical object <=> the declared
-                # tie is actually applied in this instance. Object identity is safe here
-                # precisely because nothing has been freed yet: no allocator address reuse
-                # can forge a false match, unlike ``data_ptr``.
-                alias_p = param_by_name.get(full_name)
-                canon_p = param_by_name.get(canonical_full)
-                if alias_p is None or canon_p is None or alias_p is not canon_p:
-                    continue
-                alias_to_canonical[full_name] = canonical_full
+                if alias_re.search(full_name[plen:]):
+                    declared_aliases.add(full_name)
 
-    # tie_word_embeddings: output embedding aliased to input embedding. Best-effort.
+    # tie_word_embeddings: the input-embedding name is canonical for the shared weight.
+    embedding_canonical: dict[int, str] = {}
     if getattr(getattr(model, "config", None), "tie_word_embeddings", False):
         try:
-            out_emb = model.get_output_embeddings()
             in_emb = model.get_input_embeddings()
+            out_emb = model.get_output_embeddings()
         except (AttributeError, NotImplementedError):
-            out_emb = in_emb = None
-        if out_emb is not None and in_emb is not None and out_emb is not in_emb:
-            names_by_module = {m: n for n, m in model.named_modules()}
-            out_name = names_by_module.get(out_emb)
-            in_name = names_by_module.get(in_emb)
-            if out_name is not None and in_name is not None:
-                out_key = f"{out_name}.weight" if out_name else "weight"
-                in_key = f"{in_name}.weight" if in_name else "weight"
-                if out_key != in_key:
-                    alias_to_canonical.setdefault(out_key, in_key)
+            in_emb = out_emb = None
+        in_weight = getattr(in_emb, "weight", None)
+        # Confirm the tie is actually applied: input and output share the same weight object.
+        if in_weight is not None and in_weight is getattr(out_emb, "weight", None):
+            in_name = {m: n for n, m in model.named_modules()}.get(in_emb)
+            if in_name is not None:
+                embedding_canonical[id(in_weight)] = f"{in_name}.weight" if in_name else "weight"
 
+    # Emit {alias -> canonical} for shared groups that have a clear, declared canonical.
+    alias_to_canonical: dict[str, str] = {}
+    for parameter_id, names in groups.items():
+        if len(names) < 2:
+            continue
+        canonical = embedding_canonical.get(parameter_id)
+        if canonical is None or canonical not in names:
+            non_aliases = [name for name in names if name not in declared_aliases]
+            # No canonical to keep: undeclared share (all non-alias) or all-alias group.
+            if len(non_aliases) == len(names) or not non_aliases:
+                continue
+            canonical = non_aliases[0]
+        for name in names:
+            if name != canonical:
+                alias_to_canonical[name] = canonical
     return alias_to_canonical
 
 
-class TiedGroupResolver:
-    """Resolves declared tied-weight groups by parameter *name*, not memory identity.
+class TiedWeightMap:
+    """Name-based lookups over the ``{alias: canonical}`` map from :func:`_build_tied_alias_map`.
 
-    Built once per export (see :class:`ExportContext`) from
-    :func:`_build_tied_alias_map`. Every export site that used to key dedup on
-    ``data_ptr`` or ``id(Parameter)`` instead asks this resolver for a stable,
-    name-based *group key*: two parameters in the same declared tie return the same
-    key; a parameter in no declared tie returns ``None`` (and is exported in full,
-    never aliased). Because the key is a name, it survives packing, FSDP resharding,
-    offload, and allocator reuse — the failure modes address/``id`` cannot survive.
+    A thin, immutable view built once per export. Export sites that once keyed dedup on
+    ``data_ptr`` ask for a *group key* instead: both sides of a tie share one key, an untied
+    parameter returns ``None``. The key is a name, so it survives packing, FSDP resharding,
+    offload, and allocator reuse — where ``data_ptr`` does not.
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -332,23 +263,15 @@ class TiedGroupResolver:
     def container_group_key(self, container_name: str, first_proj_attr: str) -> str | None:
         """Return a group key for a fused-experts container, or ``None`` if untied.
 
-        The tie is declared on the container's 3-D projection Parameters (e.g.
-        ``…experts.gate_up_proj``); resolving the first projection and stripping its
+        The tie is on the container's 3-D projection Parameter (e.g.
+        ``…experts.gate_up_proj``); the canonical is the *same* projection on another
+        container (they are one id-group), so it carries the same suffix. Stripping that
         suffix yields one key shared by all of the container's projections.
         """
         gk = self.group_key(f"{container_name}.{first_proj_attr}")
         if gk is None:
             return None
-        suffix = f".{first_proj_attr}"
-        if not gk.endswith(suffix):
-            # A misresolved canonical (a differently-named canonical projection, or a
-            # mangled re.sub fallback) would make removesuffix a silent no-op, returning a
-            # full parameter name as the container key. That key won't match the one from
-            # the container's other projection, so sync_tied_input_amax would put the two
-            # tied containers in different groups and skip the merge -- under-covering the
-            # retained input_scale. Degrade to "untied" instead of grouping incorrectly.
-            return None
-        return gk.removesuffix(suffix)
+        return gk.removesuffix(f".{first_proj_attr}")
 
     def alias_prefix_pairs(self) -> dict[str, str]:
         """Map each alias *module* prefix to its canonical *module* prefix.

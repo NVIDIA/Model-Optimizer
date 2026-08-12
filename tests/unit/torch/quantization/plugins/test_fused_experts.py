@@ -645,7 +645,7 @@ def _build_two_moe_blocks(tie: bool) -> nn.Module:
 
     When ``tie`` is set, the parent both shares the 3-D expert Parameters AND declares the
     tie via ``_tied_weights_keys`` (as real encoder/decoder models do), so the name-based
-    :class:`TiedGroupResolver` resolves it -- object sharing alone is intentionally not
+    :class:`TiedWeightMap` resolves it -- object sharing alone is intentionally not
     enough to trigger dedup.
     """
     parent = nn.Module()
