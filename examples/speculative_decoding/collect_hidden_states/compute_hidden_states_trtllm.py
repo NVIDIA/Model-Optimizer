@@ -20,6 +20,7 @@ import os
 os.environ["TLLM_LOG_LEVEL"] = "error"
 import argparse
 import asyncio
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -263,7 +264,11 @@ def main(args: argparse.Namespace) -> None:
                 num_invalid += 1
                 continue
 
-            input_ids = tokenizer.apply_chat_template(conversations, add_generation_template=False)
+            input_ids = tokenizer.apply_chat_template(conversations, add_generation_prompt=False)
+            # Newer transformers return a BatchEncoding/dict rather than a list of token ids;
+            # extract input_ids so the length check and generation receive the real tokens.
+            if isinstance(input_ids, Mapping):
+                input_ids = input_ids["input_ids"]
             num_input_tokens = (
                 input_ids.shape[1] if isinstance(input_ids, torch.Tensor) else len(input_ids)
             )
