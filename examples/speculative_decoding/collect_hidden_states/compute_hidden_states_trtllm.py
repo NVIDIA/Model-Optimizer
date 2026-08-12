@@ -36,6 +36,21 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 )
 
 
+def get_conversation_input_ids(tokenizer, conversations):
+    """Tokenize ``conversations`` and return the flat sequence of input token ids.
+
+    ``tokenizer.apply_chat_template`` returns a ``BatchEncoding``/dict (carrying an
+    ``input_ids`` field) on newer ``transformers`` versions rather than a plain list of
+    token ids. Callers rely on ``len(...)`` / ``.shape`` reflecting the token count, so
+    unwrap the mapping. Without this, ``len(...)`` is the number of dict keys (2), which
+    makes every conversation look ~empty and get dropped by the length filter.
+    """
+    input_ids = tokenizer.apply_chat_template(conversations, add_generation_prompt=False)
+    if isinstance(input_ids, Mapping):
+        input_ids = input_ids["input_ids"]
+    return input_ids
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="""Collect hidden states from conversations
@@ -264,11 +279,7 @@ def main(args: argparse.Namespace) -> None:
                 num_invalid += 1
                 continue
 
-            input_ids = tokenizer.apply_chat_template(conversations, add_generation_prompt=False)
-            # Newer transformers return a BatchEncoding/dict rather than a list of token ids;
-            # extract input_ids so the length check and generation receive the real tokens.
-            if isinstance(input_ids, Mapping):
-                input_ids = input_ids["input_ids"]
+            input_ids = get_conversation_input_ids(tokenizer, conversations)
             num_input_tokens = (
                 input_ids.shape[1] if isinstance(input_ids, torch.Tensor) else len(input_ids)
             )
