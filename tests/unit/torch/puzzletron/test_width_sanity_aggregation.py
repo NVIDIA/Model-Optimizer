@@ -73,9 +73,18 @@ def test_aggregation_separates_ranking_from_physical_equivalence():
     summaries = {
         "axis_a": {
             "rows": [
-                {"axis": "axis_a", "layer_idx": 2, "target_value": 4, "method": method, "loss": loss}
+                {
+                    "axis": "axis_a",
+                    "layer_idx": 2,
+                    "target_value": 4,
+                    "method": method,
+                    "loss": loss,
+                }
                 for method, loss in (
-                    ("activation", 0.5), ("random", 0.8), ("reverse", 0.9), ("realized", 0.5)
+                    ("activation", 0.5),
+                    ("random", 0.8),
+                    ("reverse", 0.9),
+                    ("realized", 0.5),
                 )
             ]
         },
@@ -85,7 +94,10 @@ def test_aggregation_separates_ranking_from_physical_equivalence():
             "rows": [
                 {"role": role, "metrics": {"loss": loss}}
                 for role, loss in (
-                    ("activation", 1.0), ("original", 0.9), ("reverse", 0.8), ("realized", 1.2)
+                    ("activation", 1.0),
+                    ("original", 0.9),
+                    ("reverse", 0.8),
+                    ("realized", 1.2),
                 )
             ],
         },
@@ -100,8 +112,7 @@ def test_aggregation_separates_ranking_from_physical_equivalence():
     assert width["axes"] == ["axis_a", "hidden_width"]
     assert slicing["axes"] == ["axis_a", "hidden_width"]
     assert any(
-        finding["evidence"]["group"]["axis"] == "hidden_width"
-        for finding in slicing["findings"]
+        finding["evidence"]["group"]["axis"] == "hidden_width" for finding in slicing["findings"]
     )
     assert all("hidden_width" not in finding["message"] for finding in slicing["findings"])
 

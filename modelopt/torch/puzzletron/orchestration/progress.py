@@ -40,9 +40,7 @@ _VLLM_TOTAL = re.compile(
     r"\((?P<specs>\d+) unique benchmarks\)"
 )
 _SUBBLOCK_KINDS = ("attention", "mla", "mamba", "ffn", "moe")
-_WIDTH_ITER = re.compile(
-    r"\[activation/automodel\] iter (?P<current>\d+)/(?P<total>\d+)\b"
-)
+_WIDTH_ITER = re.compile(r"\[activation/automodel\] iter (?P<current>\d+)/(?P<total>\d+)\b")
 _WIDTH_TARGET = re.compile(
     r"\[activation/automodel\] entering calibration loop: target (?P<total>\d+) iteration"
 )
@@ -160,9 +158,7 @@ def _depth_progress(puzzle_dir: Path, config: Mapping[str, Any] | None) -> str |
     if max_removals <= 0:
         return None
 
-    iteration_dirs = sorted(
-        path for path in iterative.glob("iteration_*") if path.is_dir()
-    )
+    iteration_dirs = sorted(path for path in iterative.glob("iteration_*") if path.is_dir())
     if selected >= max_removals and iteration_dirs:
         return f"removing layer {max_removals} out of {max_removals}, current progress complete"
 
@@ -188,7 +184,9 @@ def _depth_progress(puzzle_dir: Path, config: Mapping[str, Any] | None) -> str |
     return f"removing layer 1 out of {max_removals}, current progress 0/{available or '?'}"
 
 
-def _width_progress_from_artifacts(puzzle_dir: Path, config: Mapping[str, Any] | None) -> str | None:
+def _width_progress_from_artifacts(
+    puzzle_dir: Path, config: Mapping[str, Any] | None
+) -> str | None:
     root = Path(puzzle_dir)
     candidates: list[Path] = []
     configured = _nested(config, "pruning", "activations_log_dir")
@@ -196,7 +194,13 @@ def _width_progress_from_artifacts(puzzle_dir: Path, config: Mapping[str, Any] |
         candidates.append(Path(str(configured)) / ".native_resume" / "progress.json")
     candidates.extend(
         [
-            root / "pruning" / "pruning_scores" / "automodel" / "all_axes" / ".native_resume" / "progress.json",
+            root
+            / "pruning"
+            / "pruning_scores"
+            / "automodel"
+            / "all_axes"
+            / ".native_resume"
+            / "progress.json",
             root / "activations_log" / ".native_resume" / "progress.json",
             root / "width" / ".native_resume" / "progress.json",
         ]
@@ -235,9 +239,7 @@ def _width_progress_from_logs(log_paths: Sequence[str]) -> str | None:
 
 def _combined_log_text(log_paths: Sequence[str], *, max_bytes: int = 1048576) -> str:
     return "\n".join(
-        text
-        for log_path in log_paths
-        if (text := _tail_text(Path(log_path), max_bytes=max_bytes))
+        text for log_path in log_paths if (text := _tail_text(Path(log_path), max_bytes=max_bytes))
     ).replace("\r", "\n")
 
 
@@ -291,13 +293,9 @@ def _bypass_progress(log_paths: Sequence[str]) -> str | None:
         prefix = ""
         if probes:
             probe = probes[-1]
-            prefix = (
-                f"{probe.group('mode')} probe "
-                f"{probe.group('index')}/{probe.group('count')}: "
-            )
+            prefix = f"{probe.group('mode')} probe {probe.group('index')}/{probe.group('count')}: "
         return (
-            f"{prefix}step {step.group('current')}/{step.group('total')}, "
-            f"loss {step.group('loss')}"
+            f"{prefix}step {step.group('current')}/{step.group('total')}, loss {step.group('loss')}"
         )
     if probes:
         probe = probes[-1]
@@ -343,8 +341,7 @@ def _replacement_progress(
     )
     widths = _nested(config, "embedding_pruning", "widths", default=()) or ()
     scenario_roots = [
-        puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
-        for width in widths
+        puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00" for width in widths
     ]
     if not scenario_roots:
         scenario_roots = sorted((puzzle_dir / "scenarios").glob("width-*/depth-00"))
@@ -360,8 +357,7 @@ def _replacement_progress(
         expected += len(solutions)
         output_dir = manifest_path.parent / output_name
         completed += sum(
-            (output_dir / f"solution_{index}.json").is_file()
-            for index in range(len(solutions))
+            (output_dir / f"solution_{index}.json").is_file() for index in range(len(solutions))
         )
     if expected:
         return f"scored {completed}/{expected} replacement candidates"
@@ -418,10 +414,7 @@ def _post_mip_progress(
     if not isinstance(current, Mapping) or not current.get("execution_identity"):
         return None
     candidate_set = _read_json(
-        input_root
-        / "executions"
-        / str(current["execution_identity"])
-        / "candidate_set.json"
+        input_root / "executions" / str(current["execution_identity"]) / "candidate_set.json"
     )
     if not isinstance(candidate_set, Mapping):
         return None
@@ -429,9 +422,7 @@ def _post_mip_progress(
     if not isinstance(revision_ids, list) or not revision_ids:
         return None
 
-    executions_root = (
-        puzzle_dir / "artifacts" / "post_mip" / "nodes" / node_id / "executions"
-    )
+    executions_root = puzzle_dir / "artifacts" / "post_mip" / "nodes" / node_id / "executions"
     executions = [path for path in executions_root.glob("post_mip_execution_*") if path.is_dir()]
     rows_by_revision: dict[str, Mapping[str, Any]] = {}
     if executions:
@@ -453,9 +444,7 @@ def _post_mip_progress(
     }
     completed = len(rows_by_revision)
     failed = sum(row.get("status") == "failed" for row in rows_by_revision.values())
-    timed_out = sum(
-        row.get("status") == "timed_out" for row in rows_by_revision.values()
-    )
+    timed_out = sum(row.get("status") == "timed_out" for row in rows_by_revision.values())
     outcomes = []
     if failed:
         outcomes.append(f"{failed} failed")
@@ -463,8 +452,7 @@ def _post_mip_progress(
         outcomes.append(f"{timed_out} timed out")
     suffix = f", {', '.join(outcomes)}" if outcomes else ""
     return (
-        f"{labels.get(node_type, 'processed')} {completed}/{len(revision_ids)} candidates"
-        f"{suffix}"
+        f"{labels.get(node_type, 'processed')} {completed}/{len(revision_ids)} candidates{suffix}"
     )
 
 

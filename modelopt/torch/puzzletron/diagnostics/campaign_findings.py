@@ -216,8 +216,7 @@ def loss_trend_findings(
         finite = [
             row
             for row in sorted(values, key=lambda item: item.get(step_key, 0))
-            if isinstance(row.get(loss_key), (int, float))
-            and math.isfinite(float(row[loss_key]))
+            if isinstance(row.get(loss_key), (int, float)) and math.isfinite(float(row[loss_key]))
         ]
         if len(finite) < 2:
             continue

@@ -51,18 +51,14 @@ def _normalize_summary(axis: str, summary: Mapping[str, Any]) -> list[dict[str, 
             continue
         metrics = source.get("metrics") if isinstance(source.get("metrics"), Mapping) else {}
         row = {
-            key: value
-            for key, value in source.items()
-            if key not in {"metrics", "method", "role"}
+            key: value for key, value in source.items() if key not in {"metrics", "method", "role"}
         }
         row.update(metrics)
         row.update(
             axis=str(source.get("axis") or axis),
             layer_idx=source.get("layer_idx", "global"),
             target_value=source.get("target_value", source.get("hidden_width")),
-            teacher_value=source.get(
-                "teacher_value", summary.get("teacher_hidden_width")
-            ),
+            teacher_value=source.get("teacher_value", summary.get("teacher_hidden_width")),
             method=method,
         )
         normalized.append(row)
@@ -99,7 +95,11 @@ def descriptor_realization_findings(
                     stage="slicing_sanity",
                     message=(
                         f"sorted and physical failed the descriptor realization gate for {metric}"
-                        + (f": delta {float(delta):.6g}." if isinstance(delta, (int, float)) else ".")
+                        + (
+                            f": delta {float(delta):.6g}."
+                            if isinstance(delta, (int, float))
+                            else "."
+                        )
                     ),
                     evidence={
                         "kind": "descriptor_realization_gate",

@@ -390,10 +390,7 @@ def test_report_promotes_legacy_descriptor_realization_failure(tmp_path: Path):
     summary = _activation_diagnostic_summary(tmp_path)
 
     assert len(summary["slicing_findings"]) == 1
-    assert (
-        summary["slicing_findings"][0]["evidence"]["kind"]
-        == "descriptor_realization_gate"
-    )
+    assert summary["slicing_findings"][0]["evidence"]["kind"] == "descriptor_realization_gate"
 
 
 def test_library_uses_active_semantic_subblock_family(tmp_path: Path):
@@ -674,7 +671,7 @@ def test_progress_report_renders_axis_selectable_activation_diagnostic_tables(tm
             }
         )
     _write(
-            tmp_path / "artifacts/width_sanity/summary.json",
+        tmp_path / "artifacts/width_sanity/summary.json",
         {"rows": rows, "primary_metric": "normalized_mse_loss_hidden_states"},
     )
 
@@ -812,8 +809,7 @@ def test_progress_report_uses_subblock_losses_for_subblock_bypass_overfit(tmp_pa
         {"status": "complete"},
     )
     _write(
-        tmp_path
-        / "artifacts/bypass/overfit_probe/smallest_fixed/local_kd_loss_history.json",
+        tmp_path / "artifacts/bypass/overfit_probe/smallest_fixed/local_kd_loss_history.json",
         {
             "granularity": "subblock",
             "records": [
@@ -830,12 +826,18 @@ def test_progress_report_uses_subblock_losses_for_subblock_bypass_overfit(tmp_pa
     result = generate_campaign_progress_report(tmp_path, model_name="Qwen3.5-0.8B")
     document = Path(result["html"]).read_text(encoding="utf-8")
 
-    assert '<label class=\'selector-label\' for=\'bypass-overfit-unit-select\'>Subblock</label>' in document
+    assert (
+        "<label class='selector-label' for='bypass-overfit-unit-select'>Subblock</label>"
+        in document
+    )
     assert "layer_0:attention:self_attn" in document
     assert "per_subblock_loss" in document
-    assert "per_layer_loss||" not in document.split("function renderLossChart", maxsplit=1)[1].split(
-        "</script>", maxsplit=1
-    )[0]
+    assert (
+        "per_layer_loss||"
+        not in document.split("function renderLossChart", maxsplit=1)[1].split(
+            "</script>", maxsplit=1
+        )[0]
+    )
 
 
 def test_nested_bypass_report_exposes_ema_and_display_only_outlier_controls(tmp_path: Path):
@@ -1058,13 +1060,9 @@ def test_evaluation_report_adds_teacher_styles_solution_kinds_and_pareto_front(t
 
 
 def test_report_separates_plot_titles_from_horizontal_legends(tmp_path: Path):
-    document = Path(generate_campaign_progress_report(tmp_path)["html"]).read_text(
-        encoding="utf-8"
-    )
+    document = Path(generate_campaign_progress_report(tmp_path)["html"]).read_text(encoding="utf-8")
 
-    assert (
-        "legend:{orientation:'h',x:0,xanchor:'left',y:1.18,yanchor:'bottom'}" in document
-    )
+    assert "legend:{orientation:'h',x:0,xanchor:'left',y:1.18,yanchor:'bottom'}" in document
     assert "margin:{l:62,r:18,t:96,b:55}" in document
     assert "function chartTitle(text,size=15)" in document
     assert "title:chartTitle(" in document
@@ -1177,9 +1175,9 @@ def test_progress_report_renders_proper_distillation_terms_and_before_after_eval
     global_section = document.split('id="global-distillation"', maxsplit=1)[1].split(
         "</details>", maxsplit=1
     )[0]
-    post_section = document.split(
-        'id="post-distillation-evaluation"', maxsplit=1
-    )[1].split("</details>", maxsplit=1)[0]
+    post_section = document.split('id="post-distillation-evaluation"', maxsplit=1)[1].split(
+        "</details>", maxsplit=1
+    )[0]
     assert 'id="proper-distillation-plots"' in global_section
     assert "Before KD" not in global_section and "After KD" not in global_section
     assert 'id="proper-distillation-plots"' not in post_section
@@ -1415,8 +1413,7 @@ def test_mip_report_separates_homogeneous_solutions_and_simplifies_costs(tmp_pat
     assert "stats.num_params: 73–75" in document
     assert (
         "homogeneousHead.innerHTML=`<tr><th>Solution</th><th>Hidden Width</th>"
-        "<th>Removed Sublayers</th>"
-        not in document
+        "<th>Removed Sublayers</th>" not in document
     )
 
 

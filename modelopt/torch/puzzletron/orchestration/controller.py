@@ -470,9 +470,7 @@ class CampaignController:
                     "and rerun the controller"
                 )
                 return False
-            selected = self.terminal_controls.choose_revisions(
-                request.prompt, request.revision_ids
-            )
+            selected = self.terminal_controls.choose_revisions(request.prompt, request.revision_ids)
             decision_path = (
                 self.plan.puzzle_dir
                 / "artifacts"
@@ -851,9 +849,7 @@ class CampaignController:
         """Generate the canonical campaign report through the configured executor."""
 
         attempt = build_final_report_attempt(self.plan, attempt_id=str(uuid.uuid4()))
-        fallback_logs = (
-            (attempt.command.log_path,) if attempt.command.log_path is not None else ()
-        )
+        fallback_logs = (attempt.command.log_path,) if attempt.command.log_path is not None else ()
         self.logger.stage("generating final campaign report")
         try:
             handle = self.executor.submit(attempt)

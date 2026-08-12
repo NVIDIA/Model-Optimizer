@@ -146,11 +146,7 @@ def test_online_merge_fans_unique_metrics_back_to_every_profile_alias(tmp_path):
     write_online_evaluation_plan(puzzle_dir, plan)
     written_plan = json.loads(
         (
-            puzzle_dir
-            / "artifacts"
-            / "zero_shot_evaluation"
-            / "online_plan"
-            / "index.json"
+            puzzle_dir / "artifacts" / "zero_shot_evaluation" / "online_plan" / "index.json"
         ).read_text()
     )
     assert written_plan["execution"] == {
@@ -158,9 +154,7 @@ def test_online_merge_fans_unique_metrics_back_to_every_profile_alias(tmp_path):
         "materialized_solution_checkpoints": False,
         "model_loads_per_worker": 1,
     }
-    assert written_plan["widths"]["8"]["execution"] == online_execution_contract(
-        puzzle_dir, 8
-    )
+    assert written_plan["widths"]["8"]["execution"] == online_execution_contract(puzzle_dir, 8)
     raw = (
         puzzle_dir
         / "artifacts"

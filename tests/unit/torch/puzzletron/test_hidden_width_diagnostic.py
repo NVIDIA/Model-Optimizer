@@ -43,9 +43,10 @@ def test_near_teacher_axis_targets_selects_two_largest_legal_values():
         }
     }
 
-    assert _near_teacher_axis_targets(
-        config, ["ffn_intermediate", "binary_axis"], count=2
-    ) == {"ffn_intermediate": [10240, 8192], "binary_axis": [1]}
+    assert _near_teacher_axis_targets(config, ["ffn_intermediate", "binary_axis"], count=2) == {
+        "ffn_intermediate": [10240, 8192],
+        "binary_axis": [1],
+    }
 
 
 def test_hidden_width_targets_apply_requested_ratios_and_alignment():
@@ -113,14 +114,20 @@ def test_hidden_only_diagnostic_finishes_without_empty_parent_sweep(tmp_path):
     assert summary["axes"] == ["hidden_width"]
     assert summary["parent_sweep"] == {"status": "not_applicable"}
     assert not temporary.exists()
-    assert json.loads((artifacts / "activation_diagnostic_summary.json").read_text())[
-        "hidden_width"
-    ]["passed"] is True
+    assert (
+        json.loads((artifacts / "activation_diagnostic_summary.json").read_text())["hidden_width"][
+            "passed"
+        ]
+        is True
+    )
     assert (artifacts / "activation_diagnostic_table.md").is_file()
     assert (artifacts / "activation_diagnostic_scores.csv").is_file()
-    assert json.loads((artifacts / "diagnostic_cleanup.json").read_text())[
-        "reverse_checkpoint_removed"
-    ] is True
+    assert (
+        json.loads((artifacts / "diagnostic_cleanup.json").read_text())[
+            "reverse_checkpoint_removed"
+        ]
+        is True
+    )
 
 
 def test_hidden_only_guard_allows_nonmaster_rank_without_summary():

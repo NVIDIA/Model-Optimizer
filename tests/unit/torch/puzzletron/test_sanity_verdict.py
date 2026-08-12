@@ -149,12 +149,8 @@ def test_folded_correctness_failure_preserves_advisory_finding_severity(tmp_path
             passed=False,
             blocking=True,
             findings=[
-                finding_from_message(
-                    stage="width_sanity", message="ranking quality regressed"
-                ),
-                finding_from_message(
-                    stage="sort_sanity", message="sorted teacher drifted"
-                ),
+                finding_from_message(stage="width_sanity", message="ranking quality regressed"),
+                finding_from_message(stage="sort_sanity", message="sorted teacher drifted"),
             ],
         ),
     )

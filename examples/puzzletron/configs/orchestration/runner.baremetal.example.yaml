@@ -22,4 +22,4 @@ runner:
     venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
     # Optional script sourced before virtualenv activation on every host.
     # Leave null when the worker login environment needs no additional setup.
-    setup_env: null
+    setup_env:

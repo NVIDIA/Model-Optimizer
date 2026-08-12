@@ -102,9 +102,7 @@ def _dataset_subset_issues(state: WizardState) -> list[ValidationIssue]:
         for item in catalog.get("subsets") or ()
         if isinstance(item, Mapping)
     }
-    records = [
-        item for item in selection.get("subsets") or () if isinstance(item, Mapping)
-    ]
+    records = [item for item in selection.get("subsets") or () if isinstance(item, Mapping)]
     names = [str(item.get("name", "")) for item in records]
     if not records or any(not name for name in names) or len(names) != len(set(names)):
         issues.append(
@@ -163,8 +161,7 @@ def _dataset_subset_issues(state: WizardState) -> list[ValidationIssue]:
                 )
             )
         elif any(
-            record.get(key) != cached.get(key)
-            for key in ("num_rows", "num_bytes_original_files")
+            record.get(key) != cached.get(key) for key in ("num_rows", "num_bytes_original_files")
         ):
             issues.append(
                 ValidationIssue(

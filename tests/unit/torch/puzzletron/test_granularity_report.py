@@ -88,7 +88,7 @@ def test_nested_bypass_report_selects_exact_subblock_losses(tmp_path: Path):
     assert '<select id="nested-bypass-width-select">' in document
     assert 'id="nested-bypass-axis-filters"' in document
     assert 'id="nested-bypass-config-summary"' in document
-    assert 'nested-bypass-config-select' not in document
+    assert "nested-bypass-config-select" not in document
     assert document.count("id='nested-bypass-unit-plot'") == 1
     assert "layer_0:mamba:linear_attn" in document
     assert "layer_0:ffn:feed_forward" in document

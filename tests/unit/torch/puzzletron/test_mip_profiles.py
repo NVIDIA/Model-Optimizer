@@ -155,7 +155,7 @@ def test_matrix_expands_profiles_but_search_lists_do_not():
                     },
                     "search_space": {"depth": [0, 1, 4], "embedding": [2688, 2560]},
                 }
-            }
+            },
         },
         available_depths=range(5),
         available_embeddings=(2688, 2560, 2432),
@@ -187,15 +187,13 @@ def test_explicit_total_depth_selector_matches_list_depth_selector():
     def normalize(depth):
         (profile,) = normalize_mip_profiles(
             {
-                "defaults": {
-                    "objectives": "metrics.cosine_embedding_loss_hidden_states"
-                },
+                "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
                 "runs": {
                     "depth": {
                         "constraints": {"params": "75%"},
                         "search_space": {"depth": depth},
                     }
-                }
+                },
             },
             available_depths=range(5),
             available_embeddings=(2688,),
@@ -223,11 +221,9 @@ def test_typed_depth_selectors_form_a_cartesian_product_with_distinct_identities
             "runs": {
                 "typed": {
                     "constraints": {"params": "75%"},
-                    "search_space": {
-                        "depth": {"attention": [1, 2], "moe": [1, 2]}
-                    },
+                    "search_space": {"depth": {"attention": [1, 2], "moe": [1, 2]}},
                 }
-            }
+            },
         },
         available_depths=range(7),
         available_embeddings=(2688,),
@@ -253,7 +249,7 @@ def test_typed_depth_selector_validation_is_eager():
                 "constraints": {"params": "75%"},
                 "search_space": {"depth": {"attention": 1}},
             }
-        }
+        },
     }
     kwargs = {
         "available_depths": range(5),
@@ -285,15 +281,13 @@ def test_invalid_homogeneous_keep_is_rejected(value):
     with pytest.raises(ValueError, match="homogeneous"):
         normalize_mip_profiles(
             {
-                "defaults": {
-                    "objectives": "metrics.cosine_embedding_loss_hidden_states"
-                },
+                "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
                 "runs": {
                     "bad": {
                         "homogeneous": {"enabled": True, "keep": value},
                         "constraints": {"params": "75%"},
                     }
-                }
+                },
             },
             available_depths=(0,),
             available_embeddings=(2688,),
@@ -305,12 +299,8 @@ def test_workload_constraint_requires_declared_workload():
         normalize_mip_profiles(
             {
                 "workloads": {},
-                "defaults": {
-                    "objectives": "metrics.cosine_embedding_loss_hidden_states"
-                },
-                "runs": {
-                    "bad": {"constraints": {"runtime": {"at": {"missing": "75%"}}}}
-                },
+                "defaults": {"objectives": "metrics.cosine_embedding_loss_hidden_states"},
+                "runs": {"bad": {"constraints": {"runtime": {"at": {"missing": "75%"}}}}},
             },
             available_depths=(0,),
             available_embeddings=(2688,),

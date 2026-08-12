@@ -222,9 +222,7 @@ class PostMIPFlowEditor:
         if dependents:
             return dependents
         flow = self._flows[flow_id]
-        nodes = OrderedDict(
-            (name, value) for name, value in flow.nodes.items() if name != node_id
-        )
+        nodes = OrderedDict((name, value) for name, value in flow.nodes.items() if name != node_id)
         self._flows[flow_id] = replace(flow, nodes=nodes)
         return ()
 
@@ -232,9 +230,7 @@ class PostMIPFlowEditor:
         self.edit_node(flow_id, node_id, input_id=new_input)
 
     def to_config(self) -> OrderedDict[str, Any]:
-        return OrderedDict(
-            (flow_id, flow.to_config()) for flow_id, flow in self._flows.items()
-        )
+        return OrderedDict((flow_id, flow.to_config()) for flow_id, flow in self._flows.items())
 
     def compile(self, mip_runs: Mapping[str, Any] | None = None):
         # Keep the setup package usable without PyTorch until canonical validation.
