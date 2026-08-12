@@ -619,6 +619,7 @@ class _TransposedExpertsCalibMixin:
             weight = getattr(self, weight_name)
             yield weight.transpose(-1, -2), getattr(self, f"{weight_name}_weight_quantizer")
 
+
 class _QuantSparseSequentialMoe(QuantModule):
     """Quantization wrapper for HuggingFace sparse MoE blocks.
 

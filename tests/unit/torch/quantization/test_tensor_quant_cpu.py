@@ -436,9 +436,11 @@ def test_temporarily_fold_weights_rejects_sequential_quantizer():
     qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
     qlinear.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
 
-    with pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"):
-        with mtq.temporarily_fold_weights(qlinear):
-            pass
+    with (
+        pytest.raises(NotImplementedError, match="does not support SequentialQuantizer"),
+        mtq.temporarily_fold_weights(qlinear),
+    ):
+        pass
 
 
 WINT4INT8_CFG = {
