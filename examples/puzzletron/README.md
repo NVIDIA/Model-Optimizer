@@ -10,6 +10,7 @@ distill the selected model.
 - [Start here](#start-here)
 - [Setup wizard](#setup-wizard)
 - [Installation](#installation)
+- [Evaluate a checkpoint](#evaluate-a-checkpoint)
 - [Run with an agent](#run-with-an-agent)
 - [Configuration](#configuration)
 - [Run a campaign](#run-a-campaign)
@@ -22,6 +23,8 @@ distill the selected model.
   smoke and production bundles.
 - **Generated campaign:** complete the [installation](#installation), then
   [run the campaign](#run-a-campaign) with its generated bundle.
+- **Checkpoint evaluation:** use [Evaluate a checkpoint](#evaluate-a-checkpoint)
+  for a local model without creating or running a pruning campaign.
 - **Agent-assisted campaign:** follow [Run with an agent](#run-with-an-agent)
   with your model, data, compute environment, and deployment goals.
 - **Existing results:** see [Reports](#reports) to regenerate a campaign report
@@ -318,6 +321,23 @@ python -m pip check
 Record the three source revisions and verification output with the campaign.
 Re-run verification after pulling either fork or rebuilding a CUDA extension.
 
+## Evaluate a checkpoint
+
+Basic evaluation is independent of MIP and the campaign DAG. In the Puzzletron
+worker environment, run any compatible local Hugging Face checkpoint directly:
+
+```bash
+python examples/puzzletron/evaluate_lmms_checkpoint.py \
+  --checkpoint /path/to/checkpoint \
+  --output-dir /path/to/results/checkpoint-smoke
+```
+
+The default one-GPU smoke evaluates eight samples each from IFEval and GSM8K.
+Qwen 3.5 checkpoints are configured automatically. See
+[checkpoint evaluation](docs/checkpoint_evaluation.md) to choose tasks, run a
+full evaluation, find results, or override model detection. For options not
+covered by the convenience command, use the native `python -m lmms_eval` CLI.
+
 ## Run with an agent
 
 The canonical agent workflow is
@@ -467,11 +487,9 @@ the same command for the full campaign. Add `--dry-run` to inspect either plan
 without submitting work, or select one stage while iterating, for example
 `--stage mip --dry-run`.
 
-The setup wizard can also add downstream `lmms-eval` nodes that evaluate
-materialized candidates through vLLM. They run in the standard Puzzletron
-worker environment, whose example requirements pin a compatible `lmms-eval`
-snapshot. See [post-MIP pipelines](docs/post_mip_pipeline.md) for configuration
-details and for adding downstream evaluation to an existing campaign.
+The setup wizard can also add downstream evaluation for materialized campaign
+candidates. See [post-MIP pipelines](docs/post_mip_pipeline.md) to configure it
+or add it to an existing campaign.
 
 ### Legacy checked-in Nano campaign
 

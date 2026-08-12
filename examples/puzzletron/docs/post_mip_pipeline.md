@@ -141,21 +141,12 @@ from the original candidate.
 
 ## Downstream evaluation
 
-`downstream_evaluation` runs `python -m lmms_eval` as a subprocess from the
-Puzzletron worker environment. The runner passes an argument list directly and
-does not invoke a shell. Values in `command_prefix` and `extra_args` are arguments;
-shell syntax is not interpreted. The standard example requirements pin a snapshot
-compatible with the newer `wandb` required by the pinned AutoModel build:
-
-```bash
-python -m pip install -r examples/puzzletron/requirements.txt
-python -c 'import importlib.metadata as m; assert m.version("lmms-eval") == "0.7.0"'
-```
-
-The runner derives the realized checkpoint path, vLLM topology arguments, task
-list, and output path from the campaign config. Use `model_args` only for
-non-derived model options such as dtype or maximum model length, and `extra_args`
-only for non-reserved `lmms-eval` flags.
+`downstream_evaluation` adapts the generic
+[checkpoint evaluator](checkpoint_evaluation.md) to materialized campaign
+candidates and publishes their task metrics. Add it after a `materialize` node;
+the linked example config shows the complete flow. Use the standalone
+[checkpoint evaluation](checkpoint_evaluation.md) command when campaign
+lineage, filtering, and reports are not needed.
 
 ## Filters
 
