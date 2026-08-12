@@ -448,7 +448,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
         if is_moe(module) and (
-            quantization_format is not QUANTIZATION_NONE
+            quantization_format is not None
+            and quantization_format != QUANTIZATION_NONE
             and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)
