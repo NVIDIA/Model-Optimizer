@@ -38,22 +38,17 @@ from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import _hf_checkpoint_is_complete, post_mip_summary_is_current
 
-if __package__.startswith("puzzletron_orchestrator."):
-    from puzzletron_orchestrator.post_mip.identity import (
-        PostMIPExecutionContractUnavailable,
-        expected_post_mip_candidate_count,
-        expected_post_mip_execution_contract,
-        prepare_post_mip_candidate_ledger,
-    )
-else:
-    from ...post_mip.identity import (
-        PostMIPExecutionContractUnavailable,
-        expected_post_mip_candidate_count,
-        expected_post_mip_execution_contract,
-        prepare_post_mip_candidate_ledger,
-    )
-
 __all__ = ["ManualInputRequired", "PostMIPAdapter"]
+
+
+def _post_mip_identity_api() -> Any:
+    """Load the producer identity contract after orchestration initialization."""
+
+    if __package__.startswith("puzzletron_orchestrator."):
+        from puzzletron_orchestrator.post_mip import identity as identity_api
+    else:
+        from ...post_mip import identity as identity_api
+    return identity_api
 
 
 class ManualInputRequired(RuntimeError):
@@ -94,9 +89,10 @@ def _identity_config(plan: CampaignPlan) -> dict[str, Any]:
 
 
 def _available_evaluation_candidates(plan: CampaignPlan, stage_id: str) -> int | None:
+    identity_api = _post_mip_identity_api()
     try:
-        return expected_post_mip_candidate_count(_identity_config(plan), stage_id)
-    except PostMIPExecutionContractUnavailable:
+        return identity_api.expected_post_mip_candidate_count(_identity_config(plan), stage_id)
+    except identity_api.PostMIPExecutionContractUnavailable:
         return None
 
 
@@ -125,7 +121,7 @@ class PostMIPAdapter(WorkAdapter):
         """Prepare the candidate registry only on the attempt-submission path."""
 
         del node
-        prepare_post_mip_candidate_ledger(_identity_config(plan))
+        _post_mip_identity_api().prepare_post_mip_candidate_ledger(_identity_config(plan))
 
     def execution_identity_projection(
         self,
@@ -137,7 +133,9 @@ class PostMIPAdapter(WorkAdapter):
         """Bind scheduler attempts to the canonical producer execution contract."""
 
         del work_plan
-        return expected_post_mip_execution_contract(_identity_config(plan), node.stage_id)
+        return _post_mip_identity_api().expected_post_mip_execution_contract(
+            _identity_config(plan), node.stage_id
+        )
 
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
         config = _node_config(plan, node.stage_id)

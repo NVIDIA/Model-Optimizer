@@ -55,6 +55,23 @@ def test_lightweight_package_does_not_import_torch() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_pipeline_config_import_does_not_cycle_through_post_mip() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path; "
+            "assert callable(pipeline_config_from_path)",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_named_vllm_measurement_gpu_group_includes_data_parallelism() -> None:
     from puzzletron_orchestrator.vllm_measurements import normalize_vllm_measurements
 

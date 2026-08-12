@@ -50,13 +50,11 @@ if __package__.startswith("puzzletron_orchestrator."):
         stage_manifest_uses_execution_record,
         validate_stage_execution_record,
     )
-    from puzzletron_orchestrator.post_mip.identity import expected_post_mip_execution_identity
 else:
     from ...execution_record import (
         stage_manifest_uses_execution_record,
         validate_stage_execution_record,
     )
-    from ...post_mip.identity import expected_post_mip_execution_identity
 
 __all__ = [
     "StageCompatAdapter",
@@ -465,6 +463,13 @@ def post_mip_summary_is_current(
     """Validate a node summary without importing the PyTorch-backed worker package."""
 
     try:
+        if __package__.startswith("puzzletron_orchestrator."):
+            from puzzletron_orchestrator.post_mip.identity import (
+                expected_post_mip_execution_identity,
+            )
+        else:
+            from ...post_mip.identity import expected_post_mip_execution_identity
+
         effective_config = dict(config)
         effective_config["puzzle_dir"] = str(puzzle_dir)
         return summary.get("execution_identity") == expected_post_mip_execution_identity(
