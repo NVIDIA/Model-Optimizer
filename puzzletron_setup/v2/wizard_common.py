@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-import yaml
+import yaml  # type: ignore[import-untyped, unused-ignore]
 
 from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOLDER, SetupError
 

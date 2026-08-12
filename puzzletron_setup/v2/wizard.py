@@ -26,7 +26,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped, unused-ignore]
 
 from puzzletron_orchestrator.mesh import vllm_topology_to_mesh
 from puzzletron_setup import (
@@ -583,6 +583,7 @@ def data_section(
         }
 
     if adapter is not None:
+        assert acquisition is not None
         if adapter == _PUZZLE_KD_ADAPTER:
             print(
                 "  Puzzle-KD train and validation row counts will be inferred "
@@ -593,6 +594,7 @@ def data_section(
                 raise SetupError(
                     "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
                 )
+            assert subset_selection is not None
             subset_media_shards = {
                 record["name"]: record["num_media_shards"]
                 for record in subset_selection["subsets"]
@@ -890,7 +892,7 @@ def pruning_section(session: WizardSession, resolver: DefaultsResolver, context:
     if action is BACK:
         return False
 
-    defaults = deepcopy(BUILTINS["pruning"])
+    defaults: dict[str, Any] = deepcopy(BUILTINS["pruning"])
     defaults["width_importance_samples"] = int(
         resolver.resolve_default(
             "pruning.width_importance_samples",
@@ -1205,7 +1207,7 @@ def _profile_prompt(
 
 
 def _pruning_payload(state: WizardState) -> dict[str, Any]:
-    payload = deepcopy(BUILTINS["pruning"])
+    payload: dict[str, Any] = deepcopy(BUILTINS["pruning"])
     current = state.collection("pruning")
     if not isinstance(current, Mapping):
         return payload
@@ -3613,8 +3615,8 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
             )
             if BACK in (node_id, input_id):
                 return False
-            selector = {}
-            config = {}
+            selector: dict[str, Any] = {}
+            config: dict[str, Any] = {}
             if node_type == "filter":
                 metric = session.text(
                     f"post_mip.{run_id}.node.metric",
@@ -3799,7 +3801,7 @@ def _vllm_topology_prompt(
     """Ask for and validate one complete vLLM parallel topology."""
     topology_defaults = _mapping_copy(defaults)
     while True:
-        topology = {}
+        topology: dict[str, Any] = {}
         for name, label in (
             ("tensor_parallel_size", f"{label_prefix} tensor parallel (TP):"),
             ("pipeline_parallel_size", f"{label_prefix} pipeline parallel (PP):"),
