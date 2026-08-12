@@ -42,6 +42,21 @@ These instructions apply to AI-assisted work in this repository.
 - Before opening or marking a PR ready for review, read the
   [submitting your code](CONTRIBUTING.md#submitting-your-code) guidance.
 - Read `.github/PULL_REQUEST_TEMPLATE.md` and satisfy the checklist.
+- **PR description:** fill the template sections — what changed and why, a usage
+  snippet if it adds an API or flag, and what you actually ran under Testing.
+  Root cause, benchmark numbers, and design rationale belong here. Don't restate
+  the diff file by file.
+- **Only changelog-worthy changes get a `CHANGELOG.rst` entry:** new features,
+  backward breaking changes, deprecations, and fixes for critical or known bugs
+  from a previous release. Skip bugs introduced and fixed within the same
+  unreleased cycle.
+- **Keep each entry to one or two sentences** written for external users: what
+  changed and what they need to do. No internal bug numbers (e.g. NVBug IDs),
+  root-cause analysis, or implementation detail — that belongs in the PR
+  description. File features under the matching `**New Features**` sub-section
+  used by recent releases (e.g. `*Quantization*`, `*Speculative Decoding*`,
+  `*Megatron Framework (M-LM / M-Bridge)*`, `*Misc*`) rather than relabeling
+  existing ones.
 
 ## Responding to PR review feedback
 
