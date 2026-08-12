@@ -49,7 +49,9 @@ def test_matches_rendered_prompt():
     assert len(input_ids) > 10
 
 
-@pytest.mark.parametrize("wrap", ["batch_encoding", "tensor_2d", "batched_list", "plain_list"])
+@pytest.mark.parametrize(
+    "wrap", ["batch_encoding", "plain_dict", "tensor_2d", "batched_list", "plain_list"]
+)
 def test_normalizes_to_flat_list(wrap):
     """Pin every apply_chat_template return shape to a flat list[int], regardless of version."""
     expected = _expected_ids(get_tiny_tokenizer())
@@ -57,6 +59,7 @@ def test_normalizes_to_flat_list(wrap):
         "batch_encoding": BatchEncoding(
             {"input_ids": expected, "attention_mask": [1] * len(expected)}
         ),
+        "plain_dict": {"input_ids": expected, "attention_mask": [1] * len(expected)},
         "tensor_2d": torch.tensor([expected]),
         "batched_list": [expected],
         "plain_list": expected,

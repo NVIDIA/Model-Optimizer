@@ -22,6 +22,7 @@ import os
 import sys
 import warnings
 from collections import Counter, defaultdict, deque
+from collections.abc import Mapping
 
 import torch
 import torch.distributed
@@ -45,10 +46,10 @@ def get_conversation_input_ids(tokenizer, conversations):
     input_ids = tokenizer.apply_chat_template(
         conversations, add_generation_prompt=False, tokenize=True, return_tensors=None
     )
-    if hasattr(input_ids, "input_ids"):
-        input_ids = input_ids.input_ids  # transformers>=5 returns a BatchEncoding
+    if isinstance(input_ids, Mapping):
+        input_ids = input_ids["input_ids"]  # transformers>=5 returns a BatchEncoding
     if isinstance(input_ids, torch.Tensor):
-        input_ids = input_ids.squeeze(0).tolist()
+        input_ids = input_ids.flatten().tolist()
     if input_ids and isinstance(input_ids[0], list | tuple):
         assert len(input_ids) == 1, f"expected a single conversation, got {len(input_ids)}"
         input_ids = list(input_ids[0])  # unwrap a single-conversation batch dim
