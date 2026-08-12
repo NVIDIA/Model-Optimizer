@@ -454,7 +454,6 @@ def _run_worker(args: argparse.Namespace) -> None:
                 stage=args.worker_stage,
                 gpus_per_node=gpus_per_node,
             )
-            outputs["base_manifest"] = str(result.manifest_path)
             result = _complete_composite_stage(cfg, args.worker_stage, outputs)
     if int(os.environ.get("RANK", "0")) == 0:
         if result.status == "failed":

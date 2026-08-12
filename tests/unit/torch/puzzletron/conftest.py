@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from puzzletron_orchestrator.identity import stable_hash
+from puzzletron_orchestrator.identity import canonicalize, stable_hash
 from puzzletron_orchestrator.stages import semantic_stage_config
 
 
@@ -36,7 +36,9 @@ def write_terminal_manifest():
         config: dict[str, object],
         **extra: object,
     ) -> None:
-        semantic_config = semantic_stage_config(config, stage)
+        authored_config = canonicalize(config)
+        config_identity = stable_hash(authored_config, prefix=f"{stage}_cfg")
+        semantic_config = semantic_stage_config(authored_config, stage)
         semantic_config_identity = stable_hash(semantic_config, prefix=f"{stage}_semantic_cfg")
         capability_snapshot = extra.get("capability_snapshot")
         semantic_identity = stable_hash(
@@ -54,6 +56,8 @@ def write_terminal_manifest():
                 {
                     "stage": stage,
                     "status": "success",
+                    "config": authored_config,
+                    "config_identity": config_identity,
                     "semantic_config": semantic_config,
                     "semantic_config_identity": semantic_config_identity,
                     "semantic_identity": semantic_identity,
