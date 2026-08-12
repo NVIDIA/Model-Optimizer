@@ -26,7 +26,11 @@ Usage:
 import glob
 import json
 import os
+import re
 import shutil
+import tempfile
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import nox
@@ -239,13 +243,239 @@ def pre_commit_all(session):
     session.run("pre-commit", "run", "--all-files", "--show-diff-on-failure")
 
 
+@dataclass(frozen=True)
+class _ChangedPythonFile:
+    base_path: str | None
+    head_path: str
+
+
+@dataclass(frozen=True)
+class _MypyDiagnostic:
+    path: str
+    line: int
+    column: int | None
+    message: str
+    code: str | None
+    raw: str
+
+    @property
+    def fingerprint(self):
+        return self.path, self.message, self.code
+
+
+_MYPY_LOCATION = re.compile(
+    r"^(?P<path>.*?):(?P<line>\d+)(?::(?P<column>\d+))?: error: (?P<message>.*)$"
+)
+_MYPY_CODE = re.compile(r"^(?P<message>.*)  \[(?P<code>[^]]+)\]$")
+_MYPY_DIFF_DEPENDENCIES = ("types-PyYAML==6.0.12.20260724",)
+
+
+def _normalize_diagnostic_path(path):
+    normalized = path.replace("\\", "/")
+    return normalized.removeprefix("./")
+
+
+def _parse_changed_python_files(output):
+    changes = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        status = fields[0][:1]
+        if status == "R" and len(fields) == 3:
+            changes.append(_ChangedPythonFile(base_path=fields[1], head_path=fields[2]))
+        elif status == "C" and len(fields) == 3:
+            changes.append(_ChangedPythonFile(base_path=None, head_path=fields[2]))
+        elif status == "A" and len(fields) == 2:
+            changes.append(_ChangedPythonFile(base_path=None, head_path=fields[1]))
+        elif status == "M" and len(fields) == 2:
+            changes.append(_ChangedPythonFile(base_path=fields[1], head_path=fields[1]))
+        else:
+            raise ValueError(f"Unsupported git name-status line: {line!r}")
+    return tuple(changes)
+
+
+def _parse_mypy_diagnostics(output):
+    diagnostics = []
+    for line in output.splitlines():
+        location_match = _MYPY_LOCATION.match(line)
+        if location_match is None:
+            continue
+
+        message = location_match.group("message")
+        code_match = _MYPY_CODE.match(message)
+        code = None
+        if code_match is not None:
+            message = code_match.group("message")
+            code = code_match.group("code")
+        column = location_match.group("column")
+        diagnostics.append(
+            _MypyDiagnostic(
+                path=_normalize_diagnostic_path(location_match.group("path")),
+                line=int(location_match.group("line")),
+                column=int(column) if column is not None else None,
+                message=message,
+                code=code,
+                raw=line,
+            )
+        )
+    return tuple(diagnostics)
+
+
+def _new_mypy_diagnostics(base_output, head_output, base_to_head_paths: dict[str, str]):
+    available_base_diagnostics = Counter(
+        (
+            _normalize_diagnostic_path(base_to_head_paths.get(diagnostic.path, diagnostic.path)),
+            diagnostic.message,
+            diagnostic.code,
+        )
+        for diagnostic in _parse_mypy_diagnostics(base_output)
+    )
+
+    new_diagnostics = []
+    for diagnostic in _parse_mypy_diagnostics(head_output):
+        if available_base_diagnostics[diagnostic.fingerprint]:
+            available_base_diagnostics[diagnostic.fingerprint] -= 1
+        else:
+            new_diagnostics.append(diagnostic)
+    return tuple(new_diagnostics)
+
+
+def _resolve_git_commit(session, ref):
+    return session.run(
+        "git",
+        "rev-parse",
+        "--verify",
+        f"{ref}^{{commit}}",
+        external=True,
+        silent=True,
+    ).strip()
+
+
+def _run_mypy(session, checkout, paths, cache_dir):
+    if not paths:
+        return ""
+    with session.chdir(checkout):
+        return session.run(
+            "mypy",
+            "--no-install-types",
+            "--interactive",
+            "--no-error-summary",
+            "--no-color-output",
+            "--no-pretty",
+            "--show-column-numbers",
+            "--show-error-codes",
+            "--follow-imports=skip",
+            "--ignore-missing-imports",
+            "--cache-dir",
+            str(cache_dir),
+            "--",
+            *paths,
+            success_codes=[0, 1],
+            silent=True,
+        )
+
+
+def _run_changed_file_mypy(session, from_ref, to_ref):
+    """Run mypy on the base and head snapshots and report only new diagnostics."""
+
+    changed_file_output = session.run(
+        "git",
+        "diff",
+        "--name-status",
+        "--find-renames",
+        "--diff-filter=ACMR",
+        f"{from_ref}...{to_ref}",
+        "--",
+        "*.py",
+        external=True,
+        silent=True,
+    )
+    changes = _parse_changed_python_files(changed_file_output)
+    if not changes:
+        session.log("mypy diff ratchet: no changed Python files")
+        return
+
+    repository = session.run(
+        "git", "rev-parse", "--show-toplevel", external=True, silent=True
+    ).strip()
+    with tempfile.TemporaryDirectory(prefix="modelopt-mypy-diff-") as temporary_directory:
+        temporary_path = Path(temporary_directory)
+        checkout = temporary_path / "checkout"
+        checkout_index = checkout / ".git" / "index"
+        session.run(
+            "git",
+            "clone",
+            "--quiet",
+            "--shared",
+            "--no-checkout",
+            repository,
+            str(checkout),
+            external=True,
+        )
+
+        session.run(
+            "git",
+            "-C",
+            str(checkout),
+            "checkout",
+            "--quiet",
+            "--detach",
+            from_ref,
+            external=True,
+            env={"GIT_INDEX_FILE": str(checkout_index)},
+        )
+        base_paths = [change.base_path for change in changes if change.base_path is not None]
+        missing_base_paths = [path for path in base_paths if not (checkout / path).is_file()]
+        if missing_base_paths:
+            session.error(f"mypy diff base paths are missing: {', '.join(missing_base_paths)}")
+        base_output = _run_mypy(session, checkout, base_paths, temporary_path / "base-mypy-cache")
+
+        session.run(
+            "git",
+            "-C",
+            str(checkout),
+            "checkout",
+            "--quiet",
+            "--detach",
+            to_ref,
+            external=True,
+            env={"GIT_INDEX_FILE": str(checkout_index)},
+        )
+        head_paths = [change.head_path for change in changes]
+        missing_head_paths = [path for path in head_paths if not (checkout / path).is_file()]
+        if missing_head_paths:
+            session.error(f"mypy diff head paths are missing: {', '.join(missing_head_paths)}")
+        head_output = _run_mypy(session, checkout, head_paths, temporary_path / "head-mypy-cache")
+
+    session.log(f"mypy base diagnostics ({from_ref}):\n{base_output.rstrip() or '(none)'}")
+    session.log(f"mypy head diagnostics ({to_ref}):\n{head_output.rstrip() or '(none)'}")
+
+    base_to_head_paths = {
+        change.base_path: change.head_path for change in changes if change.base_path is not None
+    }
+    new_diagnostics = _new_mypy_diagnostics(base_output, head_output, base_to_head_paths)
+    head_diagnostics = _parse_mypy_diagnostics(head_output)
+    if new_diagnostics:
+        formatted_diagnostics = "\n".join(diagnostic.raw for diagnostic in new_diagnostics)
+        session.log(f"New mypy diagnostics:\n{formatted_diagnostics}")
+        session.error(
+            f"mypy diff ratchet found {len(new_diagnostics)} new diagnostic(s) "
+            f"among {len(head_diagnostics)} at the head"
+        )
+    session.log(
+        f"mypy diff ratchet passed with {len(head_diagnostics)} head diagnostic(s) "
+        "and no new diagnostics"
+    )
+
+
 @nox.session
 def pre_commit_diff(session):
     if len(session.posargs) not in (0, 2):
         session.error("pre_commit_diff expects optional FROM_REF and TO_REF arguments")
 
     from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
-    session.install("-e", ".[all,dev-lint]")
+    from_ref = _resolve_git_commit(session, from_ref)
+    to_ref = _resolve_git_commit(session, to_ref)
+    session.install("-e", ".[all,dev-lint]", *_MYPY_DIFF_DEPENDENCIES)
     skip_hooks = {hook for hook in os.environ.get("SKIP", "").split(",") if hook}
     skip_hooks.add("mypy")
     session.run(
@@ -258,28 +488,7 @@ def pre_commit_diff(session):
         "--show-diff-on-failure",
         env={"SKIP": ",".join(sorted(skip_hooks))},
     )
-
-    changed_files = session.run(
-        "git",
-        "diff",
-        "--name-only",
-        "--diff-filter=ACMR",
-        f"{from_ref}...{to_ref}",
-        "--",
-        "*.py",
-        external=True,
-        silent=True,
-    )
-    changed_python_files = [path for path in changed_files.splitlines() if Path(path).is_file()]
-    if changed_python_files:
-        session.run(
-            "mypy",
-            "--cache-dir",
-            os.devnull,
-            "--follow-imports=skip",
-            "--ignore-missing-imports",
-            *changed_python_files,
-        )
+    _run_changed_file_mypy(session, from_ref, to_ref)
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────

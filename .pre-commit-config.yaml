@@ -33,6 +33,12 @@ repos:
     rev: v1.17.1
     hooks:
       - id: mypy
+        # --interactive clears legacy non_interactive config while automatic installs stay off.
+        args: [--no-install-types, --interactive]
+        additional_dependencies:
+          - nox==2026.4.10
+          - types-docutils==0.22.3.20260724
+          - types-PyYAML==6.0.12.20260724
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v21.1.0
