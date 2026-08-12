@@ -28,6 +28,7 @@ from .quant_module import (
     QuantLinearConvBase,
     QuantModule,
     QuantModuleRegistry,
+    _is_temporary_weight_fold,
     _LegacyQuantLinearConvBaseMixin,
 )
 from .tensor_quantizer import TensorQuantizer
@@ -68,7 +69,9 @@ class SVDQuantTensorQuantizer(TensorQuantizer):
     @property
     def svdquant_lora_a(self):
         """Lora a weights for svdquant."""
-        if not hasattr(self, "_svdquant_lora_a"):
+        if not getattr(self, "_enable_svdquant_lora", True) or not hasattr(
+            self, "_svdquant_lora_a"
+        ):
             return None
         return self._svdquant_lora_a
 
@@ -92,7 +95,9 @@ class SVDQuantTensorQuantizer(TensorQuantizer):
     @property
     def svdquant_lora_b(self):
         """Lora b weights for svdquant."""
-        if not hasattr(self, "_svdquant_lora_b"):
+        if not getattr(self, "_enable_svdquant_lora", True) or not hasattr(
+            self, "_svdquant_lora_b"
+        ):
             return None
         return self._svdquant_lora_b
 
@@ -171,7 +176,8 @@ class SVDQuantLinear(QuantLinearConvBase):
             and self.weight_quantizer.fake_quant
         ):
             if (
-                self._not_sequential_quantizers()
+                not _is_temporary_weight_fold()
+                and self._not_sequential_quantizers()
                 and self.weight_quantizer.svdquant_lora_a is not None
                 and self.weight_quantizer.svdquant_lora_b is not None
             ):
@@ -179,6 +185,7 @@ class SVDQuantLinear(QuantLinearConvBase):
                     self.weight
                     + self.weight_quantizer.svdquant_lora_b @ self.weight_quantizer.svdquant_lora_a
                 )
+                self.weight_quantizer._enable_svdquant_lora = False
             if not keep_attrs:
                 _attrs = [
                     "_svdquant_lora_a",

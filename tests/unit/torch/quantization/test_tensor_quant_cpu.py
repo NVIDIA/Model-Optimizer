@@ -317,19 +317,204 @@ def test_fold_weight_disables_quantizer_without_extra_transform(
         unregister_quant_backend(backend_name)
 
 
-def test_fold_weight_keep_attrs_keeps_amax(monkeypatch):
+def test_fold_weight_keep_attrs_keeps_calibration_attrs_inactive(monkeypatch):
     calls = []
     backend_name = "test_fold_backend_keep"
     qlinear = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
     try:
         qlinear.weight_quantizer.amax = torch.tensor(1.0)
+        qlinear.weight_quantizer.pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+        inputs = torch.randn(2, 4)
+        output_before = qlinear(inputs)
 
         qlinear.fold_weight(keep_attrs=True)
 
         assert hasattr(qlinear.weight_quantizer, "_amax")
+        assert hasattr(qlinear.weight_quantizer, "_pre_quant_scale")
+        assert qlinear.weight_quantizer.pre_quant_scale is None
         assert not qlinear.weight_quantizer.is_enabled
+        assert torch.allclose(qlinear(inputs), output_before)
     finally:
         unregister_quant_backend(backend_name)
+
+
+def test_temporarily_fold_weights_restores_after_exception(monkeypatch):
+    calls = []
+    backend_name = "test_temporary_fold_backend"
+    qlinear = _make_qlinear_with_backend(
+        monkeypatch,
+        calls,
+        backend_name,
+        rotate={"enable": True},
+    )
+    try:
+        quantizer = qlinear.weight_quantizer
+        quantizer.amax = torch.tensor(1.0)
+        quantizer.pre_quant_scale = torch.tensor([[0.5, 1.0, 1.5, 2.0]])
+        original_weight = qlinear.weight.detach().clone()
+        original_storage = qlinear.weight.data_ptr()
+        original_rotate = quantizer._rotate
+        original_pre_quant_scale = quantizer.pre_quant_scale.detach().clone()
+        original_input_dtype = quantizer._input_dtype
+        inputs = torch.randn(2, 4)
+        output_before = qlinear(inputs)
+
+        with pytest.raises(RuntimeError, match="test error"), mtq.temporarily_fold_weights(qlinear):
+            assert not torch.equal(qlinear.weight, original_weight)
+            assert qlinear.weight.data_ptr() == original_storage
+            assert not quantizer.is_enabled
+            assert not quantizer.rotate_is_enabled
+            assert hasattr(quantizer, "_pre_quant_scale")
+            assert quantizer.pre_quant_scale is None
+            assert torch.allclose(qlinear(inputs), output_before)
+            raise RuntimeError("test error")
+
+        assert torch.equal(qlinear.weight, original_weight)
+        assert qlinear.weight.data_ptr() == original_storage
+        assert quantizer.is_enabled
+        assert quantizer._rotate == original_rotate
+        assert torch.equal(quantizer.pre_quant_scale, original_pre_quant_scale)
+        assert quantizer._input_dtype == original_input_dtype
+        assert torch.allclose(qlinear(inputs), output_before)
+    finally:
+        unregister_quant_backend(backend_name)
+
+
+def test_temporarily_fold_weights_skips_disabled_and_none_weights():
+    disabled = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    disabled.weight_quantizer.disable()
+    original_weight = disabled.weight.detach().clone()
+
+    tied_output = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    tied_output.weight = None
+
+    with mtq.temporarily_fold_weights(torch.nn.ModuleList([disabled, tied_output])):
+        assert torch.equal(disabled.weight, original_weight)
+        assert not disabled.weight_quantizer.is_enabled
+        assert tied_output.weight_quantizer.is_enabled
+
+    assert torch.equal(disabled.weight, original_weight)
+    assert not disabled.weight_quantizer.is_enabled
+    assert tied_output.weight_quantizer.is_enabled
+
+
+def test_temporarily_fold_weights_restores_when_folding_fails(monkeypatch):
+    first_calls = []
+    second_calls = []
+    first_backend = "test_temporary_fold_first_backend"
+    second_backend = "test_temporary_fold_failing_backend"
+    first = _make_qlinear_with_backend(monkeypatch, first_calls, first_backend)
+    second = _make_qlinear_with_backend(monkeypatch, second_calls, second_backend)
+
+    def failing_backend(inputs, _quantizer):
+        raise RuntimeError("fold failed")
+
+    unregister_quant_backend(second_backend)
+    register_quant_backend(second_backend, failing_backend)
+    model = torch.nn.ModuleList([first, second])
+    original_weights = [module.weight.detach().clone() for module in model]
+    try:
+        with pytest.raises(RuntimeError, match="fold failed"), mtq.temporarily_fold_weights(model):
+            pass
+
+        for module, original_weight in zip(model, original_weights):
+            assert torch.equal(module.weight, original_weight)
+            assert module.weight_quantizer.is_enabled
+    finally:
+        unregister_quant_backend(first_backend)
+        unregister_quant_backend(second_backend)
+
+
+def test_temporarily_fold_weights_skips_non_fake_override():
+    qlinear = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    quantizer = qlinear.weight_quantizer
+    quantizer._fake_quant = False
+    original_weight = qlinear.weight.detach().clone()
+    fold_calls = []
+
+    def unconditional_fold(keep_attrs=False):
+        fold_calls.append(keep_attrs)
+        return qlinear._fold_weight_quantizer(quantizer, (qlinear.weight,), keep_attrs)
+
+    qlinear.fold_weight = unconditional_fold
+    with mtq.temporarily_fold_weights(qlinear):
+        assert torch.equal(qlinear.weight, original_weight)
+        assert quantizer.is_enabled
+
+    assert fold_calls == [True]
+    assert torch.equal(qlinear.weight, original_weight)
+    assert quantizer.is_enabled
+
+
+def test_temporarily_fold_weights_folds_all_weights_with_shared_quantizer(monkeypatch):
+    calls = []
+    backend_name = "test_temporary_fold_shared_quantizer_backend"
+    first = _make_qlinear_with_backend(monkeypatch, calls, backend_name)
+    second = QuantModuleRegistry.convert(torch.nn.Linear(4, 3))
+    second.input_quantizer.disable()
+    second.output_quantizer.disable()
+    second.weight_quantizer = first.weight_quantizer
+    quantizer = first.weight_quantizer
+    original_weights = [first.weight.detach().clone(), second.weight.detach().clone()]
+    inputs = torch.randn(2, 4)
+    outputs_before = [first(inputs), second(inputs)]
+    try:
+        with mtq.temporarily_fold_weights(torch.nn.ModuleList([first, second])):
+            assert not torch.equal(first.weight, original_weights[0])
+            assert not torch.equal(second.weight, original_weights[1])
+            assert not quantizer.is_enabled
+            assert torch.allclose(first(inputs), outputs_before[0])
+            assert torch.allclose(second(inputs), outputs_before[1])
+
+        assert quantizer.is_enabled
+        assert torch.equal(first.weight, original_weights[0])
+        assert torch.equal(second.weight, original_weights[1])
+    finally:
+        unregister_quant_backend(backend_name)
+
+
+def test_temporarily_fold_weights_skips_tied_parameter_storage():
+    first = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    second = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    second.weight = first.weight
+    second.weight_quantizer.disable()
+    original_weight = first.weight.detach().clone()
+    inputs = torch.randn(2, 4)
+    outputs_before = [first(inputs), second(inputs)]
+
+    with mtq.temporarily_fold_weights(torch.nn.ModuleList([first, second])):
+        assert torch.equal(first.weight, original_weight)
+        assert first.weight_quantizer.is_enabled
+        assert not second.weight_quantizer.is_enabled
+        assert torch.equal(first(inputs), outputs_before[0])
+        assert torch.equal(second(inputs), outputs_before[1])
+
+    assert torch.equal(first.weight, original_weight)
+    assert first.weight_quantizer.is_enabled
+    assert not second.weight_quantizer.is_enabled
+
+
+def test_temporarily_fold_weights_blocks_quantizer_shared_with_tied_weight():
+    independent = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    tied_first = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    tied_second = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    tied_second.weight = tied_first.weight
+    tied_first.weight_quantizer = independent.weight_quantizer
+    original_weights = [module.weight.detach().clone() for module in (independent, tied_first)]
+    inputs = torch.randn(2, 4)
+    outputs_before = [module(inputs) for module in (independent, tied_first, tied_second)]
+    model = torch.nn.ModuleList([independent, tied_first, tied_second])
+
+    with mtq.temporarily_fold_weights(model):
+        assert independent.weight_quantizer.is_enabled
+        assert torch.equal(independent.weight, original_weights[0])
+        assert torch.equal(tied_first.weight, original_weights[1])
+        for module, output_before in zip(model, outputs_before):
+            assert torch.equal(module(inputs), output_before)
+
+    assert independent.weight_quantizer.is_enabled
+    assert torch.equal(independent.weight, original_weights[0])
+    assert torch.equal(tied_first.weight, original_weights[1])
 
 
 WINT4INT8_CFG = {

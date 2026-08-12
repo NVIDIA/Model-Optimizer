@@ -18,6 +18,8 @@
 import contextlib
 import warnings
 from collections.abc import Iterable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -36,6 +38,129 @@ __all__ = [
     "QuantModule",
     "QuantModuleRegistry",
 ]
+
+
+@dataclass
+class _FoldWeightState:
+    """State needed to undo one ``_fold_weight_quantizer`` call."""
+
+    quantizer: TensorQuantizer
+    weights: list[torch.Tensor]
+    original_weights: list[torch.Tensor]
+    weight_keys: set[tuple]
+    disabled: bool
+    rotate: Any
+    enable_pre_quant_scale: bool
+    input_dtype: torch.dtype | None
+
+    @classmethod
+    def capture(cls, quantizer: TensorQuantizer) -> "_FoldWeightState":
+        return cls(
+            quantizer=quantizer,
+            weights=[],
+            original_weights=[],
+            weight_keys=set(),
+            disabled=quantizer._disabled,
+            rotate=quantizer._rotate,
+            enable_pre_quant_scale=quantizer._enable_pre_quant_scale,
+            input_dtype=quantizer._input_dtype,
+        )
+
+    def add_weights(self, weights: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        """Snapshot and return weight views not already recorded for this quantizer."""
+        new_weights = []
+        for weight in weights:
+            key = _tensor_view_key(weight)
+            if key in self.weight_keys:
+                continue
+            self.weight_keys.add(key)
+            self.weights.append(weight)
+            self.original_weights.append(weight.detach().clone())
+            new_weights.append(weight)
+        return tuple(new_weights)
+
+    def prepare_quantizer(self):
+        """Restore the quantizer settings needed to fold another associated weight."""
+        self.quantizer._disabled = self.disabled
+        self.quantizer._rotate = self.rotate
+        self.quantizer._enable_pre_quant_scale = self.enable_pre_quant_scale
+        self.quantizer._input_dtype = self.input_dtype
+
+    @torch.no_grad()
+    def restore(self):
+        """Restore weights and quantizer runtime state in place."""
+        for weight, original_weight in zip(self.weights, self.original_weights):
+            weight.data.copy_(original_weight)
+        self.quantizer._disabled = self.disabled
+        self.quantizer._rotate = self.rotate
+        self.quantizer._enable_pre_quant_scale = self.enable_pre_quant_scale
+        self.quantizer._input_dtype = self.input_dtype
+
+
+@dataclass
+class _TemporaryFoldWeightContext:
+    """State shared by module-specific folds in one temporary transaction."""
+
+    states: list[_FoldWeightState]
+    states_by_quantizer: dict[TensorQuantizer, _FoldWeightState]
+    shared_parameter_storages: set[tuple]
+    blocked_quantizers: set[TensorQuantizer]
+
+
+_temporary_fold_weight_context: ContextVar[_TemporaryFoldWeightContext | None] = ContextVar(
+    "temporary_fold_weight_context", default=None
+)
+
+
+def _tensor_storage_key(tensor: torch.Tensor) -> tuple | None:
+    """Return a device-qualified storage key when the tensor exposes local storage."""
+    if tensor.is_meta or tensor.numel() == 0:
+        return None
+    try:
+        return ("storage", tensor.device, tensor.untyped_storage().data_ptr())
+    except (RuntimeError, NotImplementedError):
+        try:
+            local = tensor.to_local()
+            return ("storage", local.device, local.untyped_storage().data_ptr())
+        except (AttributeError, RuntimeError, NotImplementedError):
+            return ("object", id(tensor))
+
+
+def _tensor_view_key(tensor: torch.Tensor) -> tuple:
+    """Identify an exact tensor view while allowing distinct slices of one fused weight."""
+    return (
+        _tensor_storage_key(tensor),
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+    )
+
+
+def _shared_parameter_storages(model: nn.Module) -> set[tuple]:
+    """Find storage referenced by more than one parameter attribute in the model."""
+    storage_counts: dict[tuple, int] = {}
+    for module in model.modules():
+        for parameter in module._parameters.values():
+            if parameter is None or (key := _tensor_storage_key(parameter)) is None:
+                continue
+            storage_counts[key] = storage_counts.get(key, 0) + 1
+    return {key for key, count in storage_counts.items() if count > 1}
+
+
+@contextlib.contextmanager
+def _record_fold_weight_states(model: nn.Module, states: list[_FoldWeightState]):
+    """Record fold undo state without changing the public ``fold_weight`` contract."""
+    context = _TemporaryFoldWeightContext(states, {}, _shared_parameter_storages(model), set())
+    token = _temporary_fold_weight_context.set(context)
+    try:
+        yield
+    finally:
+        _temporary_fold_weight_context.reset(token)
+
+
+def _is_temporary_weight_fold() -> bool:
+    """Return whether folding is running inside ``temporarily_fold_weights``."""
+    return _temporary_fold_weight_context.get() is not None
 
 
 class QuantModule(DynamicModule):
@@ -141,14 +266,45 @@ class QuantModule(DynamicModule):
         per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
         view while disabling and dropping its calibration attrs exactly once.
         """
+        weights = tuple(weights)
+        context = _temporary_fold_weight_context.get()
+        if context is not None:
+            if quantizer in context.blocked_quantizers:
+                return
+            if any(
+                _tensor_storage_key(weight) in context.shared_parameter_storages
+                for weight in weights
+            ):
+                context.blocked_quantizers.add(quantizer)
+                if state := context.states_by_quantizer.get(quantizer):
+                    state.restore()
+                return
+            if not quantizer.fake_quant:
+                return
+            state = context.states_by_quantizer.get(quantizer)
+            if state is None:
+                if not quantizer.is_enabled:
+                    return
+                state = _FoldWeightState.capture(quantizer)
+                context.states.append(state)
+                context.states_by_quantizer[quantizer] = state
+            weights = state.add_weights(weights)
+            if not weights:
+                return
+            state.prepare_quantizer()
+
         for weight in weights:
             weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
-        if not keep_attrs:
-            for attr_name in ("_pre_quant_scale", "_amax"):
-                if hasattr(quantizer, attr_name):
-                    delattr(quantizer, attr_name)
+        if hasattr(quantizer, "_pre_quant_scale"):
+            if keep_attrs:
+                # The scale is already baked into the folded weight.
+                quantizer._enable_pre_quant_scale = False
+            else:
+                delattr(quantizer, "_pre_quant_scale")
+        if not keep_attrs and hasattr(quantizer, "_amax"):
+            delattr(quantizer, "_amax")
 
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
@@ -156,7 +312,8 @@ class QuantModule(DynamicModule):
         Every fake-quant weight quantizer is folded regardless of its enabled state. The folded
         transform is baked into the stored weight and then disabled, so subsequent forwards use
         the stored weight directly. Calibration buffers (``_pre_quant_scale``, ``_amax``) are
-        dropped unless ``keep_attrs``.
+        dropped unless ``keep_attrs``. A retained pre-quant scale remains stored but is made
+        inactive because it has already been applied to the folded weight.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
@@ -173,7 +330,8 @@ class QuantModule(DynamicModule):
                     f"{name} doesn't have a corresponding {weight_name} in {self.__class__.__name__}"
                 )
                 weight = getattr(self, weight_name)
-                self._fold_weight_quantizer(attr, (weight,), keep_attrs)
+                if isinstance(weight, torch.Tensor):
+                    self._fold_weight_quantizer(attr, (weight,), keep_attrs)
 
 
 QuantModuleRegistry = _DMRegistryCls("Quant", QuantModule)

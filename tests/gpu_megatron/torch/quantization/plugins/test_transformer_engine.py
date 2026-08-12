@@ -152,6 +152,59 @@ def test_fold_weight_grouped_linear(share_weight_quantizer):
         assert not hasattr(quantizer, "_amax")
 
 
+@pytest.mark.parametrize("share_weight_quantizer", [False, True])
+def test_temporarily_fold_weight_grouped_linear(share_weight_quantizer):
+    model = TEGroupedLinear().cuda()
+    calib_data = [model.get_input().cuda()]
+    quantize_model_and_forward(model, mtq.INT8_DEFAULT_CFG, calib_data)
+
+    grouped_linear = model.net
+    assert isinstance(grouped_linear.weight_quantizer, GroupedQuantizer)
+    if share_weight_quantizer:
+        grouped_linear.weight_quantizer = grouped_linear.weight_quantizer[0]
+    weights = [getattr(grouped_linear, f"weight{i}") for i in range(grouped_linear.num_gemms)]
+    quantizers = [quantizer for _, quantizer in grouped_linear.iter_weights_for_calibration()]
+    original_weights = [weight.detach().clone() for weight in weights]
+    for weight, quantizer in zip(weights, quantizers):
+        if quantizer.pre_quant_scale is None:
+            quantizer.pre_quant_scale = torch.full(
+                (1, weight.shape[-1]),
+                0.5,
+                dtype=weight.dtype,
+                device=weight.device,
+            )
+    with torch.no_grad():
+        output_before = model(calib_data[0])
+        expected_weights = [
+            quantizer(weight.float().contiguous()).to(weight.dtype)
+            for weight, quantizer in zip(weights, quantizers)
+        ]
+
+    with mtq.temporarily_fold_weights(model):
+        with torch.no_grad():
+            output_folded = model(calib_data[0])
+        for weight, expected_weight, quantizer in zip(weights, expected_weights, quantizers):
+            assert torch.allclose(weight, expected_weight)
+            assert not quantizer.is_enabled
+            assert hasattr(quantizer, "_amax")
+            assert hasattr(quantizer, "_pre_quant_scale")
+            assert quantizer.pre_quant_scale is None
+
+    with torch.no_grad():
+        output_restored = model(calib_data[0])
+    if isinstance(output_before, tuple):
+        output_before = output_before[0]
+        output_folded = output_folded[0]
+        output_restored = output_restored[0]
+    assert torch.allclose(output_folded, output_before)
+    assert torch.allclose(output_restored, output_before)
+
+    for weight, original_weight, quantizer in zip(weights, original_weights, quantizers):
+        assert torch.equal(weight, original_weight)
+        assert quantizer.is_enabled
+        assert quantizer.pre_quant_scale is not None
+
+
 def test_quantize_forward_backward():
     set_seed()
     model = TELinear().cuda()

@@ -20,6 +20,7 @@ import inspect
 import os
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
@@ -41,6 +42,7 @@ from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
+from .nn.modules.quant_module import _FoldWeightState, _record_fold_weight_states
 from .utils import is_quantized
 
 __all__ = [
@@ -54,6 +56,7 @@ __all__ = [
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
+    "temporarily_fold_weights",
 ]
 
 
@@ -731,6 +734,37 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)
+
+
+@contextmanager
+def temporarily_fold_weights(model: nn.Module):
+    """Temporarily fold enabled fake-quant weights for a frozen inference region.
+
+    Each :class:`QuantModule` performs its normal module-specific ``fold_weight`` operation. The
+    original weights and quantizer runtime state are restored on exit, including after an
+    exception. Parameters are restored in place so optimizer and distributed references remain
+    valid. Disabled and non-fake weight quantizers are left untouched. Parameters whose storage is
+    tied across owners are also left unfolded because mutating them could change a disabled owner.
+    Weight ``SequentialQuantizer`` containers are not currently folded.
+
+    This context is intended for repeated no-gradient forwards with no optimizer step, such as
+    log-probability recomputation over several microbatches. It retains calibration attributes
+    while folded; a retained weight ``pre_quant_scale`` is inactive inside the context because its
+    value is already baked into the temporary weight.
+
+    Example::
+
+        with mtq.temporarily_fold_weights(model):
+            outputs = model(inputs)
+    """
+    states: list[_FoldWeightState] = []
+    try:
+        with _record_fold_weight_states(model, states):
+            fold_weight(model, keep_attrs=True)
+        yield
+    finally:
+        for state in reversed(states):
+            state.restore()
 
 
 @torch.no_grad()
