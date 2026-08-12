@@ -22,7 +22,6 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import contextlib
-import json
 import os
 
 import torch
@@ -131,24 +130,16 @@ def get_args():
     parser.add_argument(
         "--sft",
         action="store_true",
-        help="SFT-masked distillation: read raw prompt-completion jsonl from --sft_dataset_root "
-        "and mask the loss to the completion (assistant response) tokens. Uses "
-        "FinetuningDatasetConfig and the real HuggingFace tokenizer instead of the pretraining "
-        "GPTDataset and NullTokenizer.",
+        help="Distill on prompt-completion jsonl from --sft_dataset_root with the loss masked to "
+        "the completion, instead of pre-tokenized --data_paths.",
     )
     parser.add_argument(
         "--sft_dataset_root",
         type=str,
         default=None,
         help="Directory holding training.jsonl (and validation.jsonl when --eval_iters > 0) of "
-        '{"input": <prompt>, "output": <response>} records (used with --sft). Both fields are '
-        "tokenized as written, except that leading and trailing spaces on each field are "
-        "stripped: no chat template is applied and no BOS is prepended, so if the model expects "
-        "role/turn markers or a BOS token, bake them into the fields yourself, and put any "
-        "significant separator inside the text as a newline rather than a space. An EOS token is "
-        "appended after the response. A record longer than --seq_length is truncated from the "
-        "START of 'input', which drops any BOS, system prompt or opening role marker baked in "
-        "there; pre-filter or pre-truncate the corpus if that matters.",
+        '{"input": <prompt>, "output": <response>} records (used with --sft). See the README for '
+        "how the fields are tokenized and truncated.",
     )
     # Training & Eval arguments
     parser.add_argument(
@@ -299,6 +290,8 @@ def get_args():
         absent = [f for f in required if not os.path.isfile(os.path.join(args.sft_dataset_root, f))]
         if absent:
             raise ValueError(f"--sft_dataset_root {args.sft_dataset_root} is missing: {absent}.")
+        # Decided once here so it reaches print_args and costs a single tokenizer load.
+        args.sft_add_bos = _tokenizer_prepends_bos(args)
 
     _check_shared_vocabulary(args)
 
@@ -308,20 +301,10 @@ def get_args():
 
 
 def _check_shared_vocabulary(args) -> None:
-    """Raise unless teacher and student use the same tokenizer.
-
-    Warns instead when a tokenizer cannot be loaded (some VLM repos ship only a processor).
-    """
+    """Raise unless teacher and student use the same tokenizer."""
     _tok = {"trust_remote_code": args.trust_remote_code}
-    try:
-        student_vocab = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok).get_vocab()
-        teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
-    except Exception as e:
-        warn_rank_0(
-            f"Could not load both tokenizers to verify teacher and student share a vocabulary: {e}. "
-            "Distillation needs them to agree on every token id; check it yourself if in doubt."
-        )
-        return
+    student_vocab = AutoTokenizer.from_pretrained(args.student_hf_path, **_tok).get_vocab()
+    teacher_vocab = AutoTokenizer.from_pretrained(args.teacher_hf_path, **_tok).get_vocab()
     if student_vocab != teacher_vocab:
         raise ValueError(
             "Distillation scores the teacher on the student's token ids, so teacher and student "
@@ -329,49 +312,22 @@ def _check_shared_vocabulary(args) -> None:
         )
 
 
-def _warn_if_bos_missing(args) -> None:
-    """Warn when the tokenizer prepends a BOS at inference but the SFT records do not carry one.
+def _tokenizer_prepends_bos(args) -> bool:
+    """True when the student tokenizer prepends a BOS at inference.
 
-    Inspects only the first record of ``training.jsonl``.
+    Probes an encode: fast tokenizers prepend via a post-processor that exposes no attribute.
     """
-    dataset_root = args.sft_dataset_root
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.student_hf_path, trust_remote_code=args.trust_remote_code
-        )
-    except Exception:
-        return
-    bos = getattr(tokenizer, "bos_token", None)
-    if not bos:
-        return
-    try:
-        # Probe rather than trusting ``add_bos_token``: many fast tokenizers prepend BOS via the
-        # post-processor without exposing that attribute, and a missing warning is the worse
-        # failure here.
-        if tokenizer("x").input_ids[:1] != [tokenizer.bos_token_id]:
-            return
-    except Exception:
-        return
-    try:
-        with open(os.path.join(dataset_root, "training.jsonl")) as f:
-            first_input = str(json.loads(f.readline()).get("input", ""))
-    except Exception:
-        return  # a malformed or missing file is the dataset builder's error to report, not ours
-    if not first_input.startswith(bos):
-        warn_rank_0(
-            f"This tokenizer prepends {bos!r} at inference, but the first record in "
-            f"{dataset_root}/training.jsonl does not start with it. --sft tokenizes the fields "
-            f"verbatim, so the model would be trained without the BOS it is served with. Include "
-            f"{bos!r} at the start of the 'input' field."
-        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.student_hf_path, trust_remote_code=args.trust_remote_code
+    )
+    if not getattr(tokenizer, "bos_token", None):
+        return False
+    return tokenizer("x").input_ids[:1] == [tokenizer.bos_token_id]
 
 
 def main(args: argparse.Namespace):
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
-
-    if args.sft:
-        _warn_if_bos_missing(args)
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path, load_weights=True):
@@ -513,7 +469,8 @@ def main(args: argparse.Namespace):
                 # boundary and then "output" itself, the only span the loss is computed on.
                 "truncation_method": "left",
                 "answer_only_loss": True,
-                "add_bos": False,
+                # Prepended after truncation, so it survives a record that had to be cut.
+                "add_bos": args.sft_add_bos,
                 "add_eos": True,
             },
         )
