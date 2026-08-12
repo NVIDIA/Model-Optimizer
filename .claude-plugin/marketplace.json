@@ -1,0 +1,15 @@
+{
+  "name": "modelopt-skills",
+  "description": "NVIDIA ModelOpt agent skills for model quantization, deployment, and evaluation.",
+  "owner": {
+    "name": "NVIDIA Model-Optimizer"
+  },
+  "plugins": [
+    {
+      "name": "modelopt-agent",
+      "source": "./.claude/skills",
+      "description": "ModelOpt agent skills for model optimization: quantization (PTQ), deployment (vLLM/SGLang/TRT-LLM), and evaluation (nemo-evaluator-launcher).",
+      "version": "0.1.0"
+    }
+  ]
+}
