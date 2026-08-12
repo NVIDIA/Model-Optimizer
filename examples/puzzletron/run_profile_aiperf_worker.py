@@ -191,6 +191,13 @@ def run_worker(
     trust_remote_code: bool = False,
     allow_aiperf_v011_online_tokenizer_resolution: bool = False,
 ) -> Path:
+    """Run one AIPerf shard with security-sensitive behavior disabled by default.
+
+    ``trust_remote_code`` is only appropriate for trusted model sources. The
+    AIPerf v0.11 compatibility option permits online tokenizer resolution for
+    the AIPerf child process even when the campaign otherwise runs offline.
+    """
+
     # Worker execution needs the GPU stack; result merging intentionally remains
     # usable by the dependency-light login-node orchestrator.
     from modelopt.torch.puzzletron.benchmarks import run_aiperf_sweep
@@ -341,10 +348,15 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, action="append", default=[])
     parser.add_argument("--request-count", type=int)
     parser.add_argument("--benchmark-timeout", type=float, default=7200)
-    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow remote model code; use only with trusted model sources.",
+    )
     parser.add_argument(
         "--allow-aiperf-v011-online-tokenizer-resolution",
         action="store_true",
+        help="Permit online tokenizer resolution in the AIPerf v0.11 child process.",
     )
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--merge", action="store_true")

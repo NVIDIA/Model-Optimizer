@@ -46,7 +46,7 @@ __all__ = ["ManualInputRequired", "PostMIPAdapter"]
 def _post_mip_identity_api() -> Any:
     """Load the producer identity contract after orchestration initialization."""
 
-    if __package__.startswith("puzzletron_orchestrator."):
+    if (__package__ or "").startswith("puzzletron_orchestrator."):
         from puzzletron_orchestrator.post_mip import identity as identity_api
     else:
         from ...post_mip import identity as identity_api

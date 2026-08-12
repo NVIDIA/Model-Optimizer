@@ -207,6 +207,7 @@ class CampaignController:
         self._interactive_ready = False
         self._failed_stages: set[str] = set()
         self._finalization_failures: dict[str, _FinalizationFailure] = {}
+        self._first_completion_observed: dict[str, float] = {}
         self._manual_waiting: ManualInputRequired | None = None
         defaults = dict(plan.execution_defaults or {})
         self._halt_policy = HaltPolicy(str(defaults.get("halt_policy", HaltPolicy.DRAIN.value)))
@@ -459,7 +460,9 @@ class CampaignController:
             if not isinstance(value, (int, float)):
                 return _ARTIFACT_SETTLING_TIMEOUT_SECONDS
             completed_at.append(float(value))
-        return max(0.0, time.time() - max(completed_at))
+        now = time.time()
+        first_observed = self._first_completion_observed.setdefault(node.stage_id, now)
+        return max(0.0, now - max(max(completed_at), first_observed))
 
     def _policy_allows_retry(self, node: StagePlanNode, failure: FailureClass) -> bool:
         if failure in {FailureClass.SUCCESS, FailureClass.CANCELLED}:

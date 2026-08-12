@@ -33,6 +33,7 @@ import os
 import types
 from collections import deque
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -77,6 +78,7 @@ from torch.utils.checkpoint import checkpoint
 
 from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs
+from ..security_policy import require_boolean_policy
 from .flash_kld import TrainingFlashKLD
 
 
@@ -663,8 +665,6 @@ class _WeightedObjectiveMixin:
             f"epoch_{epoch}_step_{step}",
         )
         if self.dist_env.is_main:
-            from pathlib import Path
-
             consolidated = Path(checkpoint_path, "model", "consolidated")
             config_path = consolidated / "config.json"
             config = json.loads(config_path.read_text()) if config_path.is_file() else {}
@@ -672,9 +672,17 @@ class _WeightedObjectiveMixin:
                 from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
                 model_config = _config_value(getattr(self, "cfg", None), "model")
+                configured_trust = _config_value(model_config, "trust_remote_code")
                 refresh_realized_checkpoint_config(
                     consolidated,
-                    trust_remote_code=bool(_config_value(model_config, "trust_remote_code")),
+                    trust_remote_code=(
+                        False
+                        if configured_trust is None
+                        else require_boolean_policy(
+                            configured_trust,
+                            path="model.trust_remote_code",
+                        )
+                    ),
                 )
             Path(checkpoint_path, "saving_completed").touch()
         if torch.distributed.is_initialized():

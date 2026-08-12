@@ -798,6 +798,32 @@ def test_controller_retries_aggregation_until_outputs_are_visible(tmp_path: Path
     assert controller.store.stage_is_complete("convert")
 
 
+def test_resumed_controller_gets_a_fresh_artifact_settling_window(tmp_path: Path, monkeypatch):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    node = plan.stages[0]
+    attempts = [{"completed_at": 1000.0}]
+    now = [2000.0]
+    monkeypatch.setattr(
+        controller,
+        "_required_completed_attempts",
+        lambda _node, _attempts: attempts,
+    )
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
+
+    assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 0.0
+    now[0] += 299.0
+    assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 299.0
+    now[0] += 1.0
+    assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 300.0
+
+
 def test_controller_propagates_aggregation_programming_errors(tmp_path: Path, monkeypatch):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     plan = compile_campaign_plan(

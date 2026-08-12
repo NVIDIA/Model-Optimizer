@@ -696,7 +696,7 @@ def test_legacy_aiperf_worker_keeps_security_policies_disabled_by_default(tmp_pa
 @pytest.mark.parametrize(
     ("experiment_config", "path"),
     [
-        ({"model": {"trust_remote_code": "false"}}, "aiperf.trust_remote_code"),
+        ({"model": {"trust_remote_code": "false"}}, "model.trust_remote_code"),
         ({"aiperf": {"trust_remote_code": "false"}}, "aiperf.trust_remote_code"),
         (
             {"aiperf": {"allow_aiperf_v011_online_tokenizer_resolution": "false"}},

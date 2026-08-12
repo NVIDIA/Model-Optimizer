@@ -501,6 +501,11 @@ The setup wizard can also add downstream evaluation for materialized campaign
 candidates. See [post-MIP pipelines](docs/post_mip_pipeline.md) to configure it
 or add it to an existing campaign.
 
+Remote model code and AIPerf v0.11 online tokenizer resolution are disabled by
+default. Enable remote code only for a trusted model source. The tokenizer
+compatibility option permits the AIPerf child process to resolve its tokenizer
+online even when the surrounding campaign is configured for offline loading.
+
 ### Legacy checked-in Nano campaign
 
 The checked-in Nano experiment uses the legacy `zero_shot_evaluation`,
