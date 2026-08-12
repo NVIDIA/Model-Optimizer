@@ -588,11 +588,10 @@ def data_section(
                 "from the completed stage configuration."
             )
         else:
-            if not selected_subsets or subset_selection is None or acquisition is None:
+            if not selected_subsets or subset_selection is None:
                 raise SetupError(
                     "Nemotron-VLM v2 requires at least one selectable hosted-media subset."
                 )
-            assert subset_selection is not None
             subset_media_shards = {
                 record["name"]: record["num_media_shards"]
                 for record in subset_selection["subsets"]

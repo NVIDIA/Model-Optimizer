@@ -21,6 +21,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -34,6 +35,9 @@ from puzzletron_setup.v2.bundle import (
 )
 from puzzletron_setup.v2.resolved import resolve_campaign_config
 from puzzletron_setup.v2.state import WizardState
+
+if TYPE_CHECKING:
+    from puzzletron_setup.bundle import BundleValidation
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
@@ -345,6 +349,22 @@ def test_resolved_sections_take_precedence_over_compatibility_overrides(tmp_path
     assert experiment["pruning"]["automodel"]["parallel"]["tp"] == 2
 
 
+def test_stage_batches_update_shared_data_sections(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    state.set_collection(
+        "stage_batches",
+        {
+            "pruning.micro_batch_size": 7,
+            "replacement_scoring.micro_batch_size": 5,
+        },
+    )
+
+    experiment = render_experiment_v2(state, "production")
+
+    assert experiment["data"]["calibration"]["micro_batch_size"] == 7
+    assert experiment["data"]["replacement_scoring"]["micro_batch_size"] == 5
+
+
 def test_runner_compatibility_override_is_applied_to_resolved_runner(tmp_path: Path) -> None:
     state = _campaign_state(tmp_path)
 
@@ -452,10 +472,9 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
     monkeypatch,
 ) -> None:
     state = _campaign_state(tmp_path)
-
     real_validate_bundle = bundle_module.validate_bundle
 
-    def mutate_state_after_smoke(path: Path):
+    def mutate_state_after_smoke(path: Path) -> BundleValidation:
         if path.name == "smoke":
             state.set_field("stages.width_importance.batch", 99, source="user")
             state.set_collection("stage_batches", {"pruning.micro_batch_size": 99})

@@ -602,15 +602,7 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
     """Resolve one mutable wizard state into an immutable campaign snapshot."""
     payload = deepcopy(state.payload)
     collections = _mapping(payload.get("collections"))
-    field_records = {
-        str(path): {
-            "value": deepcopy(record.value),
-            "source": str(record.source),
-            "requested": deepcopy(record.requested),
-            "effective": deepcopy(record.effective),
-        }
-        for path, record in state.records().items()
-    }
+    field_records = {str(path): record.to_dict() for path, record in state.records().items()}
 
     def effective(path: str, default: Any = _USE_BUILTIN_DEFAULT) -> Any:
         record = field_records.get(path)
