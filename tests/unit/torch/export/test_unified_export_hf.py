@@ -22,7 +22,7 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import TiedGroupResolver, _build_tied_alias_map
+from modelopt.torch.export.model_utils import TiedWeightMap, _build_tied_alias_map
 from modelopt.torch.export.quant_utils import (
     fuse_prequant_layernorm,
     postprocess_state_dict,
@@ -74,7 +74,7 @@ def test_tied_group_resolver_group_key_is_shared_and_order_independent():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
 
-    resolver = TiedGroupResolver(parent)
+    resolver = TiedWeightMap(parent)
 
     assert resolver.group_key("encoder.weight") == resolver.group_key("decoder.weight")
     assert resolver.group_key("encoder.weight") == "decoder.weight"  # canonical wins
@@ -104,7 +104,7 @@ def test_tied_group_resolver_per_layer_backreference():
                 self.encoder.layers[i].experts.gate_up_proj = p
 
     parent = _Parent()
-    resolver = TiedGroupResolver(parent)
+    resolver = TiedWeightMap(parent)
 
     assert (
         resolver.container_group_key("encoder.layers.0.experts", "gate_up_proj")
@@ -154,7 +154,7 @@ def test_tied_group_resolver_parallel_pattern_declaration():
             super().__init__()
             self.model = _Model()
 
-    resolver = TiedGroupResolver(_Root())
+    resolver = TiedWeightMap(_Root())
 
     # container group key: encoder side resolves to the decoder canonical container
     assert (
@@ -222,7 +222,7 @@ def test_sync_tied_input_amax_merges_undeclared_shared_weight():
     mtq.quantize(parent, mtq.FP8_DEFAULT_CFG, forward_loop=lambda m: None)
     assert parent.a.weight is parent.b.weight  # share survives quantize
     # No _tied_weights_keys declared, so name-based grouping finds nothing to merge.
-    assert TiedGroupResolver(parent).group_key("a.weight") is None
+    assert TiedWeightMap(parent).group_key("a.weight") is None
 
     parent.a.input_quantizer.amax = torch.tensor(2.0)
     parent.b.input_quantizer.amax = torch.tensor(8.0)
@@ -240,7 +240,7 @@ def test_postprocess_name_based_drops_alias_across_distinct_addresses():
     """
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-    resolver = TiedGroupResolver(parent)
+    resolver = TiedWeightMap(parent)
 
     # Distinct storages (different data_ptr): the address pass could never collapse these.
     sd = {"encoder.weight": torch.randn(4, 4), "decoder.weight": torch.randn(4, 4)}
@@ -256,7 +256,7 @@ def test_postprocess_name_based_keeps_alias_when_canonical_absent():
     """An alias is NOT dropped when its canonical counterpart is missing (no orphaning)."""
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-    resolver = TiedGroupResolver(parent)
+    resolver = TiedWeightMap(parent)
 
     sd = {"encoder.weight": torch.randn(4, 4)}  # canonical decoder.weight absent
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
@@ -265,11 +265,11 @@ def test_postprocess_name_based_keeps_alias_when_canonical_absent():
 
 
 def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
-    """A bidirectional map (A->B and B->A) must not delete BOTH sides (missing tensor).
+    """A bidirectional declaration (A->B and B->A) must not delete BOTH sides.
 
-    Only an alias whose canonical is a *terminal* canonical (not itself an alias) is
-    dropped; a pathological bidirectional declaration keeps both keys so the loader is
-    never left without a tensor.
+    Both names are declared aliases, so the shared group has no unambiguous canonical.
+    ``_build_tied_alias_map`` skips such a group entirely (empty map), so neither side is
+    dropped and the loader is never left without a tensor.
     """
 
     class _Bi(torch.nn.Module):
@@ -281,9 +281,10 @@ def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
             self.b = torch.nn.Linear(4, 4, bias=False)
             self.b.weight = self.a.weight  # genuinely shared, declared both ways
 
-    resolver = TiedGroupResolver(_Bi())
-    # sanity: the map really is bidirectional at the prefix level
-    assert resolver.alias_prefix_pairs() == {"a": "b", "b": "a"}
+    resolver = TiedWeightMap(_Bi())
+    # Both sides are declared aliases -> no unambiguous canonical -> not deduped.
+    assert resolver.alias_to_canonical == {}
+    assert resolver.alias_prefix_pairs() == {}
 
     sd = {"a.weight": torch.randn(4, 4), "b.weight": torch.randn(4, 4)}
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, resolver=resolver)
@@ -299,7 +300,7 @@ def test_postprocess_keeps_both_sides_when_tied_quant_state_differs():
     """
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-    resolver = TiedGroupResolver(parent)
+    resolver = TiedWeightMap(parent)
 
     sd = {
         # alias (encoder) exported as quantized: weight + companion scales
@@ -341,7 +342,7 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
             self.encoder.experts.down_proj = dp
 
     parent = _Parent()
-    resolver = TiedGroupResolver(parent)
+    resolver = TiedWeightMap(parent)
     assert resolver.alias_prefix_pairs() == {"encoder.experts": "decoder.experts"}
 
     # Craft exported-style per-expert keys with distinct storages on both sides.

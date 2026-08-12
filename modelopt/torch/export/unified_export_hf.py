@@ -92,7 +92,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedGroupResolver, get_language_model_from_vl, is_multimodal_model
+from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
@@ -957,7 +957,7 @@ def _export_transformers_checkpoint(
     # amax sync and the final dedup in postprocess_state_dict (its only two consumers). It
     # resolves ties from the model's declarations (stable across FSDP resharding / offload
     # / packing).
-    resolver = TiedGroupResolver(model)
+    resolver = TiedWeightMap(model)
     _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
 
     # Resmooth and requantize fused layers

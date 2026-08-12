@@ -70,7 +70,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedGroupResolver
+from .model_utils import TiedWeightMap
 
 logger = logging.getLogger(__name__)
 
@@ -1055,7 +1055,7 @@ def postprocess_state_dict(
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
-    resolver: "TiedGroupResolver | None" = None,
+    resolver: "TiedWeightMap | None" = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -1064,7 +1064,7 @@ def postprocess_state_dict(
         maxbound: The maximum bound value for the output quantizer.
         quantization: The KV cache quantization format.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
-        resolver: Optional :class:`TiedGroupResolver`. When provided, tied-weight
+        resolver: Optional :class:`TiedWeightMap`. When provided, tied-weight
             dedup is authoritative and name-based: a declared alias key whose canonical
             counterpart is present is dropped, independent of tensor address. This is
             what makes dedup correct under the FSDP full-state-dict gather (and offload),
@@ -1138,15 +1138,11 @@ def postprocess_state_dict(
     if resolver is not None:
         alias_prefixes = resolver.alias_prefix_pairs()
         if alias_prefixes:
-            # Group every candidate alias key by the alias module-prefix it falls under and
-            # dedup the tie ATOMICALLY (all-or-nothing). Two tied sides can carry different
-            # quant state -- e.g. the alias is quantized but the canonical is not -- so
-            # dropping only the keys that happen to have a canonical twin (``weight``) while
-            # leaving those that don't (``weight_scale`` / ``input_scale``) would orphan
-            # scales on a weight that's gone. A group is dropped only when EVERY one of its
-            # keys has a canonical counterpart present; otherwise the sides differ and
-            # nothing is dropped (both kept -- larger but loadable). This also keeps an
-            # untied sibling sharing an alias prefix from being dropped.
+            # Dedup each tie ATOMICALLY per alias prefix: drop the group only when EVERY key
+            # has a canonical counterpart. Tied sides can differ in quant state (alias
+            # quantized, canonical not), so dropping just the keys with a twin would orphan
+            # weight_scale/input_scale on a gone weight; the all-or-nothing rule also spares
+            # an untied sibling under the same prefix.
             alias_groups: dict[str, list[tuple[str, str | None]]] = {}
             for key in post_state_dict:
                 a_base = resolver.matched_alias_prefix(key, alias_prefixes)
@@ -1155,19 +1151,10 @@ def postprocess_state_dict(
                 canonical_key = resolver.canonical_state_dict_key(key, alias_prefixes)
                 alias_groups.setdefault(a_base, []).append((key, canonical_key))
 
+            # No bidirectional/chain guard is needed: ties are id-groups, so if A<->B and
+            # B<->C were both shared, A, B and C would be one group -- a canonical is never
+            # also an alias of another group, so alias->canonical->alias chains cannot form.
             for a_base, members in alias_groups.items():
-                # Bidirectional tie A<->B: the canonical side is itself a declared alias, so
-                # both sides would be marked and the checkpoint would contain neither. Keep both.
-                if any(
-                    ck is not None
-                    and resolver.canonical_state_dict_key(ck, alias_prefixes) is not None
-                    for _, ck in members
-                ):
-                    logger.warning(
-                        f"Skipping name-based dedup of alias prefix '{a_base}': its canonical "
-                        f"is itself a declared alias (bidirectional tie); keeping both sides."
-                    )
-                    continue
                 # Atomic completeness: every alias key must have its canonical counterpart present.
                 missing = [k for k, ck in members if ck is None or ck not in post_state_dict]
                 if missing:
@@ -1186,25 +1173,14 @@ def postprocess_state_dict(
 
     # Address backstop: collapse two keys that still point at the SAME storage.
     #
-    # Scope — this only ever fires for *unquantized / unpacked* shared weights (e.g. a
-    # non-quantized tied embedding, or an embedding whose packing was skipped): those keep
-    # the single original shared Parameter, so two keys share one storage. A *quantized*
-    # tied weight cannot reach here: each side is packed into its own fresh Parameter, so
-    # the sides have DISTINCT storage (byte-identical, not shared) and are collapsed by the
-    # name-based pass above, not by address. The name-based pass is therefore the sole
-    # authority for quantized ties.
-    #
-    # Why it is still needed — safetensors ``save_file`` raises on any two keys that share
-    # storage, so a residual share (a tie the model did not declare) must be collapsed here
-    # or the export fails at write time. The key mirrors safetensors' own shared-storage
-    # grouping exactly — (device, storage_ptr, storage_size) — so a base tensor and a
-    # shorter view of it (which save_file treats as shared and rejects) collapse here
-    # instead of both surviving and crashing the write. Keying on tensor extent
-    # (numel*element_size) would split that view/base pair; and since two distinct live
-    # tensors cannot share a data_ptr without sharing storage, storage identity never
-    # false-collapses independent weights. Zero-pointer (meta) tensors are left for
-    # serialization to reject. Keys already marked (declared aliases) are skipped so they
-    # do not seed the first-wins map.
+    # A net for *undeclared* shares the name pass can't see, and only for unquantized/unpacked
+    # ones -- quantized ties pack into distinct storage and are collapsed by name above.
+    # safetensors save_file rejects any two keys sharing storage, so these must be collapsed
+    # here or the write fails. The key mirrors safetensors' own grouping
+    # (device, storage_ptr, storage_size), so a base tensor and a view of it collapse rather
+    # than crash the write; keying on extent (numel*element_size) would split that pair, and
+    # two live tensors can't share a data_ptr without sharing storage, so it never
+    # false-collapses independents. Meta (zero-ptr) tensors and already-marked aliases are skipped.
     from safetensors.torch import storage_ptr, storage_size
 
     already_marked = set(keys_to_delete)
@@ -1677,41 +1653,26 @@ def has_quantized_modules(model: nn.Module) -> bool:
     )
 
 
-def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" = None) -> int:
-    """Max-merge input_quantizer amaxes across modules in the same declared tie.
+def sync_tied_input_amax(model: nn.Module, resolver: "TiedWeightMap | None" = None) -> int:
+    """Max-merge ``input_quantizer`` amaxes across modules that share a weight, in place.
 
-    Mutates ``model`` in place: overwrites the ``.amax`` buffer on every
-    affected ``input_quantizer`` with the per-group maximum. Intended to
-    run as part of an export pipeline that already replaces weights with
-    packed bytes downstream — i.e. the model is not expected to be reused
-    after this helper runs.
+    Tied modules whose forward paths see different activation ranges (encoder vs decoder in
+    YOCO-style models) must end up with one ``input_scale`` covering every side. Run BEFORE
+    per-module export so the merged amax flows into ``input_scale`` derivation; the model is
+    not expected to be reused afterward.
 
-    Closes the loop on ``input_scale`` for HF-tied modules whose forward
-    paths see different activation distributions (encoder vs decoder in
-    YOCO-style models). Must run BEFORE per-module export so the merged
-    amax flows into ``input_scale`` derivation.
-
-    Grouping is name-based via :class:`TiedGroupResolver`, resolved from the
-    model's own ``_tied_weights_keys`` / ``tie_word_embeddings`` declarations —
-    so it is unaffected by allocator address reuse or FSDP resharding, which
-    can make tied Parameters share or diverge ``data_ptr`` unpredictably. Handles
-    both dense Linears (keyed by the canonical weight name) and fused MoE (keyed
-    by the canonical experts-container name). A ``resolver`` may be passed to reuse
-    an existing one; otherwise it is built from ``model``. Returns the number of
-    tied groups merged.
-
-    Dense weights that are *physically shared but not declared* (no entry in
-    ``_tied_weights_keys`` and not the ``tie_word_embeddings`` pair) are grouped by
-    the weight's object identity as a fallback: the postprocess address backstop
-    collapses such shares, so their input amaxes must be merged here too or the
-    surviving ``input_scale`` would not cover the dropped side. Object identity is
-    consulted only here, before packing while all weights are resident, so it cannot
-    collide the way a freed-then-reused ``data_ptr`` can.
+    Declared ties are grouped by name via :class:`TiedWeightMap` (stable across ``data_ptr``
+    reuse / FSDP resharding), for both dense Linears and fused-MoE containers. A weight that
+    is *physically shared but undeclared* is grouped by ``id(weight)`` as a fallback -- the
+    postprocess address backstop will collapse it, so its amaxes must merge here too or the
+    kept ``input_scale`` won't cover the dropped side. Identity is read here only, pre-pack
+    while resident, so it can't collide like a reused ``data_ptr``. Returns the number of
+    groups merged; pass ``resolver`` to reuse one, else it is built from ``model``.
     """
     from collections import defaultdict
 
     if resolver is None:
-        resolver = TiedGroupResolver(model)
+        resolver = TiedWeightMap(model)
 
     by_group: dict = defaultdict(list)
     for name, m in model.named_modules():
@@ -1738,14 +1699,8 @@ def sync_tied_input_amax(model: nn.Module, resolver: "TiedGroupResolver | None" 
             if gk is not None:
                 by_group[("dense", gk)].append(m)
             else:
-                # Undeclared physical share: the weight is not a declared tie, so the
-                # name-based grouping above misses it, yet the postprocess address
-                # backstop will still collapse two keys pointing at the same storage.
-                # Group by object identity so their input amaxes are max-merged here —
-                # otherwise the surviving side's input_scale would not cover the dropped
-                # side (silent activation clipping). Object identity is consulted only
-                # here, before packing, while every weight is resident, so it cannot
-                # collide the way a freed-then-reused data_ptr can.
+                # Undeclared share the name pass misses but the backstop will collapse:
+                # group by object identity so its amaxes still merge (see docstring).
                 by_group[("dense_shared", id(m.weight))].append(m)
 
     def _merge(quantizers: list) -> bool:

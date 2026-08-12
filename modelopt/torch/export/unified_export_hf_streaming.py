@@ -206,7 +206,7 @@ def _export_transformers_checkpoint_streaming(
     - Tied weights are dropped by *name*, not by comparing ``data_ptr`` (meaningless once
       weights move between host and device). NOTE: this path keeps its own narrow rule --
       the exact list-style ``_tied_weights_keys`` names, gated on ``tie_word_embeddings`` --
-      and does NOT use :class:`TiedGroupResolver`. It therefore only handles the
+      and does NOT use :class:`TiedWeightMap`. It therefore only handles the
       ``tie_word_embeddings`` embedding tie; dict-style / per-expert MoE ties (e.g.
       DiffusionGemma) are NOT deduped here, so the offloaded export can emit both sides of
       such a tie where the resident path emits one. Threading the resolver in is tracked as
