@@ -34,7 +34,9 @@
 #   NUM_SAMPLES      — cap records before sharding (default: dataset-specific)
 #   SHUFFLE_SEED     — deterministic shuffle before slicing (default: 42)
 #   LINES_PER_SHARD  — records per generated shard (default: 128; text: 1024)
-#   *_REVISION       — pin a Hugging Face dataset revision
+#   PAI_REPO_ID      — override the PAI-Bench-U Hugging Face repo
+#   FORCE_DOWNLOAD   — re-download PAI even if it is already materialized
+#   PAI_REVISION / TEXT_PROMPT_REVISION — pin a Hugging Face dataset revision
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source ${SCRIPT_DIR}/../service_utils.sh
@@ -53,9 +55,8 @@ while [[ $# -gt 0 ]]; do
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
 done
-
-[ -n "$DATASET" ] || { echo "ERROR: --dataset is required." >&2; exit 1; }
-[ -n "$SHARD_PATH" ] || { echo "ERROR: --shard-path is required." >&2; exit 1; }
+[ -n "$DATASET" ] && [ -n "$SHARD_PATH" ] \
+    || { echo "ERROR: --dataset and --shard-path are required." >&2; exit 1; }
 
 DATA_ROOT=${DATA_ROOT:-/scratchspace/data}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
@@ -63,12 +64,11 @@ PREPARE=modules/Model-Optimizer/examples/speculative_decoding/recipes/prepare_mu
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$DATA_ROOT/.hf_datasets_cache}
 
 pip install "huggingface-hub>=1.2.1" pillow
-
 mkdir -p "$DATA_ROOT"
 
-# Downloads go through `python3 -m huggingface_hub.cli.hf` rather than a bare
-# `hf`, which may be a stale executable on PATH. If a download stalls on a
-# CPU-only node, retry the task with HF_HUB_DISABLE_XET=1.
+# Direct `hf download` calls below go through `python3 -m huggingface_hub.cli.hf`
+# rather than a bare `hf`, which may be a stale executable on PATH. If a download
+# stalls, retry the task with HF_HUB_DISABLE_XET=1.
 case "$DATASET" in
 pai_understanding)
     PAI_ROOT=${PAI_ROOT:-$DATA_ROOT/pai_understanding}
@@ -76,9 +76,16 @@ pai_understanding)
     # PAI is sampled by shard count so the generation step gets a whole number
     # of shards per node; see the YAML's PAI_NUM_GENERATION_SHARDS comment.
     NUM_SAMPLES=${NUM_SAMPLES:-$(( ${NUM_GENERATION_SHARDS:-5} * LINES_PER_SHARD ))}
-    python3 -m huggingface_hub.cli.hf download shi-labs/physical-ai-bench-understanding \
-        --repo-type dataset --local-dir "$PAI_ROOT" --max-workers 8 \
-        ${PAI_REVISION:+--revision "$PAI_REVISION"}
+    # prepare_multimodal_synthetic_shards.py downloads PAI itself via --download,
+    # so let it. Its snapshot_download has no revision argument, so pin a
+    # revision here instead when PAI_REVISION is set.
+    PAI_DOWNLOAD_ARGS=(--download)
+    if [ -n "${PAI_REVISION:-}" ]; then
+        python3 -m huggingface_hub.cli.hf download "${PAI_REPO_ID:-shi-labs/physical-ai-bench-understanding}" \
+            --repo-type dataset --local-dir "$PAI_ROOT" --max-workers 8 \
+            --revision "$PAI_REVISION"
+        PAI_DOWNLOAD_ARGS=()
+    fi
     python3 "$PREPARE" \
         --dataset pai_understanding \
         --dataset_dir "$PAI_ROOT" \
@@ -87,6 +94,9 @@ pai_understanding)
         --max_lines_per_shard "$LINES_PER_SHARD" \
         --num_samples "$NUM_SAMPLES" \
         --shuffle_seed "$SHUFFLE_SEED" \
+        "${PAI_DOWNLOAD_ARGS[@]}" \
+        ${PAI_REPO_ID:+--repo_id "$PAI_REPO_ID"} \
+        ${FORCE_DOWNLOAD:+--force_download} \
         --overwrite
     ;;
 vqa_v2)

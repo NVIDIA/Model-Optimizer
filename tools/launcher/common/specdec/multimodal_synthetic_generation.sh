@@ -65,9 +65,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[ -n "$DATASET" ] || { echo "ERROR: --dataset is required." >&2; exit 1; }
-[ -n "$SHARD_PATH" ] || { echo "ERROR: --shard-path is required." >&2; exit 1; }
-[ -n "$OUTPUT_PATH" ] || { echo "ERROR: --output-path is required." >&2; exit 1; }
+[ -n "$DATASET" ] && [ -n "$SHARD_PATH" ] && [ -n "$OUTPUT_PATH" ] \
+    || { echo "ERROR: --dataset, --shard-path and --output-path are required." >&2; exit 1; }
 [ -n "${MODEL_PATH:-}" ] || { echo "ERROR: MODEL_PATH must name the target checkpoint." >&2; exit 1; }
 [ -d "$SHARD_PATH" ] || { echo "ERROR: missing shard path: $SHARD_PATH" >&2; exit 1; }
 
