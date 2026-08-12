@@ -20,11 +20,7 @@ pipeline:
 
   global_vars:
     hf_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-    data_dir: /cicd/tokenized/nemotron-post-training-v2
-    data_prefix: /cicd/tokenized/nemotron-post-training-v2/nvidia--Nemotron-Post-Training-Dataset-v2_default_chat_messages
-    ptq_ckpt: /cicd/megatron-bridge/Nemotron-3.5-Lightning-30B-A3B-NVFP4-ptq
-    qad_dir: /cicd/megatron-bridge/Nemotron-3.5-Lightning-30B-A3B-NVFP4-qad
-    export_dir: /cicd/export/Nemotron-3.5-Lightning-30B-A3B-NVFP4-qad-hf
+    output_dir: /cicd/megatron-bridge/Nemotron-3.5-Lightning-30B-A3B-NVFP4
 
   # 1) Tokenize the QAD training data into Megatron .bin/.idx, which distill.py reads via
   #    --data_paths. megatron_lm_qad.yaml points Megatron-LM's finetune path at a single parquet
@@ -42,7 +38,7 @@ pipeline:
       --hf_streaming
       --json_keys messages
       --tokenizer <<global_vars.hf_model>>
-      --output_dir <<global_vars.data_dir>>
+      --output_dir /cicd/tokenized/nemotron-post-training-v2
       --workers 32
       --max_sequence_length 256_000
     slurm_config:
@@ -72,7 +68,7 @@ pipeline:
       --calib_num_samples 1000
       --seq_length 32768
       --skip_generate
-      --export_megatron_path <<global_vars.ptq_ckpt>>
+      --export_megatron_path <<global_vars.output_dir>>-ptq
     slurm_config: &sc
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.06
@@ -89,14 +85,14 @@ pipeline:
       $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/distill.py
       --teacher_hf_path <<global_vars.hf_model>>
       --student_hf_path <<global_vars.hf_model>>
-      --student_megatron_path <<global_vars.ptq_ckpt>>
+      --student_megatron_path <<global_vars.output_dir>>-ptq
       --trust_remote_code
       --tp_size 1
       --pp_size 1
       --cp_size 4
       --ep_size 16
-      --data_paths <<global_vars.data_prefix>>
-      --data_path_to_cache <<global_vars.data_dir>>/cache
+      --data_paths /cicd/tokenized/nemotron-post-training-v2/nvidia--Nemotron-Post-Training-Dataset-v2_default_chat_messages
+      --data_path_to_cache /cicd/tokenized/nemotron-post-training-v2/cache
       --seq_length 32768
       --mbs 1
       --gbs 64
@@ -108,7 +104,7 @@ pipeline:
       --eval_iters 8
       --log_interval 10
       --checkpoint_keep_last 2
-      --output_dir <<global_vars.qad_dir>>
+      --output_dir <<global_vars.output_dir>>-qad
     slurm_config:
       <<: *sc
       nodes: 8
@@ -121,9 +117,9 @@ pipeline:
     inline: >-
       $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py
       --hf_model_name_or_path <<global_vars.hf_model>>
-      --megatron_path <<global_vars.qad_dir>>/checkpoints
+      --megatron_path <<global_vars.output_dir>>-qad/checkpoints
       --trust_remote_code
       --pp_size 4
-      --export_unified_hf_path <<global_vars.export_dir>>
+      --export_unified_hf_path <<global_vars.output_dir>>-qad-hf
     slurm_config:
       <<: *sc
