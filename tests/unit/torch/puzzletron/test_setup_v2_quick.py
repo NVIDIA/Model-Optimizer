@@ -30,7 +30,6 @@ import puzzletron_setup.v2.wizard_common as wizard_common_module
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
-from puzzletron_setup.v2.bundle import _effective_default_value
 from puzzletron_setup.v2.cli import _parser
 from puzzletron_setup.v2.defaults import DefaultsResolver
 from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
@@ -419,7 +418,6 @@ def test_back_from_first_guided_section_can_change_profile(
 
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (model_builder,))
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
-    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
     wizard_module.run_wizard_v2(
@@ -458,7 +456,6 @@ def test_resume_full_promotes_guided_state_and_preserves_profile_baseline(
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", (capture_baseline,))
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ("model",))
     monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
-    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
     wizard_module.run_wizard_v2(
@@ -488,7 +485,6 @@ def test_resume_replacement_defaults_file_is_persisted(
     replacement.write_text(yaml.safe_dump({"schema_version": 1}))
     monkeypatch.setattr(wizard_module, "SECTION_BUILDERS", ())
     monkeypatch.setattr(wizard_module, "SECTION_NAMES", ())
-    monkeypatch.setattr(wizard_module, "_refresh_legacy_state", lambda state: None)
     monkeypatch.setattr(wizard_module, "build_bundles_v2", lambda campaign, state: None)
 
     wizard_module.run_wizard_v2(
@@ -608,91 +604,6 @@ def test_guided_defaults_reject_invalid_leaf_values(tmp_path, defaults, message)
 
     with pytest.raises(SetupError, match=message):
         get_setup_preset("balanced").resolved_defaults(family_config)
-
-
-def test_effective_default_provenance_follows_runtime_collections(tmp_path):
-    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
-    state.set_collection(
-        "parallel_profiles",
-        {
-            "common": {"tp": 2, "cp": 1, "pp": 1, "dp_shard": 1, "dp_replicate": 1, "ep": 1},
-            "large": {"tp": 4, "cp": 2, "pp": 1, "dp_shard": 1, "dp_replicate": 1, "ep": 1},
-        },
-    )
-    state.set_collection(
-        "mip_config",
-        {
-            "runs": {
-                "latency": {
-                    "solver": {"num_solutions": 7},
-                    "objectives": [{"metric": "latency"}],
-                    "constraints": {"latency": {"operator": "<=", "value": 25.0}},
-                },
-                "memory": {
-                    "solver": {"num_solutions": 9},
-                    "objectives": [{"metric": "memory"}],
-                    "constraints": {"memory": {"operator": "<=", "value": 48.0}},
-                },
-            }
-        },
-    )
-    state.set_collection("stage_resources", {"depth_importance": {"instances": 3}})
-    state.set_collection(
-        "serving_workloads",
-        {
-            "serving": {"prefill_seq_len": 2048, "max_num_seqs": 4},
-            "offline": {"prefill_seq_len": 1024, "max_num_seqs": 8},
-            "unmeasured": {"prefill_seq_len": 512, "max_num_seqs": 16},
-        },
-    )
-    state.set_collection(
-        "vllm_measurements",
-        {
-            "serving": {
-                "runtime_stats": {"topology": {"tensor_parallel_size": 2}},
-            },
-            "offline": {
-                "runtime_stats": {"topology": {"tensor_parallel_size": 4}},
-            },
-        },
-    )
-
-    assert {
-        name: profile["tp"]
-        for name, profile in _effective_default_value(state, "profiles", {}).items()
-    } == {"common": 2, "large": 4}
-    assert _effective_default_value(state, "mip.num_solutions", 1) == {
-        "latency": 7,
-        "memory": 9,
-    }
-    assert _effective_default_value(state, "mip.objective", "loss") == {
-        "latency": ["latency"],
-        "memory": ["memory"],
-    }
-    assert _effective_default_value(state, "mip.goal_metric", None) == {
-        "latency": ["latency"],
-        "memory": ["memory"],
-    }
-    assert _effective_default_value(state, "mip.goal_value", None) == {
-        "latency": {"latency": {"operator": "<=", "value": 25.0}},
-        "memory": {"memory": {"operator": "<=", "value": 48.0}},
-    }
-    assert _effective_default_value(state, "stages.depth_importance.instances", 1) == 3
-    assert _effective_default_value(state, "vllm.enabled", False) is True
-    assert _effective_default_value(state, "vllm.max_num_seqs", 1) == {
-        "serving": 4,
-        "offline": 8,
-        "unmeasured": 16,
-    }
-    assert _effective_default_value(state, "vllm.prefill_seq_len", 4096) == {
-        "serving": 2048,
-        "offline": 1024,
-        "unmeasured": 512,
-    }
-    assert _effective_default_value(state, "vllm.topology.tensor_parallel_size", 1) == {
-        "serving": 2,
-        "offline": 4,
-    }
 
 
 def test_build_bundles_rejects_non_mapping_default_resolution(tmp_path, monkeypatch):

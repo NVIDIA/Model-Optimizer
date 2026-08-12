@@ -16,4 +16,3 @@
 """Utilities for initializing child models from parent models via bypassed training."""
 
 from .child_init import *
-from .init_child_from_parent import *
