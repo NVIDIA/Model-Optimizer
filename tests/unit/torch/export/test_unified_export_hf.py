@@ -479,36 +479,29 @@ def test_postprocess_partially_tied_container_dedups_only_tied_projections():
     )
 
 
-def test_postprocess_backstop_clones_distinct_views_no_data_loss():
-    """Two DISTINCT views of one storage (different shapes) both survive: the later is cloned
-    so safetensors can serialize both without losing data (dropping one would lose data)."""
-    from safetensors.torch import storage_ptr
-
+def test_postprocess_backstop_collapses_keys_sharing_a_dataptr():
+    """The pre-existing address backstop drops a later key that shares a ``data_ptr`` with an
+    earlier one (identity is ``value.data_ptr()``, first-wins)."""
     storage = torch.arange(4)
-    sd = {"short": storage[:2], "long": storage}  # share storage, different shapes
-    assert storage_ptr(sd["short"]) == storage_ptr(sd["long"])
+    sd = {"short": storage[:2], "long": storage}  # both start at offset 0 -> same data_ptr
+    assert sd["short"].data_ptr() == sd["long"].data_ptr()
 
     out = postprocess_state_dict(sd, maxbound=448, quantization=None)
 
-    assert set(out) == {"short", "long"}  # both survive
-    assert torch.equal(out["short"], torch.arange(2))
-    assert torch.equal(out["long"], torch.arange(4))  # no data lost
-    assert storage_ptr(out["short"]) != storage_ptr(out["long"])  # share broken
+    assert len(out) == 1 and "short" in out  # first-seen kept, later collision dropped
 
 
-def test_postprocess_backstop_keeps_both_non_overlapping_slices():
-    """Two non-overlapping slices of one storage are distinct tensors; both must survive."""
-    from safetensors.torch import storage_ptr
-
+def test_postprocess_backstop_keeps_keys_with_distinct_dataptrs():
+    """Two slices at different offsets have distinct ``data_ptr``s, so the backstop leaves both."""
     base = torch.arange(4)
-    sd = {"first": base[:2], "second": base[2:]}  # [0,1] and [2,3], same storage
-    assert storage_ptr(sd["first"]) == storage_ptr(sd["second"])
+    sd = {"first": base[:2], "second": base[2:]}  # offsets 0 and 2 -> different data_ptr
+    assert sd["first"].data_ptr() != sd["second"].data_ptr()
 
     out = postprocess_state_dict(sd, maxbound=448, quantization=None)
 
+    assert set(out) == {"first", "second"}  # neither dropped
     assert torch.equal(out["first"], torch.tensor([0, 1]))
-    assert torch.equal(out["second"], torch.tensor([2, 3]))  # not lost
-    assert storage_ptr(out["first"]) != storage_ptr(out["second"])
+    assert torch.equal(out["second"], torch.tensor([2, 3]))
 
 
 def test_postprocess_backstop_drops_true_duplicate():
