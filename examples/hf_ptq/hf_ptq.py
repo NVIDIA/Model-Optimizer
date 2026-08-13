@@ -75,7 +75,11 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
-from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
+from modelopt.torch.export.model_utils import (
+    build_tied_weight_map,
+    get_language_model_from_vl,
+    is_multimodal_model,
+)
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
@@ -611,6 +615,11 @@ def load_model(args: argparse.Namespace):
 
     model_type = get_model_type(full_model)
 
+    # Capture the tied-weight map while the model is resident (before any later FSDP2
+    # shard / offload), so the export dedup can consume it via ``tied_map=``.
+    if not args.use_fsdp2 and not calibration_only:
+        full_model._modelopt_export_tied_map = build_tied_weight_map(full_model)
+
     if args.use_fsdp2:
         device = args.dist_state.device
     else:
@@ -916,6 +925,7 @@ def export_quantized(
                     full_model,
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
+                    tied_map=getattr(full_model, "_modelopt_export_tied_map", None),
                 )
 
                 if args.qformat == "w4a16_nvfp4":

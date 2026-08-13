@@ -930,6 +930,7 @@ def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
+    tied_map: TiedWeightMap | None = None,
     **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
@@ -956,8 +957,9 @@ def _export_transformers_checkpoint(
     # One name-based tied-weight tied_map for the whole export, built once and used by the
     # amax sync and the final dedup in postprocess_state_dict (its only two consumers). It
     # resolves ties from the model's declarations (stable across FSDP resharding / offload
-    # / packing).
-    tied_map = TiedWeightMap(model)
+    # / packing). Prefer a caller-supplied map captured pre-shard; else build it here.
+    if tied_map is None:
+        tied_map = TiedWeightMap(model)
     _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
 
     # Resmooth and requantize fused layers
@@ -1501,6 +1503,7 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
+    tied_map: TiedWeightMap | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1524,6 +1527,9 @@ def export_hf_checkpoint(
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
         max_shard_size: Maximum size of each safetensors shard file. Defaults to "10GB".
+        tied_map: Optional tied-weight map from ``build_tied_weight_map`` captured before
+            FSDP2 shard / offload; if None, built here. Consumed only by the resident export
+            path (the streaming offload path derives ties from ``_tied_weights_keys``).
         **kwargs: Runtime-specific post-processing options forwarded to
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
@@ -1566,6 +1572,11 @@ def export_hf_checkpoint(
                     "save_modelopt_state=True is not supported in the streaming offload export "
                     "path and will be ignored."
                 )
+            if tied_map is not None:
+                warnings.warn(
+                    "tied_map is not consumed by the streaming offload export path (it derives "
+                    "ties from _tied_weights_keys); the provided map will be ignored."
+                )
             _, hf_quant_config = _export_transformers_checkpoint_streaming(
                 model,
                 dtype,
@@ -1588,7 +1599,9 @@ def export_hf_checkpoint(
             _write_hf_export_config(model, hf_quant_config, export_dir)
             return
 
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, dtype, tied_map=tied_map, **kwargs
+        )
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
