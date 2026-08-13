@@ -400,7 +400,11 @@ def _aiperf_subprocess_environment(
     *,
     allow_aiperf_v011_online_tokenizer_resolution: bool = False,
 ) -> dict[str, str]:
-    """Optionally relax AIPerf v0.11's offline local-tokenizer resolution."""
+    """Work around AIPerf v0.11's broken offline local-tokenizer resolution.
+
+    Remove this compatibility option after the pinned AIPerf resolver accepts
+    absolute local tokenizer directories while offline.
+    """
 
     resolved = dict(env)
     if allow_aiperf_v011_online_tokenizer_resolution:

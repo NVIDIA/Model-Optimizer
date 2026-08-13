@@ -272,7 +272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         binding=binding,
         gpus_per_task=args.gpus_per_task,
     )
-    # Replace this launcher with the already compiled task argv.
+    # Preserve the task PID and scheduler signal semantics. The command is the
+    # explicit argv from the compiled campaign plan, and no shell is involved.
     os.execvpe(command[0], command, env)  # nosec B606
     return 0
 

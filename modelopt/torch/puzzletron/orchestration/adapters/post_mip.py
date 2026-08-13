@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 
-# Aggregation uses an explicit argv without a shell.
+# Reuse the standalone aggregate entry point without importing its runtime
+# dependencies into the controller. The adapter compiles the argv and never
+# invokes a shell.
 import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
@@ -263,7 +265,7 @@ class PostMIPAdapter(WorkAdapter):
         ]
         for override in plan.overrides:
             argv.extend(["--override", override])
-        # The argv starts with the fixed Python entry point and never uses a shell.
+        # The fixed Python entry point receives only controller-compiled arguments.
         result = subprocess.run(  # nosec B603
             argv,
             cwd=repo,

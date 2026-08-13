@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
-# Commands are compiled argv lists and never use a shell.
+# Reuse the standalone stage mergers without importing their runtime
+# dependencies into the controller. Commands pass configuration-derived values
+# as separate argv elements and never invoke a shell.
 import subprocess  # nosec B404
 import time
 import uuid
@@ -392,6 +394,7 @@ class ShardedStageAdapter(WorkAdapter):
                     command=command,
                 )
             else:
+                # The adapter selects the entry point and supplies an explicit argv tuple.
                 result = subprocess.run(  # nosec B603
                     command,
                     cwd=plan.runner.contract.repository,
