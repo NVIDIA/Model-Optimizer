@@ -77,7 +77,7 @@ def _published_execution_identity(config: Mapping[str, Any], owner: str) -> str:
     try:
         current = json.loads(current_path.read_text())
         execution_identity = current["execution_identity"]
-    except (FileNotFoundError, json.JSONDecodeError, KeyError) as error:
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError) as error:
         raise PostMIPExecutionContractUnavailable(
             f"post-MIP dependency {owner!r} has no published execution identity"
         ) from error

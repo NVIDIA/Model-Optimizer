@@ -370,7 +370,11 @@ def test_post_mip_identity_tracks_dependency_execution_and_source_mapping(tmp_pa
     )
 
 
-@pytest.mark.parametrize("payload", ["{", "{}"], ids=["torn-json", "missing-identity"])
+@pytest.mark.parametrize(
+    "payload",
+    ["{", "{}", "[]", '"manifest"', "1", "null"],
+    ids=["torn-json", "missing-identity", "list", "string", "integer", "null"],
+)
 def test_unpublished_dependency_current_defers_execution_contract(
     tmp_path: Path,
     payload: str,
