@@ -32,6 +32,34 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
+def test_hf_all_tied_weights_keys_contract():
+    """Pin the transformers API we build tied_map from, so a version bump fails loud here.
+
+    We rely on ``model.all_tied_weights_keys`` being a name-based ``{alias: canonical}`` dict
+    (``tie_word_embeddings=True`` -> lm_head aliases the embedding). If transformers renames it or
+    flips the direction, this breaks instead of silently skipping tied-weight dedup.
+    """
+    from transformers import AutoModelForCausalLM, LlamaConfig
+
+    cfg = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        tie_word_embeddings=True,
+    )
+    cfg.architectures = ["LlamaForCausalLM"]
+    model = AutoModelForCausalLM.from_config(cfg)
+
+    assert model.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
+    # TiedWeightMap consumes it verbatim.
+    assert TiedWeightMap(model).alias_to_canonical == {
+        "lm_head.weight": "model.embed_tokens.weight"
+    }
+
+
 def test_tied_group_resolver_group_key_is_shared_and_order_independent():
     """Both sides of a declared tie map to the same key; untied params map to None."""
     enc, dec = make_tied_linear_pair()
