@@ -1181,7 +1181,12 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     :func:`resolve_checkpoint_dir` rewrites ``layerwise.checkpoint_dir``.
     """
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"]["layerwise"]["export_dir"] = export_path
+    algorithm = quant_cfg.get("algorithm")
+    # A recipe may carry one algorithm or a list of them; detection accepts both, so the
+    # retarget has to as well or a list-shaped recipe dies on a str index.
+    for entry in algorithm if isinstance(algorithm, list) else [algorithm]:
+        if isinstance(entry, dict) and isinstance(entry.get("layerwise"), dict):
+            entry["layerwise"]["export_dir"] = export_path
     return quant_cfg
 
 

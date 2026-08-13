@@ -2197,6 +2197,16 @@ def layerwise_calibrate(
                     # an input without the whole-model forward this path never runs.
                     def _fusion_probe(m, _inputs=layer_inputs):
                         args, kwargs_input = _inputs[0]
+                        # Same reset _layer_forward_loop does: these tuples were already
+                        # replayed once, so the cache holds this layer's keys and the probe
+                        # would see kv_len twice the mask width.
+                        cache = kwargs_input.get("past_key_values")
+                        if cache is not None:
+                            kwargs_input = dict(kwargs_input)
+                            if hasattr(cache, "reset"):
+                                cache.reset()
+                            else:
+                                kwargs_input["past_key_values"] = None
                         m(*args, **kwargs_input)
 
                     exporter.export_layer(layer_idx, layer, _fusion_probe)

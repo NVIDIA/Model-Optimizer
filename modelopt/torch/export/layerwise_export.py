@@ -347,7 +347,7 @@ class LayerwiseExporter:
             for key, tensor in layer_module.state_dict().items():
                 self._collect(tensors, prefix + key, tensor)
 
-        save_file(tensors, str(self._export_dir / layer_shard_name(layer_idx)))
+        save_file(_copy_storage_aliases(tensors), str(self._export_dir / layer_shard_name(layer_idx)))
 
     def _fuse_shared_inputs(
         self, layer_module: nn.Module, probe_forward: Callable[[nn.Module], None] | None
@@ -445,6 +445,15 @@ class LayerwiseExporter:
         for name, module in model.named_modules():
             if id(module) in self._decoder_owned_ids or id(module) in handled_ids:
                 continue
+            if _holds_meta_tensor(module):
+                # requires_weight_materialization said no window was needed, yet the weights
+                # are not here. Packing would raise deep inside the export handler; skipping
+                # would drop the tensor silently. Neither is acceptable.
+                raise RuntimeError(
+                    f"{name!r} holds meta tensors but was not offered a materialization "
+                    "window, so its weights cannot be exported. Export without export_dir "
+                    "and use export_hf_checkpoint() for this model."
+                )
             _dispatch_export_handler(name, module, self._ctx)
         for name, tensor in model.state_dict().items():
             if name.startswith(skip_prefixes) or name in seen_keys:
@@ -458,7 +467,7 @@ class LayerwiseExporter:
             mapped = self._name_mapper(name) if self._name_mapper is not None else name
             tail.setdefault(mapped, tensor.detach().contiguous().cpu())
 
-        save_file(tail, str(self._export_dir / _TAIL_SHARD))
+        save_file(_copy_storage_aliases(tail), str(self._export_dir / _TAIL_SHARD))
         self._write_index()
         save_non_weight_artifacts(model, self._export_dir)
         _write_hf_export_config(model, quant_config, self._export_dir)
@@ -518,6 +527,30 @@ class LayerwiseExporter:
             total_size += _shard_data_bytes(shard)
         index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
         (self._export_dir / _INDEX_FILE).write_text(json.dumps(index, indent=2))
+
+
+def _holds_meta_tensor(module: nn.Module) -> bool:
+    """Whether this module's own parameters or buffers are still on meta."""
+    return any(
+        t is not None and t.is_meta
+        for t in (*module._parameters.values(), *module._buffers.values())
+    )
+
+
+def _copy_storage_aliases(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Copy tensors that share storage with an earlier key.
+
+    ``save_file`` rejects two keys backed by the same storage, and ``_collect``'s ``.cpu()``
+    is a no-op rather than a copy when the tensor is already there. Copy rather than drop:
+    every key has to survive. Mirrors ``_StreamingShardWriter.add``.
+    """
+    seen: set[int] = set()
+    for key, tensor in tensors.items():
+        if tensor.data_ptr() in seen:
+            tensors[key] = tensor.clone()
+        else:
+            seen.add(tensor.data_ptr())
+    return tensors
 
 
 def _shard_data_bytes(path: Path) -> int:
