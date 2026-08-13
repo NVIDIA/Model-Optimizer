@@ -115,6 +115,7 @@ from .quant_utils import (
     sync_tied_input_amax,
     to_quantized_weight,
 )
+from .quantized_weight import capture_quantized_weight_export_state, export_quantized_weight
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
@@ -566,6 +567,38 @@ def _compressed_per_block_scale(
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
 
 
+def _alias_tied_export_tensors(
+    sub_module: nn.Module,
+    weight_name: str,
+    source_data_ptr: int,
+    tied_cache: dict[int, nn.Module] | None,
+) -> None:
+    """Restore aliases between exported modules that shared a source weight."""
+    if tied_cache is None:
+        return
+
+    quantizer_attrs = quantizer_attr_names(weight_name)
+    prior = tied_cache.get(source_data_ptr)
+    if prior is None or prior is sub_module:
+        tied_cache[source_data_ptr] = sub_module
+        return
+
+    if hasattr(prior, weight_name):
+        setattr(sub_module, weight_name, getattr(prior, weight_name))
+    for attr in (
+        quantizer_attrs.weight_scale,
+        quantizer_attrs.weight_scale_2,
+        quantizer_attrs.input_scale,
+    ):
+        if not hasattr(prior, attr):
+            continue
+        if attr in sub_module._buffers:
+            del sub_module._buffers[attr]
+        elif hasattr(sub_module, attr):
+            delattr(sub_module, attr)
+        sub_module.register_buffer(attr, getattr(prior, attr))
+
+
 def _export_quantized_weight(
     sub_module: nn.Module,
     dtype: torch.dtype,
@@ -640,6 +673,32 @@ def _export_quantized_weight(
     use_compressed_scale = (
         compressed_weight_scale is not None and compressed_weight_scale_2 is not None
     )
+
+    is_bmm_expert_weight = weight.dim() == 3 and any(
+        expert_type in type(sub_module).__name__
+        for expert_type in ["Llama4TextExperts", "GptOssExperts"]
+    )
+    use_pure_nvfp4_export = (
+        quantization_format in {QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4}
+        and not use_compressed_scale
+        and not NVFP4QTensor._is_static_quantizer(weight_quantizer)
+        and not is_bmm_expert_weight
+    )
+    if use_pure_nvfp4_export:
+        state = capture_quantized_weight_export_state(sub_module, weight_name)
+        exported = export_quantized_weight(weight, state, dtype=dtype)
+        setattr(sub_module, weight_name, nn.Parameter(exported.weight, requires_grad=False))
+        for relative_name, tensor in exported.named_tensors(weight_name).items():
+            if relative_name != weight_name:
+                sub_module.register_buffer(relative_name, tensor)
+        _alias_tied_export_tensors(
+            sub_module,
+            weight_name,
+            _tied_source_data_ptr,
+            _tied_cache,
+        )
+        torch.cuda.empty_cache()
+        return
 
     if quantization_format == QUANTIZATION_FP8:
         # Convert amax to float32
@@ -726,10 +785,6 @@ def _export_quantized_weight(
 
     # Transpose weight for bmm-style expert quantization (llama4, gpt-oss)
     # Check if this is a BMM-style expert weight that needs transposition
-    is_bmm_expert_weight = weight.dim() == 3 and any(
-        expert_type in type(sub_module).__name__
-        for expert_type in ["Llama4TextExperts", "GptOssExperts"]
-    )
     # NVFP4StaticQuantizer + BMM-style experts: route through the static-aware
     # ``_from_quantizer`` helper so the pinned per-block ``_amax`` (e.g. set by
     # the MXFP4->NVFP4 cast to ``6 * 2^k_j``) is used to derive the FP8
@@ -826,25 +881,12 @@ def _export_quantized_weight(
     # input_scale is safe to alias because sync_tied_input_amax (earlier in
     # this export) already max-merged the per-side amaxes. Gated on the
     # caller-owned _tied_cache so the dedup state is scoped to one export.
-    if _tied_cache is not None:
-        _prior = _tied_cache.get(_tied_source_data_ptr)
-        if _prior is not None and _prior is not sub_module:
-            if hasattr(_prior, weight_name):
-                setattr(sub_module, weight_name, getattr(_prior, weight_name))
-            for _attr in (
-                quantizer_attrs.weight_scale,
-                quantizer_attrs.weight_scale_2,
-                quantizer_attrs.input_scale,
-            ):
-                if not hasattr(_prior, _attr):
-                    continue
-                if _attr in sub_module._buffers:
-                    del sub_module._buffers[_attr]
-                elif hasattr(sub_module, _attr):
-                    delattr(sub_module, _attr)
-                sub_module.register_buffer(_attr, getattr(_prior, _attr))
-        else:
-            _tied_cache[_tied_source_data_ptr] = sub_module
+    _alias_tied_export_tensors(
+        sub_module,
+        weight_name,
+        _tied_source_data_ptr,
+        _tied_cache,
+    )
 
     torch.cuda.empty_cache()
 
