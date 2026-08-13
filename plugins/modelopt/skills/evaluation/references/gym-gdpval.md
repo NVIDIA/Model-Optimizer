@@ -19,11 +19,12 @@ Always invoke GDPVal through the pinned wrapper, even if `nel` is already on PAT
 
 This is a correctness requirement, not only a dependency pin. Launcher 0.2.6 writes
 the generated `NEL_INVOCATION_ID` into `run.sub` before environment-variable
-re-exports. Older launchers can emit `export NEL_INVOCATION_ID="${NEL_INVOCATION_ID}"`
-without first assigning it, then exit with `NEL_INVOCATION_ID: unbound variable`
-under `set -u` before the evaluation client starts. In a dry-run, verify that a
-literal assignment appears before the re-export; do not substitute `SLURM_JOB_ID`,
-because it changes across the benchmark's walltime-resume chain.
+re-exports. The observed 0.2.4 launcher emits
+`export NEL_INVOCATION_ID="${NEL_INVOCATION_ID}"` without first assigning it, then
+exits with `NEL_INVOCATION_ID: unbound variable` under `set -u` before the evaluation
+client starts. In a dry-run, verify that a literal assignment appears before the
+re-export; do not substitute `SLURM_JOB_ID`, because it changes across the
+benchmark's walltime-resume chain.
 
 ## Where each piece runs
 

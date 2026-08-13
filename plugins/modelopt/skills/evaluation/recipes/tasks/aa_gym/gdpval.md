@@ -16,9 +16,9 @@ It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
 Steps 1–9 apply — but with the branch differences below.
 
 Run it through `"$SKILL_DIR/scripts/nel-gdpval.sh"`, which pins the launcher to
-0.2.6. Do not use an unversioned `nel` from PATH: older launchers fail before client
-startup when the config forwards `NEL_INVOCATION_ID`. The shared reference explains
-the failure signature and dry-run check.
+0.2.6. Do not use an unversioned `nel` from PATH: the observed 0.2.4 launcher fails
+before client startup when the config forwards `NEL_INVOCATION_ID`. The shared
+reference explains the failure signature and dry-run check.
 
 ## What makes GDPVal different (not a normal `aa/` task)
 

@@ -15,11 +15,11 @@
 # limitations under the License.
 
 # GDPVal requires launcher 0.2.6. In particular, 0.2.6 assigns the generated
-# NEL_INVOCATION_ID in run.sub before evaluation.env_vars re-exports it. Older
-# launchers can instead fail under `set -u` before the evaluation client starts.
+# NEL_INVOCATION_ID in run.sub before evaluation.env_vars re-exports it. The
+# observed 0.2.4 launcher instead fails under `set -u` before client startup.
 set -euo pipefail
 
-NEL_GDPVAL_SPEC="${NEL_GDPVAL_SPEC:-nemo-evaluator-launcher[all]==0.2.6}"
+readonly NEL_GDPVAL_SPEC="nemo-evaluator-launcher[all]==0.2.6"
 
 case "${1:-}" in
   -h|--help)
