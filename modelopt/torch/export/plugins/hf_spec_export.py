@@ -510,18 +510,30 @@ class DominoExporter(DFlashExporter):
 class DSparkExporter(DFlashExporter):
     """Draft model exporter for DSpark (DFlash backbone + sequential Markov head).
 
-    Same z-lab-compatible format as DFlash, plus the DSpark head weights
-    (``markov_w1.*`` / ``markov_w2.*`` / ``gate_proj.*`` / ``joint_proj.*`` /
-    ``confidence_proj.*``, already captured by the inherited ``dflash_module.``
-    stripping) and the extra config fields the loader needs to rebuild the head
-    (``projector_type``, ``markov_rank``, ``markov_head_type``,
-    ``use_confidence_head``, ``shift_label``).
+    ModelOpt currently uses a Qwen3 draft backbone regardless of target architecture.
+    Head tensors and top-level config fields follow the DeepSpec/vLLM layout.
     """
 
+    def _extract_state_dict(self, full_state_dict: dict):
+        """Map ModelOpt head names to the DeepSpec/vLLM DSpark layout."""
+        export_sd = super()._extract_state_dict(full_state_dict)
+        prefixes = {
+            "markov_w1.": "markov_head.markov_w1.",
+            "markov_w2.": "markov_head.markov_w2.",
+            "gate_proj.": "markov_head.gate_proj.",
+            "joint_proj.": "markov_head.joint_proj.",
+            "confidence_proj.": "confidence_head.proj.",
+        }
+        for old_prefix, new_prefix in prefixes.items():
+            for key in [key for key in export_sd if key.startswith(old_prefix)]:
+                export_sd[new_prefix + key[len(old_prefix) :]] = export_sd.pop(key)
+        return export_sd
+
     def _export_config(self):
-        """Extend the DFlash config with the DSpark head fields."""
+        """Add the fields consumed by the Qwen3 DSpark runtime."""
         config = super()._export_config()
         draft_config = self.model.dflash_config
+        use_confidence_head = bool(getattr(draft_config, "use_confidence_head", False))
 
         config["dflash_config"].update(
             {
@@ -529,7 +541,19 @@ class DSparkExporter(DFlashExporter):
                 "shift_label": getattr(draft_config, "shift_label", True),
                 "markov_rank": draft_config.markov_rank,
                 "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
-                "use_confidence_head": bool(getattr(draft_config, "use_confidence_head", False)),
+                "use_confidence_head": use_confidence_head,
+            }
+        )
+        config["architectures"] = ["Qwen3DSparkModel"]
+        config.update(
+            {
+                "mask_token_id": config["dflash_config"]["mask_token_id"],
+                "target_layer_ids": config["dflash_config"]["target_layer_ids"],
+                "num_anchors": self.model.dflash_num_anchors,
+                "markov_rank": draft_config.markov_rank,
+                "markov_head_type": getattr(draft_config, "markov_head_type", "vanilla"),
+                "enable_confidence_head": use_confidence_head,
+                "confidence_head_with_markov": use_confidence_head,
             }
         )
         return config
