@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Composed PTQ recipe for MLP/MoE-only NVFP4 (block size 32) weight-only quantization, no KV-cache quant.
+# PTQ recipe wrapping the shipped nvfp4_mlp_weight_only preset (the config behind
+# mtq.NVFP4_MLP_WEIGHT_ONLY_CFG), so the two cannot drift apart.
 
 imports:
-  base_disable_all: configs/ptq/units/base_disable_all
-  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
-  nvfp4_bs32: configs/numerics/nvfp4_bs32
+  preset: configs/ptq/presets/model/nvfp4_mlp_weight_only
 
 metadata:
   recipe_type: ptq
@@ -26,13 +25,4 @@ metadata:
     Applies NVFP4 (block size 32) to MLP/MoE weight quantizers only (weight-only, activations
     untouched); uses max calibration.
 quantize:
-  algorithm: max
-  quant_cfg:
-    - $import: base_disable_all
-    - quantizer_name: '*mlp*weight_quantizer'
-      cfg:
-        $import: nvfp4_bs32
-    - quantizer_name: '*block_sparse_moe*weight_quantizer'
-      cfg:
-        $import: nvfp4_bs32
-    - $import: default_disabled_quantizers
+  $import: preset

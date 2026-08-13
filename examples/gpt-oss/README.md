@@ -57,7 +57,8 @@ If you are training Huggingface models with trainer classes from Huggingface suc
 A real end-to-end example for this is in `sft.py` in this folder. To perform QAT with full parameter SFT on GPT-OSS 20B model, run:
 
 ```sh
-# Other supported quantization recipes include general/ptq/nvfp4_mlp_weight_only, general/ptq/nvfp4_mlp_only-kv_fp8 etc.
+# Other supported quantization recipes include general/ptq/nvfp4_mlp_weight_only, or
+# general/ptq/nvfp4_mlp_only-kv_fp8 (also quantizes activations and the KV cache to FP8, which needs calibration).
 # [Optional] For faster FlashAttention3, add '--attn_implementation kernels-community/vllm-flash-attn3'
 accelerate launch --config_file configs/zero3.yaml sft.py \
     --config configs/sft_full.yaml --model_name_or_path openai/gpt-oss-20b \
