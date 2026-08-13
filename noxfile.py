@@ -246,8 +246,8 @@ def gpu(session):
 def gpu_puzzletron(session):
     """Verify the pinned runtime, then run the focused Puzzletron lifecycle GPU test."""
     session.env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    session.env["PUZZLETRON_CI_ENVIRONMENT"] = str(PUZZLETRON_V2_CI_ENVIRONMENT_PATH)
     session.run("bash", "examples/puzzletron/ci/setup_env.sh", "--modelopt", external=True)
-    _verify_puzzletron_v2_environment(session, gpu_image=True)
     session.run(
         "python",
         "-c",

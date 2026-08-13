@@ -85,6 +85,7 @@ jobs:
           files: |
             .github/workflows/unit_tests.yml
             .github/workflows/puzzletron_gpu_tests.yml
+            examples/puzzletron/ci/**
             examples/puzzletron/**/*.html
             examples/puzzletron/**/*.json
             examples/puzzletron/**/*.md

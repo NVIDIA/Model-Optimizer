@@ -65,11 +65,21 @@ def main() -> int:
     """Write validated values in GitHub output format."""
     try:
         validate_repository_contract(Path.cwd())
-        image, cache_key = resolve_image_reference(os.environ.get("PUZZLETRON_GPU_CI_IMAGE", ""))
+        configured_image = os.environ.get("PUZZLETRON_GPU_CI_IMAGE", "")
+        if not configured_image:
+            print(
+                "::warning::PUZZLETRON_GPU_CI_IMAGE is not configured; "
+                "skipping Puzzletron GPU tests until an immutable image is published.",
+                file=sys.stderr,
+            )
+            print("configured=false")
+            return 0
+        image, cache_key = resolve_image_reference(configured_image)
     except (KeyError, OSError, ValueError, json.JSONDecodeError) as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
 
+    print("configured=true")
     print(f"image={image}")
     print(f"cache_key={cache_key}")
     return 0

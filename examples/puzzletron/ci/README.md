@@ -35,7 +35,8 @@ docker run --gpus device=0 --ipc=host --rm \
 
 Publishing the reviewed image is a separate registry operation. Publish it with
 anonymous pull access, then configure `PUZZLETRON_GPU_CI_IMAGE` with the
-complete immutable `nvcr.io/...@sha256:...` reference. The workflow
-intentionally does not expose registry credentials to copied pull-request
-branches, and rejects tags and non-NVCR references before allocating a GPU
-runner.
+complete immutable `nvcr.io/...@sha256:...` reference. Until the variable is
+configured, the workflow reports an explicit non-error skip and does not
+allocate a GPU runner. Once configured, invalid tags, mutable references, and
+non-NVCR images fail before GPU allocation. The workflow intentionally does not
+expose registry credentials to copied pull-request branches.

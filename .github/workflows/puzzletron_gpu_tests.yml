@@ -20,6 +20,8 @@ jobs:
     uses: ./.github/workflows/_pr_gate.yml
     permissions:
       checks: read
+    # Cross-module Torch changes are covered by the CPU and nightly Puzzletron runs;
+    # keep pull-request GPU allocation limited to Puzzletron-owned paths.
     with:
       files: |
         .github/workflows/_pr_gate.yml
@@ -50,6 +52,7 @@ jobs:
     outputs:
       image: ${{ steps.image.outputs.image }}
       cache_key: ${{ steps.image.outputs.cache_key }}
+      configured: ${{ steps.image.outputs.configured }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -62,6 +65,7 @@ jobs:
 
   gpu-puzzletron:
     needs: [resolve-image]
+    if: needs.resolve-image.outputs.configured == 'true'
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: 50
     container:
@@ -92,10 +96,22 @@ jobs:
           echo "## Puzzletron GPU tests were not required" >> "${GITHUB_STEP_SUMMARY}"
           echo >> "${GITHUB_STEP_SUMMARY}"
           echo "No Puzzletron lifecycle path changed in this pull request." >> "${GITHUB_STEP_SUMMARY}"
+      - name: Report unconfigured Puzzletron GPU image
+        if: >-
+          ${{ needs.pr-gate.outputs.run_tests == 'true' &&
+            needs.resolve-image.result == 'success' &&
+            needs.resolve-image.outputs.configured == 'false' }}
+        run: |
+          echo "## Puzzletron GPU tests are awaiting an image" >> "${GITHUB_STEP_SUMMARY}"
+          echo >> "${GITHUB_STEP_SUMMARY}"
+          echo "Configure PUZZLETRON_GPU_CI_IMAGE with an immutable nvcr.io digest to enable this gate." >> "${GITHUB_STEP_SUMMARY}"
       - name: Required Puzzletron GPU tests did not succeed
         if: >-
           ${{ needs.pr-gate.result != 'success' ||
             (needs.pr-gate.outputs.run_tests == 'true' &&
             (needs.resolve-image.result != 'success' ||
-            needs.gpu-puzzletron.result != 'success')) }}
+            (needs.resolve-image.outputs.configured != 'false' &&
+            needs.resolve-image.outputs.configured != 'true') ||
+            (needs.resolve-image.outputs.configured == 'true' &&
+            needs.gpu-puzzletron.result != 'success'))) }}
         run: exit 1
