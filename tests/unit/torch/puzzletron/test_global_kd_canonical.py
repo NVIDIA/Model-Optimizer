@@ -786,6 +786,7 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
     ]
     assert (tmp_path / "epoch_2_step_17" / "saving_completed").is_file()
 
+
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
     # Import the dynamic mixin at test runtime to preserve lightweight module collection.
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin

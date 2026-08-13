@@ -411,9 +411,9 @@ def test_changed_post_mip_contract_resubmits_completed_work(tmp_path: Path, chan
 
     if change == "config":
         changed_config = copy.deepcopy(config)
-        changed_config["post_mip"]["flows"]["params"]["nodes"]["select"]["config"][
-            "label"
-        ] = "changed"
+        changed_config["post_mip"]["flows"]["params"]["nodes"]["select"]["config"]["label"] = (
+            "changed"
+        )
 
     else:
 
