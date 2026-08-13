@@ -136,19 +136,23 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
         )
 
     tied = _tied_quantized_modules(model)
+    if has_accelerate_offload(model) and not tied:
+        # Offloaded weights sit on meta between windows, so the grouping above inspected
+        # nothing; an empty result is not a clean bill of health. Resolving ties by name
+        # instead would survive weight moves -- the same fix ExportContext.__post_init__
+        # already carries a TODO for.
+        warnings.warn(
+            "Weight-tie detection is skipped for offloaded models: data_ptr() cannot group "
+            "weights that are not resident. A model with tied quantized modules would "
+            "export per-module input_scale instead of the merged value."
+        )
+
     if tied:
         raise NotImplementedError(
             f"layerwise export does not support weight-tied quantized modules {tied[:6]}: "
             "the whole-model path merges their input_quantizer amaxes via "
             "sync_tied_input_amax so both sides share one input_scale, which a per-layer "
             "pass cannot do because a tie partner may be uncalibrated or already written."
-        )
-
-    if has_accelerate_offload(model):
-        raise NotImplementedError(
-            "layerwise export does not support accelerate CPU/disk offload yet. Calibrate "
-            "without export_dir and export afterwards: export_hf_checkpoint() already "
-            "streams offloaded models layer by layer."
         )
 
     if dist.is_initialized() and dist.size() > 1:
@@ -253,6 +257,9 @@ class LayerwiseExporter:
                 self._layer_names[idx] = name
         # Descendants too: the tail pass must skip anything a layer shard already covered.
         self._decoder_owned_ids = {id(m) for layer in layers for m in layer.modules()}
+        # Materialization dispatch rebuilds this map per call when not supplied; only the
+        # handful of tail modules reach it, but the map is model-sized either way.
+        self._name_to_module = dict(model.named_modules())
 
         self._model = model
         self._export_dir = Path(export_dir)
@@ -354,9 +361,13 @@ class LayerwiseExporter:
         from .quant_utils import get_quantization_format
         from .unified_export_hf import _fuse_shared_input_modules, collect_shared_input_modules
 
-        layer_format = get_quantization_format(layer_module)
-        if layer_format in FUSION_FREE_FORMATS:
+        # Per-module scan, not get_quantization_format(layer_module): that returns the first
+        # format found, so a layer with FP8 attention and NVFP4 experts reports fp8 and
+        # would skip fusing its NVFP4 groups. _fuse_shared_input_modules re-evaluates the
+        # format per group, so the value passed below is only a fallback.
+        if not (_module_formats(layer_module) - FUSION_FREE_FORMATS):
             return
+        layer_format = get_quantization_format(layer_module)
         if probe_forward is None:
             raise RuntimeError(
                 f"layer format {layer_format!r} needs input-sharing groups to fuse its "
@@ -366,9 +377,7 @@ class LayerwiseExporter:
         input_to_linear, _ = collect_shared_input_modules(
             layer_module, lambda: probe_forward(layer_module)
         )
-        _fuse_shared_input_modules(
-            self._model, input_to_linear, quantization_format=layer_format
-        )
+        _fuse_shared_input_modules(self._model, input_to_linear, quantization_format=layer_format)
 
     def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
         """Export the tail, write every config artifact, and index all shards.
@@ -376,6 +385,11 @@ class LayerwiseExporter:
         Leaves ``export_dir`` a complete, loadable checkpoint, so no separate
         ``export_hf_checkpoint()`` call is needed. Returns the quant config.
         """
+        from modelopt.torch.quantization.utils.core_utils import (
+            enable_weight_access_and_writeback,
+            requires_weight_materialization,
+        )
+
         from .quant_aware_conversion import revert_quant_config_names
         from .unified_export_hf import (
             _add_mtp_exclusions,
@@ -401,18 +415,39 @@ class LayerwiseExporter:
                 revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
 
         tail: dict[str, torch.Tensor] = {}
+        seen_keys: set[str] = set()
+        handled_ids: set[int] = set()
+        # Decoder tensors are already in their own shards.
+        skip_prefixes = tuple(f"{n}." for n in self._layer_names.values() if n)
+
+        # Non-decoder modules whose weights are not directly readable -- embeddings, norms,
+        # lm_head on an offloaded model. Each needs its own materialization window, or its
+        # tensors are still on meta here and _collect drops them silently. Containers are
+        # skipped: their children get their own window.
         for name, module in model.named_modules():
             if id(module) in self._decoder_owned_ids:
                 continue
-            _dispatch_export_handler(name, module, self._ctx)
+            if not requires_weight_materialization(module, model, self._name_to_module):
+                continue
+            with enable_weight_access_and_writeback(
+                module, model, self._name_to_module, writeback=False
+            ):
+                for sub_name, sub_mod in module.named_modules():
+                    full_name = f"{name}.{sub_name}" if sub_name else name
+                    _dispatch_export_handler(full_name, sub_mod, self._ctx)
+                    handled_ids.add(id(sub_mod))
+                prefix = f"{name}." if name else ""
+                for key, tensor in module.state_dict().items():
+                    seen_keys.add(prefix + key)
+                    self._collect(tail, prefix + key, tensor)
 
-        # Decoder tensors are already in their own shards. Filtering by name prefix rather
-        # than by looking up each tensor's owning module keeps this a string compare per
-        # tensor instead of a module-tree walk, and needs no special case for top-level
-        # names that have no parent to resolve.
-        skip_prefixes = tuple(f"{n}." for n in self._layer_names.values() if n)
+        # Everything already resident. On a model with no offload this is the whole tail.
+        for name, module in model.named_modules():
+            if id(module) in self._decoder_owned_ids or id(module) in handled_ids:
+                continue
+            _dispatch_export_handler(name, module, self._ctx)
         for name, tensor in model.state_dict().items():
-            if name.startswith(skip_prefixes):
+            if name.startswith(skip_prefixes) or name in seen_keys:
                 continue
             self._collect(tail, name, tensor)
 

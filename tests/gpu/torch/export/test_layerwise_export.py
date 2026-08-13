@@ -208,6 +208,49 @@ def test_nvfp4_export_matches(tmp_path):
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
 
 
+def _mixed_fp8_nvfp4_cfg():
+    """FP8 attention, NVFP4 MLP -- a layer whose format depends on where you look.
+
+    ``get_quantization_format`` returns the first format found, so gating fusion on it
+    reports fp8 here and silently skips fusing the NVFP4 groups. o_proj stays unquantized
+    for the reason in :func:`_nvfp4_cfg`.
+    """
+    nvfp4 = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    numerics = next(
+        e["cfg"] for e in nvfp4["quant_cfg"] if e.get("quantizer_name") == "*weight_quantizer"
+    )
+    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    fp8_numerics = next(
+        e["cfg"] for e in fp8["quant_cfg"] if e.get("quantizer_name") == "*weight_quantizer"
+    )
+    return {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*self_attn*weight_quantizer", "cfg": copy.deepcopy(fp8_numerics)},
+            {"quantizer_name": "*self_attn*input_quantizer", "cfg": copy.deepcopy(fp8_numerics)},
+            {"quantizer_name": "*mlp*weight_quantizer", "cfg": copy.deepcopy(numerics)},
+            {"quantizer_name": "*mlp*input_quantizer", "cfg": copy.deepcopy(numerics)},
+            {"quantizer_name": "*o_proj*", "enable": False},
+        ]
+    }
+
+
+def test_mixed_format_export_matches(tmp_path):
+    """A layer holding two formats must still fuse the one that needs it."""
+    baseline_dir = tmp_path / "baseline"
+    base = _mixed_fp8_nvfp4_cfg()
+    base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
+
+    export_dir = tmp_path / "fused"
+    mtq.quantize(
+        _build_model(),
+        _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_mixed_fp8_nvfp4_cfg()),
+        _calib,
+    )
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
+
+
 def test_awq_is_refused(tmp_path):
     """AWQ needs the pre-quant-scale steps, which are still whole-model."""
     cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=mtq.INT4_AWQ_CFG)

@@ -770,9 +770,11 @@ class LayerwiseConfig(ModeloptBaseConfig):
             "loadable checkpoint when the last layer lands. Removes the separate "
             "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
             "Combined with ``checkpoint_dir``, an interrupted run resumes without "
-            "re-exporting finished layers. Supports FP8 on resident (non-offloaded) "
-            "single-process models; other formats raise NotImplementedError. The model "
-            "left in memory afterwards is not valid for inference if the run resumed."
+            "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
+            "weight-tied quantized modules, multimodal and MTP models raise "
+            "NotImplementedError. The model left in memory afterwards is not valid for "
+            "inference if the run resumed."
         ),
     )
 
