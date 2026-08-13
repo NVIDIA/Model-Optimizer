@@ -4,7 +4,7 @@ Model Optimizer Announcements Are Moving to GitHub Pages
 #########################################################
 
 :Author: Model Optimizer Team
-:Date: July 13, 2026
+:Date: August 13, 2026
 :Tags: release, docs, github-pages
 
 The Model Optimizer GitHub Pages site is expanding from API documentation into a lightweight announcement hub. The goal is to make releases, technical notes, examples, and deployment writeups easier to discover without introducing a separate publishing system.
