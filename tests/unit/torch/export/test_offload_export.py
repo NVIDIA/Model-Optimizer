@@ -30,8 +30,18 @@ try:
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
+from _test_utils.torch.quantization.tied_modules import (
+    make_tied_linear_pair,
+    wrap_in_parent_with_tied_keys,
+)
+
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
+from modelopt.torch.export.model_utils import (
+    TiedWeightMap,
+    _build_tied_alias_map,
+    build_tied_weight_map,
+)
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
@@ -54,6 +64,76 @@ def _make_offloaded_linear(dim: int = 16):
     add_hook_to_module(linear, hook)
     set_module_tensor_to_device(linear, "weight", "meta")
     return linear, weights_map
+
+
+def _offload_module(module):
+    """Attach a CPU-offload AlignDevicesHook to ``module`` and move its weight to meta.
+
+    Mirrors what ``accelerate.dispatch_model`` does per-module for a CPU/disk
+    offloaded model: the real weight lives in ``weights_map``, the module's own
+    ``.weight`` becomes a fresh meta Parameter.
+    """
+    weights_map = {"weight": module.weight.data.clone().cpu()}
+    hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
+    add_hook_to_module(module, hook)
+    set_module_tensor_to_device(module, "weight", "meta")
+
+
+# ---------------------------------------------------------------------------
+# tied-weight alias map under offload
+# ---------------------------------------------------------------------------
+
+
+def test_tied_alias_map_split_by_offload_needs_preshard_capture():
+    """Offload splits a shared tied Parameter, so the alias map must be built pre-offload.
+
+    ``_build_tied_alias_map`` groups names by ``id(parameter)``. When accelerate
+    offloads each module it replaces the shared ``.weight`` with a fresh meta
+    Parameter per module, so the id-group -- and the alias map -- is only
+    recoverable if captured before offload. Names, unlike object identity, are
+    stable across offload; this is why the map should be built at load time.
+    """
+    enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
+    model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+
+    # Pre-offload: one shared Parameter -> the declared tie is captured.
+    assert not has_accelerate_offload(model)
+    assert _build_tied_alias_map(model) == {"encoder.weight": "decoder.weight"}
+
+    _offload_module(model.encoder)
+    _offload_module(model.decoder)
+
+    # Post-offload: the shared param was split into per-module meta params, so the
+    # id-group is gone; the map is empty and the guard warns instead of silently
+    # skipping the dedup.
+    assert has_accelerate_offload(model)
+    with pytest.warns(UserWarning, match="tied-weight alias"):
+        assert _build_tied_alias_map(model) == {}
+
+
+def test_build_tied_weight_map_preshard_capture_survives_offload():
+    """A map captured with build_tied_weight_map before offload still resolves the tie.
+
+    This is the Option-B contract: capture while resident, consume at export. The
+    captured TiedWeightMap keeps the tie as names, so its group_key still collapses
+    both sides after offload -- whereas a map rebuilt post-offload is empty.
+    """
+    enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
+    model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+
+    # Capture at "load time" (resident), exactly as a caller would right after
+    # from_pretrained and before fully_shard / dispatch_model.
+    tied_map = build_tied_weight_map(model)
+    assert isinstance(tied_map, TiedWeightMap)
+    assert tied_map.group_key("encoder.weight") == "decoder.weight"
+    assert tied_map.group_key("decoder.weight") == "decoder.weight"
+
+    _offload_module(model.encoder)
+    _offload_module(model.decoder)
+
+    # The captured map is unaffected by offload (names, not ids); a fresh build is empty.
+    assert tied_map.group_key("encoder.weight") == "decoder.weight"
+    assert TiedWeightMap(model).alias_to_canonical == {}
 
 
 # ---------------------------------------------------------------------------
