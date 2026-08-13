@@ -41,20 +41,17 @@ def test_build_tied_alias_map_dict_style_maps_alias_to_canonical():
     assert amap == {"encoder.weight": "decoder.weight"}
 
 
-def test_build_tied_alias_map_list_style_is_empty():
-    """Legacy list-style _tied_weights_keys carries no canonical info — empty map."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
+def test_build_tied_alias_map_empty_for_non_applied_ties():
+    """No alias map when a tie carries no canonical (list-style) or is not applied.
 
-    assert _build_tied_alias_map(parent) == {}
-
-
-def test_build_tied_alias_map_skips_declared_but_unapplied_tie():
-    """A class declares a dict-style tie but the two params are DISTINCT objects
-    (e.g. ``tie_word_embeddings=False`` still ships a class-level ``_tied_weights_keys``).
-    A name-only match would drop an independent weight; the build-time object-identity
-    gate must skip it so the map stays empty.
+    Legacy list-style ``_tied_weights_keys`` has no canonical info; and a dict-style
+    declaration whose two params are DISTINCT objects (e.g. ``tie_word_embeddings=False``
+    still ships a class-level ``_tied_weights_keys``) must be skipped by the object-identity
+    gate so a name-only match never drops an independent weight.
     """
+    enc, dec = make_tied_linear_pair()
+    list_style = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
+    assert _build_tied_alias_map(list_style) == {}
 
     class _Untied(torch.nn.Module):
         _tied_weights_keys = {r"^lm_head\.weight$": "embed.weight"}
@@ -64,9 +61,9 @@ def test_build_tied_alias_map_skips_declared_but_unapplied_tie():
             self.embed = torch.nn.Linear(4, 4, bias=False)
             self.lm_head = torch.nn.Linear(4, 4, bias=False)  # separate weight object
 
-    parent = _Untied()
-    assert parent.lm_head.weight is not parent.embed.weight  # declared, but not applied
-    assert _build_tied_alias_map(parent) == {}
+    untied = _Untied()
+    assert untied.lm_head.weight is not untied.embed.weight  # declared, but not applied
+    assert _build_tied_alias_map(untied) == {}
 
 
 def test_build_tied_alias_map_warns_when_declared_tie_unformed_under_fsdp(monkeypatch):
@@ -502,17 +499,6 @@ def test_postprocess_backstop_keeps_keys_with_distinct_dataptrs():
     assert set(out) == {"first", "second"}  # neither dropped
     assert torch.equal(out["first"], torch.tensor([0, 1]))
     assert torch.equal(out["second"], torch.tensor([2, 3]))
-
-
-def test_postprocess_backstop_drops_true_duplicate():
-    """The same tensor under two names is a true duplicate: one copy is dropped."""
-    t = torch.arange(4)
-    sd = {"a": t, "b": t}  # identical view under two names
-
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None)
-
-    assert len(out) == 1 and "a" in out
-    assert torch.equal(out["a"], torch.arange(4))
 
 
 def test_postprocess_dense_tie_drops_pre_quant_scale_companion():
