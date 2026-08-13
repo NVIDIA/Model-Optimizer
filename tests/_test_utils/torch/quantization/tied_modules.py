@@ -94,9 +94,8 @@ def wrap_in_parent_with_tied_keys(
       when ``decoder_canonical=True``, list-style (legacy, no canonical/alias
       distinction) when ``decoder_canonical=False``.
 
-    Used by tests for :class:`TiedWeightMap` / :func:`_build_tied_alias_map`.
-    The legacy list-style branch exercises the "no canonical/alias info" negative
-    case (an empty alias map).
+    Used by tests for :class:`TiedWeightMap`. The list-style branch exercises the
+    "no canonical/alias info" negative case (an empty tie map).
     """
     parent_cls = type("DiffusionGemmaTestParent", (nn.Module,), {})
     parent = parent_cls()
@@ -109,8 +108,12 @@ def wrap_in_parent_with_tied_keys(
         parent._tied_weights_keys = {
             rf"^encoder\.{re.escape(weight_attr)}$": f"decoder.{weight_attr}",
         }
+        # transformers >=5.0 resolves the declaration into concrete {alias: canonical} names on
+        # the model (``all_tied_weights_keys``); TiedWeightMap reads that attribute.
+        parent.all_tied_weights_keys = {f"encoder.{weight_attr}": f"decoder.{weight_attr}"}
     else:
-        # Legacy list-style: just a list of tied paths, no canonical info.
+        # Legacy list-style: just a list of tied paths, no canonical info -> empty resolved map.
         parent._tied_weights_keys = [f"encoder.{weight_attr}"]
+        parent.all_tied_weights_keys = {}
 
     return parent

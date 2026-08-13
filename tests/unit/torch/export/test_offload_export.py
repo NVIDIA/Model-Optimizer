@@ -37,7 +37,7 @@ from _test_utils.torch.quantization.tied_modules import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
-from modelopt.torch.export.model_utils import TiedWeightMap, build_tied_weight_map
+from modelopt.torch.export.model_utils import TiedWeightMap
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
@@ -75,26 +75,22 @@ def _offload_module(module):
 # ---------------------------------------------------------------------------
 
 
-def test_build_tied_weight_map_preshard_capture_survives_offload():
-    """Capture before offload resolves the tie by name; a post-offload build is empty (Option B)."""
+def test_tied_weight_map_from_hf_map_survives_offload():
+    """TiedWeightMap reads HF's name-based all_tied_weights_keys, so offload does not change it."""
     enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
     model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
 
-    # Resident: capture the map and confirm it resolves the tie.
     assert not has_accelerate_offload(model)
-    tied_map = build_tied_weight_map(model)
-    assert isinstance(tied_map, TiedWeightMap)
-    assert tied_map.group_key("encoder.weight") == "decoder.weight"
-    assert tied_map.group_key("decoder.weight") == "decoder.weight"
+    assert TiedWeightMap(model).alias_to_canonical == {"encoder.weight": "decoder.weight"}
 
     _offload_module(model.encoder)
     _offload_module(model.decoder)
     assert has_accelerate_offload(model)
 
-    # Captured map still resolves the tie (names survive); a fresh build is empty + warns.
+    # The map is a plain name dict on the model; offload metas the weights but not the attribute.
+    tied_map = TiedWeightMap(model)
+    assert tied_map.alias_to_canonical == {"encoder.weight": "decoder.weight"}
     assert tied_map.group_key("encoder.weight") == "decoder.weight"
-    with pytest.warns(UserWarning, match="tied-weight alias"):
-        assert TiedWeightMap(model).alias_to_canonical == {}
 
 
 # ---------------------------------------------------------------------------
