@@ -83,6 +83,7 @@ pipeline:
   task_2:
     environment:
       - LAUNCH_SCRIPT: torchrun --nproc_per_node 4
+      - TRITON_CACHE_DIR: /tmp/triton_cache
     inline: >-
       $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/distill.py
       --teacher_hf_path <<global_vars.hf_model>>
