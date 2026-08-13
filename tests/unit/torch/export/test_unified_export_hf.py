@@ -15,6 +15,7 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
+import pytest
 import torch
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
@@ -22,71 +23,13 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import TiedWeightMap, _build_tied_alias_map
+from modelopt.torch.export.model_utils import TiedWeightMap
 from modelopt.torch.export.quant_utils import (
     fuse_prequant_layernorm,
     postprocess_state_dict,
     sync_tied_input_amax,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
-
-
-def test_build_tied_alias_map_dict_style_maps_alias_to_canonical():
-    """Dict-style _tied_weights_keys yields {alias_full_name: canonical_full_name}."""
-    enc, dec = make_tied_linear_pair()
-    parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-
-    amap = _build_tied_alias_map(parent)
-
-    assert amap == {"encoder.weight": "decoder.weight"}
-
-
-def test_build_tied_alias_map_empty_for_non_applied_ties():
-    """No alias map for list-style ties (no canonical) or dict-style ties whose params are distinct objects."""
-    enc, dec = make_tied_linear_pair()
-    list_style = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
-    assert _build_tied_alias_map(list_style) == {}
-
-    class _Untied(torch.nn.Module):
-        _tied_weights_keys = {r"^lm_head\.weight$": "embed.weight"}
-
-        def __init__(self):
-            super().__init__()
-            self.embed = torch.nn.Linear(4, 4, bias=False)
-            self.lm_head = torch.nn.Linear(4, 4, bias=False)  # separate weight object
-
-    untied = _Untied()
-    assert untied.lm_head.weight is not untied.embed.weight  # declared, but not applied
-    assert _build_tied_alias_map(untied) == {}
-
-
-def test_build_tied_alias_map_warns_when_declared_tie_unformed_under_fsdp(monkeypatch):
-    """A declared tie whose id-group did not form warns under FSDP2 (loud) but is silent off FSDP."""
-    import warnings as _warnings
-
-    import modelopt.torch.export.model_utils as mu
-    from modelopt.torch.export.model_utils import _build_tied_alias_map as build
-
-    class _Untied(torch.nn.Module):
-        _tied_weights_keys = {r"^lm_head\.weight$": "embed.weight"}
-
-        def __init__(self):
-            super().__init__()
-            self.embed = torch.nn.Linear(4, 4, bias=False)
-            self.lm_head = torch.nn.Linear(4, 4, bias=False)  # distinct object
-
-    # Off FSDP: no warning.
-    with _warnings.catch_warnings(record=True) as rec:
-        _warnings.simplefilter("always")
-        assert build(_Untied()) == {}
-    assert not any("shared-parameter group" in str(w.message) for w in rec)
-
-    # Under FSDP2: warn. (is_fsdp2_model is imported into model_utils, so patch it there.)
-    monkeypatch.setattr(mu, "is_fsdp2_model", lambda m: True)
-    with _warnings.catch_warnings(record=True) as rec:
-        _warnings.simplefilter("always")
-        assert build(_Untied()) == {}
-    assert any("shared-parameter group" in str(w.message) for w in rec)
 
 
 def test_tied_group_resolver_group_key_is_shared_and_order_independent():
@@ -102,29 +45,19 @@ def test_tied_group_resolver_group_key_is_shared_and_order_independent():
 
 
 def test_tied_group_resolver_per_layer_backreference():
-    """Per-layer alias regex with a backreference resolves each layer independently."""
+    """container_group_key resolves each layer's tie independently (no cross-layer collapse).
+
+    HF expands the per-layer regex/backreference into concrete ``all_tied_weights_keys`` names;
+    TiedWeightMap reads that and container_group_key must keep layers distinct.
+    """
 
     class _Parent(torch.nn.Module):
-        _tied_weights_keys = {
-            r"^encoder\.layers\.(\d+)\.experts\.gate_up_proj$": r"decoder.layers.\1.experts.gate_up_proj",
+        all_tied_weights_keys = {
+            "encoder.layers.0.experts.gate_up_proj": "decoder.layers.0.experts.gate_up_proj",
+            "encoder.layers.1.experts.gate_up_proj": "decoder.layers.1.experts.gate_up_proj",
         }
 
-        def __init__(self):
-            super().__init__()
-            self.encoder = torch.nn.Module()
-            self.decoder = torch.nn.Module()
-            for side in (self.encoder, self.decoder):
-                side.layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
-            # Tie the fused expert Parameter per layer.
-            for i in range(2):
-                p = torch.nn.Parameter(torch.zeros(4, 8, 8))
-                self.decoder.layers[i].experts = torch.nn.Module()
-                self.decoder.layers[i].experts.gate_up_proj = p
-                self.encoder.layers[i].experts = torch.nn.Module()
-                self.encoder.layers[i].experts.gate_up_proj = p
-
-    parent = _Parent()
-    tied_map = TiedWeightMap(parent)
+    tied_map = TiedWeightMap(_Parent())
 
     assert (
         tied_map.container_group_key("encoder.layers.0.experts", "gate_up_proj")
@@ -141,32 +74,21 @@ def test_tied_group_resolver_per_layer_backreference():
 
 
 def test_tied_group_resolver_parallel_pattern_declaration():
-    """DiffusionGemma-style parallel-regex ties resolve each container to its decoder canonical."""
+    """DiffusionGemma-style tie: container resolves to the decoder canonical; per-expert split keys drop by name.
 
-    class _Model(torch.nn.Module):
-        _tied_weights_keys = {
-            r"encoder.language_model.layers\.(?:[^.]+\.)*gate_up_proj": r"decoder.layers\.(?:[^.]+\.)*gate_up_proj",
-            r"encoder.language_model.layers\.(?:[^.]+\.)*down_proj": r"decoder.layers\.(?:[^.]+\.)*down_proj",
+    HF resolves DiffGemma's parallel-regex declaration into concrete ``all_tied_weights_keys``
+    names (incl. the fused expert Parameters); TiedWeightMap reads that.
+    """
+
+    class _Root(torch.nn.Module):
+        all_tied_weights_keys = {
+            "model.encoder.language_model.layers.0.experts.gate_up_proj": (
+                "model.decoder.layers.0.experts.gate_up_proj"
+            ),
+            "model.encoder.language_model.layers.0.experts.down_proj": (
+                "model.decoder.layers.0.experts.down_proj"
+            ),
         }
-
-        def __init__(self):
-            super().__init__()
-            self.decoder = torch.nn.Module()
-            self.encoder = torch.nn.Module()
-            self.encoder.language_model = torch.nn.Module()
-            for root in (self.decoder, self.encoder.language_model):
-                root.layers = torch.nn.ModuleList([torch.nn.Module()])
-            gup = torch.nn.Parameter(torch.zeros(4, 8, 8))
-            dp = torch.nn.Parameter(torch.zeros(4, 8, 8))
-            for root in (self.decoder, self.encoder.language_model):
-                root.layers[0].experts = torch.nn.Module()
-                root.layers[0].experts.gate_up_proj = gup  # tied (same object)
-                root.layers[0].experts.down_proj = dp
-
-    class _Root(torch.nn.Module):  # ForCausalLM-style `.model` wrapper
-        def __init__(self):
-            super().__init__()
-            self.model = _Model()
 
     tied_map = TiedWeightMap(_Root())
 
@@ -180,9 +102,10 @@ def test_tied_group_resolver_parallel_pattern_declaration():
     # post-export per-expert split keys of the (fully tied) container are dropped by name.
     enc = "model.encoder.language_model.layers.0.experts"
     dec = "model.decoder.layers.0.experts"
+    shared = torch.randn(4, 4)  # tied sides export identical bytes
     sd = {
-        f"{enc}.3.gate_proj.weight": torch.randn(4, 4),
-        f"{dec}.3.gate_proj.weight": torch.randn(4, 4),
+        f"{enc}.3.gate_proj.weight": shared.clone(),
+        f"{dec}.3.gate_proj.weight": shared.clone(),
     }
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
     assert f"{enc}.3.gate_proj.weight" not in out  # alias split key dropped
@@ -255,8 +178,10 @@ def test_postprocess_name_based_drops_alias_across_distinct_addresses():
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
     tied_map = TiedWeightMap(parent)
 
-    # Distinct storages (different data_ptr): the address pass could never collapse these.
-    sd = {"encoder.weight": torch.randn(4, 4), "decoder.weight": torch.randn(4, 4)}
+    # Distinct storages (different data_ptr) but identical bytes (genuinely tied): the address
+    # pass could never collapse these, but the name pass does.
+    shared = torch.randn(4, 4)
+    sd = {"encoder.weight": shared.clone(), "decoder.weight": shared.clone()}
     assert sd["encoder.weight"].data_ptr() != sd["decoder.weight"].data_ptr()
 
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
@@ -325,24 +250,10 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
     keeping only the canonical subtree -- across distinct addresses (FSDP-safe)."""
 
     class _Parent(torch.nn.Module):
-        _tied_weights_keys = {
-            r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj",
-            r"^encoder\.experts\.down_proj$": "decoder.experts.down_proj",
+        all_tied_weights_keys = {
+            "encoder.experts.gate_up_proj": "decoder.experts.gate_up_proj",
+            "encoder.experts.down_proj": "decoder.experts.down_proj",
         }
-
-        def __init__(self):
-            super().__init__()
-            self.encoder = torch.nn.Module()
-            self.encoder.experts = torch.nn.Module()
-            self.decoder = torch.nn.Module()
-            self.decoder.experts = torch.nn.Module()
-            gup = torch.nn.Parameter(torch.zeros(2, 4, 4))
-            dp = torch.nn.Parameter(torch.zeros(2, 4, 4))
-            # decoder registered first (canonical) to exercise remove_duplicate=False.
-            self.decoder.experts.gate_up_proj = gup
-            self.decoder.experts.down_proj = dp
-            self.encoder.experts.gate_up_proj = gup
-            self.encoder.experts.down_proj = dp
 
     parent = _Parent()
     tied_map = TiedWeightMap(parent)
@@ -351,13 +262,14 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
         "encoder.experts.down_proj": "decoder.experts.down_proj",
     }
 
-    # Craft exported-style per-expert keys with distinct storages on both sides.
+    # Exported-style per-expert keys; tied sides carry identical bytes (distinct storage).
     sd = {}
-    for side in ("encoder", "decoder"):
-        for e in range(2):
-            for proj in ("gate_proj", "up_proj", "down_proj"):
-                sd[f"{side}.experts.{e}.{proj}.weight"] = torch.randn(4, 4)
-                sd[f"{side}.experts.{e}.{proj}.weight_scale"] = torch.randn(4)
+    for e in range(2):
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            w, s = torch.randn(4, 4), torch.randn(4)
+            for side in ("encoder", "decoder"):
+                sd[f"{side}.experts.{e}.{proj}.weight"] = w.clone()
+                sd[f"{side}.experts.{e}.{proj}.weight_scale"] = s.clone()
 
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
@@ -370,20 +282,15 @@ def test_postprocess_keeps_independent_bias_under_tied_weight():
     """A weight tie must not drop an independent bias sharing the module prefix (the NVBug 6525352 failure class)."""
 
     class _TwoLinear(torch.nn.Module):
-        _tied_weights_keys = {r"^A\.weight$": "B.weight"}
-
-        def __init__(self):
-            super().__init__()
-            self.A = torch.nn.Linear(4, 4, bias=True)
-            self.B = torch.nn.Linear(4, 4, bias=True)
-            self.A.weight = self.B.weight  # weights tied; biases independent
+        all_tied_weights_keys = {"A.weight": "B.weight"}
 
     tied_map = TiedWeightMap(_TwoLinear())
+    tied_w = torch.randn(4, 4)  # A.weight is B.weight -> identical exported bytes
     sd = {
-        "A.weight": torch.randn(4, 4),
-        "A.bias": torch.randn(4),
-        "B.weight": torch.randn(4, 4),
-        "B.bias": torch.randn(4),
+        "A.weight": tied_w.clone(),
+        "A.bias": torch.randn(4),  # independent
+        "B.weight": tied_w.clone(),
+        "B.bias": torch.randn(4),  # independent
     }
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
@@ -396,31 +303,24 @@ def test_postprocess_partially_tied_container_dedups_only_tied_projections():
     """Only the tied projection's per-expert keys are deduped; an untied down_proj and a router child survive."""
 
     class _Parent(torch.nn.Module):
-        _tied_weights_keys = {r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj"}
-
-        def __init__(self):
-            super().__init__()
-            self.encoder = torch.nn.Module()
-            self.encoder.experts = torch.nn.Module()
-            self.decoder = torch.nn.Module()
-            self.decoder.experts = torch.nn.Module()
-            gup = torch.nn.Parameter(torch.zeros(2, 4, 4))
-            self.decoder.experts.gate_up_proj = gup
-            self.encoder.experts.gate_up_proj = gup  # tied
-            # down_proj is a distinct Parameter on each side (untied)
-            self.decoder.experts.down_proj = torch.nn.Parameter(torch.zeros(2, 4, 4))
-            self.encoder.experts.down_proj = torch.nn.Parameter(torch.zeros(2, 4, 4))
+        all_tied_weights_keys = {"encoder.experts.gate_up_proj": "decoder.experts.gate_up_proj"}
 
     tied_map = TiedWeightMap(_Parent())
     assert tied_map.alias_to_canonical == {
         "encoder.experts.gate_up_proj": "decoder.experts.gate_up_proj"
     }
 
+    # Tied projections (gate_proj/up_proj, from gate_up_proj) carry identical bytes across sides;
+    # untied down_proj and router differ.
     sd = {}
+    for e in range(2):
+        for proj in ("gate_proj", "up_proj"):
+            w = torch.randn(4, 4)
+            sd[f"encoder.experts.{e}.{proj}.weight"] = w.clone()
+            sd[f"decoder.experts.{e}.{proj}.weight"] = w.clone()
+        for side in ("encoder", "decoder"):
+            sd[f"{side}.experts.{e}.down_proj.weight"] = torch.randn(4, 4)  # untied
     for side in ("encoder", "decoder"):
-        for e in range(2):
-            for proj in ("gate_proj", "up_proj", "down_proj"):
-                sd[f"{side}.experts.{e}.{proj}.weight"] = torch.randn(4, 4)
         sd[f"{side}.experts.router.weight"] = torch.randn(4, 4)  # non-projection child
 
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
@@ -467,17 +367,30 @@ def test_postprocess_dense_tie_drops_pre_quant_scale_companion():
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
     tied_map = TiedWeightMap(parent)
+    w, pqs = torch.randn(4, 4), torch.randn(4)  # tied sides export identical bytes
     sd = {
-        "encoder.weight": torch.randn(4, 4),
-        "encoder.pre_quant_scale": torch.randn(4),
-        "decoder.weight": torch.randn(4, 4),
-        "decoder.pre_quant_scale": torch.randn(4),
+        "encoder.weight": w.clone(),
+        "encoder.pre_quant_scale": pqs.clone(),
+        "decoder.weight": w.clone(),
+        "decoder.pre_quant_scale": pqs.clone(),
     }
 
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     assert "encoder.weight" not in out and "encoder.pre_quant_scale" not in out  # both dropped
     assert "decoder.weight" in out and "decoder.pre_quant_scale" in out  # canonical kept
+
+
+def test_postprocess_raises_when_tied_sides_export_different_values():
+    """A declared tie whose two sides export different bytes must raise, not silently corrupt."""
+
+    class _TwoLinear(torch.nn.Module):
+        all_tied_weights_keys = {"A.weight": "B.weight"}
+
+    tied_map = TiedWeightMap(_TwoLinear())
+    sd = {"A.weight": torch.zeros(4, 4), "B.weight": torch.ones(4, 4)}  # declared tie, but differ
+    with pytest.raises(RuntimeError, match="differs from its canonical"):
+        postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
 
 def test_postprocess_state_dict_preserves_zero_pointer_tensors():

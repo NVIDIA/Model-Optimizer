@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
-import warnings
 from functools import partial
 
 import pytest
@@ -28,11 +27,7 @@ from torch.distributed._composable.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
-from modelopt.torch.export.model_utils import (
-    TiedWeightMap,
-    _build_tied_alias_map,
-    build_tied_weight_map,
-)
+from modelopt.torch.export.model_utils import TiedWeightMap
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     requantize_resmooth_fused_llm_layers,
@@ -214,53 +209,36 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         _compare_parameters_and_buffers(model, non_fsdp_model)
 
 
-def _tied_alias_map_fsdp2_test(rank, size):
-    """A declared tie forms a shared-parameter group BEFORE fully_shard but not after.
+def _tied_map_survives_fsdp2_test(rank, size):
+    """TiedWeightMap (from HF's name-based all_tied_weights_keys) survives fully_shard.
 
-    ``_build_tied_alias_map`` groups names by ``id(parameter)``. ``fully_shard``
-    splits the one shared ``nn.Parameter`` into two distinct per-module sharded
-    params, so the id-group -- and therefore the alias map -- is only recoverable
-    if the map is captured *before* sharding. This is the motivation for building
-    the tie-map at load time rather than at export entry: names are stable across
-    sharding, object identity is not.
+    ``fully_shard`` splits the shared ``nn.Parameter`` into distinct per-module shards, but the HF
+    map is a plain name dict on the model, unaffected by sharding, so TiedWeightMap still resolves
+    the tie both before and after -- no pre-shard capture needed.
     """
     with patch_fsdp_mp_dtypes():
         enc, dec = make_tied_linear_pair(in_features=32, out_features=32)
         model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True).to("cuda")
 
-        # Pre-shard: the tie is one shared Parameter -> alias map is produced.
-        amap_pre = _build_tied_alias_map(model)
-        assert amap_pre == {"encoder.weight": "decoder.weight"}, (
-            f"pre-shard map should capture the declared tie, got {amap_pre}"
-        )
-        # Option B: capture the map now (resident), as a caller would before sharding.
-        captured = build_tied_weight_map(model)
+        # Pre-shard: the HF map resolves the tie.
+        assert TiedWeightMap(model).alias_to_canonical == {"encoder.weight": "decoder.weight"}
 
         fully_shard(model.encoder)
         fully_shard(model.decoder)
         fully_shard(model)
         torch.distributed.barrier()
 
-        # Post-shard: fully_shard split the shared param -> id-group is gone, the
-        # map is empty, and the FSDP2 guard warns rather than silently skipping.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            amap_post = _build_tied_alias_map(model)
-        assert amap_post == {}, f"post-shard map should be empty (tie split), got {amap_post}"
-        assert any("tied-weight alias" in str(w.message) for w in caught), (
-            "expected the FSDP2 unrealized-tie warning after sharding"
-        )
-
-        # The pre-shard captured map still resolves the tie (names survive sharding).
-        assert isinstance(captured, TiedWeightMap)
-        assert captured.group_key("encoder.weight") == "decoder.weight"
-        assert captured.group_key("decoder.weight") == "decoder.weight"
+        # Post-shard: the HF name-based map is untouched -> TiedWeightMap still resolves the tie.
+        tied_map = TiedWeightMap(model)
+        assert tied_map.alias_to_canonical == {"encoder.weight": "decoder.weight"}
+        assert tied_map.group_key("encoder.weight") == "decoder.weight"
+        assert tied_map.group_key("decoder.weight") == "decoder.weight"
 
 
-def test_fsdp2_tied_alias_map_needs_preshard_capture(dist_workers):
+def test_fsdp2_tied_map_survives_shard(dist_workers):
     if torch.cuda.device_count() < 2:
         pytest.skip("needs >=2 GPUs to shard a tied weight into distinct params")
-    dist_workers.run(_tied_alias_map_fsdp2_test)
+    dist_workers.run(_tied_map_survives_fsdp2_test)
 
 
 @minimum_sm(90)

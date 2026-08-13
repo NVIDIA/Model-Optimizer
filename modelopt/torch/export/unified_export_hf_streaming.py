@@ -203,14 +203,8 @@ def _export_transformers_checkpoint_streaming(
     over a finished dict, each tensor goes through :func:`_postprocess_single_tensor` as it
     is produced. Two consequences follow from having no whole-dict view:
 
-    - Tied weights are dropped by *name*, not by comparing ``data_ptr`` (meaningless once
-      weights move between host and device). NOTE: this path keeps its own narrow rule --
-      the exact list-style ``_tied_weights_keys`` names, gated on ``tie_word_embeddings`` --
-      and does NOT use :class:`TiedWeightMap`. It therefore only handles the
-      ``tie_word_embeddings`` embedding tie; dict-style / per-expert MoE ties (e.g.
-      DiffusionGemma) are NOT deduped here, so the offloaded export can emit both sides of
-      such a tie where the resident path emits one. Threading the ``TiedWeightMap`` in is
-      tracked as a follow-up; until then such models should use the resident path.
+    - Tied weights are dropped by *name* from ``_tied_weights_keys`` (data_ptr is meaningless
+      once weights move host<->device); see the TODO below on adopting ``all_tied_weights_keys``.
     - Conversion mappings that need tensor-level splits cannot be reversed one tensor at a
       time, so they are rejected up front rather than exported incorrectly.
 
@@ -266,6 +260,10 @@ def _export_transformers_checkpoint_streaming(
     # Only apply when tie_word_embeddings=True: _tied_weights_keys can list keys whose
     # weights are not actually shared (e.g. if the model was saved with tie_word_embeddings=False
     # but the attribute was never cleared), which would incorrectly drop lm_head.weight.
+    #
+    # TODO(tied-map): the resident path reads HF's ``all_tied_weights_keys`` (covers dict-style/MoE
+    # ties); this path could too, to close the streaming gap for offloaded 5.x models -- but that
+    # swap needs offload-specific validation (meta tensors, per-tensor order, disk round-trip) first.
     raw_tied_keys: set[str] = (
         set(getattr(model, "_tied_weights_keys", None) or [])
         if getattr(model.config, "tie_word_embeddings", False)
