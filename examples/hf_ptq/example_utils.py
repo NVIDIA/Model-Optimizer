@@ -690,13 +690,70 @@ def _force_attn_implementation(model, attn_implementation: str) -> None:
                 changed.append(f"{type(cfg).__name__}: {current} -> {attn_implementation}")
             except Exception as e:  # pragma: no cover - depends on remote config class
                 warnings.warn(f"Could not apply attn_implementation on {type(cfg).__name__}: {e}")
-        for sub in ("text_config", "vision_config", "audio_config", "decoder", "encoder"):
-            pending.append(getattr(cfg, sub, None))
+        pending.extend(
+            getattr(cfg, sub, None)
+            for sub in ("text_config", "vision_config", "audio_config", "decoder", "encoder")
+        )
 
     if changed:
         print("Re-applied the requested attention implementation after model init:")
         for line in changed:
             print(f"  {line}")
+
+
+#: Modules whose weights are read from *another* module's forward, so accelerate never
+#: materializes them. Kimi-K3's ``_apply_attn_res`` does
+#: ``norm.weight.float() * proj.weight.squeeze(0).float()`` from the decoder layer's
+#: forward, reaching into these six children (``modeling_kimi_linear.py``, three call
+#: sites). Each is one row -- ``(1, hidden)`` and ``(hidden,)`` -- so pinning all of them
+#: on a 93-layer model costs single-digit MB.
+_EXTERNALLY_READ_PARAM_SUFFIXES = (
+    "self_attention_res_proj",
+    "self_attention_res_norm",
+    "mlp_res_proj",
+    "mlp_res_norm",
+    "output_attn_res_proj",
+    "output_attn_res_norm",
+)
+
+
+def _pin_externally_read_params(
+    model, suffixes: tuple[str, ...] = _EXTERNALLY_READ_PARAM_SUFFIXES
+) -> int:
+    """Make offloaded weights that are read outside their own forward permanently resident.
+
+    accelerate materializes an offloaded weight in *that module's* pre-forward hook and
+    returns it to meta in the matching post-forward. A weight read from a sibling's forward
+    is therefore on meta at the moment it is used, which surfaces as
+    ``Tensor on device meta is not on the expected device cuda:0``.
+
+    Setting the tensor is not enough on its own: ``post_forward`` walks the module's tensors
+    and pushes every one back to meta, so the hook has to go. Detaching alone is not enough
+    either -- ``AlignDevicesHook.detach_hook`` restores each tensor to
+    ``original_devices[name]`` and *skips* meta, which is precisely what a disk-offloaded
+    param has, so it would be left on meta. Retargeting ``original_devices`` at the
+    execution device first makes detach do the materialization itself, using accelerate's
+    own code path rather than a hand-rolled copy.
+
+    Safe because these modules' ``forward`` is never called -- only their raw ``.weight`` is
+    read -- so removing the hook removes nothing that was doing work.
+
+    Returns the number of modules pinned.
+    """
+    from accelerate.hooks import remove_hook_from_module
+
+    pinned = 0
+    for name, module in model.named_modules():
+        if not name.endswith(suffixes):
+            continue
+        hook = getattr(module, "_hf_hook", None)
+        if hook is None or not getattr(hook, "offload", False):
+            continue
+        device = hook.execution_device
+        hook.original_devices = dict.fromkeys(getattr(hook, "original_devices", {}), device)
+        remove_hook_from_module(module)
+        pinned += 1
+    return pinned
 
 
 def _get_config_dtype(config):
@@ -968,6 +1025,12 @@ def get_model(
     # during __init__ (see _force_attn_implementation).
     if attn_implementation is not None:
         _force_attn_implementation(model, attn_implementation)
+
+    # Offloaded weights that a sibling's forward reads would otherwise be on meta when used.
+    if _disk_offload:
+        n_pinned = _pin_externally_read_params(model)
+        if n_pinned:
+            print(f"Pinned {n_pinned} externally-read modules so offload cannot meta them.")
 
     if has_pack_quantized_config(hf_config):
         _unpack_compressed_linear_weights(model, ckpt_path)
