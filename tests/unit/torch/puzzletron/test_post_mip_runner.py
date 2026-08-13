@@ -15,6 +15,7 @@
 
 """Tests for post-MIP execution, including managed downstream evaluation."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
