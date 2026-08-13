@@ -14,63 +14,13 @@
 # limitations under the License.
 
 import argparse
-import re
+import sys
 from pathlib import Path
 
-import numpy as np
-import onnx
-from onnxruntime.quantization.calibrate import CalibrationDataReader
-
 from modelopt.onnx.quantization import quantize
-from modelopt.onnx.utils import topologically_sort_graph_nodes
 
-
-class FileCalibrationReader(CalibrationDataReader):
-    def __init__(self, calibration_dir, onnx_path):
-        graph = onnx.load(onnx_path, load_external_data=False).graph
-        self.input_dtypes = {
-            value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
-            for value in graph.input
-        }
-        self.batch_paths = sorted(Path(calibration_dir).glob("*.npz"))
-        if not self.batch_paths:
-            raise ValueError(f"No calibration batches found in {calibration_dir}")
-        self.rewind()
-
-    def get_next(self):
-        batch_path = next(self._iterator, None)
-        return None if batch_path is None else self.load(batch_path)
-
-    def get_first(self):
-        return self.load(self.batch_paths[0])
-
-    def rewind(self):
-        self._iterator = iter(self.batch_paths)
-
-    def load(self, batch_path):
-        with np.load(batch_path) as batch:
-            missing = self.input_dtypes.keys() - batch.files
-            if missing:
-                raise ValueError(f"{batch_path} is missing inputs: {sorted(missing)}")
-            return {
-                name: batch[name].astype(dtype, copy=False)
-                for name, dtype in self.input_dtypes.items()
-            }
-
-
-def find_backbone_nodes_to_exclude(onnx_path):
-    graph = onnx.load(onnx_path, load_external_data=False).graph
-    topologically_sort_graph_nodes(graph)
-    excluded = set()
-    downstream_tensors = set()
-    for node in graph.node:
-        is_osa = "OSA4_5" in node.name
-        is_downstream = any(name in downstream_tensors for name in node.input)
-        if is_osa or is_downstream:
-            excluded.add(node.name)
-        if "lateral_convs" in node.name or (is_downstream and not is_osa):
-            downstream_tensors.update(node.output)
-    return [rf"^{re.escape(name)}$" for name in sorted(excluded)]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from quantization_utils import NpzCalibrationReader, find_vovnet_nodes_to_exclude
 
 
 def default_output(onnx_path, precision):
@@ -82,7 +32,7 @@ def quantize_model(onnx_path, calibration_dir, precision, output_path, nodes_to_
     quantize(
         onnx_path=onnx_path,
         quantize_mode=precision,
-        calibration_data_reader=FileCalibrationReader(calibration_dir, onnx_path),
+        calibration_data_reader=NpzCalibrationReader(calibration_dir, onnx_path),
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         nodes_to_exclude=list(nodes_to_exclude),
@@ -106,7 +56,7 @@ def parse_args():
 def main():
     args = parse_args()
     backbone_output = args.backbone_output or default_output(args.backbone_onnx, args.precision)
-    excluded = find_backbone_nodes_to_exclude(args.backbone_onnx)
+    excluded = find_vovnet_nodes_to_exclude(args.backbone_onnx)
     print(f"Excluding {len(excluded)} accuracy-sensitive backbone nodes")
     quantize_model(
         args.backbone_onnx,
