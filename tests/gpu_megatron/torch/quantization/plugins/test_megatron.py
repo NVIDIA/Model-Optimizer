@@ -16,9 +16,13 @@
 import copy
 import math
 import re
+import sys
+import types
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -51,6 +55,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
+from megatron.core.transformer import MegatronModule, TransformerConfig
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 
@@ -60,9 +65,12 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.plugins.megatron import (
+    _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
+    _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
+    megatron_replace_quant_module_hook,
 )
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
@@ -1784,3 +1792,113 @@ def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
             {"transformer_impl": "transformer_engine"},
         ),
     )
+
+
+def test_resolve_output_layer_untied():
+    """The tiedness signal is read off the model, not from Megatron-LM global args."""
+
+    class _Flagged(torch.nn.Module):
+        def __init__(self, shared):
+            super().__init__()
+            self.share_embeddings_and_output_weights = shared
+
+    # No signal anywhere -> unknown.
+    assert _resolve_output_layer_untied(torch.nn.Module()) is None
+
+    # The root's own flag wins over any subtree.
+    root = _Flagged(False)
+    root.inner = _Flagged(True)
+    assert _resolve_output_layer_untied(root) is True
+
+    # Otherwise fall back to a subtree scan.
+    root = torch.nn.Module()
+    root.language_model = _Flagged(True)
+    assert _resolve_output_layer_untied(root) is False
+
+    # Subtrees that do not own the language model's output_layer are skipped: the vision tower
+    # and a distillation teacher, either of which may be tied differently from the student.
+    root = torch.nn.Module()
+    root.vision_model = _Flagged(True)
+    root._teacher_model = _Flagged(True)
+    root.language_model = _Flagged(False)
+    assert _resolve_output_layer_untied(root) is True
+
+
+@pytest.mark.parametrize("mlm_untied", [True, False])
+def test_output_layer_untied_falls_back_to_megatron_lm_args(mlm_untied):
+    """With no model-derived flag, the answer comes from Megatron-LM's args."""
+
+    class _Config:
+        pass
+
+    fake_training = types.ModuleType("megatron.training")
+    fake_training.get_args = lambda: SimpleNamespace(untie_embeddings_and_output_weights=mlm_untied)
+
+    config = _Config()
+    with patch.dict(sys.modules, {"megatron.training": fake_training}):
+        assert _output_layer_untied(config) is mlm_untied
+
+    # The model-derived flag takes precedence over the args fallback.
+    config.modelopt_output_layer_untied = not mlm_untied
+    with patch.dict(sys.modules, {"megatron.training": fake_training}):
+        assert _output_layer_untied(config) is (not mlm_untied)
+
+
+def test_output_layer_untied_warns_once_when_args_unavailable():
+    """Without either signal the layer is treated as tied, and the warning is not repeated."""
+
+    class _Config:
+        pass
+
+    broken = types.ModuleType("megatron.training")  # no get_args attribute
+
+    config = _Config()
+    with (
+        patch.dict(sys.modules, {"megatron.training": broken}),
+        patch("modelopt.torch.quantization.plugins.megatron.warn_rank_0") as warn,
+    ):
+        assert _output_layer_untied(config) is False
+        assert _output_layer_untied(config) is False
+    assert warn.call_count == 1
+
+
+def test_output_layer_untied_warns_when_args_uninitialized():
+    """Megatron-LM importable but not initialized: treated as tied, warned once."""
+
+    class _Config:
+        pass
+
+    def _uninitialized():
+        raise AssertionError("args is not initialized.")
+
+    fake_training = types.ModuleType("megatron.training")
+    fake_training.get_args = _uninitialized
+
+    config = _Config()
+    with (
+        patch.dict(sys.modules, {"megatron.training": fake_training}),
+        patch("modelopt.torch.quantization.plugins.megatron.warn_rank_0") as warn,
+    ):
+        assert _output_layer_untied(config) is False
+        assert _output_layer_untied(config) is False
+    assert warn.call_count == 1
+
+
+def test_output_layer_untied_not_stamped_onto_teacher_config():
+    """A distillation teacher keeps its own tiedness; the student's answer must not leak in."""
+
+    def _config():
+        return TransformerConfig(num_layers=1, hidden_size=8, num_attention_heads=1)
+
+    class _Tiny(MegatronModule):
+        def __init__(self, config, shared):
+            super().__init__(config)
+            self.share_embeddings_and_output_weights = shared
+
+    student = _Tiny(_config(), shared=False)  # untied
+    student._teacher_model = _Tiny(_config(), shared=True)  # tied -- must not be overwritten
+
+    megatron_replace_quant_module_hook(student)
+
+    assert student.config.modelopt_output_layer_untied is True
+    assert not hasattr(student._teacher_model.config, "modelopt_output_layer_untied")

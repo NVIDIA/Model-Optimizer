@@ -259,6 +259,41 @@ def test_postprocess_state_dict(state_dict, quantization, maxbound, expected_sta
     assert processed_state_dict == expected_state_dict
 
 
+def test_postprocess_state_dict_qlora_strips_base_layer():
+    """Every QLoRA `base_layer.*` tensor needed for deployment must survive the rename.
+
+    Dropping the NVFP4 global scale or a bias yields an undeployable checkpoint.
+    """
+    state_dict = {
+        "layer1.base_layer.weight": torch.ones(4, 2, dtype=torch.uint8),
+        "layer1.base_layer.weight_scale": torch.ones(4, 1),
+        "layer1.base_layer.weight_scale_2": torch.tensor([0.5]),
+        "layer1.base_layer.input_scale": torch.tensor([0.25]),
+        "layer1.base_layer.bias": torch.arange(4.0),
+        "layer1.base_layer.input_quantizer._pre_quant_scale": torch.ones(2),
+        # Quantizer internals must still be dropped.
+        "layer1.base_layer.weight_quantizer._amax": torch.tensor([1.0]),
+        "layer1.base_layer.input_quantizer._amax": torch.tensor([1.0]),
+        "layer1.base_layer.weight_quantizer._scale": torch.ones(4, 1),
+        "layer1.base_layer.weight_quantizer._double_scale": torch.tensor([0.5]),
+    }
+
+    processed_state_dict = postprocess_state_dict(
+        state_dict, 448.0, QUANTIZATION_NONE, is_modelopt_qlora=True
+    )
+
+    assert set(processed_state_dict) == {
+        "layer1.weight",
+        "layer1.weight_scale",
+        "layer1.weight_scale_2",
+        "layer1.input_scale",
+        "layer1.bias",
+        "layer1.pre_quant_scale",
+    }
+    assert torch.equal(processed_state_dict["layer1.weight_scale_2"], torch.tensor([0.5]))
+    assert torch.equal(processed_state_dict["layer1.bias"], torch.arange(4.0))
+
+
 @pytest.mark.parametrize(
     ("config", "expected"),
     [

@@ -15,6 +15,7 @@ on:
       - "tools/mcp/**"
       - "tools/resource_monitor.py"
       - ".agents/skills/**"
+      - "plugins/modelopt/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -55,6 +56,7 @@ jobs:
             tools/mcp/**
             tools/resource_monitor.py
             .agents/skills/**
+            plugins/modelopt/skills/**
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -190,7 +192,7 @@ jobs:
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
           pip install pytest
-          python -m pytest .agents/skills/ -o addopts="" -p no:cacheprovider -v
+          python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}

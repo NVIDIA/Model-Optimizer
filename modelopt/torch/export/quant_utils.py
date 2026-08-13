@@ -966,12 +966,6 @@ _KV_CACHE_REPLACEMENTS: dict[str, str] = {
     "v_bmm_quantizer._bias_value": "v_proj.v_bias",
     "input_quantizer._pre_quant_scale": "pre_quant_scale",
 }
-_QLORA_REPLACEMENTS: dict[str, str] = {
-    **_KV_CACHE_REPLACEMENTS,
-    "base_layer.weight": "weight",
-    "base_layer.input_scale": "input_scale",
-    "base_layer.weight_scale": "weight_scale",
-}
 _BASE_SKIP_KEYS: tuple[str, ...] = (
     "output_quantizer",
     "_amax",
@@ -979,7 +973,14 @@ _BASE_SKIP_KEYS: tuple[str, ...] = (
     "input_quantizer._pre_quant_scale",
     "weight_shape",
 )
-_QLORA_SKIP_KEYS: tuple[str, ...] = (*_BASE_SKIP_KEYS, "base_layer")
+
+
+def _strip_base_layer(key: str, is_modelopt_qlora: bool) -> str:
+    """Drop the `base_layer` component PEFT inserts, which deployment does not expect.
+
+    Stripping generically means new key types (bias, scales) need no enumeration here.
+    """
+    return key.replace(".base_layer.", ".") if is_modelopt_qlora else key
 
 
 def _maybe_squeeze_scale(key: str, value: Any) -> Any:
@@ -1007,8 +1008,8 @@ def _postprocess_single_tensor(
     Tied-weight dedup is NOT performed here; callers should pre-compute alias
     keys from ``model._tied_weights_keys`` and filter them at the call site.
     """
-    replacements = _QLORA_REPLACEMENTS if is_modelopt_qlora else _KV_CACHE_REPLACEMENTS
-    skip_keys = _QLORA_SKIP_KEYS if is_modelopt_qlora else _BASE_SKIP_KEYS
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
 
     # Skip problematic VL model parameters
     if key == "vision_model.radio_model.summary_idxs":
@@ -1024,7 +1025,8 @@ def _postprocess_single_tensor(
 
     # Keys not related to quantizers: keep as-is
     if all(sk not in key for sk in skip_keys):
-        return key, _maybe_squeeze_scale(key, value)
+        new_key = _strip_base_layer(key, is_modelopt_qlora)
+        return new_key, _maybe_squeeze_scale(new_key, value)
 
     # Apply replacements if the key matches any suffix in the replacements dict
     for old_suffix, new_suffix in replacements.items():
@@ -1040,7 +1042,7 @@ def _postprocess_single_tensor(
                     logger.warning(
                         "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                     )
-            new_key = prefix + new_suffix
+            new_key = _strip_base_layer(prefix + new_suffix, is_modelopt_qlora)
             return new_key, _maybe_squeeze_scale(new_key, value)
 
     # Key has a skip_key but no replacement matched — drop it
@@ -1064,8 +1066,11 @@ def postprocess_state_dict(
     Returns:
         The filtered state_dict without unnecessary keys like '_amax' and non KV cache output quantizers.
     """
-    replacements = _QLORA_REPLACEMENTS if is_modelopt_qlora else _KV_CACHE_REPLACEMENTS
-    skip_keys = _QLORA_SKIP_KEYS if is_modelopt_qlora else _BASE_SKIP_KEYS
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
+
+    def _export_key(key: str) -> str:
+        return _strip_base_layer(key, is_modelopt_qlora)
 
     post_state_dict = {}
 
@@ -1077,7 +1082,7 @@ def postprocess_state_dict(
 
         # Skip keys not related to quantizers
         if all(skip_key not in key for skip_key in skip_keys):
-            post_state_dict[key] = value
+            post_state_dict[_export_key(key)] = value
             continue
 
         # Apply replacements if the key matches any suffix in the replacements dict
@@ -1098,7 +1103,7 @@ def postprocess_state_dict(
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
-                post_state_dict[prefix + new_suffix] = value
+                post_state_dict[_export_key(prefix + new_suffix)] = value
                 break
 
     post_state_dict = {k: _maybe_squeeze_scale(k, v) for k, v in post_state_dict.items()}
