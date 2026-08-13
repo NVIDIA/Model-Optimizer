@@ -305,10 +305,12 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
     trust_remote_code = require_boolean_policy(
         stage_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False)),
         path="aiperf.trust_remote_code",
+        default=False,
     )
     allow_aiperf_v011_online_tokenizer_resolution = require_boolean_policy(
         stage_cfg.get("allow_aiperf_v011_online_tokenizer_resolution", False),
         path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+        default=False,
     )
     from ..benchmarks import run_aiperf_sweep, write_aiperf_report
 

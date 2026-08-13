@@ -246,6 +246,44 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     assert result["metrics"] == {}
 
 
+def test_aiperf_treats_null_security_policies_as_disabled(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_aiperf_sweep(_checkpoint, **settings):
+        captured.update(settings)
+        return [SimpleNamespace(concurrency=1, metrics={}, raw_artifacts={})]
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.run_aiperf_sweep",
+        fake_run_aiperf_sweep,
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    node = SimpleNamespace(
+        node_id="serving",
+        flow_id="params",
+        config={
+            "config": {
+                "trust_remote_code": None,
+                "allow_aiperf_v011_online_tokenizer_resolution": None,
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    runner._aiperf(
+        {"puzzle_dir": str(tmp_path), "model": {"trust_remote_code": True}},
+        node,
+        source,
+        "execution",
+    )
+
+    assert captured["trust_remote_code"] is False
+    assert captured["allow_aiperf_v011_online_tokenizer_resolution"] is False
+
+
 @pytest.mark.parametrize(
     ("config", "settings", "path"),
     [

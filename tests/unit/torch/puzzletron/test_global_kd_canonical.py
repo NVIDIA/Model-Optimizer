@@ -798,6 +798,75 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
     assert not (tmp_path / "epoch_2_step_18" / "saving_completed").exists()
 
 
+def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
+    import torch
+
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
+
+    publication = {"error": None, "barriers": 0}
+
+    class BaseRecipe:
+        def save_checkpoint(
+            self,
+            epoch,
+            step,
+            train_loss,
+            val_loss,
+            best_metric_key="default",
+        ):
+            del train_loss, val_loss, best_metric_key
+            consolidated = tmp_path / f"epoch_{epoch}_step_{step}/model/consolidated"
+            consolidated.mkdir(parents=True, exist_ok=True)
+            (consolidated / "config.json").write_text(
+                json.dumps({"block_configs": [{"subblock_configs": []}]})
+            )
+            return "saved"
+
+    class Recipe(_WeightedObjectiveMixin, BaseRecipe):
+        pass
+
+    def broadcast_object_list(payload, *, src):
+        assert src == 0
+        if payload[0] is not None:
+            publication["error"] = payload[0]
+        else:
+            payload[0] = publication["error"]
+
+    def barrier():
+        publication["barriers"] += 1
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
+    monkeypatch.setattr(torch.distributed, "barrier", barrier)
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("refresh failed")),
+    )
+
+    def recipe(*, is_main):
+        instance = Recipe()
+        instance.checkpointer = type(
+            "Checkpointer",
+            (),
+            {"config": type("Config", (), {"checkpoint_dir": tmp_path})()},
+        )()
+        instance.dist_env = type("DistEnv", (), {"is_main": is_main})()
+        instance.cfg = {"model": {"trust_remote_code": False}}
+        return instance
+
+    with pytest.raises(ValueError, match="refresh failed"):
+        recipe(is_main=True).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
+    assert publication == {"error": "ValueError: refresh failed", "barriers": 1}
+    assert not (tmp_path / "epoch_2_step_19/saving_completed").exists()
+
+    with pytest.raises(
+        RuntimeError,
+        match="global KD checkpoint publication failed on rank 0: ValueError: refresh failed",
+    ):
+        recipe(is_main=False).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
+    assert publication["barriers"] == 2
+
+
 def test_global_kd_optimizer_save_uses_the_actual_pipeline_model_parts():
     import torch
 

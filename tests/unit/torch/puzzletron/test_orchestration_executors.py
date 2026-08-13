@@ -693,6 +693,28 @@ def test_legacy_aiperf_worker_keeps_security_policies_disabled_by_default(tmp_pa
     assert "--allow-aiperf-v011-online-tokenizer-resolution" not in default_attempt.command.argv
 
 
+def test_legacy_aiperf_worker_treats_null_security_policies_as_disabled(tmp_path: Path):
+    plan, node = _legacy_aiperf_plan(
+        tmp_path,
+        {
+            "model": {"trust_remote_code": None},
+            "aiperf": {"allow_aiperf_v011_online_tokenizer_resolution": None},
+        },
+    )
+    adapter = adapter_for_stage(node)
+
+    attempt = adapter.command(
+        plan=plan,
+        node=node,
+        item=adapter.plan(plan, node).items[0],
+        attempt_id="null-policy",
+        runner=plan.runner,
+    )
+
+    assert "--trust-remote-code" not in attempt.command.argv
+    assert "--allow-aiperf-v011-online-tokenizer-resolution" not in attempt.command.argv
+
+
 @pytest.mark.parametrize(
     ("experiment_config", "path"),
     [

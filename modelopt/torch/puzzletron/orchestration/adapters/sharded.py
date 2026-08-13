@@ -268,10 +268,12 @@ class ShardedStageAdapter(WorkAdapter):
             trust_remote_code = require_boolean_policy(
                 trust_remote_code_value,
                 path=trust_remote_code_path,
+                default=False,
             )
             allow_online_tokenizer_resolution = require_boolean_policy(
                 aiperf.get("allow_aiperf_v011_online_tokenizer_resolution", False),
                 path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+                default=False,
             )
             if trust_remote_code:
                 argv.append("--trust-remote-code")

@@ -527,6 +527,10 @@ def semantic_stage_config(
     configuration under ``_runtime.authored_config``. Semantic compatibility
     uses that authored view by default, while execution records may explicitly
     request the effective worker view.
+
+    For identity projection, an absent section, a ``None`` section, and an
+    empty mapping are equivalent because none contains an authored option.
+    Other falsey values remain in the projection because they can be semantic.
     """
 
     runtime = config.get("_runtime")

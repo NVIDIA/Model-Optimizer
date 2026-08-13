@@ -20,8 +20,17 @@ from typing import Any
 __all__ = ["require_boolean_policy"]
 
 
-def require_boolean_policy(value: Any, *, path: str) -> bool:
-    """Return a policy boolean without accepting truthy strings or numbers."""
+def require_boolean_policy(
+    value: Any,
+    *,
+    path: str,
+    default: bool | None = None,
+) -> bool:
+    """Return a policy boolean, resolving ``None`` only to an explicit default."""
+    if default is not None and not isinstance(default, bool):
+        raise ValueError(f"{path} default must be a boolean")
+    if value is None and default is not None:
+        return default
     if not isinstance(value, bool):
         raise ValueError(f"{path} must be a boolean")
     return value

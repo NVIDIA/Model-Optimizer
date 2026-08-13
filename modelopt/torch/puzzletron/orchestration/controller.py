@@ -24,6 +24,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from .adapters.base import ExecutionIdentityProjectionUnavailable
@@ -209,6 +210,10 @@ class CampaignController:
         self._finalization_failures: dict[str, _FinalizationFailure] = {}
         self._first_completion_observed: dict[str, float] = {}
         self._manual_waiting: ManualInputRequired | None = None
+        self._compiled_nodes: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+            {str(stage["stage_id"]): stage for stage in plan_to_dict(self.plan)["stages"]}
+        )
+        self._stage_execution_identity_cache: dict[str, str] | None = None
         defaults = dict(plan.execution_defaults or {})
         self._halt_policy = HaltPolicy(str(defaults.get("halt_policy", HaltPolicy.DRAIN.value)))
 
@@ -374,17 +379,15 @@ class CampaignController:
         node: StagePlanNode,
         work_plan: WorkPlan | None = None,
     ) -> str:
+        cache = self._stage_execution_identity_cache
+        if cache is not None and node.stage_id in cache:
+            return cache[node.stage_id]
         adapter = adapter_for_stage(node)
         work_plan = work_plan or adapter.plan(self.plan, node)
-        compiled_node = next(
-            stage
-            for stage in plan_to_dict(self.plan)["stages"]
-            if stage["stage_id"] == node.stage_id
-        )
         payload = {
             "execution_contract_hash": self.plan.contract_hash,
             "semantic_config": semantic_stage_config(self.plan.experiment_config, node.stage_id),
-            "compiled_node": compiled_node,
+            "compiled_node": self._compiled_nodes[node.stage_id],
             "root_overrides": list(self.plan.overrides),
             "work_items": [
                 {
@@ -405,7 +408,10 @@ class CampaignController:
         )
         if adapter_projection:
             payload["adapter_projection"] = dict(adapter_projection)
-        return stable_hash(payload, prefix=f"{node.stage_id}_execution")
+        identity = stable_hash(payload, prefix=f"{node.stage_id}_execution")
+        if cache is not None:
+            cache[node.stage_id] = identity
+        return identity
 
     def _bind_attempt_to_stage_execution(
         self,
@@ -427,24 +433,6 @@ class CampaignController:
         attempts: list[dict[str, Any]],
     ) -> bool:
         return self._required_completed_attempts(node, attempts) is not None
-
-    def _legacy_completed_attempts(
-        self,
-        node: StagePlanNode,
-        attempts: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        work_ids = {item.work_id for item in adapter_for_stage(node).plan(self.plan, node).items}
-        return [
-            attempt
-            for attempt in attempts
-            if attempt.get("work_id") in work_ids
-            and attempt.get("status") == JobState.COMPLETED.value
-            and attempt.get("contract_hash") == self.plan.contract_hash
-            and (
-                not isinstance(attempt.get("metadata"), Mapping)
-                or "stage_execution_identity" not in attempt["metadata"]
-            )
-        ]
 
     def _completed_work_artifact_settling_elapsed(
         self,
@@ -505,7 +493,7 @@ class CampaignController:
             # timestamp fail validation immediately because their settling age
             # cannot be established safely.
             return self._completed_work_artifact_settling_elapsed(node, attempts) is not None
-        return bool(self._legacy_completed_attempts(node, attempts))
+        return False
 
     def _stage_is_active(self, stage_id: str) -> bool:
         return any(work_id.startswith(f"{stage_id}:") for _, work_id, _ in self._active.values())
@@ -525,12 +513,7 @@ class CampaignController:
                 == stage_execution_identity
                 for attempt in record.attempts
             )
-            legacy_incompatibility = bool(record and record.attempts) and all(
-                attempt.contract_hash == self.plan.contract_hash
-                and (attempt.metadata or {}).get("stage_execution_identity_incompatible") is True
-                for attempt in record.attempts
-            )
-            if not (current_failure or legacy_incompatibility) or stage_is_complete(
+            if not current_failure or stage_is_complete(
                 self.plan.experiment_config,
                 node.stage_id,
             ):
@@ -561,60 +544,6 @@ class CampaignController:
             self._failed_stages.add(node.stage_id)
             self.logger.error(f"{node.stage_id}: recovered terminal stage validation failure")
 
-    def _fail_legacy_completed_attempts(
-        self,
-        node: StagePlanNode,
-        attempts: list[dict[str, Any]],
-    ) -> bool:
-        legacy_attempts = self._legacy_completed_attempts(node, attempts)
-        if not legacy_attempts:
-            return False
-        try:
-            stage_execution_identity = self._stage_execution_identity(node)
-        except ExecutionIdentityProjectionUnavailable:
-            return False
-        persisted_attempts = [
-            PersistedAttempt(
-                attempt_id=attempt["attempt_id"],
-                work_id=attempt["work_id"],
-                stage_id=node.stage_id,
-                status=attempt.get("status", JobState.COMPLETED.value),
-                contract_hash=attempt["contract_hash"],
-                metadata={
-                    **dict(attempt.get("metadata") or {}),
-                    "stage_execution_identity_incompatible": True,
-                },
-            )
-            for attempt in legacy_attempts
-        ]
-        reason = (
-            "completed attempt metadata predates stage execution identities; "
-            "refusing automatic resubmission"
-        )
-        self._failed_stages.add(node.stage_id)
-        self.store.write_stage_record(
-            StageRunRecord(
-                stage_id=node.stage_id,
-                status=JobState.FAILED.value,
-                attempts=persisted_attempts,
-                aggregated=False,
-            )
-        )
-        self.store.append_event(
-            "stage_execution_identity_incompatible",
-            {
-                "stage_id": node.stage_id,
-                "failure_class": FailureClass.CONFIG.value,
-                "contract_hash": self.plan.contract_hash,
-                "stage_execution_identity": stage_execution_identity,
-                "attempt_ids": [attempt.attempt_id for attempt in persisted_attempts],
-                "incompatibility": "missing_stage_execution_identity",
-                "reason": reason,
-            },
-        )
-        self.logger.error(f"{node.stage_id}: {reason}")
-        return True
-
     def _available_nodes(self) -> int | None:
         slurm = self.plan.runner.slurm
         if slurm is None or slurm.max_nodes is None:
@@ -632,6 +561,8 @@ class CampaignController:
             return False
         adapter = adapter_for_stage(node)
         adapter.prepare_execution_identity_projection(plan=self.plan, node=node)
+        if self._stage_execution_identity_cache is not None:
+            self._stage_execution_identity_cache.pop(node.stage_id, None)
         work_plan = adapter.plan(self.plan, node)
         handles: list[tuple[JobHandle, str, str]] = []
         available_nodes = self._available_nodes()
@@ -1408,6 +1339,7 @@ class CampaignController:
             self._interactive_ready = True
 
             while True:
+                self._stage_execution_identity_cache = {}
                 try:
                     if self._shutdown_requested:
                         cancelled = True
@@ -1441,8 +1373,6 @@ class CampaignController:
                                     )
                                 if self._manual_waiting is not None:
                                     break
-                            else:
-                                self._fail_legacy_completed_attempts(node, stage_attempts)
                     if self._manual_waiting is not None:
                         break
                     if self._failed_stages and self._should_fail_fast():
@@ -1512,6 +1442,7 @@ class CampaignController:
                 self.logger.shutdown(f"{signal_name} received; cancelling active jobs")
                 self.shutdown(reason="keyboard interrupt")
         finally:
+            self._stage_execution_identity_cache = None
             self._interactive_ready = False
             self.terminal_controls.stop()
             if lease is not None and self._shutdown_requested and not self._shutting_down:

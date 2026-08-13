@@ -61,6 +61,31 @@ def _compiled_node(config: Mapping[str, Any], stage_id: str) -> CompiledPostMIPN
     return node
 
 
+def _dependency_owners(node: CompiledPostMIPNode) -> set[str]:
+    owners = {
+        reference.partition(".")[0]
+        for reference in node.metric_references
+        if not reference.startswith("mip.")
+    }
+    if node.model_source not in {"latest", "origin"}:
+        owners.add(node.model_source)
+    return owners
+
+
+def _published_execution_identity(config: Mapping[str, Any], owner: str) -> str:
+    current_path = _puzzle_dir(config) / "artifacts" / "post_mip" / "nodes" / owner / "current.json"
+    try:
+        current = json.loads(current_path.read_text())
+        execution_identity = current["execution_identity"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as error:
+        raise PostMIPExecutionContractUnavailable(
+            f"post-MIP dependency {owner!r} has no published execution identity"
+        ) from error
+    if not isinstance(execution_identity, str) or not execution_identity:
+        raise ValueError(f"post-MIP dependency {owner!r} has an invalid execution identity")
+    return execution_identity
+
+
 def _input_candidate_set(
     ledger: CandidateLedger,
     config: Mapping[str, Any],
@@ -114,6 +139,11 @@ def _expected_post_mip_inputs(
 ) -> tuple[CompiledPostMIPNode, CandidateSet, CandidateLedger]:
     active_execution, active_profiles = _active_mip_contract(config)
     node = _compiled_node(config, stage_id)
+    required_nodes = _dependency_owners(node)
+    if node.input_id != "source":
+        required_nodes.add(node.input_id)
+    for owner in sorted(required_nodes):
+        _published_execution_identity(config, owner)
     ledger = CandidateLedger(_puzzle_dir(config) / "artifacts" / "post_mip")
     if not ledger.registry_path.is_file():
         raise PostMIPExecutionContractUnavailable("post-MIP candidate registry is unavailable")
@@ -141,23 +171,20 @@ def post_mip_execution_contract(
 ) -> dict[str, Any]:
     """Return the exact node, input, dependency, and source-revision contract."""
 
-    dependency_owners = {
-        reference.partition(".")[0]
-        for reference in node.metric_references
-        if not reference.startswith("mip.")
+    dependency_executions = {
+        owner: _published_execution_identity(config, owner)
+        for owner in sorted(_dependency_owners(node))
     }
-    if node.model_source not in {"latest", "origin"}:
-        dependency_owners.add(node.model_source)
-    dependency_executions = {}
-    for owner in sorted(dependency_owners):
-        current_path = (
-            _puzzle_dir(config) / "artifacts" / "post_mip" / "nodes" / owner / "current.json"
-        )
-        dependency_executions[owner] = json.loads(current_path.read_text())["execution_identity"]
-    source_revisions = {
-        revision_id: ledger.source_revision(revision_id, node.model_source).revision_id
-        for revision_id in candidate_set.revision_ids
-    }
+    source_revisions = {}
+    for revision_id in candidate_set.revision_ids:
+        try:
+            source_revisions[revision_id] = ledger.source_revision(
+                revision_id, node.model_source
+            ).revision_id
+        except (KeyError, ValueError) as error:
+            raise PostMIPExecutionContractUnavailable(
+                f"post-MIP source revision for {revision_id!r} is unavailable"
+            ) from error
     return {
         "candidate_set": candidate_set.identity,
         "node": node.config,

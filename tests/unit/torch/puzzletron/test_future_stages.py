@@ -25,10 +25,17 @@ from modelopt.torch.puzzletron.security_policy import require_boolean_policy
 from modelopt.torch.puzzletron.stages.future import aiperf_stage, evaluation_stage
 
 
-@pytest.mark.parametrize("value", ["false", 0, 1, None], ids=["string", "zero", "one", "none"])
+@pytest.mark.parametrize("value", ["false", 0, 1], ids=["string", "zero", "one"])
 def test_security_policy_rejects_non_boolean_values(value):
     with pytest.raises(ValueError, match="^policy must be a boolean$"):
         require_boolean_policy(value, path="policy")
+
+
+def test_security_policy_resolves_none_only_with_an_explicit_default():
+    assert require_boolean_policy(None, path="policy", default=False) is False
+    assert require_boolean_policy(None, path="policy", default=True) is True
+    with pytest.raises(ValueError, match="^policy must be a boolean$"):
+        require_boolean_policy(None, path="policy")
 
 
 @pytest.mark.parametrize(
@@ -57,6 +64,24 @@ def test_aiperf_stage_rejects_non_boolean_security_policy(config, path):
     with pytest.raises(ValueError) as error:
         aiperf_stage(config, object())
     assert str(error.value) == f"{path} must be a boolean"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"aiperf": {"enabled": True, "trust_remote_code": None}},
+        {"aiperf": {"enabled": True}, "model": {"trust_remote_code": None}},
+        {
+            "aiperf": {
+                "enabled": True,
+                "allow_aiperf_v011_online_tokenizer_resolution": None,
+            }
+        },
+    ],
+)
+def test_aiperf_stage_treats_null_security_policy_as_disabled(config):
+    with pytest.raises(ValueError, match="^AIPerf requires experiment.dir$"):
+        aiperf_stage(config, object())
 
 
 @pytest.mark.parametrize(

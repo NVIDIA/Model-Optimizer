@@ -370,6 +370,55 @@ def test_post_mip_identity_tracks_dependency_execution_and_source_mapping(tmp_pa
     )
 
 
+def test_torn_dependency_current_defers_execution_contract(tmp_path: Path):
+    config, _ledger, _roots = _identity_fixture(tmp_path)
+    current_path = Path(config["puzzle_dir"]) / "artifacts/post_mip/nodes/materialize/current.json"
+    current_path.write_text("{")
+
+    with pytest.raises(
+        PostMIPExecutionContractUnavailable,
+        match="dependency 'materialize' has no published execution identity",
+    ):
+        expected_post_mip_execution_contract(config, "post.params.final")
+
+
+def test_dependency_current_without_execution_identity_defers_contract(tmp_path: Path):
+    config, _ledger, _roots = _identity_fixture(tmp_path)
+    current_path = Path(config["puzzle_dir"]) / "artifacts/post_mip/nodes/materialize/current.json"
+    current_path.write_text("{}")
+
+    with pytest.raises(
+        PostMIPExecutionContractUnavailable,
+        match="dependency 'materialize' has no published execution identity",
+    ):
+        expected_post_mip_execution_contract(config, "post.params.final")
+
+
+def test_invalid_dependency_execution_identity_fails_closed(tmp_path: Path):
+    config, _ledger, _roots = _identity_fixture(tmp_path)
+    current_path = Path(config["puzzle_dir"]) / "artifacts/post_mip/nodes/materialize/current.json"
+    current_path.write_text('{"execution_identity": null}\n')
+
+    with pytest.raises(ValueError, match="invalid execution identity"):
+        expected_post_mip_execution_contract(config, "post.params.final")
+
+
+def test_incomplete_source_mapping_defers_execution_contract(tmp_path: Path):
+    config, _ledger, _roots = _identity_fixture(tmp_path)
+    observations_path = (
+        Path(config["puzzle_dir"])
+        / "artifacts/post_mip/nodes/materialize/executions/materialize-a/observations.json"
+    )
+    observations = json.loads(observations_path.read_text())
+    observations_path.write_text(json.dumps(observations[1:]) + "\n")
+
+    with pytest.raises(
+        PostMIPExecutionContractUnavailable,
+        match="post-MIP source revision .* is unavailable",
+    ):
+        expected_post_mip_execution_contract(config, "post.params.final")
+
+
 def _assert_changed_identity_resubmits(config: dict, changed_config: dict, mutate=None) -> None:
     plan_a, node_a = _plan(config, "post.params.select")
     controller_a = CampaignController(plan_a, executor=object())

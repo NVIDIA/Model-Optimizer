@@ -176,16 +176,28 @@ def _resolve(value: Any, config: Mapping[str, Any]) -> Any:
 
 
 def _apply_override(config: dict[str, Any], override: str) -> None:
+    if override.startswith("~"):
+        raise ValueError(f"Deletion overrides are not supported: {override!r}")
     key, separator, raw_value = override.partition("=")
     if not separator:
         raise ValueError(f"Override must have KEY=VALUE form: {override!r}")
-    keys = key.lstrip("+").split(".")
+    addition_only = False
+    if key.startswith("++"):
+        key = key[2:]
+    elif key.startswith("+"):
+        key = key[1:]
+        addition_only = True
+    if not key or key.startswith(("+", "~")):
+        raise ValueError(f"Unsupported Hydra override form: {override!r}")
+    keys = key.split(".")
     target = config
     for part in keys[:-1]:
         child = target.setdefault(part, {})
         if not isinstance(child, dict):
             raise ValueError(f"Override path crosses a scalar: {override!r}")
         target = child
+    if addition_only and keys[-1] in target:
+        raise ValueError(f"Addition override already exists: {override!r}")
     target[keys[-1]] = _load_yaml(raw_value)
 
 

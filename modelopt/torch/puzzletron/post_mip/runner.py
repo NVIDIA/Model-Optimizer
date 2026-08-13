@@ -452,10 +452,12 @@ def _aiperf(
             (config.get("model") or {}).get("trust_remote_code", False),
         ),
         path="post_mip.aiperf.config.trust_remote_code",
+        default=False,
     )
     allow_online_tokenizer_resolution = require_boolean_policy(
         settings.pop("allow_aiperf_v011_online_tokenizer_resolution", False),
         path="post_mip.aiperf.config.allow_aiperf_v011_online_tokenizer_resolution",
+        default=False,
     )
     gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not gpu_ids:

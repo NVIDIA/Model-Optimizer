@@ -25,6 +25,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 import yaml
 
 from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
@@ -253,6 +254,55 @@ quoted: \"1e-4\"
             config["threshold"],
         )
     )
+
+
+@pytest.mark.parametrize("override", ["~value", "~value=1"])
+def test_load_experiment_config_rejects_deletion_overrides(
+    tmp_path: Path,
+    override: str,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("value: 1\n")
+
+    with pytest.raises(ValueError, match="^Deletion overrides are not supported"):
+        load_experiment_config(experiment, overrides=[override])
+
+
+@pytest.mark.parametrize("prefix", ["+", "++"])
+def test_load_experiment_config_accepts_supported_addition_overrides(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("value: 1\n")
+
+    config = load_experiment_config(experiment, overrides=[f"{prefix}added.value=2"])
+
+    assert config["added"] == {"value": 2}
+
+
+def test_load_experiment_config_distinguishes_add_from_add_or_replace(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("value: 1\n")
+
+    with pytest.raises(ValueError, match="^Addition override already exists"):
+        load_experiment_config(experiment, overrides=["+value=2"])
+
+    config = load_experiment_config(experiment, overrides=["++value=2"])
+
+    assert config["value"] == 2
+
+
+def test_load_experiment_config_rejects_unsupported_override_prefix(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("value: 1\n")
+
+    with pytest.raises(ValueError, match="^Unsupported Hydra override form"):
+        load_experiment_config(experiment, overrides=["+++added.value=2"])
 
 
 def test_convert_completeness_requires_runtime_subblock_library(

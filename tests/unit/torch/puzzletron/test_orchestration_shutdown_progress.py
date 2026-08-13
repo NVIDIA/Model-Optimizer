@@ -510,7 +510,9 @@ def test_controller_current_contract_completion_satisfies_work_plan(tmp_path: Pa
     assert not controller._submit_stage(plan.stages[0])
 
 
-def test_controller_fails_closed_for_legacy_completed_attempt(tmp_path: Path):
+def test_controller_resubmits_legacy_completed_attempt_without_execution_identity(
+    tmp_path: Path,
+):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
@@ -531,30 +533,172 @@ def test_controller_fails_closed_for_legacy_completed_attempt(tmp_path: Path):
     executor = _TrackingFakeExecutor()
     controller = CampaignController(plan, executor=executor)
     controller.store.save_attempt(attempt, None, JobState.COMPLETED.value)
+    controller.store.write_stage_record(
+        StageRunRecord(
+            stage_id="convert",
+            status=JobState.FAILED.value,
+            attempts=[
+                PersistedAttempt(
+                    attempt_id=attempt.attempt_id,
+                    work_id=attempt.work_id,
+                    stage_id=node.stage_id,
+                    status=JobState.COMPLETED.value,
+                    contract_hash=plan.contract_hash,
+                    metadata={"stage_execution_identity_incompatible": True},
+                )
+            ],
+        )
+    )
 
     result = controller.run(once=True)
 
-    assert result["halted"] is True
-    assert result["failed_stages"] == ["convert"]
-    assert executor.submitted_stage_ids == []
-    events = list(controller.store.events_root.glob("*_stage_execution_identity_incompatible.json"))
-    assert len(events) == 1
-    event = json.loads(events[0].read_text())
-    assert event["payload"]["failure_class"] == "config"
-    assert event["payload"]["incompatibility"] == "missing_stage_execution_identity"
-    assert event["payload"]["attempt_ids"] == ["legacy-completed-attempt"]
-
-    recovered_executor = _TrackingFakeExecutor()
-    recovered = CampaignController(plan, executor=recovered_executor)
-    recovered_result = recovered.run(once=True)
-
-    assert recovered_result["halted"] is True
-    assert recovered_result["failed_stages"] == ["convert"]
-    assert recovered_executor.submitted_stage_ids == []
-    assert (
-        len(list(controller.store.events_root.glob("*_stage_execution_identity_incompatible.json")))
-        == 1
+    assert result["halted"] is False
+    assert result["failed_stages"] == []
+    assert executor.submitted_stage_ids == ["convert"]
+    attempts = controller.store.list_attempts("convert")
+    assert len(attempts) == 2
+    attempts_by_id = {attempt["attempt_id"]: attempt for attempt in attempts}
+    legacy = attempts_by_id.pop("legacy-completed-attempt")
+    assert "stage_execution_identity" not in legacy["metadata"]
+    submitted = next(iter(attempts_by_id.values()))
+    assert submitted["metadata"]["stage_execution_identity"] == (
+        controller._stage_execution_identity(node)
     )
+    assert not list(
+        controller.store.events_root.glob("*_stage_execution_identity_incompatible.json")
+    )
+
+
+def test_stage_execution_identity_uses_frozen_plan_and_iteration_scoped_projection(
+    tmp_path: Path, monkeypatch
+):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+    projection = {"revision": "first"}
+    projection_calls = []
+
+    class _ProjectionAdapter:
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def execution_identity_projection(self, *, plan, node, work_plan):
+            del plan, node, work_plan
+            projection_calls.append(projection["revision"])
+            return dict(projection)
+
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.adapter_for_stage",
+        lambda _node: _ProjectionAdapter(),
+    )
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.plan_to_dict",
+        lambda _plan: pytest.fail("compiled plan must not be rebuilt while polling"),
+    )
+
+    controller._stage_execution_identity_cache = {}
+    first = controller._stage_execution_identity(node)
+    assert controller._stage_execution_identity(node) == first
+    projection["revision"] = "second"
+    assert controller._stage_execution_identity(node) == first
+    assert projection_calls == ["first"]
+
+    controller._stage_execution_identity_cache = {}
+    second = controller._stage_execution_identity(node)
+    assert second != first
+    assert projection_calls == ["first", "second"]
+
+
+def test_stage_execution_identity_refreshes_after_projection_preparation(
+    tmp_path: Path, monkeypatch
+):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor)
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+    projection = {"revision": "before-prepare"}
+
+    class _PreparingProjectionAdapter:
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def prepare_execution_identity_projection(self, *, plan, node):
+            del plan, node
+            projection["revision"] = "after-prepare"
+
+        def execution_identity_projection(self, *, plan, node, work_plan):
+            del plan, node, work_plan
+            return dict(projection)
+
+    adapter = _PreparingProjectionAdapter()
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.adapter_for_stage", lambda _node: adapter
+    )
+
+    controller._stage_execution_identity_cache = {}
+    before_prepare = controller._stage_execution_identity(node)
+
+    assert controller._submit_stage(node)
+    submitted_attempt = next(iter(executor._attempts.values()))
+    assert submitted_attempt.metadata["stage_execution_identity"] != before_prepare
+    assert submitted_attempt.metadata["stage_execution_identity"] == (
+        controller._stage_execution_identity(node)
+    )
+
+
+def test_controller_scopes_stage_execution_identity_cache_to_each_poll(tmp_path: Path, monkeypatch):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="convert",
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+    projection_calls = []
+
+    class _ProjectionAdapter:
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def execution_identity_projection(self, *, plan, node, work_plan):
+            del plan, node, work_plan
+            projection_calls.append("projected")
+            return {"revision": len(projection_calls)}
+
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.adapter_for_stage",
+        lambda _node: _ProjectionAdapter(),
+    )
+
+    def observe_identity_twice(_node):
+        first = controller._stage_execution_identity(node)
+        assert controller._stage_execution_identity(node) == first
+        return True
+
+    monkeypatch.setattr(controller, "_stage_has_active_or_completed_work", observe_identity_twice)
+    monkeypatch.setattr(controller, "_interruptible_sleep", lambda _seconds: None)
+
+    controller.run(max_iterations=2)
+
+    assert projection_calls == ["projected", "projected"]
+    assert controller._stage_execution_identity_cache is None
 
 
 def test_controller_resubmits_completed_work_when_stage_semantics_change(
