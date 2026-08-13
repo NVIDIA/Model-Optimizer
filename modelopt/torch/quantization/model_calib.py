@@ -34,6 +34,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _read_manifest,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
@@ -2114,8 +2115,16 @@ def layerwise_calibrate(
         save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
-    if exporter is not None and start_layer > 0:
-        exporter.assert_shards_present(start_layer)
+    if exporter is not None:
+        if start_layer > 0:
+            exporter.assert_shards_present(start_layer)
+        else:
+            # Shards but no manifest means the resume record was lost (a checkpoint_dir on
+            # ephemeral storage is the usual cause). Calibration would restart at layer 0
+            # and overwrite finished shards without a word; refuse instead.
+            exporter.assert_no_orphan_shards(
+                start_layer, manifest_present=_read_manifest(checkpoint_dir) is not None
+            )
 
     layer_pbar = tqdm(
         total=num_layers,

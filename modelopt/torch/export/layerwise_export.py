@@ -656,6 +656,49 @@ class LayerwiseExporter:
             if mapped not in self._tied_alias_keys:
                 tail.setdefault(mapped, tensor.detach().contiguous().cpu())
 
+    def completed_layers(self) -> int:
+        """How many leading layers already have a shard on disk.
+
+        Counts a *contiguous* run from layer 0: a gap means the layers after it were never
+        finished (or were removed), and resuming past a gap would leave the checkpoint
+        permanently missing them.
+        """
+        n = 0
+        while (self._export_dir / layer_shard_name(n)).exists():
+            n += 1
+        return n
+
+    def assert_no_orphan_shards(self, start_layer: int, manifest_present: bool) -> None:
+        """Refuse to silently redo work when shards exist but the resume record does not.
+
+        The shards cannot themselves say where to resume: restarting at layer K needs the
+        cached activations feeding it (``next_inputs``) plus ``output_meta`` for every
+        skipped layer, and neither is reconstructible from quantized weights. So the resume
+        *point* necessarily comes from the checkpoint manifest.
+
+        That makes one state actively dangerous: shards on disk, no manifest. ``start_layer``
+        is then 0, ``assert_shards_present(0)`` checks an empty range and passes, and
+        calibration silently recalculates and overwrites every finished layer. On a
+        multi-hour model that is a whole session lost with nothing in the log to show for it.
+
+        Fail instead, and say what the two recoveries are. A manifest that merely lags the
+        shards is *not* an error -- that is an ordinary partial or rewound run, and those
+        layers are correctly re-exported.
+        """
+        if manifest_present or start_layer > 0:
+            return
+        done = self.completed_layers()
+        if not done:
+            return
+        raise RuntimeError(
+            f"{self._export_dir} already holds shards for layers 0..{done - 1}, but the "
+            "layerwise checkpoint directory has no manifest, so calibration would restart "
+            "at layer 0 and overwrite them. The manifest records the resume point and the "
+            "cached activations to resume with; the shards alone cannot supply either. "
+            "Either restore the checkpoint directory that produced these shards, or delete "
+            f"{self._export_dir} to re-export from scratch."
+        )
+
     def assert_shards_present(self, upto: int) -> None:
         """Require shards for layers ``[0, upto)``, which a resume intends to skip.
 

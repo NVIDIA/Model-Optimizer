@@ -324,3 +324,44 @@ def test_vlm_layerwise_export_matches_whole_model_export(tmp_path):
     config = json.loads((export_dir / "config.json").read_text())
     assert "vision_config" in config, "config.json describes the submodel, not the VLM"
     assert config.get("quantization_config") is not None, "quantization metadata was lost"
+
+
+def test_orphan_shards_without_manifest_fail_fast(tmp_path):
+    """Shards with no manifest must fail, not silently recalculate over them.
+
+    The shards cannot supply a resume point on their own: restarting at layer K needs the
+    cached activations feeding it plus output_meta for every skipped layer, and neither
+    survives in quantized weights. So a lost checkpoint directory leaves start_layer at 0,
+    assert_shards_present(0) checks an empty range, and calibration would overwrite every
+    finished layer without a word -- hours of work on a large model.
+    """
+    export_dir = tmp_path / "fused"
+    checkpoint_dir = tmp_path / "ckpt"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+    assert list(export_dir.glob("model-layer-*.safetensors")), "setup produced no shards"
+
+    # Simulate the checkpoint directory living on storage that did not survive the session.
+    shutil.rmtree(checkpoint_dir)
+
+    with pytest.raises(RuntimeError, match="no manifest"):
+        mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+
+def test_manifest_behind_shards_is_not_an_error(tmp_path, baseline_checkpoint):
+    """A manifest that lags the shards is an ordinary partial run, not the orphan case.
+
+    Guards the guard: rewinding the manifest leaves shards *ahead* of the resume point, and
+    those layers are correctly recalibrated and re-exported. Only a wholly absent manifest
+    is dangerous.
+    """
+    export_dir = tmp_path / "fused"
+    checkpoint_dir = tmp_path / "ckpt"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+    manifest_path = checkpoint_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["last_completed_layer"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+    _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(export_dir))
