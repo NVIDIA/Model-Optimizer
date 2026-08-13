@@ -7,10 +7,12 @@
 # prepare the repository's other large splits.
 #
 # PTQ topology: 1 B200 node x 4 GPUs, TP=1, PP=1, CP=1, EP=4, ETP=1.
-# QAD topology: 2 B200 nodes x 4 GPUs, TP=2, PP=1, CP=1, EP=4, ETP=1.
+# QAD topology: 4 B200 nodes x 4 GPUs, TP=1, PP=1, CP=4, EP=4, ETP=1.
+# TP must match the TP=1 static-NVFP4 PTQ checkpoint. CP=4 bounds each rank to
+# 8K tokens so the original, unchunked full-vocabulary KL loss fits at 32K.
 # With micro-batch-size=1 and global-batch-size=16, train-samples=6400 produces
 # 400 iterations. To use another sequence length, change both --seq-length and
-# --max-position-embeddings. Our final QAD run used a sequence length of 524,288.
+# --max-position-embeddings.
 #
 # Requirements:
 #   - The BF16 model is mounted at /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16.
@@ -113,8 +115,8 @@ pipeline:
       - MLM_TRAIN_SCRIPT: finetune
       - DATASET: nvidia/Nemotron-Post-Training-Dataset-v2
       - DP: "1"
-      - CP: "1"
-      - TP: "2"
+      - CP: "4"
+      - TP: "1"
       - PP: "1"
       - EP: "4"
       - ETP: "1"
@@ -122,7 +124,7 @@ pipeline:
       _factory_: "slurm_factory"
       container: nvcr.io/nvidia/nemo:26.06.00
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
-      nodes: 2
+      nodes: 4
       ntasks_per_node: 4
       gpus_per_node: 4
 
