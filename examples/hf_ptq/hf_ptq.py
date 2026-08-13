@@ -76,6 +76,7 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
+from modelopt.torch.export.layerwise_export import EXPORT_PARENT_ATTR
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -797,6 +798,16 @@ def mono_quantize(
                     else None,
                 )
 
+        # Per-layer export writes the checkpoint during calibration, from the model handed
+        # to mtq. For a VLM that is the extracted language model, so point the exporter at
+        # the full model: it prefixes tensor keys into the VLM namespace, writes the VLM
+        # config, and exports the towers calibration never touched.
+        if args.layerwise_export and language_model is not full_model:
+            # Straight into __dict__: nn.Module.__setattr__ would register the parent as a
+            # *submodule* of its own child, and that cycle makes named_modules() recurse
+            # forever. Plain attribute lookup still finds it.
+            language_model.__dict__[EXPORT_PARENT_ATTR] = full_model
+
         if calibration_only:
             language_model = mtq.calibrate(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
@@ -823,12 +834,20 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
     calibration begins, the user has already paid for the whole run.
     """
     if is_multimodal_model(full_model):
-        raise NotImplementedError(
-            "layerwise.export_dir does not support multimodal models: calibration runs on the "
-            "extracted language model, so the shards and config.json would describe that "
-            "submodel rather than the full VLM, and the VLM export path would then "
-            "overwrite config.json with the unquantized source config."
-        )
+        # Calibration runs on the extracted language model, so the exporter has to be told
+        # which model the checkpoint describes; it then prefixes tensor keys, writes the
+        # full VLM config and picks up the untouched towers. That only works if the
+        # submodel is actually reachable from the full model -- otherwise the prefix is
+        # undefined and the shards would silently describe the submodel.
+        language_model = get_language_model_from_vl(full_model)
+        language_model = language_model[-1] if language_model else None
+        if language_model is None or all(m is not language_model for m in full_model.modules()):
+            raise NotImplementedError(
+                "layerwise.export_dir does not support this multimodal model: its language "
+                "model could not be located inside the full model, so exported tensor names "
+                "cannot be resolved against the VLM namespace. Export without "
+                "layerwise.export_dir."
+            )
 
     if mtp_layer_prefixes:
         raise NotImplementedError(
@@ -900,14 +919,18 @@ def export_quantized(
 
         if is_vlm:
             # Save original model config and the processor config to the export path for VLMs.
-            print(f"Saving original model config to {export_path}")
+            # Skipped under per-layer export: calibration already wrote a config carrying the
+            # quantization_config, and the source config is unquantized, so writing it here
+            # would silently strip the quantization metadata off a finished checkpoint.
+            if not args.layerwise_export:
+                print(f"Saving original model config to {export_path}")
 
-            config_kwargs = {"trust_remote_code": args.trust_remote_code}
-            if args.attn_implementation is not None:
-                config_kwargs["attn_implementation"] = args.attn_implementation
-            AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(
-                export_path
-            )
+                config_kwargs = {"trust_remote_code": args.trust_remote_code}
+                if args.attn_implementation is not None:
+                    config_kwargs["attn_implementation"] = args.attn_implementation
+                AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(
+                    export_path
+                )
 
             # Try to save processor config if available
             try:
