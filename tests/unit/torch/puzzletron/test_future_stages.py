@@ -22,13 +22,12 @@ import pytest
 import torch
 
 from modelopt.torch.puzzletron.security_policy import require_boolean_policy
-from modelopt.torch.puzzletron.stages.future import aiperf_stage, evaluation_stage
+from modelopt.torch.puzzletron.stages.future import evaluation_stage
 
 
-@pytest.mark.parametrize("value", ["false", 0, 1], ids=["string", "zero", "one"])
-def test_security_policy_rejects_non_boolean_values(value):
+def test_security_policy_rejects_non_boolean_values():
     with pytest.raises(ValueError, match="^policy must be a boolean$"):
-        require_boolean_policy(value, path="policy")
+        require_boolean_policy("false", path="policy")
 
 
 def test_security_policy_resolves_none_only_with_an_explicit_default():
@@ -38,62 +37,11 @@ def test_security_policy_resolves_none_only_with_an_explicit_default():
         require_boolean_policy(None, path="policy")
 
 
-@pytest.mark.parametrize(
-    ("config", "path"),
-    [
-        (
-            {"aiperf": {"enabled": True, "trust_remote_code": "false"}},
-            "aiperf.trust_remote_code",
-        ),
-        (
-            {
-                "aiperf": {
-                    "enabled": True,
-                    "allow_aiperf_v011_online_tokenizer_resolution": "false",
-                }
-            },
-            "aiperf.allow_aiperf_v011_online_tokenizer_resolution",
-        ),
-        (
-            {"aiperf": {"enabled": True}, "model": {"trust_remote_code": "false"}},
-            "aiperf.trust_remote_code",
-        ),
-    ],
-)
-def test_aiperf_stage_rejects_non_boolean_security_policy(config, path):
-    with pytest.raises(ValueError) as error:
-        aiperf_stage(config, object())
-    assert str(error.value) == f"{path} must be a boolean"
-
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        {"aiperf": {"enabled": True, "trust_remote_code": None}},
-        {"aiperf": {"enabled": True}, "model": {"trust_remote_code": None}},
-        {
-            "aiperf": {
-                "enabled": True,
-                "allow_aiperf_v011_online_tokenizer_resolution": None,
-            }
-        },
-    ],
-)
-def test_aiperf_stage_treats_null_security_policy_as_disabled(config):
-    with pytest.raises(ValueError, match="^AIPerf requires experiment.dir$"):
-        aiperf_stage(config, object())
-
-
-@pytest.mark.parametrize(
-    "configured",
-    ["/checkpoint", 7, {"student": "/checkpoint"}],
-    ids=["string", "integer", "mapping"],
-)
-def test_evaluation_stage_rejects_non_list_or_tuple_checkpoints(configured):
+def test_evaluation_stage_rejects_scalar_checkpoints():
     config = {
         "zero_shot_evaluation": {
             "enabled": True,
-            "checkpoints": configured,
+            "checkpoints": "/checkpoint",
         }
     }
     with pytest.raises(

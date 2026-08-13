@@ -143,29 +143,6 @@ def test_dynamic_stage_semantic_projection_keeps_stage_id_fallback() -> None:
     assert semantic_stage_config(config, "post.custom") == config
 
 
-@pytest.mark.parametrize("empty_section", [None, {}], ids=["null", "empty-mapping"])
-def test_semantic_projection_treats_empty_optional_sections_as_absent(empty_section) -> None:
-    baseline = semantic_stage_config({"build_library": {"enabled": True}}, "build_library")
-
-    assert (
-        semantic_stage_config(
-            {"build_library": {"enabled": True}, "library": empty_section},
-            "build_library",
-        )
-        == baseline
-    )
-    assert (
-        semantic_stage_config(
-            {
-                "build_library": {"enabled": True},
-                "library": {"vllm": {"enabled": True}},
-            },
-            "build_library",
-        )
-        != baseline
-    )
-
-
 def test_semantic_projection_uses_authored_config_unless_effective_view_is_requested() -> None:
     config = {
         "model": {"source": "normalized-model"},

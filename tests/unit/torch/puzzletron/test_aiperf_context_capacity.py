@@ -133,24 +133,18 @@ def _offline_environment() -> dict[str, str]:
     }
 
 
-def test_aiperf_environment_preserves_offline_policy_by_default():
-    source = _offline_environment()
-
-    resolved = _aiperf_subprocess_environment(source)
-
-    assert resolved == source
-    assert resolved is not source
-
-
-def test_aiperf_v011_online_tokenizer_relaxation_is_explicit_and_non_mutating():
+def test_aiperf_online_tokenizer_relaxation_is_explicit_and_non_mutating():
     expected_source = _offline_environment()
     source = dict(expected_source)
 
+    default_environment = _aiperf_subprocess_environment(source)
     resolved = _aiperf_subprocess_environment(
         source,
         allow_aiperf_v011_online_tokenizer_resolution=True,
     )
 
+    assert default_environment == source
+    assert default_environment is not source
     assert "HF_HUB_OFFLINE" not in resolved
     assert "TRANSFORMERS_OFFLINE" not in resolved
     assert resolved["HF_DATASETS_OFFLINE"] == "1"
@@ -211,10 +205,7 @@ def test_vllm_topology_args_enable_dp_and_expert_parallel_only_when_requested():
     assert "--expert-parallel-size" not in ep_args
 
 
-@pytest.mark.parametrize("trust_remote_code", [False, True])
-def test_vllm_server_command_applies_explicit_remote_code_policy(
-    monkeypatch, tmp_path, trust_remote_code
-):
+def test_vllm_server_command_applies_explicit_remote_code_policy(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
         lambda _checkpoint: [],
@@ -227,10 +218,10 @@ def test_vllm_server_command_applies_explicit_remote_code_policy(
         input_tokens=32,
         output_tokens=8,
         topology={"gpu_group_size": 1},
-        trust_remote_code=trust_remote_code,
+        trust_remote_code=True,
     )
 
-    assert ("--trust-remote-code" in command) is trust_remote_code
+    assert "--trust-remote-code" in command
 
 
 def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):

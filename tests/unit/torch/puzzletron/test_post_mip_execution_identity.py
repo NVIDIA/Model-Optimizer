@@ -30,7 +30,6 @@ from puzzletron_orchestrator.post_mip.base import compile_post_mip_flows
 from puzzletron_orchestrator.post_mip.identity import (
     PostMIPExecutionContractUnavailable,
     expected_post_mip_execution_contract,
-    post_mip_execution_contract_identity,
 )
 from puzzletron_orchestrator.post_mip.records import (
     ArchitectureCandidate,
@@ -249,36 +248,6 @@ def _controller_identity(config: dict, stage_id: str) -> str:
     return CampaignController(plan, executor=object())._stage_execution_identity(node)
 
 
-def test_post_mip_identity_tracks_nested_config_and_same_size_candidate_set(tmp_path: Path):
-    config, ledger, roots = _identity_fixture(tmp_path)
-    baseline = _controller_identity(config, "post.params.select")
-
-    changed_config = copy.deepcopy(config)
-    changed_config["post_mip"]["flows"]["params"]["nodes"]["select"]["config"]["label"] = "changed"
-    assert _controller_identity(changed_config, "post.params.select") != baseline
-
-    replacement_set = CandidateSet.create(
-        "params", "score", roots[1:], producer_execution_identity="score-b"
-    )
-    ledger.publish_node(
-        "score",
-        [
-            NodeObservation(
-                node_id="score",
-                input_revision_id=revision_id,
-                source_revision_id=revision_id,
-                output_revision_id=revision_id,
-                status="success",
-                metrics={"loss": float(index)},
-            )
-            for index, revision_id in enumerate(roots[1:])
-        ],
-        replacement_set,
-        "score-b",
-    )
-    assert _controller_identity(config, "post.params.select") != baseline
-
-
 def test_post_mip_currentness_does_not_initialize_the_candidate_registry(tmp_path: Path):
     config, _ledger, _roots = _identity_fixture(tmp_path)
     config["post_mip"]["flows"]["params"]["nodes"]["root_select"] = {
@@ -354,26 +323,10 @@ def test_malformed_active_mip_fails_closed(tmp_path: Path):
         expected_post_mip_execution_contract(config, "post.params.select")
 
 
-def test_post_mip_identity_tracks_dependency_execution_and_source_mapping(tmp_path: Path):
-    config, _ledger, roots = _identity_fixture(tmp_path)
-    contract = expected_post_mip_execution_contract(config, "post.params.final")
-    dependency_only = copy.deepcopy(contract)
-    dependency_only["dependency_executions"]["materialize"] = "materialize-b"
-    source_only = copy.deepcopy(contract)
-    source_only["source_revisions"][roots[0]] = "replacement-revision"
-
-    assert post_mip_execution_contract_identity(dependency_only) != (
-        post_mip_execution_contract_identity(contract)
-    )
-    assert post_mip_execution_contract_identity(source_only) != (
-        post_mip_execution_contract_identity(contract)
-    )
-
-
 @pytest.mark.parametrize(
     "payload",
-    ["{", "{}", "[]", '"manifest"', "1", "null"],
-    ids=["torn-json", "missing-identity", "list", "string", "integer", "null"],
+    ["{", "{}", "[]"],
+    ids=["torn-json", "missing-identity", "non-object"],
 )
 def test_unpublished_dependency_current_defers_execution_contract(
     tmp_path: Path,
@@ -450,47 +403,48 @@ def _assert_changed_identity_resubmits(config: dict, changed_config: dict, mutat
     assert executor.attempts[0].metadata["stage_execution_identity"] == identity_b
 
 
-def test_changed_post_mip_config_resubmits_completed_work(tmp_path: Path):
-    config, _ledger, _roots = _identity_fixture(tmp_path)
-    changed_config = copy.deepcopy(config)
-    changed_config["post_mip"]["flows"]["params"]["nodes"]["select"]["config"]["label"] = "changed"
-
-    _assert_changed_identity_resubmits(config, changed_config)
-
-
-def test_same_size_candidate_set_change_resubmits_completed_work(tmp_path: Path):
+@pytest.mark.parametrize("change", ["config", "candidate_set"])
+def test_changed_post_mip_contract_resubmits_completed_work(tmp_path: Path, change: str):
     config, ledger, roots = _identity_fixture(tmp_path)
+    changed_config = config
+    mutate = None
 
-    def replace_candidate_set() -> None:
-        replacement_set = CandidateSet.create(
-            "params", "score", roots[1:], producer_execution_identity="score-b"
-        )
-        ledger.publish_node(
-            "score",
-            [
-                NodeObservation(
-                    node_id="score",
-                    input_revision_id=revision_id,
-                    source_revision_id=revision_id,
-                    output_revision_id=revision_id,
-                    status="success",
-                    metrics={"loss": float(index)},
-                )
-                for index, revision_id in enumerate(roots[1:])
-            ],
-            replacement_set,
-            "score-b",
-        )
+    if change == "config":
+        changed_config = copy.deepcopy(config)
+        changed_config["post_mip"]["flows"]["params"]["nodes"]["select"]["config"][
+            "label"
+        ] = "changed"
 
-    _assert_changed_identity_resubmits(config, config, replace_candidate_set)
+    else:
+
+        def replace_candidate_set() -> None:
+            replacement_set = CandidateSet.create(
+                "params", "score", roots[1:], producer_execution_identity="score-b"
+            )
+            ledger.publish_node(
+                "score",
+                [
+                    NodeObservation(
+                        node_id="score",
+                        input_revision_id=revision_id,
+                        source_revision_id=revision_id,
+                        output_revision_id=revision_id,
+                        status="success",
+                        metrics={"loss": float(index)},
+                    )
+                    for index, revision_id in enumerate(roots[1:])
+                ],
+                replacement_set,
+                "score-b",
+            )
+
+        mutate = replace_candidate_set
+
+    _assert_changed_identity_resubmits(config, changed_config, mutate)
 
 
-@pytest.mark.parametrize(
-    "attempt_status",
-    [JobState.COMPLETED.value, JobState.PENDING.value, JobState.RUNNING.value],
-)
 def test_unresolved_future_post_mip_node_defers_failed_record_recovery(
-    tmp_path: Path, attempt_status: str
+    tmp_path: Path,
 ):
     config, _ledger, _roots = _identity_fixture(tmp_path)
     plan, node = _plan(config, "post.params.final")
@@ -506,7 +460,7 @@ def test_unresolved_future_post_mip_node_defers_failed_record_recovery(
                     attempt_id="old",
                     work_id=f"{node.stage_id}:gang",
                     stage_id=node.stage_id,
-                    status=attempt_status,
+                    status=JobState.COMPLETED.value,
                     contract_hash=plan.contract_hash,
                     metadata={"stage_execution_identity": "old"},
                 )

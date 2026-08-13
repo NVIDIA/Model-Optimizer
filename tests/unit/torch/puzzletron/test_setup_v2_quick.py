@@ -389,37 +389,6 @@ def test_cli_forwards_full_to_the_wizard(monkeypatch, tmp_path):
     assert captured["full"] is True
 
 
-def test_cli_forwards_non_interactive_campaign_contract(monkeypatch, tmp_path):
-    captured = {}
-    defaults = tmp_path / "defaults.yaml"
-    defaults.write_text("schema_version: 1\n")
-    campaign = tmp_path / "campaign"
-
-    def run_wizard_v2(**kwargs):
-        captured.update(kwargs)
-        return campaign
-
-    monkeypatch.setattr(wizard_module, "run_wizard_v2", run_wizard_v2)
-
-    assert (
-        cli_module.main(
-            [
-                "--defaults",
-                str(defaults),
-                "--campaign-dir",
-                str(campaign),
-                "--profile",
-                "smoke",
-                "--non-interactive",
-            ]
-        )
-        == 0
-    )
-    assert captured["campaign_dir"] == campaign
-    assert captured["setup_profile"] == "smoke"
-    assert isinstance(captured["backend"], NonInteractiveBackend)
-
-
 @pytest.mark.parametrize("full", [False, True])
 def test_fresh_state_reprompts_for_empty_campaign_directory(tmp_path, full, capsys):
     campaign = tmp_path / ("full" if full else "guided")

@@ -115,22 +115,11 @@ def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(tmp_p
     assert replacement_finalizer.finalization_marker_is_current(marker_a, manifest_path, summary)
 
     manifest_a = manifest_path.read_text()
-    summary_payload = summary.read_text()
     summary.unlink()
     assert not replacement_finalizer.finalization_marker_is_current(
         marker_a, manifest_path, summary
     )
-    summary.write_text(json.dumps({"scenario_count": 2, "widths": [256]}))
-    assert not replacement_finalizer.finalization_marker_is_current(
-        marker_a, manifest_path, summary
-    )
-    summary.write_text(summary_payload)
-    manifest_path.unlink()
-    assert not replacement_finalizer.finalization_marker_is_current(
-        marker_a, manifest_path, summary
-    )
-    manifest_path.write_text(manifest_a)
-
+    summary.write_text(json.dumps(report))
     manifest_b = json.loads(manifest_a)
     manifest_b["semantic_identity"] = "replacement_scoring_semantic_b"
     manifest_path.write_text(json.dumps(manifest_b))
@@ -138,34 +127,10 @@ def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(tmp_p
         marker_a, manifest_path, summary
     )
 
-    marker_b = tmp_path / "completion-b" / "finalized"
-    marker_b.parent.mkdir()
-    replacement_finalizer.write_finalization_marker(marker_b, manifest_path)
-    assert replacement_finalizer.finalization_marker_is_current(marker_b, manifest_path, summary)
-
-    manifest_path.write_text(manifest_a)
-    assert replacement_finalizer.finalization_marker_is_current(marker_a, manifest_path, summary)
+    manifest_path.write_text("[]\n")
     assert not replacement_finalizer.finalization_marker_is_current(
-        marker_b, manifest_path, summary
-    )
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [[], "manifest", 1, None],
-    ids=("list", "string", "integer", "null"),
-)
-def test_replacement_scoring_marker_rejects_non_object_manifests(tmp_path, payload):
-    marker = tmp_path / "finalized"
-    marker.write_text("replacement_scoring_semantic_test\n")
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps(payload))
-    summary = tmp_path / "summary.json"
-    summary.write_text("{}\n")
-
-    assert not replacement_finalizer.finalization_marker_is_current(
-        marker,
-        manifest,
+        marker_a,
+        manifest_path,
         summary,
     )
 

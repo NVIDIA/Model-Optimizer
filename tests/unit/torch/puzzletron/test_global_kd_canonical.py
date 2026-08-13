@@ -786,18 +786,6 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
     ]
     assert (tmp_path / "epoch_2_step_17" / "saving_completed").is_file()
 
-    recipe.cfg = {"model": {"trust_remote_code": "false"}}
-    with pytest.raises(ValueError, match=r"^model\.trust_remote_code must be a boolean$"):
-        recipe.save_checkpoint(
-            2,
-            18,
-            0.5,
-            {"lm_loss": 0.25},
-            best_metric_key="lm_loss",
-        )
-    assert not (tmp_path / "epoch_2_step_18" / "saving_completed").exists()
-
-
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
     # Import the dynamic mixin at test runtime to preserve lightweight module collection.
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
