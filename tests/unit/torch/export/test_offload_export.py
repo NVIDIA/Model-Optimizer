@@ -63,12 +63,7 @@ def _make_offloaded_linear(dim: int = 16):
 
 
 def _offload_module(module):
-    """Attach a CPU-offload AlignDevicesHook to ``module`` and move its weight to meta.
-
-    Mirrors what ``accelerate.dispatch_model`` does per-module for a CPU/disk
-    offloaded model: the real weight lives in ``weights_map``, the module's own
-    ``.weight`` becomes a fresh meta Parameter.
-    """
+    """Offload ``module`` like accelerate does: real weight to ``weights_map``, ``.weight`` to a meta Parameter."""
     weights_map = {"weight": module.weight.data.clone().cpu()}
     hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
     add_hook_to_module(module, hook)
@@ -81,13 +76,7 @@ def _offload_module(module):
 
 
 def test_build_tied_weight_map_preshard_capture_survives_offload():
-    """Capturing before offload preserves the tie; a map built after offload is empty.
-
-    Offload replaces each module's shared ``.weight`` with a fresh meta Parameter, so
-    the ``id(parameter)`` group -- and any map built post-offload -- is empty (guarded
-    by a warning). ``build_tied_weight_map`` called while resident records the tie by
-    name, which survives: the Option B contract (capture at load, consume at export).
-    """
+    """Capture before offload resolves the tie by name; a post-offload build is empty (Option B)."""
     enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
     model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
 

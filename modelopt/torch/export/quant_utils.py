@@ -1132,23 +1132,17 @@ def postprocess_state_dict(
         for key in post_state_dict:
             if "lora" in key and key not in keys_to_delete:
                 keys_to_delete.append(key)
-    # Name-based tied-weight dedup (authoritative; address-independent). For each declared
-    # {alias: canonical} tie, drop the alias's OWN exported keys when the canonical twin is
-    # present. Expansion is per-parameter, NOT per-module-prefix, so an untied sibling under
-    # the same module (an independent bias, or an untied projection of a partially-tied
-    # experts container) is never swept up. Works under the FSDP full-state-dict gather /
-    # offload, where tied tensors are materialized at distinct addresses.
+    # Name-based tied-weight dedup (authoritative, address-independent): for each declared
+    # {alias: canonical} tie, drop the alias's own exported keys when the canonical is present.
+    # Per-parameter (not per-prefix), so an untied sibling (a bias, an untied projection) is kept.
+    # This is what makes it correct under the FSDP gather / offload, where tied tensors land at
+    # distinct addresses.
     dropped_dense_prefixes: set[str] = set()
     if tied_map is not None and tied_map.alias_to_canonical:
-        # --- The one place a tied parameter is expanded into its EXPORTED state-dict keys ---
-        # A {alias: canonical} entry names a *pre-pack* parameter; export then renames/splits
-        # it. This block maps that name to the concrete keys export produced. If export starts
-        # emitting a new companion key (a new scale) or a new fused-projection name, extend
-        # `weight_suffixes` / `proj_splits` HERE -- nothing else needs to change.
-        #
-        # A dense quantized weight exports as these keys; a `X.weight` tie covers exactly them.
-        # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed from
-        # input_quantizer._pre_quant_scale in the KV-cache pass above.)
+        # Expand each tied *pre-pack* parameter name into the concrete keys export produced. If
+        # export starts emitting a new scale companion or fused-projection name, extend
+        # `weight_suffixes` / `proj_splits` here -- nothing else needs to change.
+        # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed in the KV-cache pass.)
         weight_suffixes = (
             "weight",
             "weight_scale",
@@ -1163,12 +1157,11 @@ def postprocess_state_dict(
             "down_proj": ("down_proj",),
         }
 
-        # group name -> [(alias_key, canonical_key), ...]; dropped atomically (all or none).
+        # group name -> [(alias_key, canonical_key), ...], dropped all-or-none.
         alias_groups: dict[str, list[tuple[str, str]]] = {}
-        # Dense group name -> its module prefix, for the post-drop leftover-companion check.
+        # dense group name -> module prefix, for the leftover-companion check below.
         dense_prefixes: dict[str, str] = {}
-        # Fused-MoE containers: (alias_prefix, canonical_prefix) -> set of tied per-expert
-        # projection names (the split names, e.g. {"gate_proj", "up_proj", "down_proj"}).
+        # fused-MoE container (alias_prefix, canonical_prefix) -> its tied per-expert projection names.
         moe_containers: dict[tuple[str, str], set[str]] = {}
 
         for alias, canonical in tied_map.alias_to_canonical.items():
@@ -1185,17 +1178,14 @@ def postprocess_state_dict(
                     alias_groups[alias] = members
                     dense_prefixes[alias] = a_pre
             elif a_name in proj_splits and a_name == c_name:
-                # Fused-MoE projection: export splits the 3-D container into per-expert keys not
-                # present in the declaration. Record the per-expert projection names it becomes.
+                # Fused-MoE: export splits the 3-D container into per-expert keys; record those names.
                 moe_containers.setdefault((a_pre, c_pre), set()).update(proj_splits[a_name])
             elif alias in post_state_dict:
                 alias_groups[alias] = [(alias, canonical)]
 
         for (a_pre, c_pre), tied_proj_names in moe_containers.items():
-            # Rewrite ONLY the per-expert keys of the tied projections -- matched by a
-            # projection path component -- so an untied projection (e.g. down_proj when only
-            # gate_up_proj is tied) or a non-projection child (a router / per-expert bias)
-            # under the same container is never swept up.
+            # Rewrite only the tied projections' per-expert keys, so an untied projection (e.g.
+            # down_proj when only gate_up_proj is tied) or a router/bias child is left alone.
             prefix = f"{a_pre}." if a_pre else ""
             members = [
                 (key, c_pre + key[len(a_pre) :])
@@ -1207,8 +1197,7 @@ def postprocess_state_dict(
                 alias_groups[a_pre] = members
 
         # Atomic drop: remove a group only when every alias key has its canonical twin present,
-        # so mixed quant state (alias quantized, canonical not) never orphans scales. No chain
-        # guard needed: ties are id-groups, so a canonical is never also an alias.
+        # so mixed quant state (one side quantized, the other not) never orphans a scale.
         for gk, members in alias_groups.items():
             missing = [ak for ak, ck in members if ck not in post_state_dict]
             if missing:
@@ -1227,17 +1216,15 @@ def postprocess_state_dict(
                 f"canonical kept."
             )
 
-    # Apply the name-based (and quant / LoRA) drops first, so the address pass below runs on the
-    # already-reduced dict and never re-processes a declared alias. dict.fromkeys dedups while
-    # preserving order (a key marked twice is deleted once).
+    # Apply the name drops first so the address pass below runs on the reduced dict and never
+    # re-processes a declared alias. dict.fromkeys dedups the delete list while preserving order.
     for key in dict.fromkeys(keys_to_delete):
         post_state_dict.pop(key, None)
 
-    # Address backstop (pre-existing postprocess dedup, unchanged): drop any remaining keys that
-    # still share a data_ptr. Declared ties are already gone by name above, so this only catches
-    # an UNDECLARED same-address share (an unquantized/unpacked tied weight). A quantized tie packs
-    # to distinct storage and never reaches here. Zero-pointer (meta) tensors are left for
-    # serialization to handle.
+    # Address backstop (pre-existing, unchanged): drop any remaining keys that still share a
+    # data_ptr. Declared ties are already gone above, so this only catches an undeclared
+    # same-address share (an unquantized/unpacked tie); a quantized tie packs to distinct storage
+    # and never reaches here. Zero-pointer (meta) tensors are left to serialization.
     seen_tensors: dict = {}
     backstop_delete = []
     for key, value in post_state_dict.items():
@@ -1254,9 +1241,8 @@ def postprocess_state_dict(
     for key in backstop_delete:
         del post_state_dict[key]
 
-    # Surface an un-enumerated companion: if a dense tie was dropped but a non-`bias` key still
-    # remains under its module prefix, it is likely a new quantizer companion missing from
-    # `weight_suffixes` (which would otherwise leak as an orphan) -- warn so it gets added.
+    # If a dense tie was dropped but a non-`bias` key still remains under its prefix, it is likely
+    # a new quantizer companion missing from `weight_suffixes` -- warn so it gets added.
     for pre in dropped_dense_prefixes:
         leftovers = [
             k for k in post_state_dict if k.startswith(f"{pre}.") and k.rsplit(".", 1)[-1] != "bias"
@@ -1722,13 +1708,10 @@ def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = No
     per-module export so the merged amax flows into ``input_scale`` derivation; the model is
     not expected to be reused afterward.
 
-    Declared ties are grouped by name via :class:`TiedWeightMap` (stable across ``data_ptr``
-    reuse / FSDP resharding), for both dense Linears and fused-MoE containers. A weight that
-    is *physically shared but undeclared* is grouped by ``id(weight)`` as a fallback -- the
-    postprocess address backstop will collapse it, so its amaxes must merge here too or the
-    kept ``input_scale`` won't cover the dropped side. Identity is read here only, pre-pack
-    while resident, so it can't collide like a reused ``data_ptr``. Returns the number of
-    groups merged; pass ``tied_map`` to reuse one, else it is built from ``model``.
+    Declared ties are grouped by name via :class:`TiedWeightMap` (dense Linears and fused-MoE
+    containers). A physically shared but *undeclared* weight is grouped by ``id(weight)`` as a
+    fallback, so the side the address backstop later drops still had its amax merged in here.
+    Returns the number of groups merged; pass ``tied_map`` to reuse one, else it is built here.
     """
     if tied_map is None:
         tied_map = TiedWeightMap(model)
@@ -1758,8 +1741,7 @@ def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = No
             if gk is not None:
                 by_group[("dense", gk)].append(m)
             else:
-                # Undeclared share the name pass misses but the backstop will collapse:
-                # group by object identity so its amaxes still merge (see docstring).
+                # Undeclared share: group by object identity so its amaxes still merge.
                 by_group[("dense_shared", id(m.weight))].append(m)
 
     def _merge(quantizers: list) -> bool:

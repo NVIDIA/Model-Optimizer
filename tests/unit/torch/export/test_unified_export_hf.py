@@ -42,13 +42,7 @@ def test_build_tied_alias_map_dict_style_maps_alias_to_canonical():
 
 
 def test_build_tied_alias_map_empty_for_non_applied_ties():
-    """No alias map when a tie carries no canonical (list-style) or is not applied.
-
-    Legacy list-style ``_tied_weights_keys`` has no canonical info; and a dict-style
-    declaration whose two params are DISTINCT objects (e.g. ``tie_word_embeddings=False``
-    still ships a class-level ``_tied_weights_keys``) must be skipped by the object-identity
-    gate so a name-only match never drops an independent weight.
-    """
+    """No alias map for list-style ties (no canonical) or dict-style ties whose params are distinct objects."""
     enc, dec = make_tied_linear_pair()
     list_style = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=False)
     assert _build_tied_alias_map(list_style) == {}
@@ -67,9 +61,7 @@ def test_build_tied_alias_map_empty_for_non_applied_ties():
 
 
 def test_build_tied_alias_map_warns_when_declared_tie_unformed_under_fsdp(monkeypatch):
-    """Under FSDP2/offload, a declared alias whose id-group did not form (identity may have
-    been split by sharding) must warn -- fail loud so dedup can't be silently skipped. The
-    same case is silent off FSDP (it is just an unapplied tie)."""
+    """A declared tie whose id-group did not form warns under FSDP2 (loud) but is silent off FSDP."""
     import warnings as _warnings
 
     import modelopt.torch.export.model_utils as mu
@@ -149,13 +141,7 @@ def test_tied_group_resolver_per_layer_backreference():
 
 
 def test_tied_group_resolver_parallel_pattern_declaration():
-    """DiffusionGemma-style {alias_regex: canonical_regex} (parallel patterns, no backrefs).
-
-    Both sides are regexes that differ only in a leading literal head
-    (``encoder.language_model.`` -> ``decoder.``); the shared trailing structure is copied
-    from the concrete name. The container's fused expert Parameter is split into per-expert
-    keys on export, so the alias-prefix rewrite must map those to the decoder canonical.
-    """
+    """DiffusionGemma-style parallel-regex ties resolve each container to its decoder canonical."""
 
     class _Model(torch.nn.Module):
         _tied_weights_keys = {
@@ -242,10 +228,7 @@ def test_sync_tied_input_amax_no_op_for_untied_modules():
 
 
 def test_sync_tied_input_amax_merges_undeclared_shared_weight():
-    """Two Linears that physically SHARE a weight object but declare no tie still get
-    their input amaxes merged by object identity. The address backstop drops one such
-    side, so the surviving input_scale must cover both activation ranges (no clipping).
-    """
+    """Two Linears sharing a weight but declaring no tie still get their input amaxes merged by identity."""
     parent = torch.nn.Module()
     parent.a = torch.nn.Linear(16, 32, bias=False)
     parent.b = torch.nn.Linear(16, 32, bias=False)
@@ -267,9 +250,7 @@ def test_sync_tied_input_amax_merges_undeclared_shared_weight():
 
 
 def test_postprocess_name_based_drops_alias_across_distinct_addresses():
-    """Declared alias is dropped by name even when its tensor has a DIFFERENT address
-    than the canonical -- the FSDP full_state_dict case that address dedup cannot catch.
-    """
+    """Declared alias dropped by name even when its tensor is at a different address (the FSDP full_state_dict case)."""
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
     tied_map = TiedWeightMap(parent)
@@ -297,12 +278,7 @@ def test_postprocess_name_based_keeps_alias_when_canonical_absent():
 
 
 def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
-    """A bidirectional declaration (A->B and B->A) must not delete BOTH sides.
-
-    Both names are declared aliases, so the shared group has no unambiguous canonical.
-    ``_build_tied_alias_map`` skips such a group entirely (empty map), so neither side is
-    dropped and the loader is never left without a tensor.
-    """
+    """A bidirectional declaration (A<->B) has no clear canonical, so the map is empty and neither side is dropped."""
 
     class _Bi(torch.nn.Module):
         _tied_weights_keys = {r"^a\.weight$": "b.weight", r"^b\.weight$": "a.weight"}
@@ -324,11 +300,7 @@ def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
 
 
 def test_postprocess_keeps_both_sides_when_tied_quant_state_differs():
-    """Tied sides with different quant state (alias quantized, canonical not) must not be
-    deduped: dropping ``encoder.weight`` while its ``weight_scale`` / ``input_scale`` have
-    no canonical counterpart would orphan scales on a weight that's gone. The alias group
-    is dropped atomically (all-or-nothing), so here nothing is dropped.
-    """
+    """Tied sides with differing quant state aren't deduped (atomic drop), so no scale is orphaned."""
     enc, dec = make_tied_linear_pair()
     parent = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
     tied_map = TiedWeightMap(parent)
@@ -395,12 +367,7 @@ def test_postprocess_name_based_drops_tied_expert_subtree_by_name():
 
 
 def test_postprocess_keeps_independent_bias_under_tied_weight():
-    """A weight tie must not drop an independent bias sharing the module prefix.
-
-    Two Linears with tied weights but distinct biases: dropping ``A.bias`` because ``B.bias``
-    exists is the NVBug 6525352 failure class reached by name. Targeted per-parameter
-    expansion (weight + its scales only) leaves the bias untouched.
-    """
+    """A weight tie must not drop an independent bias sharing the module prefix (the NVBug 6525352 failure class)."""
 
     class _TwoLinear(torch.nn.Module):
         _tied_weights_keys = {r"^A\.weight$": "B.weight"}
@@ -426,12 +393,7 @@ def test_postprocess_keeps_independent_bias_under_tied_weight():
 
 
 def test_postprocess_partially_tied_container_dedups_only_tied_projections():
-    """Only ``gate_up_proj`` of a fused-experts container is tied (``down_proj`` independent).
-
-    Per-projection matching dedups exactly the tied projections' per-expert keys (gate_proj /
-    up_proj), while the untied ``down_proj`` AND a non-projection child (a router) under the
-    same container survive.
-    """
+    """Only the tied projection's per-expert keys are deduped; an untied down_proj and a router child survive."""
 
     class _Parent(torch.nn.Module):
         _tied_weights_keys = {r"^encoder\.experts\.gate_up_proj$": "decoder.experts.gate_up_proj"}
@@ -477,8 +439,7 @@ def test_postprocess_partially_tied_container_dedups_only_tied_projections():
 
 
 def test_postprocess_backstop_collapses_keys_sharing_a_dataptr():
-    """The pre-existing address backstop drops a later key that shares a ``data_ptr`` with an
-    earlier one (identity is ``value.data_ptr()``, first-wins)."""
+    """The address backstop drops a later key that shares a ``data_ptr`` with an earlier one (first-wins)."""
     storage = torch.arange(4)
     sd = {"short": storage[:2], "long": storage}  # both start at offset 0 -> same data_ptr
     assert sd["short"].data_ptr() == sd["long"].data_ptr()
