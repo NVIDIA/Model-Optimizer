@@ -86,7 +86,7 @@ over the selected profile. To expose every per-section and nested setting, use
 the advanced flow explicitly:
 
 Automation can use the same setup entry point without answering prompts. The
-defaults file must provide every required value that has no built-in default:
+defaults file must provide every required value that has no resolved default:
 
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py \

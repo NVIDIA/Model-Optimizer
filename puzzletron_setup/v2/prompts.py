@@ -56,7 +56,7 @@ class PromptChoice:
 class PromptBackend(Protocol):
     """Minimal backend used by the navigable wizard session."""
 
-    def text(self, message: str, default: str) -> Any:
+    def text(self, message: str, default: str | None) -> Any:
         """Request a text value."""
         raise NotImplementedError
 
@@ -128,10 +128,10 @@ class InteractiveBackend:
 
     _BACK_TITLE = "← Back"
 
-    def text(self, message: str, default: str) -> Any:
+    def text(self, message: str, default: str | None) -> Any:
         """Request text while supporting semantic Back navigation."""
         print("  Press Esc to go back (or type :back).")
-        question = _bind_escape_back(_questionary().text(message, default=default))
+        question = _bind_escape_back(_questionary().text(message, default=default or ""))
         value = _answer(question)
         if value is BACK:
             return BACK
@@ -206,9 +206,9 @@ class InteractiveBackend:
 class NonInteractiveBackend:
     """Accept resolved prompt defaults without depending on prompt ordering or labels."""
 
-    def text(self, message: str, default: str) -> Any:
-        """Return a non-empty resolved text default."""
-        if not str(default).strip():
+    def text(self, message: str, default: str | None) -> Any:
+        """Return a resolved text default, including an explicit empty string."""
+        if default is None:
             raise SetupError(f"Non-interactive setup requires a default for {message!r}.")
         return default
 
@@ -275,7 +275,7 @@ class ScriptedBackend:
         value = self._answers.popleft()
         return BACK if value == ":back" else value
 
-    def text(self, message: str, default: str) -> Any:
+    def text(self, message: str, default: str | None) -> Any:
         """Return the next scripted text answer."""
         del message, default
         return self._next()

@@ -4506,7 +4506,7 @@ def _fresh_state(
         )
     if full:
         while True:
-            value = backend.text("Campaign directory:", "")
+            value = backend.text("Campaign directory:", None)
             if value is BACK:
                 continue
             if not str(value).strip():
@@ -4523,7 +4523,7 @@ def _fresh_state(
         if preset is BACK:
             continue
         while True:
-            value = backend.text("Campaign directory:", "")
+            value = backend.text("Campaign directory:", None)
             if value is BACK:
                 break
             if not str(value).strip():

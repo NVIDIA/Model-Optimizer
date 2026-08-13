@@ -369,10 +369,11 @@ def test_non_interactive_backend_uses_semantic_defaults() -> None:
     choices = [PromptChoice("First", "first"), PromptChoice("Second", "second")]
 
     assert backend.text("Path:", "/resolved/path") == "/resolved/path"
+    assert backend.text("Optional commands:", "") == ""
     assert backend.select("Choice:", choices, "second") == "second"
     assert backend.checkbox("Choices:", choices, ["first"]) == ["first"]
     with pytest.raises(SetupError, match="requires a default"):
-        backend.text("Path:", "")
+        backend.text("Path:", None)
 
 
 def test_cli_forwards_full_to_the_wizard(monkeypatch, tmp_path):

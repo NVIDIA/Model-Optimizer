@@ -243,23 +243,42 @@ def build_tiny_qwen_campaign(
         )
     )
 
-    setup = subprocess.run(
-        [
-            sys.executable,
-            str(project_root / "examples/puzzletron/puzzletron_setup_v2.py"),
-            "--defaults",
-            str(defaults_path),
-            "--campaign-dir",
-            str(campaign_dir),
-            "--profile",
-            "balanced",
-            "--non-interactive",
-        ],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    setup_command = [
+        sys.executable,
+        str(project_root / "examples/puzzletron/puzzletron_setup_v2.py"),
+        "--defaults",
+        str(defaults_path),
+        "--campaign-dir",
+        str(campaign_dir),
+        "--profile",
+        "balanced",
+        "--non-interactive",
+    ]
+    try:
+        setup = subprocess.run(
+            setup_command,
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = (
+            error.stdout.decode(errors="replace")
+            if isinstance(error.stdout, bytes)
+            else error.stdout
+        )
+        stderr = (
+            error.stderr.decode(errors="replace")
+            if isinstance(error.stderr, bytes)
+            else error.stderr
+        )
+        raise AssertionError(
+            "Tiny Qwen Puzzletron setup timed out after 300 seconds.\n"
+            f"stdout:\n{(stdout or '')[-12000:]}\n"
+            f"stderr:\n{(stderr or '')[-12000:]}"
+        ) from error
     if setup.returncode != 0:
         raise AssertionError(
             "Tiny Qwen Puzzletron setup failed.\n"
