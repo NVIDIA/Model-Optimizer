@@ -27,6 +27,14 @@ from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
 from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
 from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 
+__all__ = [
+    "finalization_marker_is_current",
+    "finalize_replacement_scoring",
+    "finalize_replacement_scoring_diagnostics",
+    "main",
+    "write_finalization_marker",
+]
+
 
 def finalize_replacement_scoring_diagnostics(config: dict):
     """Preserve the finalizer seam across package and script entry points."""
@@ -37,14 +45,6 @@ def finalize_replacement_scoring_diagnostics(config: dict):
     from embedding_pipeline import finalize_replacement_scoring_diagnostics as script_finalize
 
     return script_finalize(config)
-
-
-__all__ = [
-    "finalization_marker_is_current",
-    "finalize_replacement_scoring",
-    "main",
-    "write_finalization_marker",
-]
 
 
 def _successful_manifest_identity(manifest_path: str | Path) -> str | None:

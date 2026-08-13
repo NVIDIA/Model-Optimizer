@@ -460,7 +460,7 @@ def _patterns_present(puzzle_dir: Path, patterns: tuple[str, ...]) -> bool:
 def post_mip_summary_is_current(
     config: Mapping[str, Any], puzzle_dir: Path, stage_id: str, summary: Mapping[str, Any]
 ) -> bool:
-    """Validate a node summary without importing the PyTorch-backed worker package."""
+    """Validate a node summary without importing torch."""
 
     try:
         if __package__.startswith("puzzletron_orchestrator."):

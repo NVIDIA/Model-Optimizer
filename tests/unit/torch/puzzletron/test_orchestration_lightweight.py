@@ -56,6 +56,30 @@ def test_lightweight_package_does_not_import_torch() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_post_mip_completion_check_does_not_import_torch() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys, tempfile; "
+            "from pathlib import Path; "
+            "from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete; "
+            "root = Path(tempfile.mkdtemp()); "
+            "summary = root / 'artifacts/post_mip/nodes/node/summary.json'; "
+            "summary.parent.mkdir(parents=True); "
+            "summary.write_text(json.dumps({'status': 'success'})); "
+            "assert not stage_is_complete({'puzzle_dir': str(root)}, 'post.flow.node'); "
+            "assert 'torch' not in sys.modules",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_pipeline_config_import_does_not_cycle_through_post_mip() -> None:
     environment = dict(os.environ)
     # This subprocess checks cold importability, not subprocess coverage collection.
