@@ -703,6 +703,42 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
         return hf_config
 
 
+def _force_attn_implementation(model, attn_implementation: str) -> None:
+    """Set ``_attn_implementation`` on the model config and every nested sub-config.
+
+    Some remote modeling code overrides the requested attention implementation inside
+    ``__init__`` -- Kimi-K3 rewrites it to ``flash_attention_2`` unconditionally, ignoring
+    ``--attn_implementation``. Export runs a trace forward, so a backend whose compiled
+    extension is unavailable in this environment fails there rather than at load.
+
+    Sub-configs are walked because multimodal models keep separate ones per tower, and
+    remote code typically rewrites the *nested* config (Kimi-K3 rewrites ``text_config``
+    from ``KimiLinearModel.__init__``). Layer modules hold a reference to the same config
+    object, so overriding it here takes effect on the next forward. Only applied when the
+    caller asked for an implementation explicitly.
+    """
+    pending, seen, changed = [model.config], set(), []
+    while pending:
+        cfg = pending.pop()
+        if cfg is None or id(cfg) in seen:
+            continue
+        seen.add(id(cfg))
+        current = getattr(cfg, "_attn_implementation", None)
+        if current is not None and current != attn_implementation:
+            try:
+                cfg._attn_implementation = attn_implementation
+                changed.append(f"{type(cfg).__name__}: {current} -> {attn_implementation}")
+            except Exception as e:  # pragma: no cover - depends on remote config class
+                warnings.warn(f"Could not apply attn_implementation on {type(cfg).__name__}: {e}")
+        for sub in ("text_config", "vision_config", "audio_config", "decoder", "encoder"):
+            pending.append(getattr(cfg, sub, None))
+
+    if changed:
+        print("Re-applied the requested attention implementation after model init:")
+        for line in changed:
+            print(f"  {line}")
+
+
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -967,6 +1003,12 @@ def get_model(
             **model_kwargs2,
         )
     model.eval()
+
+    # Honour the caller's explicit choice even when remote modeling code overwrote it
+    # during __init__ (see _force_attn_implementation).
+    if attn_implementation is not None:
+        _force_attn_implementation(model, attn_implementation)
+
     if has_pack_quantized_config(hf_config):
         _unpack_compressed_linear_weights(model, ckpt_path)
 
