@@ -32,6 +32,7 @@ from example_utils import (
     add_mlflow_args,
     build_quant_cfg,
     cleanup_distributed,
+    colocate_layerwise_checkpoint_dir,
     copy_custom_model_files,
     create_vlm_calibration_loop,
     get_model,
@@ -1368,6 +1369,14 @@ def quantize_main(
             assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes)
             quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
             print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+            # The shards are only a resume artifact if the manifest that names the resume
+            # point survives alongside them; see colocate_layerwise_checkpoint_dir.
+            quant_cfg, moved = colocate_layerwise_checkpoint_dir(quant_cfg, args.export_path)
+            if moved:
+                print(
+                    "Layerwise checkpoint_dir co-located with the export path so a resumed "
+                    "run finds its manifest next to the shards it must not overwrite."
+                )
 
         if needs_checkpoint_path_update(quant_cfg):
             quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)

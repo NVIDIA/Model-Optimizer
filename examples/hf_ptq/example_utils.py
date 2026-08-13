@@ -1142,6 +1142,42 @@ def _layerwise_checkpoint_dir(algorithm) -> str | None:
     return nested.get("checkpoint_dir") if isinstance(nested, dict) else None
 
 
+def colocate_layerwise_checkpoint_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
+    """Move the layerwise checkpoint dir under ``export_path``. Returns ``(cfg, moved)``.
+
+    Per-layer export describes its shards as the resume artifact, but the resume *point*
+    still comes from ``checkpoint_dir``'s manifest -- ``_CheckpointState.from_folder``
+    returns ``start = info[0] if info else 0``, and nothing derives it from the shards. So
+    if the manifest and the shards do not share a lifetime, losing the manifest silently
+    restarts calibration at layer 0 and overwrites every finished shard, with
+    ``assert_shards_present(0)`` passing trivially on the way through.
+
+    That is not hypothetical: the shipped recipes default ``checkpoint_dir`` to
+    ``/tmp/modelopt_layerwise_ckpt``, and ``/tmp`` is container-local. A run that outlasts
+    its GPU session -- the case this whole path exists for -- comes back to a wiped
+    manifest and redoes everything.
+
+    Co-locating the two makes the invariant structural rather than a thing the user has to
+    know. Only applied when per-layer export is on; without it ``checkpoint_dir`` is an
+    ordinary resume directory whose placement is the caller's business.
+    """
+    location = _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm"))
+    if location is None:
+        return quant_cfg, False
+    shape, current = location
+    target = os.path.join(export_path, ".layerwise_checkpoint")
+    if current == target:
+        return quant_cfg, False
+
+    quant_cfg = copy.deepcopy(quant_cfg)
+    algo = quant_cfg["algorithm"]
+    if shape == "flat":
+        algo["layerwise_checkpoint_dir"] = target
+    else:
+        algo["layerwise"] = {**algo["layerwise"], "checkpoint_dir": target}
+    return quant_cfg, True
+
+
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
     """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
     return _layerwise_checkpoint_dir(quant_cfg.get("algorithm")) is not None
