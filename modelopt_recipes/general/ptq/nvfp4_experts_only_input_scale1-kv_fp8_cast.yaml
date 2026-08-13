@@ -38,7 +38,7 @@ quantize:
   algorithm:
     method: max
     # Max calibration is fast and does not typically need checkpointing.
-    # layerwise=false required for VLMs where the decoder layers are nested under
+    # layerwise.enable=false required for VLMs where the decoder layers are nested under
     # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
     layerwise: {enable: false}
     # Every quantized activation quantizer here is either constant_amax (experts/block-sparse
