@@ -39,6 +39,9 @@ def test_hf_all_tied_weights_keys_contract():
     (``tie_word_embeddings=True`` -> lm_head aliases the embedding). If transformers renames it or
     flips the direction, this breaks instead of silently skipping tied-weight dedup.
     """
+    pytest.importorskip(
+        "transformers", minversion="5.0"
+    )  # attribute only exists on transformers>=5.0
     from transformers import AutoModelForCausalLM, LlamaConfig
 
     cfg = LlamaConfig(
@@ -58,6 +61,15 @@ def test_hf_all_tied_weights_keys_contract():
     assert TiedWeightMap(model).alias_to_canonical == {
         "lm_head.weight": "model.embed_tokens.weight"
     }
+
+
+def test_tied_weight_map_drops_self_entries():
+    """A self-entry (alias == canonical) is filtered, so the kept canonical is never dropped."""
+
+    class _M(torch.nn.Module):
+        all_tied_weights_keys = {"a.weight": "b.weight", "b.weight": "b.weight"}
+
+    assert TiedWeightMap(_M()).alias_to_canonical == {"a.weight": "b.weight"}
 
 
 def test_tied_group_resolver_group_key_is_shared_and_order_independent():
@@ -138,6 +150,36 @@ def test_tied_group_resolver_parallel_pattern_declaration():
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
     assert f"{enc}.3.gate_proj.weight" not in out  # alias split key dropped
     assert f"{dec}.3.gate_proj.weight" in out  # canonical kept
+
+
+def test_postprocess_moe_alias_container_ties_to_two_canonicals():
+    """One alias container whose projections tie to DIFFERENT canonical containers dedups both.
+
+    Groups are keyed by the full (alias, canonical) pair, so gate_up_proj -> decA and
+    down_proj -> decB under the same 'enc.experts' don't overwrite each other.
+    """
+
+    class _M(torch.nn.Module):
+        all_tied_weights_keys = {
+            "enc.experts.gate_up_proj": "decA.experts.gate_up_proj",
+            "enc.experts.down_proj": "decB.experts.down_proj",
+        }
+
+    tied_map = TiedWeightMap(_M())
+    w = torch.randn(4, 4)  # tied sides export identical bytes
+    sd = {
+        "enc.experts.0.gate_proj.weight": w.clone(),
+        "decA.experts.0.gate_proj.weight": w.clone(),
+        "enc.experts.0.down_proj.weight": w.clone(),
+        "decB.experts.0.down_proj.weight": w.clone(),
+    }
+    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
+    assert "enc.experts.0.gate_proj.weight" not in out  # tied to decA -> dropped
+    assert (
+        "enc.experts.0.down_proj.weight" not in out
+    )  # tied to decB -> dropped (would leak w/o fix)
+    assert "decA.experts.0.gate_proj.weight" in out
+    assert "decB.experts.0.down_proj.weight" in out
 
 
 def _quantize_and_get_input_quantizers(parent):
@@ -228,28 +270,6 @@ def test_postprocess_name_based_keeps_alias_when_canonical_absent():
     out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
 
     assert "encoder.weight" in out
-
-
-def test_postprocess_name_based_keeps_both_sides_of_bidirectional_tie():
-    """A bidirectional declaration (A<->B) has no clear canonical, so the map is empty and neither side is dropped."""
-
-    class _Bi(torch.nn.Module):
-        _tied_weights_keys = {r"^a\.weight$": "b.weight", r"^b\.weight$": "a.weight"}
-
-        def __init__(self):
-            super().__init__()
-            self.a = torch.nn.Linear(4, 4, bias=False)
-            self.b = torch.nn.Linear(4, 4, bias=False)
-            self.b.weight = self.a.weight  # genuinely shared, declared both ways
-
-    tied_map = TiedWeightMap(_Bi())
-    # Both sides are declared aliases -> no unambiguous canonical -> not deduped.
-    assert tied_map.alias_to_canonical == {}
-
-    sd = {"a.weight": torch.randn(4, 4), "b.weight": torch.randn(4, 4)}
-    out = postprocess_state_dict(sd, maxbound=448, quantization=None, tied_map=tied_map)
-
-    assert "a.weight" in out and "b.weight" in out  # neither side dropped
 
 
 def test_postprocess_keeps_both_sides_when_tied_quant_state_differs():

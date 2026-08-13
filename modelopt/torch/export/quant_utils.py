@@ -1194,7 +1194,9 @@ def postprocess_state_dict(
                 and any(part in tied_proj_names for part in key[len(prefix) :].split("."))
             ]
             if members:
-                alias_groups[a_pre] = members
+                # Key by the full (alias, canonical) pair: one alias container's projections may
+                # tie to different canonical containers, and keying by a_pre alone would overwrite.
+                alias_groups[f"{a_pre} -> {c_pre}"] = members
 
         # Atomic drop: remove a group only when every alias key has its canonical twin present,
         # so mixed quant state (one side quantized, the other not) never orphans a scale.

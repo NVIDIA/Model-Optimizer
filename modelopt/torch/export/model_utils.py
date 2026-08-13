@@ -14,6 +14,8 @@
 # limitations under the License.
 """Utility functions for model type detection and classification."""
 
+import warnings
+
 import torch.nn as nn
 
 MODEL_NAME_TO_TYPE = {
@@ -167,9 +169,20 @@ class TiedWeightMap:
         ``torch.equal``-pruned, and name-based so it survives FSDP shard / offload. Absent on
         transformers <5.0 -> empty map (the ``data_ptr`` backstop in postprocess is the net).
         """
-        self.alias_to_canonical: dict[str, str] = dict(
-            getattr(model, "all_tied_weights_keys", None) or {}
-        )
+        all_tied = getattr(model, "all_tied_weights_keys", None)
+        if all_tied is None and getattr(
+            getattr(model, "config", None), "tie_word_embeddings", False
+        ):
+            warnings.warn(
+                "model.all_tied_weights_keys is unavailable (transformers <5.0); declared tied "
+                "weights are deduplicated only by the address backstop (resident export). Upgrade "
+                "to transformers>=5.0 for name-based tied-weight dedup under FSDP/offload."
+            )
+        # Drop any self-entry (alias == canonical): HF should not emit one, but a target==source
+        # pair would schedule the kept canonical for deletion, so filter it out defensively.
+        self.alias_to_canonical: dict[str, str] = {
+            alias: canonical for alias, canonical in (all_tied or {}).items() if alias != canonical
+        }
         self.canonical_names: set[str] = set(self.alias_to_canonical.values())
 
     def group_key(self, param_full_name: str) -> str | None:
