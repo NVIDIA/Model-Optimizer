@@ -34,8 +34,8 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 
 ### nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
 
-A few **agentic** AA benchmarks do **not** run on the default
-`nemo-evaluator-launcher` 0.2.6 (Steps 1–9 don't apply). They run on **nel-next**
+A few **agentic** AA benchmarks do **not** run on the currently validated
+`nemo-evaluator-launcher` 0.2.6 path (Steps 1–9 don't apply). They run on **nel-next**
 (`nemo-evaluator[harbor]` 0.4.x) — a separate package, CLI (`nel eval run`), `-O`
 overrides, and `services`/`benchmarks`/`cluster`/`output` schema. If the user asks
 for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
@@ -45,16 +45,16 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
-Steps 1–9 below are the 0.2.6 path — use them for everything else.
+Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
 
 ---
 
 ### GDPVal (NeMo Gym "Stirrup" agent) path — branch here too
 
-GDPVal **does** run on the 0.2.6 `nel` launcher (as a `nemo_gym` task, not
-nel-next), so Steps 1–9 apply — but it is mechanically special and **standalone**
-(one gym eval per config; never mix it with `aa/` tasks). If the user asks for
-GDPVal:
+GDPVal **does** run on the currently validated 0.2.6 `nel` launcher (as a
+`nemo_gym` task, not nel-next), so Steps 1–9 apply — but it is mechanically
+special and **standalone** (one gym eval per config; never mix it with `aa/`
+tasks). If the user asks for GDPVal:
 
 1. Read **`references/gym-gdpval.md`** (Apptainer SIF sandbox, gym prepare/reap
    machinery, deploy sizing, rubric-vs-comparison scoring, MLflow deliverables trap,
@@ -71,8 +71,8 @@ GDPVal:
    `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR`, and `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the
    config has a `pre_cmd`). Thinking mode is mandatory (non-thinking loses ~86%).
 4. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gdpval.sh"`; it
-   enforces the required 0.2.6 launcher even if `nel` on PATH is stale and avoids
-   the observed 0.2.4 launcher's unset `NEL_INVOCATION_ID` failure.
+   enforces the currently validated 0.2.6 launcher even if `nel` on PATH is stale
+   and avoids an unset `NEL_INVOCATION_ID` failure before client startup.
    **`limit_samples` is inert on the gym path** (the gym runs all 220 tasks
    regardless), so there is no cheap canary: watch the real run's first
    ~20–30 min for the SIF-sandbox line and judge auth, and cancel if wrong. See the

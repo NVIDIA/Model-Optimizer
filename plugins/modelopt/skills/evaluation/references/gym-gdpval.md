@@ -1,13 +1,13 @@
 # GDPVal (NeMo Gym "Stirrup" agent) — reference for the gym / agentic path
 
-GDPVal runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task, but it is
-mechanically unlike the `aa/` nemo-skills tasks: the Stirrup agent produces
-office/PDF **deliverables** in a per-task **Apptainer** code-exec sandbox, a
-pairwise/rubric **judge** (Gemini 3.1 Pro) scores them, and NeMo Gym is pulled and
-run **inline in the eval container** (`install_on_the_fly`) via `ng_prepare_benchmark`
-+ `ng_e2e_collect_rollouts`. This file is the shared machinery; the config template
-is `recipes/examples/gym_gdpval/` and the per-task pointer is
-`recipes/tasks/aa_gym/gdpval.md`.
+GDPVal is currently validated with the **0.2.6 `nel` launcher** as a `nemo_gym`
+task, but it is mechanically unlike the `aa/` nemo-skills tasks: the Stirrup agent
+produces office/PDF **deliverables** in a per-task **Apptainer** code-exec sandbox,
+a pairwise/rubric **judge** (Gemini 3.1 Pro) scores them, and NeMo Gym is pulled
+and run **inline in the eval container** (`install_on_the_fly`) via
+`ng_prepare_benchmark` + `ng_e2e_collect_rollouts`. This file is the shared
+machinery; the config template is `recipes/examples/gym_gdpval/` and the per-task
+pointer is `recipes/tasks/aa_gym/gdpval.md`.
 
 Always invoke GDPVal through the pinned wrapper, even if `nel` is already on PATH:
 
@@ -17,14 +17,38 @@ Always invoke GDPVal through the pinned wrapper, even if `nel` is already on PAT
 "$SKILL_DIR/scripts/nel-gdpval.sh" run --config <gdpval-config.yaml>
 ```
 
-This is a correctness requirement, not only a dependency pin. Launcher 0.2.6 writes
-the generated `NEL_INVOCATION_ID` into `run.sub` before environment-variable
-re-exports. The observed 0.2.4 launcher emits
+Using the wrapper with a validated pin is a correctness and reproducibility
+requirement. The currently pinned 0.2.6 launcher writes the generated
+`NEL_INVOCATION_ID` into `run.sub` before environment-variable re-exports. The
+failure this pin fixes emits
 `export NEL_INVOCATION_ID="${NEL_INVOCATION_ID}"` without first assigning it, then
 exits with `NEL_INVOCATION_ID: unbound variable` under `set -u` before the evaluation
 client starts. In a dry-run, verify that a literal assignment appears before the
 re-export; do not substitute `SLURM_JOB_ID`, because it changes across the
 benchmark's walltime-resume chain.
+
+The exact version is a reproducibility baseline, not a claim that future launchers
+are incompatible. Keep baseline and candidate evaluations on the same validated
+launcher so a harness change does not become part of the measured model delta.
+
+## Updating the launcher pin
+
+When a newer `nemo-evaluator-launcher` release is available:
+
+1. Review its release notes for launcher schema, generated Slurm, resume, and export
+   changes.
+2. Update `NEL_GDPVAL_VERSION` in `scripts/nel-gdpval.sh` and the expected spec in
+   `tests/test_nel_gdpval.py`.
+3. Run the focused test and pre-commit checks. Verify `nel-gdpval.sh --version`
+   reports the candidate version.
+4. Dry-run a known GDPVal config and confirm the literal `NEL_INVOCATION_ID`
+   assignment still precedes its runtime re-export in every generated `run.sub`.
+5. Launch with the candidate version and monitor the first 20–30 minutes for SIF
+   sandbox startup and judge authentication. GDPVal ignores `limit_samples`, so
+   there is no cheap reduced-sample canary.
+
+Only then update the validated version used for scored runs. Do not mix launcher
+versions within a baseline-versus-candidate comparison.
 
 ## Where each piece runs
 
@@ -201,7 +225,7 @@ mount source, and `raise ValueError` listing the missing ones **before** any
 | `GDPVAL_REF_FILES_DIR` | lit:/gdpval_ref_files | shared-FS ref-file staging (node-local /tmp breaks multi-node Ray) |
 | `PERSIST_DELIVERABLES_DIR` | lit | where deliverables persist (see MLflow note) |
 | `GDPVAL_MAX_TURNS` | lit (optional) | Stirrup turn cap (default 100; golden uses 250) |
-| `NEL_INVOCATION_ID` | runtime | stable run id assigned by launcher 0.2.6; do not use `SLURM_JOB_ID` |
+| `NEL_INVOCATION_ID` | runtime | stable run id assigned by the validated launcher; do not use `SLURM_JOB_ID` |
 
 `INFERENCE_JUDGE_URL` is the judge host — config (from `.env`), substituted as the
 literal `<INFERENCE_JUDGE_URL>` placeholder in `gdpval_judge.base_url`, **not**

@@ -20,7 +20,7 @@ from pathlib import Path
 SCRIPT = Path(__file__).parents[1] / "scripts" / "nel-gdpval.sh"
 
 
-def test_launcher_uses_exact_pin_despite_environment_override(tmp_path):
+def test_launcher_uses_validated_pin_despite_environment_override(tmp_path):
     args_file = tmp_path / "uvx-args"
     uvx = tmp_path / "uvx"
     uvx.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$UVX_ARGS_FILE"\n')
@@ -29,7 +29,8 @@ def test_launcher_uses_exact_pin_despite_environment_override(tmp_path):
     env = os.environ.copy()
     env.update(
         {
-            "NEL_GDPVAL_SPEC": "nemo-evaluator-launcher[all]==0.2.4",
+            "NEL_GDPVAL_SPEC": "nemo-evaluator-launcher[all]==0.0.0",
+            "NEL_GDPVAL_VERSION": "0.0.0",
             "PATH": f"{tmp_path}:{env['PATH']}",
             "UVX_ARGS_FILE": str(args_file),
         }

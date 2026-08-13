@@ -12,13 +12,14 @@ deliverables inside a per-task Apptainer code-exec sandbox, then a pairwise/rubr
 judge (**Gemini 3.1 Pro**) scores them. It is the most resource-intensive benchmark
 in the suite — **220 tasks**, `num_repeats=1`, 4 judge trials per rollout.
 
-It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
-Steps 1–9 apply — but with the branch differences below.
+It is currently validated with the **0.2.6 `nel` launcher** as a `nemo_gym` task
+(NOT nel-next), so Steps 1–9 apply — but with the branch differences below.
 
-Run it through `"$SKILL_DIR/scripts/nel-gdpval.sh"`, which pins the launcher to
-0.2.6. Do not use an unversioned `nel` from PATH: the observed 0.2.4 launcher fails
-before client startup when the config forwards `NEL_INVOCATION_ID`. The shared
-reference explains the failure signature and dry-run check.
+Run it through `"$SKILL_DIR/scripts/nel-gdpval.sh"`, which pins the currently
+validated launcher. Do not use an unversioned `nel` from PATH: an incompatible
+launcher can fail before client startup when the config forwards
+`NEL_INVOCATION_ID`. The shared reference explains the failure signature, dry-run
+check, and procedure for validating and adopting a newer launcher.
 
 ## What makes GDPVal different (not a normal `aa/` task)
 

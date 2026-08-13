@@ -144,7 +144,7 @@ evaluation:
     # deliverables are NOT auto-uploaded — they stay on disk for inspection.
     # Drop "_cache" if you WANT them uploaded as artifacts.
     PERSIST_DELIVERABLES_DIR: lit:/results/gdpval/deliverables_cache
-    # Requires launcher 0.2.6 via $SKILL_DIR/scripts/nel-gdpval.sh. That launcher
+    # Use the currently validated launcher via $SKILL_DIR/scripts/nel-gdpval.sh. It
     # assigns this stable ID before the runtime re-export (including across resumes).
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
   # Installs apptainer + squashfuse into the eval container (needs
