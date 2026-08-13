@@ -9,6 +9,22 @@ run **inline in the eval container** (`install_on_the_fly`) via `ng_prepare_benc
 is `recipes/examples/gym_gdpval/` and the per-task pointer is
 `recipes/tasks/aa_gym/gdpval.md`.
 
+Always invoke GDPVal through the pinned wrapper, even if `nel` is already on PATH:
+
+```bash
+"$SKILL_DIR/scripts/nel-gdpval.sh" --version  # must report nemo_evaluator_launcher: 0.2.6
+"$SKILL_DIR/scripts/nel-gdpval.sh" run --config <gdpval-config.yaml> --dry-run
+"$SKILL_DIR/scripts/nel-gdpval.sh" run --config <gdpval-config.yaml>
+```
+
+This is a correctness requirement, not only a dependency pin. Launcher 0.2.6 writes
+the generated `NEL_INVOCATION_ID` into `run.sub` before environment-variable
+re-exports. Older launchers can emit `export NEL_INVOCATION_ID="${NEL_INVOCATION_ID}"`
+without first assigning it, then exit with `NEL_INVOCATION_ID: unbound variable`
+under `set -u` before the evaluation client starts. In a dry-run, verify that a
+literal assignment appears before the re-export; do not substitute `SLURM_JOB_ID`,
+because it changes across the benchmark's walltime-resume chain.
+
 ## Where each piece runs
 
 | Component | Where |
@@ -184,7 +200,7 @@ mount source, and `raise ValueError` listing the missing ones **before** any
 | `GDPVAL_REF_FILES_DIR` | lit:/gdpval_ref_files | shared-FS ref-file staging (node-local /tmp breaks multi-node Ray) |
 | `PERSIST_DELIVERABLES_DIR` | lit | where deliverables persist (see MLflow note) |
 | `GDPVAL_MAX_TURNS` | lit (optional) | Stirrup turn cap (default 100; golden uses 250) |
-| `NEL_INVOCATION_ID` | runtime | run id |
+| `NEL_INVOCATION_ID` | runtime | stable run id assigned by launcher 0.2.6; do not use `SLURM_JOB_ID` |
 
 `INFERENCE_JUDGE_URL` is the judge host — config (from `.env`), substituted as the
 literal `<INFERENCE_JUDGE_URL>` placeholder in `gdpval_judge.base_url`, **not**
