@@ -161,38 +161,22 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
 
 def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
-    r"""Map each tied *alias* parameter name to its *canonical* name.
+    r"""Map each tied *alias* parameter name to its *canonical* (kept) name.
 
-    Ties are detected by **object identity** — parameters registered under more than one
-    name that are the same live :class:`~torch.nn.Parameter`. Built before export packs or
-    splits weights (which break the shared object), while all params are resident, so
-    identity is reliable; the map is keyed by *name*, so it survives the later packing /
-    FSDP gather / offload when the drop actually runs.
-
-    Declarations do not *create* ties — they only pick the canonical (kept) member of a
-    shared group:
-
-    - dict-style ``_tied_weights_keys``: a name matching an alias key (relative to the
-      declaring submodule) is an alias side; the canonical is a non-alias group member.
-      Only the alias pattern is matched — the canonical-side value is never parsed, so
-      parallel-pattern / backref declarations (DiffusionGemma) need no special handling.
-    - ``tie_word_embeddings=True``: the input-embedding name is canonical.
-
-    Groups left untouched (both sides kept): a declared-but-unapplied tie can't form
-    (distinct objects never group); an *undeclared* share or an all-alias group has no
-    canonical the loader could re-tie from, so it is not dropped. An undeclared share that
-    still aliases storage is caught by the address backstop in :func:`postprocess_state_dict`.
+    Ties are found by object identity while the model is resident and recorded by name, so the
+    map survives later packing / FSDP gather / offload. Declarations pick the canonical name:
+    dict-style ``_tied_weights_keys`` drops the alias side, ``tie_word_embeddings`` keeps the
+    input embedding. Undeclared shares are left to the address backstop in
+    :func:`postprocess_state_dict`.
     """
-    # Group names by object identity. remove_duplicate=False so a shared Parameter appears
-    # under every name -- that gives both the tie signal and the canonical/alias names.
+    # remove_duplicate=False so a shared Parameter shows up under every one of its names.
     groups: dict[int, list[str]] = defaultdict(list)
     param_names: list[str] = []
     for name, parameter in model.named_parameters(remove_duplicate=False):
         groups[id(parameter)].append(name)
         param_names.append(name)
 
-    # Mark declared alias names (the drop side). Only the alias pattern (dict key) is
-    # matched; the canonical-side value is never parsed.
+    # Collect the declared alias names (the drop side); we match only the alias pattern.
     declared_aliases: set[str] = set()
     for mod_name, submodule in model.named_modules():
         tied = getattr(submodule, "_tied_weights_keys", None)
@@ -242,11 +226,8 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
             if name != canonical:
                 alias_to_canonical[name] = canonical
 
-    # Fail loud, don't fail silent under sharding: a declared alias whose param did NOT join a
-    # shared id-group is either an unapplied tie (fine) or -- under FSDP2 / offload -- a tie
-    # whose object identity the wrapper may have split into distinct sharded params, which would
-    # silently skip dedup. Detection here rests on id(parameter); warn only in that context so a
-    # future torch change can't disable dedup quietly.
+    # A declared alias that never joined an id-group is fine when untied, but under FSDP2/offload
+    # it usually means the wrapper split the shared Parameter and we'd miss the tie -- so warn.
     unrealized = declared_aliases - set(alias_to_canonical)
     if unrealized:
         if is_fsdp2_model(model) or has_accelerate_offload(model):
@@ -261,10 +242,9 @@ def _build_tied_alias_map(model: nn.Module) -> dict[str, str]:
 class TiedWeightMap:
     """Name-based lookups over the ``{alias: canonical}`` map from :func:`_build_tied_alias_map`.
 
-    A thin, immutable view built once per export. Export sites that once keyed dedup on
-    ``data_ptr`` ask for a *group key* instead: both sides of a tie share one key, an untied
-    parameter returns ``None``. The key is a name, so it survives packing, FSDP resharding,
-    offload, and allocator reuse — where ``data_ptr`` does not.
+    Export sites ask for a *group key*: both sides of a tie share one key, an untied parameter
+    returns ``None``. The key is a name, so it survives packing / FSDP / offload, where a
+    ``data_ptr`` would not.
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -273,10 +253,10 @@ class TiedWeightMap:
         self.canonical_names: set[str] = set(self.alias_to_canonical.values())
 
     def group_key(self, param_full_name: str) -> str | None:
-        """Return the canonical group key for a parameter, or ``None`` if untied.
+        """Canonical group key for a parameter name, or ``None`` if untied.
 
-        Both sides of a declared tie map to the same canonical name, so the key is
-        independent of which side the export walk visits first.
+        Both sides of a tie return the same key, so it does not matter which side export
+        visits first.
         """
         if param_full_name in self.alias_to_canonical:
             return self.alias_to_canonical[param_full_name]
@@ -285,12 +265,10 @@ class TiedWeightMap:
         return None
 
     def container_group_key(self, container_name: str, first_proj_attr: str) -> str | None:
-        """Return a group key for a fused-experts container, or ``None`` if untied.
+        """Group key for a fused-experts container, or ``None`` if untied.
 
-        The tie is on the container's 3-D projection Parameter (e.g.
-        ``…experts.gate_up_proj``); the canonical is the *same* projection on another
-        container (they are one id-group), so it carries the same suffix. Stripping that
-        suffix yields one key shared by all of the container's projections.
+        The tie lives on the container's 3-D projection (e.g. ``…experts.gate_up_proj``);
+        stripping that suffix gives one key shared by all the container's projections.
         """
         gk = self.group_key(f"{container_name}.{first_proj_attr}")
         if gk is None:

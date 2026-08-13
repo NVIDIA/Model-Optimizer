@@ -907,8 +907,7 @@ def _process_quantized_modules(
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
     """
-    # There is no per-module dedup cache; tied-weight duplicates are dropped by name in
-    # postprocess_state_dict, driven by the tied_map the driver owns.
+    # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     fsdp_module_to_reshard = None
 
@@ -954,10 +953,8 @@ def _export_transformers_checkpoint(
         NotImplementedError: if the model has accelerate offload hooks.
     """
     dtype = _resolve_export_dtype(model, dtype)
-    # One name-based tied-weight tied_map for the whole export, built once and used by the
-    # amax sync and the final dedup in postprocess_state_dict (its only two consumers). It
-    # resolves ties from the model's declarations (stable across FSDP resharding / offload
-    # / packing). Prefer a caller-supplied map captured pre-shard; else build it here.
+    # One tied-weight map for the whole export, used by the amax sync and the final dedup in
+    # postprocess_state_dict. Prefer a caller-supplied map captured pre-shard; else build it here.
     if tied_map is None:
         tied_map = TiedWeightMap(model)
     _prepare_moe_inputs(model, dtype, is_modelopt_qlora)
@@ -988,10 +985,8 @@ def _export_transformers_checkpoint(
 
     _warn_on_unsynced_moe_gate_up(model)
 
-    # Merge per-side input_quantizer amaxes BEFORE _process_quantized_modules, so the
-    # merged value flows into input_scale derivation. Still required with name-based
-    # dedup: the tied group collapses to one retained weight whose single input_scale
-    # must cover every side's activation range (else the dropped side clips at inference).
+    # Merge per-side input_quantizer amaxes BEFORE export, so the retained tied weight's single
+    # input_scale covers every side's activation range (else the dropped side clips at inference).
     synced_input = sync_tied_input_amax(model, tied_map)
     if synced_input:
         print(

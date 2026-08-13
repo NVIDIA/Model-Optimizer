@@ -643,10 +643,8 @@ class TestExportFusedExperts:
 def _build_two_moe_blocks(tie: bool) -> nn.Module:
     """Build a parent with two _SyntheticSparseMoeBlock children, optionally with tied 3-D params.
 
-    When ``tie`` is set, the parent both shares the 3-D expert Parameters AND declares the
-    tie via ``_tied_weights_keys`` (as real encoder/decoder models do), so the name-based
-    :class:`TiedWeightMap` resolves it -- object sharing alone is intentionally not
-    enough to trigger dedup.
+    When ``tie`` is set the parent both shares the 3-D expert Parameters and declares the tie via
+    ``_tied_weights_keys``, so the name-based map resolves it (object sharing alone is not enough).
     """
     parent = nn.Module()
     parent.encoder = _SyntheticSparseMoeBlock()
@@ -696,12 +694,7 @@ class TestExportFusedExpertsTiedDedup:
             QuantModuleRegistry.unregister(mod_type)
 
     def test_tied_fused_experts_pack_independently_to_equal_values(self):
-        """Tied FusedExperts pack independently (distinct storage), byte-identical values.
-
-        There is no per-module dedup cache: each container splits and packs the shared
-        source itself, so per-expert buffers have DIFFERENT data_ptrs but EQUAL bytes --
-        the duplicate keys are then dropped by name in postprocess_state_dict.
-        """
+        """Tied FusedExperts pack independently: distinct data_ptrs, equal bytes (dropped by name later)."""
         parent = _build_two_moe_blocks(tie=True)
         expert_type = type(parent.encoder.experts)
         self._cleanup_registry(expert_type)
