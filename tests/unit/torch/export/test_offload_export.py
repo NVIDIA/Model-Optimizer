@@ -37,11 +37,7 @@ from _test_utils.torch.quantization.tied_modules import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
-from modelopt.torch.export.model_utils import (
-    TiedWeightMap,
-    _build_tied_alias_map,
-    build_tied_weight_map,
-)
+from modelopt.torch.export.model_utils import TiedWeightMap, build_tied_weight_map
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
@@ -84,45 +80,19 @@ def _offload_module(module):
 # ---------------------------------------------------------------------------
 
 
-def test_tied_alias_map_split_by_offload_needs_preshard_capture():
-    """Offload splits a shared tied Parameter, so the alias map must be built pre-offload.
-
-    ``_build_tied_alias_map`` groups names by ``id(parameter)``. When accelerate
-    offloads each module it replaces the shared ``.weight`` with a fresh meta
-    Parameter per module, so the id-group -- and the alias map -- is only
-    recoverable if captured before offload. Names, unlike object identity, are
-    stable across offload; this is why the map should be built at load time.
-    """
-    enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
-    model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
-
-    # Pre-offload: one shared Parameter -> the declared tie is captured.
-    assert not has_accelerate_offload(model)
-    assert _build_tied_alias_map(model) == {"encoder.weight": "decoder.weight"}
-
-    _offload_module(model.encoder)
-    _offload_module(model.decoder)
-
-    # Post-offload: the shared param was split into per-module meta params, so the
-    # id-group is gone; the map is empty and the guard warns instead of silently
-    # skipping the dedup.
-    assert has_accelerate_offload(model)
-    with pytest.warns(UserWarning, match="tied-weight alias"):
-        assert _build_tied_alias_map(model) == {}
-
-
 def test_build_tied_weight_map_preshard_capture_survives_offload():
-    """A map captured with build_tied_weight_map before offload still resolves the tie.
+    """Capturing before offload preserves the tie; a map built after offload is empty.
 
-    This is the Option-B contract: capture while resident, consume at export. The
-    captured TiedWeightMap keeps the tie as names, so its group_key still collapses
-    both sides after offload -- whereas a map rebuilt post-offload is empty.
+    Offload replaces each module's shared ``.weight`` with a fresh meta Parameter, so
+    the ``id(parameter)`` group -- and any map built post-offload -- is empty (guarded
+    by a warning). ``build_tied_weight_map`` called while resident records the tie by
+    name, which survives: the Option B contract (capture at load, consume at export).
     """
     enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
     model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
 
-    # Capture at "load time" (resident), exactly as a caller would right after
-    # from_pretrained and before fully_shard / dispatch_model.
+    # Resident: capture the map and confirm it resolves the tie.
+    assert not has_accelerate_offload(model)
     tied_map = build_tied_weight_map(model)
     assert isinstance(tied_map, TiedWeightMap)
     assert tied_map.group_key("encoder.weight") == "decoder.weight"
@@ -130,10 +100,12 @@ def test_build_tied_weight_map_preshard_capture_survives_offload():
 
     _offload_module(model.encoder)
     _offload_module(model.decoder)
+    assert has_accelerate_offload(model)
 
-    # The captured map is unaffected by offload (names, not ids); a fresh build is empty.
+    # Captured map still resolves the tie (names survive); a fresh build is empty + warns.
     assert tied_map.group_key("encoder.weight") == "decoder.weight"
-    assert TiedWeightMap(model).alias_to_canonical == {}
+    with pytest.warns(UserWarning, match="tied-weight alias"):
+        assert TiedWeightMap(model).alias_to_canonical == {}
 
 
 # ---------------------------------------------------------------------------
