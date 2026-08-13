@@ -18,37 +18,23 @@
 These tests require a CUDA GPU. CPU-only tests are in tests/unit/.
 """
 
-from copy import deepcopy
-
 import pytest
 import torch
+from _test_utils.torch.speculative.dflash import get_dflash_config
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 
 BLOCK_SIZE = 4
 NUM_DRAFT_LAYERS = 2
 SEQ_LEN = 16  # must be multiple of BLOCK_SIZE
 
 
-def _get_dflash_config(block_size=BLOCK_SIZE, num_layers=NUM_DRAFT_LAYERS):
-    """Create a DFlash config for testing."""
-    config = deepcopy(DFLASH_DEFAULT_CFG["config"])
-    config["dflash_block_size"] = block_size
-    config["dflash_use_torch_compile"] = False
-    config["dflash_mask_token_id"] = 0
-    config["dflash_architecture_config"] = {
-        "num_hidden_layers": num_layers,
-    }
-    return config
-
-
 @pytest.fixture
 def dflash_model():
     """Create a tiny DFlash model on GPU."""
     model = get_tiny_llama(num_hidden_layers=4)
-    config = _get_dflash_config()
+    config = get_dflash_config()
     mtsp.convert(model, [("dflash", config)])
     model = model.cuda()
     return model
@@ -120,7 +106,7 @@ class TestDFlashTrainingForwardGPU:
     def model(self):
         """Create a tiny DFlash model in training mode on GPU."""
         model = get_tiny_llama(num_hidden_layers=4)
-        config = _get_dflash_config()
+        config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         model = model.cuda()
         model.train()
@@ -206,7 +192,7 @@ class TestDFlashOfflineForwardGPU:
         """Create a tiny DFlash model with dflash_offline=True on GPU."""
         model = get_tiny_llama(num_hidden_layers=self.NUM_BASE_LAYERS)
         model.config.num_orig_hidden_layers = self.NUM_BASE_LAYERS
-        config = _get_dflash_config()
+        config = get_dflash_config()
         config["dflash_offline"] = True
         mtsp.convert(model, [("dflash", config)])
         model = model.cuda()

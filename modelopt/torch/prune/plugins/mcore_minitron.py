@@ -28,7 +28,7 @@ import io
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from itertools import product
 from typing import Any
@@ -47,6 +47,7 @@ from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
+from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from pydantic import create_model
 from rich.console import Console
 from rich.markup import escape as rich_escape
@@ -255,6 +256,11 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `hparams_to_skip`: List of hparams to skip during the search (default: None).
+    - `candidate_filter`: Callable rejecting candidate configs the caller cannot use, e.g. ones
+        their checkpoint format cannot represent (default: None). Receives every supported hparam,
+        with non-searched ones filled in from the model config (unset ones are omitted, so a
+        filter using them raises `KeyError`). Like `score_func`, it is assumed
+        unchanged when resuming from a `checkpoint`, since rejected candidates are not cached.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     - `seq_length`: Sequence length for KV-cache memory estimate (default: 4096).
         Only used with the ``memory_mb`` constraint.
@@ -280,6 +286,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "max_width_pruning": 0.40,
             "max_depth_pruning": 0.20,
             "hparams_to_skip": None,
+            "candidate_filter": None,
             "top_k": 10,
             # Memory footprint config (only used with memory_mb constraint)
             "seq_length": 4096,
@@ -294,6 +301,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "layer_scores": {},
             "sorted_layers": None,
             "all_candidates_per_constraint": {},
+            "best": {},
         }
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
@@ -520,6 +528,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         max_width_pruning = self.config["max_width_pruning"]
         max_depth_pruning = self.config["max_depth_pruning"]
         hparams_to_skip = self.config["hparams_to_skip"]
+        candidate_filter = self.config["candidate_filter"]
         top_k = self.config["top_k"]
         constraints_str = ", ".join(f"{self._fmt_metric(v, k)} {k}" for k, v in max_metrics.items())
         print_rank_0(f"\nSearching for the best pruned architecture under {constraints_str}...")
@@ -548,12 +557,24 @@ class MCoreMinitronSearcher(BaseSearcher):
                 max_depth_pruning,
                 hparams_to_skip,
             )
+            # Only place to reject invalid hparam *combinations*; unsearched ones come from config.
+            base_config = {
+                hp: getattr(self.model.config, hp)
+                for hp in SUPPORTED_HPARAMS
+                if getattr(self.model.config, hp, None) is not None
+            }
             selected = []
+            num_filtered = 0
             for ss_config in tqdm(
                 search_space_configs,
                 desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
+                if candidate_filter is not None and not candidate_filter(
+                    {**base_config, **ss_config}
+                ):
+                    num_filtered += 1
+                    continue
                 candidate_metrics = self._compute_candidate_metrics(ss_config, max_num_layers)
                 if all(candidate_metrics[k] <= max_metrics[k] for k in active_metric_keys):
                     selected.append(
@@ -561,7 +582,11 @@ class MCoreMinitronSearcher(BaseSearcher):
                             ss_config, {k: candidate_metrics[k] for k in active_metric_keys}, None
                         )
                     )
-            assert len(selected) > 0, "No subnets found fitting the constraints!"
+            if num_filtered:
+                print_rank_0(f"Rejected {num_filtered} candidates via candidate_filter.")
+            assert len(selected) > 0, "No subnets found fitting the constraints!" + (
+                f" candidate_filter rejected all {num_filtered} candidates." if num_filtered else ""
+            )
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
             self.all_candidates_per_constraint[constraints_cache_key] = sorted(
                 selected, key=lambda x: x.metrics[primary_key], reverse=True
@@ -641,6 +666,7 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         dist.barrier()
         best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
+        self.best = asdict(best)
         best_grid = Table.grid(padding=(0, 2))
         best_grid.add_column(style="bold green", no_wrap=True)
         best_grid.add_column()
@@ -950,6 +976,25 @@ class MCoreMinitronModeDescriptor(ModeDescriptor):
         return restore_mcore_minitron
 
 
+def _fused_ln_linears_over_hidden_size(module: nn.Module):
+    """Yield fused-layernorm linears whose layernorm is over ``hidden_size``.
+
+    MLA's Q/KV up-projections are ``TELayerNormColumnParallelLinear`` too, but their layernorm is
+    over the latent rank and MCore unpacks their output as ``(out, bias)``. Setting
+    ``return_layernorm_output`` there makes it ``((out, ln_out), bias)`` and breaks the forward.
+    """
+    up_projs = {
+        id(sub)
+        for m in module.modules()
+        if isinstance(m, MLASelfAttention)
+        for attr in ("linear_q_up_proj", "linear_kv_up_proj")
+        if (sub := getattr(m, attr, None)) is not None
+    }
+    for m in module.modules():
+        if isinstance(m, TELayerNormColumnParallelLinear) and id(m) not in up_projs:
+            yield m
+
+
 class ImportanceEstimatorRegistry:
     """Register importance estimators and forward hooks for all supported modules in the model.
 
@@ -1032,9 +1077,8 @@ class ImportanceEstimatorRegistry:
         self._hooks.clear()
 
         # Unpatch return_layernorm_output on fused TELayerNormColumnParallelLinear modules
-        for m in self.model.modules():
-            if isinstance(m, TELayerNormColumnParallelLinear):
-                m.return_layernorm_output = False
+        for m in _fused_ln_linears_over_hidden_size(self.model):
+            m.return_layernorm_output = False
 
     def get_layer_scores(self) -> dict[int, torch.Tensor]:
         """Get the layer scores (1-indexed) from the model.
@@ -1164,9 +1208,8 @@ def _register_hidden_size_importance(
     # Layernorms are fused into TELayerNormColumnParallelLinear. We temporarily
     # patch return_layernorm_output=True so TE's fused kernel returns the layernorm output.
     # For MoE layers, pre_mlp_layernorm is a separate TENorm — use a regular forward hook.
-    for m in module.modules():
-        if isinstance(m, TELayerNormColumnParallelLinear):
-            m.return_layernorm_output = True
+    for m in _fused_ln_linears_over_hidden_size(module):
+        m.return_layernorm_output = True
 
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):

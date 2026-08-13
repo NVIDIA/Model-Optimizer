@@ -192,7 +192,7 @@ class SVDQuantLinear(QuantLinearConvBase):
 class RealQuantLinear(QuantModule):
     """Quantized version of nn.Linear with real quantization."""
 
-    list_of_scale_tensors = ["_scale", "double_scale", "_scale_zeros"]
+    list_of_scale_tensors = ["_scale", "_double_scale", "_scale_zeros"]
     allow_real_quant_gemm = True
 
     @property

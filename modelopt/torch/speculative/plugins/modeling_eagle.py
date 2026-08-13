@@ -118,7 +118,7 @@ class EagleModule(nn.Module):
         if self._input_embeds is None:
             raise ValueError("self._input_embeds is None")
 
-        input_embeds = self._input_embeds
+        input_embeds = self.layers[0].input_layernorm(self._input_embeds)
         self._input_embeds = None
         kwargs["hidden_states"] = torch.cat(
             (input_embeds, self.layers[0].hidden_norm(kwargs["hidden_states"])), dim=-1
@@ -160,7 +160,10 @@ class EagleModule(nn.Module):
         # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
         # Also, we normalize input embeddings and hidden states before concatenating them.
         # The default input norm in first layer attn will be disabled.
-        self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
+        # Stash raw embeds and normalize in the attention pre-hook instead: FSDP2 only
+        # unshards layers[0] weights inside its own forward. Nothing consumes them without
+        # the hook, so don't hold the reference past this forward.
+        self._input_embeds = inputs_embeds if self.config.use_aux_hidden_state else None
 
         if self.config.eagle_decoder_type == "llama":
             # rotary_emb must be pre-initialized by the caller (see HFEagleModel);

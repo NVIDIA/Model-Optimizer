@@ -19,6 +19,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
+| Tracking runs with MLflow | Record a PTQ run on an MLflow server so it can be reproduced from its entry alone | \[[Link](#tracking-runs-with-mlflow)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
@@ -118,7 +119,6 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Whisper<sup>9</sup> | ✅ | ❌ | ❌ | ❌ | - |
 | Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Llava (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | - |
-| Phi-3-vision, Phi-4-multimodal (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
 | Qwen2, 2.5-VL (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
 | Gemma 3 (VLM)<sup>11</sup> | ✅ | - | - | - | - |
 | Nemotron VL (VLM)<sup>11,13</sup> | ✅ | - | - | - | ✅ |
@@ -129,7 +129,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>2.</sup>For some models, there is only support for exporting quantized checkpoints.* \
 > *<sup>3.</sup>W4A8_AWQ is only available on some models but not all* \
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
-> *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later* \
+> *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v1.2 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
@@ -587,27 +587,24 @@ print(llm_fp8.generate(["What's the age of the earth? "]))
 
 ### Unified HF Checkpoint Deployment Model Support Matrix
 
-| Model | Quant format | TRT-LLM | vLLM | SGLang |
-| :---: | :---: | :---: | :---: | :---: |
-| LLAMA 3.x | FP8 | ✅ | ✅ | ✅ |
-| LLAMA 3.x | FP4 | ✅ | ✅ | ✅ |
-| LLAMA 4 | FP8 | ✅ | - | ✅ |
-| LLAMA 4 | FP4 | ✅ | - | - |
-| DS-R1 | FP8 | ✅ | ✅ | ✅ |
-| DS-R1 | FP4 | ✅ | ✅ | ✅ |
-| DS-V3 | FP8 | ✅ | ✅ | ✅ |
-| DS-V3 | FP4 | ✅ | ✅ | ✅ |
-| QWen3 | FP8 | ✅ | ✅ | ✅ |
-| QWen3 | FP4 | ✅ | ✅ | - |
-| QWen3 MoE | FP8 | ✅ | ✅ | ✅ |
-| QWen3 MoE | FP4 | ✅ | - | - |
-| QWen3.5 MoE | FP4 | - | - | ✅ |
-| QWen2.5 | FP8 | ✅ | ✅ | ✅ |
-| QWen2.5 | FP4 | ✅ | ✅ | - |
-| QwQ-32B | FP8 | ✅ | ✅ | ✅ |
-| QwQ-32B | FP4 | ✅ | ✅ | - |
-| Mixtral 8x7B | FP8 | ✅ | ✅ | ✅ |
-| Mixtral 8x7B | FP4 | ✅ | - | - |
+The deployment support matrix — which model families and quantization formats are covered on
+TRT-LLM, vLLM, and SGLang, including vision-language models, speculative decoding drafters, and
+diffusion models — lives in the documentation so there is a single copy to keep current:
+
+**[Unified HF Checkpoint → Model Support Matrix](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html#model-support-matrix)**
+
+Each entry there is drawn from [`tests/examples/hf_ptq/test_deploy.py`](../../tests/examples/hf_ptq/test_deploy.py),
+which loads the exported checkpoint in each framework and generates from short text prompts. That
+file is also the place to look for the exact checkpoint, tensor-parallel size, and minimum SM
+version behind each entry.
+
+> *Note: those cases are marked `release` and run out-of-band — no workflow currently passes
+> `--run-release` — and each is a load-and-generate smoke check on the text path. Read the legend in
+> the docs before treating an entry as verified support.*
+
+> *Note: the matrix records what modelopt validates, not the full set of what will run. vLLM, SGLang,
+> and TRT-LLM load unified HF checkpoints generically, so unlisted models frequently deploy without
+> any modelopt change — check the serving framework's own model support list and try it.*
 
 ### (Legacy) TensorRT-LLM Checkpoints
 
@@ -637,6 +634,61 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 - Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
+
+## Tracking runs with MLflow
+
+Set MLflow's own `MLFLOW_TRACKING_URI`, or pass `--mlflow <tracking-uri>`, to record a PTQ
+run on an MLflow server so it can be reproduced later from its MLflow entry alone:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --recipe general/ptq/nvfp4_default-kv_fp8_cast \
+  --export_path <quantized_ckpt_path> \
+  --mlflow https://<your-mlflow-server>/
+```
+
+The run is opened *before* the model loads, so a bad URI or a missing token fails within
+seconds rather than after a full calibration.
+
+<details>
+<summary>Uploaded artifacts</summary>
+
+| Artifact | Contents |
+| --- | --- |
+| `command.txt` | The full invocation, copy-pasteable, with credentials masked |
+| `version.txt` | The ModelOpt version that ran |
+| `recipe/resolved_recipe.yaml` | The `--recipe` with its `$import`s expanded, so it stands alone |
+| `logs/hf_ptq.log` | The run's Python stdout/stderr, including the traceback if it crashed |
+| `summary/quant_summary.txt` | The per-quantizer summary (unless `--no-verbose`) |
+| `summary/moe.html` | Per-expert calibration token counts, when the run produces them |
+
+</details>
+
+Every command-line argument is also logged as a searchable param, alongside
+`user` / `hostname` / `modelopt_version` / `git_sha` tags. A run that fails is
+still recorded, with status `FAILED` and its log attached.
+
+Other flags:
+
+- `--mlflow_experiment` — defaults to `$USER/hf_ptq/<checkpoint basename>-<recipe name>`,
+  falling back to `--qformat` when no `--recipe` is used.
+- `--mlflow_run_name` — defaults to the UTC start time, `YYYYmmdd-HHMMSS`.
+- `$MLFLOW_TRACKING_URI` enables tracking on its own; `--mlflow` overrides it. A URI taken
+  from the environment is best-effort — if the client is missing or the server is
+  unreachable the run warns and continues untracked, since the variable is often exported
+  for other tooling. An explicit `--mlflow` fails loudly instead.
+
+Authentication uses MLflow's own environment variables (`MLFLOW_TRACKING_TOKEN`, or
+`MLFLOW_TRACKING_USERNAME` / `MLFLOW_TRACKING_PASSWORD`).
+
+The tracking itself lives in `modelopt.torch.utils.mlflow`
+([`MlflowRunLogger`](../../modelopt/torch/utils/mlflow.py)), so other example scripts can
+record runs the same way; `hf_ptq.py` only supplies the params and artifacts specific to PTQ.
+
+> Note: only the main rank uploads, so `--use_fsdp2` runs produce a single run. The log
+> captures Python output; output written directly by native libraries (NCCL, CUDA) goes to
+> the terminal only. On SLURM, keep the job's own `.out` file for those.
 
 ## Resources
 

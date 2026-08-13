@@ -40,6 +40,17 @@ from modelopt.torch.export.quant_aware_conversion import (
 
 BLOCK = 16
 
+# Tiny Mixtral shaped to match the synthetic expert tensors built by ``_nvfp4_linear`` below.
+_MIXTRAL_KWARGS = {
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_local_experts": 2,
+    "num_experts_per_tok": 2,
+    "vocab_size": 64,
+    "max_position_embeddings": 64,
+}
+
 
 def _nvfp4_linear(module: str, out: int, in_features: int) -> dict[str, torch.Tensor]:
     """Synthetic NVFP4 quantized-linear tensor group keyed under ``module``."""
@@ -176,8 +187,9 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     a ModelOpt-expanded per-expert state dict (in-memory ``mlp.experts.<i>.*`` names)
     must revert to the hub layout (``block_sparse_moe.experts.<i>.w{1,2,3}``).
     """
+    # Imports stay function-local: unit tests must import without transformers installed.
     pytest.importorskip("transformers")
-    from transformers import MixtralConfig, MixtralForCausalLM
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
 
     try:
         from transformers.conversion_mapping import get_checkpoint_conversion_mapping
@@ -186,18 +198,7 @@ def test_build_reverse_rules_from_mixtral_conversion_mapping_cpu():
     if not get_checkpoint_conversion_mapping("mixtral"):
         pytest.skip("transformers build has no mixtral conversion_mapping")
 
-    cfg = MixtralConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        num_local_experts=2,
-        num_experts_per_tok=2,
-        vocab_size=64,
-        max_position_embeddings=64,
-    )
-    model = MixtralForCausalLM(cfg)
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
 
     p = "model.layers.0"
     sd = {f"{p}.mlp.gate.weight": torch.randn(2, 32)}
@@ -316,6 +317,151 @@ def test_nested_text_prefix_reverse_still_applies_to_text_model():
     assert mapper("model.layers.0") == "model.language_model.layers.0"
 
 
+def test_scoped_submodel_prefix_change_does_not_capture_siblings():
+    """A vision sub-model's ``PrefixChange`` must not prefix the whole VLM state dict.
+
+    NVBug 6525511: ``LlavaForConditionalGeneration`` on transformers>=5.12 collects the
+    vision tower's own "add ``vision_model.``" prefix change. transformers scopes it to
+    ``model.vision_tower`` via ``scope_prefix`` and only matches keys under that prefix;
+    applying the raw pattern instead prefixes *every* key, so the export writes
+    ``vision_model.language_model.*`` / ``vision_model.lm_head.*`` and vLLM fails with
+    "There is no module or parameter named 'vision_model'".
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import PrefixChange
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.vision_tower = torch.nn.Module()
+    model.model.vision_tower.encoder = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+    model.lm_head = torch.nn.Linear(2, 2, bias=False)
+
+    prefix_change = PrefixChange(prefix_to_remove="vision_model")
+    prefix_change.scope_prefix = "model.vision_tower"
+    prefix_change.base_model_prefix = "model"
+    model._weight_conversions = [prefix_change]
+
+    state_dict = {
+        "model.vision_tower.encoder.weight": torch.randn(2, 2),
+        "model.language_model.layers.0.weight": torch.randn(2, 2),
+        "lm_head.weight": torch.randn(2, 2),
+    }
+    reverted = revert_weight_conversion_quant_aware(model, state_dict)
+
+    # Only the vision tower's own subtree gains the ``vision_model.`` segment.
+    assert set(reverted) == {
+        "model.vision_tower.vision_model.encoder.weight",
+        "model.language_model.layers.0.weight",
+        "lm_head.weight",
+    }
+    # Regression guard: nothing may be moved under a bogus top-level ``vision_model``.
+    assert not any(k.startswith("vision_model.") for k in reverted)
+
+
+def test_scoped_rule_maps_config_module_names_consistently():
+    """``build_reverse_name_mapper`` must apply the same scoping as the weight rename.
+
+    Otherwise ``exclude_modules`` (which lists the BF16 vision tower) lands in a
+    different namespace than the weights and a deployment loader silently treats an
+    excluded layer as quantized.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import PrefixChange
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.vision_tower = torch.nn.Module()
+    model.model.vision_tower.encoder = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+
+    prefix_change = PrefixChange(prefix_to_remove="vision_model")
+    prefix_change.scope_prefix = "model.vision_tower"
+    prefix_change.base_model_prefix = "model"
+    model._weight_conversions = [prefix_change]
+
+    mapper = build_reverse_name_mapper(model)
+    assert mapper is not None
+    assert mapper("model.vision_tower.encoder") == "model.vision_tower.vision_model.encoder"
+    # Sibling namespaces are untouched.
+    assert mapper("model.language_model.layers.0") == "model.language_model.layers.0"
+    # A trailing-wildcard exclude pattern tracks the same rename its weights got, so the
+    # excluded (BF16) vision tower still matches the exported tensor names.
+    assert mapper("model.vision_tower*") == "model.vision_tower.vision_model*"
+
+
+def test_root_scoped_rule_still_faces_shadowing_guard():
+    """A ``scope_prefix == ""`` rule has whole-key-space reach and must not bypass #2032.
+
+    ``_scope_prefixes`` keeps an empty candidate for the root scope, which
+    ``_sub_scoped`` matches against every key -- so such a rule is as broad as an
+    unscoped one. Skipping the shadowing heuristic merely because ``scope_prefixes`` is a
+    non-empty *tuple* would reintroduce NVBug 6525534: the nested text model's
+    ``^model.language_model.`` reverse would be kept and rewrite ``model.visual.*``.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import WeightRenaming
+
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.visual = torch.nn.Module()
+    model.model.visual.patch_embed = torch.nn.Linear(2, 2, bias=False)
+    model.model.language_model = torch.nn.Module()
+    model.model.language_model.layers = torch.nn.ModuleList([torch.nn.Linear(2, 2, bias=False)])
+
+    renaming = WeightRenaming(
+        source_patterns=r"^model.language_model.",
+        target_patterns=r"^model.(?!language_model.)",
+    )
+    # Root scope: reaches every key, exactly like an unscoped rule.
+    renaming.scope_prefix = ""
+    renaming.base_model_prefix = ""
+    model._weight_conversions = [renaming]
+
+    state_dict = {
+        "model.visual.patch_embed.weight": torch.randn(2, 2),
+        "model.language_model.layers.0.weight": torch.randn(2, 2),
+    }
+    reverted = revert_weight_conversion_quant_aware(model, state_dict)
+
+    # The sibling vision namespace must be untouched (the #2032 guarantee).
+    assert set(reverted) == set(state_dict)
+    assert not any("language_model.visual" in k for k in reverted)
+
+
+def test_scoped_weight_converter_is_refused():
+    """A scoped ``WeightConverter`` must fall back rather than emit unscoped rules.
+
+    Converter-derived rules (expert leaf renames, dense splits) match by module suffix,
+    so they cannot be confined to a sub-model subtree the way an anchored rename can.
+    No current architecture scopes a converter -- transformers only scopes
+    ``WeightRenaming``/``PrefixChange`` -- so if one ever appears, refusing the whole
+    conversion keeps the in-memory names (a warning) instead of silently rewriting an
+    identically-named module in a sibling namespace.
+    """
+    pytest.importorskip("transformers.core_model_loading")
+    # Local import: optional dependency, guarded by the importorskip above.
+    from transformers.core_model_loading import Chunk, WeightConverter
+
+    conv = WeightConverter(
+        source_patterns="mlp.gate_up_proj",
+        target_patterns=["mlp.gate_proj", "mlp.up_proj"],
+        operations=[Chunk(dim=0)],
+    )
+    conv.scope_prefix = "model.language_model"
+    conv.base_model_prefix = "model"
+    model = types.SimpleNamespace(_weight_conversions=[conv])
+
+    sd = _nvfp4_linear("model.language_model.layers.0.mlp.gate_up_proj", 8, 16)
+    with pytest.raises(QuantConversionUnsupportedError, match="scoped WeightConverter"):
+        revert_weight_conversion_quant_aware(model, sd)
+
+
 def test_split_collision_raises():
     """A split whose target key already exists must fail instead of overwriting."""
     sd = _nvfp4_linear("m.gate_up_proj", 8, 16)
@@ -354,22 +500,11 @@ def test_revert_quant_config_names_mapper():
     deployment loader matched none of the excludes and loaded an excluded BF16 layer as
     quantized. Uses Mixtral's real mapping (``mlp.experts`` <-> ``block_sparse_moe.experts``).
     """
+    # Import stays function-local: the helper needs transformers, which unit tests run without.
     pytest.importorskip("transformers.core_model_loading")
-    from transformers import MixtralConfig, MixtralForCausalLM
+    from _test_utils.torch.transformers_models import get_tiny_mixtral
 
-    model = MixtralForCausalLM(
-        MixtralConfig(
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            num_local_experts=2,
-            num_experts_per_tok=2,
-            vocab_size=64,
-            max_position_embeddings=64,
-        )
-    )
+    model = get_tiny_mixtral(**_MIXTRAL_KWARGS)
     mapper = build_reverse_name_mapper(model)
     assert mapper is not None
 

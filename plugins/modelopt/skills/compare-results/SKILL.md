@@ -1,0 +1,102 @@
+---
+name: compare-results
+description: Establish baseline-vs-candidate evaluation plans, delegate missing evaluations, compare validated results, and decide quantization feasibility. Use when the user asks to compare baseline vs quantized runs, explain an accuracy drop/regression, verify whether a quantized checkpoint is acceptable, or compare NEL/MLflow evaluation outputs. Do NOT use for generic single-model evaluation without comparison intent (use evaluation), live NEL status/debugging (use launching-evals), or generic MLflow browsing without a comparison goal (use accessing-mlflow).
+license: Apache-2.0
+---
+
+# Compare Results
+
+Use this to plan and complete a baseline-vs-candidate comparison. The baseline
+is the reference checkpoint, and the candidate is the checkpoint whose accuracy
+change is being measured, typically a further quantized version of the baseline.
+
+## Workflow
+
+1. Establish the candidate checkpoint/run and the matching baseline. Infer the
+   baseline from the PTQ source model/checkpoint in the workspace or config used
+   to create the candidate. If it cannot be inferred, ask the user for the
+   baseline checkpoint or an existing baseline invocation/run path.
+2. If a required baseline or candidate evaluation is missing, delegate to the
+   evaluation skill to create, run, and verify it. The companion evaluation
+   config should match benchmark versions, task configs, serving args, token
+   limits, dataset setup, credentials, cluster, and container as closely as
+   possible; change only the model/checkpoint and checkpoint-specific serving or
+   quantization flags.
+3. Fetch the baseline and candidate task list, configs, score artifacts, and
+   logs. If the user provides MLflow runs or invocation IDs, use the
+   accessing-mlflow skill to fetch configs and artifacts.
+4. Confirm each run passed evaluation Step 9, "Verify completed evaluation run",
+   before comparing scores. If not, validate logs, server health,
+   judge/code-execution status, sample accounting, and reasoning parsing before
+   computing deltas.
+5. For each task, use the canonical score field from the matching evaluation
+   skill task recipe, `recipes/tasks/<task>.md`, under **Score Extraction**.
+6. Use the evaluation skill's `references/run-validation.md` to perform the
+   **External Baseline Sanity Check**. Record each source URL, protocol
+   difference, and task status before applying the candidate-delta gate. A
+   failed baseline blocks a success verdict; correct and rerun it first. If no
+   credible comparable reference exists, label the baseline externally
+   unverified rather than claiming the check passed, then continue using the
+   validated measured baseline.
+7. Compute exact deltas outside the chat context when there are multiple tasks
+   or repeated runs.
+8. Report comparability, external baseline sanity, and quantized-feasibility
+   verdicts before interpreting the delta as model quality. If the user did not
+   provide an acceptance threshold, report feasibility as inconclusive instead
+   of inventing one.
+
+## Comparability Checklist
+
+Before treating a baseline-vs-quantized delta as a model quality result, verify
+the validated runs are comparable:
+
+1. Prompt text, system prompt, chat template, and rendered messages match.
+2. Task name, benchmark version, dataset split, container, harness, and task
+   fragment match.
+3. Generation settings match, including temperature, top_p, top_k, max tokens,
+   stop strings, chat-template kwargs, reasoning mode/budget, and task-specific
+   overrides.
+4. Reasoning traces are enabled, disabled, parsed, stripped, or ignored
+   consistently between runs.
+5. The number of evaluated and scored samples/repeats matches for each task and
+   split.
+6. Judge-backed or simulator-backed tasks use the same judge/user model,
+   endpoint class, prompt, and scoring config.
+7. The same accuracy metric and score field is used for both runs.
+8. **Baseline precision matches the gate.** A `<1pp vs BF16` gate requires a true
+   full-precision (BF16) baseline. Many models ship *natively quantized* (e.g.
+   INT4 `W4A16` or block-wise FP8) with no BF16 release — a quant-to-quant
+   comparison against the released precision (e.g. INT4 vs NVFP4, as for
+   Kimi-K2.6) is still a valid result; just compare like-for-like, **state which
+   precision the baseline is**, and apply the gate relative to that baseline
+   rather than to an assumed BF16.
+
+For SciCode, keep `num_repeats: 1` to limit sandbox workload. If variance is a
+concern, run multiple independent matched baseline/candidate pairs instead of
+increasing repeats within one run.
+
+If any item differs, either rerun with matched settings or label the result as
+not an apples-to-apples quantization comparison.
+
+These checks compare the baseline and candidate to each other. The external
+baseline check in the evaluation skill's `references/run-validation.md`
+separately tests whether the baseline's absolute score is credible; both guards
+must be reported.
+
+## Report Format
+
+Include:
+
+- Baseline and candidate identifiers.
+- Per-task metric path, baseline score, candidate score, delta, and stderr if
+  available.
+- Per-task external reference score, source URL, known protocol differences,
+  percentage-point difference, and sanity status (`verified`, `failed`, or
+  `externally unverified`).
+- Comparability status for prompt/template, generation settings, sample counts,
+  reasoning handling, judge/simulator setup, and score field.
+- Comparability verdict: comparable, not comparable, or inconclusive.
+- Quantization feasibility verdict: acceptable, not acceptable, or inconclusive.
+  Never report `acceptable` when external baseline sanity failed. An externally
+  unverified baseline does not block `acceptable`; apply the candidate-delta
+  gate and report the missing external corroboration.

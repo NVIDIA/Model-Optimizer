@@ -129,6 +129,10 @@ The top5 accuracy of the model is <accuracy score between 0-100%>
 Inference latency of the model is <X> ms
 ```
 
+### FAR3D 3D object detection
+
+The [FAR3D example](./far3d/) demonstrates an end-to-end workflow that exports and quantizes the FAR3D ONNX image encoder, builds TensorRT engines, and evaluates 3D object detection mAP on the Argoverse 2 validation set.
+
 ## Advanced Features
 
 ### Per node calibration of ONNX models

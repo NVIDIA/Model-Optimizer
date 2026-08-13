@@ -29,8 +29,7 @@ docs/source/reference/generated
 **/.ipynb_checkpoints
 
 # Environments
-.env
-.env-*
+.env*
 .venv
 env/
 venv/

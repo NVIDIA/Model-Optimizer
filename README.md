@@ -170,7 +170,25 @@ Please read our [Contributing](./CONTRIBUTING.md) guidelines for details on how 
 
 ## AI Agents
 
-For AI-assisted development setup, see the [agent tooling notes](./.agents/TOOLING.md).
+ModelOpt's agent skills can be installed from this repository and used in any
+workspace.
+
+### Claude Code
+
+```bash
+claude plugin marketplace add https://github.com/NVIDIA/Model-Optimizer.git
+claude plugin install modelopt@modelopt
+```
+
+### Codex
+
+```bash
+codex plugin marketplace add https://github.com/NVIDIA/Model-Optimizer.git
+```
+
+Then open `/plugins`, select the `modelopt` marketplace, and install `modelopt`.
+Contributors can also use the skills directly from a checkout. See the
+[agent tooling notes](./.agents/TOOLING.md).
 
 ### Top Contributors
 

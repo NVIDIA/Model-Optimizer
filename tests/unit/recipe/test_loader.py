@@ -159,6 +159,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/fp8_default-kv_fp8",
     "general/ptq/fp8_default-kv_fp8_cast",
     "general/ptq/int4_blockwise_weight_only",
+    "general/ptq/nvfp4_act_headroom-kv_fp8_cast",
     "general/ptq/nvfp4_default-kv_fp8",
     "general/ptq/nvfp4_default-kv_fp8_cast",
     "general/ptq/nvfp4_default-kv_nvfp4_cast",
@@ -166,7 +167,7 @@ _BUILTIN_PTQ_RECIPES = [
     "general/ptq/nvfp4_experts_only-kv_fp8",
     "general/ptq/nvfp4_experts_only-kv_fp8_cast",
     "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
-    "huggingface/models/nvidia/Mistral-Medium-3.5-128B-NVFP4/ptq/nvfp4-max-calib",
+    "huggingface/models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib",
     "general/ptq/nvfp4_mlp_only-kv_fp8",
     "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
     "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
@@ -211,6 +212,41 @@ def test_nvfp4_mlp_only_novit_recipe_disables_vision_quantizers():
     }
 
     assert {"*visual*", "*vision_tower*"} <= disabled_quantizers
+
+
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/ptq/nvfp4_mlp_only-kv_fp8",
+        "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
+        "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
+        "general/ptq/nvfp4_mlp_only_mse-kv_fp8_cast",
+        "general/ptq/nvfp4_omlp_only-kv_fp8",
+        "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
+    ],
+)
+def test_nvfp4_mlp_only_recipes_match_nemotron_h_dense_mlp(recipe_path):
+    recipe = load_recipe(recipe_path)
+    enabled_patterns = [
+        entry["quantizer_name"]
+        for entry in recipe.quantize.model_dump()["quant_cfg"]
+        if entry["enable"]
+    ]
+
+    for quantizer_name in (
+        "backbone.layers.0.mixer.up_proj.weight_quantizer",
+        "backbone.layers.0.mixer.up_proj.input_quantizer",
+        "backbone.layers.0.mixer.down_proj.weight_quantizer",
+        "backbone.layers.0.mixer.down_proj.input_quantizer",
+    ):
+        assert any(fnmatch(quantizer_name, pattern) for pattern in enabled_patterns)
+
+    for quantizer_name in (
+        "backbone.layers.0.mixer.in_proj.weight_quantizer",
+        "backbone.layers.0.mixer.out_proj.input_quantizer",
+        "backbone.layers.0.mixer.shared_experts.up_proj.weight_quantizer",
+    ):
+        assert not any(fnmatch(quantizer_name, pattern) for pattern in enabled_patterns)
 
 
 @pytest.mark.parametrize(

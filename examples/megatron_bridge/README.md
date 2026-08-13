@@ -130,6 +130,21 @@ The distillation script expects pre-tokenized data in Megatron's binary format (
 See the **[Dataset Preparation README](../dataset/README.md#tokenizing-for-megatron-frameworks)**
 for full instructions on tokenizing JSONL files and Hugging Face datasets and get the list of output prefixes that you can use for `--data_paths` argument.
 
+Alternatively, pass `--sft --sft_dataset_root <dir>` to distill on **raw prompt-completion JSONL**
+with the loss masked to the completion. The directory must hold `training.jsonl` (and
+`validation.jsonl` when `--eval_iters > 0`) of `{"input": <prompt>, "output": <response>}` records, which are tokenized with
+the model's own HuggingFace tokenizer. Both fields are tokenized **as written**, except that
+leading and trailing spaces on each field are stripped — no chat template is applied. So if your
+model expects role/turn markers, include them in the `"input"` field yourself, and express any
+significant separator as a newline rather than a trailing space. A BOS token is prepended
+automatically when the tokenizer prepends one at inference, so do not add it yourself; an EOS
+token is appended after the response. A record longer than `--seq_length` is truncated from the
+**start** of `"input"`, which drops any system prompt or opening role marker baked in there, so
+pre-filter or pre-truncate the corpus if that matters.
+
+Teacher and student must share a tokenizer — distillation scores the teacher on the student's
+token ids, and the KD losses compare the two models' logits elementwise over the vocab dimension.
+
 ### Distillation with Real Data
 
 Example usage to distill a 4B student (HF) from an 8B teacher (HF) on 8 GPUs (TP=8, PP=1):
@@ -364,9 +379,6 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 
 > [!NOTE]
 > Multi-token-prediction (MTP) heads (e.g. Qwen3.5) are not pruned yet — they are dropped for the prune run and the saved checkpoint has no MTP. Autoregressive inference is unaffected; for speculative decoding, run a short MTP SFT on the pruned model.
-
-> [!NOTE]
-> If pruning a Nemotron model and you want to save the pruned model back in HF format, please downgrade to `transformers<5` via `python -m pip install "transformers<5"` before pruning.
 
 ### Vision-Language Models (VLMs)
 

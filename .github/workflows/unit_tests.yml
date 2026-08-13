@@ -15,6 +15,7 @@ on:
       - "tools/mcp/**"
       - "tools/resource_monitor.py"
       - ".agents/skills/**"
+      - "plugins/modelopt/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -26,17 +27,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-dco:
-    uses: ./.github/workflows/_wait_for_checks.yml
-    permissions:
-      checks: read
-    secrets: inherit
-    with:
-      match_pattern: "^DCO$"
   check-file-changes:
     runs-on: ubuntu-latest
     outputs:
-      any_changed: ${{ steps.changed.outputs.any_changed || steps.non-pr.outputs.any_changed }}
+      any_changed: ${{ steps.changed.outputs.any_modified || steps.non-pr.outputs.any_changed }}
     steps:
       - id: non-pr
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -48,20 +42,22 @@ jobs:
       - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
-        uses: step-security/changed-files@v46.0.5
+        uses: step-security/changed-files@v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
             modelopt/**
+            modelopt_recipes/**
             noxfile.py
             pyproject.toml
             tests/unit/**
+            tests/_test_utils/**
             tools/launcher/**
             tools/mcp/**
             tools/resource_monitor.py
             .agents/skills/**
+            plugins/modelopt/skills/**
   linux:
-    needs: [check-dco]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -73,7 +69,7 @@ jobs:
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: pip install nox uv && nox -s "unit-3.12(torch_213, tf_latest)"
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
@@ -196,7 +192,7 @@ jobs:
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
           pip install pytest
-          python -m pytest .agents/skills/ -o addopts="" -p no:cacheprovider -v
+          python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}

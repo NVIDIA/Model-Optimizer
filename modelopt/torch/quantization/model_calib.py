@@ -21,7 +21,7 @@ import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -41,9 +41,16 @@ from modelopt.torch.utils.distributed import is_initialized as dist_is_initializ
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4ActHeadroomCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from .utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -66,6 +73,7 @@ __all__ = [
     "local_hessian_calibrate",
     "lsq",
     "max_calibrate",
+    "nvfp4_act_headroom_calibrate",
     "smoothquant",
     "svdquant",
 ]
@@ -208,7 +216,7 @@ def _has_expert_parallelism(module: nn.Module) -> bool:
 
 
 def _iter_leaf_quantizers(quantizer):
-    if isinstance(quantizer, SequentialQuantizer):
+    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
         for _q in quantizer:
             yield from _iter_leaf_quantizers(_q)
         return
@@ -376,12 +384,12 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
         """Sync amax across DP (always) and EP (filtered — see _should_sync_amax_across_ep)."""
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_dp_ep(_q, parallel_state, parent_name, child_name)
             return
@@ -395,7 +403,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
@@ -417,7 +425,7 @@ def max_calibrate(
         parallel_state: ParallelState,
     ):
         # Syncing amax across TP for sequential quantizer
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_tp(
                     _q, linear_name, quantizer_type, axes_for_sync, parallel_state
@@ -488,6 +496,144 @@ def max_calibrate(
 
     # _amax is now cross-rank consistent across ranks.
     _finalize_with_shared_state(model, weight_patterns)
+
+
+def _is_nvfp4_dynamic_activation_quantizer(module: nn.Module) -> bool:
+    """True for an enabled NVFP4 (E2M1 + E4M3 scale) dynamic-block quantizer leaf.
+
+    These carry their per-tensor global scale in ``_amax`` and are calibrated like plain max
+    (the quantizer itself is not ``_dynamic``; only its per-block scales are).
+    """
+    if not isinstance(module, TensorQuantizer):
+        return False
+    if getattr(module, "_disabled", False) or getattr(module, "_dynamic", False):
+        return False
+    block_sizes = module.block_sizes
+    return (
+        block_sizes is not None
+        and block_sizes.get("type", None) == "dynamic"
+        and module.num_bits == (2, 1)
+        and block_sizes.get("scale_bits", None) == (4, 3)
+    )
+
+
+def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
+    """True for a plain NVFP4 dynamic-block *input* quantizer.
+
+    :class:`SequentialQuantizer` activation quantizers are not supported by this algorithm and
+    are rejected in :func:`_swap_in_nvfp4_act_headroom_calibrators` rather than matched here.
+    """
+    return name.endswith("input_quantizer") and _is_nvfp4_dynamic_activation_quantizer(module)
+
+
+def _swap_in_nvfp4_act_headroom_calibrators(
+    model: nn.Module, *, anchor_percentile: float, upper_percentile: float, rho: float
+) -> list[tuple[nn.Module, Any]]:
+    """Swap in an :class:`NVFP4ActHeadroomCalibrator` for each qualifying NVFP4 input quantizer.
+
+    Returns ``(quantizer, original_calibrator)`` pairs so the caller can restore them.
+    """
+    # Validate before mutating anything, so a rejected model is left untouched. A
+    # SequentialQuantizer wraps several quantizers over one activation; this algorithm derives a
+    # single global scale per tensor and has no defined behavior for that composition, so reject
+    # it explicitly instead of silently leaving those activations on plain max.
+    for name, module in model.named_modules():
+        if not name.endswith("input_quantizer") or not isinstance(module, SequentialQuantizer):
+            continue
+        if any(_is_nvfp4_dynamic_activation_quantizer(q) for q in _iter_leaf_quantizers(module)):
+            raise NotImplementedError(
+                f"nvfp4_act_headroom does not support SequentialQuantizer activation quantizers, "
+                f"but {name!r} is one wrapping an NVFP4 dynamic-block quantizer. Use a single "
+                f"activation quantizer config for these modules, or calibrate with 'max'."
+            )
+
+    swapped: list[tuple[nn.Module, Any]] = []
+    for name, module in model.named_modules():
+        if not _is_nvfp4_dynamic_input_quantizer(name, module):
+            continue
+        swapped.append((module, module._calibrator))
+        module._calibrator = NVFP4ActHeadroomCalibrator(
+            module.num_bits,
+            None,
+            module._unsigned,
+            block_size=module.block_sizes.get(-1, 16),
+            anchor_percentile=anchor_percentile,
+            upper_percentile=upper_percentile,
+            rho=rho,
+        )
+    return swapped
+
+
+@torch.no_grad()
+def nvfp4_act_headroom_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    *,
+    anchor_percentile: float = 1.0,
+    upper_percentile: float = 99.99,
+    rho: float = 16384.0,
+    weight_scale_algorithm: Any = None,
+):
+    """Calibrate NVFP4 activation global scales with headroom.
+
+    For NVFP4 dynamic-block *input* quantizers, the per-tensor global scale is derived from
+    the distribution of per-block activation amaxes so that headroom is left above the
+    calibrated range (see :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>`).
+
+    Weight scales are an orthogonal concern and are delegated to ``weight_scale_algorithm``,
+    so a recipe can combine this activation policy with ``max``, ``mse`` or ``local_hessian``
+    weights. Each of those runs max calibration first, so the activation collectors installed
+    here are populated in that pass and any later refinement touches only weights.
+
+    Args:
+        model: model to be calibrated.
+        forward_loop: callable that runs calibration data through the model.
+        anchor_percentile: percentile of the per-block amaxes used as the anchor.
+        upper_percentile: percentile of the per-block amaxes used as the top of the calibrated
+            range; ``100`` uses the literal observed max.
+        rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
+        weight_scale_algorithm: config for the algorithm that calibrates the *weight* scales --
+            ``{"method": "max"}`` (the default), ``"mse"`` or ``"local_hessian"``, plus that
+            algorithm's own options such as ``distributed_sync`` and ``shared_states``.
+            ``None`` is treated as ``{"method": "max"}``.
+
+    Raises:
+        NotImplementedError: if an NVFP4 activation quantizer is a ``SequentialQuantizer``,
+            which this algorithm does not support.
+
+    .. note::
+        Under data parallelism the per-rank scales are combined with a ``MAX`` all-reduce, so
+        the result is the largest per-rank headroom scale rather than the scale implied by
+        pooling every rank's per-block distribution.
+    """
+    swapped = _swap_in_nvfp4_act_headroom_calibrators(
+        model, anchor_percentile=anchor_percentile, upper_percentile=upper_percentile, rho=rho
+    )
+    if not swapped:
+        warn_rank_0(
+            "nvfp4_act_headroom: no NVFP4 dynamic-block input quantizer matched, so this is "
+            "equivalent to plain max calibration. Check that the recipe enables NVFP4 "
+            "activation quantizers."
+        )
+    print_rank_0(
+        f"nvfp4_act_headroom: calibrating {len(swapped)} NVFP4 activation quantizer(s) "
+        f"(anchor_percentile={anchor_percentile}, upper_percentile={upper_percentile}, "
+        f"rho={rho})."
+    )
+    # max_calibrate runs the forward loop once: the swapped-in calibrators accumulate their
+    # per-block histograms in the same pass that collects max stats for every other quantizer.
+    # The calibrators are restored afterwards so this algorithm does not leak into a later
+    # calibration of the same model, and so a repeat run starts from a fresh histogram.
+    # Default to max rather than the helper's own default, so selecting this activation policy
+    # never silently changes how weights are calibrated.
+    try:
+        _run_weight_scale_calibration(
+            model, forward_loop, weight_scale_algorithm or {"method": "max"}
+        )
+    finally:
+        for quantizer, original_calibrator in swapped:
+            quantizer._calibrator = original_calibrator
 
 
 def _mse_quant_func(x, amax, quantizer):
@@ -2125,8 +2271,11 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
-def _run_scale_calibration(model, forward_loop, scale_algorithm):
-    """Run scale calibration."""
+def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
+    """Run the weight-scale calibration algorithm.
+
+    These algorithms set *weight* scales; activation scales are the caller's concern.
+    """
     if scale_algorithm is None:
         scale_algorithm = {"method": "mse"}
 
@@ -2169,7 +2318,7 @@ def lsq(
         tied_amax: If True, pre and post share a single tensor.
         quantize_pre_scale: If False, skip FP8 quantization for the LSQ pre scale.
     """
-    _run_scale_calibration(model, forward_loop, scale_algorithm)
+    _run_weight_scale_calibration(model, forward_loop, scale_algorithm)
 
     name_to_module = dict(model.named_modules())
     seen_modules: set[int] = set()
