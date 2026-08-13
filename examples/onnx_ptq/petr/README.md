@@ -10,16 +10,17 @@ Clone the reference repositories and apply the DL4AGX compatibility patch:
 
 ```bash
 git clone https://github.com/NVIDIA/DL4AGX.git
+git -C DL4AGX checkout 9f7b29104c253d5bc68334e7b83b3eecb72d4572
 git clone https://github.com/megvii-research/PETR.git
-cd PETR
-git apply ../DL4AGX/AV-Solutions/petr-trt/patch.diff
-git clone https://github.com/open-mmlab/mmdetection3d.git -b v0.17.1
-mkdir -p ckpts data
-ln -s /path/to/nuscenes data/nuscenes
-cd ..
+git -C PETR checkout f7525f93467a33707ef401c587a52d5e7b34de74
+git -C PETR apply ../DL4AGX/AV-Solutions/petr-trt/patch.diff
+git clone https://github.com/open-mmlab/mmdetection3d.git PETR/mmdetection3d
+git -C PETR/mmdetection3d checkout f1107977dfd26155fc1f83779ee6535d2468f449
+mkdir -p PETR/ckpts PETR/data
+ln -s /data/Dataset/nuScenes PETR/data/nuscenes
 ```
 
-Download the `PETR-vov-p4-800x320_epoch24.pth` and `PETRv2-vov-p4-800x320_epoch24.pth` checkpoints linked from the DL4AGX README, rename them as shown below, and prepare this layout:
+Download the `PETR-vov-p4-800x320_epoch24.pth` and `PETRv2-vov-p4-800x320_epoch24.pth` checkpoints linked from the DL4AGX README and rename them as shown below. Use nuScenes only under its [terms of use](https://www.nuscenes.org/terms-of-use).
 
 ```text
 PETR/
@@ -27,23 +28,12 @@ PETR/
 │   ├── PETR-vov-p4-800x320_e24.pth
 │   └── PETRv2-vov-p4-800x320_e24.pth
 ├── data/nuscenes/
+│   ├── maps/
 │   ├── samples/
 │   ├── sweeps/
-│   ├── v1.0-trainval/
-│   └── nuscenes_infos_val.pkl
+│   └── v1.0-trainval/
 └── mmdetection3d/
 ```
-
-PETRv2 also needs metadata for the previous camera sweeps:
-
-```bash
-/opt/petr/bin/python \
-  /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_sweep_metadata.py \
-  /workspace/PETR/data/nuscenes \
-  --split val
-```
-
-This creates `mmdet3d_nuscenes_30f_infos_val.pkl`.
 
 Build and start the example image from the Model Optimizer checkout:
 
@@ -53,10 +43,13 @@ docker build \
   -t petr-modelopt \
   .
 
-docker run --rm -it --network=host --gpus=all --shm-size=64G \
+docker run --rm -it --gpus=all --shm-size=64G \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
   -v /path/to/Model-Optimizer:/opt/Model-Optimizer \
   -v /path/to/PETR:/workspace/PETR \
   -v /path/to/DL4AGX:/workspace/DL4AGX \
+  -v /path/to/nuscenes:/data/Dataset/nuScenes \
   petr-modelopt
 ```
 
@@ -65,6 +58,33 @@ Use the isolated Python 3.8 environment for PETR export, calibration preparation
 ```bash
 export PYTHONPATH=/opt/petr/lib/python3.8/site-packages:/workspace/PETR:/workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
 ```
+
+Inside the container, generate `nuscenes_infos_val.pkl` from the local nuScenes tables with the converter included in the pinned PETR checkout:
+
+```bash
+cd /workspace/PETR
+/opt/petr/bin/python - <<'PY'
+from tools.data_converter.nuscenes_converter import create_nuscenes_infos
+
+create_nuscenes_infos(
+    "/workspace/PETR/data/nuscenes",
+    "nuscenes",
+    version="v1.0-trainval",
+    max_sweeps=10,
+)
+PY
+```
+
+PETRv2 also needs metadata for the previous camera sweeps. Run this step in the same container:
+
+```bash
+/opt/petr/bin/python \
+  /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_sweep_metadata.py \
+  /workspace/PETR/data/nuscenes \
+  --split val
+```
+
+This creates `mmdet3d_nuscenes_30f_infos_val.pkl` without overwriting an existing file.
 
 ## 2. Export PETRv1 and PETRv2 to ONNX
 
@@ -91,10 +111,10 @@ The exporters create a backbone graph and a head graph. Simplify both graphs:
 ```bash
 for version in v1 v2; do
   model="PETR${version}"
-  python -m onnxsim \
+  /opt/petr/bin/python -m onnxsim \
     "onnx_files/${model}.extract_feat.onnx" \
     "onnx_files/sim_${model}.extract_feat.onnx"
-  python -m onnxsim \
+  /opt/petr/bin/python -m onnxsim \
     "onnx_files/${model}.pts_bbox_head.forward.onnx" \
     "onnx_files/sim_${model}.pts_bbox_head.forward.onnx"
 done
@@ -135,21 +155,27 @@ Collect 512 representative backbone and head input batches. The default interval
 Repeat with `v2`, the PETRv2 config, checkpoint, graphs, engines, and `calibration/PETRv2` output directory.
 
 TensorRT 11 uses strongly typed networks and no longer accepts `--fp16`.
-Create calibrated mixed-FP16 graphs with Model Optimizer AutoCast, preserving
-FP32 model inputs and outputs, then build the reference engines. The example
-below uses one representative batch for AutoCast node classification:
+Use the base Python environment for Model Optimizer AutoCast, preserving FP32
+model inputs and outputs, then build the reference engines. The example below
+uses one representative batch for AutoCast node classification:
 
 ```bash
 for version in v1 v2; do
   model="PETR${version}"
-  python /opt/Model-Optimizer/examples/onnx_ptq/petr/convert_to_fp16.py \
-    "onnx_files/sim_${model}.extract_feat.onnx" \
-    "onnx_files/sim_${model}.extract_feat.fp16.onnx" \
-    "calibration/${model}/backbone/batch_0000.npz"
-  python /opt/Model-Optimizer/examples/onnx_ptq/petr/convert_to_fp16.py \
-    "onnx_files/sim_${model}.pts_bbox_head.forward.onnx" \
-    "onnx_files/sim_${model}.pts_bbox_head.forward.fp16.onnx" \
-    "calibration/${model}/head/batch_0000.npz"
+  env -u PYTHONPATH python -m modelopt.onnx.autocast \
+    --onnx_path "onnx_files/sim_${model}.extract_feat.onnx" \
+    --output_path "onnx_files/sim_${model}.extract_feat.fp16.onnx" \
+    --calibration_data "calibration/${model}/backbone/batch_0000.npz" \
+    --low_precision_type fp16 \
+    --keep_io_types \
+    --providers cuda:0 cpu
+  env -u PYTHONPATH python -m modelopt.onnx.autocast \
+    --onnx_path "onnx_files/sim_${model}.pts_bbox_head.forward.onnx" \
+    --output_path "onnx_files/sim_${model}.pts_bbox_head.forward.fp16.onnx" \
+    --calibration_data "calibration/${model}/head/batch_0000.npz" \
+    --low_precision_type fp16 \
+    --keep_io_types \
+    --providers cuda:0 cpu
   trtexec \
     --onnx="onnx_files/sim_${model}.extract_feat.fp16.onnx" \
     --saveEngine="engines/${model}.backbone.fp16.engine" \
@@ -166,7 +192,7 @@ done
 Use the base Python environment for Model Optimizer. This command quantizes the backbone and keeps the head in FP16:
 
 ```bash
-python /opt/Model-Optimizer/examples/onnx_ptq/petr/quantize.py \
+env -u PYTHONPATH python /opt/Model-Optimizer/examples/onnx_ptq/petr/quantize.py \
   --backbone-onnx onnx_files/sim_PETRv1.extract_feat.onnx \
   --head-onnx onnx_files/sim_PETRv1.pts_bbox_head.forward.onnx \
   --calibration-dir calibration/PETRv1 \

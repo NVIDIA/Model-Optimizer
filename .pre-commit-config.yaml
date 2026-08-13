@@ -127,6 +127,9 @@ repos:
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
               examples/onnx_ptq/far3d/evaluate.py|
+              examples/onnx_ptq/petr/evaluate.py|
+              examples/onnx_ptq/petr/prepare_sweep_metadata.py|
+              examples/onnx_ptq/trt_runner.py|
               examples/llm_qat/train.py|
               examples/llm_sparsity/weight_sparsity/finetune.py|
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|

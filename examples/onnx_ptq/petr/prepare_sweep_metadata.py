@@ -1,3 +1,6 @@
+# Adapted from https://github.com/megvii-research/PETR/blob/f7525f93467a33707ef401c587a52d5e7b34de74/tools/generate_sweep_pkl.py.
+# Copyright (c) 2022 megvii-model. All Rights Reserved.
+#
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,12 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Adapted from PETR tools/generate_sweep_pkl.py.
-# Copyright (c) 2022 Megvii Inc. All rights reserved.
-
 import argparse
 import os
-import pickle
 
 import mmcv
 import numpy as np
@@ -26,7 +25,7 @@ import tqdm
 from nuscenes import NuScenes
 from pyquaternion import Quaternion
 
-sensors = [
+SENSORS = [
     "CAM_FRONT",
     "CAM_FRONT_RIGHT",
     "CAM_BACK_RIGHT",
@@ -34,6 +33,8 @@ sensors = [
     "CAM_BACK_LEFT",
     "CAM_FRONT_LEFT",
 ]
+NUM_PREV = 5
+NUM_SWEEPS = 5
 
 
 def parse_args():
@@ -44,25 +45,14 @@ def parse_args():
     return parser.parse_args()
 
 
-args = parse_args()
-info_prefix = args.split
-data_root = os.path.abspath(args.data_root) + os.sep
-num_prev = 5
-num_sweep = 5
-
-info_path = args.output or os.path.join(data_root, f"mmdet3d_nuscenes_30f_infos_{info_prefix}.pkl")
-key_infos = pickle.load(open(os.path.join(data_root, f"nuscenes_infos_{info_prefix}.pkl"), "rb"))
-nuscenes_version = "v1.0-test" if info_prefix == "test" else "v1.0-trainval"
-nuscenes = NuScenes(nuscenes_version, data_root)
-
-
-def add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
-    sweep_cam = {}
-    sweep_cam["is_key_frame"] = sample_data["is_key_frame"]
-    sweep_cam["data_path"] = os.path.join(data_root, sample_data["filename"])
-    sweep_cam["type"] = "camera"
-    sweep_cam["timestamp"] = sample_data["timestamp"]
-    sweep_cam["sample_data_token"] = sample_data["sample_token"]
+def add_frame(nuscenes, data_root, sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
+    sweep_cam = {
+        "is_key_frame": sample_data["is_key_frame"],
+        "data_path": os.path.join(data_root, sample_data["filename"]),
+        "type": "camera",
+        "timestamp": sample_data["timestamp"],
+        "sample_data_token": sample_data["sample_token"],
+    }
     pose_record = nuscenes.get("ego_pose", sample_data["ego_pose_token"])
     calibrated_sensor_record = nuscenes.get(
         "calibrated_sensor", sample_data["calibrated_sensor_token"]
@@ -74,13 +64,10 @@ def add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
     sweep_cam["sensor2ego_rotation"] = calibrated_sensor_record["rotation"]
     sweep_cam["cam_intrinsic"] = calibrated_sensor_record["camera_intrinsic"]
 
-    l2e_r_s = sweep_cam["sensor2ego_rotation"]
-    l2e_t_s = sweep_cam["sensor2ego_translation"]
-    e2g_r_s = sweep_cam["ego2global_rotation"]
+    l2e_r_s_mat = Quaternion(sweep_cam["sensor2ego_rotation"]).rotation_matrix
+    e2g_r_s_mat = Quaternion(sweep_cam["ego2global_rotation"]).rotation_matrix
     e2g_t_s = sweep_cam["ego2global_translation"]
-
-    l2e_r_s_mat = Quaternion(l2e_r_s).rotation_matrix
-    e2g_r_s_mat = Quaternion(e2g_r_s).rotation_matrix
+    l2e_t_s = sweep_cam["sensor2ego_translation"]
     rotation = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
     )
@@ -106,55 +93,87 @@ def add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat):
     sweep_cam["extrinsics"] = lidar2cam_rt.astype(np.float32)
     sweep_cam["lidar2img"] = (viewpad @ lidar2cam_rt.T).astype(np.float32)
 
-    pop_keys = [
+    for key in (
         "ego2global_translation",
         "ego2global_rotation",
         "sensor2ego_translation",
         "sensor2ego_rotation",
         "cam_intrinsic",
-    ]
-    for key in pop_keys:
+    ):
         sweep_cam.pop(key)
 
     return sweep_cam
 
 
-for current_id in tqdm.tqdm(range(len(key_infos["infos"]))):
-    e2g_t = key_infos["infos"][current_id]["ego2global_translation"]
-    e2g_r = key_infos["infos"][current_id]["ego2global_rotation"]
-    l2e_t = key_infos["infos"][current_id]["lidar2ego_translation"]
-    l2e_r = key_infos["infos"][current_id]["lidar2ego_rotation"]
-    l2e_r_mat = Quaternion(l2e_r).rotation_matrix
-    e2g_r_mat = Quaternion(e2g_r).rotation_matrix
+def add_sweeps(key_infos, nuscenes, data_root):
+    for current_id in tqdm.tqdm(range(len(key_infos["infos"]))):
+        info = key_infos["infos"][current_id]
+        e2g_t = info["ego2global_translation"]
+        l2e_t = info["lidar2ego_translation"]
+        l2e_r_mat = Quaternion(info["lidar2ego_rotation"]).rotation_matrix
+        e2g_r_mat = Quaternion(info["ego2global_rotation"]).rotation_matrix
 
-    sample = nuscenes.get("sample", key_infos["infos"][current_id]["token"])
-    current_cams = {}
-    for cam in sensors:
-        current_cams[cam] = nuscenes.get("sample_data", sample["data"][cam])
+        sample = nuscenes.get("sample", info["token"])
+        current_cams = {cam: nuscenes.get("sample_data", sample["data"][cam]) for cam in SENSORS}
+        sweep_lists = []
+        for _ in range(NUM_PREV):
+            if not sample["prev"]:
+                break
+            for _ in range(NUM_SWEEPS):
+                sweep_cams = {}
+                for cam in SENSORS:
+                    if not current_cams[cam]["prev"]:
+                        sweep_cams = sweep_lists[-1] if sweep_lists else {}
+                        break
+                    sample_data = nuscenes.get("sample_data", current_cams[cam]["prev"])
+                    sweep_cams[cam] = add_frame(
+                        nuscenes,
+                        data_root,
+                        sample_data,
+                        e2g_t,
+                        l2e_t,
+                        l2e_r_mat,
+                        e2g_r_mat,
+                    )
+                    current_cams[cam] = sample_data
+                sweep_lists.append(sweep_cams)
 
-    sweep_lists = []
-    for _ in range(num_prev):
-        if sample["prev"] == "":
-            break
-        for _ in range(num_sweep):
+            sample = nuscenes.get("sample", sample["prev"])
             sweep_cams = {}
-            for cam in sensors:
-                if current_cams[cam]["prev"] == "":
-                    sweep_cams = sweep_lists[-1]
-                    break
-                sample_data = nuscenes.get("sample_data", current_cams[cam]["prev"])
-                sweep_cam = add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat)
+            for cam in SENSORS:
+                sample_data = nuscenes.get("sample_data", sample["data"][cam])
+                sweep_cams[cam] = add_frame(
+                    nuscenes,
+                    data_root,
+                    sample_data,
+                    e2g_t,
+                    l2e_t,
+                    l2e_r_mat,
+                    e2g_r_mat,
+                )
                 current_cams[cam] = sample_data
-                sweep_cams[cam] = sweep_cam
             sweep_lists.append(sweep_cams)
-        sample = nuscenes.get("sample", sample["prev"])
-        sweep_cams = {}
-        for cam in sensors:
-            sample_data = nuscenes.get("sample_data", sample["data"][cam])
-            sweep_cam = add_frame(sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_mat)
-            current_cams[cam] = sample_data
-            sweep_cams[cam] = sweep_cam
-        sweep_lists.append(sweep_cams)
-    key_infos["infos"][current_id]["sweeps"] = sweep_lists
+        info["sweeps"] = sweep_lists
 
-mmcv.dump(key_infos, info_path)
+
+def main():
+    args = parse_args()
+    data_root = os.path.abspath(args.data_root) + os.sep
+    input_path = os.path.join(data_root, f"nuscenes_infos_{args.split}.pkl")
+    output_path = args.output or os.path.join(
+        data_root, f"mmdet3d_nuscenes_30f_infos_{args.split}.pkl"
+    )
+    if os.path.exists(output_path):
+        raise FileExistsError(f"Refusing to overwrite {output_path}")
+
+    # This metadata must be generated locally by the documented MMDetection3D data-prep step.
+    key_infos = mmcv.load(input_path)
+
+    version = "v1.0-test" if args.split == "test" else "v1.0-trainval"
+    nuscenes = NuScenes(version, data_root)
+    add_sweeps(key_infos, nuscenes, data_root)
+    mmcv.dump(key_infos, output_path)
+
+
+if __name__ == "__main__":
+    main()

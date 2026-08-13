@@ -31,19 +31,23 @@ class CalibrationWriter:
         if any(self.output_dir.glob("*.npz")):
             raise FileExistsError(f"{self.output_dir} already contains calibration batches")
         graph = onnx.load(onnx_path, load_external_data=False).graph
-        self.names = [value.name for value in graph.input]
-        self.dtypes = [
-            onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
+        self.dtypes = {
+            value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
             for value in graph.input
-        ]
+        }
         self.saved = 0
 
     def __call__(self, values):
-        if len(values) != len(self.names):
-            raise ValueError(f"Received {len(values)} inputs, expected {len(self.names)}")
+        missing = self.dtypes.keys() - values.keys()
+        unexpected = values.keys() - self.dtypes.keys()
+        if missing or unexpected:
+            raise ValueError(
+                f"Calibration input mismatch; missing={sorted(missing)}, "
+                f"unexpected={sorted(unexpected)}"
+            )
         batch = {
-            name: value.detach().cpu().numpy().astype(dtype, copy=False)
-            for name, dtype, value in zip(self.names, self.dtypes, values)
+            name: values[name].detach().cpu().numpy().astype(dtype, copy=False)
+            for name, dtype in self.dtypes.items()
         }
         np.savez(self.output_dir / f"batch_{self.saved:04d}.npz", **batch)
         self.saved += 1
@@ -101,5 +105,4 @@ def main():
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("fork")
     main()
