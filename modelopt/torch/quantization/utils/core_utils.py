@@ -828,22 +828,30 @@ def _disable_fsdp_unshard_reshard(layer):
         yield
 
 
-def get_prefixed_param_names(parent_model, target_module):
+def build_param_index(model):
+    """Map ``id(param)`` to its ``(position, name)`` in ``model.named_parameters()``.
+
+    Lets callers resolve many modules against one walk of the parameters instead of one walk
+    each; the position keeps "first in ``named_parameters()`` order" resolvable.
+    """
+    return {id(param): (i, name) for i, (name, param) in enumerate(model.named_parameters())}
+
+
+def get_prefixed_param_names(parent_model, target_module, param_index=None):
     """Get parameter names for a target module prefixed with the parent model name.
 
     This function is used to get full parameter name from FSDPParam module_info which stores the
     unprefixed parameter name.
 
+    Pass ``param_index`` (see :func:`build_param_index`) when resolving many target modules
+    against the same parent, so the parent's parameters are walked once rather than per module.
     """
+    if param_index is None:
+        param_index = build_param_index(parent_model)
     target_ids = {id(p) for p in target_module.parameters()}
-    return next(
-        (
-            name.rsplit(".", 1)[0]
-            for name, param in parent_model.named_parameters()
-            if id(param) in target_ids
-        ),
-        None,  # default value if no match
-    )
+    # Lowest position == first in named_parameters() order, matching a linear scan's result.
+    match = min((param_index[pid] for pid in target_ids if pid in param_index), default=None)
+    return match[1].rsplit(".", 1)[0] if match is not None else None
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
@@ -856,10 +864,14 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
     Returns:
         dict: Full parameter name → FSDP parameter.
     """
+    # Built once per call, not once per FSDPParam: export resolves every quantized module, so the
+    # per-param walk made this quadratic in (params x modules) and stalled MoE exports for hours.
+    # It cannot be cached across calls -- callers swap in quantized params between them.
+    param_index = build_param_index(model)
     mapping = {}
     for param in fsdp_param_list:
         # Get the module name
-        module_name = get_prefixed_param_names(model, param._module_info.module)
+        module_name = get_prefixed_param_names(model, param._module_info.module, param_index)
         if module_name is not None:
             # Get the parameter name from _module_info and construct full param name
             param_name = param._module_info.param_name
