@@ -370,22 +370,14 @@ def test_post_mip_identity_tracks_dependency_execution_and_source_mapping(tmp_pa
     )
 
 
-def test_torn_dependency_current_defers_execution_contract(tmp_path: Path):
+@pytest.mark.parametrize("payload", ["{", "{}"], ids=["torn-json", "missing-identity"])
+def test_unpublished_dependency_current_defers_execution_contract(
+    tmp_path: Path,
+    payload: str,
+):
     config, _ledger, _roots = _identity_fixture(tmp_path)
     current_path = Path(config["puzzle_dir"]) / "artifacts/post_mip/nodes/materialize/current.json"
-    current_path.write_text("{")
-
-    with pytest.raises(
-        PostMIPExecutionContractUnavailable,
-        match="dependency 'materialize' has no published execution identity",
-    ):
-        expected_post_mip_execution_contract(config, "post.params.final")
-
-
-def test_dependency_current_without_execution_identity_defers_contract(tmp_path: Path):
-    config, _ledger, _roots = _identity_fixture(tmp_path)
-    current_path = Path(config["puzzle_dir"]) / "artifacts/post_mip/nodes/materialize/current.json"
-    current_path.write_text("{}")
+    current_path.write_text(payload)
 
     with pytest.raises(
         PostMIPExecutionContractUnavailable,

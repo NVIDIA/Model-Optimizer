@@ -691,7 +691,6 @@ class _WeightedObjectiveMixin:
         if torch.distributed.is_initialized():
             publication_status = [publication_error_text]
             torch.distributed.broadcast_object_list(publication_status, src=0)
-            torch.distributed.barrier()
             publication_error_text = publication_status[0]
         if publication_error is not None:
             raise publication_error
