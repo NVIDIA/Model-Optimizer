@@ -3,7 +3,7 @@
 DSpark vs Domino: Same DFlash Backbone, Different Correction Heads
 ##################################################################
 
-:Author: ModelOpt Team
+:Author: Model Optimizer Team
 :Date: July 13, 2026
 :Tags: speculative-decoding, dflash, dspark, domino, architecture
 
