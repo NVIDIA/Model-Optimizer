@@ -80,6 +80,40 @@ tasks). If the user asks for GDPVal:
 
 ---
 
+### MRCR (NeMo Gym `simple_agent`) path — branch here too
+
+MRCR is a **long-context** gym benchmark and, like GDPVal, a 0.2.6 `nemo_gym`
+task that is **standalone** (one gym eval per config). It is **not** an AA
+benchmark — never generate it as part of an "AA" request. It is far simpler than
+GDPVal: `simple_agent`, **no SIF sandbox, no judge, no Tavily** — deterministic
+prefix-gated `SequenceMatcher` grading, so `HF_TOKEN` is the only secret. If the
+user asks for MRCR:
+
+1. Read **`recipes/tasks/gym/mrcr.md`** (variant table, serving envelope, score
+   extraction, failure modes).
+2. Start from **`recipes/examples/gym_mrcr/example_gym_mrcr.yaml`** — a single
+   self-contained file, targeting the 1M variant like the reviewed golden.
+3. **Pick the variant first** — `config_n3_1m` / `config_n3_128k` / `config`. It
+   sets the context cap, the dataset size, *and* the metric key prefix, and the
+   three are not comparable to each other. Change it in **both**
+   `data_prep_params` and `collect_rollout_params`.
+4. `.env` needs `HF_TOKEN` (the dataset and the n3 tokenizer are both gated) and
+   `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a `pre_cmd` that installs
+   `tiktoken` + `transformers` into the Gym venv — prepare fails without it).
+   The template's Gym pin is **newer than any image's baked Gym**, so it must
+   actually apply: on images where `/opt/Gym` is not a git repo it is silently
+   ignored. NVIDIA-internal: `modelopttools:eval-config` **Step 3d** names a
+   container where pinning works (and how to pull it).
+5. Long-context envelope, not the model, drives the deploy:
+   `--max-model-len 1100000` + `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`,
+   `gpu_memory_utilization: 0.95`, prefix caching + chunked prefill, and a
+   multi-instance fan-out (golden: 4 nodes / 4 instances). **Never cap output
+   tokens** — answers reproduce a full earlier turn verbatim.
+6. Report the **needle-count strata** (2/4/8) alongside the headline
+   `pass@1/accuracy`; quantization damage shows up in the 8-needle stratum first.
+
+---
+
 ### Step 1 — Prerequisites
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
@@ -94,6 +128,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
 - **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require `nemo-evaluator[harbor]` 0.4.x (the package; `nemo-evaluator-next` is the eval *image* repo); `aa/` is the 0.2.6 suite.
 - **GDPVal (NeMo Gym / agentic)** — **part of the AA suite** but a 0.2.6 `nemo_gym` task on a different harness, so it's **standalone** (see the GDPVal branch above): recipe `recipes/tasks/aa_gym/gdpval.md` + shared reference `references/gym-gdpval.md` + self-contained example `recipes/examples/gym_gdpval/`. Generated as its **own config** from the example, **never merged into the `aa/` multi-task `tasks` list**. The `aa_gym/` dir holds the NeMo Gym Stirrup-agent tasks.
+- **MRCR (NeMo Gym / long-context)** — **NOT an AA benchmark**; a 0.2.6 `nemo_gym` task, also **standalone** (see the MRCR branch above): recipe `recipes/tasks/gym/mrcr.md` + self-contained example `recipes/examples/gym_mrcr/`. The `gym/` dir holds non-AA NeMo Gym tasks; only generate it when the user asks for MRCR by name (or for long-context coverage).
 
 **AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/aa_gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
 
