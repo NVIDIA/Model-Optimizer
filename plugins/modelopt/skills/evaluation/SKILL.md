@@ -407,8 +407,13 @@ export DUMMY_API_KEY=dummy
 **Step 8.1 — Dry-run** (config validation):
 
 ```bash
+"$SKILL_DIR/scripts/nel-check.sh"      # re-assert the validated launcher before scoring
 nel run --config <path> --dry-run
 ```
+
+Re-run the check here even if Step 1 already passed: the existing-config path skips
+Step 1 entirely, and this is the last point before a run that will be scored and
+compared. GDPVal instead goes through `nel-gdpval.sh`, which pins the launcher itself.
 
 Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
 
