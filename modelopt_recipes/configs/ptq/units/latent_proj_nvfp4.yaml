@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# QuantizerCfgList: dynamic NVFP4 on latent-MoE fc1/fc2 projections.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*latent_proj.weight_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*latent_proj.input_quantizer'
+    cfg:
+      $import: nvfp4

@@ -756,6 +756,7 @@ def get_model(
         )
 
     device_map = "auto"
+    _vl_sharded = False
     if device == "cpu":
         device_map = "cpu"
 
@@ -767,11 +768,35 @@ def get_model(
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
 
         if is_nemotron_vl(hf_config):
-            print(
-                "Detected Nemotron VL model from config. "
-                "Disabling automatic device mapping for compatibility."
-            )
-            device_map = None
+            # Nemotron VL defaults to a single-device load: the balanced "auto" map has historically
+            # split these wrappers badly. That default is preserved, but it must be overridable --
+            # otherwise a 120B-class VL checkpoint is pinned to one GPU and OOMs no matter how many
+            # GPUs were allocated. MODELOPT_VL_DEVICE_MAP opts in to a sharded (pipelined) load:
+            #   auto / balanced -> spread the layers evenly over the visible GPUs. RECOMMENDED: every
+            #                      device keeps headroom for calibration activations.
+            #   sequential      -> fill each GPU up to max_memory before spilling to the next. NOTE
+            #                      this packs GPU 0 to gpu_mem_percentage of its capacity, so even
+            #                      when the weights fit, calibration activations can still OOM there.
+            _vl_map = os.environ.get("MODELOPT_VL_DEVICE_MAP", "").strip().lower()
+            if _vl_map in {"auto", "balanced", "sequential"}:
+                device_map = "sequential" if _vl_map == "sequential" else "auto"
+                _vl_sharded = True
+                print(
+                    f"Detected Nemotron VL model from config. MODELOPT_VL_DEVICE_MAP={_vl_map} -> "
+                    f"device_map='{device_map}' across {torch.cuda.device_count()} GPU(s)."
+                )
+            elif use_seq_device_map:
+                print(
+                    "Detected Nemotron VL model from config, but --use_seq_device_map was requested "
+                    "explicitly. Using device_map='sequential'."
+                )
+            else:
+                print(
+                    "Detected Nemotron VL model from config. "
+                    "Disabling automatic device mapping for compatibility. "
+                    "Set MODELOPT_VL_DEVICE_MAP=auto to pipeline it across GPUs instead."
+                )
+                device_map = None
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
@@ -801,6 +826,15 @@ def get_model(
         max_memory = get_max_memory()
         max_memory = {key: value * gpu_mem_percentage for key, value in max_memory.items()}
         model_kwargs["max_memory"] = max_memory
+
+    if _vl_sharded and device != "cpu" and "max_memory" not in model_kwargs:
+        # Same reasoning as the sequential branch above: cap each GPU so the weights cannot consume
+        # the whole device and leave nothing for calibration activations.
+        max_memory = get_max_memory()
+        model_kwargs["max_memory"] = {
+            key: (value * gpu_mem_percentage if isinstance(key, int) else value)
+            for key, value in max_memory.items()
+        }
 
     if hf_config.model_type == "bart":
         # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors

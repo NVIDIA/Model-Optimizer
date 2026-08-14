@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# QuantizerCfgList: dynamic NVFP4 on Mamba in_proj/out_proj.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*mixer.in_proj.weight_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*mixer.in_proj.input_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*mixer.out_proj.weight_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*mixer.out_proj.input_quantizer'
+    cfg:
+      $import: nvfp4

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# QuantizerCfgList snippet RE-ENABLING W4A16 NVFP4 on lm_head: NVFP4 WEIGHTS only, activations left
+# BF16. Per the Super 3.5 VL plan, lm_head is constrained to >= W4A16 and must never be W4A4.
+# Import AFTER default_disabled_quantizers.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*lm_head*weight_quantizer'
+    enable: true
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*lm_head*input_quantizer'
+    enable: false

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# QuantizerCfgList snippet enabling dynamic NVFP4 on MoE SHARED-expert weight/input quantizers.
+# NB: the existing `experts_nvfp4` unit globs '*.experts.*', which does NOT match
+# '*.shared_experts.*' (the literal '.experts.' substring is absent -- it is '_experts.').
+# Verified empirically on nemotron_h: '*shared_experts*weight_quantizer' -> 80 modules.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  nvfp4: configs/numerics/nvfp4
+---
+  - quantizer_name: '*shared_experts*weight_quantizer'
+    cfg:
+      $import: nvfp4
+  - quantizer_name: '*shared_experts*input_quantizer'
+    cfg:
+      $import: nvfp4
