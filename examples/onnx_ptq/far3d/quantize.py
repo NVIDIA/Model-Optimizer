@@ -17,24 +17,14 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-
 from modelopt.onnx.quantization import quantize
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from quantization_utils import (
-    FileCalibrationReader,
+    NpyCalibrationReader,
     NpzCalibrationReader,
     find_vovnet_nodes_to_exclude,
 )
-
-
-class EncoderCalibrationReader(FileCalibrationReader):
-    def __init__(self, calibration_dir, max_batches=512):
-        super().__init__(calibration_dir, "*.npy", max_batches)
-
-    def load(self, batch_path):
-        return {"img": np.load(batch_path, allow_pickle=False)}
 
 
 def parse_args():
@@ -70,8 +60,11 @@ def quantize_encoder(args):
     quantize(
         onnx_path=args.encoder_onnx,
         quantize_mode=args.quantization_mode,
-        calibration_data_reader=EncoderCalibrationReader(
-            encoder_dir, max_batches=args.max_calibration_batches
+        calibration_data_reader=NpyCalibrationReader(
+            encoder_dir,
+            args.encoder_onnx,
+            "img",
+            max_batches=args.max_calibration_batches,
         ),
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
