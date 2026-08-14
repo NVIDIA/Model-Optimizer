@@ -23,6 +23,8 @@ import math
 import tensorrt as trt
 import torch
 
+__all__ = ["TensorRTRunner"]
+
 TRT_TO_TORCH = {
     trt.DataType.FLOAT: torch.float32,
     trt.DataType.HALF: torch.float16,
@@ -144,5 +146,4 @@ class TensorRTRunner:
 
         if not self.context.execute_async_v3(stream.cuda_stream):
             raise RuntimeError("TensorRT execution failed")
-        stream.synchronize()
         return outputs

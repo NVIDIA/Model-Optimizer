@@ -161,6 +161,7 @@ def main():
     outputs = []
     for data in tqdm(data_loader):
         result = pipeline(stream, data)
+        torch.cuda.current_stream().wait_stream(stream)
         boxes = LiDARInstance3DBoxes(result["bboxes"].cpu())
         outputs.append(
             {

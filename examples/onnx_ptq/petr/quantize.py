@@ -28,11 +28,20 @@ def default_output(onnx_path, precision):
     return str(path.with_name(f"{path.stem}.{precision}{path.suffix}"))
 
 
-def quantize_model(onnx_path, calibration_dir, precision, output_path, nodes_to_exclude=()):
+def quantize_model(
+    onnx_path,
+    calibration_dir,
+    precision,
+    output_path,
+    nodes_to_exclude=(),
+    max_calibration_batches=512,
+):
     quantize(
         onnx_path=onnx_path,
         quantize_mode=precision,
-        calibration_data_reader=NpzCalibrationReader(calibration_dir, onnx_path),
+        calibration_data_reader=NpzCalibrationReader(
+            calibration_dir, onnx_path, max_batches=max_calibration_batches
+        ),
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         nodes_to_exclude=list(nodes_to_exclude),
@@ -47,6 +56,12 @@ def parse_args():
     parser.add_argument("--head-onnx", required=True)
     parser.add_argument("--calibration-dir", required=True, type=Path)
     parser.add_argument("--precision", choices=("int8", "fp8"), default="int8")
+    parser.add_argument(
+        "--max-calibration-batches",
+        type=int,
+        default=512,
+        help="Maximum number of calibration batches to load",
+    )
     parser.add_argument("--quantize-head", action="store_true")
     parser.add_argument("--backbone-output")
     parser.add_argument("--head-output")
@@ -55,6 +70,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.max_calibration_batches < 1:
+        raise ValueError("--max-calibration-batches must be positive")
     backbone_output = args.backbone_output or default_output(args.backbone_onnx, args.precision)
     excluded = find_vovnet_nodes_to_exclude(args.backbone_onnx)
     print(f"Excluding {len(excluded)} accuracy-sensitive backbone nodes")
@@ -64,6 +81,7 @@ def main():
         args.precision,
         backbone_output,
         excluded,
+        max_calibration_batches=args.max_calibration_batches,
     )
     if args.quantize_head:
         head_output = args.head_output or default_output(args.head_onnx, args.precision)
@@ -72,6 +90,7 @@ def main():
             args.calibration_dir / "head",
             args.precision,
             head_output,
+            max_calibration_batches=args.max_calibration_batches,
         )
     else:
         print("Keeping the head in FP16; use --quantize-head to quantize it")
