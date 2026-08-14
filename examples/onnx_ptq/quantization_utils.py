@@ -42,7 +42,8 @@ MAX_TENSOR_ELEMENTS = 32_000_000
 def _open_regular_file(path, file_type, max_bytes):
     path = Path(path)
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(path, flags)
     except OSError as error:
         raise ValueError(f"Unable to open {path} as a {file_type} file") from error
     try:
