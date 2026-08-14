@@ -76,12 +76,16 @@ def quantize_encoder(args):
 
 def quantize_decoder(args):
     decoder_dir = Path(args.calibration_dir) / "decoder"
+    calibration_reader = NpzCalibrationReader(
+        decoder_dir,
+        args.decoder_onnx,
+        max_batches=args.max_calibration_batches,
+        safe_cast_inputs=("timestamp",),
+    )
     quantize(
         onnx_path=args.decoder_onnx,
         quantize_mode=args.quantization_mode,
-        calibration_data_reader=NpzCalibrationReader(
-            decoder_dir, args.decoder_onnx, max_batches=args.max_calibration_batches
-        ),
+        calibration_data_reader=calibration_reader,
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         high_precision_dtype="fp16" if args.quantization_mode == "fp8" else "fp32",
