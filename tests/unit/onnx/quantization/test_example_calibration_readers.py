@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import io
+import os
 import zipfile
 
 import numpy as np
@@ -67,7 +68,7 @@ def test_file_reader_sorts_and_caps_batches(tmp_path):
     ]
 
 
-def test_readers_load_valid_batches(tmp_path):
+def test_readers_load_valid_batches(tmp_path, monkeypatch):
     model_path = make_model(tmp_path)
     array = np.ones((1, 2), dtype=np.float32)
     npy_dir = tmp_path / "npy"
@@ -76,6 +77,7 @@ def test_readers_load_valid_batches(tmp_path):
     npz_dir = tmp_path / "npz"
     npz_dir.mkdir()
     write_npz(npz_dir / "batch_0000.npz", array)
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
 
     np.testing.assert_array_equal(
         NpyCalibrationReader(npy_dir, model_path, "input").get_first()["input"], array
