@@ -17,7 +17,6 @@ import os
 import re
 import stat
 import zipfile
-from itertools import islice
 from math import prod
 from pathlib import Path
 
@@ -140,14 +139,10 @@ class FileCalibrationReader(CalibrationDataReader):
     def __init__(self, calibration_dir, pattern, max_batches=MAX_CALIBRATION_BATCHES):
         if max_batches < 1:
             raise ValueError("max_batches must be positive")
-        batch_paths = list(islice(Path(calibration_dir).glob(pattern), max_batches + 1))
+        batch_paths = sorted(Path(calibration_dir).glob(pattern))[:max_batches]
         if not batch_paths:
             raise ValueError(f"No {pattern} calibration batches found in {calibration_dir}")
-        if len(batch_paths) > max_batches:
-            raise ValueError(
-                f"More than {max_batches} calibration batches found in {calibration_dir}"
-            )
-        self.batch_paths = sorted(batch_paths)
+        self.batch_paths = batch_paths
         self.rewind()
 
     def get_next(self):
