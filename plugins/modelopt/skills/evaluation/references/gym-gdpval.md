@@ -33,22 +33,16 @@ launcher so a harness change does not become part of the measured model delta.
 
 ## Updating the launcher pin
 
-When a newer `nemo-evaluator-launcher` release is available:
+The pin itself lives in `scripts/nel-validated-version.sh` (shared with the Step 1
+gate), and the general bump procedure is in `references/launcher-version.md`.
+GDPVal adds two requirements to it, because this is the one config that forwards
+`runtime:NEL_INVOCATION_ID`:
 
-1. Review its release notes for launcher schema, generated Slurm, resume, and export
-   changes.
-2. Update `NEL_GDPVAL_VERSION` in `scripts/nel-gdpval.sh` and the expected spec in
-   `tests/test_nel_gdpval.py`.
-3. Run the focused test and pre-commit checks. Verify `nel-gdpval.sh --version`
-   reports the candidate version.
-4. Dry-run a known GDPVal config and confirm the literal `NEL_INVOCATION_ID`
+1. Dry-run a known GDPVal config and confirm the literal `NEL_INVOCATION_ID`
    assignment still precedes its runtime re-export in every generated `run.sub`.
-5. Launch with the candidate version and monitor the first 20–30 minutes for SIF
+2. Launch with the candidate version and monitor the first 20–30 minutes for SIF
    sandbox startup and judge authentication. GDPVal ignores `limit_samples`, so
    there is no cheap reduced-sample canary.
-
-Only then update the validated version used for scored runs. Do not mix launcher
-versions within a baseline-versus-candidate comparison.
 
 ## Where each piece runs
 

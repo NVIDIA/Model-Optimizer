@@ -31,9 +31,15 @@ single-model run:
 6. If reasoning traces are present, confirm they are parsed/stripped/ignored before scoring consistently. Check for parser errors, unmatched reasoning delimiters, `finish_reason: length`, reasoning text leaked into answers, answers stripped with the reasoning, or reasoning disabled when the config intended it to be active.
 
 Report the run-validation summary before any score: log scan status, sample
-accounting, reasoning/answer parsing status, and any errors or warnings found.
-If any validation item fails, either rerun/fix it or label the result as
-incomplete or invalid.
+accounting, reasoning/answer parsing status, the launcher version the run was
+scored on, and any errors or warnings found. If any validation item fails, either
+rerun/fix it or label the result as incomplete or invalid.
+
+Record the launcher version (`"$SKILL_DIR/scripts/nel-check.sh" --version`)
+alongside the scores, and confirm a baseline and its candidate were scored on the
+same one before handing them to `compare-results` — a launcher difference is a
+harness change inside the delta, and it is undetectable after the fact if nobody
+wrote the version down. See `references/launcher-version.md`.
 
 ## External Baseline Sanity Check
 
