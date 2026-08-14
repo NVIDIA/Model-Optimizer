@@ -19,8 +19,8 @@ from pathlib import Path
 
 from modelopt.onnx.quantization import quantize
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from quantization_utils import NpzCalibrationReader, find_vovnet_nodes_to_exclude
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from examples.onnx_ptq.quantization_utils import NpzCalibrationReader, find_vovnet_nodes_to_exclude
 
 
 def default_output(onnx_path, precision):

@@ -49,6 +49,10 @@ def aligned_tensor(shape, dtype, device, alignment=256):
     return storage[offset : offset + element_count].view(shape)
 
 
+def _base_tensor_name(name):
+    return name.rsplit(".1", maxsplit=1)[0] if name.endswith(".1") else name
+
+
 class TensorRTRunner:
     def __init__(self, engine_path, state_names=(), input_callback=None):
         with open(engine_path, "rb") as engine_file:
@@ -100,7 +104,7 @@ class TensorRTRunner:
     def input_key(name, inputs):
         if name in inputs:
             return name
-        base_name = name.rsplit(".1", maxsplit=1)[0] if name.endswith(".1") else name
+        base_name = _base_tensor_name(name)
         if base_name in inputs:
             return base_name
         raise KeyError(f"Missing TensorRT input {name}")
@@ -125,7 +129,7 @@ class TensorRTRunner:
         callback_inputs = {}
         for name, shape in self.input_shapes.items():
             if name in self.state:
-                callback_name = name.rsplit(".1", maxsplit=1)[0]
+                callback_name = _base_tensor_name(name)
                 callback_inputs[callback_name] = self.state[name]
                 continue
             input_key, value = self.prepare_input(name, inputs)
