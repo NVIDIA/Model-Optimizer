@@ -1751,6 +1751,10 @@ def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = No
             gk = tied_map.container_group_key(name, first_proj_attr)
             if gk is not None:
                 by_group[("moe", gk)].append(m)
+            else:
+                # Undeclared share: group by projection identity so its amaxes still merge
+                # (symmetric with the dense fallback below).
+                by_group[("moe_shared", id(first_proj))].append(m)
         # Dense quantized Linear with an input_quantizer
         elif (
             hasattr(m, "input_quantizer")

@@ -33,7 +33,7 @@ Changelog
 
 **Bug Fixes**
 
-- Fix tied-weight deduplication during HF checkpoint export. The previous ``data_ptr()``-keyed dedup misfired -- a recycled address can falsely alias unrelated weights, and the FSDP gather / offload materializes tied weights at distinct addresses so a genuine tie is missed. The tie map is now sourced from HuggingFace's name-based ``model.all_tied_weights_keys`` (transformers>=5.0), which survives FSDP shard / offload; the duplicate is dropped by name in ``postprocess_state_dict``, guarded by a ``torch.equal`` check. A ``data_ptr`` backstop is retained for undeclared same-storage shares (and for transformers<5.0, which lacks the map).
+- Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 
 0.46 (2026-08-17)

@@ -45,8 +45,6 @@ def _export_weight(
     # install the built-in handlers while retaining this legacy helper's import path.
     from .unified_export_hf import _export_quantized_weight
 
-    # Dense tied weights are not deduped at pack time: both sides pack independently
-    # and the duplicate is dropped by name in postprocess_state_dict.
     _export_quantized_weight(module, ctx.dtype, weight_name)
 
 
