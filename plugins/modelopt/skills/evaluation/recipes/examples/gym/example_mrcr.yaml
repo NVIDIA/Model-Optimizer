@@ -29,7 +29,7 @@
 # Before running: `.env` needs HF_TOKEN and NEMO_EVALUATOR_TRUST_PRE_CMD=1
 # (this config has a `pre_cmd`).
 #
-#   nel run --config example_gym_mrcr.yaml --env-file .env
+#   nel run --config example_mrcr.yaml --env-file .env
 #
 # =============================================================================
 defaults:

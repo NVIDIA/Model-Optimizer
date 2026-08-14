@@ -17,7 +17,7 @@
 # GDPVal (NeMo Gym "Stirrup" agent) — STANDALONE gym eval, RUBRIC mode.
 # Self-deploys a checkpoint via vLLM on one SLURM node. One gym eval per config.
 #
-# Read recipes/tasks/aa_gym/gdpval.md + references/gym-gdpval.md first — they
+# Read recipes/tasks/gym/gdpval.md + references/gym-gdpval.md first — they
 # cover the SIF sandbox, scoring modes, judge panel, preflight and failure modes.
 #
 # Before running: `.env` needs HF_TOKEN, INFERENCE_API_KEY, TAVILY_API_KEY,
@@ -25,7 +25,7 @@
 # SIF must exist (prefer a site-provided one, else
 # `srun -p cpu -t 01:00:00 --pty "$SKILL_DIR/scripts/gdpval-sif.sh"`).
 #
-#   nel run --config example_gym_gdpval.yaml --env-file .env
+#   nel run --config example_gdpval.yaml --env-file .env
 #
 # `limit_samples` is INERT here — the gym always runs all 220 tasks. There is no
 # cheap smoke test; see the recipe's Canary section.

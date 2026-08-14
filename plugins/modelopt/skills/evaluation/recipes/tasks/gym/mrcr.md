@@ -14,8 +14,10 @@ stripped response and the reference answer, **gated on the response starting wit
 the required random prefix** (wrong prefix → 0). Results are stratified by needle
 count (2 / 4 / 8) — accuracy falls sharply as N rises.
 
-**Not an AA benchmark.** It lives under `recipes/tasks/gym/`, not `aa_gym/`, and
-is never part of the AA Index v2 set.
+**Not an AA benchmark** — never generate it for an "AA" request. It shares
+`recipes/tasks/gym/` with GDPVal, which *is* part of the AA suite: the directory
+groups tasks by **harness** (NeMo Gym), not by suite membership, so read that
+per-task, not from the path.
 
 It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
 Steps 1–9 apply — with the branch differences below.
@@ -44,7 +46,7 @@ Start from the self-contained example and edit it — **do not** copy a fragment
 into another config:
 
 ```text
-recipes/examples/gym_mrcr/example_gym_mrcr.yaml   # SLURM + vLLM, 1M variant, self-contained
+recipes/examples/gym/example_mrcr.yaml   # SLURM + vLLM, 1M variant, self-contained
 ```
 
 ### Variant selection — pick before anything else
@@ -153,7 +155,7 @@ explicitly for a canary rather than assuming the launcher-level
 `++…params.limit_samples=N` reaches the gym:
 
 ```bash
-nel run --config example_gym_mrcr.yaml -o \
+nel run --config example_mrcr.yaml -o \
   ++evaluation.tasks.0.nemo_evaluator_config.config.params.extra.nemo_gym.collect_rollout_params="<existing string> ++limit=5"
 ```
 

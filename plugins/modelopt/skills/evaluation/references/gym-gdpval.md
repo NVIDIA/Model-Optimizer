@@ -6,8 +6,8 @@ produces office/PDF **deliverables** in a per-task **Apptainer** code-exec sandb
 a pairwise/rubric **judge** (Gemini 3.1 Pro) scores them, and NeMo Gym is pulled
 and run **inline in the eval container** (`install_on_the_fly`) via
 `ng_prepare_benchmark` + `ng_e2e_collect_rollouts`. This file is the shared
-machinery; the config template is `recipes/examples/gym_gdpval/` and the per-task
-pointer is `recipes/tasks/aa_gym/gdpval.md`.
+machinery; the config template is `recipes/examples/gym/` and the per-task
+pointer is `recipes/tasks/gym/gdpval.md`.
 
 Always invoke GDPVal through the pinned wrapper, even if `nel` is already on PATH:
 
