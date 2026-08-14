@@ -775,6 +775,11 @@ def process_layer_quant_config(layer_config_dict):
     # If we have more than one quantization format, infer MIXED_PRECISION
     if len(quantization_formats) > 1:
         per_layer_config["quant_algo"] = "MIXED_PRECISION"
+        per_layer_config["exclude_modules"] = sorted(
+            _prefix_wildcard_summarize_exclude_modules(
+                exclude_modules, per_layer_config["quantized_layers"].keys()
+            )
+        )
     elif len(quantization_formats) == 1 and quantization_config is not None:
         per_layer_config.update(quantization_config)
         per_layer_config["exclude_modules"] = sorted(

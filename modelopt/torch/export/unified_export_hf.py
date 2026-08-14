@@ -115,6 +115,7 @@ from .quant_utils import (
     sync_tied_input_amax,
     to_quantized_weight,
 )
+from .quantized_weight import capture_quantized_weight_export_state, export_quantized_weight
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
 __all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
@@ -749,6 +750,7 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
+        exported = None
         if use_compressed_scale and weight_scale_2 is not None:
             # Dequant is ``nibble * weight_scale * weight_scale_2``; the stored per-block scale is
             # normalized against the compression-time global scale, so rescale to keep that product.
@@ -769,19 +771,30 @@ def _export_quantized_weight(
                 weight,
                 weight_scale_2,
             )[0]
+        elif quantization_format in {QUANTIZATION_NVFP4, QUANTIZATION_W4A16_NVFP4}:
+            exported = export_quantized_weight(
+                weight,
+                capture_quantized_weight_export_state(sub_module, weight_name),
+                dtype=dtype,
+            )
+            weight_scale = exported.weight_scale
+            weight_scale_2 = exported.weight_scale_2
         else:
             weight_scale = NVFP4QTensor.get_weights_scaling_factor(
                 weight,
                 block_size=block_size,
                 weights_scaling_factor_2=weight_scale_2,
             )[0]
-
-        quantized_weight = to_quantized_weight(
-            weight.to(dtype),
-            weight_scale,
-            quantization_format,
-            weight_scale_2,
-            block_size,
+        quantized_weight = (
+            exported.weight
+            if exported is not None
+            else to_quantized_weight(
+                weight.to(dtype),
+                weight_scale,
+                quantization_format,
+                weight_scale_2,
+                block_size,
+            )
         )
 
         quantized_weight, weight_scale = maybe_transpose_expert_weight_dimensions(

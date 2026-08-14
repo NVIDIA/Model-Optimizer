@@ -118,6 +118,26 @@ def test_quantize(model_cls, config):
     quantize_model_and_forward(model, config, calib_data)
 
 
+def test_grouped_post_restore_preserves_weight_amax():
+    """Grouped restore must not clear calibrated state for non-representative experts."""
+    model = TEGroupedLinear().cuda()
+    with torch.no_grad():
+        for index in range(model.num_gemms):
+            getattr(model.net, f"weight{index}").fill_(0.25 + index)
+
+    data = model.get_input().cuda()
+    mtq.quantize(model, copy.deepcopy(mtq.FP8_DEFAULT_CFG), lambda module: module(data))
+
+    quantizers = model.net.weight_quantizer
+    assert isinstance(quantizers, mtq.nn.GroupedQuantizer)
+    before_restore = [quantizer.amax.clone() for quantizer in quantizers]
+
+    model.net.modelopt_post_restore()
+
+    for quantizer, expected in zip(quantizers, before_restore):
+        torch.testing.assert_close(quantizer.amax, expected)
+
+
 def test_quantize_forward_backward():
     set_seed()
     model = TELinear().cuda()
