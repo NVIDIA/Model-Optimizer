@@ -481,8 +481,8 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
 
 def get_quantization_format_from_quantizers(
     module: nn.Module,
-    weight_quantizer: object,
-    input_quantizer: object | None = None,
+    weight_quantizer: Any,
+    input_quantizer: Any | None = None,
     *,
     weight_name: str = "weight",
 ) -> str | None:
